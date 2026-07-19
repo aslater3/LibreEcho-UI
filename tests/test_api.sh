@@ -7,6 +7,7 @@ expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
 expect "$(curl -fsS "$URL/swagger.html")" 'LibreEcho API Reference'
+expect "$(curl -fsS "$URL/js/swagger.js")" 'executeOperation'
 expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
 expect "$(curl -fsS "$URL/api/v1/network/wifi/scan")" 'LibreNet-5G'
 code=$(curl -sS -o /tmp/le-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{bad')
