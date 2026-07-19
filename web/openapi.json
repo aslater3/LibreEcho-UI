@@ -1,0 +1,77 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "LibreEcho Device API",
+    "version": "1.0.0",
+    "description": "Local administration API shared by the mock and Linux hardware backends. State-changing requests require X-LibreEcho-CSRF. Device power operations also require X-LibreEcho-Confirm."
+  },
+  "servers": [{"url":"/api/v1","description":"This LibreEcho device"}],
+  "tags": [
+    {"name":"Discovery"},{"name":"Device"},{"name":"Audio"},{"name":"LED and buttons"},
+    {"name":"Wake word"},{"name":"Network"},{"name":"Privacy"},{"name":"Integrations"},
+    {"name":"System"},{"name":"Diagnostics"},{"name":"Development"}
+  ],
+  "paths": {
+    "/": {"get":{"tags":["Discovery"],"summary":"Discover API links","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/status": {"get":{"tags":["Device"],"summary":"Read system telemetry","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/device": {"get":{"tags":["Device"],"summary":"Read device identity","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/config": {"get":{"tags":["Discovery"],"summary":"Read API configuration metadata","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/audio": {
+      "get":{"tags":["Audio"],"summary":"Read audio state","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["Audio"],"summary":"Update volume or microphone state","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/audio/test": {"post":{"tags":["Audio"],"summary":"Play a test tone","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/led": {
+      "get":{"tags":["LED and buttons"],"summary":"Read LED state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "put":{"tags":["LED and buttons"],"summary":"Update LED colour or brightness","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/led/test": {"post":{"tags":["LED and buttons"],"summary":"Run the LED test","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/buttons": {
+      "get":{"tags":["LED and buttons"],"summary":"Read button mappings","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "put":{"tags":["LED and buttons"],"summary":"Update button mappings","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/wake-word": {
+      "get":{"tags":["Wake word"],"summary":"Read wake-word state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "put":{"tags":["Wake word"],"summary":"Update model or sensitivity","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/wake-word/test": {"post":{"tags":["Wake word"],"summary":"Simulate wake-word detection","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/network": {
+      "get":{"tags":["Network"],"summary":"Read network state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "put":{"tags":["Network"],"summary":"Update hostname and local access","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/network/wifi/scan": {"get":{"tags":["Network"],"summary":"Scan Wi-Fi networks","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/network/wifi/connect": {"post":{"tags":["Network"],"summary":"Connect to Wi-Fi","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"503":{"$ref":"#/components/responses/Error"}}}},
+    "/network/wifi/disconnect": {"post":{"tags":["Network"],"summary":"Disconnect Wi-Fi","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/privacy": {
+      "get":{"tags":["Privacy"],"summary":"Read privacy configuration","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "put":{"tags":["Privacy"],"summary":"Update privacy configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/integrations": {"get":{"tags":["Integrations"],"summary":"List integrations","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/integrations/{id}": {"put":{"tags":["Integrations"],"summary":"Enable or disable an integration","parameters":[{"$ref":"#/components/parameters/Csrf"},{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"}}}},
+    "/system": {"get":{"tags":["System"],"summary":"Read OS and OTA state","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/system/reboot": {"post":{"tags":["System"],"summary":"Reboot device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
+    "/system/shutdown": {"post":{"tags":["System"],"summary":"Shut down device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
+    "/system/factory-reset": {"post":{"tags":["System"],"summary":"Factory-reset device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
+    "/logs": {"get":{"tags":["Diagnostics"],"summary":"Read bounded service logs","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/logs/stream": {"get":{"tags":["Diagnostics"],"summary":"Read log stream snapshot","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/events": {"get":{"tags":["Diagnostics"],"summary":"Read SSE event snapshot","responses":{"200":{"description":"text/event-stream"}}}},
+    "/diagnostics": {"get":{"tags":["Diagnostics"],"summary":"Run diagnostic checks","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/diagnostics/export": {"post":{"tags":["Diagnostics"],"summary":"Prepare redacted diagnostics","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/dev/mock": {"post":{"tags":["Development"],"summary":"Control mock state (development build only)","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"}}}}
+  },
+  "components": {
+    "parameters": {
+      "Csrf":{"name":"X-LibreEcho-CSRF","in":"header","required":true,"schema":{"type":"string","example":"libreecho-local"}},
+      "Confirm":{"name":"X-LibreEcho-Confirm","in":"header","required":true,"schema":{"type":"string","example":"confirm-device-action"}}
+    },
+    "requestBodies": {"JsonObject":{"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}}},
+    "responses": {
+      "Success":{"description":"Successful LibreEcho response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Envelope"}}}},
+      "Error":{"description":"Structured error response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Envelope"}}}}
+    },
+    "schemas": {
+      "Envelope":{"type":"object","required":["ok","data","error"],"properties":{"ok":{"type":"boolean"},"data":{"nullable":true},"error":{"nullable":true,"$ref":"#/components/schemas/ApiError"}}},
+      "ApiError":{"type":"object","properties":{"code":{"type":"string"},"message":{"type":"string"}}}
+    }
+  }
+}
