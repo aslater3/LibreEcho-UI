@@ -1,0 +1,10 @@
+{
+  "networks": [
+    {"ssid":"LibreNet-5G","security":"wpa2","signal":88,"connect":"success"},
+    {"ssid":"LibreNet-IoT","security":"wpa2","signal":71,"connect":"success"},
+    {"ssid":"FailNet","security":"wpa2","signal":55,"connect":"fail"},
+    {"ssid":"Open Test Network","security":"open","signal":42,"connect":"success"}
+  ],
+  "temperature_c": 47,
+  "seed": 4998472
+}

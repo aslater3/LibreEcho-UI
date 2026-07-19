@@ -1,0 +1,15 @@
+{
+  "device_name": "LibreEcho",
+  "hostname": "libreecho",
+  "volume": 50,
+  "microphone_gain": 65,
+  "microphone_muted": false,
+  "led_r": 72,
+  "led_g": 216,
+  "led_b": 118,
+  "led_brightness": 70,
+  "wake_word": "LibreEcho",
+  "wake_enabled": true,
+  "wake_sensitivity": 68,
+  "bind": "127.0.0.1:8080"
+}

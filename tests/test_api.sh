@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+URL=${LIBREECHO_TEST_URL:-http://127.0.0.1:18082}
+CSRF='X-LibreEcho-CSRF: libreecho-local'
+expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exit 1; }; }
+expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
+expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
+expect "$(curl -fsS "$URL/api/v1/network/wifi/scan")" 'LibreNet-5G'
+code=$(curl -sS -o /tmp/le-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{bad')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H 'Content-Type: application/json' --data '{"volume":20}')
+[ "$code" = 403 ]
+code=$(curl -sS -o /tmp/le-confirm.out -w '%{http_code}' -X POST "$URL/api/v1/system/reboot" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 403 ]
+echo 'api: ok'

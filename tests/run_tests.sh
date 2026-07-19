@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+PORT=${LIBREECHO_TEST_PORT:-18082}
+URL="http://127.0.0.1:$PORT"
+CFG=./build/test-suite-config.json
+rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
+./build/test-unit
+./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
+pid=$!
+cleanup(){ if [ "${pid:-0}" -gt 1 ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; }
+trap cleanup EXIT INT TERM
+i=0
+while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-server.log; exit 1; }; sleep 0.1; done
+LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
+LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_limits.sh
+sh tests/test_memory.sh "$pid"
+kill "$pid"
+wait "$pid" 2>/dev/null || true
+pid=0
+./build/libreecho-web --backend mock --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 >./build/test-restart.log 2>&1 &
+pid=$!
+sleep 1
+curl -fsS "$URL/api/v1/audio" | grep -q '"volume":37'
+echo 'persistence: ok'
+kill "$pid"
+wait "$pid" 2>/dev/null || true
+pid=0
+./build/libreecho-web --backend linux --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" >./build/test-linux.log 2>&1 &
+pid=$!
+sleep 1
+code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio")
+[ "$code" = 501 ]
+grep -q 'not_supported' /tmp/le-linux-audio.out
+echo 'linux unsupported: ok'
+echo 'all tests: ok'

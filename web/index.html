@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>LibreEcho Control Centre</title>
-<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="/css/app.css" />
 </head>
 <body>
 <svg class="sprite" aria-hidden="true">
@@ -22,19 +22,19 @@
 </svg>
 <div class="app-shell">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-mark"><span></span><i></i><b></b></div><div><strong><em>Libre</em>Echo</strong><small>Open. Private. Yours.</small></div></div>
+    <div class="brand"><img class="brand-mark" src="/assets/mark.svg" alt=""><div><strong><em>Libre</em>Echo</strong><small>Open. Private. Yours.</small></div></div>
     <nav id="nav"></nav>
     <div class="side-bottom">
-      <div class="status-card"><div class="online"><span></span>Device Online</div><p>Uptime: 2d 4h 18m</p><p>LibreEcho OS v0.1.0</p></div>
-      <a class="github-card" href="#"><span class="github-dot">●</span><span>View on GitHub<small>github.com/libreecho</small></span></a>
+      <div class="status-card"><div class="online" id="device-online"><span></span>Connecting…</div><p id="sidebar-uptime">Uptime: —</p><p id="sidebar-version">LibreEcho OS</p></div>
+      <a class="github-card" href="https://github.com/libreecho"><span class="github-dot">●</span><span>View on GitHub<small>github.com/libreecho</small></span></a>
     </div>
   </aside>
   <main>
-    <header><div><h1 id="page-title">Overview</h1><p id="page-subtitle">Your LibreEcho at a glance</p></div><div class="header-actions"><button id="reboot" class="outline-btn">↻&nbsp; Reboot</button><button class="icon-btn" id="theme">☼</button><div class="avatar">LE</div></div></header>
-    <section id="content"></section>
+    <header><button class="menu-btn" id="menu" aria-label="Toggle navigation">☰</button><div><h1 id="page-title">Overview</h1><p id="page-subtitle">Your LibreEcho at a glance</p></div><div class="header-actions"><span class="backend-badge" id="backend-badge">Connecting</span><button id="reboot" class="outline-btn">↻&nbsp; Reboot</button><button class="icon-btn" id="theme" aria-label="Toggle colour theme">☼</button><div class="avatar">LE</div></div></header>
+    <section id="content" aria-live="polite"><div class="panel loading">Loading device state…</div></section>
   </main>
 </div>
 <div class="toast" id="toast">Saved</div>
-<script src="app.js"></script>
+<script src="/js/app.js"></script>
 </body>
 </html>

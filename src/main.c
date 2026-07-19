@@ -1,0 +1,10 @@
+#include "api.h"
+#include "backend.h"
+#include "http_server.h"
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+static volatile int running=1;static void stop(int s){(void)s;running=0;}static void usage(const char*p){fprintf(stderr,"Usage: %s [--backend mock|linux] [--listen IP:PORT] [--web-root PATH] [--config PATH] [--mock-config PATH] [--seed N] [--dev-controls]\n",p);}
+int main(int argc,char**argv){const char*mode="mock",*cfg="./config/runtime.json",*mock="./config/mock-state.json";unsigned seed=0;int dev=0,i;struct le_backend*b=0;struct api_context api;struct http_options o;char listen[96]="127.0.0.1:8080",*colon;memset(&o,0,sizeof(o));strcpy(o.web_root,"./web");o.max_clients=16;for(i=1;i<argc;i++){if(!strcmp(argv[i],"--backend")&&i+1<argc)mode=argv[++i];else if(!strcmp(argv[i],"--listen")&&i+1<argc)strncpy(listen,argv[++i],sizeof(listen)-1);else if(!strcmp(argv[i],"--web-root")&&i+1<argc)strncpy(o.web_root,argv[++i],sizeof(o.web_root)-1);else if(!strcmp(argv[i],"--config")&&i+1<argc)cfg=argv[++i];else if(!strcmp(argv[i],"--mock-config")&&i+1<argc)mock=argv[++i];else if(!strcmp(argv[i],"--seed")&&i+1<argc)seed=(unsigned)strtoul(argv[++i],0,10);else if(!strcmp(argv[i],"--dev-controls"))dev=1;else if(!strcmp(argv[i],"--help")){usage(argv[0]);return 0;}else{usage(argv[0]);return 2;}}colon=strrchr(listen,':');if(!colon){usage(argv[0]);return 2;}*colon=0;strncpy(o.listen_host,listen,sizeof(o.listen_host)-1);o.port=atoi(colon+1);if(o.port<1||o.port>65535){fprintf(stderr,"Invalid port\n");return 2;}if(strcmp(o.listen_host,"127.0.0.1")&&strcmp(o.listen_host,"::1"))fprintf(stderr,"WARNING: LAN binding requested; configure authentication before production use\n");if(le_backend_init(&b,mode,mock,cfg,seed)!=LE_OK){fprintf(stderr,"Unable to initialise %s backend\n",mode);return 1;}api_init(&api,b,dev);signal(SIGINT,stop);signal(SIGTERM,stop);signal(SIGPIPE,SIG_IGN);i=http_server_run(&o,&api,&running);le_backend_destroy(b);return i?1:0;}

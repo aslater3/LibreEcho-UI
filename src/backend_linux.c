@@ -1,0 +1,16 @@
+#include "backend_internal.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/statvfs.h>
+#include <sys/utsname.h>
+#include <unistd.h>
+struct linux_state{char config[384];char temp_path[256];};
+static int unsupported0(struct le_backend*b){(void)b;return LE_NOT_SUPPORTED;}static int unsupported_i(struct le_backend*b,int v){(void)b;(void)v;return LE_NOT_SUPPORTED;}static int unsupported_s(struct le_backend*b,const char*s){(void)b;(void)s;return LE_NOT_SUPPORTED;}static void destroy(struct le_backend*b){free(b->data);}
+static int status(struct le_backend*b,struct le_system_status*o){FILE*f;double up=0,l1=0;unsigned long total=0,avail=0;char key[64],unit[16];unsigned long value;struct statvfs sv;(void)b;memset(o,0,sizeof(*o));strcpy(o->device_state,"online");f=fopen("/proc/uptime","r");if(f){if(fscanf(f,"%lf",&up)==1)o->uptime=up;fclose(f);}f=fopen("/proc/loadavg","r");if(f){if(fscanf(f,"%lf",&l1)==1)o->cpu=(int)(l1*25.0);fclose(f);}f=fopen("/proc/meminfo","r");if(f){while(fscanf(f,"%63s %lu %15s",key,&value,unit)==3){if(!strcmp(key,"MemTotal:"))total=value;if(!strcmp(key,"MemAvailable:"))avail=value;}fclose(f);}if(total){o->memory_total_mb=(int)(total/1024);o->memory_used_mb=(int)((total-avail)/1024);o->memory=(int)((total-avail)*100/total);}if(!statvfs("/",&sv)&&sv.f_blocks){unsigned long long t=(unsigned long long)sv.f_blocks*sv.f_frsize,u=(unsigned long long)(sv.f_blocks-sv.f_bavail)*sv.f_frsize;o->storage_total_mb=(int)(t/1048576);o->storage_used_mb=(int)(u/1048576);o->storage=(int)(u*100/t);}f=fopen(((struct linux_state*)b->data)->temp_path,"r");if(f){long t;if(fscanf(f,"%ld",&t)==1)o->temperature=(int)(t>1000?t/1000:t);fclose(f);}return LE_OK;}
+static int device(struct le_backend*b,struct le_device_info*o){struct utsname u;(void)b;memset(o,0,sizeof(*o));gethostname(o->hostname,sizeof(o->hostname)-1);strcpy(o->name,o->hostname);strcpy(o->model,"LibreEcho device");strcpy(o->serial,"unavailable");strcpy(o->os_version,"LibreEcho OS");if(!uname(&u))strncpy(o->kernel,u.release,sizeof(o->kernel)-1);strcpy(o->hardware_revision,"adapter pending");strcpy(o->backend,"linux");return LE_OK;}
+static int network(struct le_backend*b,struct le_network_state*o){(void)b;memset(o,0,sizeof(*o));strcpy(o->state,"unsupported");gethostname(o->hostname,sizeof(o->hostname)-1);return LE_OK;}
+static int tick(struct le_backend*b){(void)b;return LE_OK;}static int ctrl(struct le_backend*b,const char*a,const char*v){(void)b;(void)a;(void)v;return LE_NOT_SUPPORTED;}
+/* Hardware adapter boundaries. TODO(Echo research): implement the versioned AF_UNIX protocol for /run/libreecho/{audio,led,wakeword,network}.sock. Do not add undocumented ioctl values here. */
+static const struct le_backend_ops ops={destroy,status,device,0,unsupported_i,unsupported_i,unsupported_i,unsupported0,0,0,unsupported_i,0,unsupported0,network,0,0,unsupported0,unsupported_s,0,unsupported_s,unsupported_i,unsupported0,unsupported0,unsupported0,unsupported0,tick,ctrl};
+int le_linux_create(struct le_backend*b,const char*cfg){struct linux_state*s=calloc(1,sizeof(*s));if(!s)return LE_IO;if(cfg)strncpy(s->config,cfg,sizeof(s->config)-1);strcpy(s->temp_path,"/sys/class/thermal/thermal_zone0/temp");b->data=s;b->ops=&ops;return LE_OK;}
