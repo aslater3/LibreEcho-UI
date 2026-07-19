@@ -52,7 +52,7 @@ return 2;
 if(strcmp(o.listen_host,"127.0.0.1")&&strcmp(o.listen_host,"::1")&&!token[0]&&!insecure_lan){fprintf(stderr,"Refusing unauthenticated LAN bind; use --auth-token-file or explicit --allow-insecure-lan\n");return 2;}
 if(le_backend_init(&b,mode,mock,cfg,seed)!=LE_OK){fprintf(stderr,"Unable to initialise %s backend\n",mode);
 return 1;
-}api_init(&api,b,dev,token,allowed_origin);
+}api_init(&api,b,dev,token,allowed_origin,cfg);
 signal(SIGINT,stop);
 signal(SIGTERM,stop);
 signal(SIGPIPE,SIG_IGN);

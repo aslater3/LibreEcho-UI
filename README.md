@@ -23,6 +23,8 @@ Limits are fixed at 16 clients, 8 KiB headers, 16 KiB API bodies, 12 Wi-Fi scan 
 
 Configuration writes are atomic and only happen on changes. Mock telemetry stays in memory. Stored Wi-Fi passwords are neither returned nor logged. The API consistently returns `{ "ok", "data", "error" }` envelopes.
 
+System → Configuration provides a versioned JSON backup and restore workflow. Exports include configurable audio, microphone, LED, wake-word, hostname, local-access, button, privacy and integration settings. They intentionally exclude Wi-Fi passwords, bearer tokens, logs, diagnostics and live telemetry. Imports are type/range checked as a complete schema before application and are atomically persisted with the same backup behavior as normal configuration writes. The Linux backend returns `not_supported` until all corresponding hardware adapters can safely apply a complete restore.
+
 For authenticated LAN deployment, create a root-readable token file containing at least 16 random characters and declare the exact browser origin:
 
 ```sh

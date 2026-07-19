@@ -16,6 +16,8 @@
     "/status": {"get":{"tags":["Device"],"summary":"Read system telemetry","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/device": {"get":{"tags":["Device"],"summary":"Read device identity","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/config": {"get":{"tags":["Discovery"],"summary":"Read API configuration metadata","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/config/export": {"get":{"tags":["Device"],"summary":"Export portable device configuration","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/config/import": {"post":{"tags":["Device"],"summary":"Validate, apply and persist portable configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
     "/audio": {
       "get":{"tags":["Audio"],"summary":"Read audio state","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}},
       "put":{"tags":["Audio"],"summary":"Update volume or microphone state","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}
