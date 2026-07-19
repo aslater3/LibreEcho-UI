@@ -60,6 +60,9 @@
     "/dev/mock": {"post":{"tags":["Development"],"summary":"Control mock state (development build only)","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"}}}}
   },
   "components": {
+    "securitySchemes": {
+      "BearerAuth":{"type":"http","scheme":"bearer","description":"Optional device token enabled with --auth-token-file"}
+    },
     "parameters": {
       "Csrf":{"name":"X-LibreEcho-CSRF","in":"header","required":true,"schema":{"type":"string","example":"libreecho-local"}},
       "Confirm":{"name":"X-LibreEcho-Confirm","in":"header","required":true,"schema":{"type":"string","example":"confirm-device-action"}}

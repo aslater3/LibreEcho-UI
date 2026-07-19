@@ -35,4 +35,24 @@ code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio"
 [ "$code" = 501 ]
 grep -q 'not_supported' /tmp/le-linux-audio.out
 echo 'linux unsupported: ok'
+kill "$pid"
+wait "$pid" 2>/dev/null || true
+pid=0
+if ./build/libreecho-web --backend mock --listen 0.0.0.0:18084 --web-root ./web >./build/test-insecure-lan.log 2>&1; then
+    echo 'unauthenticated LAN bind was not refused' >&2
+    exit 1
+fi
+printf '%s\n' 'test-token-0123456789abcdef' >./build/test-auth-token
+chmod 600 ./build/test-auth-token
+./build/libreecho-web --backend mock --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" --auth-token-file ./build/test-auth-token --allowed-origin http://device.test >./build/test-auth.log 2>&1 &
+pid=$!
+sleep 1
+curl -fsS "$URL/api/v1/config" | grep -q 'bearer-token'
+code=$(curl -sS -o /tmp/le-auth.out -w '%{http_code}' "$URL/api/v1/status")
+[ "$code" = 401 ]
+curl -fsS "$URL/api/v1/status" -H 'Authorization: Bearer test-token-0123456789abcdef' >/dev/null
+code=$(curl -sS -o /tmp/le-origin.out -w '%{http_code}' -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H 'X-LibreEcho-CSRF: libreecho-local' -H 'Origin: http://evil.test' -H 'Content-Type: application/json' --data '{"hostname":"blocked"}')
+[ "$code" = 403 ]
+curl -fsS -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H 'X-LibreEcho-CSRF: libreecho-local' -H 'Origin: http://device.test' -H 'Content-Type: application/json' --data '{"hostname":"allowed"}' >/dev/null
+echo 'authentication and origin: ok'
 echo 'all tests: ok'

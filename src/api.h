@@ -3,8 +3,8 @@
 #include "backend.h"
 #include "event_bus.h"
 #include <stddef.h>
-struct api_request{char method[8],path[256],origin[256],csrf[96],confirm[96];const char*body;size_t body_len;};
+struct api_request{char method[8],path[256],origin[256],authorization[256],csrf[96],confirm[96];const char*body;size_t body_len;};
 struct api_response{int status;char type[64];char body[32768];size_t length;};
-struct api_context{struct le_backend*backend;struct le_event_bus events;int dev_controls,privacy_local_only,privacy_audio_retention,privacy_telemetry,privacy_crash_reports,privacy_log_hours,net_ssh,net_api_lan;unsigned integrations;char button_short[32],button_long[32];char logs[LE_MAX_LOGS][256];size_t log_count,log_next;};
-void api_init(struct api_context*,struct le_backend*,int);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
+struct api_context{struct le_backend*backend;struct le_event_bus events;int dev_controls,privacy_local_only,privacy_audio_retention,privacy_telemetry,privacy_crash_reports,privacy_log_hours,net_ssh,net_api_lan;unsigned integrations;char button_short[32],button_long[32],auth_token[192],allowed_origin[256];char logs[LE_MAX_LOGS][256];size_t log_count,log_next;};
+void api_init(struct api_context*,struct le_backend*,int,const char*,const char*);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
 #endif

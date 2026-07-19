@@ -1,11 +1,11 @@
 'use strict';
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
-const state={page:'Overview',csrf:'libreecho-local',timer:null,data:{},busy:false};
+const state={page:'Overview',csrf:'libreecho-local',token:sessionStorage.getItem('libreecho-token')||'',timer:null,data:{},busy:false};
 const items=[['Overview','home'],['Device','device'],['Audio','audio'],['Wake Word','mic'],['LED & Buttons','sun'],['Network','wifi'],['Privacy','shield'],['Integrations','puzzle'],['System','gear'],['Logs','log'],['About','info']];
 const descriptions={Overview:'Your LibreEcho at a glance',Device:'Identity, hardware and power controls',Audio:'Playback, microphone and volume controls','Wake Word':'Configure local wake-word detection','LED & Buttons':'Customise light-ring behaviour and controls',Network:'Wi-Fi, addressing and connectivity',Privacy:'Local processing and data retention controls',Integrations:'Connect services and home automation',System:'Updates, backup and advanced settings',Logs:'Diagnostics and troubleshooting',About:'Project, licences and version information'};
 const nav=$('#nav'),content=$('#content');
 function esc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-async function api(path,opt={}){const headers={'Accept':'application/json',...(opt.body?{'Content-Type':'application/json','X-LibreEcho-CSRF':state.csrf}:{}),...(opt.headers||{})};const res=await fetch('/api/v1'+path,{...opt,headers});let body;try{body=await res.json()}catch(_){throw new Error('The device returned an unreadable response')}if(!res.ok||!body.ok)throw new Error(body.error?.message||`Request failed (${res.status})`);return body.data}
+async function api(path,opt={}){const headers={'Accept':'application/json',...(state.token?{'Authorization':'Bearer '+state.token}:{}),...(opt.body?{'Content-Type':'application/json','X-LibreEcho-CSRF':state.csrf}:{}),...(opt.headers||{})};const res=await fetch('/api/v1'+path,{...opt,headers});let body;try{body=await res.json()}catch(_){throw new Error('The device returned an unreadable response')}if(!res.ok||!body.ok)throw new Error(body.error?.message||`Request failed (${res.status})`);return body.data}
 function toast(message,error=false){const t=$('#toast');t.textContent=message;t.classList.toggle('error',error);t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
 function panel(title,body,extra=''){return `<section class="panel setting-panel ${extra}"><h3>${title}</h3>${body}</section>`}
 function field(label,value,id,type='text',extra=''){return `<label class="field"><span>${label}</span><input id="${id}" type="${type}" value="${esc(value)}" ${extra}></label>`}
@@ -43,4 +43,4 @@ function showPage(name){state.page=name;$$('.nav-item').forEach(x=>x.classList.t
 items.forEach(([name,icon],i)=>{const b=document.createElement('button');b.className='nav-item'+(i?'':' active');b.dataset.page=name;b.innerHTML=`<svg><use href="#${icon}"></use></svg><span>${name}</span>`;b.onclick=()=>showPage(name);nav.appendChild(b)});
 $('#reboot').onclick=()=>power('reboot','Reboot');$('#theme').onclick=()=>{const light=document.body.classList.toggle('light');localStorage.setItem('libreecho-theme',light?'light':'dark');$('#theme').textContent=light?'☾':'☼'};$('#menu').onclick=()=>document.body.classList.toggle('nav-open');
 if(localStorage.getItem('libreecho-theme')==='light'){document.body.classList.add('light');$('#theme').textContent='☾'}
-api('/config').then(c=>{state.csrf=c.csrf_token;render()}).catch(errorView);
+api('/config').then(c=>{state.csrf=c.csrf_token;if(c.authentication==='bearer-token'&&!state.token){const token=prompt('Enter the LibreEcho API token');if(!token)throw new Error('Authentication token required');state.token=token;sessionStorage.setItem('libreecho-token',token)}return api('/status')}).then(()=>render()).catch(errorView);

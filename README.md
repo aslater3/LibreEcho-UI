@@ -23,6 +23,21 @@ Limits are fixed at 16 clients, 8 KiB headers, 16 KiB API bodies, 12 Wi-Fi scan 
 
 Configuration writes are atomic and only happen on changes. Mock telemetry stays in memory. Stored Wi-Fi passwords are neither returned nor logged. The API consistently returns `{ "ok", "data", "error" }` envelopes.
 
+For authenticated LAN deployment, create a root-readable token file containing at least 16 random characters and declare the exact browser origin:
+
+```sh
+libreecho-web --backend linux \
+  --listen 0.0.0.0:8080 \
+  --auth-token-file /etc/libreecho/api.token \
+  --allowed-origin http://libreecho.local:8080 \
+  --user libreecho \
+  --web-root /usr/local/share/libreecho/web
+```
+
+The daemon refuses an unauthenticated non-loopback bind unless the operator explicitly supplies `--allow-insecure-lan`. Bearer tokens are compared in constant time and are never logged. `--user` resolves the account after binding, clears supplementary groups, and then calls `setgid()`/`setuid()`. Ensure the web root remains readable and the configuration directory is writable by that account.
+
+A reverse proxy is not required: the native daemon serves the frontend, API, OpenAPI document and event responses. A small existing LAN proxy may still be used for TLS or centralized authentication, with LibreEcho bound to loopback behind it. nginx is optional rather than a runtime dependency.
+
 ## Build and run
 
 Requirements are a C99 compiler, POSIX libc, `make`, and (for API tests) `curl`.
