@@ -5,6 +5,6 @@
 #include <stddef.h>
 struct api_request{char method[8],path[256],origin[256],csrf[96],confirm[96];const char*body;size_t body_len;};
 struct api_response{int status;char type[64];char body[32768];size_t length;};
-struct api_context{struct le_backend*backend;struct le_event_bus events;int dev_controls;char logs[LE_MAX_LOGS][256];size_t log_count,log_next;};
+struct api_context{struct le_backend*backend;struct le_event_bus events;int dev_controls,privacy_local_only,privacy_audio_retention,privacy_telemetry,privacy_crash_reports,privacy_log_hours;unsigned integrations;char logs[LE_MAX_LOGS][256];size_t log_count,log_next;};
 void api_init(struct api_context*,struct le_backend*,int);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
 #endif
