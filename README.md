@@ -2,6 +2,13 @@
 
 LibreEcho Web is a hardware-independent control centre for an Amazon Echo Gen 2-class device. It combines the supplied dark LibreEcho interface with a dependency-free C99 HTTP daemon, a realistic development backend, and a conservative Linux hardware boundary.
 
+## Documentation
+
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — System design, component interaction, data flow
+- **[API.md](docs/API.md)** — Complete HTTP API reference
+- **[HARDWARE.md](docs/HARDWARE.md)** — Adding new hardware subsystems
+- **[OPERATIONS.md](docs/OPERATIONS.md)** — Deployment, configuration, backup, troubleshooting
+
 ## Architecture
 
 The daemon is a single bounded `poll()` event loop: no per-request processes, per-client threads, language runtime, package manager, database, or container is required. It serves static files and `/api/v1/` from the same process.
