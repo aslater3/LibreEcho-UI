@@ -1,10 +1,13 @@
 #include "log.h"
+#include "logd.h"
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #ifdef LE_LOG_SYSLOG
 #include <syslog.h>
@@ -13,6 +16,7 @@
 static enum le_log_level threshold = LE_LOG_INFO;
 static int show_source = 0;
 static int use_syslog = 0;
+static int logd_fd = -1;
 static char ident_buf[32] = "libreecho";
 
 void le_log_init(const char *ident, int argc, char **argv)
@@ -35,6 +39,20 @@ void le_log_init(const char *ident, int argc, char **argv)
         else if (!strcmp(argv[i], "--syslog"))
             use_syslog = 1;
     }
+    
+    /* Connect to central log daemon */
+    logd_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (logd_fd >= 0) {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, LE_LOGD_SOCK, sizeof(addr.sun_path) - 1);
+        if (connect(logd_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            close(logd_fd);
+            logd_fd = -1;
+        }
+    }
+    
 #ifdef LE_LOG_SYSLOG
     if (use_syslog)
         openlog(ident_buf, LOG_PID | LOG_NDELAY, LOG_DAEMON);
@@ -76,6 +94,11 @@ void le_log(enum le_log_level level, const char *fmt, ...)
 {
     va_list ap;
     char msg[1024];
+    char json[LE_LOGD_MSG_MAX];
+    struct timespec ts;
+    struct tm tm;
+    char stamp[32];
+    int n;
 
     if (level < threshold)
         return;
@@ -84,26 +107,37 @@ void le_log(enum le_log_level level, const char *fmt, ...)
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
+    /* Format JSON for central log daemon */
+    clock_gettime(CLOCK_REALTIME, &ts);
+    localtime_r(&ts.tv_sec, &tm);
+    strftime(stamp, sizeof(stamp), "%H:%M:%S", &tm);
+
+    n = snprintf(json, sizeof(json),
+                 "{\"ts\":%ld,\"level\":\"%s\",\"service\":\"%s\",\"msg\":\"%s\"}\n",
+                 (long)ts.tv_sec, level_str(level), ident_buf, msg);
+
+    /* Send to central log daemon if connected */
+    if (n > 0 && n < (int)sizeof(json) && logd_fd >= 0) {
+        if (send(logd_fd, json, n, MSG_NOSIGNAL) < 0) {
+            close(logd_fd);
+            logd_fd = -1;
+        }
+    }
+
 #ifdef LE_LOG_SYSLOG
     if (use_syslog) {
         syslog(level_to_syslog(level), "%s", msg);
         if (level >= LE_LOG_ERROR) {
-            /* Also mirror errors to stderr for visibility */
             fprintf(stderr, "%s [%s] %s\n", ident_buf, level_str(level), msg);
         }
         return;
     }
 #endif
 
+    /* Also write to stderr for local debugging (or if logd unavailable) */
     if (show_source && level == LE_LOG_DEBUG) {
         fprintf(stderr, "%s [%s] %s\n", ident_buf, level_str(level), msg);
-    } else {
-        struct timespec ts;
-        struct tm tm;
-        char stamp[32];
-        clock_gettime(CLOCK_REALTIME, &ts);
-        localtime_r(&ts.tv_sec, &tm);
-        strftime(stamp, sizeof(stamp), "%H:%M:%S", &tm);
+    } else if (logd_fd < 0) {
         fprintf(stderr, "%s.%03d %s [%s] %s\n",
                 stamp, (int)(ts.tv_nsec / 1000000),
                 ident_buf, level_str(level), msg);

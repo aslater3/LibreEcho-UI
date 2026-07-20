@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "system": {
+    "hostname": "libreecho",
+    "log_level": "info",
+    "log_retention_days": 7,
+    "timezone": "UTC"
+  },
+  "audio": {
+    "volume": 50,
+    "microphone_gain": 65,
+    "microphone_muted": false,
+    "notification_volume": 70
+  },
+  "led": {
+    "brightness": 70,
+    "boot_color": [72, 216, 118],
+    "animation_speed": 1.0
+  },
+  "network": {
+    "wifi_enabled": true,
+    "hostname": "libreecho",
+    "ssh_enabled": false,
+    "api_lan_access": false
+  },
+  "wake_word": {
+    "enabled": true,
+    "sensitivity": 68,
+    "model": "default"
+  },
+  "privacy": {
+    "local_only": true,
+    "audio_retention": false,
+    "telemetry": false,
+    "crash_reports": false,
+    "log_hours": 24
+  }
+}
