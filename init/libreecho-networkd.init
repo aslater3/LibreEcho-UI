@@ -1,0 +1,59 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          libreecho-networkd
+# Required-Start:    $network
+# Required-Stop:     $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+### END INIT INFO
+
+[ -r /etc/default/libreecho-networkd ] && . /etc/default/libreecho-networkd
+
+DAEMON=${DAEMON:-/usr/local/sbin/libreecho-networkd}
+PIDFILE=${PIDFILE:-/var/run/libreecho-networkd.pid}
+LOGFILE=${LOGFILE:-/var/log/libreecho-networkd.log}
+SOCKET=${SOCKET:-/run/libreecho/network.sock}
+ARGS=${ARGS:---socket $SOCKET}
+
+is_running() {
+    [ -s "$PIDFILE" ] || return 1
+    pid=$(sed -n '1p' "$PIDFILE")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+start_service() {
+    if is_running; then echo "libreecho-networkd already running"; return 0; fi
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
+    else
+        "$DAEMON" $ARGS >>"$LOGFILE" 2>&1 &
+        echo $! >"$PIDFILE"
+    fi
+}
+
+stop_service() {
+    if ! is_running; then rm -f "$PIDFILE"; return 0; fi
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
+    else
+        pid=$(sed -n '1p' "$PIDFILE")
+        kill "$pid" 2>/dev/null || true
+        count=0
+        while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 5 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+}
+
+case "${1:-}" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart) stop_service; start_service ;;
+    status) if is_running; then echo "running"; else echo "stopped"; exit 1; fi ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
