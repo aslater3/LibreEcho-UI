@@ -9,10 +9,10 @@ CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-audiod $(BUILD)/libreecho-ledd
-NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/adapter_server.c
-AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_server.c
-LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c
-SOURCES = src/main.c src/http_server.c src/api.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/adapter/adapter_client.c src/adapter/adapter_server.c
+NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/adapter_server.c src/log.c
+AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_server.c src/log.c
+LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
+SOURCES = src/main.c src/http_server.c src/api.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 AUDIOD_OBJECTS = $(AUDIOD_SOURCES:src/%.c=$(BUILD)/%.o)

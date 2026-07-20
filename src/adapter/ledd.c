@@ -13,6 +13,7 @@
 #endif
 
 #include "adapter.h"
+#include "log.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -123,24 +124,7 @@ struct daemon_context {
 
 static volatile sig_atomic_t stop_requested;
 
-static void log_message(const char *level, const char *fmt, ...)
-{
-    va_list ap;
-    time_t now = time(NULL);
-    struct tm tm_now;
-    char stamp[32];
-
-    if (localtime_r(&now, &tm_now) != NULL)
-        strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm_now);
-    else
-        strcpy(stamp, "unknown-time");
-
-    fprintf(stderr, "%s [%s] ", stamp, level);
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-    fputc('\n', stderr);
-}
+/* logging provided by le_log (src/log.h) */
 
 static void on_signal(int signo)
 {
@@ -241,13 +225,13 @@ static int hardware_write_rgb(const struct hardware *hw, unsigned int r,
         int n = snprintf(text, sizeof(text), "%u %u %u\n", r, g, b);
         if (n < 0 || (size_t)n >= sizeof(text) ||
             write_text_file(hw->multi_path, text) != 0) {
-            log_message("warning", "unable to write %s", hw->multi_path);
+            le_log_warn( "unable to write %s", hw->multi_path);
             errors++;
         }
         if (hw->brightness_path[0] != '\0' &&
             write_number_file(hw->brightness_path,
                               (brightness * 255U + 50U) / 100U) != 0) {
-            log_message("warning", "unable to write %s", hw->brightness_path);
+            le_log_warn( "unable to write %s", hw->brightness_path);
             errors++;
         }
     } else {
@@ -271,7 +255,7 @@ static int hardware_write_rgb(const struct hardware *hw, unsigned int r,
 static void hardware_apply(const struct hardware *hw, const struct colour *c)
 {
     if (hardware_write_rgb(hw, c->r, c->g, c->b, c->brightness) != 0)
-        log_message("warning", "LED hardware write failed; retaining state in memory");
+        le_log_warn( "LED hardware write failed; retaining state in memory");
 }
 
 static int contains_ci(const char *haystack, const char *needle)
@@ -350,9 +334,9 @@ static void detect_sysfs(struct hardware *hw)
     if (hw->has_multi || (have_red && have_green && have_blue)) {
         hw->kind = HW_SYSFS;
         if (hw->has_multi)
-            log_message("info", "using sysfs LED backend (%s)", hw->multi_path);
+            le_log_info( "using sysfs LED backend (%s)", hw->multi_path);
         else
-            log_message("info", "using sysfs individual RGB LED backend");
+            le_log_info( "using sysfs individual RGB LED backend");
     } else {
         hw->multi_path[0] = '\0';
         hw->red_path[0] = '\0';
@@ -387,8 +371,8 @@ static int detect_i2c(void)
         }
         close(fd);
         if (address_selected) {
-            log_message("info", "I2C bus %d is accessible", bus);
-            log_message("info", "I2C LED driver not yet identified");
+            le_log_info( "I2C bus %d is accessible", bus);
+            le_log_info( "I2C LED driver not yet identified");
             return 1;
         }
     }
@@ -400,7 +384,7 @@ static void hardware_detect(struct hardware *hw, int force_stub)
     memset(hw, 0, sizeof(*hw));
     hw->kind = HW_STUB;
     if (force_stub) {
-        log_message("warning", "LED stub backend forced by command line");
+        le_log_warn( "LED stub backend forced by command line");
         return;
     }
 
@@ -412,7 +396,7 @@ static void hardware_detect(struct hardware *hw, int force_stub)
         hw->kind = HW_I2C_STUB;
         return;
     }
-    log_message("warning", "no LED hardware found; using in-memory stub backend");
+    le_log_warn( "no LED hardware found; using in-memory stub backend");
 }
 
 /* ----------------------------- JSON parser ------------------------------ */
@@ -823,13 +807,13 @@ static int persist_state(const struct led_state *state)
              (long)getpid());
     fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) {
-        log_message("warning", "cannot persist LED state at %s: %s",
+        le_log_warn( "cannot persist LED state at %s: %s",
                     STATE_PATH, strerror(errno));
         return -1;
     }
     if (write_all_fd(fd, text, strlen(text)) != 0 || fsync(fd) != 0 ||
         close(fd) != 0 || rename(temp_path, STATE_PATH) != 0) {
-        log_message("warning", "atomic LED state write failed: %s",
+        le_log_warn( "atomic LED state write failed: %s",
                     strerror(errno));
         close(fd);
         unlink(temp_path);
@@ -1195,7 +1179,7 @@ static void accept_clients(struct daemon_context *ctx)
                 continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 return;
-            log_message("warning", "accept failed: %s", strerror(errno));
+            le_log_warn( "accept failed: %s", strerror(errno));
             return;
         }
         for (i = 0; i < MAX_CLIENTS; i++) {
@@ -1247,21 +1231,21 @@ static int make_listener(const char *path)
     int fd;
 
     if (strlen(path) >= sizeof(address.sun_path)) {
-        log_message("error", "socket path is too long");
+        le_log_error( "socket path is too long");
         return -1;
     }
     if (lstat(path, &st) == 0) {
         if (!S_ISSOCK(st.st_mode)) {
-            log_message("error", "refusing to unlink non-socket %s", path);
+            le_log_error( "refusing to unlink non-socket %s", path);
             return -1;
         }
         if (unlink(path) != 0) {
-            log_message("error", "cannot unlink stale socket %s: %s", path,
+            le_log_error( "cannot unlink stale socket %s: %s", path,
                         strerror(errno));
             return -1;
         }
     } else if (errno != ENOENT) {
-        log_message("error", "cannot inspect socket %s: %s", path,
+        le_log_error( "cannot inspect socket %s: %s", path,
                     strerror(errno));
         return -1;
     }
@@ -1275,7 +1259,7 @@ static int make_listener(const char *path)
     if (bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
         listen(fd, MAX_CLIENTS) != 0 || chmod(path, 0660) != 0 ||
         set_nonblocking(fd) != 0) {
-        log_message("error", "cannot create LED socket %s: %s", path,
+        le_log_error( "cannot create LED socket %s: %s", path,
                     strerror(errno));
         close(fd);
         unlink(path);
@@ -1334,6 +1318,7 @@ int main(int argc, char **argv)
             sizeof(ctx.socket_path) - 1);
     for (i = 0; i < MAX_CLIENTS; i++)
         ctx.clients[i].fd = -1;
+    le_log_init("ledd", argc, argv);
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--foreground") == 0) {
@@ -1347,6 +1332,9 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
             strncpy(ctx.socket_path, argv[i], sizeof(ctx.socket_path) - 1);
+        } else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "--debug") == 0 ||
+                   strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "--syslog") == 0) {
+            /* handled by le_log_init */
         } else {
             usage(argv[0]);
             return EXIT_FAILURE;
@@ -1355,7 +1343,7 @@ int main(int argc, char **argv)
 
     if (mkdir_p("/run/libreecho") != 0 && strcmp(ctx.socket_path,
                                                    LE_ADAPTER_LED_SOCK) == 0) {
-        log_message("error", "cannot create /run/libreecho: %s",
+        le_log_error( "cannot create /run/libreecho: %s",
                     strerror(errno));
         return EXIT_FAILURE;
     }
@@ -1368,7 +1356,7 @@ int main(int argc, char **argv)
         if (slash != NULL && slash != parent) {
             *slash = '\0';
             if (mkdir_p(parent) != 0) {
-                log_message("error", "cannot create socket directory %s: %s",
+                le_log_error( "cannot create socket directory %s: %s",
                             parent, strerror(errno));
                 return EXIT_FAILURE;
             }
@@ -1382,7 +1370,7 @@ int main(int argc, char **argv)
     hardware_apply(&ctx.hw, &ctx.state.current);
 
     if (!ctx.foreground && daemonize_process() != 0) {
-        log_message("error", "daemonization failed: %s", strerror(errno));
+        le_log_error( "daemonization failed: %s", strerror(errno));
         return EXIT_FAILURE;
     }
 
@@ -1397,7 +1385,7 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &action, NULL);
     signal(SIGPIPE, SIG_IGN);
 
-    log_message("info", "LED daemon listening on %s", ctx.socket_path);
+    le_log_info( "LED daemon listening on %s", ctx.socket_path);
     while (!stop_requested) {
         struct pollfd fds[1 + MAX_CLIENTS];
         int slots[1 + MAX_CLIENTS];
@@ -1425,7 +1413,7 @@ int main(int argc, char **argv)
         if (poll(fds, nfds, timeout) < 0) {
             if (errno == EINTR)
                 continue;
-            log_message("error", "poll failed: %s", strerror(errno));
+            le_log_error( "poll failed: %s", strerror(errno));
             break;
         }
         if (fds[0].revents & POLLIN)
@@ -1446,6 +1434,6 @@ int main(int argc, char **argv)
     if (ctx.listen_fd >= 0)
         close(ctx.listen_fd);
     unlink(ctx.socket_path);
-    log_message("info", "LED daemon stopped");
+    le_log_info( "LED daemon stopped");
     return EXIT_SUCCESS;
 }

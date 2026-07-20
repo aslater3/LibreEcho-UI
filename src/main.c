@@ -1,6 +1,7 @@
 #include "api.h"
 #include "backend.h"
 #include "http_server.h"
+#include "log.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +11,7 @@
 static volatile int running=1;
 static void stop(int s){(void)s;
 running=0;
-}static void usage(const char*p){fprintf(stderr,"Usage: %s [--backend mock|linux] [--listen IP:PORT] [--web-root PATH] [--config PATH] [--mock-config PATH] [--seed N] [--dev-controls] [--auth-token-file PATH] [--allowed-origin URL] [--user NAME] [--allow-insecure-lan]\n",p);
+}static void usage(const char*p){fprintf(stderr,"Usage: %s [--backend mock|linux] [--listen IP:PORT] [--web-root PATH] [--config PATH] [--mock-config PATH] [--seed N] [--dev-controls] [--auth-token-file PATH] [--allowed-origin URL] [--user NAME] [--allow-insecure-lan] [--verbose] [--debug] [--quiet]\n",p);
 }
 static int read_token(const char*path,char*out,size_t size){FILE*f;size_t n;struct stat st;if(!path)return 0;if(stat(path,&st)||!S_ISREG(st.st_mode)||(st.st_mode&077))return-1;f=fopen(path,"r");if(!f)return-1;n=fread(out,1,size-1,f);fclose(f);while(n&&(out[n-1]=='\n'||out[n-1]=='\r'||out[n-1]==' '||out[n-1]=='\t'))n--;out[n]=0;return n>=16?0:-1;}
 int main(int argc,char**argv){const char*mode="mock",*cfg="./config/runtime.json",*mock="./config/mock-state.json",*token_path=0,*allowed_origin=0;
@@ -20,6 +21,7 @@ struct le_backend*b=0;
 struct api_context api;
 struct http_options o;
 char listen[96]="127.0.0.1:8080",token[192]={0},*colon;
+le_log_init("libreecho-web",argc,argv);
 memset(&o,0,sizeof(o));
 strcpy(o.web_root,"./web");
 o.max_clients=16;
@@ -36,6 +38,7 @@ else if(!strcmp(argv[i],"--auth-token-file")&&i+1<argc)token_path=argv[++i];
 else if(!strcmp(argv[i],"--allowed-origin")&&i+1<argc)allowed_origin=argv[++i];
 else if(!strcmp(argv[i],"--user")&&i+1<argc)strncpy(o.run_user,argv[++i],sizeof(o.run_user)-1);
 else if(!strcmp(argv[i],"--allow-insecure-lan"))insecure_lan=1;
+else if(!strcmp(argv[i],"--verbose")||!strcmp(argv[i],"--debug")||!strcmp(argv[i],"--quiet")||!strcmp(argv[i],"--syslog")){}
 else if(!strcmp(argv[i],"--help")){usage(argv[0]);
 return 0;
 }else{usage(argv[0]);

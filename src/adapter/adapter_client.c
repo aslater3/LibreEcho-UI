@@ -1,4 +1,5 @@
 #include "adapter.h"
+#include "log.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -336,9 +337,12 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
 
     if (!sock_path || timeout_ms < 0 || strlen(sock_path) >= sizeof(address.sun_path))
         return NULL;
+    le_log_debug("adapter: connecting to %s (timeout %dms)", sock_path, timeout_ms);
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0)
+    if (fd < 0) {
+        le_log_pdebug("adapter: socket() failed for %s", sock_path);
         return NULL;
+    }
     memset(&address, 0, sizeof(address));
     address.sun_family = AF_UNIX;
     memcpy(address.sun_path, sock_path, strlen(sock_path) + 1);
@@ -353,6 +357,7 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
     rc = connect(fd, (struct sockaddr *)&address, address_len);
     if (rc < 0) {
         if (errno != EINPROGRESS) {
+            le_log_pdebug("adapter: connect(%s) failed", sock_path);
             close(fd);
             return NULL;
         }
@@ -365,6 +370,7 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
                 rc = poll(&pfd, 1, timeout_ms);
             } while (rc < 0 && errno == EINTR);
             if (rc <= 0 || (pfd.revents & POLLNVAL)) {
+                le_log_debug("adapter: connect(%s) timed out or invalid", sock_path);
                 close(fd);
                 return NULL;
             }
@@ -383,6 +389,7 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
     }
     a->fd = fd;
     a->next_id = 1;
+    le_log_debug("adapter: connected to %s (fd=%d)", sock_path, fd);
     return a;
 }
 
@@ -445,12 +452,17 @@ int le_adapter_call(struct le_adapter *a, const char *cmd,
         return LE_ADAPTER_ERR_PROTO;
     used += (size_t)n;
 
+    le_log_debug("adapter: call id=%lu cmd=\"%s\"", id, cmd);
     rc = write_all(a, request, used);
-    if (rc != LE_ADAPTER_OK)
+    if (rc != LE_ADAPTER_OK) {
+        le_log_debug("adapter: write failed for cmd=\"%s\" (rc=%d)", cmd, rc);
         return rc;
+    }
     rc = read_line(a, response, sizeof(response));
-    if (rc != LE_ADAPTER_OK)
+    if (rc != LE_ADAPTER_OK) {
+        le_log_debug("adapter: read failed for cmd=\"%s\" (rc=%d)", cmd, rc);
         return rc;
+    }
 
     value = find_key(response, "v");
     if (parse_ulong_value(value, &response_id) < 0 ||
@@ -466,6 +478,7 @@ int le_adapter_call(struct le_adapter *a, const char *cmd,
         value = find_key(response, "error");
         if (json_read_string(value, error_text, sizeof(error_text), NULL) < 0)
             return LE_ADAPTER_ERR_PROTO;
+        le_log_debug("adapter: cmd=\"%s\" rejected: %s", cmd, error_text);
         if (out && out_size) {
             size_t error_size = strlen(error_text);
             if (error_size >= out_size)

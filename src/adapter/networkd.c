@@ -11,6 +11,7 @@
 #endif
 
 #include "adapter.h"
+#include "log.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -937,6 +938,7 @@ static void check_scan_timeout(struct daemon_ctx *ctx)
 static void handle_wpa_event(struct daemon_ctx *ctx, const char *event)
 {
     struct network_state before;
+    le_log_debug("networkd: wpa event: %.80s", event);
     if (strstr(event, "CTRL-EVENT-SCAN-RESULTS")) {
         if (ctx->scan.active)
             finish_scan(ctx, 0, NULL);
@@ -1146,9 +1148,11 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
 
     result = le_adapter_parse_request(message, cmd, sizeof(cmd), &args, &id);
     if (result < 0) {
+        le_log_warn("networkd: malformed request from client %d", ci);
         (void)send_err_fd(ctx->clients[ci].fd, 0, "malformed request");
         return;
     }
+    le_log_debug("networkd: cmd=\"%s\" id=%lu client=%d", cmd, id, ci);
     if (!strcmp(cmd, "status")) {
         (void)ensure_wpa(ctx);
         refresh_state(ctx);
@@ -1161,7 +1165,9 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             (void)send_err_fd(ctx->clients[ci].fd, id, "scan already in progress");
             return;
         }
+        le_log_info("networkd: scan requested");
         if (wpa_ok(ctx, "SCAN\n", reply, sizeof(reply)) < 0) {
+            le_log_error("networkd: wpa_supplicant scan unavailable");
             (void)send_err_fd(ctx->clients[ci].fd, id, "wpa_supplicant scan unavailable");
             return;
         }
@@ -1183,8 +1189,10 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             (void)send_err_fd(ctx->clients[ci].fd, id, "DHCP already in progress");
             return;
         }
+        le_log_info("networkd: connect to ssid=\"%s\" security=%s", ssid, have_security == 1 ? security : "wpa2");
         if (connect_network(ctx, ssid, have_psk == 1 ? psk : "",
                             have_security == 1 ? security : "wpa2") < 0) {
+            le_log_error("networkd: wpa_supplicant rejected network \"%s\"", ssid);
             (void)send_err_fd(ctx->clients[ci].fd, id, "wpa_supplicant rejected network");
             return;
         }
@@ -1197,6 +1205,7 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         }
     } else if (!strcmp(cmd, "disconnect")) {
         char reply[WPA_REPLY_MAX];
+        le_log_info("networkd: disconnect requested");
         if (ctx->dhcp.active)
             cancel_dhcp(ctx);
         if (ctx->wpa.command.fd >= 0)
@@ -1368,7 +1377,7 @@ static int daemonize_process(void)
 static void usage(const char *name)
 {
     fprintf(stderr,
-            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--foreground]\n",
+            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--foreground] [--verbose] [--debug] [--quiet]\n",
             name);
 }
 
@@ -1392,6 +1401,9 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
                 copy_string(ctx->wpa_path, sizeof(ctx->wpa_path), value);
             else
                 copy_string(ctx->interface, sizeof(ctx->interface), value);
+        } else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "--debug") ||
+                   !strcmp(argv[i], "--quiet") || !strcmp(argv[i], "--syslog")) {
+            /* handled by le_log_init */
         } else {
             usage(argv[0]);
             return -1;
@@ -1438,8 +1450,11 @@ int main(int argc, char **argv)
     ctx.dhcp.client_fd = -1;
     for (i = 0; i < CLIENT_MAX; ++i)
         ctx.clients[i].fd = -1;
+    le_log_init("networkd", argc, argv);
     if (parse_args(&ctx, argc, argv) < 0)
         return 2;
+    le_log_info("networkd: starting (socket=%s, interface=%s, wpa=%s)",
+                ctx.socket_path, ctx.interface, ctx.wpa_path);
 
     memset(&action, 0, sizeof(action));
     action.sa_handler = on_signal;

@@ -5,6 +5,7 @@
 #include "backend_internal.h"
 #include "adapter/adapter.h"
 #include "json.h"
+#include "log.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -185,15 +186,21 @@ static int adapter_command(const char *socket_path, const char *command,
 {
     struct le_adapter *adapter;
     int rc;
+    int result;
 
     if (response && response_size)
         response[0] = '\0';
     adapter = le_adapter_connect(socket_path, 100);
-    if (!adapter)
+    if (!adapter) {
+        le_log_debug("backend: adapter %s unavailable (daemon not running?)", command);
         return LE_NOT_SUPPORTED;
+    }
     rc = le_adapter_call(adapter, command, args, response, response_size);
     le_adapter_close(adapter);
-    return adapter_result(rc);
+    result = adapter_result(rc);
+    if (result != LE_OK)
+        le_log_debug("backend: adapter %s failed (rc=%d)", command, rc);
+    return result;
 }
 
 static int adapter_json_command(const char *socket_path, const char *command,
@@ -691,6 +698,7 @@ static int wake_test(struct le_backend *b)
 static int linux_reboot(struct le_backend *b)
 {
     (void)b;
+    le_log_info("backend: reboot requested");
     sync();
     return reboot(LINUX_REBOOT_CMD_RESTART) == 0 ? LE_OK : LE_IO;
 }
@@ -698,6 +706,7 @@ static int linux_reboot(struct le_backend *b)
 static int linux_shutdown(struct le_backend *b)
 {
     (void)b;
+    le_log_info("backend: shutdown requested");
     sync();
     return reboot(LINUX_REBOOT_CMD_POWER_OFF) == 0 ? LE_OK : LE_IO;
 }
@@ -710,13 +719,18 @@ static int factory_reset(struct le_backend *b)
     ssize_t written;
 
     (void)b;
+    le_log_info("backend: factory reset requested");
     fd = open("/tmp/.libreecho_factory_reset", O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0)
+    if (fd < 0) {
+        le_log_perr("backend: cannot write factory reset marker");
         return LE_IO;
+    }
     written = write(fd, marker, sizeof(marker) - 1);
     close_rc = close(fd);
-    if (written != (ssize_t)(sizeof(marker) - 1) || close_rc < 0)
+    if (written != (ssize_t)(sizeof(marker) - 1) || close_rc < 0) {
+        le_log_error("backend: factory reset marker write incomplete");
         return LE_IO;
+    }
     return linux_reboot(b);
 }
 

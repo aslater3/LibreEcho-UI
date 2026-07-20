@@ -15,6 +15,7 @@
 #endif
 
 #include "adapter.h"
+#include "log.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -962,6 +963,7 @@ static int handle_request(struct audio_hw *audio, char *message,
 
     if (parse_request(message, &id, command, sizeof(command)) < 0)
         return response_error(response, response_size, 0, "malformed request");
+    le_log_debug("audiod: cmd=\"%s\" id=%lu", command, id);
 
     if (!strcmp(command, "status")) {
         (void)snprintf(data, sizeof(data),
@@ -979,6 +981,7 @@ static int handle_request(struct audio_hw *audio, char *message,
     if (!strcmp(command, "set_volume")) {
         if (json_long(message, "volume", &value) < 0 || value < 0 || value > 100)
             return response_error(response, response_size, id, "volume must be 0-100");
+        le_log_info("audiod: set_volume %d -> %d", audio->volume, (int)value);
         if (audio_set_volume(audio, (int)value) < 0)
             return response_error(response, response_size, id, "volume unavailable");
         return response_ok(response, response_size, id, "{}");
@@ -986,6 +989,7 @@ static int handle_request(struct audio_hw *audio, char *message,
     if (!strcmp(command, "set_gain")) {
         if (json_long(message, "gain", &value) < 0 || value < 0 || value > 100)
             return response_error(response, response_size, id, "gain must be 0-100");
+        le_log_info("audiod: set_gain %d -> %d", audio->gain, (int)value);
         if (audio_set_gain(audio, (int)value) < 0)
             return response_error(response, response_size, id, "microphone gain unavailable");
         return response_ok(response, response_size, id, "{}");
@@ -998,6 +1002,7 @@ static int handle_request(struct audio_hw *audio, char *message,
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "test_tone")) {
+        le_log_info("audiod: test tone requested");
         if (start_test_tone(audio) < 0)
             return response_error(response, response_size, id, "audio output unavailable");
         return response_ok(response, response_size, id, "{\"playing\":true}");
@@ -1105,7 +1110,7 @@ static int accept_client(int listen_fd, struct client clients[LE_MAX_CLIENTS])
 
 static void usage(const char *program)
 {
-    fprintf(stderr, "usage: %s [--socket PATH] [--card NUM] [--foreground]\n",
+    fprintf(stderr, "usage: %s [--socket PATH] [--card NUM] [--foreground] [--verbose] [--debug] [--quiet]\n",
             program);
 }
 
@@ -1124,6 +1129,7 @@ int main(int argc, char **argv)
     memset(clients, 0, sizeof(clients));
     for (i = 0; i < LE_MAX_CLIENTS; ++i)
         clients[i].fd = -1;
+    le_log_init("audiod", argc, argv);
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--socket") && i + 1 < argc) {
             socket_path = argv[++i];
@@ -1137,12 +1143,16 @@ int main(int argc, char **argv)
             card = (int)parsed;
         } else if (!strcmp(argv[i], "--foreground")) {
             foreground = 1;
+        } else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "--debug") ||
+                   !strcmp(argv[i], "--quiet") || !strcmp(argv[i], "--syslog")) {
+            /* handled by le_log_init */
         } else {
             usage(argv[0]);
             return EXIT_FAILURE;
         }
     }
     (void)foreground; /* daemonization is intentionally not implicit */
+    le_log_info("audiod: starting (socket=%s, card=%d)", socket_path, card);
 
     memset(&action, 0, sizeof(action));
     action.sa_handler = signal_stop;
