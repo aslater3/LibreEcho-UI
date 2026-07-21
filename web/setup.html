@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Set up LibreEcho</title>
+  <link rel="stylesheet" href="/css/setup.css">
+</head>
+<body>
+  <main class="setup-shell">
+    <aside class="setup-side">
+      <a class="setup-brand" href="/setup.html"><img src="/assets/mark.svg" alt=""><span><strong><em>Libre</em>Echo</strong><small>First-boot setup</small></span></a>
+      <div class="ap-state"><i></i><span><strong>Setup access point</strong><small>Direct, local connection</small></span></div>
+      <ol class="steps" aria-label="Setup progress">
+        <li class="active" data-step-marker="0"><b>1</b><span>Welcome<small>Meet your LibreEcho</small></span></li>
+        <li data-step-marker="1"><b>2</b><span>Network<small>Connect to your Wi-Fi</small></span></li>
+        <li data-step-marker="2"><b>3</b><span>Essentials<small>Name, sound and voice</small></span></li>
+        <li data-step-marker="3"><b>4</b><span>Privacy<small>Choose your defaults</small></span></li>
+        <li data-step-marker="4"><b>5</b><span>Review<small>Apply configuration</small></span></li>
+      </ol>
+      <p class="side-note">Setup data is sent only to this device. Wi-Fi credentials are never returned by the API.</p>
+    </aside>
+
+    <section class="setup-main">
+      <div id="setup-error" class="error-banner" role="alert" hidden></div>
+
+      <section class="setup-page active" data-step="0">
+        <span class="eyebrow">Welcome to LibreEcho</span>
+        <h1>Let’s get your device ready.</h1>
+        <p class="lead">You’re connected directly to LibreEcho’s temporary setup network. This short wizard will connect it to your Wi-Fi and establish safe local defaults.</p>
+        <div class="feature-grid">
+          <article><span>⌁</span><h2>Local first</h2><p>Core processing and administration stay on your network.</p></article>
+          <article><span>◇</span><h2>No cloud required</h2><p>Integrations are optional and disabled unless you choose them later.</p></article>
+          <article><span>✓</span><h2>Change anything</h2><p>Every choice remains available in the control centre.</p></article>
+        </div>
+      </section>
+
+      <section class="setup-page" data-step="1">
+        <span class="eyebrow">Network</span>
+        <h1>Connect LibreEcho to Wi-Fi.</h1>
+        <p class="lead">Select a network or enter its name manually. The temporary setup access point may disappear while the device joins your LAN.</p>
+        <div class="section-heading"><h2>Nearby networks</h2><button class="text-button" id="scan-wifi" type="button">Scan again</button></div>
+        <div id="wifi-list" class="wifi-list" aria-live="polite"><p class="muted">Scanning for networks…</p></div>
+        <div class="form-grid">
+          <label><span>Network name (SSID)</span><input id="setup-ssid" maxlength="63" autocomplete="off" required></label>
+          <label><span>Security</span><select id="setup-security"><option value="wpa2">WPA2</option><option value="wpa3">WPA3</option><option value="open">Open</option></select></label>
+          <label class="wide" id="password-field"><span>Wi-Fi password</span><div class="password-input"><input id="setup-password" type="password" maxlength="127" autocomplete="new-password"><button id="show-password" type="button" aria-label="Show password">Show</button></div><small>At least 8 characters. It will not be exposed through the web API.</small></label>
+        </div>
+      </section>
+
+      <section class="setup-page" data-step="2">
+        <span class="eyebrow">Essentials</span>
+        <h1>Make it yours.</h1>
+        <p class="lead">Choose how the device appears on your network and set comfortable starting values.</p>
+        <div class="form-card">
+          <label><span>Hostname</span><input id="setup-hostname" maxlength="63" pattern="[A-Za-z0-9][A-Za-z0-9-]{0,62}" required><small>Letters, numbers and hyphens; used at <strong id="hostname-preview">libreecho.local</strong>.</small></label>
+          <label class="range-label"><span>Initial volume <output id="volume-output">64%</output></span><input id="setup-volume" type="range" min="0" max="100" value="64"></label>
+          <label><span>Wake word</span><select id="setup-wake"><option>LibreEcho</option><option>Computer</option><option>Echo</option></select></label>
+          <label class="range-label"><span>Wake-word sensitivity <output id="sensitivity-output">68%</output></span><input id="setup-sensitivity" type="range" min="0" max="100" value="68"></label>
+        </div>
+      </section>
+
+      <section class="setup-page" data-step="3">
+        <span class="eyebrow">Privacy</span>
+        <h1>Private by default.</h1>
+        <p class="lead">These conservative defaults can be changed later. No cloud dependency is required.</p>
+        <div class="choice-list">
+          <label><span><strong>Local processing only</strong><small>Keep supported speech and automation processing on this device.</small></span><input id="setup-local" type="checkbox" checked><i></i></label>
+          <label><span><strong>Anonymous diagnostic telemetry</strong><small>Share basic reliability information. Audio and credentials are never included.</small></span><input id="setup-telemetry" type="checkbox"><i></i></label>
+        </div>
+        <div class="privacy-note"><strong>Microphone audio retention starts off.</strong><span>Crash reporting, remote API access, SSH and third-party integrations also remain disabled.</span></div>
+      </section>
+
+      <section class="setup-page" data-step="4">
+        <span class="eyebrow">Review</span>
+        <h1>Ready to connect.</h1>
+        <p class="lead">LibreEcho will save these settings, join your Wi-Fi and close its temporary setup access point.</p>
+        <dl class="review-list" id="setup-review"></dl>
+        <label class="confirm"><input id="setup-confirm" type="checkbox"><span>I understand this connection may close when LibreEcho leaves setup mode.</span></label>
+      </section>
+
+      <section class="setup-page complete" data-step="5">
+        <div class="success-ring">✓</div>
+        <span class="eyebrow">Setup complete</span>
+        <h1>LibreEcho is joining your network.</h1>
+        <p class="lead">The setup access point can now close. Reconnect your phone or computer to your normal Wi-Fi, then open the address below.</p>
+        <a id="control-centre-link" class="device-address" href="/">http://libreecho.local</a>
+        <p class="muted">If the name does not resolve, find LibreEcho’s address in your router or reopen this page after reconnecting.</p>
+      </section>
+
+      <footer class="setup-actions" id="setup-actions">
+        <button id="setup-back" class="secondary" type="button" hidden>Back</button>
+        <span id="step-count">Step 1 of 5</span>
+        <button id="setup-next" class="primary" type="button">Get started</button>
+      </footer>
+    </section>
+  </main>
+  <script src="/js/setup.js"></script>
+</body>
+</html>

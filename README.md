@@ -40,6 +40,32 @@ The daemon refuses an unauthenticated non-loopback bind unless the operator expl
 
 A reverse proxy is not required: the native daemon serves the frontend, API, OpenAPI document and event responses. A small existing LAN proxy may still be used for TLS or centralized authentication, with LibreEcho bound to loopback behind it. nginx is optional rather than a runtime dependency.
 
+## First-boot AP setup
+
+When the runtime configuration is absent, the daemon serves `/setup.html` at `/`
+instead of the normal control centre. The responsive five-step wizard captures:
+
+- Wi-Fi SSID, security mode and password;
+- hostname;
+- initial volume;
+- wake word and sensitivity; and
+- local-processing and diagnostic-telemetry defaults.
+
+The wizard uses `GET/POST /api/v1/setup`, the same CSRF and input-validation
+boundary as the rest of the API, and rejects a second completion attempt. The
+Wi-Fi password is handed directly to the backend, zeroed from the request
+structure after use, never persisted by the web configuration store, never
+returned, and never logged. Successful setup is atomically recorded in the JSON
+configuration. Existing installations without the new flag are treated as
+already configured, while factory reset clears the flag and returns `/` to the
+wizard.
+
+On the eventual device, a small network supervisor must create the temporary AP,
+provide DHCP/DNS captive-portal routing, start the daemon with an explicitly
+approved AP bind, and close the AP after the setup-complete event. Those platform
+actions remain outside the web daemon and behind the network adapter boundary;
+the mock backend models the UI and delayed Wi-Fi transition now.
+
 ## Build and run
 
 Requirements are a C99 compiler, POSIX libc, `make`, and (for API tests) `curl`.
@@ -104,7 +130,7 @@ Set `LIBREECHO_URL` when using a port other than 8080. These routes exist only i
 
 ## API and live state
 
-Implemented v1 areas include status, device, config metadata, audio, LED, buttons, wake word, Wi-Fi scan/connect/disconnect, network identity, privacy, integrations, system/OTA model, logs, diagnostics, events, and guarded power operations. The overview polls once every five seconds. `/api/v1/events` emits bounded SSE-formatted event snapshots, but a persistent multi-client SSE fan-out is deferred; polling avoids pretending that the initial one-shot stream is a full push service.
+Implemented v1 areas include first-boot setup, status, device, config metadata, audio, LED, buttons, wake word, Wi-Fi scan/connect/disconnect, network identity, privacy, integrations, system/OTA model, logs, diagnostics, events, and guarded power operations. The overview polls once every five seconds. `/api/v1/events` emits bounded SSE-formatted event snapshots, but a persistent multi-client SSE fan-out is deferred; polling avoids pretending that the initial one-shot stream is a full push service.
 
 OTA is a UI/API data model only. The Linux backend returns unsupported for hardware installation. There are no raw writes to `/dev/block/*`.
 
@@ -116,12 +142,12 @@ make test
 
 The suite covers JSON/config units, API smoke behavior, malformed JSON, 16 KiB limits, CSRF, destructive confirmation, mock faults and delayed connections, secret redaction, restrictive config mode, restart persistence, Linux unsupported operations, and idle RSS. No Echo hardware is needed. See `tests/browser-checklist.md` for the responsive/accessibility smoke pass.
 
-Latest measurements on the macOS ARM64 development host (19 July 2026):
+Latest measurements on the macOS ARM64 development host (21 July 2026):
 
-- Normal daemon binary: 73,184 bytes.
-- Size-optimised daemon binary: 73,072 bytes.
-- Idle RSS with mock backend: 1,680 KiB.
-- Complete uncompressed frontend: about 148 KiB (including the 99 KiB device image).
+- Normal daemon binary: 90,112 bytes.
+- Size-optimised daemon binary: 90,016 bytes.
+- Idle RSS with mock backend: 1,728 KiB.
+- Complete uncompressed frontend: about 190 KiB (including the 99 KiB device image).
 
 Host results are indicative; remeasure on the final musl/uClibc target with `size`, `/proc/<pid>/status`, and representative LAN clients.
 
@@ -146,10 +172,10 @@ Host results are indicative; remeasure on the final musl/uClibc target with `siz
 │   ├── backend_linux.c
 │   └── json.{c,h}
 ├── web/
-│   ├── index.html
+│   ├── {index.html,setup.html,swagger.html,openapi.json}
 │   ├── assets/{mark.svg,device.png}
-│   ├── css/app.css
-│   └── js/app.js
+│   ├── css/{app.css,setup.css,api-docs.css}
+│   └── js/{app.js,setup.js,swagger.js}
 ├── tests/
 │   ├── run_tests.sh
 │   ├── test_unit.c
@@ -181,6 +207,7 @@ Do not add undocumented ioctl numbers. Each integration belongs behind `backend.
 ## Known limitations
 
 - Authentication/token provisioning is an abstraction only; loopback is therefore the safe default.
+- AP creation, captive-portal DNS/DHCP and AP shutdown require the future device network supervisor; the web/API handoff is implemented.
 - TLS is expected to terminate at a small trusted LAN proxy if required; no TLS library is bundled.
 - SSE is currently a bounded one-shot snapshot and the UI uses five-second overview polling.
 - Privacy, integration, button and OTA panels expose the API model, but some settings are not yet persisted independently.

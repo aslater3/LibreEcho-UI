@@ -7,12 +7,16 @@
   },
   "servers": [{"url":"/api/v1","description":"This LibreEcho device"}],
   "tags": [
-    {"name":"Discovery"},{"name":"Device"},{"name":"Audio"},{"name":"LED and buttons"},
+    {"name":"Discovery"},{"name":"Setup"},{"name":"Device"},{"name":"Audio"},{"name":"LED and buttons"},
     {"name":"Wake word"},{"name":"Network"},{"name":"Privacy"},{"name":"Integrations"},
     {"name":"System"},{"name":"Diagnostics"},{"name":"Development"}
   ],
   "paths": {
     "/": {"get":{"tags":["Discovery"],"summary":"Discover API links","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/setup": {
+      "get":{"tags":["Setup"],"summary":"Read first-boot setup state","description":"Returns safe initial values and whether first-boot setup is complete. Wi-Fi credentials are never returned.","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "post":{"tags":["Setup"],"summary":"Complete first-boot AP-mode setup","description":"Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. This one-time operation is rejected after setup completes.","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}
+    },
     "/status": {"get":{"tags":["Device"],"summary":"Read system telemetry","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/device": {"get":{"tags":["Device"],"summary":"Read device identity","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/config": {"get":{"tags":["Discovery"],"summary":"Read API configuration metadata","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
