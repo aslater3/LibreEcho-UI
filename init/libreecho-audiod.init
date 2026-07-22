@@ -13,7 +13,7 @@ DAEMON=${DAEMON:-/usr/local/sbin/libreecho-audiod}
 PIDFILE=${PIDFILE:-/var/run/libreecho-audiod.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-audiod.log}
 SOCKET=${SOCKET:-/run/libreecho/audio.sock}
-ARGS=${ARGS:---socket $SOCKET}
+ARGS=${ARGS:---foreground --socket $SOCKET}
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1
@@ -28,7 +28,7 @@ start_service() {
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else
-        "$DAEMON" $ARGS >>"$LOGFILE" 2>&1 &
+        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
         echo $! >"$PIDFILE"
     fi
 }

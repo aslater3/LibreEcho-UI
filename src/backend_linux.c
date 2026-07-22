@@ -33,6 +33,9 @@
 struct linux_state {
     char config[384];
     char temp_path[256];
+    unsigned long long cpu_prev_total[LE_MAX_CPUS];
+    unsigned long long cpu_prev_busy[LE_MAX_CPUS];
+    unsigned char cpu_prev_valid[LE_MAX_CPUS];
 };
 
 static struct linux_state *state(struct le_backend *b)
@@ -75,6 +78,85 @@ static int read_line(const char *path, char *out, size_t out_size)
     n = strcspn(out, "\r\n");
     out[n] = '\0';
     return 0;
+}
+
+static void read_cpu_status(struct le_backend *b, struct le_system_status *o)
+{
+    FILE *f;
+    char line[256];
+    long configured;
+    size_t count, i;
+
+    configured = sysconf(_SC_NPROCESSORS_CONF);
+    if (configured < 1)
+        configured = 1;
+    count = (size_t)configured;
+    if (count > LE_MAX_CPUS)
+        count = LE_MAX_CPUS;
+    o->cpu_count = count;
+
+    for (i = 0; i < count; ++i) {
+        char path[PATH_MAX], online[8], frequency[32];
+        o->cpus[i].online = i == 0;
+        frequency[0] = '\0';
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%zu/online", i);
+        if (!read_line(path, online, sizeof(online)))
+            o->cpus[i].online = atoi(online) != 0;
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%zu/cpufreq/scaling_cur_freq", i);
+        if (read_line(path, frequency, sizeof(frequency))) {
+            snprintf(path, sizeof(path),
+                     "/sys/devices/system/cpu/cpu%zu/cpufreq/cpuinfo_cur_freq", i);
+            (void)read_line(path, frequency, sizeof(frequency));
+        }
+        o->cpus[i].frequency_khz = atoi(frequency);
+    }
+
+    f = fopen("/proc/stat", "r");
+    if (!f)
+        return;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned int cpu;
+        unsigned long long user, nice, system, idle, iowait;
+        unsigned long long irq, softirq, steal;
+        unsigned long long busy, total;
+        unsigned long long delta_busy, delta_total;
+
+        if (sscanf(line, "cpu%u %llu %llu %llu %llu %llu %llu %llu %llu",
+                   &cpu, &user, &nice, &system, &idle, &iowait, &irq,
+                   &softirq, &steal) != 9 || cpu >= count)
+            continue;
+        busy = user + nice + system + irq + softirq + steal;
+        total = busy + idle + iowait;
+        if (state(b)->cpu_prev_valid[cpu] &&
+            total >= state(b)->cpu_prev_total[cpu] &&
+            busy >= state(b)->cpu_prev_busy[cpu]) {
+            delta_total = total - state(b)->cpu_prev_total[cpu];
+            delta_busy = busy - state(b)->cpu_prev_busy[cpu];
+            if (delta_total)
+                o->cpus[cpu].utilization = (int)((delta_busy * 100) /
+                                                 delta_total);
+            if (o->cpus[cpu].utilization > 100)
+                o->cpus[cpu].utilization = 100;
+        }
+        state(b)->cpu_prev_total[cpu] = total;
+        state(b)->cpu_prev_busy[cpu] = busy;
+        state(b)->cpu_prev_valid[cpu] = 1;
+    }
+    fclose(f);
+
+    {
+        int total_utilization = 0;
+        int online_count = 0;
+        for (i = 0; i < count; ++i) {
+            if (!o->cpus[i].online)
+                continue;
+            total_utilization += o->cpus[i].utilization;
+            ++online_count;
+        }
+        if (online_count)
+            o->cpu = total_utilization / online_count;
+    }
 }
 
 /* Return the first balanced JSON object associated with key. */
@@ -336,6 +418,35 @@ static void read_dns(char *out, size_t out_size)
     fclose(f);
 }
 
+static int read_temperature(void)
+{
+    char path[PATH_MAX], type_path[PATH_MAX], raw[32], type[64];
+    int fallback = 0;
+    unsigned int zone;
+
+    for (zone = 0; zone < 16; ++zone) {
+        long value;
+        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%u/temp", zone);
+        if (read_line(path, raw, sizeof(raw)))
+            continue;
+        value = strtol(raw, NULL, 10);
+        if (value > 1000)
+            value /= 1000;
+        if (value < -40 || value > 150)
+            continue;
+        if (!fallback)
+            fallback = (int)value;
+        snprintf(type_path, sizeof(type_path),
+                 "/sys/class/thermal/thermal_zone%u/type", zone);
+        type[0] = '\0';
+        (void)read_line(type_path, type, sizeof(type));
+        if (value != 0 && (strstr(type, "cpu") || strstr(type, "soc") ||
+                           strstr(type, "mtk") || strstr(type, "thermal")))
+            return (int)value;
+    }
+    return fallback;
+}
+
 /* status() reads the Linux procfs/sysfs measurements directly. */
 static int status(struct le_backend *b, struct le_system_status *o)
 {
@@ -382,13 +493,9 @@ static int status(struct le_backend *b, struct le_system_status *o)
         o->storage_used_mb = (int)(u / 1048576);
         o->storage = (int)(u * 100 / t);
     }
-    f = fopen(state(b)->temp_path, "r");
-    if (f) {
-        long temperature;
-        if (fscanf(f, "%ld", &temperature) == 1)
-            o->temperature = (int)(temperature > 1000 ? temperature / 1000 : temperature);
-        fclose(f);
-    }
+    (void)f;
+    o->temperature = read_temperature();
+    read_cpu_status(b, o);
     return LE_OK;
 }
 
@@ -411,6 +518,35 @@ static int device(struct le_backend *b, struct le_device_info *o)
     return LE_OK;
 }
 
+static int networkd_status(struct le_backend *b, struct le_network_state *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int found = 0;
+    int rc;
+
+    (void)b;
+    rc = adapter_command(LE_ADAPTER_NETWORK_SOCK, "status", NULL,
+                         response, sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+
+    memset(o, 0, sizeof(*o));
+    o->rssi_dbm = -1;
+    gethostname(o->hostname, sizeof(o->hostname) - 1);
+    if (json_get_string(response, "state", o->state, sizeof(o->state)) > 0)
+        found = 1;
+    if (json_get_string(response, "ssid", o->ssid, sizeof(o->ssid)) > 0)
+        found = 1;
+    (void)json_get_string(response, "ip", o->ip, sizeof(o->ip));
+    (void)json_get_string(response, "gateway", o->gateway, sizeof(o->gateway));
+    (void)json_get_string(response, "dns", o->dns, sizeof(o->dns));
+    (void)json_get_int(response, "signal", &o->signal);
+    (void)json_get_int(response, "rssi_dbm", &o->rssi_dbm);
+    o->dhcp = o->ip[0] && (!strcmp(o->state, "connected") || o->gateway[0]);
+    o->internet = o->gateway[0] && !strcmp(o->state, "connected");
+    return found ? LE_OK : LE_IO;
+}
+
 static int network(struct le_backend *b, struct le_network_state *o)
 {
     char path[PATH_MAX];
@@ -419,8 +555,11 @@ static int network(struct le_backend *b, struct le_network_state *o)
     char iface[IFNAMSIZ];
     int have_iface = 0;
 
-    (void)b;
+    if (networkd_status(b, o) == LE_OK)
+        return LE_OK;
+
     memset(o, 0, sizeof(*o));
+    o->rssi_dbm = -1;
     gethostname(o->hostname, sizeof(o->hostname) - 1);
 
     snprintf(path, sizeof(path), "/sys/class/net/wlan0/operstate");

@@ -43,7 +43,9 @@ fi
 
 cd "$ROOT"
 "$MAKE" clean
-"$MAKE" CROSS_COMPILE="$BUILD_CROSS_COMPILE" CC="$COMPILER" release
+TARGET_GC_LDFLAGS=${GC_LDFLAGS:--static -Wl,--gc-sections}
+"$MAKE" CROSS_COMPILE="$BUILD_CROSS_COMPILE" CC="$COMPILER" \
+    GC_LDFLAGS="$TARGET_GC_LDFLAGS" release
 
 for binary in \
     build/libreecho-web \

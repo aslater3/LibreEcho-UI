@@ -20,6 +20,12 @@
 #include <limits.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#define _LINUX_IF_H
+#ifndef IFNAMSIZ
+#define IFNAMSIZ 16
+#endif
+#include <linux/wireless.h>
+#undef _LINUX_IF_H
 #include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -71,6 +77,7 @@ struct network_state {
     char mac[18];
     int link_up;
     int signal;
+    int rssi_dbm;
 };
 
 struct client {
@@ -214,7 +221,9 @@ static int state_json(const struct network_state *s, char *out, size_t size)
         append_json_string(out, size, &n, s->gateway) < 0 ||
         append_text(out, size, &n, ",\"dns\":") < 0 ||
         append_json_string(out, size, &n, s->dns) < 0 ||
-        append_text(out, size, &n, ",\"signal\":%d,\"mac\":", s->signal) < 0 ||
+        append_text(out, size, &n,
+                    ",\"signal\":%d,\"rssi_dbm\":%d,\"mac\":",
+                    s->signal, s->rssi_dbm) < 0 ||
         append_json_string(out, size, &n, s->mac) < 0 ||
         append_text(out, size, &n, "}") < 0)
         return -1;
@@ -225,6 +234,7 @@ static int state_equal(const struct network_state *a,
                        const struct network_state *b)
 {
     return a->link_up == b->link_up && a->signal == b->signal &&
+           a->rssi_dbm == b->rssi_dbm &&
            !strcmp(a->interface, b->interface) && !strcmp(a->state, b->state) &&
            !strcmp(a->ssid, b->ssid) && !strcmp(a->ip, b->ip) &&
            !strcmp(a->gateway, b->gateway) && !strcmp(a->dns, b->dns) &&
@@ -437,6 +447,64 @@ static const char *wpa_value(const char *status, const char *key,
     return NULL;
 }
 
+static int rssi_to_percent(int rssi_dbm)
+{
+    int signal;
+
+    if (rssi_dbm <= -100)
+        return 0;
+    if (rssi_dbm >= -30)
+        return 100;
+    signal = (rssi_dbm + 100) * 100 / 70;
+    return signal < 0 ? 0 : signal > 100 ? 100 : signal;
+}
+
+/* Some vendor wpa_supplicant builds expose a control socket but reject the
+ * direct monitor attach used by this small daemon.  The MTK WEXT driver still
+ * provides the current dBm level through SIOCGIWSTATS, so retain useful live
+ * telemetry instead of reporting an entirely unavailable network. */
+static int read_wireless_rssi(const char *iface)
+{
+    struct iwreq request;
+    struct iw_statistics statistics;
+    int fd;
+    int level;
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -1;
+    memset(&request, 0, sizeof(request));
+    memset(&statistics, 0, sizeof(statistics));
+    strncpy(request.ifr_name, iface, sizeof(request.ifr_name) - 1);
+    request.u.data.pointer = &statistics;
+    request.u.data.length = sizeof(statistics);
+    request.u.data.flags = 1;
+    if (ioctl(fd, SIOCGIWSTATS, &request) < 0) {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    level = (int)statistics.qual.level;
+    if (level > 127)
+        level -= 256;
+    return level <= 0 ? level : -1;
+}
+
+static void refresh_link_fallback(struct daemon_ctx *ctx)
+{
+    int rssi = read_wireless_rssi(ctx->interface);
+
+    copy_string(ctx->state.state, sizeof(ctx->state.state),
+                ctx->state.link_up ? "connected" : "disconnected");
+    if (rssi > -128) {
+        ctx->state.rssi_dbm = rssi;
+        ctx->state.signal = rssi_to_percent(rssi);
+    } else {
+        ctx->state.rssi_dbm = -1;
+        ctx->state.signal = 0;
+    }
+}
+
 /* ----- Interface information ------------------------------------------- */
 
 static int interface_link_up(const char *name)
@@ -597,14 +665,14 @@ static void refresh_wpa_info(struct daemon_ctx *ctx)
     int n;
 
     if (ctx->wpa.command.fd < 0) {
-        copy_string(ctx->state.state, sizeof(ctx->state.state), "unavailable");
+        refresh_link_fallback(ctx);
         return;
     }
     n = wpa_ctrl_request(&ctx->wpa.command, "STATUS\n", reply, sizeof(reply),
                          WPA_TIMEOUT_MS);
     if (n < 0) {
         wpa_close(ctx);
-        copy_string(ctx->state.state, sizeof(ctx->state.state), "unavailable");
+        refresh_link_fallback(ctx);
         return;
     }
     if (wpa_value(reply, "ssid", value, sizeof(value)))
@@ -623,8 +691,13 @@ static void refresh_wpa_info(struct daemon_ctx *ctx)
     }
     n = wpa_ctrl_request(&ctx->wpa.command, "SIGNAL_POLL\n", reply,
                          sizeof(reply), WPA_TIMEOUT_MS);
-    if (n >= 0 && wpa_value(reply, "RSSI", value, sizeof(value)))
-        ctx->state.signal = (int)strtol(value, NULL, 10);
+    if (n >= 0 && wpa_value(reply, "RSSI", value, sizeof(value))) {
+        ctx->state.rssi_dbm = (int)strtol(value, NULL, 10);
+        ctx->state.signal = rssi_to_percent(ctx->state.rssi_dbm);
+    } else {
+        ctx->state.rssi_dbm = -1;
+        ctx->state.signal = 0;
+    }
 }
 
 static void refresh_state(struct daemon_ctx *ctx)
@@ -892,7 +965,7 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
                 append_text(data, size, &used, ",\"security\":") < 0 ||
                 append_json_string(data, size, &used, scan_security(flags)) < 0 ||
                 append_text(data, size, &used, ",\"signal\":%d}",
-                            (int)strtol(signal, NULL, 10)) < 0)
+                            rssi_to_percent((int)strtol(signal, NULL, 10))) < 0)
                 return -1;
             ++count;
         }
@@ -1466,6 +1539,7 @@ int main(int argc, char **argv)
 
     copy_string(ctx.state.interface, sizeof(ctx.state.interface), ctx.interface);
     ctx.state.signal = -1;
+    ctx.state.rssi_dbm = -1;
     copy_string(ctx.state.state, sizeof(ctx.state.state), "unavailable");
 
     if (!ctx.foreground && daemonize_process() < 0)

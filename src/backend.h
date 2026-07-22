@@ -7,10 +7,12 @@
 #define LE_TEXT 64
 #define LE_MAX_WIFI 12
 #define LE_MAX_LOGS 128
+#define LE_MAX_CPUS 8
 
 enum le_result { LE_OK=0, LE_INVALID=-1, LE_NOT_SUPPORTED=-2, LE_IO=-3, LE_BUSY=-4, LE_AUTH=-5 };
 
-struct le_system_status { double uptime; int cpu, memory, storage, temperature; int memory_used_mb, memory_total_mb; int storage_used_mb, storage_total_mb; char device_state[24]; };
+struct le_cpu_state { int online, utilization, frequency_khz; };
+struct le_system_status { double uptime; int cpu, memory, storage, temperature; int memory_used_mb, memory_total_mb; int storage_used_mb, storage_total_mb; char device_state[24]; size_t cpu_count; struct le_cpu_state cpus[LE_MAX_CPUS]; };
 struct le_device_info { char name[LE_TEXT], hostname[LE_TEXT], model[LE_TEXT], serial[LE_TEXT], os_version[32], kernel[64], hardware_revision[32], backend[16]; };
 struct le_audio_state { int volume, microphone_gain, notification_volume, muted, startup_sound, amplifier_on, output_available; };
 struct le_led_profile { uint8_t r,g,b; int brightness, animation_speed; };
@@ -18,7 +20,7 @@ struct le_led_state { struct le_led_profile current, boot, listening, thinking, 
 struct le_wifi_network { char ssid[LE_TEXT], security[16]; int signal; };
 struct le_wifi_scan { struct le_wifi_network networks[LE_MAX_WIFI]; size_t count; };
 struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };
-struct le_network_state { char state[24], ssid[LE_TEXT], ip[48], gateway[48], dns[96], hostname[LE_TEXT]; int signal, internet, dhcp, ssh, api_lan; };
+struct le_network_state { char state[24], ssid[LE_TEXT], ip[48], gateway[48], dns[96], hostname[LE_TEXT]; int signal, rssi_dbm, internet, dhcp, ssh, api_lan; };
 struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb; };
 struct le_backend;
 

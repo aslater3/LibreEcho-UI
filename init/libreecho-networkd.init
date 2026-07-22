@@ -13,7 +13,13 @@ DAEMON=${DAEMON:-/usr/local/sbin/libreecho-networkd}
 PIDFILE=${PIDFILE:-/var/run/libreecho-networkd.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-networkd.log}
 SOCKET=${SOCKET:-/run/libreecho/network.sock}
-ARGS=${ARGS:---socket $SOCKET}
+INTERFACE=${INTERFACE:-wlan0}
+# libreecho-wifi uses the control directory from the image's
+# wpa_supplicant.conf (ctrl_interface=/tmp/wpa_ctrl).
+WPA_CTRL=${WPA_CTRL:-/tmp/wpa_ctrl/$INTERFACE}
+# networkd is an adapter entry point.  The existing image control plane owns
+# wpa_supplicant; this daemon only attaches to its control socket.
+ARGS=${ARGS:---foreground --socket $SOCKET --interface $INTERFACE --wpa-ctrl $WPA_CTRL}
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1
@@ -28,7 +34,7 @@ start_service() {
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else
-        "$DAEMON" $ARGS >>"$LOGFILE" 2>&1 &
+        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
         echo $! >"$PIDFILE"
     fi
 }

@@ -12,10 +12,11 @@
 DAEMON=${DAEMON:-/usr/local/sbin/libreecho-web}
 PIDFILE=${PIDFILE:-/var/run/libreecho-web.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-web.log}
-ARGS=${ARGS:---backend linux --config /etc/libreecho/web-config.json --web-root /usr/local/share/libreecho/web --listen 127.0.0.1:8080}
-# For LAN access, override ARGS in /etc/default/libreecho-web (when sourced by
-# your platform) with --auth-token-file, --allowed-origin and --user. The
-# daemon refuses an unauthenticated LAN bind by default.
+# This development image deliberately exposes the UI through wlan0.  Production
+# deployments must override ARGS with authentication and an allowed origin.
+ARGS=${ARGS:---backend linux --config /etc/libreecho/web-config.json --web-root /usr/local/share/libreecho/web --listen 0.0.0.0:8080 --allow-insecure-lan}
+# For authenticated LAN access, override ARGS in /etc/default/libreecho-web
+# with --auth-token-file, --allowed-origin and --user.
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1
@@ -30,7 +31,7 @@ start_service() {
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else
-        "$DAEMON" $ARGS >>"$LOGFILE" 2>&1 &
+        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
         echo $! >"$PIDFILE"
     fi
 }

@@ -43,6 +43,12 @@ Returns system health and telemetry.
     "simulated": false,
     "uptime_seconds": 3600,
     "cpu_percent": 15,
+    "cpus": {
+      "count": 4,
+      "cores": [
+        { "id": 0, "online": true, "utilization_percent": 12, "frequency_khz": 1300000 }
+      ]
+    },
     "memory_percent": 45,
     "memory_used_mb": 450,
     "memory_total_mb": 1000,
@@ -195,6 +201,7 @@ Returns network state.
     "state": "connected",
     "ssid": "MyNetwork",
     "signal": 75,
+    "rssi_dbm": -47,
     "ip": "192.168.1.100",
     "gateway": "192.168.1.1",
     "dns": "8.8.8.8, 8.8.4.4",
