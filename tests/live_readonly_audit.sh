@@ -50,12 +50,14 @@ done
 [ "$(status /api/v1/network/wifi/scan)" = 501 ]
 [ "$(status /api/v1/wake-word)" = 501 ]
 index=$(curl -fsS "$URL/")
-printf '%s' "$index" | grep -q 'app.js?rev=12'
+printf '%s' "$index" | grep -q 'app.js?rev=13'
 printf '%s' "$index" | grep -q 'auth-dialog'
 printf '%s' "$index" | grep -q 'assets/favicon.svg'
-app=$(curl -fsS "$URL/js/app.js?rev=12")
+app=$(curl -fsS "$URL/js/app.js?rev=13")
 printf '%s' "$app" | grep -q 'led-ring-view'
 printf '%s' "$app" | grep -q 'clock_source'
+printf '%s' "$app" | grep -q 'storageValue'
+printf '%s' "$app" | grep -q 'usage unavailable'
 printf '%s' "$app" | grep -q "csrf:''"
 printf '%s' "$app" | grep -q 'openAuthDialog'
 swagger=$(curl -fsS "$URL/js/swagger.js")
