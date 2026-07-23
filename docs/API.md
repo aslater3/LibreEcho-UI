@@ -220,7 +220,9 @@ Returns network state.
     "internet": true,
     "dhcp": true,
     "ssh": false,
-    "api_lan": false
+    "api_lan": false,
+    "api_lan_effective": false,
+    "api_lan_forced": false
   },
   "error": null
 }
@@ -228,7 +230,11 @@ Returns network state.
 
 #### PUT /api/v1/network
 
-Update network settings.
+`api_lan` is the persisted setting. `api_lan_effective` is the access state
+that is actually in force. `api_lan_forced` is true when the daemon was
+started with the development-only `--allow-insecure-lan` override, in which
+case the effective access remains enabled even if the persisted setting is
+false.
 
 **Request:**
 ```json

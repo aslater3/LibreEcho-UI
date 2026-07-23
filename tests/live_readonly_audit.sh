@@ -16,7 +16,10 @@ printf '%s' "$status_json" | jq -e '.ok and .data.cpus.count >= 1 and (.data.cpu
 device=$(json /api/v1/device)
 printf '%s' "$device" | jq -e '.ok and (.data.name | length) > 0 and (.data.kernel | length) > 0' >/dev/null
 network=$(json /api/v1/network)
-printf '%s' "$network" | jq -e '.ok and (.data.state | type) == "string" and (.data.ssid | type) == "string" and (.data.rssi_dbm | type) == "number" and (.data.ip | type) == "string"' >/dev/null
+printf '%s' "$network" | jq -e '.ok and (.data.state | type) == "string" and (.data.ssid | type) == "string" and (.data.rssi_dbm | type) == "number" and (.data.ip | type) == "string" and (.data.api_lan | type) == "boolean" and (.data.api_lan_effective | type) == "boolean" and (.data.api_lan_forced | type) == "boolean"' >/dev/null
+if printf '%s' "$config" | jq -e '.data.bind_policy == "lan-development"' >/dev/null; then
+    printf '%s' "$network" | jq -e '.data.api_lan_effective == true and .data.api_lan_forced == true' >/dev/null
+fi
 led=$(json /api/v1/led)
 printf '%s' "$led" | jq -e '.ok and (.data.animation_active | type) == "boolean" and (.data.animation_profile | type) == "string" and (.data.brightness >= 0 and .data.brightness <= 100) and all([.data.colour.r,.data.colour.g,.data.colour.b][]; . >= 0 and . <= 255)' >/dev/null
 exported=$(json /api/v1/config/export)
