@@ -122,8 +122,9 @@ goto done;
 }if(strstr(q.path,"/system/")&&strcmp(q.method,"GET"))last_destructive=now;
 api_handle(api,&q,&r);
 response(c->fd,r.status,r.type,r.body,r.length);
+if(body_len)memset(body,0,body_len);
 }else if(strcmp(q.method,"GET")&&strcmp(q.method,"HEAD"))response(c->fd,405,"text/plain","Method not allowed",18);
-else if(serve_file(c->fd,o,q.path))response(c->fd,404,"text/plain","Not found",9);
+else if(serve_file(c->fd,o,!api->setup_completed&&!strcmp(q.path,"/")?"/setup.html":q.path))response(c->fd,404,"text/plain","Not found",9);
 
 done:close(c->fd);
 c->fd=-1;

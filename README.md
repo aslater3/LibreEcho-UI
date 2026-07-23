@@ -8,6 +8,7 @@ LibreEcho Web is a hardware-independent control centre for an Amazon Echo Gen 2-
 - **[API.md](docs/API.md)** — Complete HTTP API reference
 - **[HARDWARE.md](docs/HARDWARE.md)** — Adding new hardware subsystems
 - **[OPERATIONS.md](docs/OPERATIONS.md)** — Deployment, configuration, backup, troubleshooting
+- **[HARDWARE_INTEGRATION.md](docs/HARDWARE_INTEGRATION.md)** — WebUI-to-device integration runbook and acceptance tests
 
 ## Architecture
 

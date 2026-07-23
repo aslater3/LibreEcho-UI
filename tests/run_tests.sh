@@ -33,6 +33,8 @@ pid=0
 pid=$!
 sleep 1
 curl -fsS "$URL/api/v1/audio" | grep -q '"volume":37'
+curl -fsS "$URL/api/v1/config" | grep -q '"setup_completed":true'
+curl -fsS "$URL/" | grep -q 'LibreEcho Control Centre'
 echo 'persistence: ok'
 kill "$pid"
 wait "$pid" 2>/dev/null || true
