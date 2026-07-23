@@ -313,7 +313,9 @@ Returns system information and OTA state.
       "rollback_available": false
     },
     "timezone": "Europe/London",
-    "ntp": true
+    "ntp": false,
+    "clock_valid": false,
+    "clock_source": "unset"
   },
   "error": null
 }

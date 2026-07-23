@@ -23,7 +23,7 @@ explicitly requested.
 | `/api/v1/wake-word` | yes | `501` while adapter is absent | UI now shows an explicit unsupported state |
 | `/api/v1/privacy` | yes | pass | persist all fields consistently |
 | `/api/v1/integrations` | yes | pass | add endpoint schema validation |
-| `/api/v1/system` | yes | pass, currently static metadata | label unsupported OTA fields honestly |
+| `/api/v1/system` | yes | live pass; NTP unavailable and clock validity are explicit | add a real time-sync adapter before release |
 | `/api/v1/logs`, `/logs/stream` | yes | live pass; bounded central JSON-lines and one-shot SSE stream | improve clock/boot-relative timestamps |
 | `/api/v1/diagnostics` | yes | live pass; all daemon sockets/PIDs and wlan0 healthy | none |
 | `/api/v1/events` | yes | pass | validate reconnect/last-event behaviour |
@@ -92,7 +92,8 @@ explicitly requested.
 - `/api/v1/logs/stream` now returns a one-shot `text/event-stream` event rather
   than JSON with an incorrect content type.
 - Log timestamps reflect the device's unsynchronised wall clock (2010-era
-  values on this boot). Add a boot-relative/clock-valid field before release.
+  values on this boot); the System endpoint now exposes `clock_valid: false`
+  and `clock_source: "unset"` rather than claiming NTP synchronization.
 
 ## Silent-validation record
 
