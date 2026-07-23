@@ -12,6 +12,7 @@ expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
 expect "$(curl -fsS "$URL/api/v1/network/wifi/scan")" 'LibreNet-5G'
 expect "$(curl -fsS "$URL/api/v1/system")" '"ntp":false'
 expect "$(curl -fsS "$URL/api/v1/system")" '"clock_valid":true'
+expect "$(curl -fsS "$URL/api/v1/logs")" '"boot_seconds":'
 curl -fsS -D /tmp/le-log-stream.headers "$URL/api/v1/logs/stream" -o /tmp/le-log-stream.out
 grep -qi '^content-type: text/event-stream' /tmp/le-log-stream.headers
 grep -q '^event: logs$' /tmp/le-log-stream.out

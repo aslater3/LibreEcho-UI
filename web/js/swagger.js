@@ -2,7 +2,7 @@
 
 const ref=document.querySelector('#api-reference'),filter=document.querySelector('#endpoint-filter');
 
-let operations=[],apiToken=sessionStorage.getItem('libreecho-token')||'',csrfToken='';
+let operations=[],apiToken=sessionStorage.getItem('libreecho-token')||'',csrfToken='',configReady=Promise.resolve();
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -19,7 +19,7 @@ document.querySelectorAll('.execute').forEach(b=>b.onclick=()=>executeOperation(
 document.querySelectorAll('.clear-response').forEach(b=>b.onclick=()=>{const box=document.querySelector('#response-'+b.dataset.operation);
 box.hidden=true;
 box.querySelector('pre').textContent=''})}
-async function executeOperation(id){const op=operations.find(x=>x.id===id),button=document.querySelector(`.execute[data-operation="${id}"]`),box=document.querySelector('#response-'+id),scope=button.closest('.try-box'),url=scope.querySelector('.try-url').value.trim();
+async function executeOperation(id){await configReady;const op=operations.find(x=>x.id===id),button=document.querySelector(`.execute[data-operation="${id}"]`),box=document.querySelector('#response-'+id),scope=button.closest('.try-box'),url=scope.querySelector('.try-url').value.trim();
 if(!url.startsWith('/api/v1')){box.hidden=false;
 box.querySelector('.response-status').textContent='Blocked';
 box.querySelector('pre').textContent='Only same-device /api/v1 paths are allowed.';
@@ -52,7 +52,7 @@ box.querySelector('pre').textContent=formatted||'(empty response)'}catch(e){box.
 box.querySelector('.response-status').className='response-status failure';
 box.querySelector('pre').textContent=e.message}finally{button.disabled=false;
 button.textContent='Execute'}}
-fetch('/api/v1/config').then(r=>r.json()).then(body=>{if(body.data){csrfToken=body.data.csrf_token||'';if(body.data.authentication==='bearer-token'&&!apiToken){apiToken=prompt('Enter the LibreEcho API token')||'';if(apiToken)sessionStorage.setItem('libreecho-token',apiToken)}}}).catch(()=>{});
+configReady=fetch('/api/v1/config').then(r=>r.json()).then(body=>{const status=document.querySelector('#auth-status');if(body.data){csrfToken=body.data.csrf_token||'';if(body.data.authentication==='development-disabled')status.textContent='Development access: authentication is disabled.';else if(apiToken)status.textContent='Session token available from the Control Centre.';else status.innerHTML='Authentication is enabled. <a href="/">Sign in from the Control Centre</a> before executing requests.'}}).catch(()=>{const status=document.querySelector('#auth-status');if(status)status.textContent='Authentication status unavailable.'});
 fetch('/openapi.json').then(r=>{if(!r.ok)throw new Error('Specification unavailable');
 return r.json()}).then(spec=>{document.querySelector('#api-title').textContent=spec.info.title;
 document.querySelector('#api-version').textContent=spec.info.version;

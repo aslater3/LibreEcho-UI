@@ -402,6 +402,7 @@ Returns recent log entries.
     "entries": [
       {
         "timestamp": 1721476800,
+        "boot_seconds": 42,
         "level": "info",
         "message": "LibreEcho web daemon started"
       }
@@ -415,7 +416,9 @@ Returns recent log entries.
 
 #### GET /api/v1/logs/stream
 
-Returns SSE-formatted log stream (one-shot).
+Returns SSE-formatted log stream (one-shot). Each entry includes
+`boot_seconds` when produced by the current logging protocol; this monotonic
+value remains useful when the device wall clock is not synchronised.
 
 #### GET /api/v1/diagnostics
 
@@ -587,7 +590,7 @@ Returns SSE-formatted event stream (one-shot snapshot).
 ```
 id: 1
 event: log
-data: {"timestamp":1721476800,"level":"info","message":"started"}
+data: {"timestamp":1721476800,"boot_seconds":42,"level":"info","message":"started"}
 
 id: 2
 event: audio

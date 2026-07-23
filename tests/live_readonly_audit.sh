@@ -24,7 +24,7 @@ printf '%s' "$exported" | jq -e '.ok and (.data.schema_version | type) == "numbe
 system=$(json /api/v1/system)
 printf '%s' "$system" | jq -e '.ok and (.data.ntp | type) == "boolean" and (.data.clock_valid | type) == "boolean" and (.data.clock_source | type) == "string"' >/dev/null
 logs=$(json /api/v1/logs)
-printf '%s' "$logs" | jq -e '.ok and (.data.entries | type) == "array" and .data.bounded == true and (.data.source | type) == "string"' >/dev/null
+printf '%s' "$logs" | jq -e '.ok and (.data.entries | type) == "array" and .data.bounded == true and (.data.source | type) == "string" and any(.data.entries[]?; (.boot_seconds | type) == "number" and .boot_seconds >= 0)' >/dev/null
 json /api/v1/diagnostics | jq -e '.ok and (.data.checks | length) >= 1 and all(.data.checks[]; (.name | type) == "string" and (.status | type) == "string")' >/dev/null
 
 log_headers=/tmp/libreecho-live-log-stream.headers
@@ -48,11 +48,15 @@ done
 [ "$(status /api/v1/wake-word)" = 501 ]
 index=$(curl -fsS "$URL/")
 printf '%s' "$index" | grep -q 'app.js?rev=12'
+printf '%s' "$index" | grep -q 'auth-dialog'
 app=$(curl -fsS "$URL/js/app.js?rev=12")
 printf '%s' "$app" | grep -q 'led-ring-view'
 printf '%s' "$app" | grep -q 'clock_source'
 printf '%s' "$app" | grep -q "csrf:''"
+printf '%s' "$app" | grep -q 'openAuthDialog'
 swagger=$(curl -fsS "$URL/js/swagger.js")
 printf '%s' "$swagger" | grep -q 'csrfToken'
+printf '%s' "$swagger" | grep -q 'configReady'
+! printf '%s' "$swagger" | grep -q "prompt('Enter the LibreEcho API token')"
 ! printf '%s\n%s' "$app" "$swagger" | grep -q 'libreecho-local'
 echo 'live read-only audit: PASS (audio and hardware actions not invoked)'

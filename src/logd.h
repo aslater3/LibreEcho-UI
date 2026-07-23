@@ -9,8 +9,10 @@
  * (or falls back to stderr depending on le_log configuration).
  *
  * Wire format: single JSON line, newline-terminated, max 1024 bytes.
- *   {"ts":1721476800,"level":"info","service":"networkd","msg":"scan requested"}
+ *   {"ts":1721476800,"boot_seconds":42,"level":"info","service":"networkd","msg":"scan requested"}
  *
+ * boot_seconds is monotonic time since boot and remains useful when the
+ * device's wall clock has not been synchronised. Older entries may omit it.
  * logd writes to /var/log/libreecho/system.log in the same JSON-lines format.
  * Rotation: when the file exceeds LOGD_MAX_SIZE, rename to .1, .2, etc.
  *

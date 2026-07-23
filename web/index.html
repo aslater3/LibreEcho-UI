@@ -30,11 +30,22 @@
     </div>
   </aside>
   <main>
-    <header><button class="menu-btn" id="menu" aria-label="Toggle navigation">☰</button><div><h1 id="page-title">Overview</h1><p id="page-subtitle">Your LibreEcho at a glance</p></div><div class="header-actions"><span class="backend-badge" id="backend-badge">Connecting</span><button id="reboot" class="outline-btn">↻&nbsp; Reboot</button><button class="icon-btn" id="theme" aria-label="Toggle colour theme">☼</button><div class="avatar">LE</div></div></header>
+    <header><button class="menu-btn" id="menu" aria-label="Toggle navigation">☰</button><div><h1 id="page-title">Overview</h1><p id="page-subtitle">Your LibreEcho at a glance</p></div><div class="header-actions"><span class="backend-badge" id="backend-badge">Connecting</span><button id="reboot" class="outline-btn">↻&nbsp; Reboot</button><button class="icon-btn" id="theme" aria-label="Toggle colour theme">☼</button><button class="outline-btn auth-control" id="auth-control" type="button">Sign in</button></div></header>
     <section id="content" aria-live="polite"><div class="panel loading">Loading device state…</div></section>
   </main>
 </div>
 <div class="toast" id="toast">Saved</div>
+<dialog id="auth-dialog" aria-labelledby="auth-title">
+  <form id="auth-form" class="auth-form">
+    <h2 id="auth-title">Sign in to LibreEcho</h2>
+    <p id="auth-copy" class="muted">Use a configured local account to continue.</p>
+    <label class="field" id="auth-username-row"><span>Username</span><input id="auth-username" name="username" autocomplete="username" required></label>
+    <label class="field" id="auth-password-row"><span>Password</span><input id="auth-password" name="password" type="password" autocomplete="current-password" required></label>
+    <label class="field" id="auth-token-row" hidden><span>API token</span><input id="auth-token" name="token" autocomplete="off"></label>
+    <p id="auth-error" class="error-text" role="alert" hidden></p>
+    <div class="auth-actions"><button id="auth-cancel" class="secondary-btn" type="button">Cancel</button><button class="primary-btn" type="submit">Sign in</button></div>
+  </form>
+</dialog>
 <script src="/js/app.js?rev=12"></script>
 </body>
 </html>

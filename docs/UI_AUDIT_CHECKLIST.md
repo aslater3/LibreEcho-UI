@@ -24,7 +24,7 @@ explicitly requested.
 | `/api/v1/privacy` | yes | pass | persist all fields consistently |
 | `/api/v1/integrations` | yes | pass | add endpoint schema validation |
 | `/api/v1/system` | yes | live pass; NTP unavailable and clock validity are explicit | add a real time-sync adapter before release |
-| `/api/v1/logs`, `/logs/stream` | yes | live pass; bounded central JSON-lines and one-shot SSE stream | improve clock/boot-relative timestamps |
+| `/api/v1/logs`, `/logs/stream` | yes | live pass; bounded central JSON-lines and one-shot SSE stream | keep retention and rotation bounded |
 | `/api/v1/diagnostics` | yes | live pass; all daemon sockets/PIDs and wlan0 healthy | none |
 | `/api/v1/events` | yes | pass | validate reconnect/last-event behaviour |
 | `/openapi.json`, `/swagger.html` | yes | pass | keep generated contract in sync |
@@ -41,7 +41,7 @@ explicitly requested.
 - [x] LED view polls live state while an animation is active.
 - [x] Network scan handles empty results and adapter errors without a blank panel.
 - [x] Unsupported wake-word state is non-actionable in the UI.
-- [x] Add a login flow for configured local users, with bearer sessions.
+- [x] Add a visible login/logout flow for configured local users, with bearer sessions.
 - [x] Add a visible service/log health summary.
 - [x] Show clock validity and source on the System page instead of only an ambiguous NTP label.
 - [x] Make active LED animation state visible as motion in the rendered ring, respecting reduced-motion preferences.
@@ -53,8 +53,8 @@ explicitly requested.
 - [x] Start logd, networkd, audiod, ledd, and web automatically after the
   recovery control plane reaches loopback readiness.
 - [x] Make startup ordering and each init-script result visible in `/tmp/init.log`.
-- [x] Ensure `/api/v1/logs` reads logd output and preserves timestamps; logd
-  rotation remains bounded.
+- [x] Ensure `/api/v1/logs` reads logd output and preserves wall-clock and
+  boot-relative timestamps; logd rotation remains bounded.
 - [x] Add live PID/socket health to the diagnostics endpoint.
 - [x] Add an authenticated user-file packaging/provisioning step for release
   images; no password is stored in this repository.
@@ -76,13 +76,14 @@ explicitly requested.
   read-only contract sweep.
 - [ ] Validate LED animation timing against the hardware daemon and refresh the
   rendered ring while active.
+- [x] Replace prompt-based browser login with a visible login/logout surface;
+  retain password provisioning/reset as a production follow-up.
+- [x] Add boot-relative log time alongside wall-clock time for unsynchronised
+  devices.
+- [x] Make the API explorer wait for the current CSRF token and reuse the
+  Control Centre session instead of prompting.
 - [ ] Add authenticated-device smoke coverage to the post-flash sweep using a
   throwaway users file, without placing credentials in the image.
-- [ ] Replace prompt-based browser login with a visible login/logout surface and
-  add a password provisioning/reset workflow before production.
-- [ ] Add boot-relative log time alongside wall-clock time for unsynchronised
-  devices.
-- [ ] Verify API explorer state-changing requests after CSRF rotation.
 
 ## Latest silent validation (2026-07-23)
 
@@ -95,7 +96,7 @@ explicitly requested.
 - All five daemons autostarted with result `0`; `/api/v1/diagnostics` reports
   their health as `ok`, and central log JSON-lines/SSE checks pass.
 - The image reports a 64-character boot-generated CSRF token and serves UI
-  commit `7a6c7b4f`; CPU, temperature, Wi-Fi SSID/RSSI/IP, LED state, system
+  commit `60ff00a8`; CPU, temperature, Wi-Fi SSID/RSSI/IP, LED state, system
   clock fields, config export, logs, diagnostics, and SSE contracts pass.
 - No playback, capture, mixer, LED test, Wi-Fi mutation, restore, or power
   operation was invoked during this validation.

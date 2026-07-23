@@ -95,7 +95,7 @@ void le_log(enum le_log_level level, const char *fmt, ...)
     va_list ap;
     char msg[1024];
     char json[LE_LOGD_MSG_MAX];
-    struct timespec ts;
+    struct timespec ts, mono;
     struct tm tm;
     char stamp[32];
     int n;
@@ -109,12 +109,14 @@ void le_log(enum le_log_level level, const char *fmt, ...)
 
     /* Format JSON for central log daemon */
     clock_gettime(CLOCK_REALTIME, &ts);
+    if (clock_gettime(CLOCK_MONOTONIC, &mono) != 0)
+        memset(&mono, 0, sizeof(mono));
     localtime_r(&ts.tv_sec, &tm);
     strftime(stamp, sizeof(stamp), "%H:%M:%S", &tm);
 
     n = snprintf(json, sizeof(json),
-                 "{\"ts\":%ld,\"level\":\"%s\",\"service\":\"%s\",\"msg\":\"%s\"}\n",
-                 (long)ts.tv_sec, level_str(level), ident_buf, msg);
+                 "{\"ts\":%ld,\"boot_seconds\":%ld,\"level\":\"%s\",\"service\":\"%s\",\"msg\":\"%s\"}\n",
+                 (long)ts.tv_sec, (long)mono.tv_sec, level_str(level), ident_buf, msg);
 
     /* Send to central log daemon if connected */
     if (n > 0 && n < (int)sizeof(json) && logd_fd >= 0) {
