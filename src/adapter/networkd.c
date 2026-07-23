@@ -1060,7 +1060,7 @@ static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
         return;
     if (failed)
         (void)send_err_fd(fd, id, error ? error : "scan failed");
-    else if (wpa_call(ctx, "GET_SCAN_RESULTS\n", reply, sizeof(reply)) < 0 ||
+    else if (wpa_call(ctx, "SCAN_RESULTS\n", reply, sizeof(reply)) < 0 ||
              parse_scan_results(reply, data, sizeof(data)) < 0)
         (void)send_err_fd(fd, id, "unable to read scan results");
     else
