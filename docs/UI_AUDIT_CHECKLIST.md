@@ -13,7 +13,7 @@ explicitly requested.
 | `/api/v1`, `/api/v1/` | yes | pass | none |
 | `/api/v1/status` | yes | pass | CPU field naming covered |
 | `/api/v1/device` | yes | live pass; reports `LibreEcho`/`libreecho` | none |
-| `/api/v1/config` | yes | live pass; token is now boot-generated and current image intentionally reports `development-disabled` | package a users file for authenticated builds |
+| `/api/v1/config` | yes | live pass; token is boot-generated, authentication mode is explicit, and LAN development binding is reported truthfully | package a users file for authenticated builds |
 | `/api/v1/config/export` | yes | live pass; returns safe partial export when wake-word is absent | keep field list/versioned contract current |
 | `/api/v1/audio` | yes | live pass; reports `startup_sound:false` | do not play |
 | `/api/v1/led` | yes | live pass; animation state and ring renderer added | verify live polling on next UI image |
@@ -87,17 +87,19 @@ explicitly requested.
 
 ## Latest silent validation (2026-07-23)
 
-- Image run `20260723T010449Z-1b002f05f27d-clean-ssh0-ui80d7acc92faf-06b989f62e3c`
-  was verified and flashed to slot `a`; boot SHA-256 begins
-  `a6818cd7f3252ed61688287d7a8cddb21e120ebdc5b7f1e8a8028763ee2ffe30`.
+- Image run `20260723T012025Z-1b002f05f27d-clean-ssh0-ui65d74a69c5fe-e223aea99f30`
+  was verified and flashed to slot `a`; boot SHA-256 is
+  `f596b25506dc0be8f5003f209ecffdd4e8fb90d59b3be2dcfd30461bb610b6e7`.
 - The existing UART reader captured kernel `1b002f05` with `Brought up 4 CPUs`;
   the refined post-boot scan found no CPU boot failure, hard-lockup watchdog,
   panic, Oops, or BUG signature.
 - All five daemons autostarted with result `0`; `/api/v1/diagnostics` reports
   their health as `ok`, and central log JSON-lines/SSE checks pass.
-- The image reports a 64-character boot-generated CSRF token and serves UI
-  commit `60ff00a8`; CPU, temperature, Wi-Fi SSID/RSSI/IP, LED state, system
-  clock fields, config export, logs, diagnostics, and SSE contracts pass.
+- The image reports a 64-character boot-generated CSRF token, truthful
+  `lan-development` binding, boot-relative log seconds, and serves UI commit
+  `65d74a69`; CPU, temperature, Wi-Fi SSID/RSSI/IP, LED state, system clock
+  fields, config export, logs, diagnostics, authentication controls, and SSE
+  contracts pass.
 - No playback, capture, mixer, LED test, Wi-Fi mutation, restore, or power
   operation was invoked during this validation.
 - [x] Add a bounded read-only service status panel to the Logs page.

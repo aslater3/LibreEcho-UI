@@ -10,7 +10,7 @@ status() { curl -sS -o /tmp/libreecho-live-audit.out -w '%{http_code}' "$URL$1";
 
 json /api/v1 | jq -e '.ok and .data.name == "LibreEcho API" and .data.version == "v1"' >/dev/null
 config=$(json /api/v1/config)
-printf '%s' "$config" | jq -e '.ok and (.data.csrf_token | test("^[0-9a-f]{64}$")) and (.data.authentication | type == "string")' >/dev/null
+printf '%s' "$config" | jq -e '.ok and (.data.csrf_token | test("^[0-9a-f]{64}$")) and (.data.authentication | type == "string") and (.data.bind_policy | type == "string")' >/dev/null
 status_json=$(json /api/v1/status)
 printf '%s' "$status_json" | jq -e '.ok and .data.cpus.count >= 1 and (.data.cpus.cores | length) == .data.cpus.count and all(.data.cpus.cores[]; (.id | type) == "number" and (.online | type) == "boolean" and (.utilization_percent >= 0 and .utilization_percent <= 100) and (.frequency_khz >= 0)) and (.data.temperature_c | type) == "number"' >/dev/null
 device=$(json /api/v1/device)

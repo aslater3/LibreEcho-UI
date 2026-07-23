@@ -357,7 +357,7 @@ Returns API configuration.
     "api_version": 1,
     "csrf_token": "<64-character per-boot token>",
     "authentication": "development-disabled",
-    "bind_policy": "loopback-default",
+    "bind_policy": "lan-development",
     "max_request_body": 16384
   },
   "error": null
