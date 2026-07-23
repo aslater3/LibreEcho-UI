@@ -421,6 +421,22 @@ static int wpa_ok(struct daemon_ctx *ctx, const char *command,
     return n >= 2 && !strncmp(reply, "OK", 2) ? 0 : -1;
 }
 
+/* A vendor supplicant can reject SCAN with FAIL-BUSY while a background
+ * scan is already completing.  Treat that response as an in-progress scan
+ * so the monitor event can deliver the resulting table to the caller. */
+static int wpa_scan_request(struct daemon_ctx *ctx, char *reply, size_t size)
+{
+    int n = wpa_call(ctx, "SCAN\n", reply, size);
+    if (n < 0)
+        return -1;
+    if (n >= 2 && !strncmp(reply, "OK", 2))
+        return 0;
+    if (n >= 9 && !strncmp(reply, "FAIL-BUSY", 9))
+        return 1;
+    le_log_warn("networkd: wpa_supplicant rejected scan: %.80s", reply);
+    return -1;
+}
+
 static const char *wpa_value(const char *status, const char *key,
                              char *value, size_t size)
 {
@@ -1274,16 +1290,20 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             remove_client(ctx, ci);
     } else if (!strcmp(cmd, "scan")) {
         char reply[WPA_REPLY_MAX];
+        int scan_state;
         if (ctx->scan.active) {
             (void)send_err_fd(ctx->clients[ci].fd, id, "scan already in progress");
             return;
         }
         le_log_info("networkd: scan requested");
-        if (wpa_ok(ctx, "SCAN\n", reply, sizeof(reply)) < 0) {
+        scan_state = wpa_scan_request(ctx, reply, sizeof(reply));
+        if (scan_state < 0) {
             le_log_error("networkd: wpa_supplicant scan unavailable");
             (void)send_err_fd(ctx->clients[ci].fd, id, "wpa_supplicant scan unavailable");
             return;
         }
+        if (scan_state > 0)
+            le_log_warn("networkd: scan already active; waiting for results");
         ctx->scan.active = 1;
         ctx->scan.client_fd = ctx->clients[ci].fd;
         ctx->scan.id = id;
