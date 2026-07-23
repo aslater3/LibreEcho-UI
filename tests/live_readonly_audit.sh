@@ -52,6 +52,7 @@ done
 index=$(curl -fsS "$URL/")
 printf '%s' "$index" | grep -q 'app.js?rev=12'
 printf '%s' "$index" | grep -q 'auth-dialog'
+printf '%s' "$index" | grep -q 'assets/favicon.svg'
 app=$(curl -fsS "$URL/js/app.js?rev=12")
 printf '%s' "$app" | grep -q 'led-ring-view'
 printf '%s' "$app" | grep -q 'clock_source'
@@ -62,4 +63,8 @@ printf '%s' "$swagger" | grep -q 'csrfToken'
 printf '%s' "$swagger" | grep -q 'configReady'
 ! printf '%s' "$swagger" | grep -q "prompt('Enter the LibreEcho API token')"
 ! printf '%s\n%s' "$app" "$swagger" | grep -q 'libreecho-local'
+mark=$(curl -fsS "$URL/assets/mark.svg")
+printf '%s' "$mark" | grep -q 'linearGradient'
+printf '%s' "$mark" | grep -q 'stroke-dasharray="122 48"'
+printf '%s' "$mark" | grep -q 'M22 20v24h21'
 echo 'live read-only audit: PASS (audio and hardware actions not invoked)'

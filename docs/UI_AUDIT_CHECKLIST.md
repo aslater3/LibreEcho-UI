@@ -39,6 +39,8 @@ explicitly requested.
   deliberate `Unavailable`/ `Not configured` labels.
 - [x] LED page has a rendered 24-segment ring view based on live colour and
   brightness.
+- [x] Control centre, API reference, favicon, and docs now use the canonical
+  gradient open-ring LibreEcho mark.
 - [x] LED view polls live state while an animation is active.
 - [x] Network scan handles empty results and adapter errors without a blank panel.
 - [x] Unsupported wake-word state is non-actionable in the UI.
