@@ -57,6 +57,8 @@
 #define SCAN_TIMEOUT_MS 12000
 #define SCAN_POLL_MS 1800
 #define WPA_TIMEOUT_MS 2500
+#define WEXT_SCAN_BUFFER_SIZE 65535
+#define WEXT_SCAN_RETRY_MS 100
 
 struct wpa_ctrl {
     int fd;
@@ -1044,6 +1046,206 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
     return (int)used;
 }
 
+struct wext_scan_cell {
+    char ssid[IW_ESSID_MAX_SIZE + 1];
+    char security[16];
+    int signal;
+    int encrypted;
+};
+
+static int wext_signal_percent(const struct iw_quality *quality)
+{
+    int level;
+
+    if (!quality)
+        return 0;
+    if (quality->updated & IW_QUAL_DBM) {
+        level = (int)(signed char)quality->level;
+        return rssi_to_percent(level);
+    }
+    return quality->qual > 100 ? 0 : quality->qual;
+}
+
+static struct wext_scan_cell *wext_new_cell(struct wext_scan_cell *cells,
+                                             size_t *count)
+{
+    struct wext_scan_cell *cell;
+
+    if (!cells || !count || *count >= SCAN_MAX)
+        return NULL;
+    cell = &cells[(*count)++];
+    memset(cell, 0, sizeof(*cell));
+    copy_string(cell->security, sizeof(cell->security), "unknown");
+    return cell;
+}
+
+static void wext_parse_ies(struct wext_scan_cell *cell,
+                           const unsigned char *payload, size_t length)
+{
+    size_t offset = 0;
+
+    if (!cell || !payload)
+        return;
+    while (offset + 2 <= length) {
+        size_t ie_length = payload[offset + 1];
+        if (offset + 2 + ie_length > length)
+            break;
+        if (payload[offset] == 0x30 ||
+            (payload[offset] == 0xdd && ie_length >= 4 &&
+             payload[offset + 2] == 0x00 &&
+             payload[offset + 3] == 0x50 &&
+             payload[offset + 4] == 0xf2 &&
+             payload[offset + 5] == 0x01))
+            cell->encrypted = 1;
+        offset += 2 + ie_length;
+    }
+}
+
+static int wext_parse_scan_events(const unsigned char *stream, size_t length,
+                                  char *data, size_t data_size)
+{
+    struct wext_scan_cell cells[SCAN_MAX];
+    struct wext_scan_cell *current = NULL;
+    size_t offset = 0, count = 0, i, used = 0, emitted = 0;
+
+    memset(cells, 0, sizeof(cells));
+    while (offset + IW_EV_LCP_PK_LEN <= length) {
+        uint16_t event_length, command;
+        const unsigned char *event = stream + offset;
+
+        memcpy(&event_length, event, sizeof(event_length));
+        memcpy(&command, event + 2, sizeof(command));
+        if (event_length < IW_EV_LCP_PK_LEN ||
+            offset + event_length > length)
+            return -1;
+
+        if (command == SIOCGIWAP) {
+            current = wext_new_cell(cells, &count);
+        } else if (current && command == SIOCGIWESSID &&
+                   event_length >= IW_EV_POINT_PK_LEN) {
+            uint16_t essid_length;
+            size_t payload_length = event_length - IW_EV_POINT_PK_LEN;
+            memcpy(&essid_length, event + IW_EV_LCP_PK_LEN,
+                   sizeof(essid_length));
+            if (essid_length < payload_length)
+                payload_length = essid_length;
+            if (payload_length >= sizeof(current->ssid))
+                payload_length = sizeof(current->ssid) - 1;
+            if (payload_length)
+                memcpy(current->ssid, event + IW_EV_POINT_PK_LEN,
+                       payload_length);
+            current->ssid[payload_length] = '\0';
+        } else if (current && command == IWEVQUAL &&
+                   event_length >= IW_EV_QUAL_PK_LEN) {
+            struct iw_quality quality;
+            memcpy(&quality, event + IW_EV_LCP_PK_LEN, sizeof(quality));
+            current->signal = wext_signal_percent(&quality);
+        } else if (current && command == SIOCGIWENCODE &&
+                   event_length >= IW_EV_POINT_PK_LEN) {
+            uint16_t flags;
+            memcpy(&flags, event + IW_EV_LCP_PK_LEN + sizeof(uint16_t),
+                   sizeof(flags));
+            if (!(flags & IW_ENCODE_DISABLED))
+                current->encrypted = 1;
+        } else if (current && command == IWEVGENIE &&
+                   event_length >= IW_EV_POINT_PK_LEN) {
+            uint16_t ie_length;
+            size_t payload_length = event_length - IW_EV_POINT_PK_LEN;
+            memcpy(&ie_length, event + IW_EV_LCP_PK_LEN,
+                   sizeof(ie_length));
+            if (ie_length < payload_length)
+                payload_length = ie_length;
+            wext_parse_ies(current, event + IW_EV_POINT_PK_LEN,
+                           payload_length);
+        }
+        offset += event_length;
+    }
+
+    if (offset != length || append_text(data, data_size, &used,
+                                        "{\"networks\":[") < 0)
+        return -1;
+    for (i = 0; i < count; ++i) {
+        struct wext_scan_cell *cell = &cells[i];
+        if (!cell->ssid[0])
+            continue;
+        if (emitted++ && append_text(data, data_size, &used, ",") < 0)
+            return -1;
+        if (cell->encrypted)
+            copy_string(cell->security, sizeof(cell->security), "wpa2");
+        if (append_text(data, data_size, &used, "{\"ssid\":") < 0 ||
+            append_json_string(data, data_size, &used, cell->ssid) < 0 ||
+            append_text(data, data_size, &used, ",\"security\":") < 0 ||
+            append_json_string(data, data_size, &used, cell->security) < 0 ||
+            append_text(data, data_size, &used, ",\"signal\":%d}",
+                        cell->signal) < 0)
+            return -1;
+    }
+    return append_text(data, data_size, &used, "]}") < 0 ? -1 : (int)used;
+}
+
+static int wext_scan(const char *iface, char *data, size_t data_size)
+{
+    struct iwreq request;
+    unsigned char *buffer;
+    long long deadline;
+    int fd, scan_errno = 0;
+
+    if (!iface || !data || data_size < 16)
+        return -1;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -1;
+    buffer = malloc(WEXT_SCAN_BUFFER_SIZE);
+    if (!buffer) {
+        close(fd);
+        return -1;
+    }
+
+    memset(&request, 0, sizeof(request));
+    copy_string(request.ifr_name, sizeof(request.ifr_name), iface);
+    request.u.data.pointer = NULL;
+    request.u.data.length = 0;
+    request.u.data.flags = 0;
+    if (ioctl(fd, SIOCSIWSCAN, &request) < 0 &&
+        errno != EBUSY && errno != EINPROGRESS && errno != EPERM) {
+        scan_errno = errno;
+        goto failed;
+    }
+
+    deadline = monotonic_ms() + SCAN_TIMEOUT_MS;
+    for (;;) {
+        int result;
+        memset(&request, 0, sizeof(request));
+        copy_string(request.ifr_name, sizeof(request.ifr_name), iface);
+        request.u.data.pointer = buffer;
+        request.u.data.length = WEXT_SCAN_BUFFER_SIZE;
+        request.u.data.flags = 0;
+        result = ioctl(fd, SIOCGIWSCAN, &request);
+        if (result == 0) {
+            int parsed = wext_parse_scan_events(buffer, request.u.data.length,
+                                                data, data_size);
+            free(buffer);
+            close(fd);
+            return parsed;
+        }
+        if (errno != EAGAIN && errno != EBUSY && errno != EINPROGRESS) {
+            scan_errno = errno;
+            goto failed;
+        }
+        if (monotonic_ms() >= deadline) {
+            scan_errno = ETIMEDOUT;
+            goto failed;
+        }
+        (void)poll(NULL, 0, WEXT_SCAN_RETRY_MS);
+    }
+
+failed:
+    le_log_warn("networkd: WEXT scan failed: %s", strerror(scan_errno));
+    free(buffer);
+    close(fd);
+    return -1;
+}
+
 static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
 {
     int fd = ctx->scan.client_fd;
@@ -1333,8 +1535,16 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         if (scan_state == 1)
             le_log_warn("networkd: scan already active; waiting for results");
         else if (scan_state == 2) {
-            le_log_warn("networkd: fresh scan trigger unavailable; using cached results");
-            ctx->scan.poll_at = monotonic_ms();
+            le_log_warn("networkd: wpa scan unsupported; using WEXT driver results");
+            if (wext_scan(ctx->interface, data, sizeof(data)) < 0) {
+                le_log_error("networkd: WEXT scan unavailable");
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "Wi-Fi scan is unavailable");
+            } else {
+                le_log_info("networkd: WEXT scan results ready");
+                (void)send_ok_fd(ctx->clients[ci].fd, id, data);
+            }
+            return;
         }
         ctx->scan.active = 1;
         ctx->scan.client_fd = ctx->clients[ci].fd;

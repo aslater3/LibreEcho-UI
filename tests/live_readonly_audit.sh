@@ -30,6 +30,9 @@ logs=$(json /api/v1/logs)
 printf '%s' "$logs" | jq -e '.ok and (.data.entries | type) == "array" and .data.bounded == true and (.data.source | type) == "string" and any(.data.entries[]?; (.boot_seconds | type) == "number" and .boot_seconds >= 0)' >/dev/null
 json /api/v1/diagnostics | jq -e '.ok and (.data.checks | length) >= 1 and all(.data.checks[]; (.name | type) == "string" and (.status | type) == "string")' >/dev/null
 
+scan=$(json /api/v1/network/wifi/scan)
+printf '%s' "$scan" | jq -e '.ok and (.data.networks | type) == "array" and all(.data.networks[]; (.ssid | type) == "string" and (.security | type) == "string" and (.signal | type) == "number" and .signal >= 0 and .signal <= 100)' >/dev/null
+
 log_headers=/tmp/libreecho-live-log-stream.headers
 log_stream=/tmp/libreecho-live-log-stream.out
 curl -fsS -D "$log_headers" "$URL/api/v1/logs/stream" -o "$log_stream"
@@ -47,7 +50,7 @@ for route in /api/v1/status /api/v1/device /api/v1/config /api/v1/config/export 
         exit 1
     fi
 done
-[ "$(status /api/v1/network/wifi/scan)" = 501 ]
+[ "$(status /api/v1/network/wifi/scan)" = 200 ]
 [ "$(status /api/v1/wake-word)" = 501 ]
 index=$(curl -fsS "$URL/")
 printf '%s' "$index" | grep -q 'app.js?rev=13'

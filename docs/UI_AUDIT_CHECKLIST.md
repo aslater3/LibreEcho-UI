@@ -19,7 +19,7 @@ explicitly requested.
 | `/api/v1/led` | yes | live pass; animation state and ring renderer added | verify live polling on next UI image |
 | `/api/v1/buttons` | yes | final image pass; GET is explicit and unsupported methods return 405 | none |
 | `/api/v1/network` | yes | live pass; connected, RSSI, IP and `Zebox 5g` SSID | Overview now includes SSID |
-| `/api/v1/network/wifi/scan` | yes | `501` on Linux; failure logged centrally | repair adapter scan path |
+| `/api/v1/network/wifi/scan` | yes | live pass; vendor WEXT fallback returns a typed network list and central logs record the fallback | replace WEXT with nl80211/vendor scan support when the Wi-Fi stack is upgraded |
 | `/api/v1/wake-word` | yes | `501` while adapter is absent | UI now shows an explicit unsupported state |
 | `/api/v1/privacy` | yes | pass | persist all fields consistently |
 | `/api/v1/integrations` | yes | pass | add endpoint schema validation |
@@ -73,7 +73,8 @@ explicitly requested.
   production follow-up.
 - [x] Make Linux configuration export include only confirmed-safe persisted
   fields and return a useful result when one adapter is unavailable.
-- [ ] Implement the Linux Wi-Fi scan adapter and expose an empty-result state.
+- [x] Implement the Linux Wi-Fi scan adapter fallback using the MTK driver's
+  WEXT scan table and expose a typed empty-result state.
 - [x] Add endpoint schema/type assertions to the UI smoke test rather than only
   HTTP status assertions; `tests/live_readonly_audit.sh` is the post-flash
   read-only contract sweep.
@@ -95,10 +96,24 @@ explicitly requested.
   usage is required by the production image.
 - [ ] Replace the in-memory LED stub with the physical ring adapter and retain
   the rendered UI as its read-only state view.
-- [ ] Keep the explicit Wi-Fi scan failure visible until the Linux scan adapter
-  is implemented; current logs correctly record the request and `501` reason.
+- [x] Keep Wi-Fi scan failures explicit while allowing the WEXT fallback to
+  return results when the vendor supplicant lacks `SCAN_RESULTS`.
 
 ## Latest silent validation (2026-07-23)
+
+- Image run `20260723T025110Z-1b002f05f27d-clean-ssh0-uia74710a0ffde-4c4d09c6118d`
+  was independently verified and flashed to slot `a`; boot SHA-256 is
+  `dc9e1bfbba53abd3adb4c4718c2624dc777641d8ca8ef5e34f4c9d20933b7a1c`.
+- The live device brought up all four CPUs, reported `47 °C`, and exposed
+  `3728 MB` raw eMMC capacity with `storage_available:false` and
+  `storage_state:"block-device-unmounted"`; no storage was mounted or written.
+- `/api/v1/network/wifi/scan` returned HTTP 200 with a valid network list, and
+  central logs recorded `wpa scan unsupported; using WEXT driver results` and
+  `WEXT scan results ready`.
+- The complete host suite passed before this image build; the post-build API
+  check also passed JSON quote/backslash escaping using mock-only button data.
+- No playback, capture, mixer, LED test, Wi-Fi connect/disconnect, restore, or
+  power operation was invoked during this validation.
 
 - Image run `20260723T015835Z-1b002f05f27d-clean-ssh0-uid99014cf475e-de8183f34911`
   was independently verified and flashed to slot `a`; boot SHA-256 is
@@ -127,8 +142,9 @@ explicitly requested.
 - The current image has no users file, so the development UI is intentionally
   unauthenticated LAN mode. Authenticated builds now accept
   `LIBREECHO_WEB_USERS_FILE` and package a mode-`0600` users file.
-- Linux Wi-Fi scan returns `501` and records the failure in central logs; this
-  is an adapter limitation, not a UI blank-state failure.
+- Linux Wi-Fi scan uses the WEXT driver table because the vendor supplicant
+  rejects both `SCAN` and `SCAN_RESULTS`; the fallback is read-only and does
+  not alter association or credentials.
 - Linux configuration export now returns the available persisted fields with
   `partial: true` and an `unsupported` field list when an optional adapter is
   absent; restore remains intentionally unsupported on Linux.
@@ -143,7 +159,7 @@ explicitly requested.
 
 ## Silent-validation record
 
-The live sweep that generated this checklist returned HTTP 200 for all core
-read-only routes except the expected Linux `501` adapter gaps. No POST, PUT,
-test, connect, disconnect, restore, reboot, shutdown, factory-reset, audio,
-or capture operation was invoked.
+The current live sweep returned HTTP 200 for the core read-only routes,
+including Wi-Fi scan; wake-word remains an explicit unsupported adapter gap.
+No POST, PUT, test, connect, disconnect, restore, reboot, shutdown,
+factory-reset, audio, or capture operation was invoked.
