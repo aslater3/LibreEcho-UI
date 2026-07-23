@@ -101,6 +101,17 @@ explicitly requested.
 
 ## Latest silent validation (2026-07-23)
 
+- Final flashed run `20260723T025847Z-1b002f05f27d-clean-ssh0-ui950c6c61e452-23359827b43b`
+  contains UI commit `950c6c6` and boot SHA-256
+  `ebab7dd3375eeaada716769e2e249e55832cf84084f8142ad2e20b041d039afe`.
+  The post-flash sweep passed with four online cores, `47 °C`, raw storage
+  capacity `3728 MB`, Wi-Fi scan HTTP 200, startup sound disabled, and all
+  daemon diagnostics healthy.
+- Desktop Firefox rendering was attempted in a clean headless profile but
+  remains blocked by the host's `RenderCompositorSWGL` framebuffer failure;
+  API/static asset validation passed, but this is not claimed as a pixel-level
+  browser pass.
+
 - Image run `20260723T025110Z-1b002f05f27d-clean-ssh0-uia74710a0ffde-4c4d09c6118d`
   was independently verified and flashed to slot `a`; boot SHA-256 is
   `dc9e1bfbba53abd3adb4c4718c2624dc777641d8ca8ef5e34f4c9d20933b7a1c`.
