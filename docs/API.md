@@ -546,6 +546,59 @@ Update button mappings.
 }
 ```
 
+### Bluetooth
+
+#### GET /api/v1/bluetooth
+
+Returns native HCI controller state, Classic/LE capability flags, active
+discovery results, stored bond records, and any pending pairing request.
+
+#### PUT /api/v1/bluetooth
+
+Update one controller setting:
+
+```json
+{ "enabled": true }
+```
+
+`discoverable` and `connectable` can also be supplied as booleans. Enabling
+the controller is explicit and is limited to one activation attempt per boot.
+
+#### POST /api/v1/bluetooth/pairing-mode
+
+Enter or leave pairing mode:
+
+```json
+{ "enabled": true }
+```
+
+Entering pairing mode automatically makes the controller connectable,
+discoverable, and bondable. It also starts a yellow breathing LED pattern;
+leaving it restores the controller settings that were active beforehand.
+
+#### POST /api/v1/bluetooth/scan and POST /api/v1/bluetooth/scan/stop
+
+Start or stop a combined Classic + LE discovery scan. Results are returned by
+`GET /api/v1/bluetooth`.
+
+#### POST /api/v1/bluetooth/pair
+
+Start pairing with a discovered or known device:
+
+```json
+{ "address": "AA:BB:CC:DD:EE:FF", "type": 0, "io_capability": 3 }
+```
+
+The UI handles pending confirmation, passkey, and PIN requests through
+`POST /api/v1/bluetooth/pairing/response`. `POST /api/v1/bluetooth/unpair`
+removes the bond and stored controller keys; `POST
+/api/v1/bluetooth/disconnect` terminates an active connection.
+
+The LED adapter protocol defines transient `pulse`, `flash`, and
+`full_ring_flash` patterns. `half_ring`, `chase`, `dance`, and `random` are
+reserved for the per-pixel LED backend; the current full-ring backend rejects
+them explicitly rather than pretending to render them.
+
 ### Privacy
 
 #### PUT /api/v1/privacy

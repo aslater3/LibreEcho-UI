@@ -9,16 +9,18 @@ CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
-ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-audiod $(BUILD)/libreecho-ledd
+ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-audiod $(BUILD)/libreecho-ledd $(BUILD)/libreecho-btd
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/adapter_server.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_server.c src/log.c
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
+BTD_SOURCES = src/adapter/btd.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
 SOURCES = src/main.c src/http_server.c src/api.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 AUDIOD_OBJECTS = $(AUDIOD_SOURCES:src/%.c=$(BUILD)/%.o)
 LEDD_OBJECTS = $(LEDD_SOURCES:src/%.c=$(BUILD)/%.o)
+BTD_OBJECTS = $(BTD_SOURCES:src/%.c=$(BUILD)/%.o)
 LOGD_OBJECTS = $(LOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 comma := ,
 GC_LDFLAGS ?= $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections)
@@ -42,6 +44,9 @@ $(BUILD)/libreecho-audiod: $(AUDIOD_OBJECTS)
 $(BUILD)/libreecho-ledd: $(LEDD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LEDD_OBJECTS) $(LDFLAGS) -o $@
 
+$(BUILD)/libreecho-btd: $(BTD_OBJECTS)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(BTD_OBJECTS) $(LDFLAGS) -o $@
+
 adapters: $(ADAPTER_TARGETS)
 
 $(BUILD)/%.o: src/%.c
@@ -63,11 +68,11 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -m 0755 $(ADAPTER_TARGETS) $(DESTDIR)$(PREFIX)/sbin/
 	cp -R web/* $(DESTDIR)$(PREFIX)/share/libreecho/web/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
-	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-audiod.init init/libreecho-ledd.init $(DESTDIR)/etc/init.d/
+	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-audiod.init init/libreecho-ledd.init init/libreecho-btd.init $(DESTDIR)/etc/init.d/
 
 deploy: all
 	./deploy/push-adb.sh $(DEPLOY_ARGS)
 
 clean:
 	rm -f $(OBJECTS) $(NETWORKD_OBJECTS) $(AUDIOD_OBJECTS) $(LEDD_OBJECTS) \
-		$(LOGD_OBJECTS) $(ADAPTER_TARGETS) $(TARGET) $(LOGD_TARGET)
+		$(LOGD_OBJECTS) $(BTD_OBJECTS) $(ADAPTER_TARGETS) $(TARGET) $(LOGD_TARGET)

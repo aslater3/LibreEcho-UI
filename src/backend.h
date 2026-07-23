@@ -8,6 +8,7 @@
 #define LE_MAX_WIFI 12
 #define LE_MAX_LOGS 128
 #define LE_MAX_CPUS 8
+#define LE_MAX_BLUETOOTH_DEVICES 24
 
 enum le_result { LE_OK=0, LE_INVALID=-1, LE_NOT_SUPPORTED=-2, LE_IO=-3, LE_BUSY=-4, LE_AUTH=-5 };
 
@@ -16,12 +17,23 @@ struct le_system_status { double uptime; int cpu, memory, storage, temperature; 
 struct le_device_info { char name[LE_TEXT], hostname[LE_TEXT], model[LE_TEXT], serial[LE_TEXT], os_version[32], kernel[64], hardware_revision[32], backend[16]; };
 struct le_audio_state { int volume, microphone_gain, notification_volume, muted, startup_sound, amplifier_on, output_available; };
 struct le_led_profile { uint8_t r,g,b; int brightness, animation_speed; };
-struct le_led_state { struct le_led_profile current, boot, listening, thinking, error, dnd; int animation_active, animation_profile; };
+struct le_led_state { struct le_led_profile current, boot, listening, thinking, error, dnd; int animation_active, animation_profile, pattern_active; char pattern[16]; };
 struct le_wifi_network { char ssid[LE_TEXT], security[16]; int signal; };
 struct le_wifi_scan { struct le_wifi_network networks[LE_MAX_WIFI]; size_t count; };
 struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };
 struct le_network_state { char state[24], ssid[LE_TEXT], ip[48], gateway[48], dns[96], hostname[LE_TEXT]; int signal, rssi_dbm, internet, dhcp, ssh, api_lan; };
 struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb; };
+struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, paired, connected; };
+struct le_bluetooth_pairing { char address[18], method[24]; int type; unsigned int value; };
+struct le_bluetooth_state {
+    char state[32], transport[32], hci[32], local_name[LE_TEXT], last_error[96];
+    int available, enabled, activation_attempted, scanning, pairing, pairing_mode;
+    int classic, le, ssp, secure_connection, connectable, discoverable, bondable, hidp;
+    size_t discovered_count, known_count;
+    struct le_bluetooth_device discovered[LE_MAX_BLUETOOTH_DEVICES];
+    struct le_bluetooth_device known[LE_MAX_BLUETOOTH_DEVICES];
+    struct le_bluetooth_pairing pending_pairing;
+};
 struct le_backend;
 
 int le_backend_init(struct le_backend **out, const char *mode, const char *mock_path, const char *config_path, unsigned seed);
@@ -33,6 +45,8 @@ int le_get_audio_state(struct le_backend*,struct le_audio_state*); int le_set_vo
 int le_get_led_state(struct le_backend*,struct le_led_state*); int le_set_led_colour(struct le_backend*,uint8_t,uint8_t,uint8_t); int le_set_led_brightness(struct le_backend*,int); int le_set_boot_led(struct le_backend*,const struct le_led_profile*); int le_run_led_test(struct le_backend*);
 int le_get_network_state(struct le_backend*,struct le_network_state*); int le_scan_wifi(struct le_backend*,struct le_wifi_scan*); int le_connect_wifi(struct le_backend*,const struct le_wifi_credentials*); int le_disconnect_wifi(struct le_backend*); int le_set_hostname(struct le_backend*,const char*);
 int le_get_wake_word_state(struct le_backend*,struct le_wake_word_state*); int le_set_wake_word(struct le_backend*,const char*); int le_set_wake_word_sensitivity(struct le_backend*,int); int le_test_wake_word(struct le_backend*);
+int le_get_bluetooth_state(struct le_backend*,struct le_bluetooth_state*); int le_set_bluetooth_enabled(struct le_backend*,int);
+int le_bluetooth_scan(struct le_backend*,int); int le_bluetooth_pair(struct le_backend*,const char*,int,int); int le_bluetooth_unpair(struct le_backend*,const char*,int); int le_bluetooth_disconnect(struct le_backend*,const char*,int); int le_bluetooth_pairing_response(struct le_backend*,const char*,int,const char*,unsigned int,const char*); int le_bluetooth_set_discoverable(struct le_backend*,int); int le_bluetooth_set_connectable(struct le_backend*,int); int le_bluetooth_set_pairing_mode(struct le_backend*,int);
 int le_reboot(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);
 int le_backend_tick(struct le_backend*); int le_backend_mock_control(struct le_backend*,const char*,const char*);
 

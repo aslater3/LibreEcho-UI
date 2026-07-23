@@ -8,7 +8,7 @@
   "servers": [{"url":"/api/v1","description":"This LibreEcho device"}],
   "tags": [
     {"name":"Discovery"},{"name":"Authentication"},{"name":"Setup"},{"name":"Device"},{"name":"Audio"},{"name":"LED and buttons"},
-    {"name":"Wake word"},{"name":"Network"},{"name":"Privacy"},{"name":"Integrations"},
+    {"name":"Wake word"},{"name":"Network"},{"name":"Bluetooth"},{"name":"Privacy"},{"name":"Integrations"},
     {"name":"System"},{"name":"Diagnostics"},{"name":"Development"}
   ],
   "paths": {
@@ -30,6 +30,17 @@
       "put":{"tags":["Audio"],"summary":"Update volume or microphone state","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}
     },
     "/audio/test": {"post":{"tags":["Audio"],"summary":"Play a test tone","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth": {
+      "get":{"tags":["Bluetooth"],"summary":"Read Bluetooth controller, discovery, pairing and known-device state","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["Bluetooth"],"summary":"Enable Bluetooth or update discoverable/connectable settings","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/bluetooth/pairing-mode": {"post":{"tags":["Bluetooth"],"summary":"Enter or leave pairing mode and make the controller visible","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/scan": {"post":{"tags":["Bluetooth"],"summary":"Start a Classic + LE discovery scan","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"409":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/scan/stop": {"post":{"tags":["Bluetooth"],"summary":"Stop an active discovery scan","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/bluetooth/pair": {"post":{"tags":["Bluetooth"],"summary":"Start pairing with a discovered or known device","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/unpair": {"post":{"tags":["Bluetooth"],"summary":"Remove a paired device and its stored bond","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/disconnect": {"post":{"tags":["Bluetooth"],"summary":"Disconnect an active Bluetooth connection","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/pairing/response": {"post":{"tags":["Bluetooth"],"summary":"Answer a pending confirmation, passkey or PIN request","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}},
     "/led": {
       "get":{"tags":["LED and buttons"],"summary":"Read LED state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
       "put":{"tags":["LED and buttons"],"summary":"Update LED colour or brightness","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
