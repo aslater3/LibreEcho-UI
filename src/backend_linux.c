@@ -719,6 +719,9 @@ static int led(struct le_backend *b, struct le_led_state *o)
     memset(o, 0, sizeof(*o));
     if (json_get_bool(response, "animation_active", &o->animation_active) < 0)
         o->animation_active = 0;
+    if (json_get_bool(response, "pattern_active", &o->pattern_active) < 0)
+        o->pattern_active = 0;
+    (void)json_get_string(response, "pattern", o->pattern, sizeof(o->pattern));
     o->animation_profile = -1;
     if (json_get_string(response, "animation_profile", object, sizeof(object)) > 0) {
         if (!strcmp(object, "listening")) o->animation_profile = 0;
@@ -889,6 +892,251 @@ static int wake_test(struct le_backend *b)
     return adapter_json_command(LE_ADAPTER_WAKEWORD_SOCK, "test", NULL);
 }
 
+static int bluetooth_address_valid(const char *address)
+{
+    int i;
+
+    if (!address || strlen(address) != 17)
+        return 0;
+    for (i = 0; i < 17; ++i) {
+        if ((i + 1) % 3 == 0) {
+            if (address[i] != ':')
+                return 0;
+        } else if (!((address[i] >= '0' && address[i] <= '9') ||
+                     (address[i] >= 'a' && address[i] <= 'f') ||
+                     (address[i] >= 'A' && address[i] <= 'F'))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void bluetooth_parse_devices(const char *response, const char *key,
+                                    struct le_bluetooth_device *devices,
+                                    size_t *count)
+{
+    const char *array;
+    const char *end;
+    const char *object;
+
+    *count = 0;
+    array = strstr(response, key);
+    if (!array || !(array = strchr(array, '[')))
+        return;
+    end = strchr(array, ']');
+    if (!end)
+        return;
+    object = array + 1;
+    while (*count < LE_MAX_BLUETOOTH_DEVICES &&
+           (object = strstr(object, "{\"address\"")) != NULL && object < end) {
+        const char *object_end = strchr(object, '}');
+        char item[512];
+        size_t length;
+        struct le_bluetooth_device *device = &devices[*count];
+
+        if (!object_end || object_end > end)
+            break;
+        length = (size_t)(object_end - object + 1);
+        if (length >= sizeof(item))
+            break;
+        memcpy(item, object, length);
+        item[length] = '\0';
+        memset(device, 0, sizeof(*device));
+        if (json_get_string(item, "address", device->address,
+                            sizeof(device->address)) < 1)
+            break;
+        (void)json_get_string(item, "name", device->name, sizeof(device->name));
+        (void)json_get_int(item, "type", &device->type);
+        (void)json_get_int(item, "rssi", &device->rssi);
+        (void)json_get_bool(item, "paired", &device->paired);
+        (void)json_get_bool(item, "connected", &device->connected);
+        ++*count;
+        object = object_end + 1;
+    }
+}
+
+static int bluetooth(struct le_backend *b, struct le_bluetooth_state *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc;
+
+    (void)b;
+    rc = adapter_command(LE_ADAPTER_BLUETOOTH_SOCK, "status", NULL,
+                         response, sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    memset(o, 0, sizeof(*o));
+    (void)json_get_string(response, "state", o->state, sizeof(o->state));
+    (void)json_get_string(response, "transport", o->transport,
+                          sizeof(o->transport));
+    (void)json_get_string(response, "hci", o->hci, sizeof(o->hci));
+    (void)json_get_string(response, "local_name", o->local_name,
+                          sizeof(o->local_name));
+    (void)json_get_string(response, "last_error", o->last_error,
+                          sizeof(o->last_error));
+    (void)json_get_bool(response, "available", &o->available);
+    (void)json_get_bool(response, "enabled", &o->enabled);
+    (void)json_get_bool(response, "activation_attempted",
+                        &o->activation_attempted);
+    (void)json_get_bool(response, "scanning", &o->scanning);
+    (void)json_get_bool(response, "pairing", &o->pairing);
+    (void)json_get_bool(response, "pairing_mode", &o->pairing_mode);
+    (void)json_get_bool(response, "classic", &o->classic);
+    (void)json_get_bool(response, "le", &o->le);
+    (void)json_get_bool(response, "ssp", &o->ssp);
+    (void)json_get_bool(response, "secure_connection", &o->secure_connection);
+    (void)json_get_bool(response, "connectable", &o->connectable);
+    (void)json_get_bool(response, "discoverable", &o->discoverable);
+    (void)json_get_bool(response, "bondable", &o->bondable);
+    (void)json_get_bool(response, "hidp", &o->hidp);
+    bluetooth_parse_devices(response, "\"discovered\"", o->discovered,
+                            &o->discovered_count);
+    bluetooth_parse_devices(response, "\"known_devices\"", o->known,
+                            &o->known_count);
+    if (o->pairing)
+        (void)json_get_string(response, "address", o->pending_pairing.address,
+                              sizeof(o->pending_pairing.address));
+    (void)json_get_int(response, "type", &o->pending_pairing.type);
+    (void)json_get_string(response, "method", o->pending_pairing.method,
+                          sizeof(o->pending_pairing.method));
+    {
+        int value;
+        if (json_get_int(response, "value", &value) > 0 && value >= 0)
+            o->pending_pairing.value = (unsigned int)value;
+    }
+    return LE_OK;
+}
+
+static int bluetooth_set(struct le_backend *b, int enabled)
+{
+    char args[32];
+
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}",
+             enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_BLUETOOTH_SOCK,
+                                "set_enabled", args);
+}
+
+static int bluetooth_scan(struct le_backend *b, int start)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_BLUETOOTH_SOCK,
+                                start ? "scan" : "scan_stop", NULL);
+}
+
+static int bluetooth_pair(struct le_backend *b, const char *address, int type,
+                          int io_capability)
+{
+    char args[128];
+
+    (void)b;
+    if (!bluetooth_address_valid(address) || type < 0 || type > 255 ||
+        io_capability < 0 || io_capability > 4)
+        return LE_INVALID;
+    snprintf(args, sizeof(args),
+             "{\"address\":\"%s\",\"type\":%d,\"io_capability\":%d}",
+             address, type, io_capability);
+    return adapter_json_command(LE_ADAPTER_BLUETOOTH_SOCK, "pair", args);
+}
+
+static int bluetooth_unpair(struct le_backend *b, const char *address, int type)
+{
+    char args[96];
+
+    (void)b;
+    if (!bluetooth_address_valid(address) || type < 0 || type > 255)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"address\":\"%s\",\"type\":%d}",
+             address, type);
+    return adapter_json_command(LE_ADAPTER_BLUETOOTH_SOCK, "unpair", args);
+}
+
+static int bluetooth_disconnect(struct le_backend *b, const char *address,
+                                int type)
+{
+    char args[96];
+
+    (void)b;
+    if (!bluetooth_address_valid(address) || type < 0 || type > 255)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"address\":\"%s\",\"type\":%d}",
+             address, type);
+    return adapter_json_command(LE_ADAPTER_BLUETOOTH_SOCK, "disconnect", args);
+}
+
+static int bluetooth_pairing_response(struct le_backend *b, const char *address,
+                                      int type, const char *method,
+                                      unsigned int value, const char *pin)
+{
+    char args[192];
+    const char *command;
+
+    (void)b;
+    if (!bluetooth_address_valid(address) || type < 0 || type > 255 || !method)
+        return LE_INVALID;
+    if (!strcmp(method, "confirm")) {
+        command = "pair_confirm";
+        snprintf(args, sizeof(args), "{\"address\":\"%s\",\"type\":%d}",
+                 address, type);
+    } else if (!strcmp(method, "reject")) {
+        command = "pair_reject";
+        snprintf(args, sizeof(args), "{\"address\":\"%s\",\"type\":%d}",
+                 address, type);
+    } else if (!strcmp(method, "passkey")) {
+        command = "pair_passkey";
+        if (value > 999999)
+            return LE_INVALID;
+        snprintf(args, sizeof(args),
+                 "{\"address\":\"%s\",\"type\":%d,\"passkey\":%u}",
+                 address, type, value);
+    } else if (!strcmp(method, "pin")) {
+        size_t i;
+        command = "pair_pin";
+        if (!pin || !pin[0] || strlen(pin) > 16)
+            return LE_INVALID;
+        for (i = 0; pin[i]; ++i)
+            if ((unsigned char)pin[i] < 0x20 || pin[i] == '"' || pin[i] == '\\')
+                return LE_INVALID;
+        snprintf(args, sizeof(args),
+                 "{\"address\":\"%s\",\"type\":%d,\"pin\":\"%s\"}",
+                 address, type, pin);
+    } else {
+        return LE_INVALID;
+    }
+    return adapter_json_command(LE_ADAPTER_BLUETOOTH_SOCK, command, args);
+}
+
+static int bluetooth_controller_setting(struct le_backend *b, const char *command,
+                                         int enabled)
+{
+    char args[32];
+
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}",
+             enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_BLUETOOTH_SOCK, command, args);
+}
+
+static int bluetooth_discoverable(struct le_backend *b, int enabled)
+{
+    return bluetooth_controller_setting(b, "set_discoverable", enabled);
+}
+
+static int bluetooth_connectable(struct le_backend *b, int enabled)
+{
+    return bluetooth_controller_setting(b, "set_connectable", enabled);
+}
+
+static int bluetooth_pairing_mode(struct le_backend *b, int enabled)
+{
+    return bluetooth_controller_setting(b, "pairing_mode", enabled);
+}
+
 static int linux_reboot(struct le_backend *b)
 {
     (void)b;
@@ -953,6 +1201,9 @@ static const struct le_backend_ops ops = {
     led, colour, brightness, boot_led, led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,
     wake, wake_set, sensitivity, wake_test,
+    bluetooth, bluetooth_set, bluetooth_scan, bluetooth_pair,
+    bluetooth_unpair, bluetooth_disconnect, bluetooth_pairing_response,
+    bluetooth_discoverable, bluetooth_connectable, bluetooth_pairing_mode,
     linux_reboot, linux_shutdown, factory_reset, tick, control
 };
 

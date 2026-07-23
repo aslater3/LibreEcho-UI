@@ -21,6 +21,7 @@ explicitly requested.
 | `/api/v1/network` | yes | live pass; connected, RSSI, IP and `Zebox 5g` SSID | Overview now includes SSID |
 | `/api/v1/network/wifi/scan` | yes | live pass; vendor WEXT fallback returns a typed network list and central logs record the fallback | replace WEXT with nl80211/vendor scan support when the Wi-Fi stack is upgraded |
 | `/api/v1/wake-word` | yes | `501` while adapter is absent | UI now shows an explicit unsupported state |
+| `/api/v1/bluetooth` and `/bluetooth/*` | yes | host/mock contract implemented; native HCI path awaits the next flashed kernel image | run bounded scan, pair, unpair, disconnect and reboot-persistence tests on hardware |
 | `/api/v1/privacy` | yes | pass | persist all fields consistently |
 | `/api/v1/integrations` | yes | pass | add endpoint schema validation |
 | `/api/v1/system` | yes | live pass; NTP unavailable and clock validity are explicit | add a real time-sync adapter before release |
@@ -48,12 +49,14 @@ explicitly requested.
 - [x] Add a visible service/log health summary.
 - [x] Show clock validity and source on the System page instead of only an ambiguous NTP label.
 - [x] Make active LED animation state visible as motion in the rendered ring, respecting reduced-motion preferences.
+- [x] Add a Bluetooth page with controller state, capabilities, discovery, pairing responses, known devices, unpair, disconnect, connectable, and discoverable controls.
+- [ ] Validate Bluetooth discovery and bond persistence on the MT8163 hardware image.
 
 ## Platform and service work
 
 - [x] Add local users with salted password verification and expiring sessions.
 - [x] Keep bearer-token mode available for scripted administration.
-- [x] Start logd, networkd, audiod, ledd, and web automatically after the
+- [x] Start logd, networkd, audiod, ledd, btd, and web automatically after the
   recovery control plane reaches loopback readiness.
 - [x] Make startup ordering and each init-script result visible in `/tmp/init.log`.
 - [x] Ensure `/api/v1/logs` reads logd output and preserves wall-clock and

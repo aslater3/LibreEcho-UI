@@ -43,8 +43,10 @@
 #define MAX_CLIENTS 4
 #define STATE_PATH "/etc/libreecho/led-state.json"
 #define SYSFS_LED_DIR "/sys/class/leds"
+#define SYSFS_I2C_DIR "/sys/bus/i2c/devices"
 #define MAX_PATH 512
 #define FRAME_MS 33
+#define IS31_CHANNELS 36
 
 struct colour {
     unsigned int r;
@@ -74,7 +76,8 @@ static const char *const profile_names[PROFILE_COUNT] = {
 enum hardware_kind {
     HW_STUB = 0,
     HW_SYSFS,
-    HW_I2C_STUB
+    HW_I2C_STUB,
+    HW_IS31FL3236
 };
 
 struct hardware {
@@ -85,6 +88,8 @@ struct hardware {
     char green_path[MAX_PATH];
     char blue_path[MAX_PATH];
     char brightness_path[MAX_PATH];
+    char is31_frame_path[MAX_PATH];
+    char is31_boot_animation_path[MAX_PATH];
 };
 
 struct client {
@@ -120,7 +125,19 @@ struct daemon_context {
     int animation_active;
     int animation_profile;
     double animation_started;
+    int pattern_active;
+    int pattern_kind;
+    struct colour pattern_colour;
+    unsigned int pattern_repeats;
+    double pattern_started;
+    int pattern_previous_kind;
+    struct colour pattern_previous_colour;
+    unsigned int pattern_previous_repeats;
+    struct colour pattern_saved;
+    int pattern_saved_animation;
 };
+
+enum pattern_kind { PATTERN_NONE = 0, PATTERN_PULSE, PATTERN_FLASH };
 
 static volatile sig_atomic_t stop_requested;
 
@@ -204,6 +221,33 @@ static int write_number_file(const char *path, unsigned int value)
     return write_text_file(path, text);
 }
 
+static unsigned int scale_channel(unsigned int channel, unsigned int brightness);
+
+static int write_is31_frame(const struct hardware *hw,
+                            unsigned int r, unsigned int g, unsigned int b,
+                            unsigned int brightness)
+{
+    char frame[IS31_CHANNELS * 2 + 2];
+    unsigned int channels[3];
+    size_t i;
+    int used = 0;
+
+    channels[0] = scale_channel(r, brightness);
+    channels[1] = scale_channel(g, brightness);
+    channels[2] = scale_channel(b, brightness);
+    for (i = 0; i < IS31_CHANNELS / 3; i++) {
+        int added = snprintf(frame + used, sizeof(frame) - (size_t)used,
+                             "%02x%02x%02x", channels[0], channels[1],
+                             channels[2]);
+        if (added < 0 || (size_t)added >= sizeof(frame) - (size_t)used)
+            return -1;
+        used += added;
+    }
+    frame[used++] = '\n';
+    frame[used] = '\0';
+    return write_text_file(hw->is31_frame_path, frame);
+}
+
 /* ---------------------------- Hardware layer --------------------------- */
 
 static unsigned int scale_channel(unsigned int channel, unsigned int brightness)
@@ -218,6 +262,8 @@ static int hardware_write_rgb(const struct hardware *hw, unsigned int r,
     char text[80];
     int errors = 0;
 
+    if (hw->kind == HW_IS31FL3236)
+        return write_is31_frame(hw, r, g, b, brightness);
     if (hw->kind != HW_SYSFS)
         return 0;
 
@@ -346,6 +392,52 @@ static void detect_sysfs(struct hardware *hw)
     }
 }
 
+static void detect_is31(struct hardware *hw)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char base[MAX_PATH];
+    char frame[MAX_PATH];
+    char boot_animation[MAX_PATH];
+
+    dir = opendir(SYSFS_I2C_DIR);
+    if (dir == NULL)
+        return;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.')
+            continue;
+        if (!append_path(base, sizeof(base), SYSFS_I2C_DIR, entry->d_name) ||
+            !append_path(frame, sizeof(frame), base, "frame") ||
+            !append_path(boot_animation, sizeof(boot_animation), base,
+                         "boot_animation") ||
+            !path_is_file(frame) || !path_is_file(boot_animation))
+            continue;
+        strncpy(hw->is31_frame_path, frame, sizeof(hw->is31_frame_path) - 1);
+        hw->is31_frame_path[sizeof(hw->is31_frame_path) - 1] = '\0';
+        strncpy(hw->is31_boot_animation_path, boot_animation,
+                sizeof(hw->is31_boot_animation_path) - 1);
+        hw->is31_boot_animation_path[
+            sizeof(hw->is31_boot_animation_path) - 1] = '\0';
+        hw->kind = HW_IS31FL3236;
+        le_log_info("using IS31FL3236 LED backend (%s)", frame);
+        break;
+    }
+    closedir(dir);
+}
+
+static int hardware_claim(const struct hardware *hw)
+{
+    if (hw->kind != HW_IS31FL3236)
+        return 0;
+    /* The kernel driver owns the ring's boot chase until this write. */
+    if (write_text_file(hw->is31_boot_animation_path, "0\n") != 0) {
+        le_log_error("could not stop IS31FL3236 boot animation");
+        return -1;
+    }
+    le_log_info("LED boot-animation handover complete");
+    return 0;
+}
+
 static int detect_i2c(void)
 {
     static const unsigned int addresses[] = {
@@ -390,6 +482,10 @@ static void hardware_detect(struct hardware *hw, int force_stub)
 
     detect_sysfs(hw);
     if (hw->kind == HW_SYSFS)
+        return;
+
+    detect_is31(hw);
+    if (hw->kind == HW_IS31FL3236)
         return;
 
     if (detect_i2c()) {
@@ -918,8 +1014,86 @@ static void apply_animated(struct daemon_context *ctx, double now)
     hardware_apply(&ctx->hw, &output);
 }
 
+static const char *pattern_name(int kind)
+{
+    return kind == PATTERN_PULSE ? "pulse" : kind == PATTERN_FLASH ? "flash" : "none";
+}
+
+static void stop_pattern(struct daemon_context *ctx, double now)
+{
+    (void)now;
+    if (!ctx->pattern_active)
+        return;
+    ctx->pattern_active = 0;
+    ctx->pattern_kind = PATTERN_NONE;
+    ctx->pattern_previous_kind = PATTERN_NONE;
+    ctx->state.current = ctx->pattern_saved;
+    ctx->animation_active = ctx->pattern_saved_animation;
+    if (ctx->animation_active)
+        ctx->animation_started = monotonic_seconds();
+    if (ctx->animation_active)
+        apply_animated(ctx, monotonic_seconds());
+    else
+        apply_current(ctx);
+}
+
+static void start_pattern(struct daemon_context *ctx, int kind,
+                          const struct colour *colour, unsigned int repeats,
+                          double now)
+{
+    if (ctx->pattern_active) {
+        ctx->pattern_previous_kind = ctx->pattern_kind;
+        ctx->pattern_previous_colour = ctx->pattern_colour;
+        ctx->pattern_previous_repeats = ctx->pattern_repeats;
+    } else {
+        ctx->pattern_saved = ctx->state.current;
+        ctx->pattern_saved_animation = ctx->animation_active;
+        ctx->pattern_previous_kind = PATTERN_NONE;
+    }
+    ctx->pattern_active = 1;
+    ctx->pattern_kind = kind;
+    ctx->pattern_colour = *colour;
+    ctx->pattern_repeats = repeats;
+    ctx->pattern_started = now;
+    ctx->animation_active = 0;
+}
+
+static void update_pattern(struct daemon_context *ctx, double now)
+{
+    double elapsed = now - ctx->pattern_started;
+    struct colour output = ctx->pattern_colour;
+    int on = 1;
+
+    if (ctx->pattern_kind == PATTERN_PULSE) {
+        double phase = elapsed * 0.6666666667;
+        double wave;
+        while (phase >= 1.0) phase -= 1.0;
+        wave = 0.20 + 0.80 * (0.5 + 0.5 * sine_approx(phase * 6.28318530717958647692));
+        output.brightness = (unsigned int)((double)ctx->pattern_colour.brightness * wave + 0.5);
+    } else if (ctx->pattern_kind == PATTERN_FLASH) {
+        unsigned int cycle = (unsigned int)(elapsed / 0.20);
+        on = (cycle % 2U) == 0;
+        if (ctx->pattern_repeats && cycle >= ctx->pattern_repeats * 2U) {
+            if (ctx->pattern_previous_kind != PATTERN_NONE) {
+                ctx->pattern_kind = ctx->pattern_previous_kind;
+                ctx->pattern_colour = ctx->pattern_previous_colour;
+                ctx->pattern_repeats = ctx->pattern_previous_repeats;
+                ctx->pattern_previous_kind = PATTERN_NONE;
+                ctx->pattern_started = now;
+                update_pattern(ctx, now);
+            } else {
+                stop_pattern(ctx, now);
+            }
+            return;
+        }
+        if (!on) output.brightness = 0;
+    }
+    hardware_apply(&ctx->hw, &output);
+}
+
 static void start_test(struct daemon_context *ctx, double now)
 {
+    stop_pattern(ctx, now);
     if (!ctx->test_active) {
         ctx->test_saved = ctx->state.current;
         ctx->test_saved_animation = ctx->animation_active;
@@ -957,6 +1131,8 @@ static void update_animation(struct daemon_context *ctx, double now)
             output.brightness = ctx->test_saved.brightness;
             hardware_apply(&ctx->hw, &output);
         }
+    } else if (ctx->pattern_active) {
+        update_pattern(ctx, now);
     } else if (ctx->animation_active) {
         apply_animated(ctx, now);
     }
@@ -972,6 +1148,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
     n = snprintf(out, out_size,
         "{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u,"
         "\"animation_active\":%s,\"animation_profile\":\"%s\","
+        "\"pattern_active\":%s,\"pattern\":\"%s\","
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"profiles\":{",
         ctx->state.current.r, ctx->state.current.g, ctx->state.current.b,
@@ -979,6 +1156,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
         ctx->animation_active && ctx->animation_profile >= 0 &&
                 ctx->animation_profile < PROFILE_COUNT
             ? profile_names[ctx->animation_profile] : "none",
+        ctx->pattern_active ? "true" : "false", pattern_name(ctx->pattern_kind),
         ctx->state.boot.r, ctx->state.boot.g,
         ctx->state.boot.b, ctx->state.boot.brightness);
     if (n < 0 || (size_t)n >= out_size)
@@ -1009,6 +1187,8 @@ static int handle_request(struct daemon_context *ctx, int fd,
     struct colour colour;
     char data[2048];
     unsigned int r, g, b, brightness;
+    unsigned int repeats = 0;
+    char pattern[32];
     int profile;
     double now = monotonic_seconds();
 
@@ -1027,6 +1207,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
             get_arg_unsigned(&request, "b", &b, 255) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "set_colour requires r, g and b in 0..255");
+        stop_pattern(ctx, now);
         ctx->state.current.r = r;
         ctx->state.current.g = g;
         ctx->state.current.b = b;
@@ -1040,6 +1221,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
         if (get_arg_unsigned(&request, "brightness", &brightness, 100) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "brightness must be in 0..100");
+        stop_pattern(ctx, now);
         ctx->state.current.brightness = brightness;
         ctx->animation_active = 0;
         apply_current(ctx);
@@ -1079,6 +1261,40 @@ static int handle_request(struct daemon_context *ctx, int fd,
         return send_response(fd, request.id, 1, "{}", NULL);
     }
 
+    if (strcmp(request.command, "pattern") == 0) {
+        if (!request.have_args ||
+            json_get_string(request.args, "name", pattern, sizeof(pattern)) != 0)
+            return send_response(fd, request.id, 0, NULL,
+                                 "pattern requires a name");
+        if (!strcmp(pattern, "stop")) {
+            stop_pattern(ctx, now);
+            return send_response(fd, request.id, 1, "{\"pattern\":\"none\"}", NULL);
+        }
+        if (!strcmp(pattern, "pulse") || !strcmp(pattern, "flash") ||
+            !strcmp(pattern, "full_ring_flash")) {
+            int kind = !strcmp(pattern, "pulse") ? PATTERN_PULSE : PATTERN_FLASH;
+            if (get_arg_unsigned(&request, "r", &r, 255) != 0 ||
+                get_arg_unsigned(&request, "g", &g, 255) != 0 ||
+                get_arg_unsigned(&request, "b", &b, 255) != 0 ||
+                get_arg_unsigned(&request, "brightness", &brightness, 100) != 0 ||
+                get_arg_unsigned(&request, "repeats", &repeats, 100) != 0)
+                return send_response(fd, request.id, 0, NULL,
+                                     "pattern requires r, g, b, brightness and repeats");
+            colour.r = r;
+            colour.g = g;
+            colour.b = b;
+            colour.brightness = brightness;
+            start_pattern(ctx, kind, &colour, repeats, now);
+            update_pattern(ctx, now);
+            return send_response(fd, request.id, 1, "{\"pattern_active\":true}", NULL);
+        }
+        if (!strcmp(pattern, "half_ring") || !strcmp(pattern, "chase") ||
+            !strcmp(pattern, "dance") || !strcmp(pattern, "random"))
+            return send_response(fd, request.id, 0, NULL,
+                                 "pattern is reserved until per-pixel LED hardware is available");
+        return send_response(fd, request.id, 0, NULL, "unknown LED pattern");
+    }
+
     if (strcmp(request.command, "test") == 0) {
         start_test(ctx, now);
         update_animation(ctx, now);
@@ -1089,6 +1305,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
         if (get_arg_profile_field(&request, "profile", &profile) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "animate requires a valid profile");
+        stop_pattern(ctx, now);
         ctx->state.current = ctx->state.profiles[profile];
         ctx->animation_profile = profile;
         ctx->animation_active = 1;
@@ -1372,6 +1589,8 @@ int main(int argc, char **argv)
     load_state(&ctx.state);
     ctx.state.current = ctx.state.boot;
     hardware_detect(&ctx.hw, force_stub);
+    if (hardware_claim(&ctx.hw) != 0)
+        return EXIT_FAILURE;
     hardware_apply(&ctx.hw, &ctx.state.current);
 
     if (!ctx.foreground && daemonize_process() != 0) {
@@ -1402,7 +1621,7 @@ int main(int argc, char **argv)
         fds[0].events = POLLIN;
         fds[0].revents = 0;
         slots[0] = -1;
-        if (ctx.test_active || ctx.animation_active)
+        if (ctx.test_active || ctx.animation_active || ctx.pattern_active)
             timeout = FRAME_MS;
 
         for (j = 0; j < MAX_CLIENTS; j++) {
@@ -1429,7 +1648,7 @@ int main(int argc, char **argv)
                 (fds[j].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)))
                 receive_client(&ctx, &ctx.clients[slot]);
         }
-        if (ctx.test_active || ctx.animation_active)
+        if (ctx.test_active || ctx.animation_active || ctx.pattern_active)
             update_animation(&ctx, monotonic_seconds());
     }
 
