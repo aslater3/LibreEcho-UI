@@ -91,6 +91,9 @@ explicitly requested.
   absent; restore remains intentionally unsupported on Linux.
 - `/api/v1/logs/stream` now returns a one-shot `text/event-stream` event rather
   than JSON with an incorrect content type.
+- Web-daemon lifecycle and API audit events now feed the same central logd
+  stream as the hardware daemons, while the bounded in-memory event history is
+  retained for development fallback.
 - Log timestamps reflect the device's unsynchronised wall clock (2010-era
   values on this boot); the System endpoint now exposes `clock_valid: false`
   and `clock_source: "unset"` rather than claiming NTP synchronization.
