@@ -10,6 +10,10 @@ expect "$(curl -fsS "$URL/swagger.html")" 'LibreEcho API Reference'
 expect "$(curl -fsS "$URL/js/swagger.js")" 'executeOperation'
 expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
 expect "$(curl -fsS "$URL/api/v1/network/wifi/scan")" 'LibreNet-5G'
+curl -fsS -D /tmp/le-log-stream.headers "$URL/api/v1/logs/stream" -o /tmp/le-log-stream.out
+grep -qi '^content-type: text/event-stream' /tmp/le-log-stream.headers
+grep -q '^event: logs$' /tmp/le-log-stream.out
+grep -q '^data: {"ok":true' /tmp/le-log-stream.out
 code=$(curl -sS -o /tmp/le-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{bad')
 [ "$code" = 400 ]
 code=$(curl -sS -o /tmp/le-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H 'Content-Type: application/json' --data '{"volume":20}')

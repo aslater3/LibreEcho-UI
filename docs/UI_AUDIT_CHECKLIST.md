@@ -14,7 +14,7 @@ explicitly requested.
 | `/api/v1/status` | yes | pass | CPU field naming covered |
 | `/api/v1/device` | yes | live pass; reports `LibreEcho`/`libreecho` | none |
 | `/api/v1/config` | yes | live pass; current image intentionally reports `development-disabled` | package a users file for authenticated builds |
-| `/api/v1/config/export` | yes | `501` on Linux | implement a complete Linux-safe export |
+| `/api/v1/config/export` | yes | live pass; returns safe partial export when wake-word is absent | keep field list/versioned contract current |
 | `/api/v1/audio` | yes | live pass; reports `startup_sound:false` | do not play |
 | `/api/v1/led` | yes | live pass; animation state and ring renderer added | verify live polling on next UI image |
 | `/api/v1/buttons` | yes | pass | add explicit GET to the API contract |
@@ -24,7 +24,7 @@ explicitly requested.
 | `/api/v1/privacy` | yes | pass | persist all fields consistently |
 | `/api/v1/integrations` | yes | pass | add endpoint schema validation |
 | `/api/v1/system` | yes | pass, currently static metadata | label unsupported OTA fields honestly |
-| `/api/v1/logs`, `/logs/stream` | yes | live pass; central JSON-lines source with bounded output | improve clock/boot-relative timestamps |
+| `/api/v1/logs`, `/logs/stream` | yes | live pass; bounded central JSON-lines and one-shot SSE stream | improve clock/boot-relative timestamps |
 | `/api/v1/diagnostics` | yes | live pass; all daemon sockets/PIDs and wlan0 healthy | none |
 | `/api/v1/events` | yes | pass | validate reconnect/last-event behaviour |
 | `/openapi.json`, `/swagger.html` | yes | pass | keep generated contract in sync |
@@ -42,7 +42,7 @@ explicitly requested.
 - [x] Network scan handles empty results and adapter errors without a blank panel.
 - [x] Unsupported wake-word state is non-actionable in the UI.
 - [x] Add a login flow for configured local users, with bearer sessions.
-- [ ] Add a visible service/log health summary.
+- [x] Add a visible service/log health summary.
 
 ## Platform and service work
 
@@ -65,14 +65,14 @@ explicitly requested.
   deployments while preserving same-origin protection.
 - [ ] Add login rate limiting and a password reset/provisioning workflow before
   production use.
-- [ ] Make Linux configuration export include only confirmed-safe persisted
+- [x] Make Linux configuration export include only confirmed-safe persisted
   fields and return a useful result when one adapter is unavailable.
 - [ ] Implement the Linux Wi-Fi scan adapter and expose an empty-result state.
 - [ ] Add endpoint schema/type assertions to the UI smoke test rather than only
   HTTP status assertions.
 - [ ] Validate LED animation timing against the hardware daemon and refresh the
   rendered ring while active.
-- [ ] Add a bounded read-only service status panel to the Logs page.
+- [x] Add a bounded read-only service status panel to the Logs page.
 - [ ] Test UI at narrow/mobile and desktop widths with a browser after the
   device candidate is flashed.
 
@@ -86,6 +86,11 @@ explicitly requested.
   `LIBREECHO_WEB_USERS_FILE` and package a mode-`0600` users file.
 - Linux Wi-Fi scan returns `501` and records the failure in central logs; this
   is an adapter limitation, not a UI blank-state failure.
+- Linux configuration export now returns the available persisted fields with
+  `partial: true` and an `unsupported` field list when an optional adapter is
+  absent; restore remains intentionally unsupported on Linux.
+- `/api/v1/logs/stream` now returns a one-shot `text/event-stream` event rather
+  than JSON with an incorrect content type.
 - Log timestamps reflect the device's unsynchronised wall clock (2010-era
   values on this boot). Add a boot-relative/clock-valid field before release.
 

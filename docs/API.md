@@ -363,9 +363,12 @@ Returns API configuration.
 
 #### GET /api/v1/config/export
 
-Export complete configuration as JSON.
+Export the confirmed-safe configuration as JSON. The export remains useful on
+Linux when an optional hardware adapter is absent: `partial` is `true` and
+the omitted field names are listed in `unsupported`.
 
-**Response:** Raw config JSON (not wrapped in envelope).
+**Response:** The configuration object is returned in the normal API envelope.
+The mock backend normally returns `partial: false` and `unsupported: []`.
 
 #### POST /api/v1/config/import
 

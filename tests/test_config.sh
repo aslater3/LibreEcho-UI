@@ -7,6 +7,7 @@ grep -q '"volume": 37' "$CFG"
 ! grep -qi 'password' "$(dirname "$CFG")/test-suite-config.json"
 exported=$(curl -fsS "$URL/api/v1/config/export" | jq -c '.data')
 printf '%s' "$exported" | grep -q '"schema_version":1'
+printf '%s' "$exported" | jq -e '.partial == false and .unsupported == []' >/dev/null
 ! printf '%s' "$exported" | grep -Eqi 'password|auth_token|telemetry_value|logs'
 curl -fsS -X PUT "$URL/api/v1/audio" -H 'X-LibreEcho-CSRF: libreecho-local' -H 'Content-Type: application/json' --data '{"volume":10}' >/dev/null
 curl -fsS -X POST "$URL/api/v1/config/import" -H 'X-LibreEcho-CSRF: libreecho-local' -H 'Content-Type: application/json' --data "$exported" >/dev/null

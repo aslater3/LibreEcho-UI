@@ -34,6 +34,9 @@ sleep 1
 code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio")
 [ "$code" = 501 ]
 grep -q 'not_supported' /tmp/le-linux-audio.out
+code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/config/export")
+[ "$code" = 200 ]
+jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
 echo 'linux unsupported: ok'
 kill "$pid"
 wait "$pid" 2>/dev/null || true
