@@ -460,6 +460,7 @@ static int read_temperature(void)
 static int read_block_capacity_mb(int *megabytes)
 {
     FILE *f;
+    char line[128];
     unsigned major, minor;
     unsigned long long blocks;
     char name[64];
@@ -470,8 +471,10 @@ static int read_block_capacity_mb(int *megabytes)
     f = fopen("/proc/partitions", "r");
     if (!f)
         return -1;
-    while (fscanf(f, "%u %u %llu %63s", &major, &minor, &blocks,
-                  name) == 4) {
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%u %u %llu %63s", &major, &minor, &blocks,
+                   name) != 4)
+            continue;
         if (!strcmp(name, "mmcblk0") && blocks) {
             *megabytes = (int)((blocks * 1024ULL) / 1048576ULL);
             fclose(f);
