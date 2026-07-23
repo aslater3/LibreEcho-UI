@@ -71,8 +71,9 @@ explicitly requested.
 - [x] Make Linux configuration export include only confirmed-safe persisted
   fields and return a useful result when one adapter is unavailable.
 - [ ] Implement the Linux Wi-Fi scan adapter and expose an empty-result state.
-- [ ] Add endpoint schema/type assertions to the UI smoke test rather than only
-  HTTP status assertions.
+- [x] Add endpoint schema/type assertions to the UI smoke test rather than only
+  HTTP status assertions; `tests/live_readonly_audit.sh` is the post-flash
+  read-only contract sweep.
 - [ ] Validate LED animation timing against the hardware daemon and refresh the
   rendered ring while active.
 - [ ] Add authenticated-device smoke coverage to the post-flash sweep using a
@@ -82,6 +83,22 @@ explicitly requested.
 - [ ] Add boot-relative log time alongside wall-clock time for unsynchronised
   devices.
 - [ ] Verify API explorer state-changing requests after CSRF rotation.
+
+## Latest silent validation (2026-07-23)
+
+- Image run `20260723T005754Z-1b002f05f27d-clean-ssh0-ui7a6c7b4f16cf-d0eeb206904d`
+  was verified and flashed to slot `a`; boot SHA-256 begins
+  `bbc6e5ec36c48f8a4fbf62507977ab8e10eee76f7da648912cdd9660e72caa41`.
+- The existing UART reader captured kernel `1b002f05` with `Brought up 4 CPUs`;
+  the refined post-boot scan found no CPU boot failure, hard-lockup watchdog,
+  panic, Oops, or BUG signature.
+- All five daemons autostarted with result `0`; `/api/v1/diagnostics` reports
+  their health as `ok`, and central log JSON-lines/SSE checks pass.
+- The image reports a 64-character boot-generated CSRF token and serves UI
+  commit `7a6c7b4f`; CPU, temperature, Wi-Fi SSID/RSSI/IP, LED state, system
+  clock fields, config export, logs, diagnostics, and SSE contracts pass.
+- No playback, capture, mixer, LED test, Wi-Fi mutation, restore, or power
+  operation was invoked during this validation.
 - [x] Add a bounded read-only service status panel to the Logs page.
 - [ ] Test UI at narrow/mobile and desktop widths with a browser after the
   device candidate is flashed.
