@@ -441,6 +441,8 @@ static int wpa_scan_request(struct daemon_ctx *ctx, char *reply, size_t size)
         return 0;
     if (n >= 9 && !strncmp(reply, "FAIL-BUSY", 9))
         return 1;
+    if (n >= 15 && !strncmp(reply, "UNKNOWN COMMAND", 15))
+        return 2;
     le_log_warn("networkd: wpa_supplicant rejected scan: %.80s", reply);
     return -1;
 }
@@ -1317,8 +1319,12 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             (void)send_err_fd(ctx->clients[ci].fd, id, "wpa_supplicant scan unavailable");
             return;
         }
-        if (scan_state > 0)
+        if (scan_state == 1)
             le_log_warn("networkd: scan already active; waiting for results");
+        else if (scan_state == 2) {
+            le_log_warn("networkd: fresh scan trigger unavailable; using cached results");
+            ctx->scan.poll_at = monotonic_ms();
+        }
         ctx->scan.active = 1;
         ctx->scan.client_fd = ctx->clients[ci].fd;
         ctx->scan.id = id;
