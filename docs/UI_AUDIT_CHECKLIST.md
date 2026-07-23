@@ -86,9 +86,9 @@ explicitly requested.
 
 ## Latest silent validation (2026-07-23)
 
-- Image run `20260723T005754Z-1b002f05f27d-clean-ssh0-ui7a6c7b4f16cf-d0eeb206904d`
+- Image run `20260723T010449Z-1b002f05f27d-clean-ssh0-ui80d7acc92faf-06b989f62e3c`
   was verified and flashed to slot `a`; boot SHA-256 begins
-  `bbc6e5ec36c48f8a4fbf62507977ab8e10eee76f7da648912cdd9660e72caa41`.
+  `a6818cd7f3252ed61688287d7a8cddb21e120ebdc5b7f1e8a8028763ee2ffe30`.
 - The existing UART reader captured kernel `1b002f05` with `Brought up 4 CPUs`;
   the refined post-boot scan found no CPU boot failure, hard-lockup watchdog,
   panic, Oops, or BUG signature.
