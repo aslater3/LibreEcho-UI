@@ -32,8 +32,8 @@
     },
     "/led/test": {"post":{"tags":["LED and buttons"],"summary":"Run the LED test","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/buttons": {
-      "get":{"tags":["LED and buttons"],"summary":"Read button mappings","responses":{"200":{"$ref":"#/components/responses/Success"}}},
-      "put":{"tags":["LED and buttons"],"summary":"Update button mappings","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+      "get":{"tags":["LED and buttons"],"summary":"Read button mappings","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["LED and buttons"],"summary":"Update button mappings","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}
     },
     "/wake-word": {
       "get":{"tags":["Wake word"],"summary":"Read wake-word state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
@@ -48,11 +48,11 @@
     "/network/wifi/connect": {"post":{"tags":["Network"],"summary":"Connect to Wi-Fi","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"503":{"$ref":"#/components/responses/Error"}}}},
     "/network/wifi/disconnect": {"post":{"tags":["Network"],"summary":"Disconnect Wi-Fi","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/privacy": {
-      "get":{"tags":["Privacy"],"summary":"Read privacy configuration","responses":{"200":{"$ref":"#/components/responses/Success"}}},
-      "put":{"tags":["Privacy"],"summary":"Update privacy configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+      "get":{"tags":["Privacy"],"summary":"Read privacy configuration","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["Privacy"],"summary":"Update privacy configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}
     },
-    "/integrations": {"get":{"tags":["Integrations"],"summary":"List integrations","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
-    "/integrations/{id}": {"put":{"tags":["Integrations"],"summary":"Enable or disable an integration","parameters":[{"$ref":"#/components/parameters/Csrf"},{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"}}}},
+    "/integrations": {"get":{"tags":["Integrations"],"summary":"List integrations","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}},
+    "/integrations/{id}": {"put":{"tags":["Integrations"],"summary":"Enable or disable an integration","parameters":[{"$ref":"#/components/parameters/Csrf"},{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"},"405":{"$ref":"#/components/responses/Error"}}}},
     "/system": {"get":{"tags":["System"],"summary":"Read OS and OTA state","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/system/reboot": {"post":{"tags":["System"],"summary":"Reboot device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
     "/system/shutdown": {"post":{"tags":["System"],"summary":"Shut down device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
