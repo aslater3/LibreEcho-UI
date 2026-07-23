@@ -327,7 +327,7 @@ Browser: displays scan results
 
 - **Default:** Loopback only (`127.0.0.1:8080`)
 - **LAN:** Requires `--auth-token-file` + `--allowed-origin`
-- **CSRF:** State-changing requests require `X-LibreEcho-CSRF: libreecho-local`
+- **CSRF:** State-changing requests require the 64-character token returned by `GET /api/v1/config`; it is generated per daemon boot.
 - **Confirmation:** Destructive actions require `X-LibreEcho-Confirm: confirm-device-action`
 - **Config:** File permissions `0600`, owned by root
 - **No raw writes:** Never writes to `/dev/block/*` directly

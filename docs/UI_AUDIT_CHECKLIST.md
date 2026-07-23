@@ -13,7 +13,7 @@ explicitly requested.
 | `/api/v1`, `/api/v1/` | yes | pass | none |
 | `/api/v1/status` | yes | pass | CPU field naming covered |
 | `/api/v1/device` | yes | live pass; reports `LibreEcho`/`libreecho` | none |
-| `/api/v1/config` | yes | live pass; current image intentionally reports `development-disabled` | package a users file for authenticated builds |
+| `/api/v1/config` | yes | live pass; token is now boot-generated and current image intentionally reports `development-disabled` | package a users file for authenticated builds |
 | `/api/v1/config/export` | yes | live pass; returns safe partial export when wake-word is absent | keep field list/versioned contract current |
 | `/api/v1/audio` | yes | live pass; reports `startup_sound:false` | do not play |
 | `/api/v1/led` | yes | live pass; animation state and ring renderer added | verify live polling on next UI image |
@@ -43,6 +43,8 @@ explicitly requested.
 - [x] Unsupported wake-word state is non-actionable in the UI.
 - [x] Add a login flow for configured local users, with bearer sessions.
 - [x] Add a visible service/log health summary.
+- [x] Show clock validity and source on the System page instead of only an ambiguous NTP label.
+- [x] Make active LED animation state visible as motion in the rendered ring, respecting reduced-motion preferences.
 
 ## Platform and service work
 
@@ -58,13 +60,14 @@ explicitly requested.
   images; no password is stored in this repository.
 - [x] Build, verify, flash, and read back the candidate without invoking audio.
 - [x] Re-run the read-only endpoint sweep and UI smoke checks after reboot.
+- [x] Add host coverage for user login, session validation, logout, invalidation, and rate limiting.
 
 ## Newly identified follow-ups
 
-- [ ] Replace fixed CSRF development token with a boot-generated value for LAN
+- [x] Replace fixed CSRF development token with a boot-generated value for LAN
   deployments while preserving same-origin protection.
-- [ ] Add login rate limiting and a password reset/provisioning workflow before
-  production use.
+- [x] Add login rate limiting; retain password reset/provisioning workflow as a
+  production follow-up.
 - [x] Make Linux configuration export include only confirmed-safe persisted
   fields and return a useful result when one adapter is unavailable.
 - [ ] Implement the Linux Wi-Fi scan adapter and expose an empty-result state.
@@ -72,6 +75,13 @@ explicitly requested.
   HTTP status assertions.
 - [ ] Validate LED animation timing against the hardware daemon and refresh the
   rendered ring while active.
+- [ ] Add authenticated-device smoke coverage to the post-flash sweep using a
+  throwaway users file, without placing credentials in the image.
+- [ ] Replace prompt-based browser login with a visible login/logout surface and
+  add a password provisioning/reset workflow before production.
+- [ ] Add boot-relative log time alongside wall-clock time for unsynchronised
+  devices.
+- [ ] Verify API explorer state-changing requests after CSRF rotation.
 - [x] Add a bounded read-only service status panel to the Logs page.
 - [ ] Test UI at narrow/mobile and desktop widths with a browser after the
   device candidate is flashed.

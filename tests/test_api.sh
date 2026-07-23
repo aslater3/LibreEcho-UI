@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 URL=${LIBREECHO_TEST_URL:-http://127.0.0.1:18082}
-CSRF='X-LibreEcho-CSRF: libreecho-local'
+CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exit 1; }; }
 expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'

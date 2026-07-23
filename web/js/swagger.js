@@ -2,7 +2,7 @@
 
 const ref=document.querySelector('#api-reference'),filter=document.querySelector('#endpoint-filter');
 
-let operations=[],apiToken=sessionStorage.getItem('libreecho-token')||'';
+let operations=[],apiToken=sessionStorage.getItem('libreecho-token')||'',csrfToken='';
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -33,7 +33,7 @@ box.querySelector('pre').textContent='Tick the destructive-action confirmation b
 return}const headers={Accept:'application/json'};if(apiToken)headers.Authorization='Bearer '+apiToken;
 let body;
 if(op.method!=='GET'){headers['Content-Type']='application/json';
-headers['X-LibreEcho-CSRF']='libreecho-local';
+headers['X-LibreEcho-CSRF']=csrfToken;
 if(confirmBox)headers['X-LibreEcho-Confirm']='confirm-device-action';
 const editor=scope.querySelector('.try-body');
 try{body=JSON.stringify(JSON.parse(editor.value))}catch(e){box.hidden=false;
@@ -52,7 +52,7 @@ box.querySelector('pre').textContent=formatted||'(empty response)'}catch(e){box.
 box.querySelector('.response-status').className='response-status failure';
 box.querySelector('pre').textContent=e.message}finally{button.disabled=false;
 button.textContent='Execute'}}
-fetch('/api/v1/config').then(r=>r.json()).then(body=>{if(body.data&&body.data.authentication==='bearer-token'&&!apiToken){apiToken=prompt('Enter the LibreEcho API token')||'';if(apiToken)sessionStorage.setItem('libreecho-token',apiToken)}}).catch(()=>{});
+fetch('/api/v1/config').then(r=>r.json()).then(body=>{if(body.data){csrfToken=body.data.csrf_token||'';if(body.data.authentication==='bearer-token'&&!apiToken){apiToken=prompt('Enter the LibreEcho API token')||'';if(apiToken)sessionStorage.setItem('libreecho-token',apiToken)}}}).catch(()=>{});
 fetch('/openapi.json').then(r=>{if(!r.ok)throw new Error('Specification unavailable');
 return r.json()}).then(spec=>{document.querySelector('#api-title').textContent=spec.info.title;
 document.querySelector('#api-version').textContent=spec.info.version;

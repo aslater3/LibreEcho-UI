@@ -17,7 +17,7 @@
     "/device": {"get":{"tags":["Device"],"summary":"Read device identity","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/config": {"get":{"tags":["Discovery"],"summary":"Read API configuration metadata","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/auth": {"get":{"tags":["Authentication"],"summary":"Read current authentication session","security":[{"BearerAuth":[]}],"responses":{"200":{"$ref":"#/components/responses/Success"},"401":{"$ref":"#/components/responses/Error"}}}},
-    "/auth/login": {"post":{"tags":["Authentication"],"summary":"Create a local user session","requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["username","password"],"properties":{"username":{"type":"string"},"password":{"type":"string","format":"password"}}}}}},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"}}}},
+    "/auth/login": {"post":{"tags":["Authentication"],"summary":"Create a local user session","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["username","password"],"properties":{"username":{"type":"string"},"password":{"type":"string","format":"password"}}}}}},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"}}}},
     "/auth/logout": {"post":{"tags":["Authentication"],"summary":"Invalidate the current local user session","security":[{"BearerAuth":[]}],"parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"401":{"$ref":"#/components/responses/Error"}}}},
     "/config/export": {"get":{"tags":["Device"],"summary":"Export portable device configuration","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
     "/config/import": {"post":{"tags":["Device"],"summary":"Validate, apply and persist portable configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
@@ -69,7 +69,7 @@
       "BearerAuth":{"type":"http","scheme":"bearer","description":"Optional device token enabled with --auth-token-file"}
     },
     "parameters": {
-      "Csrf":{"name":"X-LibreEcho-CSRF","in":"header","required":true,"schema":{"type":"string","example":"libreecho-local"}},
+      "Csrf":{"name":"X-LibreEcho-CSRF","in":"header","required":true,"description":"Use the 64-character token returned by GET /api/v1/config; it changes on daemon boot.","schema":{"type":"string","example":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}},
       "Confirm":{"name":"X-LibreEcho-Confirm","in":"header","required":true,"schema":{"type":"string","example":"confirm-device-action"}}
     },
     "requestBodies": {"JsonObject":{"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}}},

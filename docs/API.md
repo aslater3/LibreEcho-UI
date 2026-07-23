@@ -7,7 +7,7 @@ Complete reference for the `/api/v1/` HTTP API.
 | Header | Purpose |
 |--------|---------|
 | `Authorization: Bearer <token>` | Required for LAN access (if enabled) |
-| `X-LibreEcho-CSRF: libreecho-local` | Required for all state-changing requests |
+| `X-LibreEcho-CSRF: <token from GET /api/v1/config>` | Required for all state-changing requests; generated per daemon boot |
 | `X-LibreEcho-Confirm: confirm-device-action` | Required for destructive actions |
 | `Origin: http://<host>` | Required for CORS (if `--allowed-origin` set) |
 
@@ -16,6 +16,7 @@ When a private users file is supplied with `--users-file`, use `POST
 in-memory bearer session. `GET /api/v1/auth` checks the current session and
 `POST /api/v1/auth/logout` invalidates it. User records contain only a username,
 salt and SHA-256 password digest; the users file is never returned by the API.
+Failed user logins are rate limited after five attempts in a 60-second window.
 
 The development image may explicitly use `--allow-insecure-lan`, but that only
 relaxes the Origin check. It does not disable configured user or bearer-token
@@ -354,7 +355,7 @@ Returns API configuration.
   "ok": true,
   "data": {
     "api_version": 1,
-    "csrf_token": "libreecho-local",
+    "csrf_token": "<64-character per-boot token>",
     "authentication": "development-disabled",
     "bind_policy": "loopback-default",
     "max_request_body": 16384
