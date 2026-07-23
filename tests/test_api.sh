@@ -23,4 +23,8 @@ code=$(curl -sS -o /tmp/le-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/audio"
 [ "$code" = 403 ]
 code=$(curl -sS -o /tmp/le-confirm.out -w '%{http_code}' -X POST "$URL/api/v1/system/reboot" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 403 ]
+code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' -X DELETE "$URL/api/v1/buttons" -H "$CSRF")
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' "$URL/api/v1/integrations/home-assistant")
+[ "$code" = 405 ]
 echo 'api: ok'
