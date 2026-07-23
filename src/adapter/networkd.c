@@ -999,7 +999,7 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
     const char *line = reply;
     size_t used = 0;
     int count = 0;
-    if (append_text(data, size, &used, "{\"results\":[") < 0)
+    if (append_text(data, size, &used, "{\"networks\":[") < 0)
         return -1;
     while (*line && count < SCAN_MAX) {
         char row[512], *fields[5], *p;
