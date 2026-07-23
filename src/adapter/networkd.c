@@ -1049,7 +1049,7 @@ static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
     int fd = ctx->scan.client_fd;
     unsigned long id = ctx->scan.id;
     char reply[WPA_REPLY_MAX], data[LE_ADAPTER_MSG_MAX];
-    int ci;
+    int ci, n;
 
     ctx->scan.active = 0;
     ctx->scan.client_fd = -1;
@@ -1060,11 +1060,22 @@ static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
         return;
     if (failed)
         (void)send_err_fd(fd, id, error ? error : "scan failed");
-    else if (wpa_call(ctx, "SCAN_RESULTS\n", reply, sizeof(reply)) < 0 ||
-             parse_scan_results(reply, data, sizeof(data)) < 0)
-        (void)send_err_fd(fd, id, "unable to read scan results");
-    else
-        (void)send_ok_fd(fd, id, data);
+    else {
+        n = wpa_call(ctx, "SCAN_RESULTS\n", reply, sizeof(reply));
+        if (n < 0) {
+            le_log_error("networkd: scan results request failed");
+            (void)send_err_fd(fd, id, "unable to read scan results");
+        } else if (n >= 15 && !strncmp(reply, "UNKNOWN COMMAND", 15)) {
+            le_log_error("networkd: scan results command unavailable");
+            (void)send_err_fd(fd, id, "scan results unavailable");
+        } else if (parse_scan_results(reply, data, sizeof(data)) < 0) {
+            le_log_error("networkd: scan results parse failed (%d bytes)", n);
+            (void)send_err_fd(fd, id, "unable to read scan results");
+        } else {
+            le_log_info("networkd: scan results reply received (%d bytes)", n);
+            (void)send_ok_fd(fd, id, data);
+        }
+    }
     ctx->clients[ci].busy = 0;
 }
 
