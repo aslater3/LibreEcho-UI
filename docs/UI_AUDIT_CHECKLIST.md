@@ -11,13 +11,13 @@ explicitly requested.
 | Endpoint | Read-only check | Current result | Follow-up |
 |---|---:|---|---|
 | `/api/v1`, `/api/v1/` | yes | pass | none |
-| `/api/v1/status` | yes | live pass; CPU/temperature are valid; storage now distinguishes mounted usage from unmounted eMMC capacity | verify the storage-aware image after flash |
+| `/api/v1/status` | yes | final image live pass; four cores, temperature, and storage semantics are valid; unmounted eMMC reports 3728 MB capacity with unknown usage | add a persistent filesystem adapter when the production layout is defined |
 | `/api/v1/device` | yes | live pass; reports `LibreEcho`/`libreecho` | none |
 | `/api/v1/config` | yes | live pass; token is boot-generated, authentication mode is explicit, and LAN development binding is reported truthfully | package a users file for authenticated builds |
 | `/api/v1/config/export` | yes | live pass; returns safe partial export when wake-word is absent | keep field list/versioned contract current |
 | `/api/v1/audio` | yes | live pass; reports `startup_sound:false` | do not play |
 | `/api/v1/led` | yes | live pass; animation state and ring renderer added | verify live polling on next UI image |
-| `/api/v1/buttons` | yes | pass | add explicit GET to the API contract |
+| `/api/v1/buttons` | yes | final image pass; GET is explicit and unsupported methods return 405 | none |
 | `/api/v1/network` | yes | live pass; connected, RSSI, IP and `Zebox 5g` SSID | Overview now includes SSID |
 | `/api/v1/network/wifi/scan` | yes | `501` on Linux; failure logged centrally | repair adapter scan path |
 | `/api/v1/wake-word` | yes | `501` while adapter is absent | UI now shows an explicit unsupported state |
@@ -77,6 +77,8 @@ explicitly requested.
 - [x] Add endpoint schema/type assertions to the UI smoke test rather than only
   HTTP status assertions; `tests/live_readonly_audit.sh` is the post-flash
   read-only contract sweep.
+- [x] Reject unsupported methods on button, privacy, and integration routes with
+  a declared 405 response.
 - [ ] Validate LED animation timing against the hardware daemon and refresh the
   rendered ring while active.
 - [x] Replace prompt-based browser login with a visible login/logout surface;
@@ -98,9 +100,9 @@ explicitly requested.
 
 ## Latest silent validation (2026-07-23)
 
-- Image run `20260723T012025Z-1b002f05f27d-clean-ssh0-ui65d74a69c5fe-e223aea99f30`
-  was verified and flashed to slot `a`; boot SHA-256 is
-  `f596b25506dc0be8f5003f209ecffdd4e8fb90d59b3be2dcfd30461bb610b6e7`.
+- Image run `20260723T015835Z-1b002f05f27d-clean-ssh0-uid99014cf475e-de8183f34911`
+  was independently verified and flashed to slot `a`; boot SHA-256 is
+  `5e01fe53977b9ea0beccf3201c098bc558d624837d236a4d86629905fd0956cc`.
 - The existing UART reader captured kernel `1b002f05` with `Brought up 4 CPUs`;
   the refined post-boot scan found no CPU boot failure, hard-lockup watchdog,
   panic, Oops, or BUG signature.
@@ -108,9 +110,9 @@ explicitly requested.
   their health as `ok`, and central log JSON-lines/SSE checks pass.
 - The image reports a 64-character boot-generated CSRF token, truthful
   `lan-development` binding, boot-relative log seconds, and serves UI commit
-  `65d74a69`; CPU, temperature, Wi-Fi SSID/RSSI/IP, LED state, system clock
-  fields, config export, logs, diagnostics, authentication controls, and SSE
-  contracts pass.
+  `d99014cf`. CPU, temperature, Wi-Fi SSID/RSSI/IP, storage semantics,
+  LED state, system clock fields, config export, logs, diagnostics,
+  authentication controls, SSE, and declared 405 method contracts pass.
 - No playback, capture, mixer, LED test, Wi-Fi mutation, restore, or power
   operation was invoked during this validation.
 - [x] Add a bounded read-only service status panel to the Logs page.
