@@ -17,6 +17,10 @@ LOGFILE=${LOGFILE:-/var/log/libreecho-web.log}
 ARGS=${ARGS:---backend linux --config /etc/libreecho/web-config.json --web-root /usr/local/share/libreecho/web --listen 0.0.0.0:8080 --allow-insecure-lan}
 # For authenticated LAN access, override ARGS in /etc/default/libreecho-web
 # with --auth-token-file, --allowed-origin and --user.
+USERS_FILE=${USERS_FILE:-/etc/libreecho/users}
+if [ -r "$USERS_FILE" ]; then
+    ARGS="$ARGS --users-file $USERS_FILE"
+fi
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1

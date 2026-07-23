@@ -12,20 +12,20 @@ explicitly requested.
 |---|---:|---|---|
 | `/api/v1`, `/api/v1/` | yes | pass | none |
 | `/api/v1/status` | yes | pass | CPU field naming covered |
-| `/api/v1/device` | yes | pass; source now falls back to `LibreEcho`/`libreecho` | verify after flash |
-| `/api/v1/config` | yes | pass | users/bearer mode now reported |
+| `/api/v1/device` | yes | live pass; reports `LibreEcho`/`libreecho` | none |
+| `/api/v1/config` | yes | live pass; current image intentionally reports `development-disabled` | package a users file for authenticated builds |
 | `/api/v1/config/export` | yes | `501` on Linux | implement a complete Linux-safe export |
-| `/api/v1/audio` | yes | pass; source now reports the no-startup-audio marker | verify after flash; do not play |
-| `/api/v1/led` | yes | pass | animation state and ring renderer added |
+| `/api/v1/audio` | yes | live pass; reports `startup_sound:false` | do not play |
+| `/api/v1/led` | yes | live pass; animation state and ring renderer added | verify live polling on next UI image |
 | `/api/v1/buttons` | yes | pass | add explicit GET to the API contract |
-| `/api/v1/network` | yes | connected/RSSI pass, source now adds WEXT ESSID fallback | verify after flash |
-| `/api/v1/network/wifi/scan` | yes | `501` on Linux | repair adapter scan path |
-| `/api/v1/wake-word` | yes | `501` while adapter is absent | make unsupported state clear in UI |
+| `/api/v1/network` | yes | live pass; connected, RSSI, IP and `Zebox 5g` SSID | Overview now includes SSID |
+| `/api/v1/network/wifi/scan` | yes | `501` on Linux; failure logged centrally | repair adapter scan path |
+| `/api/v1/wake-word` | yes | `501` while adapter is absent | UI now shows an explicit unsupported state |
 | `/api/v1/privacy` | yes | pass | persist all fields consistently |
 | `/api/v1/integrations` | yes | pass | add endpoint schema validation |
 | `/api/v1/system` | yes | pass, currently static metadata | label unsupported OTA fields honestly |
-| `/api/v1/logs`, `/logs/stream` | yes | pass; source reads central JSON-lines logd output with memory fallback | verify daemon startup produces entries |
-| `/api/v1/diagnostics` | yes | source now reports PID/socket and wlan0 health | verify after flash |
+| `/api/v1/logs`, `/logs/stream` | yes | live pass; central JSON-lines source with bounded output | improve clock/boot-relative timestamps |
+| `/api/v1/diagnostics` | yes | live pass; all daemon sockets/PIDs and wlan0 healthy | none |
 | `/api/v1/events` | yes | pass | validate reconnect/last-event behaviour |
 | `/openapi.json`, `/swagger.html` | yes | pass | keep generated contract in sync |
 
@@ -33,15 +33,14 @@ explicitly requested.
 
 - [x] Overview CPU core cards show online state, utilization, and frequency.
 - [x] Overview network state includes a real RSSI-derived signal percentage.
-- [ ] Overview should show SSID beside connected Wi-Fi state after the new
-  adapter fallback is flashed.
+- [x] Overview now shows SSID beside connected Wi-Fi state.
 - [ ] Replace remaining literal `(none)`, `undefined`, `NaN`, and empty values with
   deliberate `Unavailable`/ `Not configured` labels.
 - [x] LED page has a rendered 24-segment ring view based on live colour and
   brightness.
-- [ ] LED view should refresh while an animation is active.
-- [ ] Network scan should handle an empty result without a blank panel.
-- [ ] Unsupported wake-word/audio operations need a non-actionable UI state.
+- [x] LED view polls live state while an animation is active.
+- [x] Network scan handles empty results and adapter errors without a blank panel.
+- [x] Unsupported wake-word state is non-actionable in the UI.
 - [x] Add a login flow for configured local users, with bearer sessions.
 - [ ] Add a visible service/log health summary.
 
@@ -55,10 +54,10 @@ explicitly requested.
 - [x] Ensure `/api/v1/logs` reads logd output and preserves timestamps; logd
   rotation remains bounded.
 - [x] Add live PID/socket health to the diagnostics endpoint.
-- [ ] Add an authenticated user-file packaging/provisioning step for release
+- [x] Add an authenticated user-file packaging/provisioning step for release
   images; no password is stored in this repository.
-- [ ] Build, verify, flash, and read back the candidate without invoking audio.
-- [ ] Re-run the read-only endpoint sweep and UI smoke checks after reboot.
+- [x] Build, verify, flash, and read back the candidate without invoking audio.
+- [x] Re-run the read-only endpoint sweep and UI smoke checks after reboot.
 
 ## Newly identified follow-ups
 
@@ -76,6 +75,19 @@ explicitly requested.
 - [ ] Add a bounded read-only service status panel to the Logs page.
 - [ ] Test UI at narrow/mobile and desktop widths with a browser after the
   device candidate is flashed.
+
+## Live image findings (2026-07-23)
+
+- The current image autostarts all five daemons after loopback; each init result
+  is `0`, all expected sockets exist, and diagnostics reports every adapter
+  healthy.
+- The current image has no users file, so the development UI is intentionally
+  unauthenticated LAN mode. Authenticated builds now accept
+  `LIBREECHO_WEB_USERS_FILE` and package a mode-`0600` users file.
+- Linux Wi-Fi scan returns `501` and records the failure in central logs; this
+  is an adapter limitation, not a UI blank-state failure.
+- Log timestamps reflect the device's unsynchronised wall clock (2010-era
+  values on this boot). Add a boot-relative/clock-valid field before release.
 
 ## Silent-validation record
 

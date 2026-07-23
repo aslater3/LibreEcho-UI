@@ -28,10 +28,17 @@ HTTP limits + security headers + API validation
 
 Limits are fixed at 16 clients, 8 KiB headers, 16 KiB API bodies, 12 Wi-Fi scan results, 128 logs, and 64 events. Static paths reject `..` and backslashes. State-changing requests require `X-LibreEcho-CSRF`; device power actions additionally require `X-LibreEcho-Confirm`. The daemon binds to loopback by default and warns on a non-loopback bind. Development builds can use a bearer token or an opt-in local user file; local users are stored as salted SHA-256 records and receive in-memory bearer sessions. Do not expose a development image to an untrusted LAN.
 
-Create a private development users file with `tools/create-user.sh alice
-'a-long-development-password' > /etc/libreecho/users`, set its mode to `0600`,
-and pass `--users-file /etc/libreecho/users`. The initramfs service bundle starts
-the five daemons in dependency order after loopback is configured; its per-
+Create a private development users file with:
+
+```sh
+tools/create-user.sh alice 'a-long-development-password' > /etc/libreecho/users
+chmod 0600 /etc/libreecho/users
+```
+
+Set `LIBREECHO_WEB_USERS_FILE=/etc/libreecho/users` during the image build. The
+initramfs service bundle installs it as `/etc/libreecho/users` and starts the
+web daemon with `--users-file`. Passwords are never stored in the repository.
+The initramfs service bundle starts the five daemons in dependency order after loopback is configured; its per-
 service results are recorded in `/tmp/libreecho-*.init.log` and `/tmp/init.log`.
 
 Configuration writes are atomic and only happen on changes. Mock telemetry stays in memory. Stored Wi-Fi passwords are neither returned nor logged. The API consistently returns `{ "ok", "data", "error" }` envelopes.
