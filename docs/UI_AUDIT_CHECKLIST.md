@@ -11,7 +11,7 @@ explicitly requested.
 | Endpoint | Read-only check | Current result | Follow-up |
 |---|---:|---|---|
 | `/api/v1`, `/api/v1/` | yes | pass | none |
-| `/api/v1/status` | yes | pass | CPU field naming covered |
+| `/api/v1/status` | yes | live pass; CPU/temperature are valid; storage now distinguishes mounted usage from unmounted eMMC capacity | verify the storage-aware image after flash |
 | `/api/v1/device` | yes | live pass; reports `LibreEcho`/`libreecho` | none |
 | `/api/v1/config` | yes | live pass; token is boot-generated, authentication mode is explicit, and LAN development binding is reported truthfully | package a users file for authenticated builds |
 | `/api/v1/config/export` | yes | live pass; returns safe partial export when wake-word is absent | keep field list/versioned contract current |
@@ -34,6 +34,7 @@ explicitly requested.
 - [x] Overview CPU core cards show online state, utilization, and frequency.
 - [x] Overview network state includes a real RSSI-derived signal percentage.
 - [x] Overview now shows SSID beside connected Wi-Fi state.
+- [x] Storage card no longer presents an unmounted recovery rootfs as `0 / 0 MB`; it shows eMMC capacity with usage unavailable.
 - [ ] Replace remaining literal `(none)`, `undefined`, `NaN`, and empty values with
   deliberate `Unavailable`/ `Not configured` labels.
 - [x] LED page has a rendered 24-segment ring view based on live colour and
@@ -84,6 +85,14 @@ explicitly requested.
   Control Centre session instead of prompting.
 - [ ] Add authenticated-device smoke coverage to the post-flash sweep using a
   throwaway users file, without placing credentials in the image.
+- [x] Distinguish filesystem storage usage from raw block-device capacity in
+  Linux telemetry; report unknown used space as `null` rather than zero.
+- [ ] Add a read-only storage mount/partition adapter if persistent filesystem
+  usage is required by the production image.
+- [ ] Replace the in-memory LED stub with the physical ring adapter and retain
+  the rendered UI as its read-only state view.
+- [ ] Keep the explicit Wi-Fi scan failure visible until the Linux scan adapter
+  is implemented; current logs correctly record the request and `501` reason.
 
 ## Latest silent validation (2026-07-23)
 

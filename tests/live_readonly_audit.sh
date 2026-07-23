@@ -12,7 +12,7 @@ json /api/v1 | jq -e '.ok and .data.name == "LibreEcho API" and .data.version ==
 config=$(json /api/v1/config)
 printf '%s' "$config" | jq -e '.ok and (.data.csrf_token | test("^[0-9a-f]{64}$")) and (.data.authentication | type == "string") and (.data.bind_policy | type == "string")' >/dev/null
 status_json=$(json /api/v1/status)
-printf '%s' "$status_json" | jq -e '.ok and .data.cpus.count >= 1 and (.data.cpus.cores | length) == .data.cpus.count and all(.data.cpus.cores[]; (.id | type) == "number" and (.online | type) == "boolean" and (.utilization_percent >= 0 and .utilization_percent <= 100) and (.frequency_khz >= 0)) and (.data.temperature_c | type) == "number"' >/dev/null
+printf '%s' "$status_json" | jq -e '.ok and .data.cpus.count >= 1 and (.data.cpus.cores | length) == .data.cpus.count and all(.data.cpus.cores[]; (.id | type) == "number" and (.online | type) == "boolean" and (.utilization_percent >= 0 and .utilization_percent <= 100) and (.frequency_khz >= 0)) and (.data.temperature_c | type) == "number" and (.data.storage_available | type) == "boolean" and (.data.storage_state | type) == "string" and (if .data.storage_available then (.data.storage_percent >= 0 and .data.storage_percent <= 100 and .data.storage_used_mb >= 0 and .data.storage_total_mb > 0) else (.data.storage_percent == null and .data.storage_used_mb == null and ((.data.storage_total_mb == null) or (.data.storage_total_mb >= 0))) end)' >/dev/null
 device=$(json /api/v1/device)
 printf '%s' "$device" | jq -e '.ok and (.data.name | length) > 0 and (.data.kernel | length) > 0' >/dev/null
 network=$(json /api/v1/network)

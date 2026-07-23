@@ -66,12 +66,20 @@ Returns system health and telemetry.
     "storage_percent": 30,
     "storage_used_mb": 2400,
     "storage_total_mb": 8000,
+    "storage_available": true,
+    "storage_state": "filesystem",
     "temperature_c": 42,
     "device_state": "online"
   },
   "error": null
 }
 ```
+
+When the recovery image has only its in-memory root filesystem mounted, the
+API reports `storage_available: false`, `storage_percent: null`, and
+`storage_used_mb: null`. It may still report the raw eMMC capacity in
+`storage_total_mb` with `storage_state: "block-device-unmounted"`; this is
+capacity information, not a claim about used space.
 
 #### GET /api/v1/device
 

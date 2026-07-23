@@ -457,6 +457,31 @@ static int read_temperature(void)
     return fallback;
 }
 
+static int read_block_capacity_mb(int *megabytes)
+{
+    FILE *f;
+    unsigned major, minor;
+    unsigned long long blocks;
+    char name[64];
+
+    if (!megabytes)
+        return -1;
+    *megabytes = 0;
+    f = fopen("/proc/partitions", "r");
+    if (!f)
+        return -1;
+    while (fscanf(f, "%u %u %llu %63s", &major, &minor, &blocks,
+                  name) == 4) {
+        if (!strcmp(name, "mmcblk0") && blocks) {
+            *megabytes = (int)((blocks * 1024ULL) / 1048576ULL);
+            fclose(f);
+            return *megabytes > 0 ? 0 : -1;
+        }
+    }
+    fclose(f);
+    return -1;
+}
+
 /* status() reads the Linux procfs/sysfs measurements directly. */
 static int status(struct le_backend *b, struct le_system_status *o)
 {
@@ -469,6 +494,10 @@ static int status(struct le_backend *b, struct le_system_status *o)
 
     memset(o, 0, sizeof(*o));
     strcpy(o->device_state, "online");
+    o->storage = -1;
+    o->storage_used_mb = -1;
+    o->storage_total_mb = -1;
+    strcpy(o->storage_state, "unavailable");
     f = fopen("/proc/uptime", "r");
     if (f) {
         if (fscanf(f, "%lf", &up) == 1)
@@ -496,12 +525,16 @@ static int status(struct le_backend *b, struct le_system_status *o)
         o->memory_used_mb = (int)((total - avail) / 1024);
         o->memory = (int)((total - avail) * 100 / total);
     }
-    if (!statvfs("/", &sv) && sv.f_blocks) {
+    if (!statvfs("/", &sv) && sv.f_blocks && sv.f_frsize) {
         unsigned long long t = (unsigned long long)sv.f_blocks * sv.f_frsize;
         unsigned long long u = (unsigned long long)(sv.f_blocks - sv.f_bavail) * sv.f_frsize;
         o->storage_total_mb = (int)(t / 1048576);
         o->storage_used_mb = (int)(u / 1048576);
         o->storage = (int)(u * 100 / t);
+        o->storage_available = 1;
+        strcpy(o->storage_state, "filesystem");
+    } else if (!read_block_capacity_mb(&o->storage_total_mb)) {
+        strcpy(o->storage_state, "block-device-unmounted");
     }
     (void)f;
     o->temperature = read_temperature();
