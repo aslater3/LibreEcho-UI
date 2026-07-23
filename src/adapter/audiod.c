@@ -792,7 +792,7 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->gain = 65;
     audio->muted = 0;
     audio->notification_volume = audio->volume;
-    audio->startup_sound = 1;
+    audio->startup_sound = access("/etc/libreecho/no-startup-audio", F_OK) == 0 ? 0 : 1;
     (void)snprintf(audio->ctl_path, sizeof(audio->ctl_path),
                    "/dev/snd/controlC%d", card);
     (void)snprintf(audio->pcm_path, sizeof(audio->pcm_path),

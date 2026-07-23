@@ -16,7 +16,7 @@ struct le_system_status { double uptime; int cpu, memory, storage, temperature; 
 struct le_device_info { char name[LE_TEXT], hostname[LE_TEXT], model[LE_TEXT], serial[LE_TEXT], os_version[32], kernel[64], hardware_revision[32], backend[16]; };
 struct le_audio_state { int volume, microphone_gain, notification_volume, muted, startup_sound, amplifier_on, output_available; };
 struct le_led_profile { uint8_t r,g,b; int brightness, animation_speed; };
-struct le_led_state { struct le_led_profile current, boot, listening, thinking, error, dnd; };
+struct le_led_state { struct le_led_profile current, boot, listening, thinking, error, dnd; int animation_active, animation_profile; };
 struct le_wifi_network { char ssid[LE_TEXT], security[16]; int signal; };
 struct le_wifi_scan { struct le_wifi_network networks[LE_MAX_WIFI]; size_t count; };
 struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };

@@ -58,6 +58,16 @@ static void copy_string(char *dst, size_t dst_size, const char *src)
     dst[n] = '\0';
 }
 
+static void read_hostname(char *out, size_t out_size)
+{
+    if (!out_size)
+        return;
+    out[0] = '\0';
+    if (gethostname(out, out_size - 1) != 0 ||
+        !out[0] || !strcmp(out, "(none)"))
+        copy_string(out, out_size, "libreecho");
+}
+
 static int read_line(const char *path, char *out, size_t out_size)
 {
     FILE *f;
@@ -506,8 +516,8 @@ static int device(struct le_backend *b, struct le_device_info *o)
 
     (void)b;
     memset(o, 0, sizeof(*o));
-    gethostname(o->hostname, sizeof(o->hostname) - 1);
-    strcpy(o->name, o->hostname);
+    read_hostname(o->hostname, sizeof(o->hostname));
+    copy_string(o->name, sizeof(o->name), "LibreEcho");
     strcpy(o->model, "LibreEcho device");
     strcpy(o->serial, "unavailable");
     strcpy(o->os_version, "LibreEcho OS");
@@ -532,7 +542,7 @@ static int networkd_status(struct le_backend *b, struct le_network_state *o)
 
     memset(o, 0, sizeof(*o));
     o->rssi_dbm = -1;
-    gethostname(o->hostname, sizeof(o->hostname) - 1);
+    read_hostname(o->hostname, sizeof(o->hostname));
     if (json_get_string(response, "state", o->state, sizeof(o->state)) > 0)
         found = 1;
     if (json_get_string(response, "ssid", o->ssid, sizeof(o->ssid)) > 0)
@@ -560,7 +570,7 @@ static int network(struct le_backend *b, struct le_network_state *o)
 
     memset(o, 0, sizeof(*o));
     o->rssi_dbm = -1;
-    gethostname(o->hostname, sizeof(o->hostname) - 1);
+    read_hostname(o->hostname, sizeof(o->hostname));
 
     snprintf(path, sizeof(path), "/sys/class/net/wlan0/operstate");
     if (!read_line(path, operstate, sizeof(operstate))) {
@@ -671,6 +681,15 @@ static int led(struct le_backend *b, struct le_led_state *o)
     if (rc != LE_OK)
         return rc;
     memset(o, 0, sizeof(*o));
+    if (json_get_bool(response, "animation_active", &o->animation_active) < 0)
+        o->animation_active = 0;
+    o->animation_profile = -1;
+    if (json_get_string(response, "animation_profile", object, sizeof(object)) > 0) {
+        if (!strcmp(object, "listening")) o->animation_profile = 0;
+        else if (!strcmp(object, "thinking")) o->animation_profile = 1;
+        else if (!strcmp(object, "error")) o->animation_profile = 2;
+        else if (!strcmp(object, "dnd")) o->animation_profile = 3;
+    }
     if (json_object(response, "current", object, sizeof(object)) ||
         json_object(response, "colour", object, sizeof(object)))
         parse_profile(object, &o->current);

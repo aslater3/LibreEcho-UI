@@ -11,6 +11,16 @@ Complete reference for the `/api/v1/` HTTP API.
 | `X-LibreEcho-Confirm: confirm-device-action` | Required for destructive actions |
 | `Origin: http://<host>` | Required for CORS (if `--allowed-origin` set) |
 
+When a private users file is supplied with `--users-file`, use `POST
+/api/v1/auth/login` with a username and password to receive a short-lived
+in-memory bearer session. `GET /api/v1/auth` checks the current session and
+`POST /api/v1/auth/logout` invalidates it. User records contain only a username,
+salt and SHA-256 password digest; the users file is never returned by the API.
+
+The development image may explicitly use `--allow-insecure-lan`, but that only
+relaxes the Origin check. It does not disable configured user or bearer-token
+authentication.
+
 ## Response Format
 
 All responses use the same envelope:

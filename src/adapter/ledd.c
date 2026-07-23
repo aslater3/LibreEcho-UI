@@ -971,10 +971,15 @@ static int status_json(const struct daemon_context *ctx, char *out,
 
     n = snprintf(out, out_size,
         "{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u,"
+        "\"animation_active\":%s,\"animation_profile\":\"%s\","
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"profiles\":{",
         ctx->state.current.r, ctx->state.current.g, ctx->state.current.b,
-        ctx->state.current.brightness, ctx->state.boot.r, ctx->state.boot.g,
+        ctx->state.current.brightness, ctx->animation_active ? "true" : "false",
+        ctx->animation_active && ctx->animation_profile >= 0 &&
+                ctx->animation_profile < PROFILE_COUNT
+            ? profile_names[ctx->animation_profile] : "none",
+        ctx->state.boot.r, ctx->state.boot.g,
         ctx->state.boot.b, ctx->state.boot.brightness);
     if (n < 0 || (size_t)n >= out_size)
         return -1;

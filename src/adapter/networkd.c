@@ -490,10 +490,47 @@ static int read_wireless_rssi(const char *iface)
     return level <= 0 ? level : -1;
 }
 
+static int read_wireless_essid(const char *iface, char *out, size_t out_size)
+{
+    struct iwreq request;
+    char essid[IW_ESSID_MAX_SIZE + 1];
+    int fd;
+    size_t length;
+
+    if (!out_size)
+        return -1;
+    out[0] = '\0';
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -1;
+    memset(&request, 0, sizeof(request));
+    memset(essid, 0, sizeof(essid));
+    strncpy(request.ifr_name, iface, sizeof(request.ifr_name) - 1);
+    request.u.essid.pointer = essid;
+    request.u.essid.length = IW_ESSID_MAX_SIZE;
+    request.u.essid.flags = 0;
+    if (ioctl(fd, SIOCGIWESSID, &request) < 0) {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    length = request.u.essid.length;
+    if (length > IW_ESSID_MAX_SIZE)
+        length = IW_ESSID_MAX_SIZE;
+    if (length >= out_size)
+        length = out_size - 1;
+    memcpy(out, essid, length);
+    out[length] = '\0';
+    return out[0] ? 0 : -1;
+}
+
 static void refresh_link_fallback(struct daemon_ctx *ctx)
 {
     int rssi = read_wireless_rssi(ctx->interface);
 
+    if (!ctx->state.ssid[0])
+        (void)read_wireless_essid(ctx->interface, ctx->state.ssid,
+                                  sizeof(ctx->state.ssid));
     copy_string(ctx->state.state, sizeof(ctx->state.state),
                 ctx->state.link_up ? "connected" : "disconnected");
     if (rssi > -128) {
@@ -677,6 +714,9 @@ static void refresh_wpa_info(struct daemon_ctx *ctx)
     }
     if (wpa_value(reply, "ssid", value, sizeof(value)))
         copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), value);
+    if (!ctx->state.ssid[0])
+        (void)read_wireless_essid(ctx->interface, ctx->state.ssid,
+                                  sizeof(ctx->state.ssid));
     if (wpa_value(reply, "wpa_state", value, sizeof(value))) {
         if (!strcmp(value, "COMPLETED"))
             copy_string(ctx->state.state, sizeof(ctx->state.state), "connected");
