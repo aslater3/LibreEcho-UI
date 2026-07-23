@@ -55,6 +55,7 @@
 #define SCAN_MAX 48
 #define DHCP_TIMEOUT_MS 15000
 #define SCAN_TIMEOUT_MS 12000
+#define SCAN_POLL_MS 1800
 #define WPA_TIMEOUT_MS 2500
 
 struct wpa_ctrl {
@@ -92,6 +93,7 @@ struct pending_scan {
     int client_fd;
     unsigned long id;
     long long deadline;
+    long long poll_at;
 };
 
 struct pending_dhcp {
@@ -385,15 +387,21 @@ static void wpa_close(struct daemon_ctx *ctx)
 
 static int wpa_open(struct daemon_ctx *ctx)
 {
-    if (ctx->wpa.command.fd >= 0 && ctx->wpa.monitor.fd >= 0)
+    if (ctx->wpa.command.fd >= 0)
         return 0;
     wpa_close(ctx);
-    if (wpa_ctrl_open_one(&ctx->wpa.command, ctx->wpa_path, 0) < 0 ||
-        wpa_ctrl_open_one(&ctx->wpa.monitor, ctx->wpa_path, 1) < 0 ||
-        wpa_ctrl_attach(&ctx->wpa.monitor) < 0) {
+    if (wpa_ctrl_open_one(&ctx->wpa.command, ctx->wpa_path, 0) < 0) {
         wpa_close(ctx);
         copy_string(ctx->state.state, sizeof(ctx->state.state), "unavailable");
         return -1;
+    }
+    /* Some vendor supplicants expose commands but reject ATTACH.  Keep the
+     * command channel for status/scan operations and use result polling when
+     * the optional event channel cannot be established. */
+    if (wpa_ctrl_open_one(&ctx->wpa.monitor, ctx->wpa_path, 1) < 0 ||
+        wpa_ctrl_attach(&ctx->wpa.monitor) < 0) {
+        le_log_warn("networkd: wpa monitor unavailable; using result polling");
+        wpa_ctrl_close(&ctx->wpa.monitor);
     }
     return 0;
 }
@@ -1060,7 +1068,14 @@ static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
 
 static void check_scan_timeout(struct daemon_ctx *ctx)
 {
-    if (ctx->scan.active && monotonic_ms() >= ctx->scan.deadline)
+    long long now = monotonic_ms();
+    if (!ctx->scan.active)
+        return;
+    if (ctx->wpa.monitor.fd < 0 && now >= ctx->scan.poll_at) {
+        finish_scan(ctx, 0, NULL);
+        return;
+    }
+    if (now >= ctx->scan.deadline)
         finish_scan(ctx, 1, "scan timed out");
 }
 
@@ -1308,6 +1323,7 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         ctx->scan.client_fd = ctx->clients[ci].fd;
         ctx->scan.id = id;
         ctx->scan.deadline = monotonic_ms() + SCAN_TIMEOUT_MS;
+        ctx->scan.poll_at = monotonic_ms() + SCAN_POLL_MS;
         ctx->clients[ci].busy = 1;
     } else if (!strcmp(cmd, "connect")) {
         char ssid[256], psk[256], security[64];
