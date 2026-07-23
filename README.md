@@ -2,7 +2,13 @@
 
 LibreEcho Web is a hardware-independent control centre for an Amazon Echo Gen 2-class device. It combines the supplied dark LibreEcho interface with a dependency-free C99 HTTP daemon, a realistic development backend, and a conservative Linux hardware boundary.
 
-For real-device work, follow [the complete hardware integration runbook](docs/HARDWARE_INTEGRATION.md). It defines the WebUI-to-device boundary, every adapter area, first-boot AP handoff, security requirements, implementation order and target acceptance tests for a human engineer or implementation LLM.
+## Documentation
+
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — System design, component interaction, data flow
+- **[API.md](docs/API.md)** — Complete HTTP API reference
+- **[HARDWARE.md](docs/HARDWARE.md)** — Adding new hardware subsystems
+- **[OPERATIONS.md](docs/OPERATIONS.md)** — Deployment, configuration, backup, troubleshooting
+- **[HARDWARE_INTEGRATION.md](docs/HARDWARE_INTEGRATION.md)** — WebUI-to-device integration runbook and acceptance tests
 
 ## Architecture
 
@@ -21,7 +27,20 @@ HTTP limits + security headers + API validation
                 └── linux: /proc + statvfs + sysfs; hardware stubs
 ```
 
-Limits are fixed at 16 clients, 8 KiB headers, 16 KiB API bodies, 12 Wi-Fi scan results, 128 logs, and 64 events. Static paths reject `..` and backslashes. State-changing requests require `X-LibreEcho-CSRF`; device power actions additionally require `X-LibreEcho-Confirm`. The daemon binds to loopback by default and warns on a non-loopback bind. The current authentication abstraction is intentionally development-disabled, so do not expose it to an untrusted LAN yet.
+Limits are fixed at 16 clients, 8 KiB headers, 16 KiB API bodies, 12 Wi-Fi scan results, 128 logs, and 64 events. Static paths reject `..` and backslashes. State-changing requests require `X-LibreEcho-CSRF`; device power actions additionally require `X-LibreEcho-Confirm`. The daemon binds to loopback by default and warns on a non-loopback bind. Development builds can use a bearer token or an opt-in local user file; local users are stored as salted SHA-256 records and receive in-memory bearer sessions. Do not expose a development image to an untrusted LAN.
+
+Create a private development users file with:
+
+```sh
+tools/create-user.sh alice 'a-long-development-password' > /etc/libreecho/users
+chmod 0600 /etc/libreecho/users
+```
+
+Set `LIBREECHO_WEB_USERS_FILE=/etc/libreecho/users` during the image build. The
+initramfs service bundle installs it as `/etc/libreecho/users` and starts the
+web daemon with `--users-file`. Passwords are never stored in the repository.
+The initramfs service bundle starts the five daemons in dependency order after loopback is configured; its per-
+service results are recorded in `/tmp/libreecho-*.init.log` and `/tmp/init.log`.
 
 Configuration writes are atomic and only happen on changes. Mock telemetry stays in memory. Stored Wi-Fi passwords are neither returned nor logged. The API consistently returns `{ "ok", "data", "error" }` envelopes.
 
@@ -41,32 +60,6 @@ libreecho-web --backend linux \
 The daemon refuses an unauthenticated non-loopback bind unless the operator explicitly supplies `--allow-insecure-lan`. Bearer tokens are compared in constant time and are never logged. `--user` resolves the account after binding, clears supplementary groups, and then calls `setgid()`/`setuid()`. Ensure the web root remains readable and the configuration directory is writable by that account.
 
 A reverse proxy is not required: the native daemon serves the frontend, API, OpenAPI document and event responses. A small existing LAN proxy may still be used for TLS or centralized authentication, with LibreEcho bound to loopback behind it. nginx is optional rather than a runtime dependency.
-
-## First-boot AP setup
-
-When the runtime configuration is absent, the daemon serves `/setup.html` at `/`
-instead of the normal control centre. The responsive five-step wizard captures:
-
-- Wi-Fi SSID, security mode and password;
-- hostname;
-- initial volume;
-- wake word and sensitivity; and
-- local-processing and diagnostic-telemetry defaults.
-
-The wizard uses `GET/POST /api/v1/setup`, the same CSRF and input-validation
-boundary as the rest of the API, and rejects a second completion attempt. The
-Wi-Fi password is handed directly to the backend, zeroed from the request
-structure after use, never persisted by the web configuration store, never
-returned, and never logged. Successful setup is atomically recorded in the JSON
-configuration. Existing installations without the new flag are treated as
-already configured, while factory reset clears the flag and returns `/` to the
-wizard.
-
-On the eventual device, a small network supervisor must create the temporary AP,
-provide DHCP/DNS captive-portal routing, start the daemon with an explicitly
-approved AP bind, and close the AP after the setup-complete event. Those platform
-actions remain outside the web daemon and behind the network adapter boundary;
-the mock backend models the UI and delayed Wi-Fi transition now.
 
 ## Build and run
 
@@ -132,7 +125,7 @@ Set `LIBREECHO_URL` when using a port other than 8080. These routes exist only i
 
 ## API and live state
 
-Implemented v1 areas include first-boot setup, status, device, config metadata, audio, LED, buttons, wake word, Wi-Fi scan/connect/disconnect, network identity, privacy, integrations, system/OTA model, logs, diagnostics, events, and guarded power operations. The overview polls once every five seconds. `/api/v1/events` emits bounded SSE-formatted event snapshots, but a persistent multi-client SSE fan-out is deferred; polling avoids pretending that the initial one-shot stream is a full push service.
+Implemented v1 areas include status, device, config metadata, audio, LED, buttons, wake word, Wi-Fi scan/connect/disconnect, network identity, privacy, integrations, system/OTA model, logs, diagnostics, events, and guarded power operations. The overview polls once every five seconds. `/api/v1/events` emits bounded SSE-formatted event snapshots, but a persistent multi-client SSE fan-out is deferred; polling avoids pretending that the initial one-shot stream is a full push service.
 
 OTA is a UI/API data model only. The Linux backend returns unsupported for hardware installation. There are no raw writes to `/dev/block/*`.
 
@@ -144,12 +137,12 @@ make test
 
 The suite covers JSON/config units, API smoke behavior, malformed JSON, 16 KiB limits, CSRF, destructive confirmation, mock faults and delayed connections, secret redaction, restrictive config mode, restart persistence, Linux unsupported operations, and idle RSS. No Echo hardware is needed. See `tests/browser-checklist.md` for the responsive/accessibility smoke pass.
 
-Latest measurements on the macOS ARM64 development host (21 July 2026):
+Latest measurements on the macOS ARM64 development host (19 July 2026):
 
-- Normal daemon binary: 90,112 bytes.
-- Size-optimised daemon binary: 90,016 bytes.
-- Idle RSS with mock backend: 1,728 KiB.
-- Complete uncompressed frontend: about 190 KiB (including the 99 KiB device image).
+- Normal daemon binary: 73,184 bytes.
+- Size-optimised daemon binary: 73,072 bytes.
+- Idle RSS with mock backend: 1,680 KiB.
+- Complete uncompressed frontend: about 148 KiB (including the 99 KiB device image).
 
 Host results are indicative; remeasure on the final musl/uClibc target with `size`, `/proc/<pid>/status`, and representative LAN clients.
 
@@ -174,10 +167,10 @@ Host results are indicative; remeasure on the final musl/uClibc target with `siz
 │   ├── backend_linux.c
 │   └── json.{c,h}
 ├── web/
-│   ├── {index.html,setup.html,swagger.html,openapi.json}
+│   ├── index.html
 │   ├── assets/{mark.svg,device.png}
-│   ├── css/{app.css,setup.css,api-docs.css}
-│   └── js/{app.js,setup.js,swagger.js}
+│   ├── css/app.css
+│   └── js/app.js
 ├── tests/
 │   ├── run_tests.sh
 │   ├── test_unit.c
@@ -209,7 +202,6 @@ Do not add undocumented ioctl numbers. Each integration belongs behind `backend.
 ## Known limitations
 
 - Authentication/token provisioning is an abstraction only; loopback is therefore the safe default.
-- AP creation, captive-portal DNS/DHCP and AP shutdown require the future device network supervisor; the web/API handoff is implemented.
 - TLS is expected to terminate at a small trusted LAN proxy if required; no TLS library is bundled.
 - SSE is currently a bounded one-shot snapshot and the UI uses five-second overview polling.
 - Privacy, integration, button and OTA panels expose the API model, but some settings are not yet persisted independently.

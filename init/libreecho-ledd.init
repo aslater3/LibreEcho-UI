@@ -1,26 +1,19 @@
 #!/bin/sh
 ### BEGIN INIT INFO
-# Provides:          libreecho-web
-# Required-Start:    $network
-# Required-Stop:     $network
+# Provides:          libreecho-ledd
+# Required-Start:    $remote_fs
+# Required-Stop:     $remote_fs
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
 ### END INIT INFO
 
-[ -r /etc/default/libreecho-web ] && . /etc/default/libreecho-web
+[ -r /etc/default/libreecho-ledd ] && . /etc/default/libreecho-ledd
 
-DAEMON=${DAEMON:-/usr/local/sbin/libreecho-web}
-PIDFILE=${PIDFILE:-/var/run/libreecho-web.pid}
-LOGFILE=${LOGFILE:-/var/log/libreecho-web.log}
-# This development image deliberately exposes the UI through wlan0.  Production
-# deployments must override ARGS with authentication and an allowed origin.
-ARGS=${ARGS:---backend linux --config /etc/libreecho/web-config.json --web-root /usr/local/share/libreecho/web --listen 0.0.0.0:8080 --allow-insecure-lan}
-# For authenticated LAN access, override ARGS in /etc/default/libreecho-web
-# with --auth-token-file, --allowed-origin and --user.
-USERS_FILE=${USERS_FILE:-/etc/libreecho/users}
-if [ -r "$USERS_FILE" ]; then
-    ARGS="$ARGS --users-file $USERS_FILE"
-fi
+DAEMON=${DAEMON:-/usr/local/sbin/libreecho-ledd}
+PIDFILE=${PIDFILE:-/var/run/libreecho-ledd.pid}
+LOGFILE=${LOGFILE:-/var/log/libreecho-ledd.log}
+SOCKET=${SOCKET:-/run/libreecho/led.sock}
+ARGS=${ARGS:---foreground --socket $SOCKET}
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1
@@ -30,8 +23,8 @@ is_running() {
 }
 
 start_service() {
-    if is_running; then echo "libreecho-web already running"; return 0; fi
-    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")"
+    if is_running; then echo "libreecho-ledd already running"; return 0; fi
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else

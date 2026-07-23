@@ -7,7 +7,7 @@
   },
   "servers": [{"url":"/api/v1","description":"This LibreEcho device"}],
   "tags": [
-    {"name":"Discovery"},{"name":"Setup"},{"name":"Device"},{"name":"Audio"},{"name":"LED and buttons"},
+    {"name":"Discovery"},{"name":"Authentication"},{"name":"Setup"},{"name":"Device"},{"name":"Audio"},{"name":"LED and buttons"},
     {"name":"Wake word"},{"name":"Network"},{"name":"Privacy"},{"name":"Integrations"},
     {"name":"System"},{"name":"Diagnostics"},{"name":"Development"}
   ],
@@ -20,6 +20,9 @@
     "/status": {"get":{"tags":["Device"],"summary":"Read system telemetry","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/device": {"get":{"tags":["Device"],"summary":"Read device identity","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/config": {"get":{"tags":["Discovery"],"summary":"Read API configuration metadata","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/auth": {"get":{"tags":["Authentication"],"summary":"Read current authentication session","security":[{"BearerAuth":[]}],"responses":{"200":{"$ref":"#/components/responses/Success"},"401":{"$ref":"#/components/responses/Error"}}}},
+    "/auth/login": {"post":{"tags":["Authentication"],"summary":"Create a local user session","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["username","password"],"properties":{"username":{"type":"string"},"password":{"type":"string","format":"password"}}}}}},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"}}}},
+    "/auth/logout": {"post":{"tags":["Authentication"],"summary":"Invalidate the current local user session","security":[{"BearerAuth":[]}],"parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"401":{"$ref":"#/components/responses/Error"}}}},
     "/config/export": {"get":{"tags":["Device"],"summary":"Export portable device configuration","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
     "/config/import": {"post":{"tags":["Device"],"summary":"Validate, apply and persist portable configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
     "/audio": {
@@ -33,8 +36,8 @@
     },
     "/led/test": {"post":{"tags":["LED and buttons"],"summary":"Run the LED test","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/buttons": {
-      "get":{"tags":["LED and buttons"],"summary":"Read button mappings","responses":{"200":{"$ref":"#/components/responses/Success"}}},
-      "put":{"tags":["LED and buttons"],"summary":"Update button mappings","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+      "get":{"tags":["LED and buttons"],"summary":"Read button mappings","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["LED and buttons"],"summary":"Update button mappings","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}
     },
     "/wake-word": {
       "get":{"tags":["Wake word"],"summary":"Read wake-word state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
@@ -49,11 +52,11 @@
     "/network/wifi/connect": {"post":{"tags":["Network"],"summary":"Connect to Wi-Fi","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"503":{"$ref":"#/components/responses/Error"}}}},
     "/network/wifi/disconnect": {"post":{"tags":["Network"],"summary":"Disconnect Wi-Fi","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/privacy": {
-      "get":{"tags":["Privacy"],"summary":"Read privacy configuration","responses":{"200":{"$ref":"#/components/responses/Success"}}},
-      "put":{"tags":["Privacy"],"summary":"Update privacy configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+      "get":{"tags":["Privacy"],"summary":"Read privacy configuration","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["Privacy"],"summary":"Update privacy configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}
     },
-    "/integrations": {"get":{"tags":["Integrations"],"summary":"List integrations","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
-    "/integrations/{id}": {"put":{"tags":["Integrations"],"summary":"Enable or disable an integration","parameters":[{"$ref":"#/components/parameters/Csrf"},{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"}}}},
+    "/integrations": {"get":{"tags":["Integrations"],"summary":"List integrations","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}},
+    "/integrations/{id}": {"put":{"tags":["Integrations"],"summary":"Enable or disable an integration","parameters":[{"$ref":"#/components/parameters/Csrf"},{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"},"405":{"$ref":"#/components/responses/Error"}}}},
     "/system": {"get":{"tags":["System"],"summary":"Read OS and OTA state","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/system/reboot": {"post":{"tags":["System"],"summary":"Reboot device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
     "/system/shutdown": {"post":{"tags":["System"],"summary":"Shut down device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
@@ -70,7 +73,7 @@
       "BearerAuth":{"type":"http","scheme":"bearer","description":"Optional device token enabled with --auth-token-file"}
     },
     "parameters": {
-      "Csrf":{"name":"X-LibreEcho-CSRF","in":"header","required":true,"schema":{"type":"string","example":"libreecho-local"}},
+      "Csrf":{"name":"X-LibreEcho-CSRF","in":"header","required":true,"description":"Use the 64-character token returned by GET /api/v1/config; it changes on daemon boot.","schema":{"type":"string","example":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}},
       "Confirm":{"name":"X-LibreEcho-Confirm","in":"header","required":true,"schema":{"type":"string","example":"confirm-device-action"}}
     },
     "requestBodies": {"JsonObject":{"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}}},

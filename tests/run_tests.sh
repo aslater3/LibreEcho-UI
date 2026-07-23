@@ -20,6 +20,15 @@ sh tests/test_memory.sh "$pid"
 kill "$pid"
 wait "$pid" 2>/dev/null || true
 pid=0
+./tools/create-user.sh test-user test-password-123 >./build/test-users
+chmod 600 ./build/test-users
+./build/libreecho-web --backend mock --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --users-file ./build/test-users >./build/test-users.log 2>&1 &
+pid=$!
+sleep 1
+LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_USERS=./build/test-users sh tests/test_auth.sh
+kill "$pid"
+wait "$pid" 2>/dev/null || true
+pid=0
 ./build/libreecho-web --backend mock --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 >./build/test-restart.log 2>&1 &
 pid=$!
 sleep 1
@@ -36,6 +45,9 @@ sleep 1
 code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio")
 [ "$code" = 501 ]
 grep -q 'not_supported' /tmp/le-linux-audio.out
+code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/config/export")
+[ "$code" = 200 ]
+jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
 echo 'linux unsupported: ok'
 kill "$pid"
 wait "$pid" 2>/dev/null || true
@@ -50,11 +62,12 @@ chmod 600 ./build/test-auth-token
 pid=$!
 sleep 1
 curl -fsS "$URL/api/v1/config" | grep -q 'bearer-token'
+CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 code=$(curl -sS -o /tmp/le-auth.out -w '%{http_code}' "$URL/api/v1/status")
 [ "$code" = 401 ]
 curl -fsS "$URL/api/v1/status" -H 'Authorization: Bearer test-token-0123456789abcdef' >/dev/null
-code=$(curl -sS -o /tmp/le-origin.out -w '%{http_code}' -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H 'X-LibreEcho-CSRF: libreecho-local' -H 'Origin: http://evil.test' -H 'Content-Type: application/json' --data '{"hostname":"blocked"}')
+code=$(curl -sS -o /tmp/le-origin.out -w '%{http_code}' -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H "$CSRF" -H 'Origin: http://evil.test' -H 'Content-Type: application/json' --data '{"hostname":"blocked"}')
 [ "$code" = 403 ]
-curl -fsS -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H 'X-LibreEcho-CSRF: libreecho-local' -H 'Origin: http://device.test' -H 'Content-Type: application/json' --data '{"hostname":"allowed"}' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H "$CSRF" -H 'Origin: http://device.test' -H 'Content-Type: application/json' --data '{"hostname":"allowed"}' >/dev/null
 echo 'authentication and origin: ok'
 echo 'all tests: ok'
