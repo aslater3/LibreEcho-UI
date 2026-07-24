@@ -988,6 +988,7 @@ int main(int argc, char **argv)
     struct airplay_ctx ctx;
     struct sigaction action;
     int foreground = 0;
+    int enable_on_start = 0;
     int i;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -1013,6 +1014,7 @@ int main(int argc, char **argv)
     snprintf(ctx.config_path, sizeof(ctx.config_path), "/etc/libreecho/airplay2.conf");
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--foreground")) foreground = 1;
+        else if (!strcmp(argv[i], "--enable-on-start")) enable_on_start = 1;
         else if (!strcmp(argv[i], "--socket") && i + 1 < argc) snprintf(ctx.socket_path, sizeof(ctx.socket_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--root") && i + 1 < argc) snprintf(ctx.runtime_root, sizeof(ctx.runtime_root), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--nqptp") && i + 1 < argc) snprintf(ctx.nqptp_path, sizeof(ctx.nqptp_path), "%s", argv[++i]);
@@ -1021,7 +1023,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--engine") && i + 1 < argc) snprintf(ctx.engine_path, sizeof(ctx.engine_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) snprintf(ctx.config_path, sizeof(ctx.config_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--metadata") && i + 1 < argc) snprintf(ctx.metadata_path, sizeof(ctx.metadata_path), "%s", argv[++i]);
-        else { fprintf(stderr, "Usage: %s [--foreground] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--audio PATH] [--engine PATH] [--config PATH] [--metadata PATH]\n", argv[0]); return 1; }
+        else { fprintf(stderr, "Usage: %s [--foreground] [--enable-on-start] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--audio PATH] [--engine PATH] [--config PATH] [--metadata PATH]\n", argv[0]); return 1; }
     }
     (void)foreground;
     le_log_init("airplayd", argc, argv);
@@ -1046,7 +1048,12 @@ int main(int argc, char **argv)
     } else {
         le_log_info("airplayd: shared audio engine ready");
     }
-    le_log_info("airplayd: starting (socket=%s, disabled by default)", ctx.socket_path);
+    le_log_info("airplayd: starting (socket=%s, enable_on_start=%s)",
+                ctx.socket_path, enable_on_start ? "yes" : "no");
+    if (enable_on_start) {
+        if (set_enabled(&ctx, 1) < 0)
+            le_log_warn("airplayd: persisted AirPlay enable failed at startup");
+    }
     while (running) {
         struct pollfd pfd[2];
         nfds_t descriptors = 1;

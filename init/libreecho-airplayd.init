@@ -16,7 +16,28 @@ LOGFILE=${LOGFILE:-/var/log/libreecho-airplayd.log}
 SOCKET=${SOCKET:-/run/libreecho/airplay.sock}
 PAYLOAD=${PAYLOAD:-/data/libreecho/features/airplay2/payload.squashfs}
 RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/airplay2/root}
+CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
 ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
+
+# The controller is always started, but the AirPlay children follow the
+# persisted integration toggle.  Bit 16 is the AirPlay 2 flag in the shared
+# integrations mask.  Keep this default-off when the persistent config is
+# absent or malformed.
+airplay_enabled_at_boot=0
+if [ -r "$CONFIG" ]; then
+    integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
+    case "$integrations" in
+        ''|*[!0-9]*) ;;
+        *)
+            if [ $((integrations & 16)) -ne 0 ]; then
+                airplay_enabled_at_boot=1
+            fi
+            ;;
+    esac
+fi
+if [ "$airplay_enabled_at_boot" -eq 1 ]; then
+    ARGS="$ARGS --enable-on-start"
+fi
 
 mount_led_socket() {
     source_socket=/run/libreecho/led.sock
