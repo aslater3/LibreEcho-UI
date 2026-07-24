@@ -34,11 +34,13 @@ struct airplay_ctx {
     char avahi_path[128];
     char dbus_path[128];
     char audio_path[128];
+    char engine_path[128];
     char config_path[128];
     pid_t dbus_pid;
     pid_t avahi_pid;
     pid_t nqptp_pid;
     pid_t audio_pid;
+    pid_t engine_pid;
     pid_t shairport_pid;
     int enabled;
 };
@@ -143,6 +145,10 @@ static int reap(struct airplay_ctx *ctx)
             ctx->audio_pid = -1;
             lost = 1;
         }
+        if (pid == ctx->engine_pid) {
+            ctx->engine_pid = -1;
+            lost = 1;
+        }
         if (pid == ctx->shairport_pid) {
             ctx->shairport_pid = -1;
             lost = 1;
@@ -224,11 +230,22 @@ static pid_t spawn_audio(const struct airplay_ctx *ctx)
     _exit(127);
 }
 
+static pid_t spawn_engine(const struct airplay_ctx *ctx)
+{
+    pid_t pid = fork();
+    if (pid != 0)
+        return pid;
+    execl(AIRPLAY_CHROOT, AIRPLAY_CHROOT, "chroot", ctx->runtime_root,
+          ctx->engine_path, (char *)NULL);
+    _exit(127);
+}
+
 static int set_enabled(struct airplay_ctx *ctx, int enabled)
 {
     int i;
     if (enabled == ctx->enabled && (!enabled ||
-                                    (child_alive(ctx->dbus_pid) &&
+                                    (child_alive(ctx->engine_pid) &&
+                                     child_alive(ctx->dbus_pid) &&
                                      child_alive(ctx->avahi_pid) &&
                                      child_alive(ctx->nqptp_pid) &&
                                      child_alive(ctx->audio_pid) &&
@@ -253,8 +270,10 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
         RUNTIME_ACCESS(ctx->avahi_path, X_OK) ||
         RUNTIME_ACCESS(ctx->nqptp_path, X_OK) ||
         RUNTIME_ACCESS(ctx->audio_path, X_OK) ||
+        RUNTIME_ACCESS(ctx->engine_path, X_OK) ||
         RUNTIME_ACCESS(ctx->shairport_path, X_OK) ||
-        RUNTIME_ACCESS(ctx->config_path, R_OK)) {
+        RUNTIME_ACCESS(ctx->config_path, R_OK) ||
+        !child_alive(ctx->engine_pid)) {
 #undef RUNTIME_ACCESS
         return -1;
     }
@@ -322,16 +341,19 @@ static int request(struct airplay_ctx *ctx, char *message,
 #define RUNTIME_AVAILABLE(relative, mode) \
         (snprintf(path, sizeof(path), "%s%s", ctx->runtime_root, (relative)), \
          access(path, (mode)) == 0)
-        available = available && RUNTIME_AVAILABLE(ctx->dbus_path, X_OK) &&
+        available = available && child_alive(ctx->engine_pid) &&
+                    RUNTIME_AVAILABLE(ctx->dbus_path, X_OK) &&
                     RUNTIME_AVAILABLE(ctx->avahi_path, X_OK) &&
                     RUNTIME_AVAILABLE(ctx->nqptp_path, X_OK) &&
                     RUNTIME_AVAILABLE(ctx->audio_path, X_OK) &&
+                    RUNTIME_AVAILABLE(ctx->engine_path, X_OK) &&
                     RUNTIME_AVAILABLE(ctx->shairport_path, X_OK) &&
                     RUNTIME_AVAILABLE(ctx->config_path, R_OK);
 #undef RUNTIME_AVAILABLE
         snprintf(data, sizeof(data),
-                 "{\"available\":%s,\"enabled\":%s,\"dbus_running\":%s,\"avahi_running\":%s,\"nqptp_running\":%s,\"audio_running\":%s,\"shairport_running\":%s}",
+                 "{\"available\":%s,\"enabled\":%s,\"engine_running\":%s,\"dbus_running\":%s,\"avahi_running\":%s,\"nqptp_running\":%s,\"audio_running\":%s,\"shairport_running\":%s}",
                  available ? "true" : "false", ctx->enabled ? "true" : "false",
+                 child_alive(ctx->engine_pid) ? "true" : "false",
                  child_alive(ctx->dbus_pid) ? "true" : "false",
                  child_alive(ctx->avahi_pid) ? "true" : "false",
                  child_alive(ctx->nqptp_pid) ? "true" : "false",
@@ -380,6 +402,7 @@ int main(int argc, char **argv)
     ctx.avahi_pid = -1;
     ctx.nqptp_pid = -1;
     ctx.audio_pid = -1;
+    ctx.engine_pid = -1;
     ctx.shairport_pid = -1;
     snprintf(ctx.socket_path, sizeof(ctx.socket_path), "%s", LE_ADAPTER_AIRPLAY_SOCK);
     snprintf(ctx.nqptp_path, sizeof(ctx.nqptp_path), "/usr/local/sbin/nqptp");
@@ -387,6 +410,7 @@ int main(int argc, char **argv)
     snprintf(ctx.avahi_path, sizeof(ctx.avahi_path), "/usr/local/sbin/avahi-daemon");
     snprintf(ctx.dbus_path, sizeof(ctx.dbus_path), "/usr/local/sbin/dbus-daemon");
     snprintf(ctx.audio_path, sizeof(ctx.audio_path), "/usr/local/sbin/libreecho-airplay-audio");
+    snprintf(ctx.engine_path, sizeof(ctx.engine_path), "/usr/local/sbin/libreecho-audio-engine");
     snprintf(ctx.config_path, sizeof(ctx.config_path), "/etc/libreecho/airplay2.conf");
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--foreground")) foreground = 1;
@@ -395,8 +419,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--nqptp") && i + 1 < argc) snprintf(ctx.nqptp_path, sizeof(ctx.nqptp_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--shairport-sync") && i + 1 < argc) snprintf(ctx.shairport_path, sizeof(ctx.shairport_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--audio") && i + 1 < argc) snprintf(ctx.audio_path, sizeof(ctx.audio_path), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--engine") && i + 1 < argc) snprintf(ctx.engine_path, sizeof(ctx.engine_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) snprintf(ctx.config_path, sizeof(ctx.config_path), "%s", argv[++i]);
-        else { fprintf(stderr, "Usage: %s [--foreground] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--config PATH]\n", argv[0]); return 1; }
+        else { fprintf(stderr, "Usage: %s [--foreground] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--audio PATH] [--engine PATH] [--config PATH]\n", argv[0]); return 1; }
     }
     (void)foreground;
     le_log_init("airplayd", argc, argv);
@@ -411,6 +436,15 @@ int main(int argc, char **argv)
     if (ctx.listener < 0) {
         perror("airplayd: listen");
         return 1;
+    }
+    ctx.engine_pid = spawn_engine(&ctx);
+    if (ctx.engine_pid < 0 ||
+        !wait_for_runtime_file(&ctx, "/run/libreecho-audio/media.pcm", 30) ||
+        !child_running(&ctx.engine_pid)) {
+        le_log_warn("airplayd: shared audio engine unavailable at startup");
+        stop_child(&ctx.engine_pid);
+    } else {
+        le_log_info("airplayd: shared audio engine ready");
     }
     le_log_info("airplayd: starting (socket=%s, disabled by default)", ctx.socket_path);
     while (running) {
@@ -428,6 +462,15 @@ int main(int argc, char **argv)
             stop_child(&ctx.nqptp_pid);
             stop_child(&ctx.avahi_pid);
             stop_child(&ctx.dbus_pid);
+        }
+        if (!child_alive(ctx.engine_pid)) {
+            ctx.engine_pid = spawn_engine(&ctx);
+            if (ctx.engine_pid < 0 ||
+                !wait_for_runtime_file(&ctx, "/run/libreecho-audio/media.pcm", 10) ||
+                !child_running(&ctx.engine_pid))
+                stop_child(&ctx.engine_pid);
+            else
+                le_log_info("airplayd: shared audio engine restarted");
         }
         if (poll(&pfd, 1, 500) < 0 && errno != EINTR)
             break;
@@ -447,6 +490,7 @@ int main(int argc, char **argv)
         }
     }
     set_enabled(&ctx, 0);
+    stop_child(&ctx.engine_pid);
     close(ctx.listener);
     unlink(ctx.socket_path);
     return 0;

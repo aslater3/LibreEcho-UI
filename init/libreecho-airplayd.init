@@ -48,10 +48,16 @@ mount_runtime() {
     mount -t tmpfs -o mode=0755,size=1m libreecho-airplay-var "$RUNTIME_ROOT/var"
     mount -t tmpfs -o mode=1777,size=64k libreecho-airplay-shm "$RUNTIME_ROOT/dev/shm"
     mkdir -p "$RUNTIME_ROOT/run/dbus" "$RUNTIME_ROOT/var/run" \
-        "$RUNTIME_ROOT/var/lib/avahi" "$RUNTIME_ROOT/run/libreecho"
+        "$RUNTIME_ROOT/var/lib/avahi" "$RUNTIME_ROOT/run/libreecho" \
+        "$RUNTIME_ROOT/run/libreecho-audio" /run/libreecho-audio
+    # The shared directory is outside /run/libreecho so this bind cannot
+    # recurse through the feature runtime root.  It carries only the four PCM
+    # buses and source-volume state; the feature remains otherwise isolated.
+    mount --bind /run/libreecho-audio "$RUNTIME_ROOT/run/libreecho-audio"
 }
 
 unmount_runtime() {
+    umount "$RUNTIME_ROOT/run/libreecho-audio" 2>/dev/null || true
     umount "$RUNTIME_ROOT/var" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run" 2>/dev/null || true
     umount "$RUNTIME_ROOT/dev/shm" 2>/dev/null || true

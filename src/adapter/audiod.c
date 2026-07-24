@@ -138,6 +138,7 @@ struct snd_ctl_elem_value {
 #define LE_TONE_SECONDS 2
 #define LE_TONE_CHANNELS 2
 #define LE_TONE_CHUNK_FRAMES 1024
+#define LE_SYSTEM_AUDIO_BUS "/run/libreecho-audio/system.pcm"
 
 static volatile sig_atomic_t g_stop;
 
@@ -611,6 +612,44 @@ static long long value_for_percent(long long min, long long max, int percent)
     return min + (range * percent + 50) / 100;
 }
 
+static int is_speaker_pcm_volume(const struct audio_control *control)
+{
+    return control->found && !strcmp(control->name, "PCM Playback Volume");
+}
+
+static long long speaker_value_for_percent(long long min, long long max,
+                                           int percent)
+{
+    long long unity = min + 127;
+    long long floor = min + 67;
+
+    if (unity > max)
+        unity = max;
+    if (percent <= 0)
+        return min;
+    if (floor > unity)
+        floor = min;
+    return floor + ((unity - floor) * (percent - 1) + 49) / 99;
+}
+
+static int speaker_percent_from_value(long long value, long long min,
+                                      long long max)
+{
+    long long unity = min + 127;
+    long long floor = min + 67;
+
+    if (unity > max)
+        unity = max;
+    if (value <= min)
+        return 0;
+    if (floor >= unity || value <= floor)
+        return 1;
+    if (value >= unity)
+        return 100;
+    return 1 + (int)(((value - floor) * 99 + (unity - floor) / 2) /
+                     (unity - floor));
+}
+
 static int write_percent_control(const struct audio_hw *audio,
                                  const struct audio_control *control,
                                  int percent)
@@ -636,7 +675,9 @@ static int write_percent_control(const struct audio_hw *audio,
     }
     if (max < min)
         return -1;
-    value = value_for_percent(min, max, percent);
+    value = is_speaker_pcm_volume(control)
+          ? speaker_value_for_percent(min, max, percent)
+          : value_for_percent(min, max, percent);
 
     memset(&elem, 0, sizeof(elem));
     elem.id = control->id;
@@ -717,7 +758,9 @@ static void refresh_state(struct audio_hw *audio)
         long long max = audio->master.info.type == SNDRV_CTL_ELEM_TYPE_INTEGER64
                       ? audio->master.info.value.integer64.max
                       : audio->master.info.value.integer.max;
-        audio->volume = percent_from_range(value, min, max);
+        audio->volume = is_speaker_pcm_volume(&audio->master)
+                      ? speaker_percent_from_value(value, min, max)
+                      : percent_from_range(value, min, max);
         audio->notification_volume = audio->volume;
     }
     if (read_control_value(audio, &audio->capture, &value) == 0) {
@@ -739,6 +782,11 @@ static int audio_set_volume(struct audio_hw *audio, int volume)
     if (volume < 0 || volume > 100)
         return -1;
     if (write_percent_control(audio, &audio->master, volume) < 0) {
+        /* Never let a percentage-based fallback address the codec's
+         * +24 dB region.  The direct control path above caps 100% at the
+         * PCM control's 0 dB/unity value. */
+        if (is_speaker_pcm_volume(&audio->master))
+            return -1;
         (void)snprintf(setting, sizeof(setting), "%d%%", volume);
         if (run_amixer(audio,
                        control_name_or_default(&audio->master,
@@ -863,6 +911,16 @@ static int write_tone_fd(int fd)
             ssize_t n = write(fd, buffer + sent, bytes - sent);
             if (n < 0 && errno == EINTR)
                 continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pfd = { fd, POLLOUT, 0 };
+                int rc;
+
+                do {
+                    rc = poll(&pfd, 1, 1000);
+                } while (rc < 0 && errno == EINTR);
+                if (rc > 0)
+                    continue;
+            }
             if (n <= 0)
                 return -1;
             sent += (size_t)n;
@@ -871,117 +929,29 @@ static int write_tone_fd(int fd)
     return 0;
 }
 
-static int play_tone_with_aplay(int card)
+static int start_test_tone(const struct audio_hw *audio)
 {
-    int pipe_fds[2];
-    pid_t player;
-    char device[32];
-    char *const argv[] = { (char *)"aplay", (char *)"-q", (char *)"-D",
-                           device, (char *)"-t", (char *)"raw", (char *)"-f",
-                           (char *)"S16_LE", (char *)"-c", (char *)"2",
-                           (char *)"-r", (char *)"48000", NULL };
-    int result;
-    int status;
-
-    if (pipe(pipe_fds) < 0)
-        return -1;
-    (void)snprintf(device, sizeof(device), "hw:%d,0", card);
-    player = fork();
-    if (player < 0) {
-        close(pipe_fds[0]);
-        close(pipe_fds[1]);
-        return -1;
-    }
-    if (player == 0) {
-        close(pipe_fds[1]);
-        if (dup2(pipe_fds[0], STDIN_FILENO) < 0)
-            _exit(127);
-        close(pipe_fds[0]);
-        execvp("aplay", argv);
-        _exit(127);
-    }
-    close(pipe_fds[0]);
-    result = write_tone_fd(pipe_fds[1]);
-    close(pipe_fds[1]);
-    do {
-        if (waitpid(player, &status, 0) < 0 && errno == EINTR)
-            continue;
-        break;
-    } while (1);
-    if (result < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
-        return -1;
-    return 0;
-}
-
-static int play_tone_with_tinyplay(int card)
-{
-    static const unsigned char wav_header[44] = {
-        'R','I','F','F', 0x24,0xdc,0x05,0x00, 'W','A','V','E',
-        'f','m','t',' ', 16,0,0,0, 1,0, 2,0,
-        0x80,0xbb,0,0, 0,0xee,0x02,0, 4,0, 16,0,
-        'd','a','t','a', 0,0xdc,0x05,0x00
-    };
-    char path[] = "/tmp/libreecho-test-tone-XXXXXX";
-    char card_arg[16];
-    char *const argv[] = { (char *)"/sbin/tinyplay", path,
-                           (char *)"-D", card_arg, (char *)"-d", (char *)"23",
-                           (char *)"-p", (char *)"1024", (char *)"-n", (char *)"2", NULL };
     int fd;
     pid_t pid;
-    pid_t waited;
-    int status = 0;
-    ssize_t written;
 
-    fd = mkstemp(path);
+    if (!audio->output_available ||
+        access(LE_SYSTEM_AUDIO_BUS, F_OK) < 0)
+        return -1;
+    fd = open(LE_SYSTEM_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
         return -1;
-    written = write(fd, wav_header, sizeof(wav_header));
-    if (written != (ssize_t)sizeof(wav_header) || write_tone_fd(fd) < 0) {
-        close(fd);
-        unlink(path);
-        return -1;
-    }
-    if (close(fd) < 0) {
-        unlink(path);
-        return -1;
-    }
-    (void)snprintf(card_arg, sizeof(card_arg), "%d", card);
     pid = fork();
     if (pid < 0) {
-        unlink(path);
+        close(fd);
         return -1;
     }
     if (pid == 0) {
-        execv(argv[0], argv);
-        _exit(127);
+        int result = write_tone_fd(fd);
+        close(fd);
+        _exit(result == 0 ? 0 : 1);
     }
-    do {
-        waited = waitpid(pid, &status, 0);
-    } while (waited < 0 && errno == EINTR);
-    unlink(path);
-    return waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
-}
-
-static int play_tone_worker(const struct audio_hw *audio)
-{
-    int result = play_tone_with_tinyplay(audio->card);
-    if (result == 0)
-        return 0;
-    return play_tone_with_aplay(audio->card);
-}
-
-static int start_test_tone(const struct audio_hw *audio)
-{
-    if (!audio->output_available && access(audio->pcm_path, W_OK) < 0)
-        return -1;
-    /*
-     * Keep this request synchronous.  The old forked implementation always
-     * returned success and discarded the child's playback error, so the UI
-     * reported "playing" even when the PCM device could not be opened.
-     * A two-second diagnostic tone is short enough to run within the adapter
-     * request timeout and gives callers an honest result.
-     */
-    return play_tone_worker(audio);
+    close(fd);
+    return 0;
 }
 
 static int queue_output(struct client *client, const char *message, size_t length)

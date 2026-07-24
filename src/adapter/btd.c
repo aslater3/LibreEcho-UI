@@ -686,7 +686,7 @@ static void led_pattern(const char *name, unsigned int r, unsigned int g,
     }
     snprintf(args, sizeof(args),
              "{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,"
-             "\"brightness\":%u,\"repeats\":%u}",
+             "\"brightness\":%u,\"repeats\":%u,\"owner\":\"bluetooth\"}",
              name, r, g, b, brightness, repeats);
     result = le_adapter_call(adapter, "pattern", args, response,
                              sizeof(response));
