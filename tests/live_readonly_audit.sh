@@ -25,7 +25,7 @@ printf '%s' "$led" | jq -e '.ok and (.data.animation_active | type) == "boolean"
 exported=$(json /api/v1/config/export)
 printf '%s' "$exported" | jq -e '.ok and (.data.schema_version | type) == "number" and (.data.partial | type) == "boolean" and (.data.unsupported | type) == "array"' >/dev/null
 system=$(json /api/v1/system)
-printf '%s' "$system" | jq -e '.ok and (.data.ntp | type) == "boolean" and (.data.clock_valid | type) == "boolean" and (.data.clock_source | type) == "string"' >/dev/null
+printf '%s' "$system" | jq -e '.ok and (.data.ntp | type) == "boolean" and (.data.ntp_state | type) == "string" and (.data.ntp_servers | type) == "string" and (.data.last_sync_epoch | type) == "number" and (.data.clock_valid | type) == "boolean" and (.data.clock_source | type) == "string" and (.data.rtc_available | type) == "boolean" and (.data.rtc_persisted | type) == "boolean"' >/dev/null
 logs=$(json /api/v1/logs)
 printf '%s' "$logs" | jq -e '.ok and (.data.entries | type) == "array" and .data.bounded == true and (.data.source | type) == "string" and any(.data.entries[]?; (.boot_seconds | type) == "number" and .boot_seconds >= 0)' >/dev/null
 json /api/v1/diagnostics | jq -e '.ok and (.data.checks | length) >= 1 and all(.data.checks[]; (.name | type) == "string" and (.status | type) == "string")' >/dev/null
@@ -59,6 +59,7 @@ printf '%s' "$index" | grep -q 'assets/favicon.svg'
 app=$(curl -fsS "$URL/js/app.js?rev=13")
 printf '%s' "$app" | grep -q 'led-ring-view'
 printf '%s' "$app" | grep -q 'clock_source'
+printf '%s' "$app" | grep -q 'ntp_servers'
 printf '%s' "$app" | grep -q 'storageValue'
 printf '%s' "$app" | grep -q 'usage unavailable'
 printf '%s' "$app" | grep -q "csrf:''"

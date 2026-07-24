@@ -76,6 +76,8 @@ curl -fsS -X POST "$URL/api/v1/bluetooth/unpair" -H "$CSRF" -H 'Content-Type: ap
 expect "$(curl -fsS "$URL/api/v1/network/wifi/scan")" 'LibreNet-5G'
 expect "$(curl -fsS "$URL/api/v1/system")" '"ntp":false'
 expect "$(curl -fsS "$URL/api/v1/system")" '"clock_valid":true'
+expect "$(curl -fsS "$URL/api/v1/system")" '"ntp_state":"unavailable"'
+expect "$(curl -fsS "$URL/api/v1/system")" '"rtc_available":false'
 expect "$(curl -fsS "$URL/api/v1/logs")" '"boot_seconds":'
 curl -fsS -D /tmp/le-log-stream.headers "$URL/api/v1/logs/stream" -o /tmp/le-log-stream.out
 grep -qi '^content-type: text/event-stream' /tmp/le-log-stream.headers
