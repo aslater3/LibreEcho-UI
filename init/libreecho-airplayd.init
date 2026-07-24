@@ -18,6 +18,30 @@ PAYLOAD=${PAYLOAD:-/data/libreecho/features/airplay2/payload.squashfs}
 RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/airplay2/root}
 ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 
+mount_led_socket() {
+    source_socket=/run/libreecho/led.sock
+    target_socket=$RUNTIME_ROOT/run/libreecho/led.sock
+    if grep -q " $target_socket " /proc/mounts 2>/dev/null; then
+        return 0
+    fi
+    count=0
+    while [ ! -S "$source_socket" ] && [ "$count" -lt 20 ]; do
+        sleep 0.1
+        count=$((count + 1))
+    done
+    [ -S "$source_socket" ] || {
+        echo "libreecho-airplayd: LED control socket unavailable" >&2
+        return 0
+    }
+    mkdir -p "$(dirname "$target_socket")"
+    : >"$target_socket"
+    mount --bind "$source_socket" "$target_socket" || {
+        rm -f "$target_socket"
+        echo "libreecho-airplayd: LED control socket bind failed" >&2
+        return 0
+    }
+}
+
 mount_runtime() {
     [ -f "$PAYLOAD" ] || {
         echo "libreecho-airplayd: feature payload missing: $PAYLOAD" >&2
@@ -25,6 +49,7 @@ mount_runtime() {
     }
     mkdir -p "$RUNTIME_ROOT"
     if grep -q " $RUNTIME_ROOT " /proc/mounts 2>/dev/null; then
+        mount_led_socket
         return 0
     fi
     mount -t squashfs -o loop,ro,nosuid,nodev,noatime "$PAYLOAD" "$RUNTIME_ROOT" || {
@@ -54,9 +79,12 @@ mount_runtime() {
     # recurse through the feature runtime root.  It carries only the four PCM
     # buses and source-volume state; the feature remains otherwise isolated.
     mount --bind /run/libreecho-audio "$RUNTIME_ROOT/run/libreecho-audio"
+    mount_led_socket
 }
 
 unmount_runtime() {
+    umount "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
+    rm -f "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run/libreecho-audio" 2>/dev/null || true
     umount "$RUNTIME_ROOT/var" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run" 2>/dev/null || true
