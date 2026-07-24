@@ -50,7 +50,11 @@ code=$(curl -sS -o /tmp/le-invalid-visualizer.out -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     --data '{"visualizer_enabled":"yes"}')
 [ "$code" = 400 ]
-expect "$(curl -fsS "$URL/api/v1/baby-monitor")" '"sources":'
+curl -fsS "$URL/api/v1/baby-monitor" | jq -e \
+    '.ok and .data.sources[0].channels == 1 and
+     .data.calibration.fallback == 16384 and
+     .data.calibration.selected_logical_mics == [0,1,3,4] and
+     .data.calibration.applied_to_raw_stream == false' >/dev/null
 code=$(curl -sS -o /tmp/le-baby-stream.out -w '%{http_code}' "$URL/api/v1/baby-monitor/stream?source=0:0")
 [ "$code" = 501 ]
 expect "$(curl -fsS "$URL/api/v1/bluetooth")" '"capabilities":'

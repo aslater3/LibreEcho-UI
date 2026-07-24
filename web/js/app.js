@@ -54,7 +54,8 @@ async function babyMonitorPage(){
   content.innerHTML='<div class="settings-grid">'+
     panel('Microphone source','<label class="field"><span>Capture endpoint</span><select id="baby-source">'+options+
       '</select></label><label class="field"><span>Microphone</span><select id="baby-channel">'+microphoneOptions(first)+
-      '</select></label><p class="muted">The Echo array exposes nine packed 24-bit microphone channels at 16 kHz. Select one channel to monitor locally.</p>'+
+      '</select></label><p class="muted">The Echo array exposes nine raw packed 24-bit capture lanes at 16 kHz. Select one lane to monitor locally.</p>'+
+      '<div class="notice unsupported"><strong>Stock calibration</strong><span>'+(d.calibration&&d.calibration.complete?'Seven logical mic gains were found in '+esc(d.calibration.source)+'. Raw-lane playback does not apply them because the stock AFE/ASP lane-to-logical mapping is not available yet.':'No complete seven-entry miccal set is available; using the stock fallback value 16384 for metadata only.')+'</span></div>'+
       (d.simulated?'<div class="notice unsupported"><strong>Preview only</strong><span>The mock backend exposes a source list but cannot produce live microphone audio.</span></div>':'')+
       '</div>')+
     panel('Playback',range('Browser playback volume',35,'baby-volume')+
