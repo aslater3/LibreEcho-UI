@@ -52,7 +52,8 @@ code=$(curl -sS -o /tmp/le-invalid-visualizer.out -w '%{http_code}' \
 [ "$code" = 400 ]
 expect "$(curl -fsS "$URL/api/v1/baby-monitor")" '"sources":'
 code=$(curl -sS -o /tmp/le-baby-stream.out -w '%{http_code}' "$URL/api/v1/baby-monitor/stream?source=0:0")
-[ "$code" = 501 ]expect "$(curl -fsS "$URL/api/v1/bluetooth")" '"capabilities":'
+[ "$code" = 501 ]
+expect "$(curl -fsS "$URL/api/v1/bluetooth")" '"capabilities":'
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' | jq -e '.ok and .data.enabled == true' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"connectable":false}' | jq -e '.ok and .data.capabilities.connectable == false' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"discoverable":true}' | jq -e '.ok and .data.capabilities.discoverable == true' >/dev/null

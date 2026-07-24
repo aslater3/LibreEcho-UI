@@ -40,7 +40,110 @@ async function devicePage(){const d=await api('/device');content.innerHTML=`<div
 async function audioPage(){const a=await api('/audio');content.innerHTML=`<div class="settings-grid">${panel('Output',range('Master volume',a.volume,'volume')+range('Notification volume',a.notification_volume,'notification-volume').replace('value="'+a.notification_volume+'"','value="'+a.notification_volume+'" disabled')+toggle('Startup sound',a.startup_sound,'startup-sound',true)+`<dl class="facts"><dt>Output</dt><dd class="${a.output_available?'connected':''}">${a.output_available?'Available':'Unavailable'}</dd><dt>Amplifier</dt><dd>${a.amplifier_on?'On':'Off'}</dd></dl><div class="button-row">${saveButton('save-output')}${action('Play test tone','test-tone')}</div>`)}${panel('Microphones',range('Microphone gain',a.microphone_gain,'mic-gain')+toggle('Microphone muted',a.microphone_muted,'mic-muted')+toggle('Acoustic echo cancellation',true,'aec',true)+`<p class="muted">Echo cancellation is reported by the future audio adapter and cannot yet be changed.</p>`+saveButton('save-microphones'))}</div>`;bindRange();bindDirty(['#volume'],'#save-output');bindDirty(['#mic-gain','#mic-muted'],'#save-microphones');$('#save-output').onclick=()=>mutate('/audio',{volume:+$('#volume').value},'Output changes saved');$('#save-microphones').onclick=()=>mutate('/audio',{microphone_gain:+$('#mic-gain').value,microphone_muted:$('#mic-muted').checked},'Microphone changes saved');$('#test-tone').onclick=()=>post('/audio/test',{},'Test tone playing')}
 const babyStream={controller:null,context:null,gain:null,nextTime:0};
 function stopBabyStream(){if(babyStream.controller)babyStream.controller.abort();babyStream.controller=null;if(babyStream.context){babyStream.context.close().catch(()=>{});babyStream.context=null}babyStream.gain=null;babyStream.nextTime=0;const status=$('#baby-status');if(status)status.textContent='Stopped'}
-async function babyMonitorPage(){const d=await api('/baby-monitor');if(!d.sources.length){content.innerHTML=`<div class="settings-grid">${panel('Baby monitor',unsupported('No capture-capable microphone devices are currently available.'))}${panel('Privacy',`<p class="muted">Audio is streamed directly from the device to this browser and is not recorded by LibreEcho.</p>`)}</div>`;return}const options=d.sources.map(s=>`<option value="${esc(s.id)}">${esc(s.name)} · card ${s.card}, device ${s.device}</option>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Microphone source',`<label class="field"><span>Listen to</span><select id="baby-source">${options}</select></label><p class="muted">Select one capture endpoint. The stream is raw PCM played locally by this browser.</p>${d.simulated?'<div class="notice unsupported"><strong>Preview only</strong><span>The mock backend exposes a source list but cannot produce live microphone audio.</span></div>':''}`)}${panel('Playback',range('Browser playback volume',75,'baby-volume')+`<div class="status-line"><span class="status-dot" id="baby-dot"></span><span id="baby-status" aria-live="polite">Stopped</span></div><div class="button-row">${action('Start listening','baby-start','primary-btn')}${action('Stop','baby-stop')}</div><p class="muted">Keep this page open to listen. Closing it stops the capture stream.</p>`)}</div>`;bindRange();$('#baby-volume').oninput=()=>{const value=Number($('#baby-volume').value)/100;$('#baby-volume').parentElement.querySelector('output').textContent=$('#baby-volume').value+'%';if(babyStream.gain)babyStream.gain.gain.value=value};$('#baby-start').onclick=async()=>{stopBabyStream();if(d.simulated){toast('Live microphone streaming is unavailable in the mock backend',true);return}const source=$('#baby-source').value;const context=new(window.AudioContext||window.webkitAudioContext)();babyStream.context=context;babyStream.controller=new AbortController();babyStream.nextTime=context.currentTime+0.05;const gain=context.createGain();gain.gain.value=Number($('#baby-volume').value)/100;gain.connect(context.destination);babyStream.gain=gain;$('#baby-status').textContent='Connecting…';$('#baby-dot').classList.add('ok');try{await context.resume();const response=await fetch(`/api/v1/baby-monitor/stream?source=${source}`,{headers:{Accept:'application/octet-stream',...(state.token?{Authorization:'Bearer '+state.token}:{})},signal:babyStream.controller.signal});if(!response.ok)throw new Error(`Microphone stream failed (${response.status})`);$('#baby-status').textContent='Listening';const reader=response.body.getReader();let carry=new Uint8Array(0);while(true){const chunk=await reader.read();if(chunk.done)break;const bytes=new Uint8Array(carry.length+chunk.value.length);bytes.set(carry);bytes.set(chunk.value,carry.length);const frames=bytes.length-(bytes.length%2);if(frames<2){carry=bytes;continue}carry=bytes.slice(frames);const audio=context.createBuffer(1,frames/2,16000);const samples=audio.getChannelData(0);const view=new DataView(bytes.buffer,bytes.byteOffset,frames);for(let i=0;i<samples.length;i++)samples[i]=view.getInt16(i*2,true)/32768;const node=context.createBufferSource();node.buffer=audio;node.connect(gain);const start=Math.max(babyStream.nextTime,context.currentTime+0.02);node.start(start);babyStream.nextTime=start+audio.duration}}}catch(e){if(e.name!=='AbortError'){console.error(e);toast(e.message,true)}stopBabyStream()}};$('#baby-stop').onclick=stopBabyStream}
+async function babyMonitorPage(){
+  const d=await api('/baby-monitor');
+  if(!d.sources.length){
+    content.innerHTML='<div class="settings-grid">'+panel('Baby monitor',unsupported('No Echo microphone array is currently available.'))+
+      panel('Privacy','<p class="muted">Audio is streamed directly from this browser and is not recorded by LibreEcho.</p>')+'</div>';
+    return;
+  }
+  const options=d.sources.map(x=>'<option value="'+esc(x.id)+'">'+esc(x.name)+' · card '+x.card+', device '+x.device+'</option>').join('');
+  const first=d.sources[0];
+  const microphoneOptions=source=> (source.microphones||[{channel:0,name:'Microphone 1'}])
+    .map(x=>'<option value="'+x.channel+'">'+esc(x.name)+'</option>').join('');
+  content.innerHTML='<div class="settings-grid">'+
+    panel('Microphone source','<label class="field"><span>Capture endpoint</span><select id="baby-source">'+options+
+      '</select></label><label class="field"><span>Microphone</span><select id="baby-channel">'+microphoneOptions(first)+
+      '</select></label><p class="muted">The Echo array exposes nine packed 24-bit microphone channels at 16 kHz. Select one channel to monitor locally.</p>'+
+      (d.simulated?'<div class="notice unsupported"><strong>Preview only</strong><span>The mock backend exposes a source list but cannot produce live microphone audio.</span></div>':'')+
+      '</div>')+
+    panel('Playback',range('Browser playback volume',35,'baby-volume')+
+      '<div class="status-line"><span class="status-dot" id="baby-dot"></span><span id="baby-status" aria-live="polite">Stopped</span></div>'+
+      '<div class="button-row">'+action('Start listening','baby-start','primary-btn')+action('Stop','baby-stop')+'</div>'+
+      '<p class="muted">Listening starts only when you press the button. Closing this page stops capture.</p>')+
+    '</div>';
+  bindRange();
+  const sourceSelect=$('#baby-source');
+  const channelSelect=$('#baby-channel');
+  const updateChannels=()=>{
+    const source=d.sources.find(x=>x.id===sourceSelect.value)||first;
+    channelSelect.innerHTML=microphoneOptions(source);
+  };
+  sourceSelect.onchange=updateChannels;
+  $('#baby-volume').oninput=()=>{
+    const value=Number($('#baby-volume').value)/100;
+    $('#baby-volume').parentElement.querySelector('output').textContent=$('#baby-volume').value+'%';
+    if(babyStream.gain)babyStream.gain.gain.value=value;
+  };
+  $('#baby-start').onclick=async()=>{
+    stopBabyStream();
+    if(d.simulated){toast('Live microphone streaming is unavailable in the mock backend',true);return}
+    const source=d.sources.find(x=>x.id===sourceSelect.value)||first;
+    const channel=Number(channelSelect.value)||0;
+    const channels=Number(source.channels)||1;
+    const bits=Number(source.bits)||16;
+    const rate=Number(source.rate)||16000;
+    const bytesPerSample=bits===24?3:2;
+    const frameBytes=channels*bytesPerSample;
+    const context=new(window.AudioContext||window.webkitAudioContext)();
+    babyStream.context=context;
+    babyStream.controller=new AbortController();
+    babyStream.nextTime=context.currentTime+0.05;
+    const gain=context.createGain();
+    gain.gain.value=Number($('#baby-volume').value)/100;
+    gain.connect(context.destination);
+    babyStream.gain=gain;
+    $('#baby-status').textContent='Connecting…';
+    $('#baby-dot').classList.add('ok');
+    try{
+      await context.resume();
+      const response=await fetch('/api/v1/baby-monitor/stream?source='+encodeURIComponent(source.id)+'&channel='+channel,{
+        headers:{Accept:'application/octet-stream',...(state.token?{Authorization:'Bearer '+state.token}:{})},
+        signal:babyStream.controller.signal
+      });
+      if(!response.ok)throw new Error('Microphone stream failed ('+response.status+')');
+      $('#baby-status').textContent='Listening';
+      const reader=response.body.getReader();
+      let carry=new Uint8Array(0);
+      while(true){
+        const chunk=await reader.read();
+        if(chunk.done)break;
+        const bytes=new Uint8Array(carry.length+chunk.value.length);
+        bytes.set(carry);
+        bytes.set(chunk.value,carry.length);
+        const frames=Math.floor(bytes.length/frameBytes);
+        const used=frames*frameBytes;
+        if(!frames){carry=bytes;continue}
+        carry=bytes.slice(used);
+        const audio=context.createBuffer(1,frames,rate);
+        const samples=audio.getChannelData(0);
+        for(let i=0;i<frames;i++){
+          const offset=i*frameBytes+channel*bytesPerSample;
+          let value;
+          if(bits===24){
+            value=bytes[offset]|(bytes[offset+1]<<8)|(bytes[offset+2]<<16);
+            if(value&0x800000)value|=-16777216;
+            samples[i]=value/8388608;
+          }else{
+            value=bytes[offset]|(bytes[offset+1]<<8);
+            if(value&0x8000)value|=-65536;
+            samples[i]=value/32768;
+          }
+        }
+        const node=context.createBufferSource();
+        node.buffer=audio;
+        node.connect(gain);
+        const start=Math.max(babyStream.nextTime,context.currentTime+0.02);
+        node.start(start);
+        babyStream.nextTime=start+audio.duration;
+      }
+    }catch(e){
+      if(e.name!=='AbortError'){console.error(e);toast(e.message,true)}
+      stopBabyStream();
+    }
+  };
+  $('#baby-stop').onclick=stopBabyStream;
+}
 async function wakePage(){let w;try{w=await api('/wake-word')}catch(e){if(/not available|not supported/i.test(e.message)){content.innerHTML=`<div class="settings-grid">${panel('Wake-word engine',unsupported('The wake-word adapter is not installed in this image. No microphone processing is running.'))}</div>`;return}throw e}content.innerHTML=`<div class="settings-grid">${panel('Wake-word engine',toggle('Enable wake-word detection',w.enabled,'wake-enabled',true)+select('Active wake word',w.wake_word,'wake-word',['LibreEcho','Computer','Echo','Custom model'])+range('Detection sensitivity',w.sensitivity,'sensitivity')+field('Detection cooldown (ms)',w.cooldown_ms,'cooldown','number','min="250" max="10000" disabled')+`<div class="button-row">${saveButton('save-wake')}${action('Simulate detection','wake-test')}</div>`)}${panel('Local processing',`<div class="privacy-callout">✓ Audio remains on this device</div><dl class="facts"><dt>Model status</dt><dd class="connected">${esc(w.model_status)}</dd><dt>Detections</dt><dd>${w.detected_count}</dd><dt>Estimated CPU cost</dt><dd>${w.cpu_cost_percent}%</dd><dt>Estimated memory cost</dt><dd>${w.memory_cost_mb} MB</dd></dl>`)}</div>`;bindRange();bindDirty(['#wake-word','#sensitivity'],'#save-wake');$('#save-wake').onclick=()=>mutate('/wake-word',{wake_word:$('#wake-word').value,sensitivity:+$('#sensitivity').value},'Wake-word changes saved');$('#wake-test').onclick=()=>post('/wake-word/test',{},'Wake word detected')}
 function ledRing(l){const physical=Array.isArray(l.pixels)&&l.pixels.length===12,colours=physical?l.pixels:Array.from({length:24},()=>l.colour),count=colours.length,opacity=physical?1:Math.max(0,Math.min(1,Number(l.brightness??0)/100));const dots=colours.map((colour,i)=>{const angle=(i/count)*Math.PI*2-Math.PI/2,x=50+38*Math.cos(angle),y=50+38*Math.sin(angle);return `<circle class="led-pixel" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${physical?'6.4':'5.5'}" fill="${rgb(colour)}" opacity="${opacity.toFixed(2)}"></circle>`}).join('');const label=l.pattern_active?`Pattern · ${esc(l.pattern||'pattern')}`:l.visualizer_active?`Music visualizer · ${esc(l.visualizer_mood||'balanced')}`:l.animation_active?`Animating · ${esc(l.animation_profile||'profile')}`:'Steady',moving=l.animation_active||l.pattern_active;return `<div class="led-ring-view${moving?' animating':''}${l.visualizer_active?' reactive':''}" role="img" aria-label="${esc(label)} LED ring"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="led-ring-track" cx="50" cy="50" r="38"></circle>${dots}<circle class="led-ring-centre" cx="50" cy="50" r="24"></circle></svg><span>${esc(label)}</span></div>`}
 function updateLedVisual(l){const ring=$('.led-ring-view');if(ring)ring.outerHTML=ledRing(l);const preview=$('.led-preview');if(preview)preview.style.setProperty('--led',rgb(l.colour))}
