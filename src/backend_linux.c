@@ -1137,6 +1137,35 @@ static int bluetooth_pairing_mode(struct le_backend *b, int enabled)
     return bluetooth_controller_setting(b, "pairing_mode", enabled);
 }
 
+static int airplay(struct le_backend *b, struct le_airplay_state *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc;
+    (void)b;
+    rc = adapter_command(LE_ADAPTER_AIRPLAY_SOCK, "status", NULL,
+                         response, sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    memset(o, 0, sizeof(*o));
+    o->available = 0;
+    (void)json_get_bool(response, "available", &o->available);
+    (void)json_get_bool(response, "enabled", &o->enabled);
+    (void)json_get_bool(response, "nqptp_running", &o->nqptp_running);
+    (void)json_get_bool(response, "shairport_running", &o->shairport_running);
+    return LE_OK;
+}
+
+static int airplay_set(struct le_backend *b, int enabled)
+{
+    char args[32];
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}",
+             enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_enabled", args);
+}
+
 static int linux_reboot(struct le_backend *b)
 {
     (void)b;
@@ -1204,6 +1233,7 @@ static const struct le_backend_ops ops = {
     bluetooth, bluetooth_set, bluetooth_scan, bluetooth_pair,
     bluetooth_unpair, bluetooth_disconnect, bluetooth_pairing_response,
     bluetooth_discoverable, bluetooth_connectable, bluetooth_pairing_mode,
+    airplay, airplay_set,
     linux_reboot, linux_shutdown, factory_reset, tick, control
 };
 

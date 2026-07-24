@@ -31,6 +31,7 @@
 #define LE_ADAPTER_LED_SOCK      "/run/libreecho/led.sock"
 #define LE_ADAPTER_WAKEWORD_SOCK "/run/libreecho/wakeword.sock"
 #define LE_ADAPTER_BLUETOOTH_SOCK "/run/libreecho/bluetooth.sock"
+#define LE_ADAPTER_AIRPLAY_SOCK   "/run/libreecho/airplay.sock"
 
 /* Result codes shared between client and daemon sides. */
 enum le_adapter_result {

@@ -34,6 +34,7 @@ struct le_bluetooth_state {
     struct le_bluetooth_device known[LE_MAX_BLUETOOTH_DEVICES];
     struct le_bluetooth_pairing pending_pairing;
 };
+struct le_airplay_state { int available, enabled, nqptp_running, shairport_running; };
 struct le_backend;
 
 int le_backend_init(struct le_backend **out, const char *mode, const char *mock_path, const char *config_path, unsigned seed);
@@ -47,6 +48,7 @@ int le_get_network_state(struct le_backend*,struct le_network_state*); int le_sc
 int le_get_wake_word_state(struct le_backend*,struct le_wake_word_state*); int le_set_wake_word(struct le_backend*,const char*); int le_set_wake_word_sensitivity(struct le_backend*,int); int le_test_wake_word(struct le_backend*);
 int le_get_bluetooth_state(struct le_backend*,struct le_bluetooth_state*); int le_set_bluetooth_enabled(struct le_backend*,int);
 int le_bluetooth_scan(struct le_backend*,int); int le_bluetooth_pair(struct le_backend*,const char*,int,int); int le_bluetooth_unpair(struct le_backend*,const char*,int); int le_bluetooth_disconnect(struct le_backend*,const char*,int); int le_bluetooth_pairing_response(struct le_backend*,const char*,int,const char*,unsigned int,const char*); int le_bluetooth_set_discoverable(struct le_backend*,int); int le_bluetooth_set_connectable(struct le_backend*,int); int le_bluetooth_set_pairing_mode(struct le_backend*,int);
+int le_get_airplay_state(struct le_backend*,struct le_airplay_state*); int le_set_airplay_enabled(struct le_backend*,int);
 int le_reboot(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);
 int le_backend_tick(struct le_backend*); int le_backend_mock_control(struct le_backend*,const char*,const char*);
 

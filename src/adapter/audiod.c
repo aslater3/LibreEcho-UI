@@ -796,7 +796,7 @@ static void audio_init(struct audio_hw *audio, int card)
     (void)snprintf(audio->ctl_path, sizeof(audio->ctl_path),
                    "/dev/snd/controlC%d", card);
     (void)snprintf(audio->pcm_path, sizeof(audio->pcm_path),
-                   "/dev/snd/pcmC%dD0p", card);
+                   "/dev/snd/pcmC%dD23p", card);
 
     audio->ctl_fd = open(audio->ctl_path, O_RDWR | O_CLOEXEC);
     if (audio->ctl_fd < 0)
@@ -874,69 +874,114 @@ static int write_tone_fd(int fd)
 static int play_tone_with_aplay(int card)
 {
     int pipe_fds[2];
-    pid_t writer;
+    pid_t player;
     char device[32];
     char *const argv[] = { (char *)"aplay", (char *)"-q", (char *)"-D",
                            device, (char *)"-t", (char *)"raw", (char *)"-f",
                            (char *)"S16_LE", (char *)"-c", (char *)"2",
                            (char *)"-r", (char *)"48000", NULL };
+    int result;
+    int status;
 
     if (pipe(pipe_fds) < 0)
         return -1;
     (void)snprintf(device, sizeof(device), "hw:%d,0", card);
-    writer = fork();
-    if (writer < 0) {
+    player = fork();
+    if (player < 0) {
         close(pipe_fds[0]);
         close(pipe_fds[1]);
         return -1;
     }
-    if (writer == 0) {
-        close(pipe_fds[0]);
-        (void)write_tone_fd(pipe_fds[1]);
+    if (player == 0) {
         close(pipe_fds[1]);
-        _exit(0);
-    }
-    close(pipe_fds[1]);
-    if (dup2(pipe_fds[0], STDIN_FILENO) < 0) {
+        if (dup2(pipe_fds[0], STDIN_FILENO) < 0)
+            _exit(127);
         close(pipe_fds[0]);
-        (void)waitpid(writer, NULL, 0);
-        return -1;
+        execvp("aplay", argv);
+        _exit(127);
     }
     close(pipe_fds[0]);
-    execvp("aplay", argv);
-    (void)waitpid(writer, NULL, 0);
-    return -1;
+    result = write_tone_fd(pipe_fds[1]);
+    close(pipe_fds[1]);
+    do {
+        if (waitpid(player, &status, 0) < 0 && errno == EINTR)
+            continue;
+        break;
+    } while (1);
+    if (result < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return -1;
+    return 0;
+}
+
+static int play_tone_with_tinyplay(int card)
+{
+    static const unsigned char wav_header[44] = {
+        'R','I','F','F', 0x24,0xdc,0x05,0x00, 'W','A','V','E',
+        'f','m','t',' ', 16,0,0,0, 1,0, 2,0,
+        0x80,0xbb,0,0, 0,0xee,0x02,0, 4,0, 16,0,
+        'd','a','t','a', 0,0xdc,0x05,0x00
+    };
+    char path[] = "/tmp/libreecho-test-tone-XXXXXX";
+    char card_arg[16];
+    char *const argv[] = { (char *)"/sbin/tinyplay", path,
+                           (char *)"-D", card_arg, (char *)"-d", (char *)"23",
+                           (char *)"-p", (char *)"1024", (char *)"-n", (char *)"2", NULL };
+    int fd;
+    pid_t pid;
+    pid_t waited;
+    int status = 0;
+    ssize_t written;
+
+    fd = mkstemp(path);
+    if (fd < 0)
+        return -1;
+    written = write(fd, wav_header, sizeof(wav_header));
+    if (written != (ssize_t)sizeof(wav_header) || write_tone_fd(fd) < 0) {
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    if (close(fd) < 0) {
+        unlink(path);
+        return -1;
+    }
+    (void)snprintf(card_arg, sizeof(card_arg), "%d", card);
+    pid = fork();
+    if (pid < 0) {
+        unlink(path);
+        return -1;
+    }
+    if (pid == 0) {
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    unlink(path);
+    return waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
 static int play_tone_worker(const struct audio_hw *audio)
 {
-    int fd;
-    int result;
-
-    fd = open(audio->pcm_path, O_WRONLY | O_CLOEXEC);
-    if (fd >= 0) {
-        result = write_tone_fd(fd);
-        close(fd);
-        if (result == 0)
-            return 0;
-    }
+    int result = play_tone_with_tinyplay(audio->card);
+    if (result == 0)
+        return 0;
     return play_tone_with_aplay(audio->card);
 }
 
 static int start_test_tone(const struct audio_hw *audio)
 {
-    pid_t pid;
-
     if (!audio->output_available && access(audio->pcm_path, W_OK) < 0)
         return -1;
-    pid = fork();
-    if (pid < 0)
-        return -1;
-    if (pid == 0) {
-        (void)play_tone_worker(audio);
-        _exit(0);
-    }
-    return 0;
+    /*
+     * Keep this request synchronous.  The old forked implementation always
+     * returned success and discarded the child's playback error, so the UI
+     * reported "playing" even when the PCM device could not be opened.
+     * A two-second diagnostic tone is short enough to run within the adapter
+     * request timeout and gives callers an honest result.
+     */
+    return play_tone_worker(audio);
 }
 
 static int queue_output(struct client *client, const char *message, size_t length)
