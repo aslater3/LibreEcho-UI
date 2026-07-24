@@ -54,6 +54,7 @@
 # define SNDRV_CTL_ELEM_ID_NAME_MAXLEN 44
 # define SNDRV_CTL_ELEM_TYPE_BOOLEAN 1
 # define SNDRV_CTL_ELEM_TYPE_INTEGER 2
+# define SNDRV_CTL_ELEM_TYPE_ENUMERATED 3
 # define SNDRV_CTL_ELEM_TYPE_INTEGER64 6
 # define SNDRV_CTL_ELEM_ACCESS_READ  (1U << 0)
 # define SNDRV_CTL_ELEM_ACCESS_WRITE (1U << 1)
@@ -160,6 +161,7 @@ struct audio_hw {
     struct audio_control master;
     struct audio_control capture;
     struct audio_control capture_switch;
+    struct audio_control amplifier_switch;
     int have_card_info;
     int output_available;
     int volume;
@@ -524,6 +526,19 @@ static void consider_control(struct audio_control *selected,
     selected->name[sizeof(selected->name) - 1] = '\0';
 }
 
+static void select_control(struct audio_control *selected,
+                           const struct snd_ctl_elem_id *id,
+                           const struct snd_ctl_elem_info *info)
+{
+    memset(selected, 0, sizeof(*selected));
+    selected->found = 1;
+    selected->writable = (info->access & SNDRV_CTL_ELEM_ACCESS_WRITE) != 0;
+    selected->id = *id;
+    selected->info = *info;
+    memcpy(selected->name, id->name, sizeof(selected->name));
+    selected->name[sizeof(selected->name) - 1] = '\0';
+}
+
 static int enumerate_controls(struct audio_hw *audio)
 {
     struct snd_ctl_elem_list list;
@@ -557,6 +572,11 @@ static int enumerate_controls(struct audio_hw *audio)
         info.id = ids[i];
         if (ioctl(audio->ctl_fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0)
             continue;
+        if (info.type == SNDRV_CTL_ELEM_TYPE_ENUMERATED &&
+            !strcmp((const char *)ids[i].name, "Ext_Speaker_Amp_Switch")) {
+            select_control(&audio->amplifier_switch, &ids[i], &info);
+            continue;
+        }
         if (info.type != SNDRV_CTL_ELEM_TYPE_BOOLEAN &&
             info.type != SNDRV_CTL_ELEM_TYPE_INTEGER &&
             info.type != SNDRV_CTL_ELEM_TYPE_INTEGER64)
@@ -586,6 +606,8 @@ static int read_control_value(const struct audio_hw *audio,
     else if (control->info.type == SNDRV_CTL_ELEM_TYPE_BOOLEAN ||
              control->info.type == SNDRV_CTL_ELEM_TYPE_INTEGER)
         *value = elem.value.integer.value[0];
+    else if (control->info.type == SNDRV_CTL_ELEM_TYPE_ENUMERATED)
+        *value = elem.value.enumerated.item[0];
     else
         return -1;
     return 0;
@@ -776,6 +798,30 @@ static void refresh_state(struct audio_hw *audio)
         audio->muted = audio->capture_switch.mute_semantics ? (value != 0) : (value == 0);
 }
 
+static int amplifier_active(const struct audio_hw *audio)
+{
+    char status_path[96];
+    char status[64];
+    int fd;
+    ssize_t n;
+
+    long long value;
+
+    if (read_control_value(audio, &audio->amplifier_switch, &value) == 0)
+        return value != 0;
+    (void)snprintf(status_path, sizeof(status_path),
+                   "/proc/asound/card%d/pcm23p/sub0/status", audio->card);
+    fd = open(status_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    n = read(fd, status, sizeof(status) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    status[n] = '\0';
+    return strstr(status, "closed") == NULL;
+}
+
 static int audio_set_volume(struct audio_hw *audio, int volume)
 {
     char setting[16];
@@ -840,7 +886,9 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->gain = 65;
     audio->muted = 0;
     audio->notification_volume = audio->volume;
-    audio->startup_sound = access("/etc/libreecho/no-startup-audio", F_OK) == 0 ? 0 : 1;
+    /* Boot playback is a hard-disabled image policy.  Keep the UI truthful
+     * even when an older persistent config still requests a startup sound. */
+    audio->startup_sound = 0;
     (void)snprintf(audio->ctl_path, sizeof(audio->ctl_path),
                    "/dev/snd/controlC%d", card);
     (void)snprintf(audio->pcm_path, sizeof(audio->pcm_path),
@@ -860,7 +908,7 @@ static void audio_init(struct audio_hw *audio, int card)
     refresh_state(audio);
     audio->output_available = audio->have_card_info && audio->master.found &&
                               access(audio->pcm_path, F_OK) == 0;
-    audio->amplifier_on = audio->output_available;
+    audio->amplifier_on = 0;
 }
 
 static void audio_destroy(struct audio_hw *audio)
@@ -918,7 +966,7 @@ static int write_tone_fd(int fd)
                 do {
                     rc = poll(&pfd, 1, 1000);
                 } while (rc < 0 && errno == EINTR);
-                if (rc > 0)
+                if (rc >= 0)
                     continue;
             }
             if (n <= 0)
@@ -981,6 +1029,8 @@ static int handle_request(struct audio_hw *audio, char *message,
     le_log_debug("audiod: cmd=\"%s\" id=%lu", command, id);
 
     if (!strcmp(command, "status")) {
+        refresh_state(audio);
+        audio->amplifier_on = amplifier_active(audio);
         (void)snprintf(data, sizeof(data),
                        "{\"volume\":%d,\"microphone_gain\":%d,"
                        "\"notification_volume\":%d,\"muted\":%s,"
