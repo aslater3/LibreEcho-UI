@@ -54,8 +54,8 @@ async function babyMonitorPage(){
   content.innerHTML='<div class="settings-grid">'+
     panel('Microphone source','<label class="field"><span>Capture endpoint</span><select id="baby-source">'+options+
       '</select></label><label class="field"><span>Microphone</span><select id="baby-channel">'+microphoneOptions(first)+
-      '</select></label><p class="muted">The Echo array exposes nine raw packed 24-bit capture lanes at 16 kHz. Select one lane to monitor locally.</p>'+
-      '<div class="notice unsupported"><strong>Stock calibration</strong><span>'+(d.calibration&&d.calibration.complete?'Seven logical mic gains were found in '+esc(d.calibration.source)+'. Raw-lane playback does not apply them because the stock AFE/ASP lane-to-logical mapping is not available yet.':'No complete seven-entry miccal set is available; using the stock fallback value 16384 for metadata only.')+'</span></div>'+
+      '</select></label><p class="muted">The Echo array transports nine packed 24-bit lanes at 16 kHz. Hardware testing confirms that lanes 1–7 carry the seven microphones; lanes 8–9 are inactive or reserved.</p>'+
+      '<div class="notice unsupported"><strong>Stock calibration</strong><span>'+(d.calibration&&d.calibration.complete?'Seven logical mic gains were found in '+esc(d.calibration.source)+'. Raw monitoring remains uncalibrated until the microphones’ logical geometry order is verified.':'No complete seven-entry miccal set is available; using the stock fallback value 16384 for metadata only.')+'</span></div>'+
       (d.simulated?'<div class="notice unsupported"><strong>Preview only</strong><span>The mock backend exposes a source list but cannot produce live microphone audio.</span></div>':'')+
       '</div>')+
     panel('Playback',range('Browser playback volume',35,'baby-volume')+
@@ -83,6 +83,8 @@ async function babyMonitorPage(){
     const channel=Number(channelSelect.value)||0;
     const channels=Number(source.channels)||1;
     const bits=Number(source.bits)||16;
+    const validBits=Math.max(2,Math.min(bits,Number(source.valid_bits)||bits));
+    const sampleScale=2**(validBits-1);
     const rate=Number(source.rate)||16000;
     const bytesPerSample=bits===24?3:2;
     const frameBytes=channels*bytesPerSample;
@@ -124,11 +126,11 @@ async function babyMonitorPage(){
           if(bits===24){
             value=bytes[offset]|(bytes[offset+1]<<8)|(bytes[offset+2]<<16);
             if(value&0x800000)value|=-16777216;
-            samples[i]=value/8388608;
+            samples[i]=Math.max(-1,Math.min(1,value/sampleScale));
           }else{
             value=bytes[offset]|(bytes[offset+1]<<8);
             if(value&0x8000)value|=-65536;
-            samples[i]=value/32768;
+            samples[i]=Math.max(-1,Math.min(1,value/sampleScale));
           }
         }
         const node=context.createBufferSource();
