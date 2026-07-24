@@ -361,7 +361,8 @@ Disconnect from WiFi.
 
 #### GET /api/v1/system
 
-Returns system information and OTA state.
+Returns system information, NTP synchronization, PMIC RTC persistence, and OTA
+state. The hardware clock is maintained in UTC.
 
 **Response:**
 ```json
@@ -378,10 +379,15 @@ Returns system information and OTA state.
       "progress": 0,
       "rollback_available": false
     },
-    "timezone": "Europe/London",
-    "ntp": false,
-    "clock_valid": false,
-    "clock_source": "unset"
+    "timezone": "UTC",
+    "ntp": true,
+    "ntp_state": "synchronized",
+    "ntp_servers": "time.cloudflare.com,time.nist.gov,ntp1.npl.co.uk,ntp2.npl.co.uk",
+    "last_sync_epoch": 1784927059,
+    "clock_valid": true,
+    "clock_source": "ntp",
+    "rtc_available": true,
+    "rtc_persisted": true
   },
   "error": null
 }

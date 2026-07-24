@@ -20,6 +20,7 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
     -o build/test-micd
 ./build/test-micd
+sh tests/test_timed.sh
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!
 cleanup(){ if [ "${pid:-0}" -gt 1 ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; }
@@ -66,6 +67,18 @@ echo 'persistence: ok'
 kill "$pid"
 wait "$pid" 2>/dev/null || true
 pid=0
+cat >./build/test-time.status <<'EOF'
+state=synchronized
+source=ntp
+synchronized=1
+clock_valid=1
+rtc_available=1
+rtc_persisted=1
+last_sync_epoch=1700000000
+config_source=image
+servers=time.cloudflare.com,time.nist.gov
+EOF
+LIBREECHO_TIME_STATUS=./build/test-time.status \
 ./build/libreecho-web --backend linux --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" >./build/test-linux.log 2>&1 &
 pid=$!
 sleep 1
@@ -75,6 +88,11 @@ grep -q 'not_supported' /tmp/le-linux-audio.out
 code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/config/export")
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
+curl -fsS "$URL/api/v1/system" | jq -e \
+    '.ok and .data.ntp == true and .data.ntp_state == "synchronized" and
+     .data.clock_source == "ntp" and .data.rtc_available == true and
+     .data.rtc_persisted == true and .data.last_sync_epoch == 1700000000 and
+     .data.ntp_servers == "time.cloudflare.com,time.nist.gov"' >/dev/null
 echo 'linux unsupported: ok'
 kill "$pid"
 wait "$pid" 2>/dev/null || true
