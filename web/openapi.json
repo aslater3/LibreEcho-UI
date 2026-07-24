@@ -29,6 +29,7 @@
       "get":{"tags":["Audio"],"summary":"Read audio state","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}},
       "put":{"tags":["Audio"],"summary":"Update volume or microphone state","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}
     },
+    "/playback": {"get":{"tags":["Audio"],"summary":"Read unified playback source, priority-bus state and optional media metadata","responses":{"200":{"$ref":"#/components/responses/Success"},"503":{"$ref":"#/components/responses/Error"}}}},
     "/audio/test": {"post":{"tags":["Audio"],"summary":"Play a test tone","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
     "/bluetooth": {
       "get":{"tags":["Bluetooth"],"summary":"Read Bluetooth controller, discovery, pairing and known-device state","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}},
@@ -43,7 +44,7 @@
     "/bluetooth/pairing/response": {"post":{"tags":["Bluetooth"],"summary":"Answer a pending confirmation, passkey or PIN request","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}},
     "/led": {
       "get":{"tags":["LED and buttons"],"summary":"Read LED state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
-      "put":{"tags":["LED and buttons"],"summary":"Update LED colour or brightness","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+      "put":{"tags":["LED and buttons"],"summary":"Update LED colour, brightness or music visualizer preference","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
     },
     "/led/test": {"post":{"tags":["LED and buttons"],"summary":"Run the LED test","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/buttons": {

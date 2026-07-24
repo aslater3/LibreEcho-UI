@@ -1492,7 +1492,8 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
     if (snprintf(command, sizeof(command), "ENABLE_NETWORK %d\n", id) >=
             (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
         snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", id) >=
-            (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
+            (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
+        wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0)
         return -1;
     ctx->network_id = id;
     return 0;

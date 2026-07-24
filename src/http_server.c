@@ -121,7 +121,7 @@ if(strstr(q.path,"/system/")&&strcmp(q.method,"GET")&&last_destructive&&now-last
 goto done;
 }if(strstr(q.path,"/system/")&&strcmp(q.method,"GET"))last_destructive=now;
 api_handle(api,&q,&r);
-if(r.status>=200&&r.status<300&&!strcmp(q.method,"PUT")&&!strncmp(q.path,"/api/v1/integrations/",21)&&api_persist_configuration(api)){r.status=503;strcpy(r.type,"application/json; charset=utf-8");strcpy(r.body,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Integration setting could not be saved\"}}");r.length=strlen(r.body);}
+if(r.status>=200&&r.status<300&&!strcmp(q.method,"PUT")&&(!strcmp(q.path,"/api/v1/audio")||!strcmp(q.path,"/api/v1/led")||!strcmp(q.path,"/api/v1/network")||!strcmp(q.path,"/api/v1/wake-word")||!strcmp(q.path,"/api/v1/buttons")||!strcmp(q.path,"/api/v1/privacy")||!strncmp(q.path,"/api/v1/integrations/",21))&&api_persist_configuration(api)){r.status=503;strcpy(r.type,"application/json; charset=utf-8");strcpy(r.body,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Configuration change could not be saved\"}}");r.length=strlen(r.body);}
 response(c->fd,r.status,r.type,r.body,r.length);
 if(body_len)memset(body,0,body_len);
 }else if(strcmp(q.method,"GET")&&strcmp(q.method,"HEAD"))response(c->fd,405,"text/plain","Method not allowed",18);

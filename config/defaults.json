@@ -1,6 +1,7 @@
 {
   "device_name": "LibreEcho",
   "hostname": "libreecho",
+  "hostname_persisted": false,
   "volume": 50,
   "microphone_gain": 65,
   "microphone_muted": false,
@@ -8,6 +9,7 @@
   "led_g": 216,
   "led_b": 118,
   "led_brightness": 70,
+  "led_visualizer_enabled": true,
   "wake_word": "LibreEcho",
   "wake_enabled": true,
   "wake_sensitivity": 68,

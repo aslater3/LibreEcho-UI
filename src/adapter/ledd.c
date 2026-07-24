@@ -47,12 +47,20 @@
 #define MAX_PATH 512
 #define FRAME_MS 33
 #define IS31_CHANNELS 36
+#define RING_PIXELS 12
+#define VISUALIZER_TIMEOUT_SECONDS 0.42
 
 struct colour {
     unsigned int r;
     unsigned int g;
     unsigned int b;
     unsigned int brightness;
+};
+
+struct pixel {
+    unsigned int r;
+    unsigned int g;
+    unsigned int b;
 };
 
 struct led_state {
@@ -137,9 +145,37 @@ struct daemon_context {
     char pattern_previous_owner[32];
     struct colour pattern_saved;
     int pattern_saved_animation;
+    int visualizer_enabled;
+    int visualizer_active;
+    char visualizer_owner[32];
+    unsigned int visualizer_brightness;
+    unsigned int visualizer_levels[RING_PIXELS];
+    unsigned int visualizer_smoothed[RING_PIXELS];
+    unsigned int visualizer_bass_floor;
+    unsigned int visualizer_beat;
+    unsigned int visualizer_impact;
+    unsigned int visualizer_energy_ema;
+    unsigned int visualizer_flux_ema;
+    int visualizer_mood;
+    int visualizer_mood_candidate;
+    unsigned int visualizer_mood_candidate_frames;
+    double visualizer_last_frame;
+    double visualizer_started;
+    struct pixel rendered_pixels[RING_PIXELS];
 };
 
 enum pattern_kind { PATTERN_NONE = 0, PATTERN_PULSE, PATTERN_FLASH };
+enum visualizer_mood {
+    VISUALIZER_MOOD_CALM = 0,
+    VISUALIZER_MOOD_BALANCED,
+    VISUALIZER_MOOD_ENERGETIC,
+    VISUALIZER_MOOD_INTENSE,
+    VISUALIZER_MOOD_COUNT
+};
+
+static const char *const visualizer_mood_names[VISUALIZER_MOOD_COUNT] = {
+    "calm", "balanced", "energetic", "intense"
+};
 
 static volatile sig_atomic_t stop_requested;
 
@@ -225,22 +261,17 @@ static int write_number_file(const char *path, unsigned int value)
 
 static unsigned int scale_channel(unsigned int channel, unsigned int brightness);
 
-static int write_is31_frame(const struct hardware *hw,
-                            unsigned int r, unsigned int g, unsigned int b,
-                            unsigned int brightness)
+static int write_is31_pixels(const struct hardware *hw,
+                             const struct pixel pixels[RING_PIXELS])
 {
     char frame[IS31_CHANNELS * 2 + 2];
-    unsigned int channels[3];
     size_t i;
     int used = 0;
 
-    channels[0] = scale_channel(r, brightness);
-    channels[1] = scale_channel(g, brightness);
-    channels[2] = scale_channel(b, brightness);
-    for (i = 0; i < IS31_CHANNELS / 3; i++) {
+    for (i = 0; i < RING_PIXELS; i++) {
         int added = snprintf(frame + used, sizeof(frame) - (size_t)used,
-                             "%02x%02x%02x", channels[0], channels[1],
-                             channels[2]);
+                             "%02x%02x%02x", pixels[i].r, pixels[i].g,
+                             pixels[i].b);
         if (added < 0 || (size_t)added >= sizeof(frame) - (size_t)used)
             return -1;
         used += added;
@@ -264,8 +295,16 @@ static int hardware_write_rgb(const struct hardware *hw, unsigned int r,
     char text[80];
     int errors = 0;
 
-    if (hw->kind == HW_IS31FL3236)
-        return write_is31_frame(hw, r, g, b, brightness);
+    if (hw->kind == HW_IS31FL3236) {
+        struct pixel pixels[RING_PIXELS];
+        size_t i;
+        for (i = 0; i < RING_PIXELS; i++) {
+            pixels[i].r = scale_channel(r, brightness);
+            pixels[i].g = scale_channel(g, brightness);
+            pixels[i].b = scale_channel(b, brightness);
+        }
+        return write_is31_pixels(hw, pixels);
+    }
     if (hw->kind != HW_SYSFS)
         return 0;
 
@@ -300,9 +339,42 @@ static int hardware_write_rgb(const struct hardware *hw, unsigned int r,
     return errors ? -1 : 0;
 }
 
-static void hardware_apply(const struct hardware *hw, const struct colour *c)
+static int hardware_write_pixels(const struct hardware *hw,
+                                 const struct pixel pixels[RING_PIXELS])
 {
-    if (hardware_write_rgb(hw, c->r, c->g, c->b, c->brightness) != 0)
+    unsigned int r = 0, g = 0, b = 0;
+    size_t i;
+
+    if (hw->kind == HW_IS31FL3236)
+        return write_is31_pixels(hw, pixels);
+    for (i = 0; i < RING_PIXELS; i++) {
+        r += pixels[i].r;
+        g += pixels[i].g;
+        b += pixels[i].b;
+    }
+    return hardware_write_rgb(hw, (r + RING_PIXELS / 2) / RING_PIXELS,
+                              (g + RING_PIXELS / 2) / RING_PIXELS,
+                              (b + RING_PIXELS / 2) / RING_PIXELS, 100);
+}
+
+static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
+{
+    size_t i;
+
+    for (i = 0; i < RING_PIXELS; i++) {
+        ctx->rendered_pixels[i].r = scale_channel(c->r, c->brightness);
+        ctx->rendered_pixels[i].g = scale_channel(c->g, c->brightness);
+        ctx->rendered_pixels[i].b = scale_channel(c->b, c->brightness);
+    }
+    if (hardware_write_pixels(&ctx->hw, ctx->rendered_pixels) != 0)
+        le_log_warn( "LED hardware write failed; retaining state in memory");
+}
+
+static void hardware_apply_pixels(struct daemon_context *ctx,
+                                  const struct pixel pixels[RING_PIXELS])
+{
+    memcpy(ctx->rendered_pixels, pixels, sizeof(ctx->rendered_pixels));
+    if (hardware_write_pixels(&ctx->hw, pixels) != 0)
         le_log_warn( "LED hardware write failed; retaining state in memory");
 }
 
@@ -701,6 +773,26 @@ static int json_get_string(struct json_span object, const char *name,
     return 0;
 }
 
+static int json_get_boolean(struct json_span object, const char *name,
+                            int *out)
+{
+    struct json_span value;
+    const char *start;
+    size_t length;
+    int found = json_object_find(object, name, &value);
+    if (found != 1)
+        return -1;
+    start = json_skip_ws(value.start);
+    length = (size_t)(value.end - start);
+    if (length == 4 && !strncmp(start, "true", 4))
+        *out = 1;
+    else if (length == 5 && !strncmp(start, "false", 5))
+        *out = 0;
+    else
+        return -1;
+    return 0;
+}
+
 static int json_get_unsigned(struct json_span object, const char *name,
                              unsigned long *out)
 {
@@ -765,6 +857,44 @@ static int get_arg_unsigned(const struct request *request, const char *name,
         json_get_unsigned(request->args, name, &value) != 0 || value > max)
         return -1;
     *out = (unsigned int)value;
+    return 0;
+}
+
+static int get_arg_owner(const struct request *request, char owner[32])
+{
+    char parsed[64];
+    size_t i;
+
+    if (!request->have_args ||
+        json_get_string(request->args, "owner", parsed, sizeof(parsed)) != 0 ||
+        parsed[0] == '\0' || strlen(parsed) > 31)
+        return -1;
+    for (i = 0; parsed[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)parsed[i];
+        if (!isalnum(c) && c != '_' && c != '-')
+            return -1;
+    }
+    memcpy(owner, parsed, i + 1);
+    return 0;
+}
+
+static int get_arg_levels(const struct request *request,
+                          unsigned int levels[RING_PIXELS])
+{
+    char text[64];
+    size_t i;
+
+    if (!request->have_args ||
+        json_get_string(request->args, "levels", text, sizeof(text)) != 0 ||
+        strlen(text) != RING_PIXELS * 2)
+        return -1;
+    for (i = 0; i < RING_PIXELS; i++) {
+        int high = hex_digit(text[i * 2]);
+        int low = hex_digit(text[i * 2 + 1]);
+        if (high < 0 || low < 0)
+            return -1;
+        levels[i] = (unsigned int)((high << 4) | low);
+    }
     return 0;
 }
 
@@ -995,11 +1125,6 @@ static int send_response(int fd, unsigned long id, int ok, const char *data,
     return send_all(fd, response, (size_t)n);
 }
 
-static void apply_current(struct daemon_context *ctx)
-{
-    hardware_apply(&ctx->hw, &ctx->state.current);
-}
-
 static void apply_animated(struct daemon_context *ctx, double now)
 {
     struct colour output = ctx->state.current;
@@ -1013,7 +1138,229 @@ static void apply_animated(struct daemon_context *ctx, double now)
     multiplier = 0.30 + 0.70 * wave;
     output.brightness = (unsigned int)((double)ctx->state.current.brightness *
                                        multiplier + 0.5);
-    hardware_apply(&ctx->hw, &output);
+    hardware_apply(ctx, &output);
+}
+
+static unsigned int visualizer_energy(unsigned int level)
+{
+    /* A gentle linear/quadratic blend keeps quiet detail without clipping. */
+    return (level * level + 255U * level + 255U) / 510U;
+}
+
+static int classify_visualizer_mood(unsigned int energy, unsigned int flux,
+                                    unsigned int low, unsigned int mid,
+                                    unsigned int high)
+{
+    /*
+     * This is intentionally an acoustic mood estimate, not a genre claim.
+     * Sustained high energy plus transients or a bright spectrum reads as
+     * intense; quieter, low-flux material reads as calm.
+     */
+    if (energy >= 178U ||
+        (energy >= 132U &&
+         (flux >= 9U || mid + high / 2U > low + 18U)))
+        return VISUALIZER_MOOD_INTENSE;
+    if (energy >= 88U || flux >= 13U ||
+        (energy >= 70U && high > low + 26U))
+        return VISUALIZER_MOOD_ENERGETIC;
+    if (energy <= 68U && flux <= 7U)
+        return VISUALIZER_MOOD_CALM;
+    return VISUALIZER_MOOD_BALANCED;
+}
+
+static void update_visualizer_mood(struct daemon_context *ctx,
+                                   const unsigned int levels[RING_PIXELS],
+                                   int first_frame)
+{
+    unsigned int energy = 0, low = 0, mid = 0, high = 0, flux = 0;
+    int candidate;
+    size_t i;
+
+    for (i = 0; i < RING_PIXELS; i++) {
+        energy += levels[i];
+        if (i < 4)
+            low += levels[i];
+        else if (i < 9)
+            mid += levels[i];
+        else
+            high += levels[i];
+        if (!first_frame && levels[i] > ctx->visualizer_levels[i])
+            flux += levels[i] - ctx->visualizer_levels[i];
+    }
+    energy /= RING_PIXELS;
+    low /= 4U;
+    mid /= 5U;
+    high /= 3U;
+    flux /= RING_PIXELS;
+
+    if (first_frame) {
+        ctx->visualizer_energy_ema = energy;
+        ctx->visualizer_flux_ema = flux;
+    } else {
+        ctx->visualizer_energy_ema =
+            (ctx->visualizer_energy_ema * 3U + energy + 2U) / 4U;
+        ctx->visualizer_flux_ema =
+            (ctx->visualizer_flux_ema * 2U + flux + 1U) / 3U;
+    }
+
+    candidate = classify_visualizer_mood(ctx->visualizer_energy_ema,
+                                         ctx->visualizer_flux_ema,
+                                         low, mid, high);
+    if (first_frame) {
+        ctx->visualizer_mood = candidate;
+        ctx->visualizer_mood_candidate = candidate;
+        ctx->visualizer_mood_candidate_frames = 0;
+    } else if (candidate == ctx->visualizer_mood) {
+        ctx->visualizer_mood_candidate = candidate;
+        ctx->visualizer_mood_candidate_frames = 0;
+    } else if (candidate != ctx->visualizer_mood_candidate) {
+        ctx->visualizer_mood_candidate = candidate;
+        ctx->visualizer_mood_candidate_frames = 1;
+    } else if (++ctx->visualizer_mood_candidate_frames >= 3U) {
+        ctx->visualizer_mood = candidate;
+        ctx->visualizer_mood_candidate_frames = 0;
+    }
+
+    if (flux * 3U > ctx->visualizer_impact) {
+        ctx->visualizer_impact = flux * 3U;
+        if (ctx->visualizer_impact > 100U)
+            ctx->visualizer_impact = 100U;
+    }
+}
+
+static void apply_visualizer(struct daemon_context *ctx, double now)
+{
+    static const struct pixel palettes[VISUALIZER_MOOD_COUNT][RING_PIXELS + 1] = {
+        {
+            {20, 118, 188}, {16, 158, 214}, {18, 190, 198},
+            {42, 210, 176}, {80, 215, 178}, {72, 186, 224},
+            {68, 138, 238}, {92, 104, 232}, {124, 92, 224},
+            {142, 108, 220}, {96, 128, 230}, {46, 154, 222},
+            {20, 118, 188}
+        },
+        {
+            {255, 150, 28}, {245, 200, 34}, {136, 224, 54},
+            {34, 218, 126}, {16, 196, 188}, {20, 150, 242},
+            {62, 96, 244}, {126, 72, 238}, {202, 54, 218},
+            {244, 56, 154}, {255, 76, 78}, {255, 112, 38},
+            {255, 150, 28}
+        },
+        {
+            {255, 42, 132}, {255, 54, 64}, {255, 142, 22},
+            {250, 224, 28}, {74, 236, 54}, {16, 226, 166},
+            {14, 196, 246}, {26, 108, 255}, {112, 52, 255},
+            {214, 38, 246}, {255, 32, 190}, {255, 34, 104},
+            {255, 42, 132}
+        },
+        {
+            {255, 18, 8}, {255, 54, 8}, {255, 102, 8},
+            {255, 162, 12}, {255, 74, 8}, {238, 24, 10},
+            {206, 8, 20}, {255, 14, 54}, {218, 12, 86},
+            {255, 28, 34}, {255, 72, 10}, {255, 30, 8},
+            {255, 18, 8}
+        }
+    };
+    static const double drift_rates[VISUALIZER_MOOD_COUNT] =
+        {0.10, 0.22, 0.48, 0.78};
+    static const double motion_rates[VISUALIZER_MOOD_COUNT] =
+        {0.16, 0.31, 0.66, 1.05};
+    const struct pixel *palette = palettes[ctx->visualizer_mood];
+    struct pixel pixels[RING_PIXELS];
+    double drift_phase = (now - ctx->visualizer_started) *
+                         drift_rates[ctx->visualizer_mood];
+    double motion_phase = (now - ctx->visualizer_started) *
+                          motion_rates[ctx->visualizer_mood];
+    unsigned int drift;
+    size_t i;
+
+    while (drift_phase >= 1.0)
+        drift_phase -= 1.0;
+    while (motion_phase >= 1.0)
+        motion_phase -= 1.0;
+    drift = (unsigned int)((0.5 + 0.5 *
+                            sine_approx(drift_phase *
+                                        6.28318530717958647692)) * 48.0);
+    for (i = 0; i < RING_PIXELS; i++) {
+        unsigned int energy = visualizer_energy(ctx->visualizer_smoothed[i]);
+        double pixel_phase = motion_phase + (double)i / RING_PIXELS;
+        unsigned int motion;
+        unsigned int r, g, b;
+
+        while (pixel_phase >= 1.0)
+            pixel_phase -= 1.0;
+        motion = 188U + (unsigned int)((0.5 + 0.5 *
+                 sine_approx(pixel_phase * 6.28318530717958647692)) * 67.0);
+        r = (palette[i].r * (255U - drift) +
+             palette[i + 1].r * drift + 127U) / 255U;
+        g = (palette[i].g * (255U - drift) +
+             palette[i + 1].g * drift + 127U) / 255U;
+        b = (palette[i].b * (255U - drift) +
+             palette[i + 1].b * drift + 127U) / 255U;
+        energy = (energy * motion + 127U) / 255U;
+        pixels[i].r = (r * energy * ctx->visualizer_brightness + 12750U) /
+                      25500U;
+        pixels[i].g = (g * energy * ctx->visualizer_brightness + 12750U) /
+                      25500U;
+        pixels[i].b = (b * energy * ctx->visualizer_brightness + 12750U) /
+                      25500U;
+        if (ctx->visualizer_impact > 0) {
+            unsigned int impact = ctx->visualizer_impact *
+                                  ctx->visualizer_brightness / 100U;
+            pixels[i].r = pixels[i].r + r * impact / 510U > 255U
+                        ? 255U : pixels[i].r + r * impact / 510U;
+            pixels[i].g = pixels[i].g + g * impact / 510U > 255U
+                        ? 255U : pixels[i].g + g * impact / 510U;
+            pixels[i].b = pixels[i].b + b * impact / 510U > 255U
+                        ? 255U : pixels[i].b + b * impact / 510U;
+        }
+    }
+
+    /* A decaying warm halo around the bass edge gives beats some weight. */
+    if (ctx->visualizer_beat > 0) {
+        static const unsigned int accent_pixels[] = {0, 1, 11};
+        static const unsigned int accent_weights[] = {100, 52, 42};
+        for (i = 0; i < sizeof(accent_pixels) / sizeof(accent_pixels[0]); i++) {
+            unsigned int at = accent_pixels[i];
+            unsigned int accent = ctx->visualizer_beat *
+                                  accent_weights[i] *
+                                  ctx->visualizer_brightness / 10000U;
+            pixels[at].r = pixels[at].r + accent > 255U
+                         ? 255U : pixels[at].r + accent;
+            pixels[at].g = pixels[at].g + accent / 3U > 255U
+                         ? 255U : pixels[at].g + accent / 3U;
+        }
+        ctx->visualizer_beat = ctx->visualizer_beat > 14U
+                             ? ctx->visualizer_beat - 14U : 0U;
+    }
+    ctx->visualizer_impact = ctx->visualizer_impact > 12U
+                           ? ctx->visualizer_impact - 12U : 0U;
+    hardware_apply_pixels(ctx, pixels);
+}
+
+static void expire_visualizer(struct daemon_context *ctx, double now)
+{
+    if (ctx->visualizer_active &&
+        now - ctx->visualizer_last_frame > VISUALIZER_TIMEOUT_SECONDS) {
+        ctx->visualizer_active = 0;
+        ctx->visualizer_owner[0] = '\0';
+        ctx->visualizer_impact = 0;
+    }
+}
+
+static void apply_base_layer(struct daemon_context *ctx, double now)
+{
+    expire_visualizer(ctx, now);
+    if (ctx->visualizer_active)
+        apply_visualizer(ctx, now);
+    else if (ctx->animation_active)
+        apply_animated(ctx, now);
+    else
+        hardware_apply(ctx, &ctx->state.current);
+}
+
+static void apply_current(struct daemon_context *ctx)
+{
+    apply_base_layer(ctx, monotonic_seconds());
 }
 
 static const char *pattern_name(int kind)
@@ -1071,10 +1418,7 @@ static void stop_pattern(struct daemon_context *ctx, const char *owner,
     ctx->animation_active = ctx->pattern_saved_animation;
     if (ctx->animation_active)
         ctx->animation_started = monotonic_seconds();
-    if (ctx->animation_active)
-        apply_animated(ctx, monotonic_seconds());
-    else
-        apply_current(ctx);
+    apply_base_layer(ctx, now);
 }
 
 static void start_pattern(struct daemon_context *ctx, int kind,
@@ -1134,7 +1478,85 @@ static void update_pattern(struct daemon_context *ctx, double now)
         }
         if (!on) output.brightness = 0;
     }
-    hardware_apply(&ctx->hw, &output);
+    hardware_apply(ctx, &output);
+}
+
+static void start_visualizer(struct daemon_context *ctx,
+                             const unsigned int levels[RING_PIXELS],
+                             unsigned int brightness, const char *owner,
+                             double now)
+{
+    unsigned int bass;
+    int first_frame = !ctx->visualizer_active;
+    size_t i;
+
+    if (!ctx->visualizer_enabled)
+        return;
+
+    if (first_frame) {
+        ctx->visualizer_started = now;
+        ctx->visualizer_bass_floor =
+            (levels[0] + levels[1] + levels[2]) / 3U;
+        ctx->visualizer_beat = 0;
+        ctx->visualizer_impact = 0;
+        for (i = 0; i < RING_PIXELS; i++)
+            ctx->visualizer_smoothed[i] = levels[i];
+    } else {
+        for (i = 0; i < RING_PIXELS; i++) {
+            unsigned int previous = ctx->visualizer_smoothed[i];
+            ctx->visualizer_smoothed[i] =
+                levels[i] >= previous
+                    ? (levels[i] * 7U + previous + 4U) / 8U
+                    : (levels[i] + previous + 1U) / 2U;
+        }
+    }
+    update_visualizer_mood(ctx, levels, first_frame);
+    memcpy(ctx->visualizer_levels, levels, sizeof(ctx->visualizer_levels));
+    ctx->visualizer_brightness = brightness;
+    copy_pattern_owner(ctx->visualizer_owner, owner);
+    ctx->visualizer_active = 1;
+    ctx->visualizer_last_frame = now;
+
+    bass = (levels[0] + levels[1] + levels[2]) / 3U;
+    if (bass > ctx->visualizer_bass_floor + 24U && bass > 64U) {
+        unsigned int beat = (bass - ctx->visualizer_bass_floor) * 2U;
+        if (beat > 110U)
+            beat = 110U;
+        if (beat > ctx->visualizer_beat)
+            ctx->visualizer_beat = beat;
+    }
+    ctx->visualizer_bass_floor =
+        (ctx->visualizer_bass_floor * 15U + bass + 8U) / 16U;
+    if (!ctx->test_active && !ctx->pattern_active)
+        apply_visualizer(ctx, now);
+}
+
+static void stop_visualizer(struct daemon_context *ctx, const char *owner,
+                            double now)
+{
+    if (!ctx->visualizer_active ||
+        (owner && owner[0] && strcmp(owner, ctx->visualizer_owner)))
+        return;
+    ctx->visualizer_active = 0;
+    ctx->visualizer_owner[0] = '\0';
+    ctx->visualizer_impact = 0;
+    if (!ctx->test_active && !ctx->pattern_active)
+        apply_base_layer(ctx, now);
+}
+
+static void set_visualizer_enabled(struct daemon_context *ctx, int enabled,
+                                   double now)
+{
+    ctx->visualizer_enabled = enabled;
+    if (enabled)
+        return;
+    stop_visualizer(ctx, NULL, now);
+    memset(ctx->visualizer_levels, 0, sizeof(ctx->visualizer_levels));
+    memset(ctx->visualizer_smoothed, 0, sizeof(ctx->visualizer_smoothed));
+    ctx->visualizer_beat = 0;
+    ctx->visualizer_impact = 0;
+    ctx->visualizer_energy_ema = 0;
+    ctx->visualizer_flux_ema = 0;
 }
 
 static void start_test(struct daemon_context *ctx, double now)
@@ -1156,7 +1578,9 @@ static void update_animation(struct daemon_context *ctx, double now)
         {255, 255, 255, 100}
     };
     double elapsed;
+    int visualizer_was_active = ctx->visualizer_active;
 
+    expire_visualizer(ctx, now);
     if (ctx->test_active) {
         elapsed = now - ctx->test_started;
         if (elapsed >= 2.0) {
@@ -1165,22 +1589,23 @@ static void update_animation(struct daemon_context *ctx, double now)
             ctx->animation_active = ctx->test_saved_animation;
             if (ctx->animation_active)
                 ctx->animation_started = now;
-            if (ctx->animation_active)
-                apply_animated(ctx, now);
-            else
-                apply_current(ctx);
+            apply_base_layer(ctx, now);
             return;
         }
         {
             unsigned int index = (unsigned int)(elapsed / 0.5);
             struct colour output = test_colours[index < 4 ? index : 3];
             output.brightness = ctx->test_saved.brightness;
-            hardware_apply(&ctx->hw, &output);
+            hardware_apply(ctx, &output);
         }
     } else if (ctx->pattern_active) {
         update_pattern(ctx, now);
+    } else if (ctx->visualizer_active) {
+        apply_visualizer(ctx, now);
     } else if (ctx->animation_active) {
         apply_animated(ctx, now);
+    } else if (visualizer_was_active) {
+        hardware_apply(ctx, &ctx->state.current);
     }
 }
 
@@ -1195,6 +1620,9 @@ static int status_json(const struct daemon_context *ctx, char *out,
         "{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u,"
         "\"animation_active\":%s,\"animation_profile\":\"%s\","
         "\"pattern_active\":%s,\"pattern\":\"%s\",\"pattern_owner\":\"%s\","
+        "\"visualizer_enabled\":%s,\"visualizer_active\":%s,"
+        "\"visualizer_owner\":\"%s\","
+        "\"visualizer_mood\":\"%s\","
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"profiles\":{",
         ctx->state.current.r, ctx->state.current.g, ctx->state.current.b,
@@ -1204,6 +1632,12 @@ static int status_json(const struct daemon_context *ctx, char *out,
             ? profile_names[ctx->animation_profile] : "none",
         ctx->pattern_active ? "true" : "false", pattern_name(ctx->pattern_kind),
         ctx->pattern_owner,
+        ctx->visualizer_enabled ? "true" : "false",
+        ctx->visualizer_active ? "true" : "false", ctx->visualizer_owner,
+        ctx->visualizer_active &&
+                ctx->visualizer_mood >= 0 &&
+                ctx->visualizer_mood < VISUALIZER_MOOD_COUNT
+            ? visualizer_mood_names[ctx->visualizer_mood] : "idle",
         ctx->state.boot.r, ctx->state.boot.g,
         ctx->state.boot.b, ctx->state.boot.brightness);
     if (n < 0 || (size_t)n >= out_size)
@@ -1219,9 +1653,36 @@ static int status_json(const struct daemon_context *ctx, char *out,
             return -1;
         used += (size_t)n;
     }
-    if (used + 2 >= out_size)
+    if (used + 1 >= out_size)
         return -1;
     out[used++] = '}';
+    n = snprintf(out + used, out_size - used, ",\"visualizer_levels\":[");
+    if (n < 0 || (size_t)n >= out_size - used)
+        return -1;
+    used += (size_t)n;
+    for (i = 0; i < RING_PIXELS; i++) {
+        n = snprintf(out + used, out_size - used, "%s%u",
+                     i == 0 ? "" : ",", ctx->visualizer_levels[i]);
+        if (n < 0 || (size_t)n >= out_size - used)
+            return -1;
+        used += (size_t)n;
+    }
+    n = snprintf(out + used, out_size - used, "],\"pixels\":[");
+    if (n < 0 || (size_t)n >= out_size - used)
+        return -1;
+    used += (size_t)n;
+    for (i = 0; i < RING_PIXELS; i++) {
+        n = snprintf(out + used, out_size - used,
+                     "%s{\"r\":%u,\"g\":%u,\"b\":%u}",
+                     i == 0 ? "" : ",", ctx->rendered_pixels[i].r,
+                     ctx->rendered_pixels[i].g, ctx->rendered_pixels[i].b);
+        if (n < 0 || (size_t)n >= out_size - used)
+            return -1;
+        used += (size_t)n;
+    }
+    if (used + 3 >= out_size)
+        return -1;
+    out[used++] = ']';
     out[used++] = '}';
     out[used] = '\0';
     return (int)used;
@@ -1274,6 +1735,20 @@ static int handle_request(struct daemon_context *ctx, int fd,
         apply_current(ctx);
         persist_state(&ctx->state);
         return send_response(fd, request.id, 1, "{}", NULL);
+    }
+
+    if (strcmp(request.command, "set_visualizer_enabled") == 0) {
+        int enabled;
+        if (!request.have_args ||
+            json_get_boolean(request.args, "enabled", &enabled) != 0)
+            return send_response(fd, request.id, 0, NULL,
+                                 "enabled must be boolean");
+        set_visualizer_enabled(ctx, enabled, now);
+        return send_response(fd, request.id, 1,
+                             enabled
+                                 ? "{\"visualizer_enabled\":true}"
+                                 : "{\"visualizer_enabled\":false}",
+                             NULL);
     }
 
     if (strcmp(request.command, "set_boot_profile") == 0) {
@@ -1344,6 +1819,38 @@ static int handle_request(struct daemon_context *ctx, int fd,
             return send_response(fd, request.id, 0, NULL,
                                  "pattern is reserved until per-pixel LED hardware is available");
         return send_response(fd, request.id, 0, NULL, "unknown LED pattern");
+    }
+
+    if (strcmp(request.command, "visualizer") == 0) {
+        unsigned int levels[RING_PIXELS];
+        char action[16];
+        char owner[32];
+
+        if (!request.have_args ||
+            json_get_string(request.args, "action", action,
+                            sizeof(action)) != 0 ||
+            get_arg_owner(&request, owner) != 0)
+            return send_response(fd, request.id, 0, NULL,
+                                 "visualizer requires a valid action and owner");
+        if (!strcmp(action, "frame")) {
+            if (get_arg_levels(&request, levels) != 0 ||
+                get_arg_unsigned(&request, "brightness", &brightness, 100) != 0)
+                return send_response(fd, request.id, 0, NULL,
+                                     "visualizer frame requires 12 hex levels and brightness in 0..100");
+            start_visualizer(ctx, levels, brightness, owner, now);
+            return send_response(fd, request.id, 1,
+                                 ctx->visualizer_active
+                                     ? "{\"visualizer_active\":true}"
+                                     : "{\"visualizer_active\":false}",
+                                 NULL);
+        }
+        if (!strcmp(action, "stop")) {
+            stop_visualizer(ctx, owner, now);
+            return send_response(fd, request.id, 1,
+                                 "{\"visualizer_active\":false}", NULL);
+        }
+        return send_response(fd, request.id, 0, NULL,
+                             "unknown visualizer action");
     }
 
     if (strcmp(request.command, "test") == 0) {
@@ -1528,7 +2035,7 @@ static int make_listener(const char *path)
         return -1;
     memset(&address, 0, sizeof(address));
     address.sun_family = AF_UNIX;
-    strncpy(address.sun_path, path, sizeof(address.sun_path) - 1);
+    memcpy(address.sun_path, path, strlen(path) + 1);
     if (bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
         listen(fd, MAX_CLIENTS) != 0 || chmod(path, 0660) != 0 ||
         set_nonblocking(fd) != 0) {
@@ -1586,6 +2093,7 @@ int main(int argc, char **argv)
     int i;
 
     memset(&ctx, 0, sizeof(ctx));
+    ctx.visualizer_enabled = 1;
     ctx.listen_fd = -1;
     strncpy(ctx.socket_path, LE_ADAPTER_LED_SOCK,
             sizeof(ctx.socket_path) - 1);
@@ -1642,7 +2150,7 @@ int main(int argc, char **argv)
     hardware_detect(&ctx.hw, force_stub);
     if (hardware_claim(&ctx.hw) != 0)
         return EXIT_FAILURE;
-    hardware_apply(&ctx.hw, &ctx.state.current);
+    hardware_apply(&ctx, &ctx.state.current);
 
     if (!ctx.foreground && daemonize_process() != 0) {
         le_log_error( "daemonization failed: %s", strerror(errno));
@@ -1672,7 +2180,8 @@ int main(int argc, char **argv)
         fds[0].events = POLLIN;
         fds[0].revents = 0;
         slots[0] = -1;
-        if (ctx.test_active || ctx.animation_active || ctx.pattern_active)
+        if (ctx.test_active || ctx.animation_active || ctx.pattern_active ||
+            ctx.visualizer_active)
             timeout = FRAME_MS;
 
         for (j = 0; j < MAX_CLIENTS; j++) {
@@ -1699,13 +2208,14 @@ int main(int argc, char **argv)
                 (fds[j].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)))
                 receive_client(&ctx, &ctx.clients[slot]);
         }
-        if (ctx.test_active || ctx.animation_active || ctx.pattern_active)
+        if (ctx.test_active || ctx.animation_active || ctx.pattern_active ||
+            ctx.visualizer_active)
             update_animation(&ctx, monotonic_seconds());
     }
 
     for (i = 0; i < MAX_CLIENTS; i++)
         close_client(&ctx.clients[i]);
-    hardware_apply(&ctx.hw, &(struct colour){0, 0, 0, 0});
+    hardware_apply(&ctx, &(struct colour){0, 0, 0, 0});
     if (ctx.listen_fd >= 0)
         close(ctx.listen_fd);
     unlink(ctx.socket_path);

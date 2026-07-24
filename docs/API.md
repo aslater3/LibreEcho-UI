@@ -90,10 +90,10 @@ Returns device information.
 {
   "ok": true,
   "data": {
-    "name": "libreecho",
-    "hostname": "libreecho",
+    "name": "LibreEcho",
+    "hostname": "LibreEcho-0316",
     "model": "LibreEcho device",
-    "serial": "unavailable",
+    "serial": "G2A0RF0485020316",
     "os_version": "LibreEcho OS",
     "kernel": "3.18.140",
     "hardware_revision": "adapter pending",
@@ -103,7 +103,43 @@ Returns device information.
 }
 ```
 
+On MT8163 devices, the boot image derives the first-boot hostname from the
+immutable IDME serial as `LibreEcho-<last-four>`. A hostname selected by the
+user is stored in `/data/libreecho/config/web-config.json` and takes precedence
+on later boots. The Linux backend reports the audited serial from
+`/proc/idme/serial`.
+
 ### Audio
+
+#### GET /api/v1/playback
+
+Returns the unit's unified playback state. `state` is one of `idle`, `playing`,
+`system`, `announcing`, or `alarm`; priority buses can overlap. `source`
+identifies the active integration when known. Track metadata is nullable
+because not every sender or future integration supplies it.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "state": "playing",
+    "source": "airplay2",
+    "buses": {
+      "media": true,
+      "system": false,
+      "announcement": false,
+      "alarm": false
+    },
+    "metadata": {
+      "available": true,
+      "title": "Track title",
+      "artist": "Artist",
+      "album": "Album"
+    }
+  },
+  "error": null
+}
+```
 
 #### GET /api/v1/audio
 
@@ -167,6 +203,14 @@ Returns LED ring state.
   "data": {
     "colour": { "r": 72, "g": 216, "b": 118 },
     "brightness": 70,
+    "visualizer_enabled": true,
+    "visualizer_active": false,
+    "visualizer_owner": "",
+    "visualizer_mood": "idle",
+    "visualizer_levels": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "pixels": [
+      { "r": 50, "g": 151, "b": 83 }
+    ],
     "boot_profile": { "r": 72, "g": 216, "b": 118, "brightness": 70 },
     "profiles": {
       "listening": "#48b9ff",
@@ -179,6 +223,12 @@ Returns LED ring state.
 }
 ```
 
+`visualizer_enabled` is the persistent user preference. When false, incoming
+music spectrum frames are ignored and the ring displays the underlying
+pattern, animation or steady state. `pixels` contains 12 entries on the
+physical IS31FL3236 ring. During an enabled audio-reactive frame these are the
+brightness-scaled colours currently sent to the hardware.
+
 #### PUT /api/v1/led
 
 Update LED settings.
@@ -189,7 +239,8 @@ Update LED settings.
   "r": 255,
   "g": 0,
   "b": 0,
-  "brightness": 80
+  "brightness": 80,
+  "visualizer_enabled": true
 }
 ```
 
@@ -382,10 +433,13 @@ Returns API configuration.
 
 Export the confirmed-safe configuration as JSON. The export remains useful on
 Linux when an optional hardware adapter is absent: `partial` is `true` and
-the omitted field names are listed in `unsupported`.
+the omitted field names are listed in `unsupported`. Passwords, Wi-Fi PSKs,
+authentication material, logs and media metadata are never included.
 
 **Response:** The configuration object is returned in the normal API envelope.
 The mock backend normally returns `partial: false` and `unsupported: []`.
+`hostname_persisted: true` distinguishes a user/config-selected hostname from
+the IDME-derived first-boot default.
 
 #### POST /api/v1/config/import
 
