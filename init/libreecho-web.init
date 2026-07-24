@@ -12,12 +12,19 @@
 DAEMON=${DAEMON:-/usr/local/sbin/libreecho-web}
 PIDFILE=${PIDFILE:-/var/run/libreecho-web.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-web.log}
+CONFIG_FILE=${CONFIG_FILE:-/data/libreecho/config/web-config.json}
+DEFAULT_CONFIG_FILE=${DEFAULT_CONFIG_FILE:-/etc/libreecho/web-config.json}
+mkdir -p "$(dirname "$CONFIG_FILE")"
+if [ ! -f "$CONFIG_FILE" ] && [ -r "$DEFAULT_CONFIG_FILE" ]; then
+    cp "$DEFAULT_CONFIG_FILE" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+fi
 # This development image deliberately exposes the UI through wlan0.  Production
 # deployments must override ARGS with authentication and an allowed origin.
-ARGS=${ARGS:---backend linux --config /etc/libreecho/web-config.json --web-root /usr/local/share/libreecho/web --listen 0.0.0.0:8080 --allow-insecure-lan}
+ARGS=${ARGS:---backend linux --config $CONFIG_FILE --web-root /usr/local/share/libreecho/web --listen 0.0.0.0:8080 --allow-insecure-lan}
 # For authenticated LAN access, override ARGS in /etc/default/libreecho-web
 # with --auth-token-file, --allowed-origin and --user.
-USERS_FILE=${USERS_FILE:-/etc/libreecho/users}
+USERS_FILE=${USERS_FILE:-/data/libreecho/config/users}
 if [ -r "$USERS_FILE" ]; then
     ARGS="$ARGS --users-file $USERS_FILE"
 fi

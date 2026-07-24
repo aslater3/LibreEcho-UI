@@ -133,6 +133,8 @@ struct daemon_context {
     int pattern_previous_kind;
     struct colour pattern_previous_colour;
     unsigned int pattern_previous_repeats;
+    char pattern_owner[32];
+    char pattern_previous_owner[32];
     struct colour pattern_saved;
     int pattern_saved_animation;
 };
@@ -1019,14 +1021,52 @@ static const char *pattern_name(int kind)
     return kind == PATTERN_PULSE ? "pulse" : kind == PATTERN_FLASH ? "flash" : "none";
 }
 
-static void stop_pattern(struct daemon_context *ctx, double now)
+static void copy_pattern_owner(char *destination, const char *source)
 {
-    (void)now;
+    size_t i;
+
+    destination[0] = '\0';
+    if (!source)
+        return;
+    for (i = 0; source[i] && i < 31; i++) {
+        unsigned char c = (unsigned char)source[i];
+        if (!isalnum(c) && c != '_' && c != '-')
+            return;
+        destination[i] = (char)c;
+        destination[i + 1] = '\0';
+    }
+}
+
+static void stop_pattern(struct daemon_context *ctx, const char *owner,
+                         double now)
+{
     if (!ctx->pattern_active)
         return;
+    if (owner && owner[0]) {
+        if (strcmp(ctx->pattern_owner, owner)) {
+            if (!strcmp(ctx->pattern_previous_owner, owner)) {
+                ctx->pattern_previous_kind = PATTERN_NONE;
+                ctx->pattern_previous_owner[0] = '\0';
+            }
+            return;
+        }
+        if (ctx->pattern_previous_kind != PATTERN_NONE) {
+            ctx->pattern_kind = ctx->pattern_previous_kind;
+            ctx->pattern_colour = ctx->pattern_previous_colour;
+            ctx->pattern_repeats = ctx->pattern_previous_repeats;
+            copy_pattern_owner(ctx->pattern_owner,
+                               ctx->pattern_previous_owner);
+            ctx->pattern_previous_kind = PATTERN_NONE;
+            ctx->pattern_previous_owner[0] = '\0';
+            ctx->pattern_started = now;
+            return;
+        }
+    }
     ctx->pattern_active = 0;
     ctx->pattern_kind = PATTERN_NONE;
     ctx->pattern_previous_kind = PATTERN_NONE;
+    ctx->pattern_owner[0] = '\0';
+    ctx->pattern_previous_owner[0] = '\0';
     ctx->state.current = ctx->pattern_saved;
     ctx->animation_active = ctx->pattern_saved_animation;
     if (ctx->animation_active)
@@ -1039,21 +1079,24 @@ static void stop_pattern(struct daemon_context *ctx, double now)
 
 static void start_pattern(struct daemon_context *ctx, int kind,
                           const struct colour *colour, unsigned int repeats,
-                          double now)
+                          const char *owner, double now)
 {
     if (ctx->pattern_active) {
         ctx->pattern_previous_kind = ctx->pattern_kind;
         ctx->pattern_previous_colour = ctx->pattern_colour;
         ctx->pattern_previous_repeats = ctx->pattern_repeats;
+        copy_pattern_owner(ctx->pattern_previous_owner, ctx->pattern_owner);
     } else {
         ctx->pattern_saved = ctx->state.current;
         ctx->pattern_saved_animation = ctx->animation_active;
         ctx->pattern_previous_kind = PATTERN_NONE;
+        ctx->pattern_previous_owner[0] = '\0';
     }
     ctx->pattern_active = 1;
     ctx->pattern_kind = kind;
     ctx->pattern_colour = *colour;
     ctx->pattern_repeats = repeats;
+    copy_pattern_owner(ctx->pattern_owner, owner);
     ctx->pattern_started = now;
     ctx->animation_active = 0;
 }
@@ -1078,11 +1121,14 @@ static void update_pattern(struct daemon_context *ctx, double now)
                 ctx->pattern_kind = ctx->pattern_previous_kind;
                 ctx->pattern_colour = ctx->pattern_previous_colour;
                 ctx->pattern_repeats = ctx->pattern_previous_repeats;
+                copy_pattern_owner(ctx->pattern_owner,
+                                   ctx->pattern_previous_owner);
                 ctx->pattern_previous_kind = PATTERN_NONE;
+                ctx->pattern_previous_owner[0] = '\0';
                 ctx->pattern_started = now;
                 update_pattern(ctx, now);
             } else {
-                stop_pattern(ctx, now);
+                stop_pattern(ctx, NULL, now);
             }
             return;
         }
@@ -1093,7 +1139,7 @@ static void update_pattern(struct daemon_context *ctx, double now)
 
 static void start_test(struct daemon_context *ctx, double now)
 {
-    stop_pattern(ctx, now);
+    stop_pattern(ctx, NULL, now);
     if (!ctx->test_active) {
         ctx->test_saved = ctx->state.current;
         ctx->test_saved_animation = ctx->animation_active;
@@ -1148,7 +1194,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
     n = snprintf(out, out_size,
         "{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u,"
         "\"animation_active\":%s,\"animation_profile\":\"%s\","
-        "\"pattern_active\":%s,\"pattern\":\"%s\","
+        "\"pattern_active\":%s,\"pattern\":\"%s\",\"pattern_owner\":\"%s\","
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"profiles\":{",
         ctx->state.current.r, ctx->state.current.g, ctx->state.current.b,
@@ -1157,6 +1203,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
                 ctx->animation_profile < PROFILE_COUNT
             ? profile_names[ctx->animation_profile] : "none",
         ctx->pattern_active ? "true" : "false", pattern_name(ctx->pattern_kind),
+        ctx->pattern_owner,
         ctx->state.boot.r, ctx->state.boot.g,
         ctx->state.boot.b, ctx->state.boot.brightness);
     if (n < 0 || (size_t)n >= out_size)
@@ -1207,7 +1254,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
             get_arg_unsigned(&request, "b", &b, 255) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "set_colour requires r, g and b in 0..255");
-        stop_pattern(ctx, now);
+        stop_pattern(ctx, NULL, now);
         ctx->state.current.r = r;
         ctx->state.current.g = g;
         ctx->state.current.b = b;
@@ -1221,7 +1268,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
         if (get_arg_unsigned(&request, "brightness", &brightness, 100) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "brightness must be in 0..100");
-        stop_pattern(ctx, now);
+        stop_pattern(ctx, NULL, now);
         ctx->state.current.brightness = brightness;
         ctx->animation_active = 0;
         apply_current(ctx);
@@ -1262,12 +1309,16 @@ static int handle_request(struct daemon_context *ctx, int fd,
     }
 
     if (strcmp(request.command, "pattern") == 0) {
+        char owner[32] = "";
+
         if (!request.have_args ||
             json_get_string(request.args, "name", pattern, sizeof(pattern)) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "pattern requires a name");
+        if (json_get_string(request.args, "owner", owner, sizeof(owner)) != 0)
+            owner[0] = '\0';
         if (!strcmp(pattern, "stop")) {
-            stop_pattern(ctx, now);
+            stop_pattern(ctx, owner, now);
             return send_response(fd, request.id, 1, "{\"pattern\":\"none\"}", NULL);
         }
         if (!strcmp(pattern, "pulse") || !strcmp(pattern, "flash") ||
@@ -1284,7 +1335,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
             colour.g = g;
             colour.b = b;
             colour.brightness = brightness;
-            start_pattern(ctx, kind, &colour, repeats, now);
+            start_pattern(ctx, kind, &colour, repeats, owner, now);
             update_pattern(ctx, now);
             return send_response(fd, request.id, 1, "{\"pattern_active\":true}", NULL);
         }
@@ -1305,7 +1356,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
         if (get_arg_profile_field(&request, "profile", &profile) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "animate requires a valid profile");
-        stop_pattern(ctx, now);
+        stop_pattern(ctx, NULL, now);
         ctx->state.current = ctx->state.profiles[profile];
         ctx->animation_profile = profile;
         ctx->animation_active = 1;

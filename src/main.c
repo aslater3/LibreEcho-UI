@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
 #include "api.h"
 #include "backend.h"
 #include "http_server.h"
@@ -61,6 +64,7 @@ if(users_path&&!valid_users_path(users_path)){fprintf(stderr,"Users file must be
 if(le_backend_init(&b,mode,mock,cfg,seed)!=LE_OK){fprintf(stderr,"Unable to initialise %s backend\n",mode);
 return 1;
 }if(random_csrf(csrf,sizeof(csrf))){fprintf(stderr,"Unable to obtain secure CSRF token\n");le_backend_destroy(b);return 2;}if(api_init(&api,b,dev,insecure_lan,token,allowed_origin,csrf,cfg,users_path)){fprintf(stderr,"Unable to initialise authentication\n");le_backend_destroy(b);return 2;}if(cfg&&access(cfg,F_OK)==0)api.setup_completed=1;
+if(api.integrations&16u){int airplay_rc=LE_IO,airplay_try;for(airplay_try=0;airplay_try<12&&airplay_rc;airplay_try++){airplay_rc=le_set_airplay_enabled(b,1);if(airplay_rc)usleep(500000);}if(airplay_rc){api_log(&api,"error","AirPlay 2 could not be started from saved configuration");fprintf(stderr,"Unable to start configured AirPlay 2 integration: %d\n",airplay_rc);}}
 signal(SIGINT,stop);
 signal(SIGTERM,stop);
 signal(SIGPIPE,SIG_IGN);
