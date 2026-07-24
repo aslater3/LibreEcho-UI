@@ -50,6 +50,22 @@ code=$(curl -sS -o /tmp/le-invalid-visualizer.out -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     --data '{"visualizer_enabled":"yes"}')
 [ "$code" = 400 ]
+curl -fsS "$URL/api/v1/baby-monitor" | jq -e \
+    '.ok and .data.sources[0].channels == 1 and
+     .data.sources[0].valid_bits == 16 and
+     .data.active_microphone_channels == 7 and
+     .data.inactive_transport_channels == [7,8] and
+     .data.calibration.fallback == 16384 and
+     .data.calibration.selected_logical_mics == [0,1,3,4] and
+     .data.calibration.applied_to_raw_stream == false' >/dev/null
+code=$(curl -sS -o /tmp/le-baby-stream.out -w '%{http_code}' "$URL/api/v1/baby-monitor/stream?source=0:0")
+[ "$code" = 501 ]
+code=$(curl -sS -o /tmp/le-baby-stream-encoded.out -w '%{http_code}' "$URL/api/v1/baby-monitor/stream?source=0%3A24&channel=0")
+[ "$code" = 501 ]
+grep -q 'not_supported' /tmp/le-baby-stream-encoded.out
+code=$(curl -sS -o /tmp/le-baby-stream-invalid-encoding.out -w '%{http_code}' "$URL/api/v1/baby-monitor/stream?source=0%ZZ24&channel=0")
+[ "$code" = 400 ]
+grep -q 'invalid_request' /tmp/le-baby-stream-invalid-encoding.out
 expect "$(curl -fsS "$URL/api/v1/bluetooth")" '"capabilities":'
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' | jq -e '.ok and .data.enabled == true' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"connectable":false}' | jq -e '.ok and .data.capabilities.connectable == false' >/dev/null
