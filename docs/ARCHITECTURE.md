@@ -187,11 +187,21 @@ Each daemon owns one hardware domain and exposes it via the adapter protocol.
 | `set_profile` | `{name, r, g, b}` | Save named profile |
 | `test` | — | Cycle RGB test pattern |
 | `animate` | `{profile}` | Start breathing animation |
+| `visualizer` | `{action:"frame", levels:"24 hex chars", brightness:0-100, owner}` or `{action:"stop", owner}` | Ephemeral 12-band music overlay |
 
 **Hardware detection:**
 1. Try `/sys/class/leds/` (sysfs LED class)
-2. Try `/dev/i2c-*` (I2C LED driver — LP5523, TLC59116)
-3. Fall back to in-memory stub
+2. Try the IS31FL3236 36-channel frame interface under `/sys/bus/i2c/devices/`
+3. Probe accessible `/dev/i2c-*` buses conservatively
+4. Fall back to the in-memory stub
+
+The visualizer maps its 12 levels to the 12 physical RGB pixels and expires
+after 420 ms without a frame. The LED daemon derives a hysteretic acoustic
+mood (`calm`, `balanced`, `energetic`, or `intense`) from energy, spectral
+balance, and positive spectral flux. Mood selects the colour family and motion
+rate; it is deliberately not presented as genre recognition. Tests and
+owner-scoped notification patterns take priority. Non-per-pixel backends
+receive a uniform aggregate colour.
 
 ### 4. Central Log Daemon (`libreecho-logd`)
 
@@ -347,14 +357,15 @@ Browser: displays scan results
 ## Directory Layout
 
 ```
+/data/libreecho/config/
+├── web-config.json          # Canonical non-secret device configuration
+├── wpa_supplicant.conf      # Wi-Fi credentials (0600, excluded from export)
+└── users                    # Local authentication database (0600)
+
 /etc/libreecho/
-├── config.json              # Central config (all services)
-├── web-config.json          # Web daemon state
-├── history/                 # Config version history
-│   ├── config-20260720-143022.json
-│   └── ...
-├── led-state.json           # LED daemon persistence
-└── api.token                # Auth token (0600)
+├── web-config.json          # Read-only first-boot defaults
+├── airplay2.conf            # Packaged integration defaults
+└── led-state.json           # Per-boot LED daemon working state
 
 /run/libreecho/
 ├── network.sock             # networkd adapter socket

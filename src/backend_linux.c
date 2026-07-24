@@ -90,6 +90,20 @@ static int read_line(const char *path, char *out, size_t out_size)
     return 0;
 }
 
+static int read_device_serial(char *out, size_t out_size)
+{
+    size_t i;
+
+    if (read_line("/proc/idme/serial", out, out_size) != 0 || !out[0])
+        return -1;
+    for (i = 0; out[i]; ++i)
+        if (!isalnum((unsigned char)out[i])) {
+            out[0] = '\0';
+            return -1;
+        }
+    return i >= 4 ? 0 : -1;
+}
+
 static void read_cpu_status(struct le_backend *b, struct le_system_status *o)
 {
     FILE *f;
@@ -494,6 +508,7 @@ static int status(struct le_backend *b, struct le_system_status *o)
     char key[64], unit[16];
     unsigned long value;
     struct statvfs sv;
+    int storage_rc;
 
     memset(o, 0, sizeof(*o));
     strcpy(o->device_state, "online");
@@ -528,7 +543,12 @@ static int status(struct le_backend *b, struct le_system_status *o)
         o->memory_used_mb = (int)((total - avail) / 1024);
         o->memory = (int)((total - avail) * 100 / total);
     }
-    if (!statvfs("/", &sv) && sv.f_blocks && sv.f_frsize) {
+    storage_rc = statvfs("/data", &sv);
+    if (storage_rc || !sv.f_blocks || !sv.f_frsize)
+        storage_rc = statvfs("/", &sv);
+    if (storage_rc || !sv.f_blocks || !sv.f_frsize)
+        memset(&sv, 0, sizeof(sv));
+    if (sv.f_blocks && sv.f_frsize) {
         unsigned long long t = (unsigned long long)sv.f_blocks * sv.f_frsize;
         unsigned long long u = (unsigned long long)(sv.f_blocks - sv.f_bavail) * sv.f_frsize;
         o->storage_total_mb = (int)(t / 1048576);
@@ -545,7 +565,7 @@ static int status(struct le_backend *b, struct le_system_status *o)
     return LE_OK;
 }
 
-/* device() reports the kernel and host identity from uname/gethostname. */
+/* device() reports the kernel, host, and immutable IDME board identity. */
 static int device(struct le_backend *b, struct le_device_info *o)
 {
     struct utsname u;
@@ -555,7 +575,8 @@ static int device(struct le_backend *b, struct le_device_info *o)
     read_hostname(o->hostname, sizeof(o->hostname));
     copy_string(o->name, sizeof(o->name), "LibreEcho");
     strcpy(o->model, "LibreEcho device");
-    strcpy(o->serial, "unavailable");
+    if (read_device_serial(o->serial, sizeof(o->serial)) != 0)
+        strcpy(o->serial, "unavailable");
     strcpy(o->os_version, "LibreEcho OS");
     if (!uname(&u))
         copy_string(o->kernel, sizeof(o->kernel), u.release);
@@ -707,6 +728,74 @@ static void parse_profile(const char *json, struct le_led_profile *profile)
     if (json_get_int(json, "animation_speed", &v) > 0) profile->animation_speed = v;
 }
 
+static void parse_led_levels(const char *json,
+                             uint8_t levels[LE_LED_PIXELS])
+{
+    const char *p = strstr(json, "\"visualizer_levels\"");
+    size_t i;
+
+    if (!p || !(p = strchr(p, '[')))
+        return;
+    p++;
+    for (i = 0; i < LE_LED_PIXELS; i++) {
+        char *end;
+        unsigned long value;
+        while (isspace((unsigned char)*p))
+            p++;
+        errno = 0;
+        value = strtoul(p, &end, 10);
+        if (errno || end == p || value > 255)
+            return;
+        levels[i] = (uint8_t)value;
+        p = end;
+        while (isspace((unsigned char)*p))
+            p++;
+        if (i + 1 < LE_LED_PIXELS) {
+            if (*p++ != ',')
+                return;
+        } else if (*p != ']') {
+            return;
+        }
+    }
+}
+
+static int parse_led_pixels(const char *json,
+                            struct le_led_pixel pixels[LE_LED_PIXELS])
+{
+    const char *p = strstr(json, "\"pixels\"");
+    size_t i;
+
+    if (!p || !(p = strchr(p, '[')))
+        return 0;
+    p++;
+    for (i = 0; i < LE_LED_PIXELS; i++) {
+        const char *end;
+        char object[128];
+        size_t length;
+        int r, g, b;
+
+        while (isspace((unsigned char)*p) || *p == ',')
+            p++;
+        if (*p != '{' || !(end = strchr(p, '}')))
+            return 0;
+        length = (size_t)(end - p + 1);
+        if (length >= sizeof(object))
+            return 0;
+        memcpy(object, p, length);
+        object[length] = '\0';
+        if (json_get_int(object, "r", &r) < 1 ||
+            json_get_int(object, "g", &g) < 1 ||
+            json_get_int(object, "b", &b) < 1 ||
+            r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255)
+            return 0;
+        pixels[i].r = (uint8_t)r;
+        pixels[i].g = (uint8_t)g;
+        pixels[i].b = (uint8_t)b;
+        p = end + 1;
+    }
+    return 1;
+}
+
 static int led(struct le_backend *b, struct le_led_state *o)
 {
     char response[LE_ADAPTER_MSG_MAX], object[LE_ADAPTER_MSG_MAX];
@@ -721,7 +810,18 @@ static int led(struct le_backend *b, struct le_led_state *o)
         o->animation_active = 0;
     if (json_get_bool(response, "pattern_active", &o->pattern_active) < 0)
         o->pattern_active = 0;
+    if (json_get_bool(response, "visualizer_active",
+                      &o->visualizer_active) < 0)
+        o->visualizer_active = 0;
+    if (json_get_bool(response, "visualizer_enabled",
+                      &o->visualizer_enabled) < 0)
+        o->visualizer_enabled = 1;
     (void)json_get_string(response, "pattern", o->pattern, sizeof(o->pattern));
+    (void)json_get_string(response, "visualizer_owner",
+                          o->visualizer_owner, sizeof(o->visualizer_owner));
+    (void)json_get_string(response, "visualizer_mood",
+                          o->visualizer_mood, sizeof(o->visualizer_mood));
+    parse_led_levels(response, o->visualizer_levels);
     o->animation_profile = -1;
     if (json_get_string(response, "animation_profile", object, sizeof(object)) > 0) {
         if (!strcmp(object, "listening")) o->animation_profile = 0;
@@ -743,6 +843,17 @@ static int led(struct le_backend *b, struct le_led_state *o)
         if (json_object(profiles, "error", object, sizeof(object))) parse_profile(object, &o->error);
         if (json_object(profiles, "dnd", object, sizeof(object))) parse_profile(object, &o->dnd);
     }
+    if (!parse_led_pixels(response, o->pixels)) {
+        size_t i;
+        for (i = 0; i < LE_LED_PIXELS; i++) {
+            o->pixels[i].r = (uint8_t)((o->current.r *
+                                      o->current.brightness + 50) / 100);
+            o->pixels[i].g = (uint8_t)((o->current.g *
+                                      o->current.brightness + 50) / 100);
+            o->pixels[i].b = (uint8_t)((o->current.b *
+                                      o->current.brightness + 50) / 100);
+        }
+    }
     return LE_OK;
 }
 
@@ -761,6 +872,18 @@ static int brightness(struct le_backend *b, int value)
     if (value < 0 || value > 100) return LE_INVALID;
     snprintf(args, sizeof(args), "{\"brightness\":%d}", value);
     return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_brightness", args);
+}
+
+static int visualizer_enabled(struct le_backend *b, int enabled)
+{
+    char args[64];
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}",
+             enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_LED_SOCK,
+                                "set_visualizer_enabled", args);
 }
 
 static int boot_led(struct le_backend *b, const struct le_led_profile *profile)
@@ -839,11 +962,16 @@ static int disconnect_wifi(struct le_backend *b)
 
 static int hostname(struct le_backend *b, const char *name)
 {
-    size_t length;
+    size_t i, length;
     (void)b;
     if (!name) return LE_INVALID;
     length = strlen(name);
-    if (!length || length >= 64) return LE_INVALID;
+    if (!length || length >= 64 || name[0] == '-' ||
+        name[length - 1] == '-')
+        return LE_INVALID;
+    for (i = 0; i < length; i++)
+        if (!isalnum((unsigned char)name[i]) && name[i] != '-')
+            return LE_INVALID;
     return sethostname(name, length) == 0 ? LE_OK : LE_IO;
 }
 
@@ -1152,6 +1280,14 @@ static int airplay(struct le_backend *b, struct le_airplay_state *o)
     (void)json_get_bool(response, "enabled", &o->enabled);
     (void)json_get_bool(response, "nqptp_running", &o->nqptp_running);
     (void)json_get_bool(response, "shairport_running", &o->shairport_running);
+    (void)json_get_string(response, "playback_state", o->playback_state,
+                          sizeof(o->playback_state));
+    (void)json_get_string(response, "source", o->source,
+                          sizeof(o->source));
+    (void)json_get_string(response, "title", o->title, sizeof(o->title));
+    (void)json_get_string(response, "artist", o->artist, sizeof(o->artist));
+    (void)json_get_string(response, "album", o->album, sizeof(o->album));
+    o->playing = !strcmp(o->playback_state, "playing");
     return LE_OK;
 }
 
@@ -1164,6 +1300,64 @@ static int airplay_set(struct le_backend *b, int enabled)
     snprintf(args, sizeof(args), "{\"enabled\":%s}",
              enabled ? "true" : "false");
     return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_enabled", args);
+}
+
+static int playback(struct le_backend *b, struct le_playback_state *o)
+{
+    struct le_airplay_state airplay_state;
+    char document[768];
+    char active[32];
+    int have_runtime_state = 0;
+
+    memset(o, 0, sizeof(*o));
+    copy_string(o->state, sizeof(o->state), "idle");
+    active[0] = '\0';
+    if (read_line("/run/libreecho-audio/status.json", document,
+                  sizeof(document)) == 0) {
+        char parsed_state[24];
+
+        parsed_state[0] = '\0';
+        if (json_get_string(document, "state", parsed_state,
+                            sizeof(parsed_state)) > 0 &&
+            (!strcmp(parsed_state, "idle") ||
+             !strcmp(parsed_state, "playing") ||
+             !strcmp(parsed_state, "system") ||
+             !strcmp(parsed_state, "announcing") ||
+             !strcmp(parsed_state, "alarm"))) {
+            copy_string(o->state, sizeof(o->state), parsed_state);
+            have_runtime_state = 1;
+        }
+        (void)json_get_string(document, "active", active, sizeof(active));
+        (void)json_get_bool(document, "media", &o->media_active);
+        (void)json_get_bool(document, "system", &o->system_active);
+        (void)json_get_bool(document, "announcement",
+                            &o->announcement_active);
+        (void)json_get_bool(document, "alarm", &o->alarm_active);
+    }
+
+    if (active[0])
+        copy_string(o->source, sizeof(o->source), active);
+    else if (!strcmp(o->state, "system"))
+        copy_string(o->source, sizeof(o->source), "system");
+    else if (!strcmp(o->state, "announcing"))
+        copy_string(o->source, sizeof(o->source), "announcement");
+    else if (!strcmp(o->state, "alarm"))
+        copy_string(o->source, sizeof(o->source), "alarm");
+
+    if (airplay(b, &airplay_state) == LE_OK && airplay_state.playing &&
+        (!have_runtime_state || o->media_active ||
+         !strcmp(o->state, "playing"))) {
+        if (!have_runtime_state) {
+            copy_string(o->state, sizeof(o->state), "playing");
+            o->media_active = 1;
+        }
+        copy_string(o->source, sizeof(o->source), "airplay2");
+        copy_string(o->title, sizeof(o->title), airplay_state.title);
+        copy_string(o->artist, sizeof(o->artist), airplay_state.artist);
+        copy_string(o->album, sizeof(o->album), airplay_state.album);
+        o->metadata_available = o->title[0] || o->artist[0] || o->album[0];
+    }
+    return LE_OK;
 }
 
 static int linux_reboot(struct le_backend *b)
@@ -1227,13 +1421,13 @@ static void destroy(struct le_backend *b)
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone,
-    led, colour, brightness, boot_led, led_test,
+    led, colour, brightness, visualizer_enabled, boot_led, led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,
     wake, wake_set, sensitivity, wake_test,
     bluetooth, bluetooth_set, bluetooth_scan, bluetooth_pair,
     bluetooth_unpair, bluetooth_disconnect, bluetooth_pairing_response,
     bluetooth_discoverable, bluetooth_connectable, bluetooth_pairing_mode,
-    airplay, airplay_set,
+    airplay, airplay_set, playback,
     linux_reboot, linux_shutdown, factory_reset, tick, control
 };
 

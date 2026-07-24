@@ -78,8 +78,20 @@ The Linux backend already implements:
 - RAM totals from `/proc/meminfo`;
 - root-filesystem usage through `statvfs()`;
 - temperature from `/sys/class/thermal/thermal_zone0/temp`;
-- hostname through `gethostname()`; and
+- hostname through `gethostname()`;
+- immutable board serial from `/proc/idme/serial`; and
 - kernel release through `uname()`.
+
+The MT8163 boot image sets the first-boot hostname to
+`LibreEcho-<last-four-IDME-serial>` before network services start. Hostname
+changes are persisted on userdata and override that default on later boots.
+
+`/data/libreecho/config/web-config.json` is the canonical non-secret device
+configuration. Successful configurable PUT operations replace it atomically,
+and the Linux control plane reapplies supported audio, LED, music-visualizer,
+hostname, wake-word and integration settings at service startup. Wi-Fi
+credentials and local users are deliberately excluded from exported JSON;
+they remain in mode-0600 persistent stores beside it.
 
 It currently does not implement real audio, LED, Wi-Fi, wake-word or power
 controls. `network()` returns an explicit unsupported state. Preserve that
@@ -222,8 +234,9 @@ Required work:
    report unavailable state.
 4. Read OS version from a small LibreEcho release file if present.
 5. Read model, serial and hardware revision only from verified device-tree,
-   procfs, sysfs or LibreEcho manufacturing data. If unavailable, return
-   `"unavailable"`; do not invent an identifier.
+   procfs, sysfs or LibreEcho manufacturing data. The current MT8163 serial
+   source is `/proc/idme/serial`; if it is unavailable or malformed, return
+   `"unavailable"` rather than inventing an identifier.
 6. CPU percentage is currently a load-average approximation. Label it as such or
    implement bounded `/proc/stat` deltas in the single backend tick.
 
@@ -261,13 +274,18 @@ Operations:
 - `get_state`
 - `set_colour` with integer `r`, `g`, `b` in 0-255
 - `set_brightness` in 0-100
+- `set_visualizer_enabled` with an explicit boolean
 - `set_boot_profile`
 - `run_test`
+- `visualizer` with 12 hexadecimal spectral levels, brightness and owner; the
+  daemon derives a stable acoustic mood for palette and motion selection
 - future `get_buttons` / `set_buttons`
 
-Determine actual LED ordering, channel width, brightness semantics and animation
-timing experimentally. Put those conversions in the LED daemon. Do not encode
-guessed ioctl values in `backend_linux.c`.
+The Biscuit IS31FL3236 path writes 12 RGB pixels through its 36-channel sysfs
+frame. Audio frame/mood state is an ephemeral, auto-expiring overlay; only the
+user's visualizer-enabled preference is persisted. Put hardware ordering and
+brightness conversions in the LED daemon. Do not encode guessed ioctl values
+in `backend_linux.c`.
 
 Button actions are currently WebUI policy stored by `api.c`; physical button and
 hardware-mute state need an input adapter. Hardware mute indication must always

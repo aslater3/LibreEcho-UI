@@ -21,6 +21,35 @@ curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0
 expect "$(curl -fsS "$URL/swagger.html")" 'LibreEcho API Reference'
 expect "$(curl -fsS "$URL/js/swagger.js")" 'executeOperation'
 expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
+curl -fsS "$URL/api/v1/playback" | jq -e \
+    '.ok and .data.state == "playing" and
+     .data.source == "airplay2" and .data.buses.media == true and
+     .data.metadata.available == true and
+     .data.metadata.title == "Open Source Radio"' >/dev/null
+curl -fsS "$URL/api/v1/led" | jq -e \
+    '.ok and (.data.visualizer_enabled == true) and
+     (.data.visualizer_active == false) and
+     (.data.visualizer_owner == "") and
+     (.data.visualizer_mood == "idle") and
+     (.data.visualizer_levels | length == 12) and
+     (.data.pixels | length == 12) and
+     all(.data.pixels[]; (.r >= 0 and .r <= 255) and
+                         (.g >= 0 and .g <= 255) and
+                         (.b >= 0 and .b <= 255))' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/led" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"visualizer_enabled":false}' |
+    jq -e '.ok and .data.visualizer_enabled == false and
+           .data.visualizer_active == false' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/led" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"visualizer_enabled":true}' |
+    jq -e '.ok and .data.visualizer_enabled == true' >/dev/null
+code=$(curl -sS -o /tmp/le-invalid-visualizer.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/led" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"visualizer_enabled":"yes"}')
+[ "$code" = 400 ]
 expect "$(curl -fsS "$URL/api/v1/bluetooth")" '"capabilities":'
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' | jq -e '.ok and .data.enabled == true' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"connectable":false}' | jq -e '.ok and .data.capabilities.connectable == false' >/dev/null
