@@ -69,6 +69,8 @@
 static volatile sig_atomic_t g_stop;
 static volatile sig_atomic_t g_child_exited;
 static pid_t g_active_child = -1;
+static char g_pending_text[LE_TTS_MAX_TEXT];
+static int g_pending_speech;
 
 static const char *announcement_bus_path(void)
 {
@@ -1015,6 +1017,26 @@ static int start_speech(struct tts_engine *engine, const char *text)
 
 /* ---- Client I/O ---- */
 
+static int in_process_synthesis_enabled(void)
+{
+    const char *value = getenv("LE_TTS_IN_PROCESS");
+    return value && !strcmp(value, "1");
+}
+
+static int queue_in_process_speech(const char *text)
+{
+    size_t length;
+
+    if (!text || g_pending_speech)
+        return -1;
+    length = strlen(text);
+    if (length >= sizeof(g_pending_text))
+        return -1;
+    memcpy(g_pending_text, text, length + 1);
+    g_pending_speech = 1;
+    return 0;
+}
+
 static int queue_output(struct client *client, const char *message, size_t length)
 {
     size_t pending = client->output_used - client->output_sent;
@@ -1043,7 +1065,8 @@ static int handle_request(struct tts_engine *engine, char *message,
         char data[128];
         (void)snprintf(data, sizeof(data),
                        "{\"speaking\":%s,\"engine\":\"%s\"}",
-                       g_active_child > 0 ? "true" : "false",
+                       (g_active_child > 0 || g_pending_speech)
+                           ? "true" : "false",
                        LE_TTSD_ENGINE_NAME);
         return response_ok(response, response_size, id, data);
     }
@@ -1054,7 +1077,9 @@ static int handle_request(struct tts_engine *engine, char *message,
         if (text[0] == '\0')
             return response_error(response, response_size, id,
                                   "text must not be empty");
-        if (start_speech(engine, text) < 0)
+        if (in_process_synthesis_enabled()
+                ? queue_in_process_speech(text) < 0
+                : start_speech(engine, text) < 0)
             return response_error(response, response_size, id,
                                   "failed to start speech");
         return response_ok(response, response_size, id, "{\"speaking\":true}");
@@ -1301,6 +1326,31 @@ int main(int argc, char **argv)
             if ((revents & POLLOUT) &&
                 flush_client(&clients[client_index]) < 0)
                 close_client(&clients[client_index]);
+        }
+        if (g_pending_speech) {
+            int output_pending = 0;
+            char text[LE_TTS_MAX_TEXT];
+
+            /*
+             * Low-memory deployments synthesize in this process so the
+             * loaded model is not duplicated by fork.  Flush the accepted
+             * response first: callers receive a queued acknowledgement
+             * immediately while this event loop then performs synthesis.
+             */
+            for (i = 0; i < LE_TTS_MAX_CLIENTS; ++i) {
+                if (clients[i].fd >= 0 &&
+                    clients[i].output_used > clients[i].output_sent) {
+                    output_pending = 1;
+                    break;
+                }
+            }
+            if (!output_pending) {
+                memcpy(text, g_pending_text, sizeof(text));
+                g_pending_text[0] = '\0';
+                g_pending_speech = 0;
+                if (start_speech(engine, text) < 0)
+                    le_log_error("ttsd: queued in-process speech failed");
+            }
         }
     }
 

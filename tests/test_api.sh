@@ -56,7 +56,7 @@ curl -fsS "$URL/api/v1/baby-monitor" | jq -e \
      .data.active_microphone_channels == 7 and
      .data.inactive_transport_channels == [7,8] and
      .data.calibration.fallback == 16384 and
-     .data.calibration.selected_logical_mics == [0,1,3,4] and
+     .data.calibration.selected_logical_mics == [0,3] and
      .data.calibration.applied_to_raw_stream == false' >/dev/null
 code=$(curl -sS -o /tmp/le-baby-stream.out -w '%{http_code}' "$URL/api/v1/baby-monitor/stream?source=0:0")
 [ "$code" = 501 ]
