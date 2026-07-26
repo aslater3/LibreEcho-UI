@@ -316,13 +316,13 @@ static int relay_capture(int client_fd, const struct micd_config *config)
             (char *)"-c", (char *)"9",
             (char *)"-r", (char *)"16000",
             (char *)"-b", (char *)"24",
-            (char *)"-p", (char *)"160",
+            (char *)"-p", (char *)"640",
             /*
-             * 160 frames is exactly 10 ms at 16 kHz.  Two periods consume
-             * 8640 bytes, comfortably below the Amazon SPI PCM driver's
-             * 69120-byte cap and avoid the old 64 ms userspace batching.
+             * 640 frames is 40 ms at 16 kHz.  Four periods consume the
+             * Amazon SPI PCM driver's full 69120-byte ring and provide
+             * enough scheduling headroom for the wake inference thread.
              */
-            (char *)"-n", (char *)"2",
+            (char *)"-n", (char *)"4",
             NULL
         };
         close(pipe_fds[0]);
@@ -358,8 +358,8 @@ static pid_t start_capture(const struct micd_config *config, int output_fd)
             (char *)"-c", (char *)"9",
             (char *)"-r", (char *)"16000",
             (char *)"-b", (char *)"24",
-            (char *)"-p", (char *)"160",
-            (char *)"-n", (char *)"2",
+            (char *)"-p", (char *)"640",
+            (char *)"-n", (char *)"4",
             NULL
         };
 
