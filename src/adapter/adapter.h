@@ -34,6 +34,8 @@
 #define LE_ADAPTER_AIRPLAY_SOCK   "/run/libreecho/airplay.sock"
 #define LE_ADAPTER_MIC_SOCK       "/run/libreecho/mic.sock"
 #define LE_ADAPTER_TTS_SOCK       "/run/libreecho/tts.sock"
+#define LE_ADAPTER_STT_SOCK       "/run/libreecho/stt.sock"
+#define LE_ADAPTER_AGENT_SOCK     "/run/libreecho/agent.sock"
 
 /* Result codes shared between client and daemon sides. */
 enum le_adapter_result {

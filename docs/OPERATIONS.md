@@ -38,6 +38,16 @@ make deploy
 /etc/init.d/libreecho-web start
 ```
 
+The full voice loop additionally requires the services to remain warm in this
+order:
+
+```sh
+/etc/init.d/libreecho-waked start
+/etc/init.d/libreecho-sttd start
+/etc/init.d/libreecho-ttsd start
+/etc/init.d/libreecho-agentd start
+```
+
 ### Access
 
 ```
@@ -46,6 +56,36 @@ http://127.0.0.1:8080          # Local only (default)
 ```
 
 ## Configuration
+
+### ChatGPT subscription voice setup
+
+1. Open **Integrations → Voice assistant**.
+2. Select **Connect ChatGPT**.
+3. Open the displayed verification URL on a trusted browser and enter the
+   device code.
+4. Return to LibreEcho and wait for the status to become **Connected**.
+5. Enable **wake-to-reply voice loop** and save.
+
+This path uses the user's ChatGPT subscription through device OAuth. LibreEcho
+does not accept an OpenAI API key and does not silently switch to metered API
+billing. Microphone audio and speech recognition remain local; only the final
+transcript and configured instruction prompt are sent to the selected response
+provider.
+
+Persistent non-secret settings are stored in
+`/data/libreecho/config/agent.json`. OAuth credentials are stored separately
+in `/data/libreecho/secrets/openai-codex.json` with mode `0600`.
+
+Assistant status and latency telemetry are available from:
+
+```sh
+curl http://127.0.0.1:8080/api/v1/assistant
+```
+
+The measured target is at most 3000 ms from estimated speech end to the first
+PCM sent to the announcement bus. Check `last_stt_processing_ms`,
+`last_first_text_ms`, `last_first_announce_dispatch_ms`, and
+`last_speech_end_to_first_pcm_ms` to locate a regression.
 
 ### Central Config
 

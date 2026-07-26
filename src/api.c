@@ -14,12 +14,74 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 static void out(struct api_response*r,int status,const char*fmt,...){va_list ap;r->status=status;strcpy(r->type,"application/json; charset=utf-8");va_start(ap,fmt);r->length=(size_t)vsnprintf(r->body,sizeof(r->body),fmt,ap);va_end(ap);if(r->length>=sizeof(r->body))r->length=sizeof(r->body)-1;}
 static void ok(struct api_response*r,const char*data){out(r,200,"{\"ok\":true,\"data\":%s,\"error\":null}",data?data:"{}");}static void err(struct api_response*r,int status,int rc,const char*msg){char e[256];json_escape(e,sizeof(e),msg);out(r,status,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",le_result_code(rc),e);}static void method_not_allowed(struct api_response*r){err(r,405,LE_INVALID,"HTTP method is not allowed for this endpoint");}
 static int changing(const char*m){return strcmp(m,"GET")&&strcmp(m,"HEAD");}static int constant_equal(const char*a,const char*b){size_t al=strlen(a),bl=strlen(b),i,n=al>bl?al:bl;unsigned diff=(unsigned)(al^bl);for(i=0;i<n;i++){unsigned ac=i<al?(unsigned char)a[i]:0,bc=i<bl?(unsigned char)b[i]:0;diff|=ac^bc;}return diff==0;}static int allowed_origin(const struct api_context*c,const char*origin){if(!origin[0]||c->allow_insecure_lan)return 1;if(c->allowed_origin[0])return constant_equal(origin,c->allowed_origin);return !strncmp(origin,"http://127.0.0.1",16)||!strncmp(origin,"http://localhost",16);}static int security(const struct api_context*c,const struct api_request*q,struct api_response*r){int authorized=0;if(!strcmp(q->path,"/api/v1/config")||(!strcmp(q->path,"/api/v1/auth/login")&&!strcmp(q->method,"POST")))authorized=1;if(!authorized&&c->auth_token[0]){char expected[256];snprintf(expected,sizeof(expected),"Bearer %s",c->auth_token);authorized=constant_equal(q->authorization,expected);}if(!authorized&&c->auth.enabled&&!strncmp(q->authorization,"Bearer ",7))authorized=le_auth_session((struct le_auth_db*)&c->auth,q->authorization+7,0,0);if((c->auth_token[0]||c->auth.enabled)&&!authorized){err(r,401,LE_AUTH,"Authentication is required");return 0;}if(!changing(q->method))return 1;if(!constant_equal(q->csrf,c->csrf_token)){err(r,403,LE_AUTH,"Missing or invalid CSRF token");return 0;}if(!allowed_origin(c,q->origin)){err(r,403,LE_AUTH,"Origin is not allowed");return 0;}return 1;}
 static int body_ok(const struct api_request*q,struct api_response*r){if(!json_valid_object(q->body,q->body_len)){err(r,400,LE_INVALID,"Request body must be a valid JSON object");return 0;}return 1;}
+static int agent_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*agent=le_adapter_connect(LE_ADAPTER_AGENT_SOCK,15000);int rc;if(!agent)return LE_NOT_SUPPORTED;rc=le_adapter_call(agent,command,args,output,size);le_adapter_close(agent);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
+static void agent_result(struct api_response*r,const char*command,const char*args){char data[LE_ADAPTER_MSG_MAX];int rc=agent_command(command,args,data,sizeof(data));if(rc)err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?503:502,rc,rc==LE_NOT_SUPPORTED?"Voice assistant service is unavailable":rc==LE_INVALID?data:"Voice assistant service request failed");else ok(r,data);}
 static int wifi_scan_json(struct api_response*r,const struct le_wifi_scan*s){size_t i,n=0;char ssid[LE_TEXT*2],security[32];int written;if(!r||!s)return -1;written=snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"networks\":[");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;for(i=0;i<s->count&&i<LE_MAX_WIFI;i++){json_escape(ssid,sizeof(ssid),s->networks[i].ssid);json_escape(security,sizeof(security),s->networks[i].security);written=snprintf(r->body+n,sizeof(r->body)-n,"%s{\"ssid\":\"%s\",\"security\":\"%s\",\"signal\":%d}",i?",":"",ssid,security,s->networks[i].signal);if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;}written=snprintf(r->body+n,sizeof(r->body)-n,"]},\"error\":null}");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n+(size_t)written;return 0;}
 static int persist_configuration(struct api_context*);
+static int run_init_command(const char *path, const char *arg)
+{
+    pid_t child = fork();
+    int status;
+    if (child < 0)
+        return LE_IO;
+    if (child == 0) {
+        execl(path, path, arg, (char *)NULL);
+        _exit(127);
+    }
+    if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        return LE_IO;
+    return LE_OK;
+}
+static int apply_home_assistant_mode(int enabled)
+{
+    static const char *const stop_local[] = {
+        "/etc/init.d/libreecho-agentd.init", "stop", NULL
+    };
+    static const char *const start_local[] = {
+        "/etc/init.d/libreecho-agentd.init", "start", NULL
+    };
+    static const char *const stop_stt[] = {
+        "/etc/init.d/libreecho-sttd.init", "stop", NULL
+    };
+    static const char *const start_stt[] = {
+        "/etc/init.d/libreecho-sttd.init", "start", NULL
+    };
+    static const char *const stop_tts[] = {
+        "/etc/init.d/libreecho-ttsd.init", "stop", NULL
+    };
+    static const char *const start_tts[] = {
+        "/etc/init.d/libreecho-ttsd.init", "start", NULL
+    };
+    static const char *const stop_wyoming[] = {
+        "/etc/init.d/libreecho-wyomingd.init", "stop", NULL
+    };
+    static const char *const start_wyoming[] = {
+        "/etc/init.d/libreecho-wyomingd.init", "start", NULL
+    };
+    if (access("/etc/init.d/libreecho-wyomingd.init", X_OK) < 0)
+        return LE_OK;
+
+    if (enabled) {
+        if (run_init_command(stop_local[0], stop_local[1]) ||
+            run_init_command(stop_stt[0], stop_stt[1]) ||
+            run_init_command(stop_tts[0], stop_tts[1]) ||
+            run_init_command(start_wyoming[0], start_wyoming[1]))
+            return LE_IO;
+    } else {
+        if (run_init_command(stop_wyoming[0], stop_wyoming[1]) ||
+            run_init_command(start_stt[0], start_stt[1]) ||
+            run_init_command(start_tts[0], start_tts[1]) ||
+            run_init_command(start_local[0], start_local[1]))
+            return LE_IO;
+    }
+    return LE_OK;
+}
 static int valid_hostname(const char*s){size_t i,n;if(!s)return 0;n=strlen(s);if(!n||n>63||s[0]=='-'||s[n-1]=='-')return 0;for(i=0;i<n;i++)if(!isalnum((unsigned char)s[i])&&s[i]!='-')return 0;return 1;}
 static int hex_digit(unsigned char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return -1;}
 static int query_component_decode(char*outbuf,size_t out_size,const char*value,size_t value_len){size_t i=0,o=0;if(!outbuf||!out_size||!value)return -1;while(i<value_len){unsigned char c=(unsigned char)value[i++];if(c=='%'){int hi,lo;if(i+1>=value_len||(hi=hex_digit((unsigned char)value[i]))<0||(lo=hex_digit((unsigned char)value[i+1]))<0)return -1;c=(unsigned char)((hi<<4)|lo);i+=2;if(!c)return -1;}else if(c=='+')c=' ';if(o+1>=out_size)return -1;outbuf[o++]=(char)c;}outbuf[o]='\0';return 0;}
@@ -117,6 +179,11 @@ static void auth_login_json(struct api_context*c,const struct api_request*q,stru
 static void auth_current_json(struct api_context*c,const struct api_request*q,struct api_response*r){char username[LE_AUTH_USERNAME_MAX],escaped[LE_AUTH_USERNAME_MAX*2];if(!strncmp(q->authorization,"Bearer ",7)&&le_auth_session(&c->auth,q->authorization+7,username,sizeof(username))){json_escape(escaped,sizeof(escaped),username);out(r,200,"{\"ok\":true,\"data\":{\"authenticated\":true,\"username\":\"%s\"},\"error\":null}",escaped);}else if(c->auth_token[0])ok(r,"{\"authenticated\":true,\"username\":\"token\"}");else err(r,401,LE_AUTH,"Authentication is required");}
 void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strcmp(q->method,"PUT"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7))le_auth_logout(&c->auth,q->authorization+7);ok(r,"{\"logged_out\":true}");return;}
  if(!strcmp(p,"/api/v1/config/export")&&!strcmp(q->method,"GET")){char config[4096];rc=configuration_json(c,config,sizeof(config));if(rc)err(r,501,rc,"Configuration export is unavailable for this backend");else ok(r,config);return;}if(!strcmp(p,"/api/v1/config/import")&&!strcmp(q->method,"POST")){rc=import_configuration(c,q->body);if(rc)err(r,rc==LE_INVALID?400:501,rc,rc==LE_INVALID?"Configuration file is invalid or incomplete":"Configuration restore is unavailable for this backend");else{api_log(c,"warning","Configuration restored from uploaded JSON");ok(r,"{\"restored\":true,\"schema_version\":1}");}return;}
+ if(!strcmp(p,"/api/v1/assistant")){if(!strcmp(q->method,"GET")){agent_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){agent_result(r,"configure",q->body);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/assistant/auth/start")&&!strcmp(q->method,"POST")){agent_result(r,"auth_start",NULL);return;}
+ if(!strcmp(p,"/api/v1/assistant/auth/poll")&&!strcmp(q->method,"POST")){agent_result(r,"auth_poll",NULL);return;}
+ if(!strcmp(p,"/api/v1/assistant/logout")&&!strcmp(q->method,"POST")){agent_result(r,"logout",NULL);return;}
+ if(!strcmp(p,"/api/v1/assistant/respond")&&!strcmp(q->method,"POST")){agent_result(r,"respond",q->body);return;}
  if((!strcmp(p,"/api/v1")||!strcmp(p,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(p,"/api/v1/status")&&!strcmp(q->method,"GET")){status_json(c,r);return;}if(!strcmp(p,"/api/v1/playback")&&!strcmp(q->method,"GET")){playback_json(c,r);return;}if(!strcmp(p,"/api/v1/device")&&!strcmp(q->method,"GET")){device_json(c,r);return;}if(!strcmp(p,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bind_policy\":\"%s\",\"max_request_body\":16384},\"error\":null}",c->csrf_token,c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",c->allow_insecure_lan?"lan-development":"loopback-default");return;}
  if(!strcmp(p,"/api/v1/audio")){if(!strcmp(q->method,"GET")){audio_json(c,r);return;}if(!strcmp(q->method,"PUT")){char voice[32];if(json_get_int(q->body,"volume",&v)>0)rc=le_set_volume(c->backend,v);if(!rc&&json_get_int(q->body,"microphone_gain",&v)>0)rc=le_set_microphone_gain(c->backend,v);if(!rc&&json_get_bool(q->body,"microphone_muted",&v)>0)rc=le_set_microphone_muted(c->backend,v);if(!rc&&json_get_string(q->body,"tts_voice",voice,sizeof(voice))>0)rc=le_set_tts_voice(c->backend,voice);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Audio setting could not be applied");return;}api_log(c,"info","Audio settings updated");event_bus_publish(&c->events,"audio","{\"changed\":true}");audio_json(c,r);return;}}
  if(!strcmp(p,"/api/v1/baby-monitor")&&!strcmp(q->method,"GET")){baby_monitor_json(c,r);return;}
@@ -147,6 +214,28 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  err(r,404,LE_INVALID,"API endpoint was not found");}
 
 #undef api_handle
+static void after_integration_change(struct api_context *c,
+                                     const struct api_request *q,
+                                     struct api_response *r)
+{
+    int enabled;
+    int rc;
+
+    if (strcmp(q->method, "PUT") ||
+        strncmp(q->path, "/api/v1/integrations/", 21) ||
+        r->status != 200)
+        return;
+    rc = persist_configuration(c);
+    if (!rc && strstr(q->path, "home-assistant") &&
+        json_get_bool(q->body, "enabled", &enabled) == 1)
+        rc = apply_home_assistant_mode(enabled);
+    if (rc)
+        err(r, 503, rc, "Integration configuration could not be applied");
+}
+#define api_handle_inner(c,q,r) do { \
+    api_handle_inner((c),(q),(r)); \
+    after_integration_change((c),(q),(r)); \
+} while (0)
 void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;if(!security(c,q,r))return;if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":"Initial setup could not be applied");return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\"},\"error\":null}",c->csrf_token,c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false");return;}api_handle_inner(c,q,r);}
 
 int api_persist_configuration(struct api_context*c){return persist_configuration(c);}

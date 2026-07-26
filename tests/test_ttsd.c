@@ -27,6 +27,7 @@ int main(void)
     char directory[128];
     char socket_path[160];
     char fifo_path[160];
+    char first_pcm_path[160];
     struct le_adapter *adapter = NULL;
     struct timespec pause_time = {0, 20000000};
     char response[LE_ADAPTER_MSG_MAX];
@@ -39,6 +40,8 @@ int main(void)
              (long)getpid());
     snprintf(socket_path, sizeof(socket_path), "%s/tts.sock", directory);
     snprintf(fifo_path, sizeof(fifo_path), "%s/announcement.pcm", directory);
+    snprintf(first_pcm_path, sizeof(first_pcm_path),
+             "%s/first-pcm", directory);
     CHECK(mkdir(directory, 0700) == 0);
     CHECK(mkfifo(fifo_path, 0600) == 0);
   fifo_fd = open(fifo_path, O_RDWR | O_NONBLOCK);
@@ -52,6 +55,7 @@ int main(void)
     if (child == 0) {
         (void)setenv("LE_TTS_STREAMING", "1", 1);
         (void)setenv("LE_TTS_ANNOUNCEMENT_BUS", fifo_path, 1);
+        (void)setenv("LE_TTS_FIRST_PCM_FILE", first_pcm_path, 1);
         execl("./build/libreecho-ttsd", "libreecho-ttsd",
               "--socket", socket_path, "--foreground", (char *)NULL);
         _exit(127);
@@ -78,7 +82,8 @@ int main(void)
     /* 2. speak with valid text should succeed (return 0, data has
      *    speaking:true). */
     CHECK(le_adapter_call(adapter, "speak",
-                          "{\"text\":\"Now playing test song by test artist\"}",
+                          "{\"text\":\"Now playing test song by test artist\","
+                          "\"request_id\":\"turn-123\"}",
                           response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"speaking\":true") != NULL);
     {
@@ -94,6 +99,18 @@ int main(void)
             nanosleep(&pause_time, NULL);
         }
         CHECK(audio_bytes > 0);
+    }
+    {
+        FILE *marker = fopen(first_pcm_path, "r");
+        char request_id[64];
+        unsigned long long timestamp;
+
+        CHECK(marker != NULL);
+        CHECK(fscanf(marker, "%63s %llu",
+                     request_id, &timestamp) == 2);
+        fclose(marker);
+        CHECK(!strcmp(request_id, "turn-123"));
+        CHECK(timestamp > 0);
     }
 
     /* 3. stop_speech should succeed. */
@@ -126,6 +143,7 @@ cleanup:
     }
     unlink(socket_path);
     unlink(fifo_path);
+    unlink(first_pcm_path);
     rmdir(directory);
     return result;
 }

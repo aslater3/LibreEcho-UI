@@ -8,7 +8,7 @@
   "servers": [{"url":"/api/v1","description":"This LibreEcho device"}],
   "tags": [
     {"name":"Discovery"},{"name":"Authentication"},{"name":"Setup"},{"name":"Device"},{"name":"Audio"},{"name":"LED and buttons"},
-    {"name":"Wake word"},{"name":"Network"},{"name":"Bluetooth"},{"name":"Privacy"},{"name":"Integrations"},
+    {"name":"Wake word"},{"name":"Network"},{"name":"Bluetooth"},{"name":"Privacy"},{"name":"Assistant"},{"name":"Integrations"},
     {"name":"System"},{"name":"Diagnostics"},{"name":"Development"}
   ],
   "paths": {
@@ -70,6 +70,111 @@
     "/privacy": {
       "get":{"tags":["Privacy"],"summary":"Read privacy configuration","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}},
       "put":{"tags":["Privacy"],"summary":"Update privacy configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/assistant": {
+      "get": {
+        "tags": ["Assistant"],
+        "summary": "Read voice-assistant state and latency telemetry",
+        "description": "Reports subscription authentication, wake/STT stream health, and measured speech-end-to-first-PCM latency.",
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      },
+      "put": {
+        "tags": ["Assistant"],
+        "summary": "Configure the wake-to-reply assistant",
+        "description": "Configures the provider, model, voice-safe instruction prompt, and whether wake-to-reply is enabled. No API-key provider is available.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {"type":"boolean"},
+                  "provider": {"type":"string","enum":["openai-codex"]},
+                  "model": {"type":"string","minLength":1,"maxLength":95},
+                  "prompt": {"type":"string","minLength":1,"maxLength":2047}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "400": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/assistant/auth/start": {
+      "post": {
+        "tags": ["Assistant"],
+        "summary": "Start ChatGPT subscription device login",
+        "description": "Returns a verification URL and user code. LibreEcho does not request an OpenAI API key.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "502": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/assistant/auth/poll": {
+      "post": {
+        "tags": ["Assistant"],
+        "summary": "Check ChatGPT device-login completion",
+        "description": "Polls at the server-provided interval and stores successful OAuth credentials in the device's private persistent secret store.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "502": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/assistant/logout": {
+      "post": {
+        "tags": ["Assistant"],
+        "summary": "Disconnect the ChatGPT subscription",
+        "description": "Deletes the locally stored OAuth credentials and disables authenticated requests until device login is completed again.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "502": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/assistant/respond": {
+      "post": {
+        "tags": ["Assistant"],
+        "summary": "Stream a text request into spoken playback",
+        "description": "Sends text through the configured subscription provider, segments streamed response text at voice-safe boundaries, and queues it on the local announcement bus.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                  "text": {"type":"string","minLength":1,"maxLength":4095}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "400": {"$ref":"#/components/responses/Error"},
+          "502": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
     },
     "/integrations": {"get":{"tags":["Integrations"],"summary":"List integrations","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}},
     "/integrations/{id}": {"put":{"tags":["Integrations"],"summary":"Enable or disable an integration","parameters":[{"$ref":"#/components/parameters/Csrf"},{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"},"405":{"$ref":"#/components/responses/Error"}}}},

@@ -410,6 +410,31 @@ static int json_string(const char *json, const char *key,
     return 0;
 }
 
+static int json_quote(char *output, size_t size, const char *input)
+{
+    size_t used = 0;
+
+    while (input && *input) {
+        unsigned char c = (unsigned char)*input++;
+
+        if (c == '"' || c == '\\' || c == '\n' ||
+            c == '\r' || c == '\t') {
+            if (used + 2 >= size)
+                return -1;
+            output[used++] = '\\';
+            output[used++] = c == '\n' ? 'n' :
+                             c == '\r' ? 'r' :
+                             c == '\t' ? 't' : (char)c;
+        } else {
+            if (c < 0x20 || used + 1 >= size)
+                return -1;
+            output[used++] = (char)c;
+        }
+    }
+    output[used] = '\0';
+    return 0;
+}
+
 static int parse_request(char *message, unsigned long *id,
                          char *command, size_t command_size)
 {
@@ -1074,6 +1099,8 @@ static int handle_request(struct audio_hw *audio, char *message,
     }
     if (!strcmp(command, "speak")) {
         char text[512];
+        char escaped_text[1024];
+        char request_id[64] = "";
         struct le_adapter *tts;
         char tts_response[LE_ADAPTER_MSG_MAX];
         int rc;
@@ -1082,13 +1109,44 @@ static int handle_request(struct audio_hw *audio, char *message,
             return response_error(response, response_size, id, "missing or invalid text field");
         if (text[0] == '\0')
             return response_error(response, response_size, id, "text must not be empty");
+        if (json_quote(escaped_text, sizeof(escaped_text), text) < 0)
+            return response_error(response, response_size, id,
+                                  "text is too long");
+        if (json_value(message, "request_id") &&
+            json_string(message, "request_id", request_id,
+                        sizeof(request_id)) < 0)
+            return response_error(response, response_size, id,
+                                  "invalid request_id");
+        {
+            const unsigned char *position =
+                (const unsigned char *)request_id;
+
+            while (*position &&
+                   ((*position >= 'a' && *position <= 'z') ||
+                    (*position >= 'A' && *position <= 'Z') ||
+                    (*position >= '0' && *position <= '9') ||
+                    *position == '-' || *position == '_'))
+                ++position;
+            if (*position)
+                return response_error(response, response_size, id,
+                                      "invalid request_id");
+        }
         le_log_info("audiod: speak requested (%zu chars)", strlen(text));
         tts = le_adapter_connect(LE_ADAPTER_TTS_SOCK, 200);
         if (!tts)
             return response_error(response, response_size, id, "tts daemon unavailable");
         {
-            char args[600];
-            (void)snprintf(args, sizeof(args), "{\"text\":\"%s\"}", text);
+            char args[1200];
+
+            if (request_id[0])
+                (void)snprintf(
+                    args, sizeof(args),
+                    "{\"text\":\"%s\",\"request_id\":\"%s\"}",
+                    escaped_text, request_id);
+            else
+                (void)snprintf(
+                    args, sizeof(args),
+                    "{\"text\":\"%s\"}", escaped_text);
             rc = le_adapter_call(tts, "speak", args, tts_response, sizeof(tts_response));
         }
         le_adapter_close(tts);

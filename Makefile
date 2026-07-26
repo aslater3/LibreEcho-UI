@@ -9,7 +9,7 @@ CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
-ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd
+ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
@@ -19,6 +19,18 @@ BTD_SOURCES = src/adapter/btd.c src/adapter/adapter_client.c src/adapter/adapter
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
 TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
+STTD_SOURCES = src/adapter/sttd.c src/adapter/stt_engine_mock.c src/adapter/adapter_server.c src/log.c
+STTD_SHERPA_CXX_SOURCES = src/adapter/stt_engine_sherpa.cpp
+AGENTD_SOURCES = src/adapter/agentd.c src/adapter/llm_provider.c \
+	src/adapter/llm_codex.c src/adapter/llm_http.c src/adapter/llm_store.c \
+	src/adapter/voice_reply.c src/adapter/voice_playback.c \
+	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+	src/adapter/voice_listening_led.c \
+	src/adapter/adapter_client.c src/adapter/adapter_server.c \
+	src/config_store.c src/json.c src/log.c
+WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
+	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
+	src/adapter/adapter_client.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
 SOURCES = src/main.c src/http_server.c src/api.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
@@ -30,11 +42,14 @@ LEDD_OBJECTS = $(LEDD_SOURCES:src/%.c=$(BUILD)/%.o)
 BTD_OBJECTS = $(BTD_SOURCES:src/%.c=$(BUILD)/%.o)
 AIRPLAYD_OBJECTS = $(AIRPLAYD_SOURCES:src/%.c=$(BUILD)/%.o)
 TTSD_OBJECTS = $(TTSD_SOURCES:src/%.c=$(BUILD)/%.o)
+STTD_OBJECTS = $(STTD_SOURCES:src/%.c=$(BUILD)/%.o)
+AGENTD_OBJECTS = $(AGENTD_SOURCES:src/%.c=$(BUILD)/%.o)
+WYOMINGD_OBJECTS = $(WYOMINGD_SOURCES:src/%.c=$(BUILD)/%.o)
 LOGD_OBJECTS = $(LOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 comma := ,
 GC_LDFLAGS ?= $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections)
 
-.PHONY: all adapters clean release test install deploy
+.PHONY: all adapters clean release test install deploy test-wyoming-protocol test-wyomingd
 all: CPPFLAGS += -DLE_DEV_CONTROLS=1
 all: $(TARGET) $(LOGD_TARGET) adapters
 
@@ -67,6 +82,31 @@ $(BUILD)/libreecho-airplayd: $(AIRPLAYD_OBJECTS)
 
 $(BUILD)/libreecho-ttsd: $(TTSD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(TTSD_OBJECTS) $(LDFLAGS) -lpthread -lm -o $@
+
+$(BUILD)/libreecho-sttd: $(STTD_OBJECTS)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(STTD_OBJECTS) $(LDFLAGS) -o $@
+
+$(BUILD)/libreecho-agentd: $(AGENTD_OBJECTS)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AGENTD_OBJECTS) $(LDFLAGS) \
+		-lpthread -o $@
+
+$(BUILD)/libreecho-wyomingd: $(WYOMINGD_OBJECTS)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(WYOMINGD_OBJECTS) $(LDFLAGS) -lm -o $@
+
+$(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
+		src/adapter/wyoming_protocol.c src/json.c
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+test-wyoming-protocol: $(BUILD)/test-wyoming-protocol
+	./$(BUILD)/test-wyoming-protocol
+
+$(BUILD)/test-wyomingd: tests/test_wyomingd.c $(BUILD)/libreecho-wyomingd
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc tests/test_wyomingd.c \
+		src/adapter/voice_stream.c src/adapter/wyoming_protocol.c src/json.c \
+		-o $@
+
+test-wyomingd: $(BUILD)/test-wyomingd
+	./$(BUILD)/test-wyomingd
 
 # sherpa-onnx backed ttsd (cross-compiled ARM32, static).  Uses the real
 # ZipVoice neural TTS engine instead of the mock sine chirp.  Requires
@@ -111,9 +151,16 @@ SHERPA_LDFLAGS = -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
 $(BUILD)/tts_engine_sherpa.arm.o: $(TTSD_SHERPA_CXX_SOURCES)
 	$(CROSS_COMPILE)g++ $(SHERPA_CXXFLAGS) -c $< -o $@
 
+$(BUILD)/stt_engine_sherpa.arm.o: $(STTD_SHERPA_CXX_SOURCES)
+	$(CROSS_COMPILE)g++ $(SHERPA_CXXFLAGS) -c $< -o $@
+
 $(BUILD)/ttsd.arm.o: src/adapter/ttsd.c
 	$(CROSS_COMPILE)$(CC) -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
 		-D_POSIX_C_SOURCE=200809L -DLE_TTSD_ENGINE_SHERPA -std=c99 -O2 -Isrc -Isrc/adapter -c $< -o $@
+
+$(BUILD)/sttd.arm.o: src/adapter/sttd.c
+	$(CROSS_COMPILE)$(CC) -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
+		-D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Isrc -Isrc/adapter -c $< -o $@
 
 $(BUILD)/adapter_server.arm.o: src/adapter/adapter_server.c
 	$(CROSS_COMPILE)$(CC) -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
@@ -158,6 +205,35 @@ $(BUILD)/libreecho-ttsd-sherpa: $(BUILD)/ttsd.arm.o $(BUILD)/tts_engine_sherpa.a
 		-Wl,--end-group \
 		-lpthread -ldl -lm -o $@
 
+$(BUILD)/libreecho-sttd-sherpa-arm32: $(BUILD)/sttd.arm.o \
+		$(BUILD)/stt_engine_sherpa.arm.o $(BUILD)/adapter_server.arm.o
+	$(CROSS_COMPILE)g++ $(SHERPA_LDFLAGS) \
+		$(BUILD)/sttd.arm.o $(BUILD)/stt_engine_sherpa.arm.o \
+		$(BUILD)/adapter_server.arm.o \
+		-lsherpa-onnx-c-api -lsherpa-onnx-core -lsherpa-onnx-cxx-api \
+		-lkaldi-native-fbank-core -lkissfft-float \
+		-lsherpa-onnx-fst -lsherpa-onnx-fstfar \
+		-lsherpa-onnx-kaldifst-core -lkaldi-decoder-core \
+		-lespeak-ng -lpiper_phonemize -lssentencepiece_core -lucd \
+		-Wl,--start-group \
+		$(ORT_BUILD)/libonnxruntime_session.a \
+		$(ORT_BUILD)/libonnxruntime_optimizer.a \
+		$(ORT_BUILD)/libonnxruntime_providers.a \
+		$(ORT_BUILD)/libonnxruntime_graph.a \
+		$(ORT_BUILD)/libonnxruntime_framework.a \
+		$(ORT_BUILD)/libonnxruntime_common.a \
+		$(ORT_BUILD)/libonnxruntime_mlas.a \
+		$(ORT_BUILD)/libonnxruntime_util.a \
+		$(ORT_BUILD)/libonnxruntime_flatbuffers.a \
+		$(ORT_BUILD)/libonnxruntime_lora.a \
+		$(ORT_BUILD)/_deps/onnx-build/libonnx.a \
+		$(ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
+		$(ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
+		$(ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
+		$(HOME)/workspace/onnxruntime-arm32/install/lib/libre2.a \
+		$$(find $(ORT_BUILD)/_deps/abseil_cpp-build -name '*.a') \
+		-Wl,--end-group -lpthread -ldl -lm -o $@
+
 $(BUILD)/test-voice-aec: tests/test_voice_aec.c src/adapter/voice_aec.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
@@ -173,8 +249,77 @@ $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -o $@
 
+$(BUILD)/test-voice-stream: tests/test_voice_stream.c \
+		src/adapter/voice_stream.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-sttd: tests/test_sttd.c src/adapter/adapter_client.c \
+		src/log.c $(BUILD)/libreecho-sttd
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_sttd.c \
+		src/adapter/adapter_client.c src/log.c -o $@
+
+$(BUILD)/test-llm-provider: tests/test_llm_provider.c \
+		src/adapter/llm_provider.c src/adapter/llm_codex.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -o $@
+
+$(BUILD)/mock-llm-curl: tests/mock_llm_curl.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror $< -o $@
+
+$(BUILD)/mock-audio-adapter: tests/mock_audio_adapter.c \
+		src/adapter/adapter_server.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-llm-http: tests/test_llm_http.c src/adapter/llm_http.c \
+		$(BUILD)/mock-llm-curl
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_llm_http.c \
+		src/adapter/llm_http.c -o $@
+
+$(BUILD)/test-llm-store: tests/test_llm_store.c src/adapter/llm_store.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-agentd: tests/test_agentd.c src/adapter/adapter_client.c \
+		src/log.c $(BUILD)/libreecho-agentd $(BUILD)/mock-llm-curl \
+		$(BUILD)/mock-audio-adapter $(BUILD)/libreecho-sttd \
+		$(BUILD)/mock-voice-source
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_agentd.c \
+		src/adapter/adapter_client.c src/log.c -o $@
+
+$(BUILD)/test-voice-reply: tests/test_voice_reply.c \
+		src/adapter/voice_reply.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-voice-playback: tests/test_voice_playback.c \
+		src/adapter/voice_playback.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -lpthread -o $@
+
+$(BUILD)/mock-voice-source: tests/mock_voice_source.c \
+		src/adapter/voice_stream.c src/adapter/adapter_server.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
+		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
+		src/json.c $(BUILD)/libreecho-sttd $(BUILD)/mock-voice-source
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_voice_pipeline.c \
+		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
+		src/json.c src/log.c -lpthread -o $@
+
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
+		src/adapter/voice_stream.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -183,6 +328,7 @@ $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 
 $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
+		src/adapter/voice_stream.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c src/log.c
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 \
 		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
@@ -215,6 +361,12 @@ $(BUILD)/wake-adapter-client-arm32: tests/wake_adapter_client.c \
 		-Wpedantic -Werror -Isrc $^ -static \
 		-Wl,--gc-sections -o $@
 
+$(BUILD)/stt-stream-file-client-arm32: tests/stt_stream_file_client.c
+	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Os \
+		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
+		-ffunction-sections -fdata-sections -Wall -Wextra \
+		-Wpedantic -Werror $< -static -Wl,--gc-sections -o $@
+
 $(BUILD)/%.wake.arm.o: src/adapter/%.c
 	@mkdir -p $(BUILD)
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L \
@@ -226,7 +378,8 @@ $(BUILD)/%.wake.arm.o: src/adapter/%.c
 
 $(BUILD)/waked.wake.arm.o: src/adapter/adapter.h \
 	src/adapter/voice_aec.h src/adapter/voice_dsp.h \
-	src/adapter/voice_reference.h src/adapter/wake_led.h \
+	src/adapter/voice_reference.h src/adapter/voice_stream.h \
+	src/adapter/wake_led.h \
 	src/adapter/wake_worker.h
 $(BUILD)/voice_aec.wake.arm.o: src/adapter/voice_aec.h
 $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
@@ -247,6 +400,7 @@ WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/voice_aec.wake.arm.o \
 	$(BUILD)/voice_reference.wake.arm.o \
 	$(BUILD)/voice_dsp.wake.arm.o \
+	$(BUILD)/voice_stream.wake.arm.o \
 	$(BUILD)/wake_worker.wake.arm.o \
 	$(BUILD)/wake_led.wake.arm.o \
 	$(BUILD)/adapter_client.wake.arm.o \
@@ -283,7 +437,7 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -m 0755 $(ADAPTER_TARGETS) $(DESTDIR)$(PREFIX)/sbin/
 	cp -R web/* $(DESTDIR)$(PREFIX)/share/libreecho/web/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
-	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init $(DESTDIR)/etc/init.d/
+	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init $(DESTDIR)/etc/init.d/
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
 
 deploy: all
@@ -291,11 +445,24 @@ deploy: all
 
 clean:
 	rm -f $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
-		$(LOGD_OBJECTS) $(BTD_OBJECTS) $(AIRPLAYD_OBJECTS) $(TTSD_OBJECTS) $(ADAPTER_TARGETS) $(TARGET) $(LOGD_TARGET)
+		$(LOGD_OBJECTS) $(BTD_OBJECTS) $(AIRPLAYD_OBJECTS) $(TTSD_OBJECTS) \
+		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(WYOMINGD_OBJECTS) $(ADAPTER_TARGETS) \
+		$(TARGET) $(LOGD_TARGET)
 	rm -f $(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32 \
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
-		$(BUILD)/test-wake-led \
+		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
+		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
+		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
+		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
+		$(BUILD)/mock-audio-adapter \
+		$(BUILD)/test-llm-store \
+		$(BUILD)/test-agentd \
+		$(BUILD)/test-voice-reply \
+		$(BUILD)/test-voice-playback \
+		$(BUILD)/libreecho-sttd-sherpa-arm32 \
+		$(BUILD)/sttd.arm.o $(BUILD)/stt_engine_sherpa.arm.o \
 		$(BUILD)/test-wake-engine-arm32 $(BUILD)/wake-adapter-client-arm32 \
+		$(BUILD)/stt-stream-file-client-arm32 \
 		$(BUILD)/*.wake.arm.o $(BUILD)/wake_engine_onnx.arm.o \
 		$(BUILD)/test_wake_engine.arm.o
