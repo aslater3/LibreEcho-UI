@@ -506,7 +506,7 @@ static int response_request(const struct le_llm_credentials *credentials,
         "\"input\":[{\"role\":\"user\",\"content\":["
         "{\"type\":\"input_text\",\"text\":\"%s\"}]}],"
         "\"store\":false,\"stream\":true,"
-        "\"reasoning\":{\"effort\":\"low\"},\"max_output_tokens\":160}",
+        "\"reasoning\":{\"effort\":\"low\"}}",
         escaped_model, escaped_instructions, escaped_transcript);
     return length > 0 && length < (int)sizeof(request->body) ? 0 : -1;
 }
