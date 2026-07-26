@@ -238,13 +238,19 @@ int le_adapter_listen(const char *sock_path)
     unlink(sock_path);
     if (bind(fd, (struct sockaddr *)&address, address_len) < 0 ||
         listen(fd, 4) < 0) {
+        int saved_errno = errno;
+
         close(fd);
         unlink(sock_path);
+        errno = saved_errno;
         return -1;
     }
     if (chmod(sock_path, 0660) < 0) {
+        int saved_errno = errno;
+
         close(fd);
         unlink(sock_path);
+        errno = saved_errno;
         return -1;
     }
     return fd;

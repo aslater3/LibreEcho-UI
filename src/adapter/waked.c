@@ -4,6 +4,7 @@
 #include "voice_aec.h"
 #include "voice_dsp.h"
 #include "voice_reference.h"
+#include "voice_stream.h"
 #include "wake_led.h"
 #include "wake_worker.h"
 
@@ -33,6 +34,7 @@
 #define REFERENCE_TIMEOUT_NS 250000000ULL
 #define WAKE_ACCEPT_THRESHOLD 0.55f
 #define MAX_WAKE_SUBSCRIBERS 4U
+#define MAX_AUDIO_SUBSCRIBERS 2U
 
 struct waked_config {
     const char *socket_path;
@@ -51,6 +53,7 @@ struct waked_ipc {
     int listen_fd;
     int event_pipe[2];
     int subscribers[MAX_WAKE_SUBSCRIBERS];
+    int audio_subscribers[MAX_AUDIO_SUBSCRIBERS];
     unsigned int detected_count;
     int sensitivity;
     struct le_wake_event last_event;
@@ -326,6 +329,41 @@ static int add_subscriber(struct waked_ipc *ipc, int client_fd)
     return -1;
 }
 
+static int add_audio_subscriber(struct waked_ipc *ipc, int client_fd)
+{
+    size_t i;
+
+    if (set_nonblocking(client_fd) < 0)
+        return -1;
+    for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i) {
+        if (ipc->audio_subscribers[i] < 0) {
+            ipc->audio_subscribers[i] = client_fd;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void publish_audio_frame(struct waked_ipc *ipc,
+                                uint64_t first_sample,
+                                const int16_t *samples,
+                                size_t count)
+{
+    size_t i;
+
+    for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i) {
+        int fd = ipc->audio_subscribers[i];
+
+        if (fd < 0)
+            continue;
+        if (le_voice_stream_write_frame(
+                fd, first_sample, samples, count, 0) < 0) {
+            close(fd);
+            ipc->audio_subscribers[i] = -1;
+        }
+    }
+}
+
 static void handle_control_client(
     struct waked_ipc *ipc,
     struct le_wake_worker *wake_worker,
@@ -382,6 +420,28 @@ static void handle_control_client(
             close(client_fd);
         }
         return;
+    } else if (!strcmp(command, "stream_audio")) {
+        if (add_audio_subscriber(ipc, client_fd) < 0) {
+            (void)respond(client_fd, id, 0,
+                          "audio subscriber limit reached");
+            close(client_fd);
+            return;
+        }
+        if (respond(
+                client_fd, id, 1,
+                "{\"streaming\":true,\"format\":\"pcm_s16_le\","
+                "\"sample_rate\":16000,\"channels\":1,"
+                "\"frame_header_bytes\":24,"
+                "\"sample_indexed\":true}") < 0) {
+            size_t i;
+
+            for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i) {
+                if (ipc->audio_subscribers[i] == client_fd)
+                    ipc->audio_subscribers[i] = -1;
+            }
+            close(client_fd);
+        }
+        return;
     } else if (!strcmp(command, "set_sensitivity")) {
         int sensitivity;
 
@@ -426,6 +486,7 @@ static int process_frame(struct le_voice_aec *aec,
                          struct le_voice_reference *reference,
                          struct le_voice_vad *vad,
                          struct le_wake_worker *wake_worker,
+                         struct waked_ipc *ipc,
                          const int16_t *microphone,
                          int16_t *preroll,
                          size_t *preroll_position,
@@ -467,6 +528,11 @@ static int process_frame(struct le_voice_aec *aec,
     preroll_write(preroll, preroll_position, clean,
                   LE_VOICE_AEC_FRAME_SAMPLES);
     ++metrics->processed_frames;
+    publish_audio_frame(
+        ipc,
+        (metrics->processed_frames - 1U) *
+            LE_VOICE_AEC_FRAME_SAMPLES,
+        clean, LE_VOICE_AEC_FRAME_SAMPLES);
 
 #ifdef LE_WAKE_ENGINE_ONNX
     if (wake_worker && wake_worker->implementation) {
@@ -537,6 +603,8 @@ static int run_waked(const struct waked_config *config)
         threshold_sensitivity(config->wake_threshold);
     for (i = 0; i < MAX_WAKE_SUBSCRIBERS; ++i)
         ipc.subscribers[i] = -1;
+    for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i)
+        ipc.audio_subscribers[i] = -1;
     preroll = (int16_t *)calloc(PREROLL_SAMPLES, sizeof(*preroll));
     if (!preroll)
         goto out;
@@ -664,7 +732,7 @@ static int run_waked(const struct waked_config *config)
                         microphone_used - frame_bytes);
                 microphone_used -= frame_bytes;
                 frame_result = process_frame(
-                    &aec, &reference, &vad, &wake_worker, microphone,
+                    &aec, &reference, &vad, &wake_worker, &ipc, microphone,
                     preroll, &preroll_position, dump_fd, dump_limit,
                     &metrics);
                 if (frame_result < 0)
@@ -711,6 +779,10 @@ out:
     for (i = 0; i < MAX_WAKE_SUBSCRIBERS; ++i) {
         if (ipc.subscribers[i] >= 0)
             close(ipc.subscribers[i]);
+    }
+    for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i) {
+        if (ipc.audio_subscribers[i] >= 0)
+            close(ipc.audio_subscribers[i]);
     }
     if (ipc.event_pipe[0] >= 0)
         close(ipc.event_pipe[0]);

@@ -29,6 +29,19 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
 make build/test-voice-aec build/test-voice-reference
 ./build/test-voice-aec
 ./build/test-voice-reference
+make build/test-voice-stream build/test-sttd build/test-llm-provider \
+    build/test-llm-http build/test-llm-store build/test-agentd
+make build/test-voice-reply build/test-voice-playback
+make build/test-voice-pipeline
+./build/test-voice-stream
+./build/test-sttd
+./build/test-llm-provider
+./build/test-llm-http
+./build/test-llm-store
+./build/test-agentd
+./build/test-voice-reply
+./build/test-voice-playback
+./build/test-voice-pipeline
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_ttsd.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \

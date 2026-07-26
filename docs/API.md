@@ -222,6 +222,70 @@ Use `POST /api/v1/audio/announce/stop` with `{}` to interrupt the active
 announcement. State-changing API calls require the normal CSRF header and,
 when configured, local API authentication.
 
+### Voice assistant
+
+The voice assistant uses local wake-word detection, post-AEC microphone audio,
+local streaming speech recognition, a subscription-authenticated response
+provider, and the same local announcement bus as the announce API. It never
+accepts or falls back to an OpenAI API key.
+
+#### GET /api/v1/assistant
+
+Returns assistant configuration, ChatGPT device-login state, pipeline
+connectivity, local STT timing, and first-audio latency telemetry. The latency
+measurement is from the estimated end of speech to the first PCM submitted to
+the announcement bus; the current target is 3000 ms.
+
+#### PUT /api/v1/assistant
+
+Updates the provider-neutral assistant configuration:
+
+```json
+{
+  "enabled": true,
+  "provider": "openai-codex",
+  "model": "gpt-5.4",
+  "prompt": "Reply in concise, natural spoken English without markdown."
+}
+```
+
+The prompt is sent as the response provider's instruction text. Keep it
+voice-safe: concise prose, no markdown, URLs, citations, emoji, or claims that
+an external action succeeded without tool confirmation.
+
+#### POST /api/v1/assistant/auth/start
+
+Starts ChatGPT subscription device login. The response contains a
+`verification_url` and `user_code`; no account password or API key is entered
+on LibreEcho.
+
+#### POST /api/v1/assistant/auth/poll
+
+Checks whether device login has completed. Respect the `auth_state` and
+server-derived polling interval exposed by assistant status. Successful OAuth
+credentials are written with mode `0600` below
+`/data/libreecho/secrets/` and are excluded from configuration exports,
+diagnostics, image builds, and logs.
+
+#### POST /api/v1/assistant/logout
+
+Deletes the persistent ChatGPT OAuth credentials from the device.
+
+#### POST /api/v1/assistant/respond
+
+Streams a text request through the configured provider and speaks response
+segments as soon as a voice-safe boundary is available:
+
+```json
+{
+  "text": "What is the weather likely to be like today?"
+}
+```
+
+This endpoint is primarily a setup and diagnostics path. Normal operation is:
+wake event, continuous post-AEC audio, local streaming STT, streamed response
+text, warm local TTS, then `audiod` announcement playback.
+
 ### LED
 
 #### GET /api/v1/led

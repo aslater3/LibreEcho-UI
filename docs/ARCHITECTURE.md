@@ -99,6 +99,31 @@ libreecho-web --backend linux \
 
 **Backend selection:** `--backend mock` (simulated) or `--backend linux` (real hardware).
 
+### Streaming voice-assistant pipeline
+
+The assistant is split at provider-neutral boundaries:
+
+```text
+waked post-AEC PCM
+  -> sttd local streaming recognition
+  -> agentd provider interface
+  -> ChatGPT subscription response stream
+  -> voice-safe text segmentation
+  -> warm ttsd
+  -> audiod announcement bus
+```
+
+`agentd` consumes indexed 16 kHz PCM continuously after wake detection, so STT
+does not wait for a second recording process to start. It sends only the final
+transcript to the configured response provider. Response deltas are spoken at
+the first natural break after 32 characters, or the next word boundary after
+48 characters, which bounds text buffering for the three-second first-audio
+target.
+
+The first provider is `openai-codex`, authenticated by ChatGPT device OAuth
+against the user's subscription. Provider code supplies auth, refresh, request,
+and streaming-event callbacks; no metered API-key fallback exists.
+
 ### 2. Adapter Protocol
 
 **Role:** Versioned JSON protocol between web daemon and companion daemons.
@@ -359,8 +384,12 @@ Browser: displays scan results
 ```
 /data/libreecho/config/
 ├── web-config.json          # Canonical non-secret device configuration
+├── agent.json               # Non-secret assistant provider/model/prompt
 ├── wpa_supplicant.conf      # Wi-Fi credentials (0600, excluded from export)
 └── users                    # Local authentication database (0600)
+
+/data/libreecho/secrets/
+└── openai-codex.json        # OAuth credentials (0600; never exported)
 
 /etc/libreecho/
 ├── web-config.json          # Read-only first-boot defaults
@@ -370,6 +399,10 @@ Browser: displays scan results
 /run/libreecho/
 ├── network.sock             # networkd adapter socket
 ├── audio.sock               # audiod adapter socket
+├── wakeword.sock            # wake events and indexed post-AEC PCM
+├── stt.sock                 # local streaming STT
+├── tts.sock                 # warm local TTS
+├── agent.sock               # provider/auth/voice-loop control
 ├── led.sock                 # ledd adapter socket
 └── log.sock                 # logd log aggregation socket
 
@@ -403,9 +436,12 @@ libreecho-audiod    (needs logd for logging)
     ↑
 libreecho-ledd      (needs logd for logging)
     ↑
+libreecho-waked → libreecho-sttd → libreecho-ttsd → libreecho-agentd
+    ↑
 libreecho-web       (needs all above for full functionality)
 ```
 
-**Startup order:** logd → networkd → audiod → ledd → web
+**Startup order:** logd → networkd → audiod → micd → waked → sttd → ledd →
+btd → airplayd → ttsd → agentd → web
 
-**Shutdown order:** web → ledd → audiod → networkd → logd
+**Shutdown order:** reverse startup order.

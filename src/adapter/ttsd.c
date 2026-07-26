@@ -65,12 +65,17 @@
 #define LE_TTS_STREAM_GAP_WAIT_MS 40
 #define LE_TTS_STREAM_MAX_GAP_MS 5000
 #define LE_TTS_MAX_CPUS 16
+#define LE_TTS_REQUEST_ID_MAX 64
+#define LE_TTS_FIRST_PCM_FILE "/run/libreecho/tts-first-pcm"
 
 static volatile sig_atomic_t g_stop;
 static volatile sig_atomic_t g_child_exited;
 static pid_t g_active_child = -1;
 static char g_pending_text[LE_TTS_MAX_TEXT];
+static char g_pending_request_id[LE_TTS_REQUEST_ID_MAX];
 static int g_pending_speech;
+
+static void mark_first_pcm(const char *request_id);
 
 static const char *announcement_bus_path(void)
 {
@@ -102,6 +107,7 @@ struct pcm_stream_queue {
     int closed;
     int failed;
     unsigned int inserted_gap_periods;
+    char request_id[LE_TTS_REQUEST_ID_MAX];
 };
 
 /* ---- Signal handlers ---- */
@@ -405,7 +411,8 @@ static int write_pcm_fd(int fd, const int16_t *pcm, size_t frames)
     return 0;
 }
 
-static int write_pcm_to_bus(const int16_t *pcm, size_t frames)
+static int write_pcm_to_bus(const int16_t *pcm, size_t frames,
+                            const char *request_id)
 {
     const char *bus_path = announcement_bus_path();
     int fd;
@@ -416,6 +423,7 @@ static int write_pcm_to_bus(const int16_t *pcm, size_t frames)
         le_log_perr("ttsd: open announcement bus %s", bus_path);
         return -1;
     }
+    mark_first_pcm(request_id);
     rc = write_pcm_fd(fd, pcm, frames);
     close(fd);
     return rc;
@@ -474,6 +482,53 @@ static double monotonic_milliseconds(void)
     if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
         return 0.0;
     return (double)now.tv_sec * 1000.0 + (double)now.tv_nsec / 1000000.0;
+}
+
+static const char *first_pcm_file_path(void)
+{
+    const char *path = getenv("LE_TTS_FIRST_PCM_FILE");
+
+    return path && path[0] ? path : LE_TTS_FIRST_PCM_FILE;
+}
+
+static int valid_request_id(const char *request_id)
+{
+    const unsigned char *position =
+        (const unsigned char *)request_id;
+
+    if (!request_id || !request_id[0])
+        return 1;
+    while (*position) {
+        if (!((*position >= 'a' && *position <= 'z') ||
+              (*position >= 'A' && *position <= 'Z') ||
+              (*position >= '0' && *position <= '9') ||
+              *position == '-' || *position == '_'))
+            return 0;
+        ++position;
+    }
+    return 1;
+}
+
+static void mark_first_pcm(const char *request_id)
+{
+    const char *path = first_pcm_file_path();
+    char record[128];
+    int length;
+    int fd;
+
+    if (!request_id || !request_id[0])
+        return;
+    length = snprintf(
+        record, sizeof(record), "%s %.0f\n",
+        request_id, monotonic_milliseconds());
+    if (length <= 0 || length >= (int)sizeof(record))
+        return;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return;
+    if (write(fd, record, (size_t)length) != length)
+        le_log_warn("ttsd: unable to write first PCM marker");
+    close(fd);
 }
 
 struct cpu_boost_state {
@@ -596,9 +651,13 @@ static void realtime_deadline(struct timespec *deadline, long milliseconds)
     deadline->tv_nsec = nanoseconds % 1000000000L;
 }
 
-static int stream_queue_init(struct pcm_stream_queue *queue)
+static int stream_queue_init(struct pcm_stream_queue *queue,
+                             const char *request_id)
 {
     memset(queue, 0, sizeof(*queue));
+    if (request_id)
+        snprintf(queue->request_id, sizeof(queue->request_id),
+                 "%s", request_id);
     if (pthread_mutex_init(&queue->mutex, NULL) != 0)
         return -1;
     if (pthread_cond_init(&queue->ready, NULL) != 0) {
@@ -734,8 +793,10 @@ static void *stream_writer(void *opaque)
                     break;
                 }
             }
-            if (!started)
+            if (!started) {
                 le_log_info("ttsd: streaming first PCM chunk to bus");
+                mark_first_pcm(queue->request_id);
+            }
             if (consecutive_gap_periods > 0) {
                 double gap_ms =
                     (double)consecutive_gap_periods *
@@ -840,7 +901,8 @@ static size_t split_stream_phrases(const char *text, char **phrases,
     return phrases[0] ? 1 : 0;
 }
 
-static int synthesize_and_stream(struct tts_engine *engine, const char *text)
+static int synthesize_and_stream(struct tts_engine *engine, const char *text,
+                                 const char *request_id)
 {
     struct pcm_stream_queue queue;
     char *phrases[LE_TTS_STREAM_MAX_PHRASES];
@@ -855,7 +917,7 @@ static int synthesize_and_stream(struct tts_engine *engine, const char *text)
         text, phrases, sizeof(phrases) / sizeof(phrases[0]));
     if (phrase_count == 0)
         return -1;
-    if (stream_queue_init(&queue) < 0)
+    if (stream_queue_init(&queue, request_id) < 0)
         goto out_phrases;
     if (pthread_create(&writer, NULL, stream_writer, &queue) != 0)
         goto out_queue;
@@ -904,7 +966,8 @@ out_phrases:
 
 /* ---- Synthesize + write (runs in forked child) ---- */
 
-static int synthesize_and_play(struct tts_engine *engine, const char *text)
+static int synthesize_and_play(struct tts_engine *engine, const char *text,
+                               const char *request_id)
 {
     struct cpu_boost_state boost;
     int16_t *stereo = NULL;
@@ -914,7 +977,7 @@ static int synthesize_and_play(struct tts_engine *engine, const char *text)
 
     cpu_boost_begin(&boost);
     if (streaming && !strcmp(streaming, "1")) {
-        rc = synthesize_and_stream(engine, text);
+        rc = synthesize_and_stream(engine, text, request_id);
         cpu_boost_end(&boost);
         return rc;
     }
@@ -925,7 +988,7 @@ static int synthesize_and_play(struct tts_engine *engine, const char *text)
     }
     le_log_info("ttsd: playing %zu frames (%.2f s) on announcement bus",
                 stereo_frames, (double)stereo_frames / LE_TTS_BUS_RATE);
-    rc = write_pcm_to_bus(stereo, stereo_frames);
+    rc = write_pcm_to_bus(stereo, stereo_frames, request_id);
     free(stereo);
     cpu_boost_end(&boost);
     return rc;
@@ -975,7 +1038,8 @@ static void reap_children(void)
     g_child_exited = 0;
 }
 
-static int start_speech(struct tts_engine *engine, const char *text)
+static int start_speech(struct tts_engine *engine, const char *text,
+                        const char *request_id)
 {
     pid_t pid;
 
@@ -985,7 +1049,7 @@ static int start_speech(struct tts_engine *engine, const char *text)
      * and for deployments where memory is tighter than responsiveness. */
     if (getenv("LE_TTS_IN_PROCESS") &&
         !strcmp(getenv("LE_TTS_IN_PROCESS"), "1")) {
-        int rc = synthesize_and_play(engine, text);
+        int rc = synthesize_and_play(engine, text, request_id);
         if (rc < 0) {
             le_log_error("ttsd: in-process synthesis failed for text (%zu chars)",
                          strlen(text));
@@ -1007,7 +1071,7 @@ static int start_speech(struct tts_engine *engine, const char *text)
     }
     if (pid == 0) {
         /* Child: synthesize and write to bus, then exit. */
-        int rc = synthesize_and_play(engine, text);
+        int rc = synthesize_and_play(engine, text, request_id);
         _exit(rc == 0 ? 0 : 1);
     }
     g_active_child = pid;
@@ -1023,7 +1087,8 @@ static int in_process_synthesis_enabled(void)
     return value && !strcmp(value, "1");
 }
 
-static int queue_in_process_speech(const char *text)
+static int queue_in_process_speech(const char *text,
+                                   const char *request_id)
 {
     size_t length;
 
@@ -1033,6 +1098,8 @@ static int queue_in_process_speech(const char *text)
     if (length >= sizeof(g_pending_text))
         return -1;
     memcpy(g_pending_text, text, length + 1);
+    snprintf(g_pending_request_id, sizeof(g_pending_request_id),
+             "%s", request_id ? request_id : "");
     g_pending_speech = 1;
     return 0;
 }
@@ -1071,15 +1138,23 @@ static int handle_request(struct tts_engine *engine, char *message,
         return response_ok(response, response_size, id, data);
     }
     if (!strcmp(command, "speak")) {
+        char request_id[LE_TTS_REQUEST_ID_MAX] = "";
+
         if (json_string(message, "text", text, sizeof(text)) < 0)
             return response_error(response, response_size, id,
                                   "missing or invalid text field");
         if (text[0] == '\0')
             return response_error(response, response_size, id,
                                   "text must not be empty");
+        if (json_value(message, "request_id") &&
+            (json_string(message, "request_id", request_id,
+                         sizeof(request_id)) < 0 ||
+             !valid_request_id(request_id)))
+            return response_error(response, response_size, id,
+                                  "invalid request_id");
         if (in_process_synthesis_enabled()
-                ? queue_in_process_speech(text) < 0
-                : start_speech(engine, text) < 0)
+                ? queue_in_process_speech(text, request_id) < 0
+                : start_speech(engine, text, request_id) < 0)
             return response_error(response, response_size, id,
                                   "failed to start speech");
         return response_ok(response, response_size, id, "{\"speaking\":true}");
@@ -1330,6 +1405,7 @@ int main(int argc, char **argv)
         if (g_pending_speech) {
             int output_pending = 0;
             char text[LE_TTS_MAX_TEXT];
+            char request_id[LE_TTS_REQUEST_ID_MAX];
 
             /*
              * Low-memory deployments synthesize in this process so the
@@ -1346,9 +1422,12 @@ int main(int argc, char **argv)
             }
             if (!output_pending) {
                 memcpy(text, g_pending_text, sizeof(text));
+                memcpy(request_id, g_pending_request_id,
+                       sizeof(request_id));
                 g_pending_text[0] = '\0';
+                g_pending_request_id[0] = '\0';
                 g_pending_speech = 0;
-                if (start_speech(engine, text) < 0)
+                if (start_speech(engine, text, request_id) < 0)
                     le_log_error("ttsd: queued in-process speech failed");
             }
         }

@@ -1,0 +1,107 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          libreecho-agentd
+# Required-Start:    $remote_fs $network libreecho-waked libreecho-sttd libreecho-ttsd
+# Required-Stop:     $remote_fs $network libreecho-waked libreecho-sttd libreecho-ttsd
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+### END INIT INFO
+
+[ -r /etc/default/libreecho-agentd ] && . /etc/default/libreecho-agentd
+
+PAYLOAD=${PAYLOAD:-/data/libreecho/features/assistant/payload.squashfs}
+RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/assistant/root}
+DAEMON=${DAEMON:-$RUNTIME_ROOT/usr/local/sbin/libreecho-agentd}
+CURL=${CURL:-$RUNTIME_ROOT/usr/local/libexec/libreecho-curl}
+CA_BUNDLE=${CA_BUNDLE:-$RUNTIME_ROOT/usr/local/share/libreecho/cacert.pem}
+PIDFILE=${PIDFILE:-/var/run/libreecho-agentd.pid}
+LOGFILE=${LOGFILE:-/var/log/libreecho-agentd.log}
+SOCKET=${SOCKET:-/run/libreecho/agent.sock}
+
+mount_runtime() {
+    [ -f "$PAYLOAD" ] || {
+        echo "libreecho-agentd: feature payload missing: $PAYLOAD" >&2
+        return 1
+    }
+    mkdir -p "$RUNTIME_ROOT"
+    if grep -q " $RUNTIME_ROOT " /proc/mounts 2>/dev/null; then
+        return 0
+    fi
+    mount -t squashfs -o loop,ro,nosuid,nodev,noatime \
+        "$PAYLOAD" "$RUNTIME_ROOT" || {
+        echo "libreecho-agentd: feature payload mount failed" >&2
+        return 1
+    }
+}
+
+unmount_runtime() {
+    umount "$RUNTIME_ROOT" 2>/dev/null || true
+}
+
+is_running() {
+    [ -s "$PIDFILE" ] || return 1
+    pid=$(sed -n '1p' "$PIDFILE")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+wait_for_socket() {
+    path=$1
+    count=0
+    while [ ! -S "$path" ] && [ "$count" -lt 100 ]; do
+        sleep 0.1
+        count=$((count + 1))
+    done
+    [ -S "$path" ]
+}
+
+start_service() {
+    if is_running; then echo "libreecho-agentd already running"; return 0; fi
+    mount_runtime || return 1
+    [ -x "$DAEMON" ] && [ -x "$CURL" ] && [ -r "$CA_BUNDLE" ] || {
+        echo "libreecho-agentd: incomplete assistant runtime" >&2
+        unmount_runtime
+        return 1
+    }
+    wait_for_socket /run/libreecho/wakeword.sock || return 1
+    wait_for_socket /run/libreecho/stt.sock || return 1
+    wait_for_socket /run/libreecho/audio.sock || return 1
+    wait_for_socket /run/libreecho/tts.sock || return 1
+    mkdir -p /data/libreecho/config /data/libreecho/secrets \
+        "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
+    chmod 0700 /data/libreecho/secrets
+    export LE_AGENT_CA_BUNDLE="$CA_BUNDLE"
+    ARGS=${ARGS:---socket $SOCKET --curl $CURL}
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS \
+            </dev/null >>"$LOGFILE" 2>&1
+    else
+        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+        echo $! >"$PIDFILE"
+    fi
+}
+
+stop_service() {
+    if is_running && command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -K -p "$PIDFILE" -R TERM/10/KILL/2
+    elif is_running; then
+        pid=$(sed -n '1p' "$PIDFILE")
+        kill "$pid" 2>/dev/null || true
+        count=0
+        while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 10 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE" "$SOCKET"
+    unmount_runtime
+}
+
+case "${1:-}" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart) stop_service; start_service ;;
+    status) if is_running; then echo "running"; else echo "stopped"; exit 1; fi ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
