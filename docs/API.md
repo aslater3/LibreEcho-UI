@@ -156,7 +156,12 @@ Returns current audio state.
     "microphone_muted": false,
     "startup_sound": true,
     "amplifier_on": true,
-    "output_available": true
+    "output_available": true,
+    "tts_voice": "southern-female",
+    "tts_voices": [
+      { "id": "southern-female", "name": "Southern English — female" },
+      { "id": "alan", "name": "Alan — male" }
+    ]
   },
   "error": null
 }
@@ -171,7 +176,8 @@ Update audio settings.
 {
   "volume": 75,
   "microphone_gain": 80,
-  "microphone_muted": false
+  "microphone_muted": false,
+  "tts_voice": "southern-female"
 }
 ```
 
@@ -189,6 +195,32 @@ Play test tone.
   "error": null
 }
 ```
+
+#### POST /api/v1/audio/announce
+
+Speak text through the local TTS service and `audiod` announcement bus. This
+is the supported path for external local services; they do not need direct
+access to the model, PCM FIFO, ALSA device, or amplifier.
+
+**Request:**
+```json
+{
+  "text": "Now playing Don’t Look Back in Anger by Oasis"
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": { "speaking": true },
+  "error": null
+}
+```
+
+Use `POST /api/v1/audio/announce/stop` with `{}` to interrupt the active
+announcement. State-changing API calls require the normal CSRF header and,
+when configured, local API authentication.
 
 ### LED
 

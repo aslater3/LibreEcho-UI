@@ -683,6 +683,24 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
     if (json_get_bool(response, "startup_sound", &v) > 0) { o->startup_sound = v; found = 1; }
     if (json_get_bool(response, "amplifier_on", &v) > 0) { o->amplifier_on = v; found = 1; }
     if (json_get_bool(response, "output_available", &v) > 0) { o->output_available = v; found = 1; }
+    {
+        const char *path = getenv("LE_TTS_VOICE_FILE");
+        FILE *voice_file;
+        if (!path || !path[0])
+            path = "/data/libreecho/config/tts-voice";
+        strcpy(o->tts_voice, "southern-female");
+        voice_file = fopen(path, "r");
+        if (voice_file) {
+            char selected[32];
+            if (fgets(selected, sizeof(selected), voice_file)) {
+                selected[strcspn(selected, "\r\n")] = '\0';
+                if (!strcmp(selected, "alan") ||
+                    !strcmp(selected, "southern-female"))
+                    strcpy(o->tts_voice, selected);
+            }
+            fclose(voice_file);
+        }
+    }
     return found ? LE_OK : LE_IO;
 }
 
@@ -716,6 +734,53 @@ static int tone(struct le_backend *b)
 {
     (void)b;
     return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "test_tone", NULL);
+}
+
+static int tts_voice(struct le_backend *b, const char *voice)
+{
+    const char *script = getenv("LE_TTS_INIT_SCRIPT");
+    pid_t pid;
+    int status;
+    (void)b;
+    if (!voice || (strcmp(voice, "alan") &&
+                   strcmp(voice, "southern-female")))
+        return LE_INVALID;
+    if (!script || !script[0])
+        script = "/etc/init.d/libreecho-ttsd.init";
+    if (access(script, X_OK) != 0)
+        return LE_NOT_SUPPORTED;
+    pid = fork();
+    if (pid < 0)
+        return LE_IO;
+    if (pid == 0) {
+        execl(script, script, "switch", voice, (char *)NULL);
+        _exit(127);
+    }
+    do {
+        if (waitpid(pid, &status, 0) >= 0)
+            break;
+    } while (errno == EINTR);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? LE_OK : LE_IO;
+}
+
+static int announce(struct le_backend *b, const char *text)
+{
+    char args[1200];
+    char escaped[1024];
+    (void)b;
+    if (!text || !text[0])
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), text);
+    if (snprintf(args, sizeof(args), "{\"text\":\"%s\"}", escaped) >=
+        (int)sizeof(args))
+        return LE_INVALID;
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "speak", args);
+}
+
+static int stop_speech(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "stop_speech", NULL);
 }
 
 static void parse_profile(const char *json, struct le_led_profile *profile)
@@ -1420,7 +1485,7 @@ static void destroy(struct le_backend *b)
 
 static const struct le_backend_ops ops = {
     destroy, status, device,
-    audio, volume, gain, mute, tone,
+    audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
     led, colour, brightness, visualizer_enabled, boot_led, led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,
     wake, wake_set, sensitivity, wake_test,
