@@ -1,5 +1,6 @@
 #include "adapter.h"
 #include "log.h"
+#include "voice_dsp.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -19,12 +20,12 @@
 
 #define MIC_CARD 0
 #define MIC_DEVICE 24
-#define MIC_RATE 16000
-#define MIC_RAW_CHANNELS 9
-#define MIC_CAPTURE_CHANNELS 7
-#define MIC_LOGICAL_CHANNELS 7
+#define MIC_RATE LE_VOICE_RATE
+#define MIC_RAW_CHANNELS LE_VOICE_RAW_CHANNELS
+#define MIC_CAPTURE_CHANNELS LE_VOICE_LOGICAL_CHANNELS
+#define MIC_LOGICAL_CHANNELS LE_VOICE_LOGICAL_CHANNELS
 #define MIC_BITS 24
-#define MICCAL_UNITY 16384
+#define MICCAL_UNITY LE_VOICE_MICCAL_UNITY
 
 struct micd_config {
     const char *socket_path;
@@ -244,13 +245,16 @@ static int format_status(char *buffer, size_t size,
         "\"calibration\":{\"q14\":[%d,%d,%d,%d,%d,%d,%d],"
         "\"fallback\":16384,\"source\":\"/proc/idme/miccal\","
         "\"values_found\":%d,\"complete\":%s,"
-        "\"selected_logical_mics\":[0,1,3,4],"
-        "\"polarity\":\"direct-provisional\","
+        "\"selected_logical_mics\":[0,3],"
+        "\"polarity\":\"all-positive-measured\","
         "\"applied_to_raw_stream\":false,"
-        "\"mapping_available\":false,"
-        "\"mapping\":\"AFE/ASP logical mapping required before applying gains\"},"
-        "\"pipeline\":{\"stage\":\"raw-capture\","
-        "\"aec\":false,\"beamforming\":false,\"wake_word\":false}}",
+        "\"applied_to_calibrated_stream\":true,"
+        "\"mapping_available\":true,"
+        "\"mapping\":\"identity-provisional; lanes 0 and 3 measured\","
+        "\"relative_delay_samples\":{\"0\":4,\"3\":0}},"
+        "\"pipeline\":{\"stage\":\"measured-delay-and-sum\","
+        "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
+        "\"aec\":false,\"beamforming\":true,\"wake_word\":false}}",
         available ? "true" : "false",
         capture_active ? "true" : "false",
         capture_active ? "\"raw-stream\"" : "null",
@@ -312,11 +316,11 @@ static int relay_capture(int client_fd, const struct micd_config *config)
             (char *)"-c", (char *)"9",
             (char *)"-r", (char *)"16000",
             (char *)"-b", (char *)"24",
-            (char *)"-p", (char *)"1024",
+            (char *)"-p", (char *)"160",
             /*
-             * 1024 frames * 9 channels * 3 bytes * 2 periods = 55296
-             * bytes.  The Amazon SPI PCM driver caps its buffer at 69120
-             * bytes, so four periods cannot pass hw_params.
+             * 160 frames is exactly 10 ms at 16 kHz.  Two periods consume
+             * 8640 bytes, comfortably below the Amazon SPI PCM driver's
+             * 69120-byte cap and avoid the old 64 ms userspace batching.
              */
             (char *)"-n", (char *)"2",
             NULL
@@ -340,25 +344,136 @@ static int relay_capture(int client_fd, const struct micd_config *config)
     return count < 0 ? -1 : 0;
 }
 
+static pid_t start_capture(const struct micd_config *config, int output_fd)
+{
+    pid_t capture = fork();
+
+    if (capture != 0)
+        return capture;
+    {
+        char *const argv[] = {
+            (char *)"tinycap", (char *)"--",
+            (char *)"-D", (char *)"0",
+            (char *)"-d", (char *)"24",
+            (char *)"-c", (char *)"9",
+            (char *)"-r", (char *)"16000",
+            (char *)"-b", (char *)"24",
+            (char *)"-p", (char *)"160",
+            (char *)"-n", (char *)"2",
+            NULL
+        };
+
+        if (dup2(output_fd, STDOUT_FILENO) < 0)
+            _exit(127);
+        if (output_fd != STDOUT_FILENO)
+            close(output_fd);
+        execv(config->capture_bin, argv);
+        _exit(127);
+    }
+}
+
+static int relay_capture_mono(int client_fd, const struct micd_config *config)
+{
+    static const uint8_t identity_map[LE_VOICE_LOGICAL_CHANNELS] =
+        {0, 1, 2, 3, 4, 5, 6};
+    struct le_voice_calibration calibration;
+    struct le_voice_beamformer beamformer;
+    struct le_voice_highpass highpass;
+    unsigned char input[LE_VOICE_RAW_FRAME_BYTES * 256];
+    int16_t output[256];
+    int miccal[LE_VOICE_LOGICAL_CHANNELS];
+    size_t pending = 0;
+    int pipe_fds[2];
+    pid_t capture;
+    ssize_t count = 0;
+    int result = -1;
+
+    if (pipe(pipe_fds) < 0)
+        return -1;
+    capture = start_capture(config, pipe_fds[1]);
+    if (capture < 0) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return -1;
+    }
+    close(pipe_fds[1]);
+
+    /*
+     * This pinned tinycap treats "--" as a raw-stdout transport, so the
+     * first byte read here is microphone PCM rather than a WAV header.
+     */
+    (void)read_miccal(config->idme_dir, miccal);
+    le_voice_calibration_init(
+        &calibration, miccal, identity_map,
+        LE_VOICE_CALIBRATION_DIRECT_Q14);
+    le_voice_beamformer_init(&beamformer);
+    le_voice_highpass_init(&highpass);
+
+    while ((count = read(pipe_fds[0], input + pending,
+                         sizeof(input) - pending)) > 0) {
+        size_t available = pending + (size_t)count;
+        size_t frames = available / LE_VOICE_RAW_FRAME_BYTES;
+        size_t consumed = frames * LE_VOICE_RAW_FRAME_BYTES;
+
+        if (frames > 0) {
+            le_voice_process_beamformed_interleaved(
+                input, frames, &calibration, &beamformer,
+                &highpass, output);
+            if (write_all(client_fd, output,
+                          frames * sizeof(output[0])) < 0)
+                break;
+        }
+        pending = available - consumed;
+        if (pending > 0)
+            memmove(input, input + consumed, pending);
+    }
+    result = count < 0 ? -1 : 0;
+
+    close(pipe_fds[0]);
+    kill(capture, SIGTERM);
+    while (waitpid(capture, NULL, 0) < 0 && errno == EINTR)
+        ;
+    return result;
+}
+
 static void run_stream_worker(int client_fd, unsigned long id, int channel,
+                              int calibrated_mono,
                               const struct micd_config *config)
 {
-    char data[256];
-    char response[512];
+    char data[512];
+    char response[768];
     int n;
 
-    n = snprintf(data, sizeof(data),
-                 "{\"format\":\"pcm_s24_3le\",\"rate\":16000,"
-                 "\"channels\":9,\"bits\":24,\"valid_bits\":16,"
-                 "\"selected_raw_channel\":%d,"
-                 "\"calibration_applied\":false}", channel);
+    if (calibrated_mono) {
+        n = snprintf(
+            data, sizeof(data),
+            "{\"format\":\"pcm_s16_le\",\"rate\":16000,"
+            "\"channels\":1,\"bits\":16,\"valid_bits\":16,"
+            "\"selected_logical_mics\":[0,3],"
+            "\"calibration_applied\":true,"
+            "\"calibration_mode\":\"direct_q14\","
+            "\"logical_map\":\"identity-provisional\","
+            "\"beamforming\":\"measured_delay_and_sum\","
+            "\"relative_delay_samples\":{\"0\":4,\"3\":0},"
+            "\"highpass_hz\":80}");
+    } else {
+        n = snprintf(data, sizeof(data),
+                     "{\"format\":\"pcm_s24_3le\",\"rate\":16000,"
+                     "\"channels\":9,\"bits\":24,\"valid_bits\":16,"
+                     "\"selected_raw_channel\":%d,"
+                     "\"calibration_applied\":false}", channel);
+    }
     if (n > 0 && (size_t)n < sizeof(data))
         n = le_adapter_respond_ok(response, sizeof(response), id, data);
     else
         n = -1;
     if (n > 0) {
-        if (write_all(client_fd, response, (size_t)n) == 0)
-            (void)relay_capture(client_fd, config);
+        if (write_all(client_fd, response, (size_t)n) == 0) {
+            if (calibrated_mono)
+                (void)relay_capture_mono(client_fd, config);
+            else
+                (void)relay_capture(client_fd, config);
+        }
     }
     close(client_fd);
 }
@@ -513,12 +628,48 @@ int main(int argc, char **argv)
             }
             if (worker == 0) {
                 close(listen_fd);
-                run_stream_worker(client_fd, id, channel, &config);
+                run_stream_worker(client_fd, id, channel, 0, &config);
                 _exit(0);
             }
             stream_worker = worker;
             close(client_fd);
             le_log_info("raw microphone stream started (lane=%d)", channel);
+        } else if (!strcmp(command, "stream_mono")) {
+            pid_t worker;
+            if (access(config.pcm_path, R_OK) != 0) {
+                (void)respond(client_fd, id, 0,
+                              "microphone capture endpoint unavailable");
+                close(client_fd);
+                continue;
+            }
+            if (stream_worker > 0) {
+                (void)respond(client_fd, id, 0,
+                              "microphone capture is already in use");
+                close(client_fd);
+                continue;
+            }
+            capture_configured = configure_capture_path(&config) == 0;
+            if (!capture_configured) {
+                (void)respond(client_fd, id, 0,
+                              "microphone mixer configuration failed");
+                close(client_fd);
+                continue;
+            }
+            worker = fork();
+            if (worker < 0) {
+                (void)respond(client_fd, id, 0,
+                              "unable to start calibrated microphone stream");
+                close(client_fd);
+                continue;
+            }
+            if (worker == 0) {
+                close(listen_fd);
+                run_stream_worker(client_fd, id, 0, 1, &config);
+                _exit(0);
+            }
+            stream_worker = worker;
+            close(client_fd);
+            le_log_info("calibrated mono microphone stream started");
         } else if (!strcmp(command, "stream_logical")) {
             (void)respond(client_fd, id, 0,
                           "logical microphone mapping is not available");

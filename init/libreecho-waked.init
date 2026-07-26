@@ -1,0 +1,123 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          libreecho-waked
+# Required-Start:    $remote_fs libreecho-micd
+# Required-Stop:     $remote_fs libreecho-micd
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+### END INIT INFO
+
+[ -r /etc/default/libreecho-waked ] && . /etc/default/libreecho-waked
+
+PAYLOAD=${PAYLOAD:-/data/libreecho/features/wakeword/payload.squashfs}
+RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/wakeword/root}
+DAEMON=${DAEMON:-$RUNTIME_ROOT/usr/local/sbin/libreecho-waked}
+MODEL_ROOT=${MODEL_ROOT:-$RUNTIME_ROOT/usr/local/share/libreecho/openwakeword}
+PIDFILE=${PIDFILE:-/var/run/libreecho-waked.pid}
+LOGFILE=${LOGFILE:-/var/log/libreecho-waked.log}
+SOCKET=${SOCKET:-/run/libreecho/wakeword.sock}
+MIC_SOCKET=${MIC_SOCKET:-/run/libreecho/mic.sock}
+REFERENCE_SOCKET=${REFERENCE_SOCKET:-/run/libreecho-audio/aec-reference.sock}
+VAD_FLOOR_FILE=${VAD_FLOOR_FILE:-/data/libreecho/config/vad-floor-rms}
+VAD_FLOOR_RMS=${VAD_FLOOR_RMS:-16}
+
+mount_runtime() {
+    [ -f "$PAYLOAD" ] || {
+        echo "libreecho-waked: feature payload missing: $PAYLOAD" >&2
+        return 1
+    }
+    mkdir -p "$RUNTIME_ROOT"
+    if grep -q " $RUNTIME_ROOT " /proc/mounts 2>/dev/null; then
+        return 0
+    fi
+    mount -t squashfs -o loop,ro,nosuid,nodev,noatime "$PAYLOAD" "$RUNTIME_ROOT" || {
+        echo "libreecho-waked: feature payload mount failed" >&2
+        return 1
+    }
+}
+
+unmount_runtime() {
+    umount "$RUNTIME_ROOT" 2>/dev/null || true
+}
+
+is_running() {
+    [ -s "$PIDFILE" ] || return 1
+    pid=$(sed -n '1p' "$PIDFILE")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+wait_for_microphone() {
+    count=0
+    while [ ! -S "$MIC_SOCKET" ] && [ "$count" -lt 50 ]; do
+        sleep 0.1
+        count=$((count + 1))
+    done
+    [ -S "$MIC_SOCKET" ]
+}
+
+start_service() {
+    if is_running; then echo "libreecho-waked already running"; return 0; fi
+    mount_runtime || return 1
+    [ -x "$DAEMON" ] &&
+        [ -f "$MODEL_ROOT/melspectrogram.onnx" ] &&
+        [ -f "$MODEL_ROOT/embedding_model.onnx" ] &&
+        [ -f "$MODEL_ROOT/alexa_v0.1.onnx" ] || {
+        echo "libreecho-waked: incomplete wakeword runtime" >&2
+        unmount_runtime
+        return 1
+    }
+    wait_for_microphone || {
+        echo "libreecho-waked: microphone adapter did not become ready" >&2
+        unmount_runtime
+        return 1
+    }
+    if [ -r "$VAD_FLOOR_FILE" ]; then
+        VAD_FLOOR_RMS=$(sed -n '1p' "$VAD_FLOOR_FILE")
+    fi
+    case "$VAD_FLOOR_RMS" in
+        *[!0-9]*|'')
+            echo "libreecho-waked: invalid VAD floor: $VAD_FLOOR_RMS" >&2
+            return 1
+            ;;
+    esac
+    if [ "$VAD_FLOOR_RMS" -lt 1 ] || [ "$VAD_FLOOR_RMS" -gt 1024 ]; then
+        echo "libreecho-waked: VAD floor outside 1..1024 RMS" >&2
+        return 1
+    fi
+    ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET --reference-socket $REFERENCE_SOCKET --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS}
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" \
+        "$(dirname "$SOCKET")" "$(dirname "$REFERENCE_SOCKET")"
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS \
+            </dev/null >>"$LOGFILE" 2>&1
+    else
+        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+        echo $! >"$PIDFILE"
+    fi
+}
+
+stop_service() {
+    if is_running && command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
+    elif is_running; then
+        pid=$(sed -n '1p' "$PIDFILE")
+        kill "$pid" 2>/dev/null || true
+        count=0
+        while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 5 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE" "$SOCKET" "$REFERENCE_SOCKET"
+    unmount_runtime
+}
+
+case "${1:-}" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart) stop_service; start_service ;;
+    status) if is_running; then echo "running"; else echo "stopped"; exit 1; fi ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

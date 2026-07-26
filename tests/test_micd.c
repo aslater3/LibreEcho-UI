@@ -108,8 +108,17 @@ int main(void)
     CHECK(strstr(response, "\"active_microphone_channels\":7") != NULL);
     CHECK(strstr(response, "\"inactive_transport_channels\":[7,8]") != NULL);
     CHECK(strstr(response, "\"configured\":true") != NULL);
-    CHECK(strstr(response, "\"mapping_available\":false") != NULL);
+    CHECK(strstr(response, "\"mapping_available\":true") != NULL);
+    CHECK(strstr(response, "\"selected_logical_mics\":[0,3]") != NULL);
+    CHECK(strstr(response,
+                 "\"relative_delay_samples\":{\"0\":4,\"3\":0}") != NULL);
     CHECK(strstr(response, "\"applied_to_raw_stream\":false") != NULL);
+    CHECK(strstr(response,
+                 "\"applied_to_calibrated_stream\":true") != NULL);
+    CHECK(strstr(response,
+                 "\"stage\":\"measured-delay-and-sum\"") != NULL);
+    CHECK(strstr(response, "\"beamforming\":true") != NULL);
+    CHECK(strstr(response, "\"vad\":\"native-energy-baseline\"") != NULL);
     CHECK(strstr(response, "\"wake_word\":false") != NULL);
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
@@ -118,7 +127,7 @@ int main(void)
                           response, sizeof(response)) ==
           LE_ADAPTER_ERR_REJECTED);
     CHECK(strstr(response, "logical microphone mapping") != NULL);
-    puts("micd: status is idle and calibration remains logical-only");
+    puts("micd: status exposes the measured 0/3 delay-and-sum stream");
     le_adapter_close(adapter);
     adapter = NULL;
     adapter = le_adapter_connect(socket_path, 250);
@@ -138,7 +147,7 @@ int main(void)
             "\"args\":{\"channel\":2}}\n";
         const char expected_args[] =
             "--\n-D\n0\n-d\n24\n-c\n9\n-r\n16000\n-b\n24\n"
-            "-p\n1024\n-n\n2\n";
+            "-p\n160\n-n\n2\n";
         FILE *file;
 
         stream_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -171,7 +180,7 @@ int main(void)
         response[used] = '\0';
         CHECK(strcmp(response, expected_args) == 0);
     }
-    puts("micd: raw stream uses the hardware-valid two-period buffer");
+    puts("micd: raw stream uses the hardware-valid 10 ms period");
     {
         FILE *file = fopen(mixer_args_path, "r");
         size_t used;

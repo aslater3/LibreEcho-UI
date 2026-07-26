@@ -8,6 +8,8 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/con
 ./build/test-unit
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
+make build/test-wake-led
+sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 sh tests/test_airplay_led_bridge.sh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
@@ -20,6 +22,13 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
     -o build/test-micd
 ./build/test-micd
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_voice_dsp.c src/adapter/voice_dsp.c \
+    -o build/test-voice-dsp
+./build/test-voice-dsp
+make build/test-voice-aec build/test-voice-reference
+./build/test-voice-aec
+./build/test-voice-reference
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_ttsd.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
