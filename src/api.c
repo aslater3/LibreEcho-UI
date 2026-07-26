@@ -23,6 +23,21 @@ static int agent_command(const char*command,const char*args,char*output,size_t s
 static void agent_result(struct api_response*r,const char*command,const char*args){char data[LE_ADAPTER_MSG_MAX];int rc=agent_command(command,args,data,sizeof(data));if(rc)err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?503:502,rc,rc==LE_NOT_SUPPORTED?"Voice assistant service is unavailable":rc==LE_INVALID?data:"Voice assistant service request failed");else ok(r,data);}
 static int wifi_scan_json(struct api_response*r,const struct le_wifi_scan*s){size_t i,n=0;char ssid[LE_TEXT*2],security[32];int written;if(!r||!s)return -1;written=snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"networks\":[");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;for(i=0;i<s->count&&i<LE_MAX_WIFI;i++){json_escape(ssid,sizeof(ssid),s->networks[i].ssid);json_escape(security,sizeof(security),s->networks[i].security);written=snprintf(r->body+n,sizeof(r->body)-n,"%s{\"ssid\":\"%s\",\"security\":\"%s\",\"signal\":%d}",i?",":"",ssid,security,s->networks[i].signal);if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;}written=snprintf(r->body+n,sizeof(r->body)-n,"]},\"error\":null}");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n+(size_t)written;return 0;}
 static int persist_configuration(struct api_context*);
+static int run_init_command(const char *path, const char *arg)
+{
+    pid_t child = fork();
+    int status;
+    if (child < 0)
+        return LE_IO;
+    if (child == 0) {
+        execl(path, path, arg, (char *)NULL);
+        _exit(127);
+    }
+    if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        return LE_IO;
+    return LE_OK;
+}
 static int apply_home_assistant_mode(int enabled)
 {
     static const char *const stop_local[] = {
@@ -49,38 +64,20 @@ static int apply_home_assistant_mode(int enabled)
     static const char *const start_wyoming[] = {
         "/etc/init.d/libreecho-wyomingd.init", "start", NULL
     };
-    const char *const *commands[4];
-    pid_t children[4];
-    size_t count = 0, i;
-    int status;
-
     if (access("/etc/init.d/libreecho-wyomingd.init", X_OK) < 0)
         return LE_OK;
 
     if (enabled) {
-        commands[count++] = stop_local;
-        commands[count++] = stop_stt;
-        commands[count++] = stop_tts;
-        commands[count++] = start_wyoming;
-    } else {
-        commands[count++] = stop_wyoming;
-        commands[count++] = start_stt;
-        commands[count++] = start_tts;
-        commands[count++] = start_local;
-    }
-    for (i = 0; i < count; ++i) {
-        children[i] = fork();
-        if (children[i] == 0) {
-            execl(commands[i][0], commands[i][0], commands[i][1],
-                  (char *)NULL);
-            _exit(127);
-        }
-        if (children[i] < 0)
+        if (run_init_command(stop_local[0], stop_local[1]) ||
+            run_init_command(stop_stt[0], stop_stt[1]) ||
+            run_init_command(stop_tts[0], stop_tts[1]) ||
+            run_init_command(start_wyoming[0], start_wyoming[1]))
             return LE_IO;
-    }
-    for (i = 0; i < count; ++i) {
-        if (waitpid(children[i], &status, 0) < 0 ||
-            !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    } else {
+        if (run_init_command(stop_wyoming[0], stop_wyoming[1]) ||
+            run_init_command(start_stt[0], start_stt[1]) ||
+            run_init_command(start_tts[0], start_tts[1]) ||
+            run_init_command(start_local[0], start_local[1]))
             return LE_IO;
     }
     return LE_OK;
