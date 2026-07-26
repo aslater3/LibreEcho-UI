@@ -33,6 +33,7 @@
 #define LE_ADAPTER_BLUETOOTH_SOCK "/run/libreecho/bluetooth.sock"
 #define LE_ADAPTER_AIRPLAY_SOCK   "/run/libreecho/airplay.sock"
 #define LE_ADAPTER_MIC_SOCK       "/run/libreecho/mic.sock"
+#define LE_ADAPTER_TTS_SOCK       "/run/libreecho/tts.sock"
 
 /* Result codes shared between client and daemon sides. */
 enum le_adapter_result {

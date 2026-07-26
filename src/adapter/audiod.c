@@ -1072,6 +1072,44 @@ static int handle_request(struct audio_hw *audio, char *message,
             return response_error(response, response_size, id, "audio output unavailable");
         return response_ok(response, response_size, id, "{\"playing\":true}");
     }
+    if (!strcmp(command, "speak")) {
+        char text[512];
+        struct le_adapter *tts;
+        char tts_response[LE_ADAPTER_MSG_MAX];
+        int rc;
+
+        if (json_string(message, "text", text, sizeof(text)) < 0)
+            return response_error(response, response_size, id, "missing or invalid text field");
+        if (text[0] == '\0')
+            return response_error(response, response_size, id, "text must not be empty");
+        le_log_info("audiod: speak requested (%zu chars)", strlen(text));
+        tts = le_adapter_connect(LE_ADAPTER_TTS_SOCK, 200);
+        if (!tts)
+            return response_error(response, response_size, id, "tts daemon unavailable");
+        {
+            char args[600];
+            (void)snprintf(args, sizeof(args), "{\"text\":\"%s\"}", text);
+            rc = le_adapter_call(tts, "speak", args, tts_response, sizeof(tts_response));
+        }
+        le_adapter_close(tts);
+        if (rc != LE_ADAPTER_OK)
+            return response_error(response, response_size, id, "tts speak failed");
+        return response_ok(response, response_size, id, "{\"speaking\":true}");
+    }
+    if (!strcmp(command, "stop_speech")) {
+        struct le_adapter *tts;
+        int rc;
+
+        le_log_info("audiod: stop speech requested");
+        tts = le_adapter_connect(LE_ADAPTER_TTS_SOCK, 200);
+        if (!tts)
+            return response_error(response, response_size, id, "tts daemon unavailable");
+        rc = le_adapter_call(tts, "stop_speech", NULL, NULL, 0);
+        le_adapter_close(tts);
+        if (rc != LE_ADAPTER_OK)
+            return response_error(response, response_size, id, "tts stop failed");
+        return response_ok(response, response_size, id, "{\"speaking\":false}");
+    }
     return response_error(response, response_size, id, "unknown command");
 }
 

@@ -5,6 +5,7 @@
   "volume": 50,
   "microphone_gain": 65,
   "microphone_muted": false,
+  "tts_voice": "southern-female",
   "led_r": 72,
   "led_g": 216,
   "led_b": 118,

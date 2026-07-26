@@ -95,4 +95,15 @@ code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' "$URL/api/v1/integration
 [ "$code" = 405 ]
 escaped=$(curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data '{"short_press":"say \"hi\"","long_press":"path\\test"}')
 printf '%s' "$escaped" | jq -e '.ok and .data.short_press == "say \"hi\"" and .data.long_press == "path\\test"' >/dev/null
+# Announce API: mock backend returns 501 (not supported), but the endpoint
+# must exist and reject empty text with 400.
+code=$(curl -sS -o /tmp/le-announce-empty.out -w '%{http_code}' -X POST "$URL/api/v1/audio/announce" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-announce-mock.out -w '%{http_code}' -X POST "$URL/api/v1/audio/announce" -H "$CSRF" -H 'Content-Type: application/json' --data '{"text":"Now playing \"Don’t Look Back in Anger\" by Oasis"}')
+[ "$code" = 501 ]
+code=$(curl -sS -o /tmp/le-announce-stop.out -w '%{http_code}' -X POST "$URL/api/v1/audio/announce/stop" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 501 ]
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"alan"}' | grep -q '"tts_voice":"alan"'
+code=$(curl -sS -o /tmp/le-voice-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"not-a-voice"}')
+[ "$code" = 400 ]
 echo 'api: ok'

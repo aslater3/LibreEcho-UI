@@ -20,6 +20,11 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
     -o build/test-micd
 ./build/test-micd
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_ttsd.c \
+    src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+    -o build/test-ttsd
+./build/test-ttsd
 sh tests/test_timed.sh
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!
