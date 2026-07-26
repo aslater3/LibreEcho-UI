@@ -42,6 +42,8 @@ make build/test-voice-pipeline
 ./build/test-voice-reply
 ./build/test-voice-playback
 ./build/test-voice-pipeline
+make build/test-wyomingd
+./build/test-wyomingd
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_ttsd.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
