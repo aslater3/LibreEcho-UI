@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,7 @@
 #define AIRPLAY_METADATA_FIFO "/run/libreecho-audio/airplay.metadata"
 #define AIRPLAY_METADATA_ITEM_MAX 8192
 #define AIRPLAY_METADATA_FIELD_MAX 192
+#define AIRPLAY_METADATA_AP2_PLIST_MAX 16384
 #define AIRPLAY_METADATA_READ_MAX 16
 
 struct airplay_metadata_parser {
@@ -404,6 +406,234 @@ static int metadata_valid_utf8(const unsigned char *text, size_t length)
     return 1;
 }
 
+struct bplist {
+    const unsigned char *data;
+    size_t length;
+    size_t offset_table;
+    uint8_t offset_size;
+    uint8_t ref_size;
+    uint64_t objects;
+    uint64_t top;
+};
+
+static uint64_t read_be(const unsigned char *data, size_t length)
+{
+    uint64_t value = 0;
+    size_t i;
+
+    for (i = 0; i < length; ++i)
+        value = (value << 8) | data[i];
+    return value;
+}
+
+static int bplist_init(struct bplist *plist, const unsigned char *data,
+                       size_t length)
+{
+    const unsigned char *trailer;
+    uint64_t offset_table;
+    uint64_t objects;
+
+    if (!plist || !data || length < 40 || memcmp(data, "bplist00", 8))
+        return -1;
+    trailer = data + length - 32;
+    objects = read_be(trailer + 8, 8);
+    offset_table = read_be(trailer + 24, 8);
+    if (trailer[6] < 1 || trailer[6] > 8 ||
+        trailer[7] < 1 || trailer[7] > 8 ||
+        objects == 0 || objects > 4096 ||
+        offset_table >= length ||
+        objects > (length - offset_table) / trailer[6])
+        return -1;
+    plist->data = data;
+    plist->length = length;
+    plist->offset_table = (size_t)offset_table;
+    plist->offset_size = trailer[6];
+    plist->ref_size = trailer[7];
+    plist->objects = objects;
+    plist->top = read_be(trailer + 16, 8);
+    return plist->top < plist->objects ? 0 : -1;
+}
+
+static int bplist_offset(const struct bplist *plist, uint64_t object,
+                         size_t *offset)
+{
+    size_t table_offset;
+    uint64_t value;
+
+    if (!plist || object >= plist->objects || !offset)
+        return -1;
+    table_offset = plist->offset_table + (size_t)object * plist->offset_size;
+    if (table_offset > plist->length ||
+        plist->offset_size > plist->length - table_offset)
+        return -1;
+    value = read_be(plist->data + table_offset, plist->offset_size);
+    if (value >= plist->length)
+        return -1;
+    *offset = (size_t)value;
+    return 0;
+}
+
+static int bplist_object_length(const struct bplist *plist, size_t *offset,
+                                unsigned char info, uint64_t *length)
+{
+    size_t pos = *offset;
+    unsigned char marker;
+    unsigned char bytes;
+
+    if (info < 0x0f) {
+        *length = info;
+        return 0;
+    }
+    if (pos >= plist->length)
+        return -1;
+    marker = plist->data[pos++];
+    if ((marker >> 4) != 0x1)
+        return -1;
+    bytes = (unsigned char)1u << (marker & 0x0f);
+    if (bytes > 8 || bytes > plist->length - pos)
+        return -1;
+    *length = read_be(plist->data + pos, bytes);
+    *offset = pos + bytes;
+    return 0;
+}
+
+static int utf8_put(char *out, size_t out_size, size_t *used, uint32_t code)
+{
+    unsigned char bytes[3];
+    size_t count;
+
+    if (code == 0 || (code >= 0xd800 && code <= 0xdfff))
+        return -1;
+    if (code < 0x80) {
+        bytes[0] = (unsigned char)code;
+        count = 1;
+    } else if (code < 0x800) {
+        bytes[0] = (unsigned char)(0xc0 | (code >> 6));
+        bytes[1] = (unsigned char)(0x80 | (code & 0x3f));
+        count = 2;
+    } else if (code < 0x10000) {
+        bytes[0] = (unsigned char)(0xe0 | (code >> 12));
+        bytes[1] = (unsigned char)(0x80 | ((code >> 6) & 0x3f));
+        bytes[2] = (unsigned char)(0x80 | (code & 0x3f));
+        count = 3;
+    } else {
+        return -1;
+    }
+    if (*used + count >= out_size)
+        return -1;
+    memcpy(out + *used, bytes, count);
+    *used += count;
+    out[*used] = '\0';
+    return 0;
+}
+
+static int bplist_copy_string(const struct bplist *plist, uint64_t object,
+                              char *out, size_t out_size)
+{
+    size_t offset;
+    size_t pos;
+    uint64_t length;
+    uint64_t i;
+    unsigned char marker;
+    unsigned char kind;
+    size_t used = 0;
+
+    if (!out || out_size == 0 ||
+        bplist_offset(plist, object, &offset) < 0)
+        return -1;
+    marker = plist->data[offset++];
+    kind = marker >> 4;
+    if (kind != 0x5 && kind != 0x6)
+        return -1;
+    if (bplist_object_length(plist, &offset, marker & 0x0f, &length) < 0)
+        return -1;
+    pos = offset;
+    if (kind == 0x5) {
+        if (length >= out_size || length > plist->length - pos)
+            return -1;
+        memcpy(out, plist->data + pos, (size_t)length);
+        out[length] = '\0';
+        return metadata_valid_utf8((const unsigned char *)out,
+                                   (size_t)length) ? 0 : -1;
+    }
+    if (length > (plist->length - pos) / 2)
+        return -1;
+    for (i = 0; i < length; ++i) {
+        uint32_t code = (uint32_t)read_be(plist->data + pos + i * 2, 2);
+        if (utf8_put(out, out_size, &used, code) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int bplist_dict_get(const struct bplist *plist, uint64_t dict,
+                           const char *key, uint64_t *value)
+{
+    size_t offset;
+    size_t keys;
+    uint64_t count;
+    uint64_t i;
+    unsigned char marker;
+    char name[96];
+
+    if (bplist_offset(plist, dict, &offset) < 0)
+        return -1;
+    marker = plist->data[offset++];
+    if ((marker >> 4) != 0xd ||
+        bplist_object_length(plist, &offset, marker & 0x0f, &count) < 0 ||
+        count > 1024)
+        return -1;
+    keys = offset;
+    if (count > (plist->length - keys) / plist->ref_size / 2)
+        return -1;
+    for (i = 0; i < count; ++i) {
+        size_t key_offset = keys + (size_t)i * plist->ref_size;
+        size_t value_offset = keys + (size_t)(count + i) * plist->ref_size;
+        uint64_t key_object = read_be(plist->data + key_offset,
+                                      plist->ref_size);
+
+        if (bplist_copy_string(plist, key_object, name, sizeof(name)) == 0 &&
+            !strcmp(name, key)) {
+            *value = read_be(plist->data + value_offset, plist->ref_size);
+            return *value < plist->objects ? 0 : -1;
+        }
+    }
+    return -1;
+}
+
+static void metadata_process_ap2_now_playing(struct airplay_ctx *ctx,
+                                             const unsigned char *data,
+                                             size_t length)
+{
+    struct bplist plist;
+    uint64_t object;
+    uint64_t inner;
+    uint64_t fields;
+    char type[64];
+
+    if (length > AIRPLAY_METADATA_AP2_PLIST_MAX ||
+        bplist_init(&plist, data, length) < 0 ||
+        bplist_dict_get(&plist, plist.top, "type", &object) < 0 ||
+        bplist_copy_string(&plist, object, type, sizeof(type)) < 0 ||
+        strcmp(type, "updateMRNowPlayingInfo") ||
+        bplist_dict_get(&plist, plist.top, "params", &inner) < 0 ||
+        bplist_dict_get(&plist, inner, "params", &fields) < 0)
+        return;
+
+#define COPY_AP2_FIELD(key, target) \
+    do { \
+        if (bplist_dict_get(&plist, fields, (key), &object) == 0) \
+            (void)bplist_copy_string(&plist, object, (target), \
+                                     AIRPLAY_METADATA_FIELD_MAX + 1); \
+    } while (0)
+    COPY_AP2_FIELD("kMRMediaRemoteNowPlayingInfoTitle", ctx->title);
+    COPY_AP2_FIELD("kMRMediaRemoteNowPlayingInfoArtist", ctx->artist);
+    COPY_AP2_FIELD("kMRMediaRemoteNowPlayingInfoAlbum", ctx->album);
+#undef COPY_AP2_FIELD
+    if (ctx->title[0] || ctx->artist[0] || ctx->album[0])
+        ctx->playing = 1;
+}
+
 static int metadata_process_item(struct airplay_ctx *ctx,
                                  const char *item, size_t item_length)
 {
@@ -428,16 +658,34 @@ static int metadata_process_item(struct airplay_ctx *ctx,
                          &value, &value_length) < 0 ||
         metadata_length(value, value_length, &declared_length) < 0)
         return -1;
-    (void)type;
-    if (!strcmp(code, "pbeg")) {
+    if (!strcmp(type, "ssnc") && !strcmp(code, "pbeg")) {
         metadata_clear_fields(ctx);
         ctx->playing = 1;
         return 0;
     }
-    if (!strcmp(code, "pend")) {
+    if (!strcmp(type, "ssnc") && !strcmp(code, "pres")) {
+        ctx->playing = 1;
+        return 0;
+    }
+    if (!strcmp(type, "ssnc") &&
+        (!strcmp(code, "pend") || !strcmp(code, "paus"))) {
         metadata_clear_fields(ctx);
         return 0;
     }
+    if (!strcmp(type, "ssnc") && !strcmp(code, "copl")) {
+        unsigned char decoded_plist[AIRPLAY_METADATA_AP2_PLIST_MAX];
+
+        if (declared_length <= sizeof(decoded_plist) &&
+            metadata_data(item, item_length, &encoded, &encoded_length) == 0 &&
+            metadata_base64_decode(encoded, encoded_length, decoded_plist,
+                                   sizeof(decoded_plist), &decoded_length) == 0 &&
+            decoded_length == declared_length)
+            metadata_process_ap2_now_playing(ctx, decoded_plist,
+                                             decoded_length);
+        return 0;
+    }
+    if (strcmp(type, "core"))
+        return 0;
     if (!strcmp(code, "minm"))
         target = ctx->title;
     else if (!strcmp(code, "asar"))

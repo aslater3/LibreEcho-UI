@@ -4,6 +4,7 @@
 
 #include "adapter.h"
 #include "voice_stream.h"
+#include "voice_listening_led.h"
 #include "../json.h"
 
 #include <errno.h>
@@ -256,6 +257,7 @@ static int start_recognition(struct le_voice_pipeline *pipeline,
     pthread_mutex_lock(&pipeline->mutex);
     pipeline->metrics.recognizing = 1;
     pthread_mutex_unlock(&pipeline->mutex);
+    le_voice_listening_led_set(1);
     return fd;
 }
 
@@ -268,6 +270,7 @@ static void close_recognition(struct le_voice_pipeline *pipeline,
     pthread_mutex_lock(&pipeline->mutex);
     pipeline->metrics.recognizing = 0;
     pthread_mutex_unlock(&pipeline->mutex);
+    le_voice_listening_led_set(0);
 }
 
 static int handle_stt_line(struct le_voice_pipeline *pipeline,

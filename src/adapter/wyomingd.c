@@ -2,6 +2,7 @@
 
 #include "adapter.h"
 #include "voice_stream.h"
+#include "voice_listening_led.h"
 #include "wyoming_protocol.h"
 #include "../json.h"
 #include "../log.h"
@@ -187,6 +188,8 @@ static int send_event(struct wyoming_state *state, const char *type,
 
 static void close_client(struct wyoming_state *state)
 {
+    if (state->streaming)
+        le_voice_listening_led_set(0);
     if (state->output_fd >= 0)
         close(state->output_fd);
     if (state->client_fd >= 0)
@@ -328,6 +331,7 @@ static int start_stream(struct wyoming_state *state)
     state->streaming = 1;
     state->stream_samples = 0;
     state->quiet_samples = 0;
+    le_voice_listening_led_set(1);
     return 0;
 }
 
@@ -336,6 +340,7 @@ static int stop_stream(struct wyoming_state *state)
     if (!state->streaming)
         return 0;
     state->streaming = 0;
+    le_voice_listening_led_set(0);
     state->detected = 0;
     state->server_running = 0;
     if (send_event(state, "audio-stop", NULL, NULL, 0) < 0)

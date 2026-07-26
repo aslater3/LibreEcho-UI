@@ -110,6 +110,38 @@ static void test_missing_metadata_and_session_clear(void)
     assert(!strstr(status, "\"artist\""));
 }
 
+static void test_ap2_now_playing_plist(void)
+{
+    static const char begin[] =
+        "<item><type>ssnc</type><code>pres</code>"
+        "<length>0</length></item>";
+    static const char command[] =
+        "<item><type>ssnc</type><code>copl</code>"
+        "<length>288</length><data encoding=\"base64\">"
+        "YnBsaXN0MDDSAQIDDlZwYXJhbXNUdHlwZdMEAQIFBg1bbWVyZ2VQb2xpY3lX"
+        "cmVwbGFjZdMHCAkKCwxfECFrTVJNZWRpYVJlbW90ZU5vd1BsYXlpbmdJbmZv"
+        "QWxidW1fECJrTVJNZWRpYVJlbW90ZU5vd1BsYXlpbmdJbmZvQXJ0aXN0XxAh"
+        "a01STWVkaWFSZW1vdGVOb3dQbGF5aW5nSW5mb1RpdGxlXxAUSHVudGluZyBI"
+        "aWdoIGFuZCBMb3dUYS1oYVpUYWtlIG9uIE1lWG5waS10ZXh0XxAWdXBkYXRl"
+        "TVJOb3dQbGF5aW5nSW5mbwgNFBkgLDQ7X4Sov8TP2AAAAAAAAAEBAAAAAAAA"
+        "AA8AAAAAAAAAAAAAAAAAAADx"
+        "</data></item>";
+    struct airplay_ctx ctx;
+    char status[2048];
+
+    init_ctx(&ctx);
+    feed_fragmented(&ctx, begin, 4);
+    feed_fragmented(&ctx, command, 11);
+    assert(ctx.playing == 1);
+    assert(!strcmp(ctx.title, "Take on Me"));
+    assert(!strcmp(ctx.artist, "a-ha"));
+    assert(!strcmp(ctx.album, "Hunting High and Low"));
+    append_status(&ctx, status, sizeof(status));
+    assert(strstr(status, "\"title\":\"Take on Me\""));
+    assert(strstr(status, "\"artist\":\"a-ha\""));
+    assert(strstr(status, "\"album\":\"Hunting High and Low\""));
+}
+
 static void test_malformed_input_recovers(void)
 {
     static const char malformed[] =
@@ -211,6 +243,7 @@ int main(void)
 {
     test_fragmented_base64_and_json();
     test_missing_metadata_and_session_clear();
+    test_ap2_now_playing_plist();
     test_malformed_input_recovers();
     test_oversized_item_recovers();
     test_oversized_field_is_ignored();

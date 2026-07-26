@@ -25,10 +25,12 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/llm_provider.c \
 	src/adapter/llm_codex.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+	src/adapter/voice_listening_led.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c \
 	src/config_store.c src/json.c src/log.c
 WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
-	src/adapter/voice_stream.c src/json.c src/log.c
+	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
+	src/adapter/adapter_client.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
 SOURCES = src/main.c src/http_server.c src/api.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
@@ -307,11 +309,13 @@ $(BUILD)/mock-voice-source: tests/mock_voice_source.c \
 
 $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
 		src/json.c $(BUILD)/libreecho-sttd $(BUILD)/mock-voice-source
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
-		src/json.c -lpthread -o $@
+		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
+		src/json.c src/log.c -lpthread -o $@
 
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \

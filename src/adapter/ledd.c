@@ -154,6 +154,14 @@ struct daemon_context {
     unsigned int visualizer_bass_floor;
     unsigned int visualizer_beat;
     unsigned int visualizer_impact;
+    unsigned int visualizer_rhythm_step;
+    unsigned int visualizer_rhythm_pulse;
+    unsigned int visualizer_rhythm_cooldown;
+    unsigned int visualizer_fx_kind;
+    unsigned int visualizer_fx_frames;
+    unsigned int visualizer_fx_phase;
+    unsigned int visualizer_fx_cooldown;
+    double visualizer_periodic_fx_next;
     unsigned int visualizer_energy_ema;
     unsigned int visualizer_flux_ema;
     int visualizer_mood;
@@ -1147,6 +1155,114 @@ static unsigned int visualizer_energy(unsigned int level)
     return (level * level + 255U * level + 255U) / 510U;
 }
 
+static unsigned int group_delta(unsigned int a, unsigned int b)
+{
+    return a > b ? a - b : b - a;
+}
+
+static void pixel_add_scaled(struct pixel *pixel,
+                             unsigned int r, unsigned int g, unsigned int b,
+                             unsigned int scale)
+{
+    unsigned int add;
+
+    add = r * scale / 255U;
+    pixel->r = pixel->r + add > 255U ? 255U : pixel->r + add;
+    add = g * scale / 255U;
+    pixel->g = pixel->g + add > 255U ? 255U : pixel->g + add;
+    add = b * scale / 255U;
+    pixel->b = pixel->b + add > 255U ? 255U : pixel->b + add;
+}
+
+static void trigger_visualizer_rhythm(struct daemon_context *ctx,
+                                      unsigned int onset,
+                                      unsigned int low_delta,
+                                      unsigned int mid_delta,
+                                      unsigned int high_delta)
+{
+    unsigned int pulse;
+    unsigned int step = 1;
+
+    if (ctx->visualizer_rhythm_cooldown > 0 || onset < 30U)
+        return;
+
+    if (high_delta > low_delta + 18U && high_delta > mid_delta)
+        step = 2U;
+    else if (mid_delta > low_delta + 14U && mid_delta >= high_delta)
+        step = 1U;
+    else if (low_delta > mid_delta + high_delta / 2U)
+        step = 3U;
+
+    ctx->visualizer_rhythm_step =
+        (ctx->visualizer_rhythm_step + step) % RING_PIXELS;
+    pulse = onset * 4U;
+    if (high_delta > low_delta && high_delta > mid_delta)
+        pulse += 24U;
+    else if (mid_delta > low_delta)
+        pulse += 16U;
+    if (pulse > 170U)
+        pulse = 170U;
+    if (pulse > ctx->visualizer_rhythm_pulse)
+        ctx->visualizer_rhythm_pulse = pulse;
+    ctx->visualizer_rhythm_cooldown = 2U;
+}
+
+static void trigger_visualizer_fx(struct daemon_context *ctx,
+                                  double now,
+                                  unsigned int onset,
+                                  unsigned int peak_jump,
+                                  unsigned int low_delta,
+                                  unsigned int mid_delta,
+                                  unsigned int high_delta)
+{
+    unsigned int dominant = low_delta;
+    unsigned int kind = 1;
+
+    if (mid_delta >= dominant) {
+        dominant = mid_delta;
+        kind = 2U;
+    }
+    if (high_delta >= dominant) {
+        dominant = high_delta;
+        kind = 3U;
+    }
+
+    if (ctx->visualizer_fx_cooldown > 0 ||
+        (onset < 76U && peak_jump < 118U && dominant < 66U))
+        return;
+
+    ctx->visualizer_fx_kind = kind;
+    ctx->visualizer_fx_frames = 5U;
+    ctx->visualizer_fx_phase = ctx->visualizer_rhythm_step;
+    ctx->visualizer_fx_cooldown = 36U;
+    ctx->visualizer_periodic_fx_next = now + 10.0;
+}
+
+static void trigger_visualizer_periodic_comet(struct daemon_context *ctx,
+                                              double now,
+                                              unsigned int onset)
+{
+    if (ctx->visualizer_periodic_fx_next <= 0.0)
+        ctx->visualizer_periodic_fx_next = now + 8.0;
+    if (now < ctx->visualizer_periodic_fx_next ||
+        ctx->visualizer_fx_frames > 0 ||
+        ctx->visualizer_fx_cooldown > 0)
+        return;
+
+    if (ctx->visualizer_mood == VISUALIZER_MOOD_CALM ||
+        (ctx->visualizer_energy_ema < 58U && onset < 28U)) {
+        ctx->visualizer_periodic_fx_next = now + 5.0;
+        return;
+    }
+
+    ctx->visualizer_fx_kind = 4U;
+    ctx->visualizer_fx_frames = 10U;
+    ctx->visualizer_fx_phase = ctx->visualizer_rhythm_step;
+    ctx->visualizer_fx_cooldown = 44U;
+    ctx->visualizer_periodic_fx_next =
+        now + 12.0 + (double)(ctx->visualizer_rhythm_step % 5U);
+}
+
 static int classify_visualizer_mood(unsigned int energy, unsigned int flux,
                                     unsigned int low, unsigned int mid,
                                     unsigned int high)
@@ -1262,41 +1378,53 @@ static void apply_visualizer(struct daemon_context *ctx, double now)
     };
     static const double drift_rates[VISUALIZER_MOOD_COUNT] =
         {0.10, 0.22, 0.48, 0.78};
-    static const double motion_rates[VISUALIZER_MOOD_COUNT] =
-        {0.16, 0.31, 0.66, 1.05};
     const struct pixel *palette = palettes[ctx->visualizer_mood];
     struct pixel pixels[RING_PIXELS];
     double drift_phase = (now - ctx->visualizer_started) *
                          drift_rates[ctx->visualizer_mood];
-    double motion_phase = (now - ctx->visualizer_started) *
-                          motion_rates[ctx->visualizer_mood];
     unsigned int drift;
+    unsigned int average = 0;
+    unsigned int base;
+    unsigned int pulse = ctx->visualizer_rhythm_pulse;
     size_t i;
+
+    for (i = 0; i < RING_PIXELS; i++)
+        average += ctx->visualizer_smoothed[i];
+    average /= RING_PIXELS;
+    base = 10U + average / 5U;
+    if (ctx->visualizer_mood >= VISUALIZER_MOOD_ENERGETIC)
+        base += 10U;
+    if (ctx->visualizer_mood == VISUALIZER_MOOD_INTENSE)
+        base += 8U;
 
     while (drift_phase >= 1.0)
         drift_phase -= 1.0;
-    while (motion_phase >= 1.0)
-        motion_phase -= 1.0;
     drift = (unsigned int)((0.5 + 0.5 *
                             sine_approx(drift_phase *
                                         6.28318530717958647692)) * 48.0);
     for (i = 0; i < RING_PIXELS; i++) {
-        unsigned int energy = visualizer_energy(ctx->visualizer_smoothed[i]);
-        double pixel_phase = motion_phase + (double)i / RING_PIXELS;
-        unsigned int motion;
+        unsigned int position =
+            (i + RING_PIXELS - ctx->visualizer_rhythm_step) % RING_PIXELS;
+        unsigned int band_energy =
+            visualizer_energy(ctx->visualizer_smoothed[i]);
+        unsigned int motif;
+        unsigned int energy;
         unsigned int r, g, b;
 
-        while (pixel_phase >= 1.0)
-            pixel_phase -= 1.0;
-        motion = 188U + (unsigned int)((0.5 + 0.5 *
-                 sine_approx(pixel_phase * 6.28318530717958647692)) * 67.0);
+        position %= 4U;
+        motif = position == 0U ? 112U :
+                position == 1U ? 62U :
+                position == 3U ? 44U : 20U;
         r = (palette[i].r * (255U - drift) +
              palette[i + 1].r * drift + 127U) / 255U;
         g = (palette[i].g * (255U - drift) +
              palette[i + 1].g * drift + 127U) / 255U;
         b = (palette[i].b * (255U - drift) +
              palette[i + 1].b * drift + 127U) / 255U;
-        energy = (energy * motion + 127U) / 255U;
+        energy = base + band_energy / 3U + motif * average / 255U +
+                 motif * pulse / 128U;
+        if (energy > 255U)
+            energy = 255U;
         pixels[i].r = (r * energy * ctx->visualizer_brightness + 12750U) /
                       25500U;
         pixels[i].g = (g * energy * ctx->visualizer_brightness + 12750U) /
@@ -1315,12 +1443,13 @@ static void apply_visualizer(struct daemon_context *ctx, double now)
         }
     }
 
-    /* A decaying warm halo around the bass edge gives beats some weight. */
+    /* A decaying halo follows full-spectrum rhythm hits, not just bass. */
     if (ctx->visualizer_beat > 0) {
-        static const unsigned int accent_pixels[] = {0, 1, 11};
-        static const unsigned int accent_weights[] = {100, 52, 42};
-        for (i = 0; i < sizeof(accent_pixels) / sizeof(accent_pixels[0]); i++) {
-            unsigned int at = accent_pixels[i];
+        static const unsigned int accent_offsets[] = {0, 1, 11, 2, 10};
+        static const unsigned int accent_weights[] = {100, 58, 50, 26, 22};
+        for (i = 0; i < sizeof(accent_offsets) / sizeof(accent_offsets[0]); i++) {
+            unsigned int at = (ctx->visualizer_rhythm_step +
+                               accent_offsets[i]) % RING_PIXELS;
             unsigned int accent = ctx->visualizer_beat *
                                   accent_weights[i] *
                                   ctx->visualizer_brightness / 10000U;
@@ -1332,6 +1461,50 @@ static void apply_visualizer(struct daemon_context *ctx, double now)
         ctx->visualizer_beat = ctx->visualizer_beat > 14U
                              ? ctx->visualizer_beat - 14U : 0U;
     }
+    if (ctx->visualizer_fx_frames > 0) {
+        unsigned int total = ctx->visualizer_fx_kind == 4U ? 10U : 5U;
+        unsigned int age = total > ctx->visualizer_fx_frames
+                         ? total - ctx->visualizer_fx_frames : 0U;
+        unsigned int strength = ctx->visualizer_fx_kind == 4U
+                              ? 132U - age * 10U
+                              : 150U - age * 24U;
+        unsigned int head = (ctx->visualizer_fx_phase + age) % RING_PIXELS;
+
+        if (ctx->visualizer_fx_kind == 4U) {
+            pixel_add_scaled(&pixels[head], 245U, 255U, 255U, strength);
+            pixel_add_scaled(&pixels[(head + 11U) % RING_PIXELS],
+                             40U, 190U, 255U, strength * 3U / 4U);
+            pixel_add_scaled(&pixels[(head + 10U) % RING_PIXELS],
+                             90U, 80U, 255U, strength / 2U);
+            pixel_add_scaled(&pixels[(head + 9U) % RING_PIXELS],
+                             255U, 70U, 190U, strength / 4U);
+        } else if (ctx->visualizer_fx_kind == 2U) {
+            pixel_add_scaled(&pixels[head], 255U, 230U, 120U, strength);
+            pixel_add_scaled(&pixels[(head + 6U) % RING_PIXELS],
+                             80U, 210U, 255U, strength * 3U / 4U);
+            pixel_add_scaled(&pixels[(head + 1U) % RING_PIXELS],
+                             255U, 90U, 190U, strength / 2U);
+            pixel_add_scaled(&pixels[(head + 5U) % RING_PIXELS],
+                             80U, 120U, 255U, strength / 2U);
+        } else if (ctx->visualizer_fx_kind == 3U) {
+            for (i = 0; i < RING_PIXELS; i += 3U)
+                pixel_add_scaled(&pixels[(head + i) % RING_PIXELS],
+                                 210U, 245U, 255U, strength * 2U / 3U);
+        } else {
+            pixel_add_scaled(&pixels[head], 255U, 255U, 210U, strength);
+            pixel_add_scaled(&pixels[(head + 11U) % RING_PIXELS],
+                             255U, 132U, 28U, strength * 2U / 3U);
+            pixel_add_scaled(&pixels[(head + 10U) % RING_PIXELS],
+                             255U, 48U, 120U, strength / 3U);
+        }
+        ctx->visualizer_fx_frames--;
+        if (ctx->visualizer_fx_frames == 0)
+            ctx->visualizer_fx_kind = 0;
+    }
+    if (ctx->visualizer_rhythm_pulse > 18U)
+        ctx->visualizer_rhythm_pulse -= 18U;
+    else
+        ctx->visualizer_rhythm_pulse = 0;
     ctx->visualizer_impact = ctx->visualizer_impact > 12U
                            ? ctx->visualizer_impact - 12U : 0U;
     hardware_apply_pixels(ctx, pixels);
@@ -1344,6 +1517,12 @@ static void expire_visualizer(struct daemon_context *ctx, double now)
         ctx->visualizer_active = 0;
         ctx->visualizer_owner[0] = '\0';
         ctx->visualizer_impact = 0;
+        ctx->visualizer_rhythm_pulse = 0;
+        ctx->visualizer_rhythm_cooldown = 0;
+        ctx->visualizer_fx_kind = 0;
+        ctx->visualizer_fx_frames = 0;
+        ctx->visualizer_fx_cooldown = 0;
+        ctx->visualizer_periodic_fx_next = 0.0;
     }
 }
 
@@ -1487,6 +1666,11 @@ static void start_visualizer(struct daemon_context *ctx,
                              double now)
 {
     unsigned int bass;
+    unsigned int flux = 0;
+    unsigned int peak_jump = 0;
+    unsigned int low = 0, mid = 0, high = 0;
+    unsigned int previous_low = 0, previous_mid = 0, previous_high = 0;
+    unsigned int low_delta, mid_delta, high_delta, onset;
     int first_frame = !ctx->visualizer_active;
     size_t i;
 
@@ -1499,15 +1683,42 @@ static void start_visualizer(struct daemon_context *ctx,
             (levels[0] + levels[1] + levels[2]) / 3U;
         ctx->visualizer_beat = 0;
         ctx->visualizer_impact = 0;
+        ctx->visualizer_rhythm_step = 0;
+        ctx->visualizer_rhythm_pulse = 0;
+        ctx->visualizer_rhythm_cooldown = 0;
+        ctx->visualizer_fx_kind = 0;
+        ctx->visualizer_fx_frames = 0;
+        ctx->visualizer_fx_phase = 0;
+        ctx->visualizer_fx_cooldown = 0;
+        ctx->visualizer_periodic_fx_next = now + 8.0;
         for (i = 0; i < RING_PIXELS; i++)
             ctx->visualizer_smoothed[i] = levels[i];
     } else {
         for (i = 0; i < RING_PIXELS; i++) {
             unsigned int previous = ctx->visualizer_smoothed[i];
+            unsigned int raw_previous = ctx->visualizer_levels[i];
+            unsigned int delta = levels[i] > raw_previous
+                               ? levels[i] - raw_previous
+                               : raw_previous - levels[i];
+
+            flux += delta;
+            if (levels[i] > raw_previous &&
+                levels[i] - raw_previous > peak_jump)
+                peak_jump = levels[i] - raw_previous;
+            if (i < 4) {
+                low += levels[i];
+                previous_low += raw_previous;
+            } else if (i < 9) {
+                mid += levels[i];
+                previous_mid += raw_previous;
+            } else {
+                high += levels[i];
+                previous_high += raw_previous;
+            }
             ctx->visualizer_smoothed[i] =
                 levels[i] >= previous
-                    ? (levels[i] * 7U + previous + 4U) / 8U
-                    : (levels[i] + previous + 1U) / 2U;
+                    ? (levels[i] * 11U + previous * 5U + 8U) / 16U
+                    : (levels[i] * 5U + previous * 3U + 4U) / 8U;
         }
     }
     update_visualizer_mood(ctx, levels, first_frame);
@@ -1518,6 +1729,40 @@ static void start_visualizer(struct daemon_context *ctx,
     ctx->visualizer_last_frame = now;
 
     bass = (levels[0] + levels[1] + levels[2]) / 3U;
+    if (!first_frame) {
+        flux = (flux + RING_PIXELS / 2U) / RING_PIXELS;
+        low = (low + 2U) / 4U;
+        previous_low = (previous_low + 2U) / 4U;
+        mid = (mid + 2U) / 5U;
+        previous_mid = (previous_mid + 2U) / 5U;
+        high = (high + 1U) / 3U;
+        previous_high = (previous_high + 1U) / 3U;
+        low_delta = group_delta(low, previous_low);
+        mid_delta = group_delta(mid, previous_mid);
+        high_delta = group_delta(high, previous_high);
+        onset = flux + peak_jump / 3U +
+                (low_delta + mid_delta + high_delta + 1U) / 3U;
+        trigger_visualizer_rhythm(ctx, onset, low_delta, mid_delta,
+                                  high_delta);
+        trigger_visualizer_fx(ctx, now, onset, peak_jump, low_delta,
+                              mid_delta, high_delta);
+        trigger_visualizer_periodic_comet(ctx, now, onset);
+        if (onset > 22U) {
+            unsigned int accent = onset * 2U;
+            if (high_delta > low_delta && high_delta >= mid_delta)
+                accent += 28U;
+            else if (mid_delta >= low_delta)
+                accent += 18U;
+            if (accent > 120U)
+                accent = 120U;
+            if (accent > ctx->visualizer_beat)
+                ctx->visualizer_beat = accent;
+        }
+        if (ctx->visualizer_rhythm_cooldown > 0)
+            ctx->visualizer_rhythm_cooldown--;
+        if (ctx->visualizer_fx_cooldown > 0)
+            ctx->visualizer_fx_cooldown--;
+    }
     if (bass > ctx->visualizer_bass_floor + 24U && bass > 64U) {
         unsigned int beat = (bass - ctx->visualizer_bass_floor) * 2U;
         if (beat > 110U)
@@ -1540,6 +1785,12 @@ static void stop_visualizer(struct daemon_context *ctx, const char *owner,
     ctx->visualizer_active = 0;
     ctx->visualizer_owner[0] = '\0';
     ctx->visualizer_impact = 0;
+    ctx->visualizer_rhythm_pulse = 0;
+    ctx->visualizer_rhythm_cooldown = 0;
+    ctx->visualizer_fx_kind = 0;
+    ctx->visualizer_fx_frames = 0;
+    ctx->visualizer_fx_cooldown = 0;
+    ctx->visualizer_periodic_fx_next = 0.0;
     if (!ctx->test_active && !ctx->pattern_active)
         apply_base_layer(ctx, now);
 }
@@ -1555,6 +1806,14 @@ static void set_visualizer_enabled(struct daemon_context *ctx, int enabled,
     memset(ctx->visualizer_smoothed, 0, sizeof(ctx->visualizer_smoothed));
     ctx->visualizer_beat = 0;
     ctx->visualizer_impact = 0;
+    ctx->visualizer_rhythm_step = 0;
+    ctx->visualizer_rhythm_pulse = 0;
+    ctx->visualizer_rhythm_cooldown = 0;
+    ctx->visualizer_fx_kind = 0;
+    ctx->visualizer_fx_frames = 0;
+    ctx->visualizer_fx_phase = 0;
+    ctx->visualizer_fx_cooldown = 0;
+    ctx->visualizer_periodic_fx_next = 0.0;
     ctx->visualizer_energy_ema = 0;
     ctx->visualizer_flux_ema = 0;
 }
