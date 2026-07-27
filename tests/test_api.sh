@@ -88,11 +88,22 @@ curl -fsS "$URL/api/v1/system/update" | jq -e \
      .data.source_reachable == "unknown" and
      .data.check_status == "not-checked" and .data.check_error == "" and
      .data.last_check_epoch == 0 and .data.last_success_epoch == 0 and
+     .data.automatic_updates == false and
      .data.rollback_version == ""' \
     >/dev/null
+for endpoint in check apply; do
+    code=$(curl -sS -o "/tmp/le-update-$endpoint.out" -w '%{http_code}' \
+        -X POST "$URL/api/v1/system/update/$endpoint" -H "$CSRF" \
+        -H 'Content-Type: application/json' --data '{}')
+    [ "$code" = 501 ]
+done
 code=$(curl -sS -o /tmp/le-update-upload.out -w '%{http_code}' \
     -X POST "$URL/api/v1/system/update/upload" -H "$CSRF" \
     -H 'Content-Type: application/x-tar' --data-binary 'not-an-update')
+[ "$code" = 501 ]
+code=$(curl -sS -o /tmp/le-update-automatic.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/update/automatic" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"enabled":true}')
 [ "$code" = 501 ]
 expect "$(curl -fsS "$URL/api/v1/logs")" '"boot_seconds":'
 curl -fsS -D /tmp/le-log-stream.headers "$URL/api/v1/logs/stream" -o /tmp/le-log-stream.out

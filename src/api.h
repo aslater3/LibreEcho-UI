@@ -10,4 +10,5 @@ struct api_context{struct le_backend*backend;struct le_event_bus events;struct l
 int api_init(struct api_context*,struct le_backend*,int,int,const char*,const char*,const char*,const char*,const char*);int api_apply_persisted_configuration(struct api_context*);int api_persist_configuration(struct api_context*);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
 int api_baby_monitor_stream_authorize(struct api_context*,const struct api_request*,struct api_response*,int*,int*,int*,int*,int*);
 int api_update_upload_authorize(struct api_context*,const struct api_request*,struct api_response*);
+int api_update_fetch_authorize(struct api_context*,const struct api_request*,struct api_response*);
 #endif
