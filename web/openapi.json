@@ -84,7 +84,7 @@
       "put": {
         "tags": ["Assistant"],
         "summary": "Configure the wake-to-reply assistant",
-        "description": "Configures the provider, model, voice-safe instruction prompt, and whether wake-to-reply is enabled. No API-key provider is available.",
+        "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, and whether wake-to-reply is enabled. API keys are write-only and never returned.",
         "parameters": [{"$ref":"#/components/parameters/Csrf"}],
         "requestBody": {
           "required": true,
@@ -94,7 +94,9 @@
                 "type": "object",
                 "properties": {
                   "enabled": {"type":"boolean"},
-                  "provider": {"type":"string","enum":["openai-codex"]},
+                  "provider": {"type":"string","enum":["openai-codex","openai-compatible"]},
+                  "base_url": {"type":"string","format":"uri","description":"Configured OpenAI-compatible endpoint, usually ending in /v1"},
+                  "api_key": {"type":"string","writeOnly":true},
                   "model": {"type":"string","minLength":1,"maxLength":95},
                   "prompt": {"type":"string","minLength":1,"maxLength":2047}
                 }

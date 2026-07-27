@@ -346,6 +346,7 @@ static int command_status(struct agent_state *state, int fd,
     struct le_voice_pipeline_metrics voice_metrics;
     char prompt[sizeof(state->config.prompt) * 2U];
     char model[sizeof(state->config.model) * 2U];
+    char base_url[sizeof(state->credentials.base_url) * 2U];
     char code[sizeof(state->auth.user_code) * 2U];
     char url[sizeof(state->auth.verification_url) * 2U];
     char error[sizeof(state->auth_error) * 2U];
@@ -369,6 +370,7 @@ static int command_status(struct agent_state *state, int fd,
 
     if (escape_json(prompt, sizeof(prompt), state->config.prompt) < 0 ||
         escape_json(model, sizeof(model), state->config.model) < 0 ||
+        escape_json(base_url, sizeof(base_url), state->credentials.base_url) < 0 ||
         escape_json(code, sizeof(code), state->auth.user_code) < 0 ||
         escape_json(url, sizeof(url), state->auth.verification_url) < 0 ||
         escape_json(error, sizeof(error), state->auth_error) < 0 ||
@@ -380,6 +382,7 @@ static int command_status(struct agent_state *state, int fd,
             "\"auth_state\":\"%s\",\"user_code\":\"%s\","
             "\"verification_url\":\"%s\",\"auth_error\":\"%s\","
             "\"model\":\"%s\",\"prompt\":\"%s\","
+            "\"base_url\":\"%s\",\"api_key_configured\":%s,"
             "\"voice_pipeline\":true,\"text_streaming\":true,"
             "\"wake_connected\":%s,\"audio_connected\":%s,"
             "\"recognizing\":%s,\"dispatching\":%s,"
@@ -398,7 +401,8 @@ static int command_status(struct agent_state *state, int fd,
             state->provider->subscription_auth ? "true" : "false",
             state->auth_state == AUTH_SIGNED_IN ? "true" : "false",
             auth_state_name(state->auth_state), code, url, error,
-            model, prompt,
+            model, prompt, base_url,
+            state->credentials.api_key[0] ? "true" : "false",
             voice_metrics.wake_connected ? "true" : "false",
             voice_metrics.audio_connected ? "true" : "false",
             voice_metrics.recognizing ? "true" : "false",
