@@ -35,7 +35,8 @@ function assistantTelemetry(a) {
     <dt>Post-AEC stream</dt><dd class="${a.audio_connected?'connected':''}">${a.audio_connected?'Connected':'Unavailable'}</dd>
     <dt>Speech recognition</dt><dd>${a.recognizing?'Recognizing':'Ready'}</dd>
     <dt>Completed voice turns</dt><dd>${Number(a.completed_transcripts||0)}</dd>
-    <dt>Last STT processing</dt><dd>${Number(a.last_stt_processing_ms||0)||'—'}${a.last_stt_processing_ms?' ms':''}</dd>
+    <dt>Last voice capture</dt><dd>${Number(a.last_stt_audio_ms||0)||'—'}${a.last_stt_audio_ms?' ms':''}</dd>
+    <dt>STT finalization</dt><dd>${Number(a.last_stt_processing_ms||0)||'—'}${a.last_stt_processing_ms?' ms':''}</dd>
     <dt>Speech end to first PCM</dt><dd class="${latency&&latency<=3000?'connected':''}">${latency?latency+' ms':'Not measured'}</dd>
     <dt>Latency target</dt><dd>${Number(a.latency_target_ms||3000)} ms</dd>
   </dl>`;

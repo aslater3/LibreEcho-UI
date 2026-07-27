@@ -235,6 +235,8 @@ static int queue_transcript(
         pipeline->metrics.last_stt_audio_ms = turn->stt_audio_ms;
         pipeline->metrics.last_stt_processing_ms =
             turn->stt_processing_ms;
+        pipeline->metrics.last_stt_total_ms =
+            turn->stt_total_ms;
         pthread_cond_signal(&pipeline->dispatch_ready);
         result = 0;
     } else {
@@ -298,6 +300,11 @@ static int handle_stt_line(struct le_voice_pipeline *pipeline,
         line, "processing_ms", &found);
     if (!found)
         turn.stt_processing_ms = 0;
+    turn.stt_total_ms = json_unsigned(
+        line, "total_ms", &found);
+    if (!found)
+        turn.stt_total_ms =
+            turn.stt_audio_ms + turn.stt_processing_ms;
     turn.endpoint = strstr(line, "\"endpoint\":true") != NULL;
     turn.follow_up = follow_up;
     if (text[0])

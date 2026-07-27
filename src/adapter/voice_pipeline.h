@@ -10,6 +10,7 @@ struct le_voice_pipeline_turn {
     uint64_t transcript_received_ms;
     uint64_t stt_audio_ms;
     uint64_t stt_processing_ms;
+    uint64_t stt_total_ms;
     int endpoint;
     int follow_up;
 };
@@ -27,6 +28,7 @@ struct le_voice_pipeline_metrics {
     unsigned long dropped_turns;
     uint64_t last_stt_audio_ms;
     uint64_t last_stt_processing_ms;
+    uint64_t last_stt_total_ms;
 };
 
 typedef void (*le_voice_pipeline_transcript_fn)(

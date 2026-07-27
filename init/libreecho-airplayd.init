@@ -13,6 +13,8 @@
 DAEMON=${DAEMON:-/usr/local/sbin/libreecho-airplayd}
 PIDFILE=${PIDFILE:-/var/run/libreecho-airplayd.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-airplayd.log}
+LOG_MAX_BYTES=${LOG_MAX_BYTES:-2097152}
+LOG_KEEP_BYTES=${LOG_KEEP_BYTES:-262144}
 SOCKET=${SOCKET:-/run/libreecho/airplay.sock}
 PAYLOAD=${PAYLOAD:-/data/libreecho/features/airplay2/payload.squashfs}
 RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/airplay2/root}
@@ -123,10 +125,24 @@ is_running() {
     kill -0 "$pid" 2>/dev/null
 }
 
+trim_log() {
+    [ -f "$LOGFILE" ] || return 0
+    size=$(wc -c <"$LOGFILE" 2>/dev/null || printf '0')
+    case "$size" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$size" -le "$LOG_MAX_BYTES" ] && return 0
+    tail -c "$LOG_KEEP_BYTES" "$LOGFILE" >"$LOGFILE.trim" || {
+        rm -f "$LOGFILE.trim"
+        return 0
+    }
+    chmod 0644 "$LOGFILE.trim"
+    mv "$LOGFILE.trim" "$LOGFILE"
+}
+
 start_service() {
     if is_running; then echo "libreecho-airplayd already running"; return 0; fi
     mount_runtime || true
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
+    trim_log
     if command -v start-stop-daemon >/dev/null 2>&1; then
         # Keep the controller and all chrooted AirPlay child stderr/stdout in
         # one persistent log.  Without this redirection start-stop-daemon

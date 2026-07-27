@@ -141,6 +141,8 @@ int main(void)
     CHECK(saw_partial);
     CHECK(strstr(response, "\"text\":\"mock transcription\"") != NULL);
     CHECK(strstr(response, "\"endpoint\":true") != NULL);
+    CHECK(strstr(response, "\"processing_ms\":") != NULL);
+    CHECK(strstr(response, "\"total_ms\":") != NULL);
     puts("sttd: status, streaming PCM and endpoint transcript: ok");
 
 cleanup:

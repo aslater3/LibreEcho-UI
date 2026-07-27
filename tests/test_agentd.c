@@ -197,6 +197,7 @@ int main(void)
     CHECK(strstr(response, "\"completed_transcripts\":2") != NULL);
     CHECK(strstr(response,
                  "\"last_speech_end_to_first_pcm_ms\":") != NULL);
+    CHECK(strstr(response, "\"last_stt_total_ms\":") != NULL);
     CHECK(strstr(response, "\"latency_target_met\":true") != NULL);
     CHECK(strstr(response, "\"latency_violations\":0") != NULL);
     CHECK(call(socket_path, "logout", NULL,

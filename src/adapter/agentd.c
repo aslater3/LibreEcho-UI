@@ -9,6 +9,7 @@
 #include "voice_reply.h"
 #include "../config_store.h"
 #include "../json.h"
+#include "../log.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -398,6 +399,7 @@ static int command_status(struct agent_state *state, int fd,
             "\"dropped_voice_turns\":%lu,"
             "\"last_stt_audio_ms\":%llu,"
             "\"last_stt_processing_ms\":%llu,"
+            "\"last_stt_total_ms\":%llu,"
             "\"latency_target_ms\":3000,\"completed_turns\":%lu,"
             "\"last_first_text_ms\":%llu,"
             "\"last_first_announce_dispatch_ms\":%llu,"
@@ -422,6 +424,7 @@ static int command_status(struct agent_state *state, int fd,
             voice_metrics.dropped_turns,
             (unsigned long long)voice_metrics.last_stt_audio_ms,
             (unsigned long long)voice_metrics.last_stt_processing_ms,
+            (unsigned long long)voice_metrics.last_stt_total_ms,
             completed_turns,
             (unsigned long long)first_text_ms,
             (unsigned long long)first_announce_ms,
@@ -671,21 +674,22 @@ static void voice_transcript(
             continuation = 0;
         if (!continuation)
             snprintf(input, sizeof(input), "%s", text);
-        fprintf(stderr,
-                "agentd: transcript detection_sample=%llu "
-                "stt_audio_ms=%llu stt_processing_ms=%llu text=%s\n",
-                (unsigned long long)turn->detection_sample,
-                (unsigned long long)turn->stt_audio_ms,
-                (unsigned long long)turn->stt_processing_ms,
-                text);
+        le_log_info(
+            "agentd: transcript follow_up=%s detection_sample=%llu "
+            "audio_ms=%llu processing_ms=%llu total_ms=%llu text_chars=%lu",
+            turn->follow_up ? "true" : "false",
+            (unsigned long long)turn->detection_sample,
+            (unsigned long long)turn->stt_audio_ms,
+            (unsigned long long)turn->stt_processing_ms,
+            (unsigned long long)turn->stt_total_ms,
+            (unsigned long)strlen(text));
         if (generate_response(
                 state, input,
                 turn->endpoint && turn->transcript_received_ms >= 500
                     ? turn->transcript_received_ms - 500 : 0,
                 reply, sizeof(reply),
                 error, sizeof(error)) < 0)
-            fprintf(stderr, "agentd: voice response failed: %s\n",
-                    error);
+            le_log_warn("agentd: voice response failed: %s", error);
         else
             generated = 1;
         if (generated) {
@@ -960,6 +964,7 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    le_log_init("agentd", argc, argv);
     poll_minimum = getenv("LE_AGENT_AUTH_POLL_MIN_SECONDS");
     if (poll_minimum) {
         char *end;
@@ -991,7 +996,7 @@ int main(int argc, char **argv)
         goto fail_mutex;
     listener = le_adapter_listen(state.socket_path);
     if (listener < 0) {
-        perror("agentd: listen");
+        le_log_perr("agentd: listen");
         le_voice_playback_stop(&state.playback);
         goto fail_mutex;
     }
@@ -1004,8 +1009,8 @@ int main(int argc, char **argv)
         le_voice_playback_stop(&state.playback);
         goto fail_mutex;
     }
-    fprintf(stderr, "agentd: ready socket=%s provider=%s\n",
-            state.socket_path, state.provider->id);
+    le_log_info("agentd: ready socket=%s provider=%s",
+                state.socket_path, state.provider->id);
     while (running) {
         int client_fd = le_adapter_accept(listener);
 
