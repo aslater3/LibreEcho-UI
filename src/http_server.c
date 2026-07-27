@@ -36,6 +36,12 @@ size_t used;
 char buf[LE_REQ_MAX+1];
 };
 
+static int close_on_exec(int fd)
+{
+int flags=fcntl(fd,F_GETFD);
+return flags<0||fcntl(fd,F_SETFD,flags|FD_CLOEXEC)<0?-1:0;
+}
+
 static const char*mime(const char*p){const char*e=strrchr(p,'.');
 if(!e)return"application/octet-stream";
 if(!strcmp(e,".html"))return"text/html; charset=utf-8";
@@ -163,6 +169,7 @@ i<LE_MAX_CLIENTS;
 i++)c[i].fd=-1;
 ls=socket(AF_INET,SOCK_STREAM,0);
 if(ls<0)return-1;
+if(close_on_exec(ls)<0){close(ls);return-1;}
 setsockopt(ls,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
 memset(&a,0,sizeof(a));
 a.sin_family=AF_INET;
@@ -181,6 +188,7 @@ i++){p[i+1].fd=c[i].fd;
 p[i+1].events=POLLIN;
 }if(poll(p,(nfds_t)(max+1),500)<0&&errno!=EINTR)break;
 if(p[0].revents&POLLIN){int fd=accept(ls,0,0);
+if(fd>=0&&close_on_exec(fd)<0){close(fd);fd=-1;}
 if(fd>=0){for(i=0;
 i<max&&c[i].fd>=0;
 i++){/* find free bounded slot */}if(i==max){response(fd,503,"text/plain","Server busy",11);

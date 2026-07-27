@@ -44,6 +44,7 @@ make build/test-voice-pipeline
 ./build/test-voice-pipeline
 make build/test-wyomingd
 ./build/test-wyomingd
+python3 tests/test_wyoming_engines.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_ttsd.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
@@ -86,7 +87,7 @@ curl -fsS "$URL/api/v1/buttons" | jq -e \
     '.data.short_press == "Play / pause" and
      .data.long_press == "Reboot device"' >/dev/null
 curl -fsS "$URL/api/v1/privacy" | jq -e \
-    '.data.local_only == true and .data.log_retention_hours == 168' >/dev/null
+    '.data.local_only == false and .data.log_retention_hours == 168' >/dev/null
 curl -fsS "$URL/api/v1/integrations" | jq -e \
     '.data.items[] | select(.id == "home-assistant") | .enabled == true' \
     >/dev/null

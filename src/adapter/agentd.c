@@ -30,6 +30,8 @@
 #define DEFAULT_WAKE_SOCKET LE_ADAPTER_WAKEWORD_SOCK
 #define DEFAULT_STT_SOCKET LE_ADAPTER_STT_SOCK
 #define DEFAULT_TTS_FIRST_PCM_FILE "/run/libreecho/tts-first-pcm"
+#define FOLLOW_UP_PLAYBACK_WAIT_MS 60000U
+#define FOLLOW_UP_MAX_DEPTH 2U
 
 enum auth_state {
     AUTH_SIGNED_OUT,
@@ -74,6 +76,10 @@ struct agent_state {
     unsigned long latency_violations;
     char turn_request_id[64];
     unsigned long completed_turns;
+    char previous_voice_user[768];
+    char previous_voice_reply[1536];
+    unsigned int follow_up_depth;
+    int follow_up_armed;
 };
 
 static volatile sig_atomic_t running = 1;
@@ -386,7 +392,9 @@ static int command_status(struct agent_state *state, int fd,
             "\"voice_pipeline\":true,\"text_streaming\":true,"
             "\"wake_connected\":%s,\"audio_connected\":%s,"
             "\"recognizing\":%s,\"dispatching\":%s,"
-            "\"wake_events\":%lu,\"completed_transcripts\":%lu,"
+            "\"follow_up_pending\":%s,"
+            "\"wake_events\":%lu,\"follow_up_listens\":%lu,"
+            "\"completed_transcripts\":%lu,"
             "\"dropped_voice_turns\":%lu,"
             "\"last_stt_audio_ms\":%llu,"
             "\"last_stt_processing_ms\":%llu,"
@@ -407,7 +415,9 @@ static int command_status(struct agent_state *state, int fd,
             voice_metrics.audio_connected ? "true" : "false",
             voice_metrics.recognizing ? "true" : "false",
             voice_metrics.dispatching ? "true" : "false",
+            voice_metrics.follow_up_pending ? "true" : "false",
             voice_metrics.wake_events,
+            voice_metrics.follow_up_listens,
             voice_metrics.completed_transcripts,
             voice_metrics.dropped_turns,
             (unsigned long long)voice_metrics.last_stt_audio_ms,
@@ -578,6 +588,23 @@ static int generate_response(struct agent_state *state,
     return 0;
 }
 
+static int response_asks_question(const char *text)
+{
+    size_t length;
+
+    if (!text)
+        return 0;
+    length = strlen(text);
+    while (length &&
+           (text[length - 1] == ' ' || text[length - 1] == '\t' ||
+            text[length - 1] == '\r' || text[length - 1] == '\n' ||
+            text[length - 1] == '"' || text[length - 1] == '\'' ||
+            text[length - 1] == ')' || text[length - 1] == ']' ||
+            text[length - 1] == '}'))
+        --length;
+    return length && text[length - 1] == '?';
+}
+
 static int command_respond(struct agent_state *state, const char *args,
                            int fd, unsigned long id)
 {
@@ -617,12 +644,33 @@ static void voice_transcript(
     const struct le_voice_pipeline_turn *turn)
 {
     struct agent_state *state = context;
+    char input[LE_LLM_TEXT_MAX];
     char reply[LE_LLM_TEXT_MAX];
     char error[256];
+    int continuation;
+    int generated = 0;
 
     pthread_mutex_lock(&state->control_mutex);
     if (state->config.enabled &&
         state->auth_state == AUTH_SIGNED_IN) {
+        continuation = turn->follow_up && state->follow_up_armed;
+        state->follow_up_armed = 0;
+        if (!continuation) {
+            state->follow_up_depth = 0;
+            state->previous_voice_user[0] = '\0';
+            state->previous_voice_reply[0] = '\0';
+        }
+        if (continuation &&
+            snprintf(
+                input, sizeof(input),
+                "Previous user: %s\nPrevious assistant: %s\n"
+                "User follow-up: %s",
+                state->previous_voice_user,
+                state->previous_voice_reply, text) >=
+                (int)sizeof(input))
+            continuation = 0;
+        if (!continuation)
+            snprintf(input, sizeof(input), "%s", text);
         fprintf(stderr,
                 "agentd: transcript detection_sample=%llu "
                 "stt_audio_ms=%llu stt_processing_ms=%llu text=%s\n",
@@ -631,13 +679,37 @@ static void voice_transcript(
                 (unsigned long long)turn->stt_processing_ms,
                 text);
         if (generate_response(
-                state, text,
+                state, input,
                 turn->endpoint && turn->transcript_received_ms >= 500
                     ? turn->transcript_received_ms - 500 : 0,
                 reply, sizeof(reply),
                 error, sizeof(error)) < 0)
             fprintf(stderr, "agentd: voice response failed: %s\n",
                     error);
+        else
+            generated = 1;
+        if (generated) {
+            snprintf(state->previous_voice_user,
+                     sizeof(state->previous_voice_user), "%.*s",
+                     (int)sizeof(state->previous_voice_user) - 1, text);
+            snprintf(state->previous_voice_reply,
+                     sizeof(state->previous_voice_reply), "%.*s",
+                     (int)sizeof(state->previous_voice_reply) - 1, reply);
+            if (response_asks_question(reply) &&
+                state->follow_up_depth < FOLLOW_UP_MAX_DEPTH &&
+                le_voice_playback_wait_idle(
+                    &state->playback,
+                    FOLLOW_UP_PLAYBACK_WAIT_MS) == 0) {
+                ++state->follow_up_depth;
+                state->follow_up_armed = 1;
+                if (le_voice_pipeline_request_follow_up(
+                        state->voice_pipeline) < 0)
+                    state->follow_up_armed = 0;
+            } else {
+                state->follow_up_armed = 0;
+                state->follow_up_depth = 0;
+            }
+        }
     }
     pthread_mutex_unlock(&state->control_mutex);
 }

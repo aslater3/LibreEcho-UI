@@ -14,5 +14,10 @@
   "wake_word": "LibreEcho",
   "wake_enabled": true,
   "wake_sensitivity": 68,
+  "voice_pipeline_mode": "local",
+  "stt_wyoming_uri": "",
+  "stt_wyoming_model": "whisper-small",
+  "tts_wyoming_uri": "",
+  "tts_wyoming_voice": "en_GB-alan-medium",
   "bind": "127.0.0.1:8080"
 }

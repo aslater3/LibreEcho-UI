@@ -39,6 +39,7 @@ struct le_voice_pipeline {
     struct le_voice_pipeline_turn pending_turn;
     int transcript_pending;
     int dispatching;
+    int follow_up_pending;
     struct le_voice_pipeline_metrics metrics;
 };
 
@@ -275,7 +276,7 @@ static void close_recognition(struct le_voice_pipeline *pipeline,
 
 static int handle_stt_line(struct le_voice_pipeline *pipeline,
                            int stt_fd, const char *line,
-                           uint64_t detection_sample)
+                           uint64_t detection_sample, int follow_up)
 {
     struct le_voice_pipeline_turn turn;
     char text[TRANSCRIPT_MAX];
@@ -298,6 +299,7 @@ static int handle_stt_line(struct le_voice_pipeline *pipeline,
     if (!found)
         turn.stt_processing_ms = 0;
     turn.endpoint = strstr(line, "\"endpoint\":true") != NULL;
+    turn.follow_up = follow_up;
     if (text[0])
         (void)queue_transcript(pipeline, text, &turn);
     return 1;
@@ -330,6 +332,7 @@ static void *capture_worker(void *opaque)
     int audio_fd = -1;
     int stt_fd = -1;
     uint64_t detection_sample = 0;
+    int recognition_follow_up = 0;
 
     while (pipeline_running(pipeline)) {
         struct pollfd descriptors[3];
@@ -429,6 +432,7 @@ static void *capture_worker(void *opaque)
             }
             pthread_mutex_unlock(&pipeline->mutex);
             detection_sample = sample;
+            recognition_follow_up = 0;
             stt_fd = start_recognition(
                 pipeline, detection_sample);
             if (stt_fd < 0) {
@@ -446,9 +450,36 @@ static void *capture_worker(void *opaque)
                 continue;
             }
             result = handle_stt_line(
-                pipeline, stt_fd, line, detection_sample);
+                pipeline, stt_fd, line, detection_sample,
+                recognition_follow_up);
             if (result != 0)
                 close_recognition(pipeline, &stt_fd);
+        }
+        if (stt_fd < 0) {
+            int start_follow_up = 0;
+
+            pthread_mutex_lock(&pipeline->mutex);
+            if (pipeline->follow_up_pending &&
+                !pipeline->dispatching &&
+                !pipeline->transcript_pending &&
+                pipeline->ring_count) {
+                pipeline->follow_up_pending = 0;
+                pipeline->metrics.follow_up_pending = 0;
+                detection_sample =
+                    pipeline->ring_first_sample + pipeline->ring_count;
+                start_follow_up = 1;
+            }
+            pthread_mutex_unlock(&pipeline->mutex);
+            if (start_follow_up) {
+                recognition_follow_up = 1;
+                stt_fd = start_recognition(
+                    pipeline, detection_sample);
+                if (stt_fd < 0) {
+                    pthread_mutex_lock(&pipeline->mutex);
+                    ++pipeline->metrics.dropped_turns;
+                    pthread_mutex_unlock(&pipeline->mutex);
+                }
+            }
         }
     }
     close_connection(pipeline, &wake_fd, 1);
@@ -533,6 +564,24 @@ fail_condition:
 fail_mutex:
     free(pipeline);
     return NULL;
+}
+
+int le_voice_pipeline_request_follow_up(
+    struct le_voice_pipeline *pipeline)
+{
+    int result = -1;
+
+    if (!pipeline)
+        return -1;
+    pthread_mutex_lock(&pipeline->mutex);
+    if (pipeline->running && !pipeline->follow_up_pending) {
+        pipeline->follow_up_pending = 1;
+        pipeline->metrics.follow_up_pending = 1;
+        ++pipeline->metrics.follow_up_listens;
+        result = 0;
+    }
+    pthread_mutex_unlock(&pipeline->mutex);
+    return result;
 }
 
 void le_voice_pipeline_get_metrics(

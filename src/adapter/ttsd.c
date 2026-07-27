@@ -51,6 +51,8 @@
 
 #ifdef LE_TTSD_ENGINE_SHERPA
 # define LE_TTSD_ENGINE_NAME "sherpa-onnx"
+#elif defined(LE_TTSD_ENGINE_WYOMING)
+# define LE_TTSD_ENGINE_NAME "wyoming"
 #else
 # define LE_TTSD_ENGINE_NAME "mock"
 #endif

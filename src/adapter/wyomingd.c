@@ -352,12 +352,14 @@ static int handle_server_event(struct wyoming_state *state)
 {
     struct le_wyoming_event event;
     unsigned char payload[MAX_PAYLOAD];
+    const char *data;
 
     if (le_wyoming_read_header(state->client_fd, &event) < 0 ||
         event.payload_length > sizeof(payload) ||
         le_wyoming_read_payload(state->client_fd, payload, sizeof(payload),
                                 &event) < 0)
         return -1;
+    data = event.data_length ? event.data : event.header;
     if (!strcmp(event.type, "describe"))
         return send_info(state);
     if (!strcmp(event.type, "run-satellite")) {
@@ -371,7 +373,7 @@ static int handle_server_event(struct wyoming_state *state)
     }
     if (!strcmp(event.type, "run-pipeline")) {
         char stage[32];
-        if (json_get_string(event.header, "start_stage", stage,
+        if (json_get_string(data, "start_stage", stage,
                             sizeof(stage)) < 1)
             return -1;
         if (!strcmp(stage, "wake")) {
@@ -394,9 +396,9 @@ static int handle_server_event(struct wyoming_state *state)
         int rate;
         int width;
         int channels;
-        if (json_get_int(event.header, "rate", &rate) != 1 ||
-            json_get_int(event.header, "width", &width) != 1 ||
-            json_get_int(event.header, "channels", &channels) != 1 ||
+        if (json_get_int(data, "rate", &rate) != 1 ||
+            json_get_int(data, "width", &width) != 1 ||
+            json_get_int(data, "channels", &channels) != 1 ||
             width != 2 || state->output_fd < 0)
             return -1;
         return play_pcm16(state, payload, event.payload_length, rate,

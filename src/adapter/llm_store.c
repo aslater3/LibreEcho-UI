@@ -121,7 +121,7 @@ int le_llm_credentials_load(const char *path,
 
         if (base && (end = strchr(base, '"')) != NULL) {
             length = (size_t)(end - base);
-            if (!length || length >= sizeof(credentials->base_url))
+            if (length >= sizeof(credentials->base_url))
                 goto fail;
             memcpy(credentials->base_url, base, length);
             credentials->base_url[length] = '\0';

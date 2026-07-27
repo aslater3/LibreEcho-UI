@@ -17,6 +17,20 @@ PIDFILE=${PIDFILE:-/var/run/libreecho-sttd.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-sttd.log}
 SOCKET=${SOCKET:-/run/libreecho/stt.sock}
 THREADS=${THREADS:-2}
+CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
+WYOMING_DAEMON=${WYOMING_DAEMON:-/usr/local/sbin/libreecho-sttd-wyoming}
+
+config_string() {
+    key=$1
+    fallback=$2
+    value=
+    if [ -r "$CONFIG" ]; then
+        value=$(sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+            "$CONFIG" | sed -n '1p')
+    fi
+    [ -n "$value" ] || value=$fallback
+    printf '%s\n' "$value"
+}
 
 mount_runtime() {
     [ -f "$PAYLOAD" ] || {
@@ -47,24 +61,42 @@ is_running() {
 
 start_service() {
     if is_running; then echo "libreecho-sttd already running"; return 0; fi
-    mount_runtime || return 1
-    [ -x "$DAEMON" ] &&
-        [ -f "$MODEL_ROOT/encoder-epoch-99-avg-1.int8.onnx" ] &&
-        [ -f "$MODEL_ROOT/decoder-epoch-99-avg-1.int8.onnx" ] &&
-        [ -f "$MODEL_ROOT/joiner-epoch-99-avg-1.int8.onnx" ] &&
-        [ -f "$MODEL_ROOT/tokens.txt" ] || {
-        echo "libreecho-sttd: incomplete English STT runtime" >&2
-        unmount_runtime
-        return 1
-    }
-    case "$THREADS" in 1|2|3|4) ;; *)
-        echo "libreecho-sttd: THREADS must be 1..4" >&2
-        unmount_runtime
-        return 1
-    esac
+    MODE=$(config_string voice_pipeline_mode local)
+    if [ "$MODE" = custom ]; then
+        ENDPOINT=$(config_string stt_wyoming_uri "")
+        MODEL=$(config_string stt_wyoming_model whisper-small)
+        case "$ENDPOINT" in tcp://*:* ) ;; *)
+            echo "libreecho-sttd: invalid Wyoming endpoint" >&2
+            return 1 ;;
+        esac
+        [ -x "$WYOMING_DAEMON" ] || {
+            echo "libreecho-sttd: Wyoming client is unavailable" >&2
+            return 1
+        }
+        DAEMON=$WYOMING_DAEMON
+        export LE_STT_WYOMING_URI=$ENDPOINT
+        export LE_STT_WYOMING_MODEL=$MODEL
+        ARGS=${ARGS:---socket $SOCKET --model-dir $ENDPOINT --threads 1}
+    else
+        mount_runtime || return 1
+        [ -x "$DAEMON" ] &&
+            [ -f "$MODEL_ROOT/encoder-epoch-99-avg-1.int8.onnx" ] &&
+            [ -f "$MODEL_ROOT/decoder-epoch-99-avg-1.int8.onnx" ] &&
+            [ -f "$MODEL_ROOT/joiner-epoch-99-avg-1.int8.onnx" ] &&
+            [ -f "$MODEL_ROOT/tokens.txt" ] || {
+            echo "libreecho-sttd: incomplete English STT runtime" >&2
+            unmount_runtime
+            return 1
+        }
+        case "$THREADS" in 1|2|3|4) ;; *)
+            echo "libreecho-sttd: THREADS must be 1..4" >&2
+            unmount_runtime
+            return 1
+        esac
+        ARGS=${ARGS:---socket $SOCKET --model-dir $MODEL_ROOT --threads $THREADS}
+    fi
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" \
         "$(dirname "$SOCKET")"
-    ARGS=${ARGS:---socket $SOCKET --model-dir $MODEL_ROOT --threads $THREADS}
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS \
             </dev/null >>"$LOGFILE" 2>&1

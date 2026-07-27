@@ -22,9 +22,12 @@
 
 struct result_state {
     pthread_mutex_t mutex;
+    struct le_voice_pipeline *pipeline;
     char text[4096];
+    struct le_voice_pipeline_turn first_turn;
     struct le_voice_pipeline_turn turn;
     int called;
+    int follow_up_result;
 };
 
 static void transcript(void *context, const char *text,
@@ -34,8 +37,13 @@ static void transcript(void *context, const char *text,
 
     pthread_mutex_lock(&state->mutex);
     snprintf(state->text, sizeof(state->text), "%s", text);
+    if (!state->called)
+        state->first_turn = *turn;
     state->turn = *turn;
-    state->called = 1;
+    ++state->called;
+    if (state->called == 1 && state->pipeline)
+        state->follow_up_result =
+            le_voice_pipeline_request_follow_up(state->pipeline);
     pthread_mutex_unlock(&state->mutex);
 }
 
@@ -84,36 +92,52 @@ int main(void)
     pipeline = le_voice_pipeline_start(
         wake_socket, stt_socket, transcript, &state);
     CHECK(pipeline != NULL);
+    pthread_mutex_lock(&state.mutex);
+    state.pipeline = pipeline;
+    pthread_mutex_unlock(&state.mutex);
     for (attempt = 0; attempt < 500; ++attempt) {
         int called;
 
         pthread_mutex_lock(&state.mutex);
         called = state.called;
         pthread_mutex_unlock(&state.mutex);
-        if (called)
+        if (called >= 2)
             break;
         nanosleep(&delay, NULL);
     }
     {
         int called;
         int endpoint;
-        uint64_t detection_sample;
+        uint64_t first_detection_sample;
+        uint64_t follow_up_detection_sample;
+        int follow_up_result;
+        int first_follow_up;
+        int second_follow_up;
         char text[sizeof(state.text)];
 
         pthread_mutex_lock(&state.mutex);
         called = state.called;
         endpoint = state.turn.endpoint;
-        detection_sample = state.turn.detection_sample;
+        first_detection_sample = state.first_turn.detection_sample;
+        follow_up_detection_sample = state.turn.detection_sample;
+        follow_up_result = state.follow_up_result;
+        first_follow_up = state.first_turn.follow_up;
+        second_follow_up = state.turn.follow_up;
         snprintf(text, sizeof(text), "%s", state.text);
         pthread_mutex_unlock(&state.mutex);
-        CHECK(called);
+        CHECK(called == 2);
+        CHECK(follow_up_result == 0);
         CHECK(!strcmp(text, "mock transcription"));
-        CHECK(detection_sample == 640);
+        CHECK(first_detection_sample == 640);
+        CHECK(follow_up_detection_sample > first_detection_sample);
+        CHECK(!first_follow_up);
+        CHECK(second_follow_up);
         CHECK(endpoint);
     }
     le_voice_pipeline_get_metrics(pipeline, &metrics);
     CHECK(metrics.wake_events == 1);
-    CHECK(metrics.completed_transcripts == 1);
+    CHECK(metrics.follow_up_listens == 1);
+    CHECK(metrics.completed_transcripts == 2);
     CHECK(metrics.last_stt_audio_ms >= 200);
     puts("voice pipeline: indexed wake audio to streaming STT: ok");
 

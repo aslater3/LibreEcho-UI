@@ -44,7 +44,16 @@ int main(void)
     CHECK(loaded.access_token[0] == '\0');
     CHECK(le_llm_credentials_remove(path) == 0);
     CHECK(access(path, F_OK) != 0);
+    memset(&saved, 0, sizeof(saved));
+    strcpy(saved.api_key, "local-api-key");
+    strcpy(saved.base_url, "http://127.0.0.1:8000/v1");
+    CHECK(le_llm_credentials_save(path, &saved) == 0);
+    CHECK(le_llm_credentials_load(path, &loaded) == 0);
+    CHECK(!strcmp(loaded.api_key, saved.api_key));
+    CHECK(!strcmp(loaded.base_url, saved.base_url));
+    CHECK(loaded.access_token[0] == '\0');
+    CHECK(le_llm_credentials_remove(path) == 0);
     rmdir(directory);
-    puts("llm store: private atomic OAuth credentials: ok");
+    puts("llm store: private atomic OAuth and local credentials: ok");
     return 0;
 }

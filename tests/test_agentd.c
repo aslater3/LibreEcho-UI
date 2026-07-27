@@ -184,7 +184,7 @@ int main(void)
                 ++lines;
             fclose(capture);
         }
-        if (lines >= 2)
+        if (lines >= 3)
             break;
         nanosleep(&delay, NULL);
     }
@@ -193,7 +193,8 @@ int main(void)
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"voice_pipeline\":true") != NULL);
     CHECK(strstr(response, "\"wake_events\":1") != NULL);
-    CHECK(strstr(response, "\"completed_transcripts\":1") != NULL);
+    CHECK(strstr(response, "\"follow_up_listens\":1") != NULL);
+    CHECK(strstr(response, "\"completed_transcripts\":2") != NULL);
     CHECK(strstr(response,
                  "\"last_speech_end_to_first_pcm_ms\":") != NULL);
     CHECK(strstr(response, "\"latency_target_met\":true") != NULL);

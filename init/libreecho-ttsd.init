@@ -18,6 +18,19 @@ SOCKET=${SOCKET:-/run/libreecho/tts.sock}
 MODEL_ROOT=${MODEL_ROOT:-$RUNTIME_ROOT/usr/local/share/libreecho/tts/models}
 VOICE_FILE=${VOICE_FILE:-/data/libreecho/config/tts-voice}
 CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
+WYOMING_DAEMON=${WYOMING_DAEMON:-/usr/local/sbin/libreecho-ttsd-wyoming}
+
+config_string() {
+    key=$1
+    fallback=$2
+    value=
+    if [ -r "$CONFIG" ]; then
+        value=$(sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+            "$CONFIG" | sed -n '1p')
+    fi
+    [ -n "$value" ] || value=$fallback
+    printf '%s\n' "$value"
+}
 
 valid_voice() {
     case "$1" in
@@ -65,17 +78,36 @@ is_running() {
 
 start_service() {
     if is_running; then echo "libreecho-ttsd already running"; return 0; fi
-    mount_runtime || return 1
-    VOICE=$(selected_voice)
-    MODEL_DIR="$MODEL_ROOT/$VOICE"
-    [ -x "$DAEMON" ] && [ -f "$MODEL_DIR/model.onnx" ] &&
-        [ -f "$MODEL_DIR/tokens.txt" ] &&
-        [ -d "$MODEL_DIR/espeak-ng-data" ] || {
-        echo "libreecho-ttsd: incomplete runtime for voice $VOICE" >&2
-        unmount_runtime
-        return 1
-    }
-    ARGS=${ARGS:---foreground --socket $SOCKET --model-dir $MODEL_DIR --voice $VOICE}
+    MODE=$(config_string voice_pipeline_mode local)
+    if [ "$MODE" = custom ]; then
+        ENDPOINT=$(config_string tts_wyoming_uri "")
+        VOICE=$(config_string tts_wyoming_voice en_GB-alan-medium)
+        case "$ENDPOINT" in tcp://*:* ) ;; *)
+            echo "libreecho-ttsd: invalid Wyoming endpoint" >&2
+            return 1 ;;
+        esac
+        [ -x "$WYOMING_DAEMON" ] || {
+            echo "libreecho-ttsd: Wyoming client is unavailable" >&2
+            return 1
+        }
+        DAEMON=$WYOMING_DAEMON
+        export LE_TTS_WYOMING_URI=$ENDPOINT
+        export LE_TTS_WYOMING_VOICE=$VOICE
+        LE_TTS_IN_PROCESS=${LE_TTS_IN_PROCESS:-0}
+        ARGS=${ARGS:---foreground --socket $SOCKET --model-dir $ENDPOINT --voice $VOICE}
+    else
+        mount_runtime || return 1
+        VOICE=$(selected_voice)
+        MODEL_DIR="$MODEL_ROOT/$VOICE"
+        [ -x "$DAEMON" ] && [ -f "$MODEL_DIR/model.onnx" ] &&
+            [ -f "$MODEL_DIR/tokens.txt" ] &&
+            [ -d "$MODEL_DIR/espeak-ng-data" ] || {
+            echo "libreecho-ttsd: incomplete runtime for voice $VOICE" >&2
+            unmount_runtime
+            return 1
+        }
+        ARGS=${ARGS:---foreground --socket $SOCKET --model-dir $MODEL_DIR --voice $VOICE}
+    fi
     export LE_TTS_THREADS=${LE_TTS_THREADS:-4}
     export LE_TTS_STREAMING=${LE_TTS_STREAMING:-1}
     export LE_TTS_IN_PROCESS=${LE_TTS_IN_PROCESS:-1}

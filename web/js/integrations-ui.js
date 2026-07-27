@@ -41,8 +41,19 @@ function assistantTelemetry(a) {
   </dl>`;
 }
 
-function localAssistantBody(a,selected) {
+function pipelineStatus(pipeline) {
+  const stt=pipeline?.stt||{},tts=pipeline?.tts||{};
+  return `<dl class="facts">
+    <dt>Wake word</dt><dd class="connected">On device</dd>
+    <dt>Speech recognition</dt><dd class="${stt.reachable?'connected':''}">${stt.reachable?'Whisper reachable':stt.configured?'Whisper unavailable':'Not configured'}</dd>
+    <dt>Speech output</dt><dd class="${tts.reachable?'connected':''}">${tts.reachable?'Piper reachable':tts.configured?'Piper unavailable':'Not configured'}</dd>
+    <dt>Pipeline mode</dt><dd>${esc(pipeline?.mode||'local')}</dd>
+  </dl>`;
+}
+
+function localAssistantBody(a,selected,pipeline) {
   const configured=Boolean(a.base_url);
+  const stt=pipeline?.stt||{},tts=pipeline?.tts||{};
   return `<div class="assistant-heading">
     <div>
       <span class="source-pill">LAN endpoint</span>
@@ -55,11 +66,16 @@ function localAssistantBody(a,selected) {
       ${field('Endpoint URL',a.base_url||'','local-base-url','url','placeholder="http://192.168.1.10:8000/v1"')}
       <label class="field"><span>API key (optional)</span><input id="local-api-key" type="password" autocomplete="off" placeholder="${a.api_key_configured?'Configured; leave blank to keep it':'Leave blank when the endpoint does not require one'}"></label>
       ${field('Model',a.model||'','local-model')}
+      ${field('Whisper Wyoming endpoint',stt.wyoming_uri||'','stt-wyoming-uri','text','placeholder="tcp://192.168.1.10:10300"')}
+      ${field('Whisper model',stt.model||'whisper-small','stt-model')}
+      ${field('Piper Wyoming endpoint',tts.wyoming_uri||'','tts-wyoming-uri','text','placeholder="tcp://192.168.1.10:10200"')}
+      ${field('Piper voice',tts.voice||'en_GB-alan-medium','tts-voice')}
       <label class="field"><span>Voice response prompt</span><textarea id="local-prompt" rows="8">${esc(a.prompt||'')}</textarea></label>
       ${saveButton('save-local-assistant')}
       ${!selected?'<p class="muted">Saving selects Local LLM without enabling the voice loop. Use the switch above when you are ready to test it.</p>':''}
     </div>
     <div>
+      ${pipelineStatus(pipeline)}
       ${selected?assistantTelemetry(a):'<div class="privacy-callout">Local LLM is not currently selected.</div>'}
       ${selected&&configured?`<label class="field"><span>Test prompt</span><input id="local-test-text" value="Say hello in one short sentence."></label>${action('Speak test response','local-test')}`:''}
     </div>
@@ -105,11 +121,33 @@ function deviceAssistantBody(a,selected) {
   </div>`;
 }
 
-async function setAssistantProvider(provider,enabled) {
+async function setAssistantProvider(provider,enabled,pipeline) {
   if(state.busy)return;
   setBusy(true);
   try {
+    if(enabled) {
+      const local=provider==='openai-compatible';
+      if(local) {
+        await api('/privacy',{method:'PUT',body:JSON.stringify({local_only:false})});
+      }
+      await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
+        mode:local?'custom':'local',
+        stt_wyoming_uri:pipeline?.stt?.wyoming_uri||'',
+        stt_model:pipeline?.stt?.model||'whisper-small',
+        tts_wyoming_uri:pipeline?.tts?.wyoming_uri||'',
+        tts_voice:pipeline?.tts?.voice||'en_GB-alan-medium'
+      })});
+    }
     await api('/assistant',{method:'PUT',body:JSON.stringify({provider,enabled})});
+    if(!enabled&&provider==='openai-compatible'&&pipeline?.mode==='custom') {
+      await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
+        mode:'local',
+        stt_wyoming_uri:pipeline?.stt?.wyoming_uri||'',
+        stt_model:pipeline?.stt?.model||'whisper-small',
+        tts_wyoming_uri:pipeline?.tts?.wyoming_uri||'',
+        tts_voice:pipeline?.tts?.voice||'en_GB-alan-medium'
+      })});
+    }
     toast(enabled?(provider==='openai-compatible'?'Local LLM enabled':'On Device Voice Assistant enabled'):'Voice assistant disabled');
     await integrationsPage();
   } catch(error) {
@@ -120,17 +158,18 @@ async function setAssistantProvider(provider,enabled) {
   }
 }
 
-function bindProviderToggle(id,provider) {
+function bindProviderToggle(id,provider,pipeline) {
   const input=$(id),row=input?.closest('.switch-row');
   if(!input)return;
   if(row)row.onclick=event=>event.stopPropagation();
-  input.onchange=()=>setAssistantProvider(provider,input.checked);
+  input.onchange=()=>setAssistantProvider(provider,input.checked,pipeline);
 }
 
 async function integrationsPage() {
-  const [d,a]=await Promise.all([
+  const [d,a,pipeline]=await Promise.all([
     api('/integrations'),
-    api('/assistant').catch(error=>({unsupported:error.message}))
+    api('/assistant').catch(error=>({unsupported:error.message})),
+    api('/voice-pipeline').catch(()=>({mode:'local',stt:{},tts:{}}))
   ]);
   const integrations=d.items.map(x=>collapsiblePanel(x.name,
     `<p class="muted">${x.id==='rest'?'Versioned local device API.':'Optional local integration; no cloud connection required.'}</p>
@@ -160,7 +199,7 @@ async function integrationsPage() {
       toggleLabel:'Use Local LLM',
       toggleId:'use-local-provider',
       enabled:localEnabled,
-      body:localAssistantBody(a,localSelected),
+      body:localAssistantBody(a,localSelected,pipeline),
       open:localSelected
     });
     const devicePanel=assistantProviderPanel({
@@ -179,21 +218,41 @@ async function integrationsPage() {
       ${integrations}
     </div>`;
 
-    bindProviderToggle('#use-local-provider','openai-compatible');
-    bindProviderToggle('#use-device-provider','openai-codex');
+    bindProviderToggle('#use-local-provider','openai-compatible',pipeline);
+    bindProviderToggle('#use-device-provider','openai-codex',pipeline);
 
-    bindDirty(['#local-base-url','#local-model','#local-prompt','#local-api-key'],'#save-local-assistant');
+    bindDirty(['#local-base-url','#local-model','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
     $('#save-local-assistant').onclick=async()=>{
-      const body={
-        provider:'openai-compatible',
-        enabled:localEnabled,
-        base_url:$('#local-base-url').value.trim(),
-        model:$('#local-model').value.trim(),
-        prompt:$('#local-prompt').value.trim()
-      };
-      const key=$('#local-api-key').value;
-      if(key)body.api_key=key;
-      await mutate('/assistant',body,'Local LLM settings saved');
+      if(state.busy)return;
+      setBusy(true);
+      try {
+        if(localEnabled) {
+          await api('/privacy',{method:'PUT',body:JSON.stringify({local_only:false})});
+        }
+        await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
+          mode:localEnabled?'custom':'local',
+          stt_wyoming_uri:$('#stt-wyoming-uri').value.trim(),
+          stt_model:$('#stt-model').value.trim(),
+          tts_wyoming_uri:$('#tts-wyoming-uri').value.trim(),
+          tts_voice:$('#tts-voice').value.trim()
+        })});
+        const body={
+          provider:'openai-compatible',
+          enabled:localEnabled,
+          base_url:$('#local-base-url').value.trim(),
+          model:$('#local-model').value.trim(),
+          prompt:$('#local-prompt').value.trim()
+        };
+        const key=$('#local-api-key').value;
+        if(key)body.api_key=key;
+        await api('/assistant',{method:'PUT',body:JSON.stringify(body)});
+        toast('Local AI stack settings saved');
+      } catch(error) {
+        toast(error.message,true);
+      } finally {
+        await integrationsPage();
+        setBusy(false);
+      }
     };
     if($('#local-test'))$('#local-test').onclick=()=>post('/assistant/respond',{text:$('#local-test-text').value},'Test response queued');
 
