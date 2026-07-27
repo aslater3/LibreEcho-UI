@@ -14,7 +14,8 @@
       row.className = 'switch-row provider-toggle';
       row.innerHTML = '<span>' + (local ? 'Use Local LLM' : 'Use On Device Voice Assistant') + '</span><input class="toggle-input" id="' + id + '" type="checkbox" ' + (checked ? 'checked' : '') + '><span class="switch"></span>';
       body.prepend(row);
-      row.querySelector('input').onchange = async event => {
+      const input = row.querySelector('input');
+      input.onchange = async event => {
         if (!event.target.checked) { event.target.checked = true; return; }
         const provider = local ? 'openai-compatible' : 'openai-codex';
         try {
@@ -22,6 +23,13 @@
           window.libreEchoAssistantProvider = provider;
           await integrationsPage();
         } catch (error) { event.target.checked = false; toast(error.message, true); }
+      };
+      row.onclick = event => {
+        if (event.target !== input) {
+          event.preventDefault();
+          input.checked = !input.checked;
+          input.dispatchEvent(new Event('change', {bubbles:true}));
+        }
       };
     });
   }

@@ -778,15 +778,21 @@ static int command_configure(struct agent_state *state, const char *args,
         strcpy(state->credentials.api_key, value);
     }
     state->config = updated;
+    state->provider = le_llm_provider_by_id(state->config.provider);
+    if (!state->provider)
+        return respond(fd, id, 0, "unsupported provider");
     if (save_config(state) < 0)
         return respond(fd, id, 0, "unable to save agent configuration");
     if (!strcmp(state->config.provider, "openai-compatible")) {
-        state->provider = le_llm_provider_by_id(state->config.provider);
-        if (!state->credentials.base_url[0] ||
+        if (state->credentials.base_url[0] &&
             le_llm_credentials_save(state->credentials_path,
                                      &state->credentials) < 0)
             return respond(fd, id, 0, "unable to save local LLM credentials");
-        state->auth_state = AUTH_SIGNED_IN;
+        state->auth_state = state->credentials.base_url[0]
+            ? AUTH_SIGNED_IN : AUTH_SIGNED_OUT;
+    } else {
+        state->auth_state = state->credentials.access_token[0]
+            ? AUTH_SIGNED_IN : AUTH_SIGNED_OUT;
     }
     return command_status(state, fd, id);
 }
