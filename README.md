@@ -127,7 +127,10 @@ Set `LIBREECHO_URL` when using a port other than 8080. These routes exist only i
 
 Implemented v1 areas include status, device, config metadata, audio, LED, buttons, wake word, Wi-Fi scan/connect/disconnect, network identity, privacy, integrations, system/OTA model, logs, diagnostics, events, and guarded power operations. The overview polls once every five seconds. `/api/v1/events` emits bounded SSE-formatted event snapshots, but a persistent multi-client SSE fan-out is deferred; polling avoids pretending that the initial one-shot stream is a full push service.
 
-OTA is a UI/API data model only. The Linux backend returns unsupported for hardware installation. There are no raw writes to `/dev/block/*`.
+OTA images expose signed A/B status and a streaming manual tar upload. The web
+daemon stores a bounded upload under `/data/libreecho/update/incoming` and
+executes the image-provided installer; it never writes a block device itself.
+Development images report the update adapter as unavailable.
 
 ## Tests
 
@@ -194,7 +197,8 @@ The following Linux adapter functions deliberately return `not_supported` until 
 - Button mappings and physical mute-state input.
 - Safe reboot/shutdown/factory-reset platform adapters without assuming systemd.
 - Authenticated diagnostics adapters for kernel and service logs.
-- Signed A/B update download, verification, inactive-slot installation, boot confirmation and rollback.
+- Automatic signed update discovery and HTTPS download once the release
+  endpoint and TLS trust policy are defined.
 - Optional privilege drop after binding, once the production user/group and writable paths are finalized.
 
 Do not add undocumented ioctl numbers. Each integration belongs behind `backend.h` or a small versioned AF_UNIX adapter.

@@ -5,6 +5,7 @@ CFG=${LIBREECHO_TEST_CONFIG:-./build/test-suite-config.json}
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exit 1; }; }
 expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
+expect "$(curl -fsS "$URL/api/v1/device")" '"os_version":"LibreEcho OS 0.1.1-dev"'
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
 expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
 expect "$(curl -fsS "$URL/")" 'First-boot setup'
@@ -78,6 +79,21 @@ expect "$(curl -fsS "$URL/api/v1/system")" '"ntp":false'
 expect "$(curl -fsS "$URL/api/v1/system")" '"clock_valid":true'
 expect "$(curl -fsS "$URL/api/v1/system")" '"ntp_state":"unavailable"'
 expect "$(curl -fsS "$URL/api/v1/system")" '"rtc_available":false'
+curl -fsS "$URL/api/v1/system/update" | jq -e \
+    '.ok and .data.supported == false and
+     .data.current_slot == "-" and .data.inactive_slot == "-" and
+     .data.pending_reboot == false and .data.max_upload_bytes == 33554432 and
+     .data.installed_version == "" and .data.latest_version == "" and
+     .data.channel == "stable" and .data.source == "github-releases" and
+     .data.source_reachable == "unknown" and
+     .data.check_status == "not-checked" and .data.check_error == "" and
+     .data.last_check_epoch == 0 and .data.last_success_epoch == 0 and
+     .data.rollback_version == ""' \
+    >/dev/null
+code=$(curl -sS -o /tmp/le-update-upload.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/system/update/upload" -H "$CSRF" \
+    -H 'Content-Type: application/x-tar' --data-binary 'not-an-update')
+[ "$code" = 501 ]
 expect "$(curl -fsS "$URL/api/v1/logs")" '"boot_seconds":'
 curl -fsS -D /tmp/le-log-stream.headers "$URL/api/v1/logs/stream" -o /tmp/le-log-stream.out
 grep -qi '^content-type: text/event-stream' /tmp/le-log-stream.headers
