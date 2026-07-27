@@ -18,6 +18,8 @@ struct le_llm_http_request {
     char account_id[160];
     char body[LE_LLM_BODY_MAX];
     int accept_sse;
+    /* Set only after endpoint validation permits a configured LAN HTTP URL. */
+    int allow_insecure_http;
 };
 
 struct le_llm_auth_session {

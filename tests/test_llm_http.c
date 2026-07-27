@@ -88,6 +88,23 @@ int main(void)
     CHECK(strstr(config, "ChatGPT-Account-Id: account-123") != NULL);
     CHECK(strstr(config, "proto = \"=https\"") != NULL);
     CHECK(strstr(config, "insecure") == NULL);
+
+    memset(&request, 0, sizeof(request));
+    strcpy(request.method, "POST");
+    strcpy(request.url, "http://192.168.10.20:8000/v1/chat/completions");
+    strcpy(request.content_type, "application/json");
+    strcpy(request.body, "{\"stream\":true}");
+    request.accept_sse = 1;
+    request.allow_insecure_http = 1;
+    CHECK(le_llm_http_execute("./build/mock-llm-curl", &request,
+                              collect, &events, &response) == 0);
+    file = fopen(capture, "r");
+    CHECK(file != NULL);
+    count = fread(config, 1, sizeof(config) - 1, file);
+    fclose(file);
+    config[count] = '\0';
+    CHECK(strstr(config, "proto = \"=http,https\"") != NULL);
+    CHECK(strstr(config, "tlsv1.2") == NULL);
     unlink(capture);
     puts("llm http: private pipe config, verified TLS and SSE: ok");
     return 0;

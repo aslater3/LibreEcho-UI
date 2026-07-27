@@ -103,9 +103,12 @@ static int build_config(const struct le_llm_http_request *request,
         snprintf(config + used, size - used,
                  "silent\nshow-error\nno-buffer\n"
                  "connect-timeout = 10\nmax-time = 45\n"
-                 "proto = \"=https\"\nproto-redir = \"=https\"\n"
-                 "tlsv1.2\n"
+                 "proto = \"=%s\"\nproto-redir = \"=%s\"\n"
+                 "%s"
                  "write-out = \"\\n%s%%{http_code}\\n\"\n",
+                 request->allow_insecure_http ? "http,https" : "https",
+                 request->allow_insecure_http ? "http,https" : "https",
+                 request->allow_insecure_http ? "" : "tlsv1.2\n",
                  STATUS_PREFIX) >= (int)(size - used))
         return -1;
     return 0;
