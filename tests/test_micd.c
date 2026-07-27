@@ -147,7 +147,7 @@ int main(void)
             "\"args\":{\"channel\":2}}\n";
         const char expected_args[] =
             "--\n-D\n0\n-d\n24\n-c\n9\n-r\n16000\n-b\n24\n"
-            "-p\n160\n-n\n2\n";
+            "-p\n640\n-n\n4\n";
         FILE *file;
 
         stream_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -180,7 +180,7 @@ int main(void)
         response[used] = '\0';
         CHECK(strcmp(response, expected_args) == 0);
     }
-    puts("micd: raw stream uses the hardware-valid 10 ms period");
+    puts("micd: raw stream uses the full-ring 40 ms period");
     {
         FILE *file = fopen(mixer_args_path, "r");
         size_t used;

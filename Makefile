@@ -4,7 +4,8 @@ PREFIX ?= /usr/local
 DESTDIR ?=
 CSTD ?= -std=c99
 WARN = -Wall -Wextra -Wpedantic
-CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Isrc/adapter
+OS_VERSION ?= $(shell tr -d '\r\n' < VERSION)
+CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Isrc/adapter -DLE_OS_VERSION=\"$(OS_VERSION)\"
 CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
@@ -421,6 +422,8 @@ adapters: $(ADAPTER_TARGETS)
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(BUILD) $(BUILD)/adapter
 	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc -c $< -o $@
+
+$(BUILD)/backend_linux.o $(BUILD)/backend_mock.o: VERSION src/version.h
 
 release: clean
 	$(MAKE) CROSS_COMPILE="$(CROSS_COMPILE)" CC="$(CC)" CFLAGS="-Os -ffunction-sections -fdata-sections" LDFLAGS="$(GC_LDFLAGS)" $(TARGET) $(LOGD_TARGET) $(ADAPTER_TARGETS)

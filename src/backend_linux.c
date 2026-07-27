@@ -6,6 +6,7 @@
 #include "adapter/adapter.h"
 #include "json.h"
 #include "log.h"
+#include "version.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -577,7 +578,7 @@ static int device(struct le_backend *b, struct le_device_info *o)
     strcpy(o->model, "LibreEcho device");
     if (read_device_serial(o->serial, sizeof(o->serial)) != 0)
         strcpy(o->serial, "unavailable");
-    strcpy(o->os_version, "LibreEcho OS");
+    strcpy(o->os_version, LE_OS_VERSION_STRING);
     if (!uname(&u))
         copy_string(o->kernel, sizeof(o->kernel), u.release);
     strcpy(o->hardware_revision, "adapter pending");
