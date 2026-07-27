@@ -4,7 +4,9 @@
     document.querySelectorAll('details').forEach(details => {
       if (details.textContent.includes('Provider setup will appear here')) {
         const heading = details.querySelector('summary h3');
-        if (heading) heading.textContent = 'On Device Voice Assistant';
+        if (heading && heading.textContent !== 'On Device Voice Assistant') {
+          heading.textContent = 'On Device Voice Assistant';
+        }
       }
     });
   }
