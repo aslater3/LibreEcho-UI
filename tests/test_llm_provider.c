@@ -88,6 +88,28 @@ int main(void)
               "{\"type\":\"response.failed\"}",
               delta, sizeof(delta)) == LE_LLM_STREAM_ERROR);
 
-    puts("llm provider: subscription auth and streaming contract: ok");
+    provider = le_llm_provider_by_id("openai-compatible");
+    CHECK(provider != NULL);
+    CHECK(!provider->subscription_auth);
+    memset(&credentials, 0, sizeof(credentials));
+    strcpy(credentials.base_url, "http://192.168.10.20:8000/v1");
+    strcpy(credentials.api_key, "local-key");
+    CHECK(provider->response_request(
+              &credentials, "gemma-4", "Be concise.", "Hello?",
+              &request) == 0);
+    CHECK(!strcmp(request.url,
+                  "http://192.168.10.20:8000/v1/chat/completions"));
+    CHECK(request.allow_insecure_http);
+    CHECK(!strcmp(request.authorization, "Bearer local-key"));
+    CHECK(strstr(request.body, "\"role\":\"system\"") != NULL);
+    CHECK(strstr(request.body, "\"stream\":true") != NULL);
+    CHECK(provider->stream_event(
+              "{\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}",
+              delta, sizeof(delta)) == LE_LLM_STREAM_DELTA);
+    CHECK(!strcmp(delta, "Hi"));
+    CHECK(provider->stream_event("[DONE]", delta, sizeof(delta)) ==
+          LE_LLM_STREAM_COMPLETE);
+
+    puts("llm provider: subscription and local-compatible contracts: ok");
     return 0;
 }

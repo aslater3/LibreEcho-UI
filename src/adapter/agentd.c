@@ -161,6 +161,19 @@ static void config_defaults(struct agent_config *config)
              le_llm_default_voice_prompt());
 }
 
+static int endpoint_valid(const char *url)
+{
+    const unsigned char *p = (const unsigned char *)url;
+
+    if (!url || (strncmp(url, "http://", 7) &&
+                 strncmp(url, "https://", 8)))
+        return 0;
+    for (; *p; ++p)
+        if (*p <= 0x20U || *p == '"' || *p == '\\')
+            return 0;
+    return 1;
+}
+
 static int escape_json(char *output, size_t size, const char *input)
 {
     size_t used = 0;
@@ -201,9 +214,10 @@ static int save_config(const struct agent_state *state)
     length = snprintf(
         json, sizeof(json),
         "{\"version\":1,\"enabled\":%s,"
-        "\"provider\":\"openai-codex\",\"model\":\"%s\","
+        "\"provider\":\"%s\",\"model\":\"%s\","
         "\"prompt\":\"%s\"}\n",
-        state->config.enabled ? "true" : "false", model, prompt);
+        state->config.enabled ? "true" : "false", state->config.provider,
+        model, prompt);
     return length > 0 && length < (int)sizeof(json)
         ? config_write_atomic(state->config_path, json, (size_t)length)
         : -1;
@@ -217,6 +231,8 @@ static void load_config(struct agent_state *state)
     config_defaults(&state->config);
     if (config_read(state->config_path, json, sizeof(json)) < 0)
         return;
+    (void)json_get_string(json, "provider", state->config.provider,
+                          sizeof(state->config.provider));
     if (json_get_bool(json, "enabled", &enabled) > 0)
         state->config.enabled = enabled;
     (void)json_get_string(json, "model", state->config.model,
@@ -360,7 +376,7 @@ static int command_status(struct agent_state *state, int fd,
             payload, sizeof(payload),
             "{\"ready\":true,\"enabled\":%s,"
             "\"provider\":\"%s\",\"provider_name\":\"%s\","
-            "\"subscription_auth\":true,\"authenticated\":%s,"
+            "\"subscription_auth\":%s,\"authenticated\":%s,"
             "\"auth_state\":\"%s\",\"user_code\":\"%s\","
             "\"verification_url\":\"%s\",\"auth_error\":\"%s\","
             "\"model\":\"%s\",\"prompt\":\"%s\","
@@ -379,6 +395,7 @@ static int command_status(struct agent_state *state, int fd,
             "\"latency_violations\":%lu}",
             state->config.enabled ? "true" : "false",
             state->provider->id, state->provider->name,
+            state->provider->subscription_auth ? "true" : "false",
             state->auth_state == AUTH_SIGNED_IN ? "true" : "false",
             auth_state_name(state->auth_state), code, url, error,
             model, prompt,
@@ -409,6 +426,8 @@ static int refresh_credentials(struct agent_state *state, int force)
     struct le_llm_http_response response;
     time_t now = time(NULL);
 
+    if (!state->provider->subscription_auth)
+        return 0;
     if (!force && state->credentials.expires_at > now + 120)
         return 0;
     if (state->provider->refresh_request(
@@ -479,7 +498,7 @@ static int generate_response(struct agent_state *state,
     struct response_stream stream;
     if (state->auth_state != AUTH_SIGNED_IN) {
         snprintf(error, error_size, "%s",
-                 "ChatGPT is not authenticated");
+                 "LLM provider is not configured");
         return -1;
     }
     if (le_voice_playback_begin_turn(&state->playback) < 0) {
@@ -489,7 +508,7 @@ static int generate_response(struct agent_state *state,
     }
     if (refresh_credentials(state, 0) < 0) {
         state->auth_state = AUTH_ERROR;
-        strcpy(state->auth_error, "ChatGPT token refresh failed");
+        strcpy(state->auth_error, "LLM credentials refresh failed");
         snprintf(error, error_size, "%s", state->auth_error);
         return -1;
     }
@@ -625,6 +644,10 @@ static int command_auth_start(struct agent_state *state, int fd,
     struct le_llm_http_request request;
     struct le_llm_http_response response;
 
+    if (!state->provider->subscription_auth ||
+        !state->provider->auth_start_request)
+        return respond(fd, id, 0, "provider does not use device login");
+
     memset(&state->auth, 0, sizeof(state->auth));
     state->auth_error[0] = '\0';
     if (state->provider->auth_start_request(&request) < 0 ||
@@ -648,6 +671,10 @@ static int command_auth_poll(struct agent_state *state, int fd,
     struct le_llm_http_response response;
     time_t now = time(NULL);
     int poll_result;
+
+    if (!state->provider->subscription_auth ||
+        !state->provider->auth_poll_request)
+        return respond(fd, id, 0, "provider does not use device login");
 
     if (state->auth_state != AUTH_WAITING)
         return command_status(state, fd, id);
@@ -715,8 +742,11 @@ static int command_configure(struct agent_state *state, const char *args,
     if (parsed > 0)
         updated.enabled = boolean;
     parsed = json_get_string(args, "provider", value, sizeof(value));
-    if (parsed < 0 || (parsed > 0 && strcmp(value, "openai-codex")))
+    if (parsed < 0 || (parsed > 0 &&
+        strcmp(value, "openai-codex") && strcmp(value, "openai-compatible")))
         return respond(fd, id, 0, "unsupported provider");
+    if (parsed > 0)
+        strcpy(updated.provider, value);
     parsed = json_get_string(args, "model", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && (!value[0] || strlen(value) >=
                                      sizeof(updated.model))))
@@ -729,9 +759,31 @@ static int command_configure(struct agent_state *state, const char *args,
         return respond(fd, id, 0, "invalid prompt");
     if (parsed > 0)
         strcpy(updated.prompt, value);
+    parsed = json_get_string(args, "base_url", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 &&
+        (!endpoint_valid(value) || strlen(value) >= sizeof(state->credentials.base_url))))
+        return respond(fd, id, 0, "invalid base_url");
+    if (parsed > 0)
+        strcpy(state->credentials.base_url, value);
+    parsed = json_get_string(args, "api_key", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 && strlen(value) >= sizeof(state->credentials.api_key)))
+        return respond(fd, id, 0, "invalid api_key");
+    if (parsed > 0) {
+        memset(state->credentials.api_key, 0,
+               sizeof(state->credentials.api_key));
+        strcpy(state->credentials.api_key, value);
+    }
     state->config = updated;
     if (save_config(state) < 0)
         return respond(fd, id, 0, "unable to save agent configuration");
+    if (!strcmp(state->config.provider, "openai-compatible")) {
+        state->provider = le_llm_provider_by_id(state->config.provider);
+        if (!state->credentials.base_url[0] ||
+            le_llm_credentials_save(state->credentials_path,
+                                     &state->credentials) < 0)
+            return respond(fd, id, 0, "unable to save local LLM credentials");
+        state->auth_state = AUTH_SIGNED_IN;
+    }
     return command_status(state, fd, id);
 }
 
@@ -834,10 +886,10 @@ int main(int argc, char **argv)
         if (!*end && value <= 30)
             state.poll_minimum = (unsigned int)value;
     }
-    state.provider = le_llm_provider_by_id("openai-codex");
+    load_config(&state);
+    state.provider = le_llm_provider_by_id(state.config.provider);
     if (!state.provider)
         return 1;
-    load_config(&state);
     if (le_llm_credentials_load(state.credentials_path,
                                 &state.credentials) == 0)
         state.auth_state = AUTH_SIGNED_IN;

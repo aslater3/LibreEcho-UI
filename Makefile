@@ -23,7 +23,7 @@ TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
 STTD_SOURCES = src/adapter/sttd.c src/adapter/stt_engine_mock.c src/adapter/adapter_server.c src/log.c
 STTD_SHERPA_CXX_SOURCES = src/adapter/stt_engine_sherpa.cpp
 AGENTD_SOURCES = src/adapter/agentd.c src/adapter/llm_provider.c \
-	src/adapter/llm_codex.c src/adapter/llm_http.c src/adapter/llm_store.c \
+	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 	src/adapter/voice_listening_led.c \
@@ -262,7 +262,8 @@ $(BUILD)/test-sttd: tests/test_sttd.c src/adapter/adapter_client.c \
 		src/adapter/adapter_client.c src/log.c -o $@
 
 $(BUILD)/test-llm-provider: tests/test_llm_provider.c \
-		src/adapter/llm_provider.c src/adapter/llm_codex.c
+		src/adapter/llm_provider.c src/adapter/llm_codex.c \
+		src/adapter/llm_openai.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -o $@
 
