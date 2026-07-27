@@ -19,7 +19,10 @@ static void out(struct api_response*r,int status,const char*fmt,...){va_list ap;
 static void ok(struct api_response*r,const char*data){out(r,200,"{\"ok\":true,\"data\":%s,\"error\":null}",data?data:"{}");}static void err(struct api_response*r,int status,int rc,const char*msg){char e[256];json_escape(e,sizeof(e),msg);out(r,status,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",le_result_code(rc),e);}static void method_not_allowed(struct api_response*r){err(r,405,LE_INVALID,"HTTP method is not allowed for this endpoint");}
 static int changing(const char*m){return strcmp(m,"GET")&&strcmp(m,"HEAD");}static int constant_equal(const char*a,const char*b){size_t al=strlen(a),bl=strlen(b),i,n=al>bl?al:bl;unsigned diff=(unsigned)(al^bl);for(i=0;i<n;i++){unsigned ac=i<al?(unsigned char)a[i]:0,bc=i<bl?(unsigned char)b[i]:0;diff|=ac^bc;}return diff==0;}static int allowed_origin(const struct api_context*c,const char*origin){if(!origin[0]||c->allow_insecure_lan)return 1;if(c->allowed_origin[0])return constant_equal(origin,c->allowed_origin);return !strncmp(origin,"http://127.0.0.1",16)||!strncmp(origin,"http://localhost",16);}static int security(const struct api_context*c,const struct api_request*q,struct api_response*r){int authorized=0;if(!strcmp(q->path,"/api/v1/config")||(!strcmp(q->path,"/api/v1/auth/login")&&!strcmp(q->method,"POST")))authorized=1;if(!authorized&&c->auth_token[0]){char expected[256];snprintf(expected,sizeof(expected),"Bearer %s",c->auth_token);authorized=constant_equal(q->authorization,expected);}if(!authorized&&c->auth.enabled&&!strncmp(q->authorization,"Bearer ",7))authorized=le_auth_session((struct le_auth_db*)&c->auth,q->authorization+7,0,0);if((c->auth_token[0]||c->auth.enabled)&&!authorized){err(r,401,LE_AUTH,"Authentication is required");return 0;}if(!changing(q->method))return 1;if(!constant_equal(q->csrf,c->csrf_token)){err(r,403,LE_AUTH,"Missing or invalid CSRF token");return 0;}if(!allowed_origin(c,q->origin)){err(r,403,LE_AUTH,"Origin is not allowed");return 0;}return 1;}
 static int body_ok(const struct api_request*q,struct api_response*r){if(!json_valid_object(q->body,q->body_len)){err(r,400,LE_INVALID,"Request body must be a valid JSON object");return 0;}return 1;}
+static int update_fetch_supported(const struct api_context*c){return !strcmp(le_backend_mode(c->backend),"linux")&&!access("/usr/local/sbin/libreecho-update",X_OK)&&!access("/usr/local/sbin/libreecho-update-fetch",X_OK);}
+static int key_from_file(const char*,const char*,char*,size_t);
 int api_update_upload_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){if(strcmp(q->path,"/api/v1/system/update/upload")||strcmp(q->method,"POST")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(strcmp(le_backend_mode(c->backend),"linux")||access("/usr/local/sbin/libreecho-update",X_OK)){err(r,501,LE_NOT_SUPPORTED,"Signed OTA updates are unavailable on this image");return 0;}return 1;}
+int api_update_fetch_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){int apply=!strcmp(q->path,"/api/v1/system/update/apply"),path_ok=!strcmp(q->path,"/api/v1/system/update/check")||apply;char status[64]="";if(!path_ok||strcmp(q->method,"POST")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return 0;}if(apply&&(!key_from_file("/data/libreecho/update/check-status","status",status,sizeof(status))||strcmp(status,"update-available"))){err(r,409,LE_BUSY,"No checked update is currently available");return 0;}return 1;}
 static int key_from_stream(FILE*f,const char*key,char*out,size_t size){char line[256];size_t n=strlen(key);while(fgets(line,sizeof(line),f))if(!strncmp(line,key,n)&&line[n]=='='){size_t len=strcspn(line+n+1,"\r\n");if(len>=size)len=size-1;memcpy(out,line+n+1,len);out[len]=0;return 1;}return 0;}
 static int key_from_file(const char*path,const char*key,char*out,size_t size){FILE*f=fopen(path,"r");int found;if(!f)return 0;found=key_from_stream(f,key,out,size);fclose(f);return found;}
 static void update_status_json(struct api_context*c,struct api_response*r)
@@ -30,6 +33,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     char installed_version[96]="",rollback_version[96]="",latest_version[96]="";
     char check_status[64]="not-checked",check_error[96]="";
     char source[64]="github-releases",channel[32]="stable",reachable[16]="unknown";
+    char automatic_text[16]="0";
     char last_check_text[24]="0",last_success_text[24]="0";
     char escaped_state[128],escaped_version[192],escaped_installed[192];
     char escaped_rollback[192],escaped_latest[192],escaped_check_status[128];
@@ -37,8 +41,9 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     char escaped_reachable[32];
     int supported=!strcmp(le_backend_mode(c->backend),"linux")&&
         !access("/usr/local/sbin/libreecho-bootctl",X_OK)&&
-        !access("/usr/local/sbin/libreecho-update",X_OK);
-    int progress=0,pending=0;
+        !access("/usr/local/sbin/libreecho-update",X_OK)&&
+        !access("/usr/local/sbin/libreecho-update-fetch",X_OK);
+    int progress=0,pending=0,automatic=0;
     long last_check=0,last_success=0;
 
     if(supported){
@@ -69,6 +74,9 @@ static void update_status_json(struct api_context*c,struct api_response*r)
                       last_check_text,sizeof(last_check_text));
         key_from_file("/data/libreecho/update/check-status","last_success_epoch",
                       last_success_text,sizeof(last_success_text));
+        key_from_file("/data/libreecho/update/automatic-updates","enabled",
+                      automatic_text,sizeof(automatic_text));
+        automatic=!strcmp(automatic_text,"1");
         progress=atoi(progress_text);
         if(progress<0||progress>100)progress=0;
         last_check=atol(last_check_text);
@@ -111,13 +119,14 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         "\"channel\":\"%s\",\"source\":\"%s\",\"source_reachable\":\"%s\","
         "\"check_status\":\"%s\",\"check_error\":\"%s\","
         "\"last_check_epoch\":%ld,\"last_success_epoch\":%ld,"
+        "\"automatic_updates\":%s,"
         "\"rollback_available\":%s,\"rollback_version\":\"%s\","
         "\"max_upload_bytes\":33554432},"
         "\"error\":null}",supported?"true":"false",current,inactive,escaped_state,
         progress,pending?"true":"false",escaped_version,escaped_installed,
         escaped_latest,escaped_channel,escaped_source,escaped_reachable,
         escaped_check_status,escaped_check_error,last_check,last_success,
-        supported?"true":"false",escaped_rollback);
+        automatic?"true":"false",supported?"true":"false",escaped_rollback);
 }
 static int agent_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*agent=le_adapter_connect(LE_ADAPTER_AGENT_SOCK,15000);int rc;if(!agent)return LE_NOT_SUPPORTED;rc=le_adapter_call(agent,command,args,output,size);le_adapter_close(agent);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
 static void agent_result(struct api_response*r,const char*command,const char*args){char data[LE_ADAPTER_MSG_MAX];int rc=agent_command(command,args,data,sizeof(data));if(rc)err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?503:502,rc,rc==LE_NOT_SUPPORTED?"Voice assistant service is unavailable":rc==LE_INVALID?data:"Voice assistant service request failed");else ok(r,data);}
@@ -306,6 +315,7 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  if(!strcmp(p,"/api/v1/privacy")){if(!strcmp(q->method,"PUT")){if(json_get_bool(q->body,"local_only",&v)>0)c->privacy_local_only=v;if(json_get_bool(q->body,"diagnostic_telemetry",&v)>0)c->privacy_telemetry=v;if(json_get_bool(q->body,"crash_reports",&v)>0)c->privacy_crash_reports=v;{char retention[16];if(json_get_string(q->body,"audio_retention",retention,sizeof(retention))>0)c->privacy_audio_retention=strcmp(retention,"none")!=0;}}out(r,200,"{\"ok\":true,\"data\":{\"local_only\":%s,\"audio_retention\":\"%s\",\"diagnostic_telemetry\":%s,\"log_retention_hours\":%d,\"crash_reports\":%s},\"error\":null}",c->privacy_local_only?"true":"false",c->privacy_audio_retention?"24h":"none",c->privacy_telemetry?"true":"false",c->privacy_log_hours,c->privacy_crash_reports?"true":"false");return;}if(!strcmp(p,"/api/v1/buttons")){ok(r,"{\"short_press\":\"start_listening\",\"long_press\":\"pairing_mode\",\"hardware_mute\":true}");return;}if(!strncmp(p,"/api/v1/integrations",20)){if(!strcmp(q->method,"PUT")){int enabled;if(json_get_bool(q->body,"enabled",&enabled)<1){err(r,400,LE_INVALID,"Enabled must be a boolean");return;}if(strstr(p,"home-assistant")){if(enabled)c->integrations|=1u;else c->integrations&=~1u;}else if(strstr(p,"mqtt")){if(enabled)c->integrations|=2u;else c->integrations&=~2u;}else if(strstr(p,"rest")){if(enabled)c->integrations|=4u;else c->integrations&=~4u;}else if(strstr(p,"airplay2")){rc=le_set_airplay_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"AirPlay 2 control could not be applied");return;}if(enabled)c->integrations|=16u;else c->integrations&=~16u;}else if(strstr(p,"bluetooth")){rc=le_set_bluetooth_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth control could not be applied");return;}if(enabled)c->integrations|=8u;else c->integrations&=~8u;}else{err(r,404,LE_INVALID,"Integration was not found");return;}}out(r,200,"{\"ok\":true,\"data\":{\"items\":[{\"id\":\"home-assistant\",\"name\":\"Home Assistant\",\"enabled\":%s},{\"id\":\"mqtt\",\"name\":\"MQTT\",\"enabled\":%s},{\"id\":\"rest\",\"name\":\"Local REST API\",\"enabled\":%s},{\"id\":\"bluetooth\",\"name\":\"Bluetooth audio\",\"enabled\":%s},{\"id\":\"airplay2\",\"name\":\"AirPlay 2\",\"enabled\":%s}]},\"error\":null}",(c->integrations&1u)?"true":"false",(c->integrations&2u)?"true":"false",(c->integrations&4u)?"true":"false",(c->integrations&8u)?"true":"false",(c->integrations&16u)?"true":"false");return;}
  if(!strcmp(p,"/api/v1/system")&&!strcmp(q->method,"GET")){system_json(c,r);return;}
  if(!strcmp(p,"/api/v1/system/update")&&!strcmp(q->method,"GET")){update_status_json(c,r);return;}
+ if(!strcmp(p,"/api/v1/system/update/automatic")){int enabled;if(strcmp(q->method,"PUT")){method_not_allowed(r);return;}if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return;}if(json_get_bool(q->body,"enabled",&enabled)<1){err(r,400,LE_INVALID,"Enabled must be a boolean");return;}rc=run_init_command("/usr/local/sbin/libreecho-update-fetch",enabled?"enable-automatic":"disable-automatic");if(rc){err(r,503,rc,"Automatic update preference could not be saved");return;}api_log(c,"info",enabled?"Automatic OTA installation enabled":"Automatic OTA installation disabled");update_status_json(c,r);return;}
  if((!strcmp(p,"/api/v1/system/reboot")||!strcmp(p,"/api/v1/system/shutdown")||!strcmp(p,"/api/v1/system/factory-reset"))&&!strcmp(q->method,"POST")){if(strcmp(q->confirm,"confirm-device-action")){err(r,403,LE_AUTH,"A valid destructive-action confirmation token is required");return;}rc=strstr(p,"factory-reset")?le_factory_reset(c->backend):strstr(p,"shutdown")?le_shutdown(c->backend):le_reboot(c->backend);if(rc){err(r,501,rc,"Device action is not available");return;}api_log(c,"warning",p);ok(r,"{\"accepted\":true}");return;}
  if(!strcmp(p,"/api/v1/logs")&&!strcmp(q->method,"GET")){logs_json(c,r);return;}if(!strcmp(p,"/api/v1/logs/stream")&&!strcmp(q->method,"GET")){logs_stream_json(c,r);return;}if(!strcmp(p,"/api/v1/diagnostics")&&!strcmp(q->method,"GET")){diagnostics_json(c,r);return;}if(!strcmp(p,"/api/v1/diagnostics/export")&&!strcmp(q->method,"POST")){ok(r,"{\"filename\":\"libreecho-diagnostics.json\",\"redacted\":true}");return;}
  if(!strcmp(p,"/api/v1/events")&&!strcmp(q->method,"GET")){struct le_event e[8];size_t n,i,used=0;n=event_bus_since(&c->events,0,e,8);r->status=200;strcpy(r->type,"text/event-stream");for(i=0;i<n;i++)used+=(size_t)snprintf(r->body+used,sizeof(r->body)-used,"id: %lu\nevent: %s\ndata: %s\n\n",e[i].id,e[i].type,e[i].data);used+=(size_t)snprintf(r->body+used,sizeof(r->body)-used,"event: status\ndata: {\"refresh\":true}\n\n");r->length=used;return;}
