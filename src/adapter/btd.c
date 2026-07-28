@@ -120,7 +120,7 @@
 /* Audio/Video major class, speaker/rendering minor class.  The management
  * API takes the already-positioned CoD major/minor bytes. */
 #define LIBREECHO_BT_MAJOR_CLASS 0x04
-#define LIBREECHO_BT_MINOR_CLASS 0x04
+#define LIBREECHO_BT_MINOR_CLASS 0x14
 #define LIBREECHO_BT_NAME "LibreEcho"
 
 /* Audio Sink (0x110B) in the Bluetooth base UUID byte order used by the
@@ -1439,6 +1439,22 @@ static int handle_request(struct bt_context *context, char *message,
         if (hci_device_up() != 0 || refresh_info(context) != 0) {
             snprintf(context->last_error, sizeof(context->last_error),
                      "hci0 power-on failed");
+            return le_adapter_respond_err(response, response_size, id,
+                                           context->last_error);
+        }
+        /* Opening the management channel clears HCI_BONDABLE.  The legacy
+         * HCIDEVUP path deliberately does not restore it once management is
+         * active, so an incoming peer would otherwise receive an immediate
+         * PIN_CODE_NEG_REPLY and no pairing request would reach the UI. */
+        if (set_controller_setting(context, MGMT_OP_SET_BONDABLE, 1) != 0) {
+            snprintf(context->last_error, sizeof(context->last_error),
+                     "hci0 bondable mode could not be enabled");
+            return le_adapter_respond_err(response, response_size, id,
+                                           context->last_error);
+        }
+        if (set_controller_setting(context, MGMT_OP_SET_CONNECTABLE, 1) != 0) {
+            snprintf(context->last_error, sizeof(context->last_error),
+                     "hci0 connectable mode could not be enabled");
             return le_adapter_respond_err(response, response_size, id,
                                            context->last_error);
         }
