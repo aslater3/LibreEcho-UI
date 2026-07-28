@@ -463,7 +463,10 @@ struct response_stream {
     struct agent_state *state;
     struct le_voice_reply reply;
     char full_text[LE_LLM_TEXT_MAX];
+    char tts_text[LE_LLM_TEXT_MAX];
     size_t used;
+    size_t tts_used;
+    int aggregate_tts;
     int complete;
 };
 
@@ -471,8 +474,28 @@ static int enqueue_segment(void *context, const char *text)
 {
     struct response_stream *stream = context;
 
+    if (stream->aggregate_tts) {
+        size_t length = strlen(text);
+        if (stream->tts_used + length + 1 >= sizeof(stream->tts_text))
+            return -1;
+        if (stream->tts_used)
+            stream->tts_text[stream->tts_used++] = ' ';
+        memcpy(stream->tts_text + stream->tts_used, text, length + 1);
+        stream->tts_used += length;
+        return 0;
+    }
+
     return le_voice_playback_enqueue(
         &stream->state->playback, text);
+}
+
+static int flush_aggregated_tts(struct response_stream *stream)
+{
+    if (!stream->aggregate_tts || !stream->tts_used)
+        return 0;
+    stream->tts_text[stream->tts_used] = '\0';
+    return le_voice_playback_enqueue(&stream->state->playback,
+                                     stream->tts_text);
 }
 
 static int response_event(void *context, const char *data)
@@ -531,6 +554,8 @@ static int generate_response(struct agent_state *state,
     }
     memset(&stream, 0, sizeof(stream));
     stream.state = state;
+    stream.aggregate_tts = getenv("LE_AGENT_TTS_AGGREGATE") &&
+                           !strcmp(getenv("LE_AGENT_TTS_AGGREGATE"), "1");
     le_voice_reply_init(&stream.reply, enqueue_segment, &stream);
     pthread_mutex_lock(&state->metrics_mutex);
     state->turn_started_ms = latency_start_ms
@@ -558,6 +583,8 @@ static int generate_response(struct agent_state *state,
                 state->config.prompt, transcript, &request) == 0) {
             memset(&stream, 0, sizeof(stream));
             stream.state = state;
+            stream.aggregate_tts = getenv("LE_AGENT_TTS_AGGREGATE") &&
+                                   !strcmp(getenv("LE_AGENT_TTS_AGGREGATE"), "1");
             le_voice_reply_init(&stream.reply, enqueue_segment, &stream);
             if (le_llm_http_execute(
                     state->curl_path, &request, response_event,
@@ -577,6 +604,10 @@ static int generate_response(struct agent_state *state,
         le_voice_reply_finish(&stream.reply) < 0) {
         snprintf(error, error_size, "%s",
                  "reply playback queue is full");
+        return -1;
+    }
+    if (flush_aggregated_tts(&stream) < 0) {
+        snprintf(error, error_size, "%s", "reply playback queue is full");
         return -1;
     }
     if (stream.used + 1 > full_text_size) {

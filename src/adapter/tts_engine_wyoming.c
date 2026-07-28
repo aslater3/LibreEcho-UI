@@ -160,6 +160,69 @@ done:
     return 0;
 }
 
+int tts_engine_synthesize_stream(struct tts_engine *engine, const char *text,
+                                 tts_engine_stream_callback callback,
+                                 void *context)
+{
+    struct le_wyoming_event event;
+    char escaped_text[4096], escaped_voice[256], data[4608];
+    int fd, result = -1;
+    if (!engine || !text || !text[0] || !callback)
+        return -1;
+    json_escape(escaped_text, sizeof(escaped_text), text);
+    json_escape(escaped_voice, sizeof(escaped_voice), engine->voice);
+    if (snprintf(data, sizeof(data),
+                 "{\"text\":\"%s\",\"voice\":{\"name\":\"%s\"}}",
+                 escaped_text, escaped_voice) >= (int)sizeof(data))
+        return -1;
+    fd = le_wyoming_connect(engine->endpoint, 3000);
+    if (fd < 0 || le_wyoming_send(fd, "synthesize", data, NULL, 0) < 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    for (;;) {
+        const char *json;
+        if (le_wyoming_read_header(fd, &event) < 0)
+            break;
+        json = event.data_length ? event.data : event.header;
+        if (!strcmp(event.type, "audio-start")) {
+            int rate = 0, width = 0, channels = 0;
+            if (json_get_int(json, "rate", &rate) != 1 ||
+                json_get_int(json, "width", &width) != 1 ||
+                json_get_int(json, "channels", &channels) != 1 ||
+                rate < 8000 || rate > 96000 || width != 2 || channels != 1)
+                break;
+            engine->sample_rate = rate;
+        }
+        if (event.payload_length) {
+            unsigned char *payload = malloc(event.payload_length);
+            if (!payload || le_wyoming_read_payload(fd, payload,
+                                                     event.payload_length,
+                                                     &event) < 0) {
+                free(payload);
+                break;
+            }
+            if (!strcmp(event.type, "audio-chunk") &&
+                (event.payload_length % sizeof(short) ||
+                 callback((const short *)payload,
+                          event.payload_length / sizeof(short),
+                          engine->sample_rate, context) < 0)) {
+                free(payload);
+                break;
+            }
+            free(payload);
+        }
+        if (!strcmp(event.type, "audio-stop")) {
+            result = 0;
+            break;
+        }
+        if (!strcmp(event.type, "error"))
+            break;
+    }
+    close(fd);
+    return result;
+}
+
 void tts_engine_free_samples(short *samples)
 {
     free(samples);

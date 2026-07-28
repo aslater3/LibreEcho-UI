@@ -105,7 +105,16 @@ int main(void)
     config[count] = '\0';
     CHECK(strstr(config, "proto = \"=http,https\"") != NULL);
     CHECK(strstr(config, "tlsv1.2") == NULL);
+
+    memset(&events, 0, sizeof(events));
+    CHECK(setenv("LE_TEST_CURL_MODE", "buffered", 1) == 0);
+    CHECK(le_llm_http_execute("./build/mock-llm-curl", &request,
+                              collect, &events, &response) == 0);
+    CHECK(response.status == 200);
+    CHECK(events.count == 1);
+    CHECK(strstr(events.joined,
+                 "\"content\":\"Local ready\"") != NULL);
     unlink(capture);
-    puts("llm http: private pipe config, verified TLS and SSE: ok");
+    puts("llm http: private pipe config, TLS, SSE and JSON fallback: ok");
     return 0;
 }

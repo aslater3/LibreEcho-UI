@@ -200,6 +200,19 @@ int main(void)
     CHECK(strstr(response, "\"last_stt_total_ms\":") != NULL);
     CHECK(strstr(response, "\"latency_target_met\":true") != NULL);
     CHECK(strstr(response, "\"latency_violations\":0") != NULL);
+    CHECK(call(
+              socket_path, "configure",
+              "{\"provider\":\"openai-compatible\",\"enabled\":true,"
+              "\"base_url\":\"http://192.168.10.20:8001/v1\","
+              "\"model\":\"Gemma-4-12B\"}",
+              response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"provider\":\"openai-compatible\"") != NULL);
+    CHECK(strstr(response,
+                 "\"base_url\":\"http://192.168.10.20:8001/v1\"") != NULL);
+    CHECK(call(socket_path, "respond",
+               "{\"text\":\"Check the local provider.\"}",
+               response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"text\":\"Local ready\"") != NULL);
     CHECK(call(socket_path, "logout", NULL,
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"authenticated\":false") != NULL);

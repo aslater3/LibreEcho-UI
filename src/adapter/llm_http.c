@@ -157,6 +157,13 @@ static int process_line(const struct le_llm_http_request *request,
             return -1;
         return 0;
     }
+    if (request->accept_sse) {
+        if (!line[0] || !strncmp(line, "event:", 6) ||
+            !strncmp(line, "id:", 3) || !strncmp(line, "retry:", 6) ||
+            line[0] == ':')
+            return 0;
+        return append_body(response, line);
+    }
     if (!request->accept_sse && line[0])
         return append_body(response, line);
     return 0;
@@ -273,6 +280,9 @@ int le_llm_http_execute(const char *curl_path,
         goto cleanup;
     close(output_pipe[0]);
     output_pipe[0] = -1;
+    if (request->accept_sse && response->body[0] && event_fn &&
+        event_fn(event_context, response->body) != 0)
+        goto cleanup;
     while (waitpid(child, &child_status, 0) < 0) {
         if (errno != EINTR)
             goto cleanup;

@@ -2031,13 +2031,14 @@ static int handle_request(struct daemon_context *ctx, int fd,
         if (get_arg_profile(&request, &profile) != 0 ||
             get_arg_unsigned(&request, "r", &r, 255) != 0 ||
             get_arg_unsigned(&request, "g", &g, 255) != 0 ||
-            get_arg_unsigned(&request, "b", &b, 255) != 0)
+            get_arg_unsigned(&request, "b", &b, 255) != 0 ||
+            get_arg_unsigned(&request, "brightness", &brightness, 100) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "set_profile requires a valid name and r, g, b");
         ctx->state.profiles[profile].r = r;
         ctx->state.profiles[profile].g = g;
         ctx->state.profiles[profile].b = b;
-        ctx->state.profiles[profile].brightness = ctx->state.current.brightness;
+        ctx->state.profiles[profile].brightness = brightness;
         persist_state(&ctx->state);
         return send_response(fd, request.id, 1, "{}", NULL);
     }

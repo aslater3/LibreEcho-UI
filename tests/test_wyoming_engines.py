@@ -173,6 +173,10 @@ def test_stt(directory):
 
 def test_tts(directory):
     rate = 22050
+    text = (
+        "The United Kingdom is a country in northwestern Europe, "
+        "made up of four constituent nations with a long shared history."
+    )
     samples = [
         int(8000 * math.sin(2 * math.pi * 440 * index / rate))
         for index in range(rate // 5)
@@ -182,7 +186,7 @@ def test_tts(directory):
     def piper(connection):
         event_type, data, _ = read_event(connection)
         assert event_type == "synthesize"
-        assert data["text"] == "Remote speech works."
+        assert data["text"] == text
         assert data["voice"]["name"] == "en_GB-alan-medium"
         audio_format = {"rate": rate, "width": 2, "channels": 1}
         send_event(connection, "audio-start", audio_format)
@@ -201,7 +205,7 @@ def test_tts(directory):
         "LE_TTS_WYOMING_VOICE": "en_GB-alan-medium",
         "LE_TTS_ANNOUNCEMENT_BUS": fifo_path,
         "LE_TTS_IN_PROCESS": "1",
-        "LE_TTS_STREAMING": "0",
+        "LE_TTS_STREAMING": "1",
     })
     process = subprocess.Popen([
         "./build/libreecho-ttsd-wyoming",
@@ -215,7 +219,7 @@ def test_tts(directory):
         wait_for_socket(socket_path)
         connection, response = adapter_call(
             socket_path, "speak",
-            {"text": "Remote speech works.", "request_id": "test-1"}
+            {"text": text, "request_id": "test-1"}
         )
         assert response["ok"] is True
         connection.close()

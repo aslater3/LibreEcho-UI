@@ -32,6 +32,8 @@ extern "C" {
 
 /* Opaque synthesizer handle. */
 struct tts_engine;
+typedef int (*tts_engine_stream_callback)(const short *samples, size_t frames,
+                                           int sample_rate, void *context);
 
 /*
  * Load and warm the model from model_dir.
@@ -62,6 +64,11 @@ int tts_engine_sample_rate(const struct tts_engine *engine);
  */
 int tts_engine_synthesize(struct tts_engine *engine, const char *text,
                           short **out, size_t *n_out);
+
+/* Stream native-rate mono PCM as Wyoming produces it. */
+int tts_engine_synthesize_stream(struct tts_engine *engine, const char *text,
+                                 tts_engine_stream_callback callback,
+                                 void *context);
 
 /* Release a sample buffer returned by tts_engine_synthesize(). */
 void tts_engine_free_samples(short *samples);

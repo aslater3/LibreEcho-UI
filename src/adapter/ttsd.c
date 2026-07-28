@@ -851,9 +851,39 @@ static void free_stream_phrases(char **phrases, size_t count)
         free(phrases[i]);
 }
 
+#ifdef LE_TTSD_ENGINE_WYOMING
+struct wyoming_stream_context {
+    struct pcm_stream_queue *queue;
+};
+
+static int enqueue_wyoming_pcm(const short *samples, size_t frames,
+                               int sample_rate, void *opaque)
+{
+    struct wyoming_stream_context *context = opaque;
+    int16_t *stereo;
+    size_t bus_frames = 0;
+
+    if (!context || stream_queue_failed(context->queue))
+        return -1;
+    stereo = resample_to_bus(samples, frames, sample_rate, &bus_frames);
+    if (!stereo || stream_queue_push(context->queue, stereo, bus_frames) < 0) {
+        free(stereo);
+        return -1;
+    }
+    return 0;
+}
+#endif
+
 static size_t split_stream_phrases(const char *text, char **phrases,
                                    size_t capacity)
 {
+#ifdef LE_TTSD_ENGINE_WYOMING
+    if (capacity == 0)
+        return 0;
+    memset(phrases, 0, capacity * sizeof(*phrases));
+    phrases[0] = strdup(text);
+    return phrases[0] ? 1 : 0;
+#else
     static const char prefix[] = "now playing";
     const char *split = NULL;
     const char *p;
@@ -901,6 +931,7 @@ static size_t split_stream_phrases(const char *text, char **phrases,
 
     phrases[0] = strdup(text);
     return phrases[0] ? 1 : 0;
+#endif
 }
 
 static int synthesize_and_stream(struct tts_engine *engine, const char *text,
@@ -910,10 +941,12 @@ static int synthesize_and_stream(struct tts_engine *engine, const char *text,
     char *phrases[LE_TTS_STREAM_MAX_PHRASES];
     pthread_t writer;
     size_t phrase_count;
-    size_t i;
-    int writer_started = 0;
     int result = -1;
+#ifndef LE_TTSD_ENGINE_WYOMING
+    int writer_started = 0;
+    size_t i;
     double request_ms = monotonic_milliseconds();
+#endif
 
     phrase_count = split_stream_phrases(
         text, phrases, sizeof(phrases) / sizeof(phrases[0]));
@@ -923,8 +956,26 @@ static int synthesize_and_stream(struct tts_engine *engine, const char *text,
         goto out_phrases;
     if (pthread_create(&writer, NULL, stream_writer, &queue) != 0)
         goto out_queue;
+#ifndef LE_TTSD_ENGINE_WYOMING
     writer_started = 1;
+#endif
 
+#ifdef LE_TTSD_ENGINE_WYOMING
+    {
+        struct wyoming_stream_context context = { &queue };
+        le_log_info("ttsd: remote streaming enabled (1 request)");
+        if (tts_engine_synthesize_stream(engine, text,
+                                          enqueue_wyoming_pcm, &context) == 0 &&
+            !stream_queue_failed(&queue))
+            result = 0;
+        stream_queue_close(&queue);
+        pthread_join(writer, NULL);
+        le_log_info("ttsd: remote streaming complete (gap periods=%u, result=%d)",
+                    queue.inserted_gap_periods, result);
+        stream_queue_destroy(&queue);
+        return result;
+    }
+#else
     le_log_info("ttsd: phrase streaming enabled (%zu phrase%s)",
                 phrase_count, phrase_count == 1 ? "" : "s");
     for (i = 0; i < phrase_count; ++i) {
@@ -958,6 +1009,9 @@ static int synthesize_and_stream(struct tts_engine *engine, const char *text,
         result = -1;
     le_log_info("ttsd: phrase streaming complete (gap periods=%u, result=%d)",
                 queue.inserted_gap_periods, result);
+
+    return result;
+#endif
 
 out_queue:
     stream_queue_destroy(&queue);
