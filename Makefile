@@ -10,7 +10,7 @@ CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
-ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd
+ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
@@ -23,7 +23,7 @@ TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
 STTD_SOURCES = src/adapter/sttd.c src/adapter/stt_engine_mock.c src/adapter/adapter_server.c src/log.c
 STTD_SHERPA_CXX_SOURCES = src/adapter/stt_engine_sherpa.cpp
 AGENTD_SOURCES = src/adapter/agentd.c src/adapter/llm_provider.c \
-	src/adapter/llm_codex.c src/adapter/llm_http.c src/adapter/llm_store.c \
+	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 	src/adapter/voice_listening_led.c \
@@ -33,7 +33,7 @@ WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
 	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
-SOURCES = src/main.c src/http_server.c src/api.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c
+SOURCES = src/main.c src/http_server.c src/api.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -93,6 +93,20 @@ $(BUILD)/libreecho-agentd: $(AGENTD_OBJECTS)
 
 $(BUILD)/libreecho-wyomingd: $(WYOMINGD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(WYOMINGD_OBJECTS) $(LDFLAGS) -lm -o $@
+
+$(BUILD)/libreecho-sttd-wyoming: src/adapter/sttd.c \
+		src/adapter/stt_engine_wyoming.c src/adapter/wyoming_client.c \
+		src/adapter/wyoming_protocol.c src/adapter/adapter_server.c \
+		src/adapter/voice_dsp.c src/json.c src/log.c
+	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc \
+		$^ $(LDFLAGS) -lm -o $@
+
+$(BUILD)/libreecho-ttsd-wyoming: src/adapter/ttsd.c \
+		src/adapter/tts_engine_wyoming.c src/adapter/wyoming_client.c \
+		src/adapter/wyoming_protocol.c src/adapter/adapter_server.c \
+		src/json.c src/log.c
+	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc \
+		-DLE_TTSD_ENGINE_WYOMING $^ $(LDFLAGS) -lpthread -lm -o $@
 
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
@@ -262,7 +276,8 @@ $(BUILD)/test-sttd: tests/test_sttd.c src/adapter/adapter_client.c \
 		src/adapter/adapter_client.c src/log.c -o $@
 
 $(BUILD)/test-llm-provider: tests/test_llm_provider.c \
-		src/adapter/llm_provider.c src/adapter/llm_codex.c
+		src/adapter/llm_provider.c src/adapter/llm_codex.c \
+		src/adapter/llm_openai.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -o $@
 

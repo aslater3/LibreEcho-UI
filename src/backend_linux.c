@@ -964,6 +964,22 @@ static int boot_led(struct le_backend *b, const struct le_led_profile *profile)
     return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_boot_profile", args);
 }
 
+static int led_profile(struct le_backend *b, const char *name,
+                       const struct le_led_profile *profile)
+{
+    char args[192];
+    (void)b;
+    if (!name || !profile ||
+        (strcmp(name, "listening") && strcmp(name, "thinking") &&
+         strcmp(name, "error") && strcmp(name, "dnd")) ||
+        profile->brightness < 0 || profile->brightness > 100)
+        return LE_INVALID;
+    snprintf(args, sizeof(args),
+             "{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%d}",
+             name, profile->r, profile->g, profile->b, profile->brightness);
+    return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_profile", args);
+}
+
 static int led_test(struct le_backend *b)
 {
     (void)b;
@@ -1487,7 +1503,7 @@ static void destroy(struct le_backend *b)
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
-    led, colour, brightness, visualizer_enabled, boot_led, led_test,
+    led, colour, brightness, visualizer_enabled, boot_led, led_profile, led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,
     wake, wake_set, sensitivity, wake_test,
     bluetooth, bluetooth_set, bluetooth_scan, bluetooth_pair,

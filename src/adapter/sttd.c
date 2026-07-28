@@ -128,6 +128,7 @@ static int publish_transcript_event(int fd, const char *event_name,
                                     const char *text, int final,
                                     uint64_t audio_samples,
                                     uint64_t processing_ms,
+                                    uint64_t total_ms,
                                     int endpoint)
 {
     char escaped[STT_TEXT_MAX * 2U];
@@ -139,11 +140,13 @@ static int publish_transcript_event(int fd, const char *event_name,
     if (snprintf(
             data, sizeof(data),
             "{\"text\":\"%s\",\"final\":%s,\"endpoint\":%s,"
-            "\"audio_ms\":%llu,\"processing_ms\":%llu}",
+            "\"audio_ms\":%llu,\"processing_ms\":%llu,"
+            "\"total_ms\":%llu}",
             escaped, final ? "true" : "false",
             endpoint ? "true" : "false",
             (unsigned long long)(audio_samples * 1000ULL / STT_RATE),
-            (unsigned long long)processing_ms) >= (int)sizeof(data))
+            (unsigned long long)processing_ms,
+            (unsigned long long)total_ms) >= (int)sizeof(data))
         return -1;
     length = le_adapter_format_event(
         event, sizeof(event), event_name, data);
@@ -160,6 +163,8 @@ static int recognize_stream(struct stt_engine *engine, int fd)
     uint64_t audio_samples = 0;
     uint64_t started = monotonic_milliseconds();
     uint64_t last_audio = started;
+    uint64_t processing_started;
+    uint64_t completed;
     char text[STT_TEXT_MAX];
     char last_partial[STT_TEXT_MAX];
     int endpoint = 0;
@@ -238,6 +243,7 @@ static int recognize_stream(struct stt_engine *engine, int fd)
                 if (publish_transcript_event(
                         fd, "transcript_partial", text, 0,
                         audio_samples,
+                        monotonic_milliseconds() - started,
                         monotonic_milliseconds() - started, 0) < 0) {
                     failed = 1;
                     break;
@@ -251,13 +257,16 @@ static int recognize_stream(struct stt_engine *engine, int fd)
             }
         }
     }
+    processing_started = monotonic_milliseconds();
     if (!failed &&
         stt_engine_stream_finish(stream, text, sizeof(text)) < 0)
         failed = 1;
+    completed = monotonic_milliseconds();
     if (!failed)
         failed = publish_transcript_event(
             fd, "transcript", text, 1, audio_samples,
-            monotonic_milliseconds() - started, endpoint) < 0;
+            completed - processing_started,
+            completed - started, endpoint) < 0;
     stt_engine_stream_destroy(stream);
     return failed ? -1 : 0;
 }

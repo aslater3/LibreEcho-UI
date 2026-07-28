@@ -18,6 +18,8 @@ struct le_llm_http_request {
     char account_id[160];
     char body[LE_LLM_BODY_MAX];
     int accept_sse;
+    /* Set only after endpoint validation permits a configured LAN HTTP URL. */
+    int allow_insecure_http;
 };
 
 struct le_llm_auth_session {
@@ -33,6 +35,8 @@ struct le_llm_auth_session {
 struct le_llm_credentials {
     char access_token[LE_LLM_TOKEN_MAX];
     char refresh_token[LE_LLM_TOKEN_MAX];
+    char api_key[LE_LLM_TOKEN_MAX];
+    char base_url[LE_LLM_URL_MAX];
     char account_id[160];
     time_t expires_at;
 };

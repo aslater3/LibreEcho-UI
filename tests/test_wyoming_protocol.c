@@ -29,7 +29,8 @@ int main(void)
               payload, sizeof(payload)) == 0);
     CHECK(le_wyoming_read_header(sockets[1], &event) == 0);
     CHECK(!strcmp(event.type, "audio-chunk"));
-    CHECK(strstr(event.header, "\"rate\":16000") != NULL);
+    CHECK(strstr(event.header, "\"data_length\":") != NULL);
+    CHECK(strstr(event.data, "\"rate\":16000") != NULL);
     CHECK(event.payload_length == sizeof(payload));
     CHECK(le_wyoming_read_payload(
               sockets[1], received, sizeof(received), &event) == 0);

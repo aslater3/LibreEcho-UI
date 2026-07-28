@@ -103,9 +103,12 @@ static int build_config(const struct le_llm_http_request *request,
         snprintf(config + used, size - used,
                  "silent\nshow-error\nno-buffer\n"
                  "connect-timeout = 10\nmax-time = 45\n"
-                 "proto = \"=https\"\nproto-redir = \"=https\"\n"
-                 "tlsv1.2\n"
+                 "proto = \"=%s\"\nproto-redir = \"=%s\"\n"
+                 "%s"
                  "write-out = \"\\n%s%%{http_code}\\n\"\n",
+                 request->allow_insecure_http ? "http,https" : "https",
+                 request->allow_insecure_http ? "http,https" : "https",
+                 request->allow_insecure_http ? "" : "tlsv1.2\n",
                  STATUS_PREFIX) >= (int)(size - used))
         return -1;
     return 0;
@@ -153,6 +156,13 @@ static int process_line(const struct le_llm_http_request *request,
         if (event_fn && event_fn(event_context, data) != 0)
             return -1;
         return 0;
+    }
+    if (request->accept_sse) {
+        if (!line[0] || !strncmp(line, "event:", 6) ||
+            !strncmp(line, "id:", 3) || !strncmp(line, "retry:", 6) ||
+            line[0] == ':')
+            return 0;
+        return append_body(response, line);
     }
     if (!request->accept_sse && line[0])
         return append_body(response, line);
@@ -270,6 +280,9 @@ int le_llm_http_execute(const char *curl_path,
         goto cleanup;
     close(output_pipe[0]);
     output_pipe[0] = -1;
+    if (request->accept_sse && response->body[0] && event_fn &&
+        event_fn(event_context, response->body) != 0)
+        goto cleanup;
     while (waitpid(child, &child_status, 0) < 0) {
         if (errno != EINTR)
             goto cleanup;

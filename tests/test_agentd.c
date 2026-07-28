@@ -184,7 +184,7 @@ int main(void)
                 ++lines;
             fclose(capture);
         }
-        if (lines >= 2)
+        if (lines >= 3)
             break;
         nanosleep(&delay, NULL);
     }
@@ -193,11 +193,26 @@ int main(void)
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"voice_pipeline\":true") != NULL);
     CHECK(strstr(response, "\"wake_events\":1") != NULL);
-    CHECK(strstr(response, "\"completed_transcripts\":1") != NULL);
+    CHECK(strstr(response, "\"follow_up_listens\":1") != NULL);
+    CHECK(strstr(response, "\"completed_transcripts\":2") != NULL);
     CHECK(strstr(response,
                  "\"last_speech_end_to_first_pcm_ms\":") != NULL);
+    CHECK(strstr(response, "\"last_stt_total_ms\":") != NULL);
     CHECK(strstr(response, "\"latency_target_met\":true") != NULL);
     CHECK(strstr(response, "\"latency_violations\":0") != NULL);
+    CHECK(call(
+              socket_path, "configure",
+              "{\"provider\":\"openai-compatible\",\"enabled\":true,"
+              "\"base_url\":\"http://192.168.10.20:8001/v1\","
+              "\"model\":\"Gemma-4-12B\"}",
+              response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"provider\":\"openai-compatible\"") != NULL);
+    CHECK(strstr(response,
+                 "\"base_url\":\"http://192.168.10.20:8001/v1\"") != NULL);
+    CHECK(call(socket_path, "respond",
+               "{\"text\":\"Check the local provider.\"}",
+               response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"text\":\"Local ready\"") != NULL);
     CHECK(call(socket_path, "logout", NULL,
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"authenticated\":false") != NULL);

@@ -10,10 +10,13 @@ int main(int argc, char **argv)
     const char *capture = getenv("LE_TEST_CURL_CAPTURE");
     const char *mode = getenv("LE_TEST_CURL_MODE");
     char buffer[16384];
+    char body[16384];
     size_t config_used = 0;
+    size_t body_used = 0;
     FILE *input;
     FILE *output;
     int response_route;
+    int compatible_route;
     int poll_route;
     int token_route;
     int i;
@@ -40,17 +43,36 @@ int main(int argc, char **argv)
     fclose(output);
     response_route =
         strstr(buffer, "/backend-api/codex/responses") != NULL;
+    compatible_route =
+        strstr(buffer, "/v1/chat/completions") != NULL;
     poll_route =
         strstr(buffer, "/api/accounts/deviceauth/token") != NULL;
     token_route = strstr(buffer, "/oauth/token") != NULL;
-    while (fread(buffer, 1, sizeof(buffer), stdin) > 0)
-        ;
+    while (body_used + 1 < sizeof(body)) {
+        size_t count = fread(
+            body + body_used, 1, sizeof(body) - body_used - 1, stdin);
+
+        if (!count)
+            break;
+        body_used += count;
+    }
+    body[body_used] = '\0';
     if ((mode && !strcmp(mode, "sse")) ||
         (!mode && response_route)) {
+        const char *reply = strstr(body, "Previous assistant:")
+            ? "Thanks." : strstr(body, "mock transcription")
+                ? "What else?" : "Hello";
+
         fputs("event: response.output_text.delta\n", stdout);
-        fputs("data: {\"type\":\"response.output_text.delta\","
-              "\"delta\":\"Hello\"}\n\n", stdout);
+        fprintf(stdout,
+                "data: {\"type\":\"response.output_text.delta\","
+                "\"delta\":\"%s\"}\n\n", reply);
         fputs("data: {\"type\":\"response.completed\"}\n\n", stdout);
+    } else if ((mode && !strcmp(mode, "buffered")) ||
+               (!mode && compatible_route)) {
+        fputs("{\"choices\":[{\"finish_reason\":\"stop\","
+              "\"index\":0,\"message\":{\"role\":\"assistant\","
+              "\"content\":\"Local ready\"}}]}\n", stdout);
     } else if (!mode && poll_route) {
         fputs("{\"authorization_code\":\"test-auth-code\","
               "\"code_verifier\":\"test-code-verifier\"}\n", stdout);

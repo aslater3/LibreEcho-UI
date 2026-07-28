@@ -79,14 +79,14 @@ int le_wyoming_send(int fd, const char *type, const char *data_json,
     if (data_length && payload_length) {
         length = snprintf(
             header, sizeof(header),
-            "{\"type\":\"%s\",\"data\":%s,"
+            "{\"type\":\"%s\",\"data_length\":%zu,"
             "\"payload_length\":%zu}\n",
-            type, data_json, payload_length);
+            type, data_length, payload_length);
     } else if (data_length) {
         length = snprintf(
             header, sizeof(header),
-            "{\"type\":\"%s\",\"data\":%s}\n",
-            type, data_json);
+            "{\"type\":\"%s\",\"data_length\":%zu}\n",
+            type, data_length);
     } else if (payload_length) {
         length = snprintf(
             header, sizeof(header),
@@ -99,6 +99,7 @@ int le_wyoming_send(int fd, const char *type, const char *data_json,
     if (length < 0 || (size_t)length >= sizeof(header))
         return -1;
     if (write_all(fd, header, (size_t)length) < 0 ||
+        (data_length && write_all(fd, data_json, data_length) < 0) ||
         (payload_length && write_all(fd, payload, payload_length) < 0))
         return -1;
     return 0;

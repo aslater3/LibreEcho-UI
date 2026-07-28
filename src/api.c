@@ -1,5 +1,6 @@
 #include "api.h"
 #include "adapter/adapter.h"
+#include "adapter/wyoming_client.h"
 #include "config_store.h"
 #include "json.h"
 #include "logd.h"
@@ -191,6 +192,181 @@ static int apply_home_assistant_mode(int enabled)
     }
     return LE_OK;
 }
+static int valid_pipeline_token(const char *value)
+{
+    const unsigned char *p = (const unsigned char *)value;
+
+    if (!value || !value[0])
+        return 0;
+    while (*p) {
+        if (!isalnum(*p) && *p != '-' && *p != '_' && *p != '.')
+            return 0;
+        ++p;
+    }
+    return 1;
+}
+static int apply_voice_pipeline_mode(const char *mode)
+{
+    static const char *const agent = "/etc/init.d/libreecho-agentd.init";
+    static const char *const stt = "/etc/init.d/libreecho-sttd.init";
+    static const char *const tts = "/etc/init.d/libreecho-ttsd.init";
+    static const char *const satellite = "/etc/init.d/libreecho-wyomingd.init";
+
+    if (access(stt, X_OK) < 0 || access(tts, X_OK) < 0 ||
+        access(agent, X_OK) < 0)
+        return LE_OK;
+    if (run_init_command(agent, "stop") ||
+        run_init_command(stt, "stop") ||
+        run_init_command(tts, "stop"))
+        return LE_IO;
+    if (access(satellite, X_OK) == 0 &&
+        run_init_command(satellite, "stop"))
+        return LE_IO;
+    if (!strcmp(mode, "home-assistant"))
+        return access(satellite, X_OK) == 0
+            ? run_init_command(satellite, "start") : LE_NOT_SUPPORTED;
+    if (run_init_command(stt, "start") ||
+        run_init_command(tts, "start") ||
+        run_init_command(agent, "start"))
+        return LE_IO;
+    return LE_OK;
+}
+static int pipeline_endpoint_reachable(const struct api_context *c,
+                                       const char *uri)
+{
+    int fd;
+
+    if (!uri[0] || strcmp(le_backend_mode(c->backend), "linux"))
+        return 0;
+    fd = le_wyoming_connect(uri, 500);
+    if (fd < 0)
+        return 0;
+    close(fd);
+    return 1;
+}
+static void ensure_voice_pipeline_config(struct api_context *c)
+{
+    char saved[16384];
+    char value[320];
+
+    if (c->voice_pipeline_mode[0])
+        return;
+    snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
+             "%s", "local");
+    snprintf(c->stt_wyoming_model, sizeof(c->stt_wyoming_model),
+             "%s", "whisper-small");
+    snprintf(c->tts_wyoming_voice, sizeof(c->tts_wyoming_voice),
+             "%s", "en_GB-alan-medium");
+    if (!c->config_path[0] ||
+        config_read(c->config_path, saved, sizeof(saved)) <= 0)
+        return;
+    if (json_get_string(saved, "voice_pipeline_mode",
+                        value, sizeof(value)) == 1 &&
+        (!strcmp(value, "local") || !strcmp(value, "custom") ||
+         !strcmp(value, "home-assistant")))
+        strcpy(c->voice_pipeline_mode, value);
+    if (json_get_string(saved, "stt_wyoming_uri",
+                        value, sizeof(value)) == 1 &&
+        (!value[0] || le_wyoming_uri_valid(value)))
+        snprintf(c->stt_wyoming_uri, sizeof(c->stt_wyoming_uri),
+                 "%s", value);
+    if (json_get_string(saved, "stt_wyoming_model",
+                        value, sizeof(value)) == 1 &&
+        valid_pipeline_token(value) &&
+        strlen(value) < sizeof(c->stt_wyoming_model))
+        strcpy(c->stt_wyoming_model, value);
+    if (json_get_string(saved, "tts_wyoming_uri",
+                        value, sizeof(value)) == 1 &&
+        (!value[0] || le_wyoming_uri_valid(value)))
+        snprintf(c->tts_wyoming_uri, sizeof(c->tts_wyoming_uri),
+                 "%s", value);
+    if (json_get_string(saved, "tts_wyoming_voice",
+                        value, sizeof(value)) == 1 &&
+        valid_pipeline_token(value) &&
+        strlen(value) < sizeof(c->tts_wyoming_voice))
+        strcpy(c->tts_wyoming_voice, value);
+}
+static void voice_pipeline_json(struct api_context *c,
+                                struct api_response *r)
+{
+    char stt_uri[640], stt_model[256], tts_uri[640], tts_voice[256];
+    int custom;
+    int stt_reachable;
+    int tts_reachable;
+
+    ensure_voice_pipeline_config(c);
+    custom = !strcmp(c->voice_pipeline_mode, "custom");
+    stt_reachable = custom &&
+        pipeline_endpoint_reachable(c, c->stt_wyoming_uri);
+    tts_reachable = custom &&
+        pipeline_endpoint_reachable(c, c->tts_wyoming_uri);
+
+    json_escape(stt_uri, sizeof(stt_uri), c->stt_wyoming_uri);
+    json_escape(stt_model, sizeof(stt_model), c->stt_wyoming_model);
+    json_escape(tts_uri, sizeof(tts_uri), c->tts_wyoming_uri);
+    json_escape(tts_voice, sizeof(tts_voice), c->tts_wyoming_voice);
+    out(r, 200,
+        "{\"ok\":true,\"data\":{\"mode\":\"%s\","
+        "\"stt\":{\"engine\":\"%s\",\"wyoming_uri\":\"%s\","
+        "\"model\":\"%s\",\"configured\":%s,\"reachable\":%s},"
+        "\"tts\":{\"engine\":\"%s\",\"wyoming_uri\":\"%s\","
+        "\"voice\":\"%s\",\"configured\":%s,\"reachable\":%s},"
+        "\"wake_word\":{\"engine\":\"openwakeword\","
+        "\"processing\":\"on-device\"}},\"error\":null}",
+        c->voice_pipeline_mode, custom ? "wyoming" : "sherpa",
+        stt_uri, stt_model, c->stt_wyoming_uri[0] ? "true" : "false",
+        stt_reachable ? "true" : "false",
+        custom ? "wyoming" : "sherpa", tts_uri, tts_voice,
+        c->tts_wyoming_uri[0] ? "true" : "false",
+        tts_reachable ? "true" : "false");
+}
+static int voice_pipeline_update(struct api_context *c, const char *json)
+{
+    char mode[sizeof(c->voice_pipeline_mode)];
+    char stt_uri[sizeof(c->stt_wyoming_uri)];
+    char stt_model[sizeof(c->stt_wyoming_model)];
+    char tts_uri[sizeof(c->tts_wyoming_uri)];
+    char tts_voice[sizeof(c->tts_wyoming_voice)];
+
+    ensure_voice_pipeline_config(c);
+    snprintf(mode, sizeof(mode), "%s", c->voice_pipeline_mode);
+    snprintf(stt_uri, sizeof(stt_uri), "%s", c->stt_wyoming_uri);
+    snprintf(stt_model, sizeof(stt_model), "%s", c->stt_wyoming_model);
+    snprintf(tts_uri, sizeof(tts_uri), "%s", c->tts_wyoming_uri);
+    snprintf(tts_voice, sizeof(tts_voice), "%s", c->tts_wyoming_voice);
+    (void)json_get_string(json, "mode", mode, sizeof(mode));
+    (void)json_get_string(json, "stt_wyoming_uri",
+                          stt_uri, sizeof(stt_uri));
+    (void)json_get_string(json, "stt_model",
+                          stt_model, sizeof(stt_model));
+    (void)json_get_string(json, "tts_wyoming_uri",
+                          tts_uri, sizeof(tts_uri));
+    (void)json_get_string(json, "tts_voice",
+                          tts_voice, sizeof(tts_voice));
+    if (strcmp(mode, "local") && strcmp(mode, "custom") &&
+        strcmp(mode, "home-assistant"))
+        return LE_INVALID;
+    if (!valid_pipeline_token(stt_model) ||
+        !valid_pipeline_token(tts_voice))
+        return LE_INVALID;
+    if (!strcmp(mode, "custom") &&
+        (!le_wyoming_uri_valid(stt_uri) ||
+         !le_wyoming_uri_valid(tts_uri)))
+        return LE_INVALID;
+    snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
+             "%s", mode);
+    snprintf(c->stt_wyoming_uri, sizeof(c->stt_wyoming_uri),
+             "%s", stt_uri);
+    snprintf(c->stt_wyoming_model, sizeof(c->stt_wyoming_model),
+             "%s", stt_model);
+    snprintf(c->tts_wyoming_uri, sizeof(c->tts_wyoming_uri),
+             "%s", tts_uri);
+    snprintf(c->tts_wyoming_voice, sizeof(c->tts_wyoming_voice),
+             "%s", tts_voice);
+    if (!strcmp(mode, "custom"))
+        c->privacy_local_only = 0;
+    return LE_OK;
+}
 static int valid_hostname(const char*s){size_t i,n;if(!s)return 0;n=strlen(s);if(!n||n>63||s[0]=='-'||s[n-1]=='-')return 0;for(i=0;i<n;i++)if(!isalnum((unsigned char)s[i])&&s[i]!='-')return 0;return 1;}
 static int hex_digit(unsigned char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return -1;}
 static int query_component_decode(char*outbuf,size_t out_size,const char*value,size_t value_len){size_t i=0,o=0;if(!outbuf||!out_size||!value)return -1;while(i<value_len){unsigned char c=(unsigned char)value[i++];if(c=='%'){int hi,lo;if(i+1>=value_len||(hi=hex_digit((unsigned char)value[i]))<0||(lo=hex_digit((unsigned char)value[i+1]))<0)return -1;c=(unsigned char)((hi<<4)|lo);i+=2;if(!c)return -1;}else if(c=='+')c=' ';if(o+1>=out_size)return -1;outbuf[o++]=(char)c;}outbuf[o]='\0';return 0;}
@@ -265,7 +441,42 @@ static void led_json(struct api_context*c,struct api_response*r){struct le_led_s
 static void wake_json(struct api_context*c,struct api_response*r){struct le_wake_word_state w;char wake[LE_TEXT*2],model[64];int rc=le_get_wake_word_state(c->backend,&w);if(rc){err(r,501,rc,"Wake-word service is not available");return;}json_escape(wake,sizeof(wake),w.wake_word);json_escape(model,sizeof(model),w.model_status);out(r,200,"{\"ok\":true,\"data\":{\"enabled\":%s,\"wake_word\":\"%s\",\"sensitivity\":%d,\"cooldown_ms\":%d,\"model_status\":\"%s\",\"detected_count\":%d,\"cpu_cost_percent\":%d,\"memory_cost_mb\":%d,\"local_processing\":true},\"error\":null}",w.enabled?"true":"false",wake,w.sensitivity,w.cooldown_ms,model,w.detected_count,w.cpu_cost,w.memory_cost_mb);}
 static int configuration_item(char*out,size_t size,size_t*used,int*first,const char*fmt,...){va_list ap;int n;if(!out||!used||!first||!fmt||*used>=size)return -1;if(!*first){n=snprintf(out+*used,size-*used,",\n  ");if(n<0||(size_t)n>=size-*used)return -1;*used+=(size_t)n;}va_start(ap,fmt);n=vsnprintf(out+*used,size-*used,fmt,ap);va_end(ap);if(n<0||(size_t)n>=size-*used)return -1;*used+=(size_t)n;*first=0;return 0;}
 static int configuration_json(struct api_context*c,char*out,size_t size){struct le_audio_state a;struct le_led_state l;struct le_wake_word_state w;struct le_network_state n;const char*unsupported[16];size_t unsupported_count=0,i,used=0;char wake[128],host[128],short_action[80],long_action[80];int audio_rc,led_rc,wake_rc,network_rc,first=0,nbytes;audio_rc=le_get_audio_state(c->backend,&a);led_rc=le_get_led_state(c->backend,&l);wake_rc=le_get_wake_word_state(c->backend,&w);network_rc=le_get_network_state(c->backend,&n);if(audio_rc){unsupported[unsupported_count++]="volume";unsupported[unsupported_count++]="microphone_gain";unsupported[unsupported_count++]="microphone_muted";}if(led_rc){unsupported[unsupported_count++]="led_r";unsupported[unsupported_count++]="led_g";unsupported[unsupported_count++]="led_b";unsupported[unsupported_count++]="led_brightness";unsupported[unsupported_count++]="led_visualizer_enabled";}if(wake_rc){unsupported[unsupported_count++]="wake_word";unsupported[unsupported_count++]="wake_sensitivity";}if(network_rc)unsupported[unsupported_count++]="hostname";nbytes=snprintf(out,size,"{\n  \"schema_version\": 1,\n  \"hostname_persisted\": true,\n  \"partial\": %s,\n  \"unsupported\": [",unsupported_count?"true":"false");if(nbytes<0||(size_t)nbytes>=size)return LE_IO;used=(size_t)nbytes;for(i=0;i<unsupported_count;i++){nbytes=snprintf(out+used,size-used,"%s\"%s\"",i?",":"",unsupported[i]);if(nbytes<0||(size_t)nbytes>=size-used)return LE_IO;used+=(size_t)nbytes;}nbytes=snprintf(out+used,size-used,"]");if(nbytes<0||(size_t)nbytes>=size-used)return LE_IO;used+=(size_t)nbytes;if(!audio_rc){if(configuration_item(out,size,&used,&first,"\"volume\": %d",a.volume)||configuration_item(out,size,&used,&first,"\"microphone_gain\": %d",a.microphone_gain)||configuration_item(out,size,&used,&first,"\"microphone_muted\": %s",a.muted?"true":"false"))return LE_IO;}if(!led_rc){if(configuration_item(out,size,&used,&first,"\"led_r\": %u",l.current.r)||configuration_item(out,size,&used,&first,"\"led_g\": %u",l.current.g)||configuration_item(out,size,&used,&first,"\"led_b\": %u",l.current.b)||configuration_item(out,size,&used,&first,"\"led_brightness\": %d",l.current.brightness)||configuration_item(out,size,&used,&first,"\"led_visualizer_enabled\": %s",l.visualizer_enabled?"true":"false"))return LE_IO;}if(!wake_rc){json_escape(wake,sizeof(wake),w.wake_word);if(configuration_item(out,size,&used,&first,"\"wake_word\": \"%s\"",wake)||configuration_item(out,size,&used,&first,"\"wake_sensitivity\": %d",w.sensitivity))return LE_IO;}if(!network_rc){json_escape(host,sizeof(host),n.hostname);if(configuration_item(out,size,&used,&first,"\"hostname\": \"%s\"",host))return LE_IO;}json_escape(short_action,sizeof(short_action),c->button_short);json_escape(long_action,sizeof(long_action),c->button_long);if(configuration_item(out,size,&used,&first,"\"ssh\": %s",c->net_ssh?"true":"false")||configuration_item(out,size,&used,&first,"\"api_lan\": %s",c->net_api_lan?"true":"false")||configuration_item(out,size,&used,&first,"\"button_short\": \"%s\"",short_action)||configuration_item(out,size,&used,&first,"\"button_long\": \"%s\"",long_action)||configuration_item(out,size,&used,&first,"\"privacy_local_only\": %s",c->privacy_local_only?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_audio_retention\": %s",c->privacy_audio_retention?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_telemetry\": %s",c->privacy_telemetry?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_crash_reports\": %s",c->privacy_crash_reports?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_log_hours\": %d",c->privacy_log_hours)||configuration_item(out,size,&used,&first,"\"integrations\": %u",c->integrations))return LE_IO;nbytes=snprintf(out+used,size-used,"\n}");return nbytes<0||(size_t)nbytes>=size-used?LE_IO:LE_OK;}
-static int persist_configuration(struct api_context*c){char config[4096];int rc=configuration_json(c,config,sizeof(config));if(rc)return rc;if(!c->config_path[0])return LE_OK;return config_write_atomic(c->config_path,config,strlen(config))?LE_IO:LE_OK;}
+static int persist_configuration(struct api_context*c)
+{
+    char config[8192];
+    char mode[48], stt_uri[640], stt_model[256];
+    char tts_uri[640], tts_voice[256];
+    size_t length;
+    int rc;
+
+    ensure_voice_pipeline_config(c);
+    rc = configuration_json(c, config, sizeof(config));
+    if (rc)
+        return rc;
+    length = strlen(config);
+    if (!length || config[length - 1] != '}')
+        return LE_IO;
+    json_escape(mode, sizeof(mode), c->voice_pipeline_mode);
+    json_escape(stt_uri, sizeof(stt_uri), c->stt_wyoming_uri);
+    json_escape(stt_model, sizeof(stt_model), c->stt_wyoming_model);
+    json_escape(tts_uri, sizeof(tts_uri), c->tts_wyoming_uri);
+    json_escape(tts_voice, sizeof(tts_voice), c->tts_wyoming_voice);
+    --length;
+    if (snprintf(
+            config + length, sizeof(config) - length,
+            ",\n  \"voice_pipeline_mode\": \"%s\","
+            "\n  \"stt_wyoming_uri\": \"%s\","
+            "\n  \"stt_wyoming_model\": \"%s\","
+            "\n  \"tts_wyoming_uri\": \"%s\","
+            "\n  \"tts_wyoming_voice\": \"%s\"\n}",
+            mode, stt_uri, stt_model, tts_uri, tts_voice) >=
+        (int)(sizeof(config) - length))
+        return LE_IO;
+    if (!c->config_path[0])
+        return LE_OK;
+    return config_write_atomic(c->config_path, config, strlen(config))
+        ? LE_IO : LE_OK;
+}
 static int import_configuration(struct api_context*c,const char*j){char wake[LE_TEXT],hostname[LE_TEXT],short_action[32],long_action[32];int schema,volume,gain,muted,r,g,b,brightness,visualizer_enabled=1,visualizer_field,sensitivity,ssh,api_lan,local_only,audio_retention,telemetry,crash_reports,log_hours,integrations,rc;if(strcmp(le_backend_mode(c->backend),"mock"))return LE_NOT_SUPPORTED;visualizer_field=json_get_bool(j,"led_visualizer_enabled",&visualizer_enabled);if(visualizer_field<0||json_get_int(j,"schema_version",&schema)<1||schema!=1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_int(j,"microphone_gain",&gain)<1||gain<0||gain>100||json_get_bool(j,"microphone_muted",&muted)<1||json_get_int(j,"led_r",&r)<1||r<0||r>255||json_get_int(j,"led_g",&g)<1||g<0||g>255||json_get_int(j,"led_b",&b)<1||b<0||b>255||json_get_int(j,"led_brightness",&brightness)<1||brightness<0||brightness>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_string(j,"hostname",hostname,sizeof(hostname))<1||json_get_bool(j,"ssh",&ssh)<1||json_get_bool(j,"api_lan",&api_lan)<1||json_get_string(j,"button_short",short_action,sizeof(short_action))<1||json_get_string(j,"button_long",long_action,sizeof(long_action))<1||json_get_bool(j,"privacy_local_only",&local_only)<1||json_get_bool(j,"privacy_audio_retention",&audio_retention)<1||json_get_bool(j,"privacy_telemetry",&telemetry)<1||json_get_bool(j,"privacy_crash_reports",&crash_reports)<1||json_get_int(j,"privacy_log_hours",&log_hours)<1||(log_hours!=24&&log_hours!=168&&log_hours!=720)||json_get_int(j,"integrations",&integrations)<1||integrations<0||integrations>31)return LE_INVALID;if((rc=le_set_volume(c->backend,volume))||(rc=le_set_microphone_gain(c->backend,gain))||(rc=le_set_microphone_muted(c->backend,muted))||(rc=le_set_led_colour(c->backend,(uint8_t)r,(uint8_t)g,(uint8_t)b))||(rc=le_set_led_brightness(c->backend,brightness))||(rc=le_set_led_visualizer_enabled(c->backend,visualizer_enabled))||(rc=le_set_wake_word(c->backend,wake))||(rc=le_set_wake_word_sensitivity(c->backend,sensitivity))||(rc=le_set_hostname(c->backend,hostname)))return rc;c->net_ssh=ssh;c->net_api_lan=api_lan;c->privacy_local_only=local_only;c->privacy_audio_retention=audio_retention;c->privacy_telemetry=telemetry;c->privacy_crash_reports=crash_reports;c->privacy_log_hours=log_hours;c->integrations=(unsigned)integrations;strcpy(c->button_short,short_action);strcpy(c->button_long,long_action);return persist_configuration(c);}
 static int read_central_logs(char lines[LE_MAX_LOGS][LE_LOGD_MSG_MAX],size_t*count){FILE*f;char line[LE_LOGD_MSG_MAX],ordered[LE_MAX_LOGS][LE_LOGD_MSG_MAX];size_t next=0,total=0;if(!count)return 0;*count=0;f=fopen(LE_LOGD_FILE,"r");if(!f)return 0;while(fgets(line,sizeof(line),f)){size_t n=strlen(line);if(n&&line[n-1]=='\n')line[n-1]=0;strncpy(lines[next%LE_MAX_LOGS],line,LE_LOGD_MSG_MAX-1);lines[next%LE_MAX_LOGS][LE_LOGD_MSG_MAX-1]=0;next++;if(total<LE_MAX_LOGS)total++;}fclose(f);if(total){size_t i,first=next-total;for(i=0;i<total;i++){strncpy(ordered[i],lines[(first+i)%LE_MAX_LOGS],LE_LOGD_MSG_MAX-1);ordered[i][LE_LOGD_MSG_MAX-1]=0;}for(i=0;i<total;i++)strncpy(lines[i],ordered[i],LE_LOGD_MSG_MAX-1);*count=total;}return *count>0;}
 static void logs_json(struct api_context*c,struct api_response*r){char central[LE_MAX_LOGS][LE_LOGD_MSG_MAX],message[256],escaped[512],level[16],service[32];size_t central_count=0,first,i,n=0;int timestamp,boot_seconds;int from_central=read_central_logs(central,&central_count);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"entries\":[");if(from_central){for(i=0;i<central_count&&n<sizeof(r->body)-500;i++){timestamp=0;boot_seconds=0;level[0]=0;service[0]=0;message[0]=0;json_get_int(central[i],"ts",&timestamp);json_get_int(central[i],"boot_seconds",&boot_seconds);json_get_string(central[i],"level",level,sizeof(level));json_get_string(central[i],"service",service,sizeof(service));json_get_string(central[i],"msg",message,sizeof(message));if(service[0]&&strncmp(message,service,strlen(service))){char prefixed[256];snprintf(prefixed,sizeof(prefixed),"%s: %s",service,message);strncpy(message,prefixed,sizeof(message)-1);message[sizeof(message)-1]=0;}json_escape(escaped,sizeof(escaped),message);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s{\"timestamp\":%d,\"boot_seconds\":%d,\"level\":\"%s\",\"message\":\"%s\"}",i?",":"",timestamp,boot_seconds,level[0]?level:"INFO",escaped);}}else{first=c->log_next-c->log_count;for(i=0;i<c->log_count&&n<sizeof(r->body)-500;i++)n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s%s",i?",":"",c->logs[(first+i)%LE_MAX_LOGS]);}n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"],\"source\":\"%s\",\"bounded\":true,\"capacity\":%d},\"error\":null}",from_central?"central-file":"web-memory",LE_MAX_LOGS);r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
@@ -307,6 +518,7 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  if(!strcmp(p,"/api/v1/audio/announce/stop")&&!strcmp(q->method,"POST")){rc=le_stop_speech(c->backend);if(rc)err(r,501,rc,"Speech could not be stopped");else ok(r,"{\"speaking\":false}");return;}
  if(!strcmp(p,"/api/v1/led")){if(!strcmp(q->method,"GET")){led_json(c,r);return;}if(!strcmp(q->method,"PUT")){int rr,gg,bb,visualizer_enabled,visualizer_field=json_get_bool(q->body,"visualizer_enabled",&visualizer_enabled);if(visualizer_field<0)rc=LE_INVALID;if(!rc&&json_get_int(q->body,"r",&rr)>0&&json_get_int(q->body,"g",&gg)>0&&json_get_int(q->body,"b",&bb)>0){if(rr<0||rr>255||gg<0||gg>255||bb<0||bb>255)rc=LE_INVALID;else rc=le_set_led_colour(c->backend,(uint8_t)rr,(uint8_t)gg,(uint8_t)bb);}if(!rc&&json_get_int(q->body,"brightness",&v)>0)rc=le_set_led_brightness(c->backend,v);if(!rc&&visualizer_field>0)rc=le_set_led_visualizer_enabled(c->backend,visualizer_enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"LED setting could not be applied");return;}event_bus_publish(&c->events,"led","{\"changed\":true}");led_json(c,r);return;}}
  if(!strcmp(p,"/api/v1/led/test")&&!strcmp(q->method,"POST")){rc=le_run_led_test(c->backend);if(rc)err(r,501,rc,"LED test is not available");else ok(r,"{\"testing\":true}");return;}
+ if(!strcmp(p,"/api/v1/led/profile")&&!strcmp(q->method,"PUT")){char name[24];struct le_led_profile profile;memset(&profile,0,sizeof(profile));if(json_get_string(q->body,"name",name,sizeof(name))<1||json_get_int(q->body,"r",&v)<1||v<0||v>255){err(r,400,LE_INVALID,"A valid LED profile and colour are required");return;}profile.r=(uint8_t)v;if(json_get_int(q->body,"g",&v)<1||v<0||v>255){err(r,400,LE_INVALID,"LED colour is invalid");return;}profile.g=(uint8_t)v;if(json_get_int(q->body,"b",&v)<1||v<0||v>255){err(r,400,LE_INVALID,"LED colour is invalid");return;}profile.b=(uint8_t)v;profile.brightness=100;if(json_get_int(q->body,"brightness",&v)>0){if(v<0||v>100){err(r,400,LE_INVALID,"LED brightness is invalid");return;}profile.brightness=v;}rc=le_set_led_profile(c->backend,name,&profile);if(rc){err(r,rc==LE_INVALID?400:501,rc,"LED profile could not be saved");return;}event_bus_publish(&c->events,"led","{\"changed\":true}");led_json(c,r);return;}
  if(!strcmp(p,"/api/v1/network")){if(!strcmp(q->method,"GET")){net_json(c,r);return;}if(!strcmp(q->method,"PUT")){char host[64];int changed=0;if(json_get_string(q->body,"hostname",host,sizeof(host))>0){rc=le_set_hostname(c->backend,host);changed=1;if(rc){err(r,rc==LE_INVALID?400:501,rc,"Hostname could not be applied");return;}}if(json_get_bool(q->body,"ssh",&v)>0){c->net_ssh=v;changed=1;}if(json_get_bool(q->body,"api_lan",&v)>0){c->net_api_lan=v;changed=1;}if(!changed){err(r,400,LE_INVALID,"No supported network setting was supplied");return;}net_json(c,r);return;}}if(!strcmp(p,"/api/v1/network/wifi/scan")&&!strcmp(q->method,"GET")){struct le_wifi_scan s;rc=le_scan_wifi(c->backend,&s);if(rc){err(r,501,rc,"Wi-Fi scan failed");return;}if(wifi_scan_json(r,&s)<0){err(r,503,LE_IO,"Wi-Fi scan response is too large");return;}return;}
  if(!strcmp(p,"/api/v1/network/wifi/connect")&&!strcmp(q->method,"POST")){struct le_wifi_credentials w;memset(&w,0,sizeof(w));if(json_get_string(q->body,"ssid",w.ssid,sizeof(w.ssid))<1){err(r,400,LE_INVALID,"SSID is required");return;}json_get_string(q->body,"password",w.password,sizeof(w.password));json_get_string(q->body,"security",w.security,sizeof(w.security));rc=le_connect_wifi(c->backend,&w);memset(w.password,0,sizeof(w.password));if(rc){err(r,503,rc,"Wi-Fi connection failed");return;}event_bus_publish(&c->events,"network","{\"state\":\"connecting\"}");ok(r,"{\"state\":\"connecting\"}");return;}if(!strcmp(p,"/api/v1/network/wifi/disconnect")&&!strcmp(q->method,"POST")){rc=le_disconnect_wifi(c->backend);if(rc)err(r,501,rc,"Wi-Fi disconnect is unavailable");else ok(r,"{\"state\":\"disconnected\"}");return;}
  if(!strcmp(p,"/api/v1/wake-word")){if(!strcmp(q->method,"GET")){wake_json(c,r);return;}if(!strcmp(q->method,"PUT")){char s[64];if(json_get_string(q->body,"wake_word",s,sizeof(s))>0)rc=le_set_wake_word(c->backend,s);if(!rc&&json_get_int(q->body,"sensitivity",&v)>0)rc=le_set_wake_word_sensitivity(c->backend,v);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Wake-word setting could not be applied");return;}wake_json(c,r);return;}}if(!strcmp(p,"/api/v1/wake-word/test")&&!strcmp(q->method,"POST")){rc=le_test_wake_word(c->backend);if(rc)err(r,409,rc,"Wake-word trigger failed");else ok(r,"{\"detected\":true}");return;}
@@ -325,6 +537,133 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  err(r,404,LE_INVALID,"API endpoint was not found");}
 
 #undef api_handle
+static int handle_voice_pipeline(struct api_context *c,
+                                 const struct api_request *q,
+                                 struct api_response *r)
+{
+    int rc;
+
+    if (strcmp(q->path, "/api/v1/voice-pipeline"))
+        return 0;
+    if (!strcmp(q->method, "GET")) {
+        voice_pipeline_json(c, r);
+        return 1;
+    }
+    if (strcmp(q->method, "PUT")) {
+        method_not_allowed(r);
+        return 1;
+    }
+    if (!q->body || !q->body_len) {
+        err(r, 400, LE_INVALID,
+            "Voice pipeline configuration is required");
+        return 1;
+    }
+    rc = voice_pipeline_update(c, q->body);
+    if (rc) {
+        err(r, 400, rc,
+            "Voice pipeline mode, endpoints, model, or voice is invalid");
+        return 1;
+    }
+    rc = persist_configuration(c);
+    if (!rc)
+        rc = apply_voice_pipeline_mode(c->voice_pipeline_mode);
+    if (rc) {
+        err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc,
+            "Voice pipeline configuration could not be applied");
+        return 1;
+    }
+    api_log(c, "info", "Voice pipeline configuration applied");
+    voice_pipeline_json(c, r);
+    return 1;
+}
+static int handle_privacy(struct api_context *c,
+                          const struct api_request *q,
+                          struct api_response *r)
+{
+    char retention[16];
+    int parsed;
+    int value;
+    int rc;
+
+    if (strcmp(q->path, "/api/v1/privacy"))
+        return 0;
+    if (!strcmp(q->method, "GET"))
+        goto respond;
+    if (strcmp(q->method, "PUT")) {
+        method_not_allowed(r);
+        return 1;
+    }
+
+    parsed = json_get_bool(q->body, "local_only", &value);
+    if (parsed < 0) {
+        err(r, 400, LE_INVALID, "local_only must be a boolean");
+        return 1;
+    }
+    if (parsed > 0 && value &&
+        !strcmp(c->voice_pipeline_mode, "custom")) {
+        err(r, 409, LE_BUSY,
+            "Disable the network voice pipeline before requiring local processing");
+        return 1;
+    }
+    if (parsed > 0)
+        c->privacy_local_only = value;
+
+    parsed = json_get_bool(q->body, "diagnostic_telemetry", &value);
+    if (parsed < 0) {
+        err(r, 400, LE_INVALID,
+            "diagnostic_telemetry must be a boolean");
+        return 1;
+    }
+    if (parsed > 0)
+        c->privacy_telemetry = value;
+
+    parsed = json_get_bool(q->body, "crash_reports", &value);
+    if (parsed < 0) {
+        err(r, 400, LE_INVALID, "crash_reports must be a boolean");
+        return 1;
+    }
+    if (parsed > 0)
+        c->privacy_crash_reports = value;
+
+    parsed = json_get_string(q->body, "audio_retention",
+                             retention, sizeof(retention));
+    if (parsed < 0 || (parsed > 0 && strcmp(retention, "none") &&
+                       strcmp(retention, "24h"))) {
+        err(r, 400, LE_INVALID, "audio_retention must be none or 24h");
+        return 1;
+    }
+    if (parsed > 0)
+        c->privacy_audio_retention = strcmp(retention, "none") != 0;
+
+    parsed = json_get_int(q->body, "log_retention_hours", &value);
+    if (parsed < 0 || (parsed > 0 && value != 24 &&
+                       value != 168 && value != 720)) {
+        err(r, 400, LE_INVALID,
+            "log_retention_hours must be 24, 168, or 720");
+        return 1;
+    }
+    if (parsed > 0)
+        c->privacy_log_hours = value;
+
+    rc = persist_configuration(c);
+    if (rc) {
+        err(r, 503, rc, "Privacy configuration could not be saved");
+        return 1;
+    }
+
+respond:
+    out(r, 200,
+        "{\"ok\":true,\"data\":{\"local_only\":%s,"
+        "\"audio_retention\":\"%s\",\"diagnostic_telemetry\":%s,"
+        "\"log_retention_hours\":%d,\"crash_reports\":%s},"
+        "\"error\":null}",
+        c->privacy_local_only ? "true" : "false",
+        c->privacy_audio_retention ? "24h" : "none",
+        c->privacy_telemetry ? "true" : "false",
+        c->privacy_log_hours,
+        c->privacy_crash_reports ? "true" : "false");
+    return 1;
+}
 static void after_integration_change(struct api_context *c,
                                      const struct api_request *q,
                                      struct api_response *r)
@@ -344,8 +683,11 @@ static void after_integration_change(struct api_context *c,
         err(r, 503, rc, "Integration configuration could not be applied");
 }
 #define api_handle_inner(c,q,r) do { \
-    api_handle_inner((c),(q),(r)); \
-    after_integration_change((c),(q),(r)); \
+    if (!handle_voice_pipeline((c),(q),(r)) && \
+        !handle_privacy((c),(q),(r))) { \
+        api_handle_inner((c),(q),(r)); \
+        after_integration_change((c),(q),(r)); \
+    } \
 } while (0)
 void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;if(!security(c,q,r))return;if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":"Initial setup could not be applied");return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\"},\"error\":null}",c->csrf_token,c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false");return;}api_handle_inner(c,q,r);}
 

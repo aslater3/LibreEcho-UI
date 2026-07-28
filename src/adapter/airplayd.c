@@ -1043,7 +1043,7 @@ static pid_t spawn_shairport(const struct airplay_ctx *ctx)
         return pid;
     execl(AIRPLAY_CHROOT, AIRPLAY_CHROOT, "chroot", ctx->runtime_root,
           ctx->shairport_path,
-          "-vvv", "--configfile", ctx->config_path, (char *)NULL);
+          "--configfile", ctx->config_path, (char *)NULL);
     _exit(127);
 }
 

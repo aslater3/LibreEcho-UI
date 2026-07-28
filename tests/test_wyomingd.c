@@ -183,7 +183,7 @@ int main(void)
     CHECK(le_wyoming_send(client_fd, "describe", NULL, NULL, 0) == 0);
     CHECK(le_wyoming_read_header(client_fd, &event) == 0);
     CHECK(!strcmp(event.type, "info"));
-    CHECK(strstr(event.header, "active_wake_words") != NULL);
+    CHECK(strstr(event.data, "active_wake_words") != NULL);
     CHECK(le_wyoming_send(client_fd, "run-pipeline",
                           "{\"start_stage\":\"wake\","
                           "\"end_stage\":\"tts\"}", NULL, 0) == 0);
@@ -202,7 +202,7 @@ int main(void)
     }
     CHECK(le_wyoming_read_header(client_fd, &event) == 0);
     CHECK(!strcmp(event.type, "detection"));
-    CHECK(strstr(event.header, "\"name\":\"Alexa\"") != NULL);
+    CHECK(strstr(event.data, "\"name\":\"Alexa\"") != NULL);
     CHECK(le_wyoming_send(client_fd, "run-pipeline",
                           "{\"start_stage\":\"asr\","
                           "\"end_stage\":\"tts\"}", NULL, 0) == 0);

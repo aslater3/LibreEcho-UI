@@ -9,6 +9,7 @@
 #include "voice_reply.h"
 #include "../config_store.h"
 #include "../json.h"
+#include "../log.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -30,6 +31,8 @@
 #define DEFAULT_WAKE_SOCKET LE_ADAPTER_WAKEWORD_SOCK
 #define DEFAULT_STT_SOCKET LE_ADAPTER_STT_SOCK
 #define DEFAULT_TTS_FIRST_PCM_FILE "/run/libreecho/tts-first-pcm"
+#define FOLLOW_UP_PLAYBACK_WAIT_MS 60000U
+#define FOLLOW_UP_MAX_DEPTH 2U
 
 enum auth_state {
     AUTH_SIGNED_OUT,
@@ -74,6 +77,10 @@ struct agent_state {
     unsigned long latency_violations;
     char turn_request_id[64];
     unsigned long completed_turns;
+    char previous_voice_user[768];
+    char previous_voice_reply[1536];
+    unsigned int follow_up_depth;
+    int follow_up_armed;
 };
 
 static volatile sig_atomic_t running = 1;
@@ -161,6 +168,19 @@ static void config_defaults(struct agent_config *config)
              le_llm_default_voice_prompt());
 }
 
+static int endpoint_valid(const char *url)
+{
+    const unsigned char *p = (const unsigned char *)url;
+
+    if (!url || (strncmp(url, "http://", 7) &&
+                 strncmp(url, "https://", 8)))
+        return 0;
+    for (; *p; ++p)
+        if (*p <= 0x20U || *p == '"' || *p == '\\')
+            return 0;
+    return 1;
+}
+
 static int escape_json(char *output, size_t size, const char *input)
 {
     size_t used = 0;
@@ -201,9 +221,10 @@ static int save_config(const struct agent_state *state)
     length = snprintf(
         json, sizeof(json),
         "{\"version\":1,\"enabled\":%s,"
-        "\"provider\":\"openai-codex\",\"model\":\"%s\","
+        "\"provider\":\"%s\",\"model\":\"%s\","
         "\"prompt\":\"%s\"}\n",
-        state->config.enabled ? "true" : "false", model, prompt);
+        state->config.enabled ? "true" : "false", state->config.provider,
+        model, prompt);
     return length > 0 && length < (int)sizeof(json)
         ? config_write_atomic(state->config_path, json, (size_t)length)
         : -1;
@@ -217,6 +238,8 @@ static void load_config(struct agent_state *state)
     config_defaults(&state->config);
     if (config_read(state->config_path, json, sizeof(json)) < 0)
         return;
+    (void)json_get_string(json, "provider", state->config.provider,
+                          sizeof(state->config.provider));
     if (json_get_bool(json, "enabled", &enabled) > 0)
         state->config.enabled = enabled;
     (void)json_get_string(json, "model", state->config.model,
@@ -330,6 +353,7 @@ static int command_status(struct agent_state *state, int fd,
     struct le_voice_pipeline_metrics voice_metrics;
     char prompt[sizeof(state->config.prompt) * 2U];
     char model[sizeof(state->config.model) * 2U];
+    char base_url[sizeof(state->credentials.base_url) * 2U];
     char code[sizeof(state->auth.user_code) * 2U];
     char url[sizeof(state->auth.verification_url) * 2U];
     char error[sizeof(state->auth_error) * 2U];
@@ -353,6 +377,7 @@ static int command_status(struct agent_state *state, int fd,
 
     if (escape_json(prompt, sizeof(prompt), state->config.prompt) < 0 ||
         escape_json(model, sizeof(model), state->config.model) < 0 ||
+        escape_json(base_url, sizeof(base_url), state->credentials.base_url) < 0 ||
         escape_json(code, sizeof(code), state->auth.user_code) < 0 ||
         escape_json(url, sizeof(url), state->auth.verification_url) < 0 ||
         escape_json(error, sizeof(error), state->auth_error) < 0 ||
@@ -360,17 +385,21 @@ static int command_status(struct agent_state *state, int fd,
             payload, sizeof(payload),
             "{\"ready\":true,\"enabled\":%s,"
             "\"provider\":\"%s\",\"provider_name\":\"%s\","
-            "\"subscription_auth\":true,\"authenticated\":%s,"
+            "\"subscription_auth\":%s,\"authenticated\":%s,"
             "\"auth_state\":\"%s\",\"user_code\":\"%s\","
             "\"verification_url\":\"%s\",\"auth_error\":\"%s\","
             "\"model\":\"%s\",\"prompt\":\"%s\","
+            "\"base_url\":\"%s\",\"api_key_configured\":%s,"
             "\"voice_pipeline\":true,\"text_streaming\":true,"
             "\"wake_connected\":%s,\"audio_connected\":%s,"
             "\"recognizing\":%s,\"dispatching\":%s,"
-            "\"wake_events\":%lu,\"completed_transcripts\":%lu,"
+            "\"follow_up_pending\":%s,"
+            "\"wake_events\":%lu,\"follow_up_listens\":%lu,"
+            "\"completed_transcripts\":%lu,"
             "\"dropped_voice_turns\":%lu,"
             "\"last_stt_audio_ms\":%llu,"
             "\"last_stt_processing_ms\":%llu,"
+            "\"last_stt_total_ms\":%llu,"
             "\"latency_target_ms\":3000,\"completed_turns\":%lu,"
             "\"last_first_text_ms\":%llu,"
             "\"last_first_announce_dispatch_ms\":%llu,"
@@ -379,18 +408,23 @@ static int command_status(struct agent_state *state, int fd,
             "\"latency_violations\":%lu}",
             state->config.enabled ? "true" : "false",
             state->provider->id, state->provider->name,
+            state->provider->subscription_auth ? "true" : "false",
             state->auth_state == AUTH_SIGNED_IN ? "true" : "false",
             auth_state_name(state->auth_state), code, url, error,
-            model, prompt,
+            model, prompt, base_url,
+            state->credentials.api_key[0] ? "true" : "false",
             voice_metrics.wake_connected ? "true" : "false",
             voice_metrics.audio_connected ? "true" : "false",
             voice_metrics.recognizing ? "true" : "false",
             voice_metrics.dispatching ? "true" : "false",
+            voice_metrics.follow_up_pending ? "true" : "false",
             voice_metrics.wake_events,
+            voice_metrics.follow_up_listens,
             voice_metrics.completed_transcripts,
             voice_metrics.dropped_turns,
             (unsigned long long)voice_metrics.last_stt_audio_ms,
             (unsigned long long)voice_metrics.last_stt_processing_ms,
+            (unsigned long long)voice_metrics.last_stt_total_ms,
             completed_turns,
             (unsigned long long)first_text_ms,
             (unsigned long long)first_announce_ms,
@@ -409,6 +443,8 @@ static int refresh_credentials(struct agent_state *state, int force)
     struct le_llm_http_response response;
     time_t now = time(NULL);
 
+    if (!state->provider->subscription_auth)
+        return 0;
     if (!force && state->credentials.expires_at > now + 120)
         return 0;
     if (state->provider->refresh_request(
@@ -427,7 +463,10 @@ struct response_stream {
     struct agent_state *state;
     struct le_voice_reply reply;
     char full_text[LE_LLM_TEXT_MAX];
+    char tts_text[LE_LLM_TEXT_MAX];
     size_t used;
+    size_t tts_used;
+    int aggregate_tts;
     int complete;
 };
 
@@ -435,8 +474,28 @@ static int enqueue_segment(void *context, const char *text)
 {
     struct response_stream *stream = context;
 
+    if (stream->aggregate_tts) {
+        size_t length = strlen(text);
+        if (stream->tts_used + length + 1 >= sizeof(stream->tts_text))
+            return -1;
+        if (stream->tts_used)
+            stream->tts_text[stream->tts_used++] = ' ';
+        memcpy(stream->tts_text + stream->tts_used, text, length + 1);
+        stream->tts_used += length;
+        return 0;
+    }
+
     return le_voice_playback_enqueue(
         &stream->state->playback, text);
+}
+
+static int flush_aggregated_tts(struct response_stream *stream)
+{
+    if (!stream->aggregate_tts || !stream->tts_used)
+        return 0;
+    stream->tts_text[stream->tts_used] = '\0';
+    return le_voice_playback_enqueue(&stream->state->playback,
+                                     stream->tts_text);
 }
 
 static int response_event(void *context, const char *data)
@@ -479,7 +538,7 @@ static int generate_response(struct agent_state *state,
     struct response_stream stream;
     if (state->auth_state != AUTH_SIGNED_IN) {
         snprintf(error, error_size, "%s",
-                 "ChatGPT is not authenticated");
+                 "LLM provider is not configured");
         return -1;
     }
     if (le_voice_playback_begin_turn(&state->playback) < 0) {
@@ -489,12 +548,14 @@ static int generate_response(struct agent_state *state,
     }
     if (refresh_credentials(state, 0) < 0) {
         state->auth_state = AUTH_ERROR;
-        strcpy(state->auth_error, "ChatGPT token refresh failed");
+        strcpy(state->auth_error, "LLM credentials refresh failed");
         snprintf(error, error_size, "%s", state->auth_error);
         return -1;
     }
     memset(&stream, 0, sizeof(stream));
     stream.state = state;
+    stream.aggregate_tts = getenv("LE_AGENT_TTS_AGGREGATE") &&
+                           !strcmp(getenv("LE_AGENT_TTS_AGGREGATE"), "1");
     le_voice_reply_init(&stream.reply, enqueue_segment, &stream);
     pthread_mutex_lock(&state->metrics_mutex);
     state->turn_started_ms = latency_start_ms
@@ -522,6 +583,8 @@ static int generate_response(struct agent_state *state,
                 state->config.prompt, transcript, &request) == 0) {
             memset(&stream, 0, sizeof(stream));
             stream.state = state;
+            stream.aggregate_tts = getenv("LE_AGENT_TTS_AGGREGATE") &&
+                                   !strcmp(getenv("LE_AGENT_TTS_AGGREGATE"), "1");
             le_voice_reply_init(&stream.reply, enqueue_segment, &stream);
             if (le_llm_http_execute(
                     state->curl_path, &request, response_event,
@@ -543,6 +606,10 @@ static int generate_response(struct agent_state *state,
                  "reply playback queue is full");
         return -1;
     }
+    if (flush_aggregated_tts(&stream) < 0) {
+        snprintf(error, error_size, "%s", "reply playback queue is full");
+        return -1;
+    }
     if (stream.used + 1 > full_text_size) {
         snprintf(error, error_size, "%s",
                  "response text is too large");
@@ -553,6 +620,23 @@ static int generate_response(struct agent_state *state,
     ++state->completed_turns;
     pthread_mutex_unlock(&state->metrics_mutex);
     return 0;
+}
+
+static int response_asks_question(const char *text)
+{
+    size_t length;
+
+    if (!text)
+        return 0;
+    length = strlen(text);
+    while (length &&
+           (text[length - 1] == ' ' || text[length - 1] == '\t' ||
+            text[length - 1] == '\r' || text[length - 1] == '\n' ||
+            text[length - 1] == '"' || text[length - 1] == '\'' ||
+            text[length - 1] == ')' || text[length - 1] == ']' ||
+            text[length - 1] == '}'))
+        --length;
+    return length && text[length - 1] == '?';
 }
 
 static int command_respond(struct agent_state *state, const char *args,
@@ -594,27 +678,73 @@ static void voice_transcript(
     const struct le_voice_pipeline_turn *turn)
 {
     struct agent_state *state = context;
+    char input[LE_LLM_TEXT_MAX];
     char reply[LE_LLM_TEXT_MAX];
     char error[256];
+    int continuation;
+    int generated = 0;
 
     pthread_mutex_lock(&state->control_mutex);
     if (state->config.enabled &&
         state->auth_state == AUTH_SIGNED_IN) {
-        fprintf(stderr,
-                "agentd: transcript detection_sample=%llu "
-                "stt_audio_ms=%llu stt_processing_ms=%llu text=%s\n",
-                (unsigned long long)turn->detection_sample,
-                (unsigned long long)turn->stt_audio_ms,
-                (unsigned long long)turn->stt_processing_ms,
-                text);
+        continuation = turn->follow_up && state->follow_up_armed;
+        state->follow_up_armed = 0;
+        if (!continuation) {
+            state->follow_up_depth = 0;
+            state->previous_voice_user[0] = '\0';
+            state->previous_voice_reply[0] = '\0';
+        }
+        if (continuation &&
+            snprintf(
+                input, sizeof(input),
+                "Previous user: %s\nPrevious assistant: %s\n"
+                "User follow-up: %s",
+                state->previous_voice_user,
+                state->previous_voice_reply, text) >=
+                (int)sizeof(input))
+            continuation = 0;
+        if (!continuation)
+            snprintf(input, sizeof(input), "%s", text);
+        le_log_info(
+            "agentd: transcript follow_up=%s detection_sample=%llu "
+            "audio_ms=%llu processing_ms=%llu total_ms=%llu text_chars=%lu",
+            turn->follow_up ? "true" : "false",
+            (unsigned long long)turn->detection_sample,
+            (unsigned long long)turn->stt_audio_ms,
+            (unsigned long long)turn->stt_processing_ms,
+            (unsigned long long)turn->stt_total_ms,
+            (unsigned long)strlen(text));
         if (generate_response(
-                state, text,
+                state, input,
                 turn->endpoint && turn->transcript_received_ms >= 500
                     ? turn->transcript_received_ms - 500 : 0,
                 reply, sizeof(reply),
                 error, sizeof(error)) < 0)
-            fprintf(stderr, "agentd: voice response failed: %s\n",
-                    error);
+            le_log_warn("agentd: voice response failed: %s", error);
+        else
+            generated = 1;
+        if (generated) {
+            snprintf(state->previous_voice_user,
+                     sizeof(state->previous_voice_user), "%.*s",
+                     (int)sizeof(state->previous_voice_user) - 1, text);
+            snprintf(state->previous_voice_reply,
+                     sizeof(state->previous_voice_reply), "%.*s",
+                     (int)sizeof(state->previous_voice_reply) - 1, reply);
+            if (response_asks_question(reply) &&
+                state->follow_up_depth < FOLLOW_UP_MAX_DEPTH &&
+                le_voice_playback_wait_idle(
+                    &state->playback,
+                    FOLLOW_UP_PLAYBACK_WAIT_MS) == 0) {
+                ++state->follow_up_depth;
+                state->follow_up_armed = 1;
+                if (le_voice_pipeline_request_follow_up(
+                        state->voice_pipeline) < 0)
+                    state->follow_up_armed = 0;
+            } else {
+                state->follow_up_armed = 0;
+                state->follow_up_depth = 0;
+            }
+        }
     }
     pthread_mutex_unlock(&state->control_mutex);
 }
@@ -624,6 +754,10 @@ static int command_auth_start(struct agent_state *state, int fd,
 {
     struct le_llm_http_request request;
     struct le_llm_http_response response;
+
+    if (!state->provider->subscription_auth ||
+        !state->provider->auth_start_request)
+        return respond(fd, id, 0, "provider does not use device login");
 
     memset(&state->auth, 0, sizeof(state->auth));
     state->auth_error[0] = '\0';
@@ -648,6 +782,10 @@ static int command_auth_poll(struct agent_state *state, int fd,
     struct le_llm_http_response response;
     time_t now = time(NULL);
     int poll_result;
+
+    if (!state->provider->subscription_auth ||
+        !state->provider->auth_poll_request)
+        return respond(fd, id, 0, "provider does not use device login");
 
     if (state->auth_state != AUTH_WAITING)
         return command_status(state, fd, id);
@@ -715,8 +853,11 @@ static int command_configure(struct agent_state *state, const char *args,
     if (parsed > 0)
         updated.enabled = boolean;
     parsed = json_get_string(args, "provider", value, sizeof(value));
-    if (parsed < 0 || (parsed > 0 && strcmp(value, "openai-codex")))
+    if (parsed < 0 || (parsed > 0 &&
+        strcmp(value, "openai-codex") && strcmp(value, "openai-compatible")))
         return respond(fd, id, 0, "unsupported provider");
+    if (parsed > 0)
+        strcpy(updated.provider, value);
     parsed = json_get_string(args, "model", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && (!value[0] || strlen(value) >=
                                      sizeof(updated.model))))
@@ -729,9 +870,37 @@ static int command_configure(struct agent_state *state, const char *args,
         return respond(fd, id, 0, "invalid prompt");
     if (parsed > 0)
         strcpy(updated.prompt, value);
+    parsed = json_get_string(args, "base_url", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 &&
+        (!endpoint_valid(value) || strlen(value) >= sizeof(state->credentials.base_url))))
+        return respond(fd, id, 0, "invalid base_url");
+    if (parsed > 0)
+        strcpy(state->credentials.base_url, value);
+    parsed = json_get_string(args, "api_key", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 && strlen(value) >= sizeof(state->credentials.api_key)))
+        return respond(fd, id, 0, "invalid api_key");
+    if (parsed > 0) {
+        memset(state->credentials.api_key, 0,
+               sizeof(state->credentials.api_key));
+        strcpy(state->credentials.api_key, value);
+    }
     state->config = updated;
+    state->provider = le_llm_provider_by_id(state->config.provider);
+    if (!state->provider)
+        return respond(fd, id, 0, "unsupported provider");
     if (save_config(state) < 0)
         return respond(fd, id, 0, "unable to save agent configuration");
+    if (!strcmp(state->config.provider, "openai-compatible")) {
+        if (state->credentials.base_url[0] &&
+            le_llm_credentials_save(state->credentials_path,
+                                     &state->credentials) < 0)
+            return respond(fd, id, 0, "unable to save local LLM credentials");
+        state->auth_state = state->credentials.base_url[0]
+            ? AUTH_SIGNED_IN : AUTH_SIGNED_OUT;
+    } else {
+        state->auth_state = state->credentials.access_token[0]
+            ? AUTH_SIGNED_IN : AUTH_SIGNED_OUT;
+    }
     return command_status(state, fd, id);
 }
 
@@ -826,6 +995,7 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    le_log_init("agentd", argc, argv);
     poll_minimum = getenv("LE_AGENT_AUTH_POLL_MIN_SECONDS");
     if (poll_minimum) {
         char *end;
@@ -834,10 +1004,10 @@ int main(int argc, char **argv)
         if (!*end && value <= 30)
             state.poll_minimum = (unsigned int)value;
     }
-    state.provider = le_llm_provider_by_id("openai-codex");
+    load_config(&state);
+    state.provider = le_llm_provider_by_id(state.config.provider);
     if (!state.provider)
         return 1;
-    load_config(&state);
     if (le_llm_credentials_load(state.credentials_path,
                                 &state.credentials) == 0)
         state.auth_state = AUTH_SIGNED_IN;
@@ -857,7 +1027,7 @@ int main(int argc, char **argv)
         goto fail_mutex;
     listener = le_adapter_listen(state.socket_path);
     if (listener < 0) {
-        perror("agentd: listen");
+        le_log_perr("agentd: listen");
         le_voice_playback_stop(&state.playback);
         goto fail_mutex;
     }
@@ -870,8 +1040,8 @@ int main(int argc, char **argv)
         le_voice_playback_stop(&state.playback);
         goto fail_mutex;
     }
-    fprintf(stderr, "agentd: ready socket=%s provider=%s\n",
-            state.socket_path, state.provider->id);
+    le_log_info("agentd: ready socket=%s provider=%s",
+                state.socket_path, state.provider->id);
     while (running) {
         int client_fd = le_adapter_accept(listener);
 

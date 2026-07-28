@@ -75,6 +75,33 @@ curl -fsS -X POST "$URL/api/v1/bluetooth/scan" -H "$CSRF" -H 'Content-Type: appl
 curl -fsS -X POST "$URL/api/v1/bluetooth/pair" -H "$CSRF" -H 'Content-Type: application/json' --data '{"address":"10:20:30:40:50:60","type":0,"io_capability":3}' | jq -e '.ok and (.data.known_devices | length) == 1' >/dev/null
 curl -fsS -X POST "$URL/api/v1/bluetooth/unpair" -H "$CSRF" -H 'Content-Type: application/json' --data '{"address":"10:20:30:40:50:60","type":0}' | jq -e '.ok and (.data.known_devices | length) == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/network/wifi/scan")" 'LibreNet-5G'
+curl -fsS "$URL/api/v1/voice-pipeline" | jq -e \
+    '.ok and .data.mode == "local" and
+     .data.stt.engine == "sherpa" and
+     .data.tts.engine == "sherpa" and
+     .data.wake_word.processing == "on-device"' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"mode":"custom","stt_wyoming_uri":"tcp://127.0.0.1:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://127.0.0.1:10200","tts_voice":"en_GB-alan-medium"}' |
+    jq -e '.ok and .data.mode == "custom" and
+           .data.stt.engine == "wyoming" and
+           .data.tts.engine == "wyoming"' >/dev/null
+curl -fsS "$URL/api/v1/privacy" |
+    jq -e '.ok and .data.local_only == false' >/dev/null
+code=$(curl -sS -o /tmp/le-local-only-conflict.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/privacy" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"local_only":true}')
+[ "$code" = 409 ]
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"mode":"local"}' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"local_only":true}' |
+    jq -e '.ok and .data.local_only == true' >/dev/null
+code=$(curl -sS -o /tmp/le-invalid-pipeline.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"mode":"custom","stt_wyoming_uri":"http://invalid","tts_wyoming_uri":"tcp://127.0.0.1:10200","stt_model":"whisper-small","tts_voice":"en_GB-alan-medium"}')
+[ "$code" = 400 ]
 expect "$(curl -fsS "$URL/api/v1/system")" '"ntp":false'
 expect "$(curl -fsS "$URL/api/v1/system")" '"clock_valid":true'
 expect "$(curl -fsS "$URL/api/v1/system")" '"ntp_state":"unavailable"'

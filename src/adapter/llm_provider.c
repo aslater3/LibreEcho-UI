@@ -3,6 +3,7 @@
 #include <string.h>
 
 const struct le_llm_provider *le_llm_codex_provider(void);
+const struct le_llm_provider *le_llm_openai_provider(void);
 
 const struct le_llm_provider *le_llm_provider_by_id(const char *id)
 {
@@ -11,6 +12,9 @@ const struct le_llm_provider *le_llm_provider_by_id(const char *id)
     if (!id)
         return NULL;
     provider = le_llm_codex_provider();
+    if (provider && !strcmp(provider->id, id))
+        return provider;
+    provider = le_llm_openai_provider();
     return provider && !strcmp(provider->id, id) ? provider : NULL;
 }
 

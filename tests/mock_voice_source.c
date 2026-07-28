@@ -138,6 +138,27 @@ int main(int argc, char **argv)
             return 1;
         nanosleep(&frame_delay, NULL);
     }
+    for (; frame < 94; ++frame) {
+        if (le_voice_stream_write_frame(
+                audio, (uint64_t)frame * 160U,
+                silence, 160, 0) < 0)
+            return 1;
+        nanosleep(&frame_delay, NULL);
+    }
+    for (; frame < 114; ++frame) {
+        if (le_voice_stream_write_frame(
+                audio, (uint64_t)frame * 160U,
+                speech, 160, 0) < 0)
+            return 1;
+        nanosleep(&frame_delay, NULL);
+    }
+    for (; frame < 134; ++frame) {
+        if (le_voice_stream_write_frame(
+                audio, (uint64_t)frame * 160U,
+                silence, 160, 0) < 0)
+            return 1;
+        nanosleep(&frame_delay, NULL);
+    }
     nanosleep(&frame_delay, NULL);
     close(audio);
     close(wake);

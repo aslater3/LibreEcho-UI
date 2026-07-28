@@ -103,10 +103,32 @@ int le_llm_credentials_load(const char *path,
         return -1;
     json[count] = '\0';
     le_llm_credentials_clear(credentials);
-    if (read_token(json, "access_token", credentials->access_token,
-                   sizeof(credentials->access_token)) < 0 ||
-        read_token(json, "refresh_token", credentials->refresh_token,
-                   sizeof(credentials->refresh_token)) < 0)
+    {
+        int access = read_token(json, "access_token", credentials->access_token,
+                                sizeof(credentials->access_token));
+        int refresh = read_token(json, "refresh_token", credentials->refresh_token,
+                                 sizeof(credentials->refresh_token));
+        int api = read_token(json, "api_key", credentials->api_key,
+                             sizeof(credentials->api_key));
+
+        if ((access < 0 && api < 0) || (access == 0 && refresh < 0))
+            goto fail;
+    }
+    {
+        const char *base = value_for(json, "base_url");
+        const char *end;
+        size_t length;
+
+        if (base && (end = strchr(base, '"')) != NULL) {
+            length = (size_t)(end - base);
+            if (length >= sizeof(credentials->base_url))
+                goto fail;
+            memcpy(credentials->base_url, base, length);
+            credentials->base_url[length] = '\0';
+        }
+    }
+    if (!credentials->api_key[0] && !credentials->base_url[0] &&
+        (!credentials->access_token[0] || !credentials->refresh_token[0]))
         goto fail;
     {
         const char *expiry = strstr(json, "\"expires_at\":");
@@ -153,18 +175,22 @@ int le_llm_credentials_save(const char *path,
     int result = -1;
 
     if (!path || !credentials ||
-        !token_safe(credentials->access_token) ||
-        !token_safe(credentials->refresh_token) ||
+        (!credentials->api_key[0] &&
+         (!token_safe(credentials->access_token) ||
+          !token_safe(credentials->refresh_token))) ||
+        (credentials->api_key[0] && !token_safe(credentials->api_key)) ||
+        (credentials->base_url[0] && !token_safe(credentials->base_url)) ||
         snprintf(temporary, sizeof(temporary), "%s.new", path) >=
             (int)sizeof(temporary))
         return -1;
     length = snprintf(
         json, sizeof(json),
-        "{\"version\":1,\"access_token\":\"%s\","
-        "\"refresh_token\":\"%s\",\"account_id\":\"%s\","
+        "{\"version\":2,\"access_token\":\"%s\","
+        "\"refresh_token\":\"%s\",\"api_key\":\"%s\","
+        "\"base_url\":\"%s\",\"account_id\":\"%s\","
         "\"expires_at\":%llu}\n",
         credentials->access_token, credentials->refresh_token,
-        credentials->account_id,
+        credentials->api_key, credentials->base_url, credentials->account_id,
         (unsigned long long)credentials->expires_at);
     if (length <= 0 || length >= (int)sizeof(json))
         return -1;
