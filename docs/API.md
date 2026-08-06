@@ -18,6 +18,17 @@ in-memory bearer session. `GET /api/v1/auth` checks the current session and
 salt and SHA-256 password digest; the users file is never returned by the API.
 Failed user logins are rate limited after five attempts in a 60-second window.
 
+When the users file is absent, the API reports `authentication: bootstrap-required`
+and the root page becomes the first-run account setup page. `POST
+/api/v1/auth/bootstrap` accepts `username`, `password`, and `password_confirm` and
+creates the first account atomically. The endpoint is one-shot: once it succeeds,
+normal authentication is immediately required and the response includes a session
+token for the new account.
+
+Authenticated administrators can manage local accounts with `GET /api/v1/auth/users`,
+`POST /api/v1/auth/users`, and `DELETE /api/v1/auth/users/{username}`. The last
+remaining user cannot be removed. Passwords are never returned by these endpoints.
+
 The development image may explicitly use `--allow-insecure-lan`, but that only
 relaxes the Origin check. It does not disable configured user or bearer-token
 authentication.

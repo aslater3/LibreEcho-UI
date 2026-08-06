@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define LE_AUTH_SESSION_SECONDS (12 * 60 * 60)
@@ -346,3 +347,5 @@ void le_auth_logout(struct le_auth_db *db, const char *token)
             db->sessions[i].token[0] = '\0';
     }
 }
+
+#include "auth_user_management.inc"

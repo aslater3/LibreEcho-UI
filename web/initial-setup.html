@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Initial setup · LibreEcho</title>
+  <link rel="stylesheet" href="/css/setup.css?rev=2">
+  <link rel="stylesheet" href="/css/auth.css?rev=1">
+</head>
+<body>
+  <main class="setup-shell account-setup">
+    <section class="setup-card" aria-labelledby="setup-title">
+      <div class="setup-brand"><span class="setup-mark">◉</span><span>LibreEcho</span></div>
+      <p class="setup-kicker">FIRST-RUN SECURITY</p>
+      <h1 id="setup-title">Create your first local account</h1>
+      <p class="setup-lede">No users exist on this device yet. Create an account to protect the control centre and manage additional local users.</p>
+      <div id="setup-error" class="setup-error" role="alert" hidden></div>
+      <form id="account-form" novalidate>
+        <label class="setup-field"><span>Username</span><input id="username" name="username" autocomplete="username" required maxlength="31" pattern="[A-Za-z0-9._-]+"><small>Letters, numbers, dots, underscores, and hyphens.</small></label>
+        <label class="setup-field"><span>Password</span><input id="password" name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128"><small>Use at least 8 characters.</small></label>
+        <label class="setup-field"><span>Confirm password</span><input id="password-confirm" name="password-confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+        <button class="setup-submit" type="submit">Create account and continue</button>
+      </form>
+      <p class="setup-note">Passwords are stored only as salted hashes on the device. This one-time bootstrap endpoint closes as soon as the first account is created.</p>
+    </section>
+  </main>
+  <script src="/js/initial-setup.js"></script>
+</body>
+</html>
