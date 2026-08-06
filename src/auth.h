@@ -36,5 +36,9 @@ int le_auth_login(struct le_auth_db *db, const char *username,
 int le_auth_session(struct le_auth_db *db, const char *token,
                     char *username, size_t username_size);
 void le_auth_logout(struct le_auth_db *db, const char *token);
+int le_auth_add_user(struct le_auth_db *db, const char *path,
+                     const char *username, const char *password);
+int le_auth_remove_user(struct le_auth_db *db, const char *path,
+                        const char *username);
 
 #endif

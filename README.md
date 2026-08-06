@@ -205,8 +205,7 @@ Do not add undocumented ioctl numbers. Each integration belongs behind `backend.
 
 ## Known limitations
 
-- Authentication/token provisioning is an abstraction only; loopback is therefore the safe default.
-- TLS is expected to terminate at a small trusted LAN proxy if required; no TLS library is bundled.
+- Local user authentication, first-run account bootstrap and user management are implemented; TLS is expected to terminate at a small trusted LAN proxy if required.
 - SSE is currently a bounded one-shot snapshot and the UI uses five-second overview polling.
 - Privacy, integration, button and OTA panels expose the API model, but some settings are not yet persisted independently.
 - Static IPv4 configuration, Ethernet, SSH control, restore/upload, and diagnostic bundle streaming need their future adapters.
