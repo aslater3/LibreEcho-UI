@@ -21,6 +21,13 @@ assert 'set_controller_setting(context, MGMT_OP_SET_CONNECTABLE, 1)' in block, (
     'enabling Bluetooth must set HCI_CONNECTABLE before an inbound '
     'connection request'
 )
+assert 'saved_errno == EALREADY' in source, (
+    'an already-up HCI controller must not be reported as a failed '
+    'saved enablement'
+)
+assert 'record_mgmt_status(context, expected, payload[2])' in source
+assert 'record_mgmt_io(context, opcode, "response", ETIMEDOUT)' in source
+assert 'mgmt_status_name(payload[2])' in source
 identity = source[source.index('#define LIBREECHO_BT_MAJOR_CLASS'):source.index('struct sockaddr_hci')]
 assert '#define LIBREECHO_BT_MINOR_CLASS 0x14' in identity, (
     'LibreEcho audio output must advertise the loudspeaker class'
