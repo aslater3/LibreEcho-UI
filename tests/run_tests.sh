@@ -6,6 +6,7 @@ CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
+sh tests/test_bluetooth_pairing_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 make build/test-wake-led
