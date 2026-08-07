@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>LibreEcho Control Centre</title>
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="/css/app.css?rev=18" />
+<link rel="stylesheet" href="/css/app.css?rev=19" />
 </head>
 <body>
 <svg class="sprite" aria-hidden="true">
@@ -37,17 +37,6 @@
   </main>
 </div>
 <div class="toast" id="toast">Saved</div>
-<dialog id="auth-dialog" aria-labelledby="auth-title">
-  <form id="auth-form" class="auth-form">
-    <h2 id="auth-title">Sign in to LibreEcho</h2>
-    <p id="auth-copy" class="muted">Use a configured local account to continue.</p>
-    <label class="field" id="auth-username-row"><span>Username</span><input id="auth-username" name="username" autocomplete="username" required></label>
-    <label class="field" id="auth-password-row"><span>Password</span><input id="auth-password" name="password" type="password" autocomplete="current-password" required></label>
-    <label class="field" id="auth-token-row" hidden><span>API token</span><input id="auth-token" name="token" autocomplete="off"></label>
-    <p id="auth-error" class="error-text" role="alert" hidden></p>
-    <div class="auth-actions"><button id="auth-cancel" class="secondary-btn" type="button">Cancel</button><button class="primary-btn" type="submit">Sign in</button></div>
-  </form>
-</dialog>
 <script src="/js/bluetooth.js?rev=1"></script>
 <script src="/js/app.js?rev=18"></script>
 <script src="/js/integrations-ui.js?rev=2"></script>

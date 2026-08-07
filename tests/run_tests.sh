@@ -79,6 +79,16 @@ LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_USERS=./build/test-users sh tests/test_
 kill "$pid"
 wait "$pid" 2>/dev/null || true
 pid=0
+printf '{}\n' >./build/bootstrap-config.json
+rm -f ./build/bootstrap-users ./build/test-bootstrap.log
+./build/libreecho-web --backend mock --config ./build/bootstrap-config.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --users-file ./build/bootstrap-users >./build/test-bootstrap.log 2>&1 &
+pid=$!
+sleep 1
+LIBREECHO_TEST_URL="$URL" sh tests/test_auth_bootstrap.sh
+kill "$pid"
+wait "$pid" 2>/dev/null || true
+pid=0
+pid=0
 ./build/libreecho-web --backend mock --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 >./build/test-restart.log 2>&1 &
 pid=$!
 sleep 1

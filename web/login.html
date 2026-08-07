@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sign in · LibreEcho</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/auth.css">
+</head>
+<body>
+  <main class="auth-shell">
+    <section class="auth-card" aria-labelledby="login-title">
+      <div class="auth-brand"><img src="/assets/mark.svg" alt=""><span><em>Libre</em>Echo</span></div>
+      <p class="auth-kicker">CONTROL CENTRE</p>
+      <h1 id="login-title">Sign in to LibreEcho</h1>
+      <p id="login-lede" class="auth-lede">Use a local account to continue.</p>
+      <form id="login-form" novalidate>
+        <label class="auth-field" id="login-username-row"><span>Username</span><input id="login-username" name="username" autocomplete="username" required maxlength="31"></label>
+        <label class="auth-field" id="login-password-row"><span>Password</span><input id="login-password" name="password" type="password" autocomplete="current-password" required minlength="8"></label>
+        <label class="auth-field" id="login-token-row" hidden><span>API token</span><input id="login-token" name="token" autocomplete="off"></label>
+        <p id="login-error" class="auth-error" role="alert" hidden></p>
+        <button class="auth-submit" type="submit">Sign in</button>
+      </form>
+      <p class="auth-note">Your session is kept only in this browser tab. Sign out clears it completely.</p>
+    </section>
+  </main>
+  <script src="/js/login.js"></script>
+</body>
+</html>

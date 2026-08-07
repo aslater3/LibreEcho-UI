@@ -118,6 +118,7 @@ return 0;
 static int destructive_path(const char*path){return !strcmp(path,"/api/v1/system/reboot")||!strcmp(path,"/api/v1/system/shutdown")||!strcmp(path,"/api/v1/system/factory-reset");}
 static void process(struct client*c,const struct http_options*o,struct api_context*api){char*end=strstr(c->buf,"\r\n\r\n"),*body,*cl;
 size_t headers,body_len=0,content_len=0;
+const char *page_path;
 struct api_request q;
 struct api_response r;
 static time_t last_destructive=0;
@@ -153,7 +154,7 @@ if(r.status>=200&&r.status<300&&!strcmp(q.method,"PUT")&&(!strcmp(q.path,"/api/v
 response(c->fd,r.status,r.type,r.body,r.length);
 if(body_len)memset(body,0,body_len);
 }else if(strcmp(q.method,"GET")&&strcmp(q.method,"HEAD"))response(c->fd,405,"text/plain","Method not allowed",18);
-else if(serve_file(c->fd,o,!api->setup_completed&&!strcmp(q.path,"/")?"/setup.html":q.path))response(c->fd,404,"text/plain","Not found",9);
+else {page_path=q.path;if(!strcmp(q.path,"/login"))page_path="/login.html";else if(!strcmp(q.path,"/initial-setup"))page_path="/initial-setup.html";else if(!api->setup_completed)page_path="/setup.html";else if(api_bootstrap_required(api)&&!strcmp(q.path,"/"))page_path="/initial-setup.html";if(serve_file(c->fd,o,page_path))response(c->fd,404,"text/plain","Not found",9);}
 
 done:close(c->fd);
 c->fd=-1;

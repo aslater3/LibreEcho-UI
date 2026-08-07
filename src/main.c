@@ -61,7 +61,7 @@ if(o.port<1||o.port>65535){fprintf(stderr,"Invalid port\n");
 return 2;
 }if(token_path&&read_token(token_path,token,sizeof(token))){fprintf(stderr,"Authentication token file must be readable and contain at least 16 characters\n");return 2;}
 if(strcmp(o.listen_host,"127.0.0.1")&&strcmp(o.listen_host,"::1")&&!token[0]&&!users_path&&!insecure_lan){fprintf(stderr,"Refusing unauthenticated LAN bind; use --auth-token-file, --users-file or explicit --allow-insecure-lan\n");return 2;}
-if(users_path&&!valid_users_path(users_path)){fprintf(stderr,"Users file must be a regular private file: %s\n",users_path);return 2;}
+if(users_path&&access(users_path,F_OK)==0&&!valid_users_path(users_path)){fprintf(stderr,"Users file must be a regular private file: %s\n",users_path);return 2;}
 if(le_backend_init(&b,mode,mock,cfg,seed)!=LE_OK){fprintf(stderr,"Unable to initialise %s backend\n",mode);
 return 1;
 }if(random_csrf(csrf,sizeof(csrf))){fprintf(stderr,"Unable to obtain secure CSRF token\n");le_backend_destroy(b);return 2;}if(api_init(&api,b,dev,insecure_lan,token,allowed_origin,csrf,cfg,users_path)){fprintf(stderr,"Unable to initialise authentication\n");le_backend_destroy(b);return 2;}if(cfg&&access(cfg,F_OK)==0)api.setup_completed=1;
