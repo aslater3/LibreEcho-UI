@@ -12,6 +12,13 @@ grep -Fq 'ARGS="$ARGS --enable-on-start"' "$script"
 grep -Fq 'integrations & 16' "$script"
 grep -Fq 'LOG_MAX_BYTES=${LOG_MAX_BYTES:-2097152}' "$script"
 grep -Fq 'tail -c "$LOG_KEEP_BYTES" "$LOGFILE"' "$script"
+grep -Fq 'AVAHI_SERVICES_SOURCE=${AVAHI_SERVICES_SOURCE:-/data/libreecho/features/airplay2/avahi-services}' "$script"
+grep -Fq '"$RUNTIME_ROOT/run/avahi-daemon"' "$script"
+grep -Fq '"$RUNTIME_ROOT/var/run/avahi-daemon"' "$script"
+grep -Fq 'prepare_avahi_runtime' "$script"
+grep -Fq '"$RUNTIME_ROOT/etc/avahi/services"' "$script"
+grep -Fq 'libreecho-airplay-avahi' "$script"
+grep -Fq 'umount "$RUNTIME_ROOT/etc/avahi"' "$script"
 grep -Fq '"--configfile", ctx->config_path' src/adapter/airplayd.c
 ! grep -Fq '"-v"' src/adapter/airplayd.c
 ! grep -Fq '"-vvv"' src/adapter/airplayd.c
