@@ -91,9 +91,9 @@ Returns device information.
   "ok": true,
   "data": {
     "name": "LibreEcho",
-    "hostname": "LibreEcho-0316",
+    "hostname": "libreecho",
     "model": "LibreEcho device",
-    "serial": "G2A0RF0485020316",
+    "serial": "unavailable",
     "os_version": "LibreEcho OS",
     "kernel": "3.18.140",
     "hardware_revision": "adapter pending",
@@ -103,11 +103,10 @@ Returns device information.
 }
 ```
 
-On MT8163 devices, the boot image derives the first-boot hostname from the
-immutable IDME serial as `LibreEcho-<last-four>`. A hostname selected by the
-user is stored in `/data/libreecho/config/web-config.json` and takes precedence
-on later boots. The Linux backend reports the audited serial from
-`/proc/idme/serial`.
+On supported devices, the first-boot hostname is platform-defined and can be
+changed by the user. A selected hostname is stored in
+`/data/libreecho/config/web-config.json` and takes precedence on later boots.
+Device-specific identifiers are not included in public API examples.
 
 ### Audio
 

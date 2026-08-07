@@ -138,16 +138,11 @@ Development images report the update adapter as unavailable.
 make test
 ```
 
-The suite covers JSON/config units, API smoke behavior, malformed JSON, 16 KiB limits, CSRF, destructive confirmation, mock faults and delayed connections, secret redaction, restrictive config mode, restart persistence, Linux unsupported operations, and idle RSS. No Echo hardware is needed. See `tests/browser-checklist.md` for the responsive/accessibility smoke pass.
+The suite covers JSON/config units, API smoke behavior, malformed JSON, 16 KiB limits, CSRF, destructive confirmation, mock faults and delayed connections, secret redaction, restrictive config mode, restart persistence, Linux unsupported operations, and idle RSS. No hardware is required. See `tests/browser-checklist.md` for the responsive/accessibility smoke pass.
 
-Latest measurements on the macOS ARM64 development host (19 July 2026):
-
-- Normal daemon binary: 73,184 bytes.
-- Size-optimised daemon binary: 73,072 bytes.
-- Idle RSS with mock backend: 1,680 KiB.
-- Complete uncompressed frontend: about 148 KiB (including the 99 KiB device image).
-
-Host results are indicative; remeasure on the final musl/uClibc target with `size`, `/proc/<pid>/status`, and representative LAN clients.
+Binary sizes and runtime measurements are build- and target-dependent; measure
+them in the CI or release environment rather than treating historical local
+measurements as release claims.
 
 ## Repository tree
 
@@ -210,7 +205,6 @@ Do not add undocumented ioctl numbers. Each integration belongs behind `backend.
 - SSE is currently a bounded one-shot snapshot and the UI uses five-second overview polling.
 - Privacy, integration, button and OTA panels expose the API model, but some settings are not yet persisted independently.
 - Static IPv4 configuration, Ethernet, SSH control, restore/upload, and diagnostic bundle streaming need their future adapters.
-- Browser screenshots could not be captured in the development session used for these measurements because no controllable browser instance was available; use the supplied checklist when one is available.
 
 ## Security notes
 
