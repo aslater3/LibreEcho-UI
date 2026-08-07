@@ -131,7 +131,7 @@ if(sscanf(c->buf,"%7s %255s",q.method,q.path)!=2){response(c->fd,400,"text/plain
 goto done;
 }cl=header(c->buf,"Content-Length");
 if(cl)content_len=(size_t)strtoul(cl,0,10);
-if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));if(!content_len||content_len>LE_UPDATE_MAX){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;if(start_update_upload(c->fd,end+4,initial,content_len)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}c->fd=-1;c->used=0;return;}
+if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));if(!content_len||content_len>LE_UPDATE_MAX){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;if(start_update_upload(c->fd,end+4,initial,content_len)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}c->fd=-1;c->used=0;return;}
 if(content_len>LE_BODY_MAX){response(c->fd,413,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}",118);
 goto done;
 }if(c->used<headers+content_len)return;
@@ -140,6 +140,7 @@ body_len=content_len;
 q.body=body;
 q.body_len=body_len;
 body[body_len]=0;
+copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));
 copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));
 copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));
 copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));
