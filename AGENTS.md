@@ -6,7 +6,8 @@ Read `docs/ARCHITECTURE.md` (system design), `docs/API.md` (HTTP API reference),
 
 ## Build and test
 
-- C99 only (`-std=c99`), POSIX 200809L. No new dependencies: no language runtime, package manager, database, or container.
+- The core daemon and its tests are C99 only (`-std=c99`), POSIX 200809L. No new dependencies: no language runtime, package manager, database, or container.
+- Exception: the sherpa/onnx inference adapters — `src/adapter/stt_engine_sherpa.cpp`, `src/adapter/tts_engine_sherpa.cpp`, and `src/adapter/wake_engine_onnx.cpp` — are deliberately C++17 (`Makefile: -std=c++17`). Do not flag C++ usage there or try to convert them to C99; the rest of `src/adapter/` stays C99.
 - Build: `make` — full suite: `make test` (clean build + `tests/run_tests.sh`).
 - Workflow parity: CI also runs `node --check web/js/app.js` and `jq -e . web/openapi.json`; keep both valid when touching them.
 - Every API or behavioral change needs a test in `tests/` wired into `tests/run_tests.sh`.
