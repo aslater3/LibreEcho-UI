@@ -12,6 +12,7 @@ grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 make build/test-wake-led
 sh tests/test_microphone_fanout_contract.sh
+sh tests/test_live_readonly_audit_contract.sh
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 sh tests/test_airplay_led_bridge.sh
