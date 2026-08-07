@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -188,18 +189,27 @@ static int write_status(const char *path, const char *state,
                         long last_sync_epoch, const char *config_source,
                         const char *servers)
 {
-    char temporary[600], body[1600];
+    char temporary[600], body[1800];
+    const char *detail = getenv("LIBREECHO_TIME_ERROR");
+    const char *exit_status = getenv("LIBREECHO_TIME_NTP_EXIT");
     int fd, n;
     ssize_t written;
+
+    if (!detail)
+        detail = "";
+    if (!exit_status)
+        exit_status = "";
 
     if (ensure_parent(path))
         return -1;
     n = snprintf(body, sizeof(body),
                  "state=%s\nsource=%s\nsynchronized=%d\nclock_valid=%d\n"
                  "rtc_available=%d\nrtc_persisted=%d\nlast_sync_epoch=%ld\n"
-                 "config_source=%s\nservers=%s\n",
+                 "config_source=%s\nservers=%s\n"
+                 "ntpd_exit_status=%s\nlast_error=%s\n",
                  state, source, synchronized, clock_valid(), rtc_available,
-                 rtc_persisted, last_sync_epoch, config_source, servers);
+                 rtc_persisted, last_sync_epoch, config_source, servers,
+                 exit_status, detail);
     if (n < 0 || (size_t)n >= sizeof(body))
         return -1;
     n = snprintf(temporary, sizeof(temporary), "%s.tmp.%ld",
@@ -278,6 +288,10 @@ static int sync_hook(const struct options *options)
                                     options->rtc_sysfs_dev);
     rtc_persisted = rtc_available &&
                     run_hwclock(options->hwclock, options->rtc_device);
+    if (rtc_persisted)
+        (void)unsetenv("LIBREECHO_TIME_ERROR");
+    else
+        (void)setenv("LIBREECHO_TIME_ERROR", "RTC persistence failed", 1);
     if (write_status(options->status, "synchronized", "ntp", 1,
                      rtc_available, rtc_persisted, now,
                      config_source ? config_source : "image",
@@ -289,12 +303,16 @@ static int sync_hook(const struct options *options)
 }
 
 static pid_t start_ntpd(const struct options *options,
-                        char peers[MAX_PEERS][MAX_PEER_LEN + 1], int count)
+                        char peers[MAX_PEERS][MAX_PEER_LEN + 1], int count,
+                        int *output_fd)
 {
     char *arguments[6 + MAX_PEERS * 2 + 1];
+    int pipe_fds[2];
     int i, n = 0;
     pid_t pid;
 
+    if (!output_fd || pipe(pipe_fds) < 0)
+        return -1;
     arguments[n++] = (char *)options->ntpd;
     arguments[n++] = "-n";
     arguments[n++] = "-N";
@@ -305,11 +323,72 @@ static pid_t start_ntpd(const struct options *options,
     }
     arguments[n] = NULL;
     pid = fork();
+    if (pid < 0) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return -1;
+    }
     if (!pid) {
+        close(pipe_fds[0]);
+        if (dup2(pipe_fds[1], STDOUT_FILENO) < 0 ||
+            dup2(pipe_fds[1], STDERR_FILENO) < 0)
+            _exit(127);
+        close(pipe_fds[1]);
         execv(options->ntpd, arguments);
         _exit(127);
     }
+    close(pipe_fds[1]);
+    if (fcntl(pipe_fds[0], F_SETFL, fcntl(pipe_fds[0], F_GETFL, 0) | O_NONBLOCK) < 0) {
+        close(pipe_fds[0]);
+        kill(pid, SIGTERM);
+        (void)waitpid(pid, NULL, 0);
+        return -1;
+    }
+    *output_fd = pipe_fds[0];
     return pid;
+}
+
+static void drain_ntpd_output(int fd, char *output, size_t size)
+{
+    char buffer[256];
+    ssize_t count;
+    size_t used;
+
+    if (fd < 0 || !output || size < 2)
+        return;
+    used = strlen(output);
+    while ((count = read(fd, buffer, sizeof(buffer))) > 0) {
+        size_t i;
+        for (i = 0; i < (size_t)count && used + 1 < size; ++i) {
+            unsigned char c = (unsigned char)buffer[i];
+            if (c == '\n' || c == '\r' || c == '\t')
+                c = ' ';
+            if (c >= 32 && c < 127)
+                output[used++] = (char)c;
+        }
+        output[used] = '\0';
+    }
+}
+
+static int wait_ntpd(pid_t pid, int output_fd, int *status,
+                     char *output, size_t output_size)
+{
+    int result;
+
+    if (output && output_size)
+        output[0] = '\0';
+    for (;;) {
+        drain_ntpd_output(output_fd, output, output_size);
+        result = waitpid(pid, status, WNOHANG);
+        if (result == pid)
+            break;
+        if (result < 0 && errno != EINTR)
+            break;
+        (void)poll(NULL, 0, 100);
+    }
+    drain_ntpd_output(output_fd, output, output_size);
+    close(output_fd);
+    return result == pid ? 0 : -1;
 }
 
 static void usage(const char *name)
@@ -381,8 +460,11 @@ int main(int argc, char **argv)
     char peers[MAX_PEERS][MAX_PEER_LEN + 1], servers[1100];
     const char *config_source = "image";
     int count, status, rtc_available;
+    int output_fd = -1;
+    int hook_result;
     pid_t pid;
     const char *environment;
+    char ntpd_error[512];
 
     le_log_init("timed", argc, argv);
     if ((environment = getenv("LIBREECHO_TIME_STATUS")))
@@ -432,15 +514,33 @@ int main(int argc, char **argv)
         (void)write_status(options.status, "synchronizing",
                            clock_valid() ? "rtc" : "unset", 0,
                            rtc_available, 0, 0, config_source, servers);
-        pid = start_ntpd(&options, peers, count);
+        pid = start_ntpd(&options, peers, count, &output_fd);
         if (pid < 0) {
             le_log_perr("could not start ntpd");
+            (void)setenv("LIBREECHO_TIME_NTP_EXIT", "start-failed", 1);
+            (void)setenv("LIBREECHO_TIME_ERROR", "could not start ntpd", 1);
             status = 1;
         } else {
             child_pid = pid;
-            while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-                ;
+            if (wait_ntpd(pid, output_fd, &status,
+                          ntpd_error, sizeof(ntpd_error)) < 0)
+                status = 1;
             child_pid = 0;
+            if (WIFEXITED(status)) {
+                char exit_text[16];
+                snprintf(exit_text, sizeof(exit_text), "%d", WEXITSTATUS(status));
+                (void)setenv("LIBREECHO_TIME_NTP_EXIT", exit_text, 1);
+            } else if (WIFSIGNALED(status)) {
+                char signal_text[32];
+                snprintf(signal_text, sizeof(signal_text), "signal-%d", WTERMSIG(status));
+                (void)setenv("LIBREECHO_TIME_NTP_EXIT", signal_text, 1);
+            } else {
+                (void)setenv("LIBREECHO_TIME_NTP_EXIT", "unknown", 1);
+            }
+            if (ntpd_error[0])
+                (void)setenv("LIBREECHO_TIME_ERROR", ntpd_error, 1);
+            else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+                (void)setenv("LIBREECHO_TIME_ERROR", "ntpd exited without diagnostics", 1);
         }
         if (stopping)
             break;
@@ -451,14 +551,26 @@ int main(int argc, char **argv)
              * successful synchronization result; persist the clock from
              * the parent after that result instead of relying on a callback.
              */
-            (void)sync_hook(&options);
+            (void)unsetenv("LIBREECHO_TIME_ERROR");
+            (void)setenv("LIBREECHO_TIME_NTP_EXIT", "0", 1);
+            hook_result = sync_hook(&options);
+            if (hook_result == 0) {
+                (void)unsetenv("LIBREECHO_TIME_ERROR");
+                if (options.one_shot)
+                    return 0;
+                sleep(660);
+                continue;
+            }
+            (void)setenv("LIBREECHO_TIME_ERROR", "RTC persistence failed", 1);
             if (options.one_shot)
-                return 0;
-            sleep(660);
-            continue;
+                return 1;
+        } else if (options.one_shot) {
+            int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+            (void)write_status(options.status, "failed",
+                               clock_valid() ? "rtc" : "unset", 0,
+                               rtc_available, 0, 0, config_source, servers);
+            return exit_code;
         }
-        if (options.one_shot)
-            return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
         le_log_warn("ntpd exited; retrying in %d seconds",
                     options.retry_seconds);
         (void)write_status(options.status, "retrying",

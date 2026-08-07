@@ -55,6 +55,28 @@ grep -qx 'config_source=image' "$root/time.status"
 grep -qx 'servers=time.cloudflare.com,time.nist.gov,ntp1.npl.co.uk,ntp2.npl.co.uk' "$root/time.status"
 grep -qx -- "-u -w -f $root/rtc0" "$root/hwclock.log"
 
+cat >"$root/ntpd-failure" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'simulated DNS failure' >&2
+exit 7
+EOF
+chmod 0755 "$root/ntpd-failure"
+if ./build/libreecho-timed \
+    --one-shot \
+    --ntpd "$root/ntpd-failure" \
+    --config "$root/ntp.conf" \
+    --persistent-config "$root/missing-persistent.conf" \
+    --status "$root/failure.status" \
+    --rtc-device "$root/rtc0" \
+    --rtc-sysfs-dev "$root/missing-sysfs-dev" \
+    --network-ready-file "$root/network-ready" >/dev/null 2>&1; then
+    echo "failed ntpd was accepted" >&2
+    exit 1
+fi
+grep -qx 'state=failed' "$root/failure.status"
+grep -qx 'ntpd_exit_status=7' "$root/failure.status"
+grep -qx 'last_error=simulated DNS failure ' "$root/failure.status"
+
 cat >"$root/persistent.conf" <<'EOF'
 server ntp.example.test
 EOF
