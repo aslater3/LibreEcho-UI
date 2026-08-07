@@ -31,7 +31,11 @@ line protocol:
   mapping has not been established.
 
 The baby-monitor HTTP endpoint is a consumer of `micd`; it does not launch or
-own `tinycap`.
+own `tinycap`. When `libreecho-waked` is running, the endpoint subscribes to its
+shared, already-captured mono stream instead of opening a second ALSA capture.
+That shared path returns calibrated `pcm_s16_le` at 16 kHz, one channel. The
+legacy raw `pcm_s24_3le` lane path remains available only when the wake service
+is absent.
 
 ## Calibration boundary
 
