@@ -9,7 +9,9 @@ code=$(curl -sS -o /tmp/le-user-status.out -w '%{http_code}' "$URL/api/v1/status
 [ "$code" = 401 ]
 code=$(curl -sS -o /tmp/le-user-bad-login.out -w '%{http_code}' -X POST "$URL/api/v1/auth/login" -H "$CSRF" -H 'Content-Type: application/json' --data '{"username":"test-user","password":"wrong-password"}')
 [ "$code" = 401 ]
-session=$(curl -fsS -X POST "$URL/api/v1/auth/login" -H "$CSRF" -H 'Content-Type: application/json' --data '{"username":"test-user","password":"test-password-123"}')
+code=$(curl -sS -o /tmp/le-user-origin.out -w '%{http_code}' -X POST "$URL/api/v1/auth/login" -H "$CSRF" -H 'Origin: http://evil.test' -H 'Content-Type: application/json' --data '{"username":"test-user","password":"test-password-123"}')
+[ "$code" = 403 ]
+session=$(curl -fsS -X POST "$URL/api/v1/auth/login" -H "$CSRF" -H "Origin: $URL" -H 'Content-Type: application/json' --data '{"username":"test-user","password":"test-password-123"}')
 token=$(printf '%s' "$session" | jq -r '.data.token')
 [ "${#token}" = 64 ]
 printf '%s' "$session" | jq -e '.data.username == "test-user" and .data.expires_in > 0' >/dev/null
