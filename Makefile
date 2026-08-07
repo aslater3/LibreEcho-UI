@@ -5,7 +5,12 @@ DESTDIR ?=
 CSTD ?= -std=c99
 WARN = -Wall -Wextra -Wpedantic
 OS_VERSION ?= $(shell tr -d '\r\n' < VERSION)
-CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Isrc/adapter -DLE_OS_VERSION=\"$(OS_VERSION)\"
+SOURCE_COMMIT ?= $(shell sh tools/source-provenance.sh --field commit 2>/dev/null || printf unknown)
+SOURCE_DIRTY ?= $(shell sh tools/source-provenance.sh --field dirty 2>/dev/null || printf unknown)
+SOURCE_DIGEST ?= $(shell sh tools/source-provenance.sh --field digest 2>/dev/null || printf unknown)
+CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Isrc/adapter -DLE_OS_VERSION=\"$(OS_VERSION)\" \
+    -DLE_SOURCE_COMMIT=\"$(SOURCE_COMMIT)\" -DLE_SOURCE_DIRTY=\"$(SOURCE_DIRTY)\" \
+    -DLE_SOURCE_DIGEST=\"$(SOURCE_DIGEST)\"
 CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
@@ -50,7 +55,7 @@ LOGD_OBJECTS = $(LOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 comma := ,
 GC_LDFLAGS ?= $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections)
 
-.PHONY: all adapters clean release test install deploy test-wyoming-protocol test-wyomingd
+.PHONY: all adapters clean release provenance test install deploy test-wyoming-protocol test-wyomingd
 all: CPPFLAGS += -DLE_DEV_CONTROLS=1
 all: $(TARGET) $(LOGD_TARGET) adapters
 
@@ -442,6 +447,11 @@ $(BUILD)/backend_linux.o $(BUILD)/backend_mock.o: VERSION src/version.h
 
 release: clean
 	$(MAKE) CROSS_COMPILE="$(CROSS_COMPILE)" CC="$(CC)" CFLAGS="-Os -ffunction-sections -fdata-sections" LDFLAGS="$(GC_LDFLAGS)" $(TARGET) $(LOGD_TARGET) $(ADAPTER_TARGETS)
+	$(MAKE) provenance
+
+provenance:
+	@mkdir -p $(BUILD)
+	@sh tools/source-provenance.sh --json > $(BUILD)/source-provenance.json
 
 test:
 	$(MAKE) clean

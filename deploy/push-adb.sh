@@ -62,6 +62,7 @@ for binary in libreecho-web libreecho-networkd libreecho-audiod libreecho-ledd; 
 done
 [ -d "$ROOT/web" ] || fail "missing web directory"
 [ -f "$ROOT/config/defaults.json" ] || fail "missing config/defaults.json"
+[ -f "$ROOT/build/source-provenance.json" ] || fail "missing build/source-provenance.json; run make release"
 for init_script in \
     libreecho-web.init \
     libreecho-networkd.init \
@@ -83,6 +84,10 @@ done
 echo "Pushing web assets..."
 adb_cmd push "$ROOT/web/." "$REMOTE_WEB/" \
     || fail "could not push web assets"
+
+echo "Pushing source provenance..."
+adb_cmd push "$ROOT/build/source-provenance.json" "/usr/local/share/libreecho/source-provenance.json" \
+    || fail "could not push source provenance"
 
 echo "Pushing configuration..."
 adb_cmd push "$ROOT/config/defaults.json" "$REMOTE_CONFIG" \
