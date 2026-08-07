@@ -42,9 +42,11 @@ static void on_signal(int signo)
 static int make_listener(const char *path)
 {
     struct sockaddr_un addr;
+    size_t path_len;
     int fd;
 
-    if (strlen(path) >= sizeof(addr.sun_path)) {
+    path_len = strlen(path);
+    if (path_len >= sizeof(addr.sun_path)) {
         le_log_error("logd: socket path too long: %s", path);
         return -1;
     }
@@ -58,7 +60,7 @@ static int make_listener(const char *path)
 
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    memcpy(addr.sun_path, path, path_len + 1);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         le_log_perror(LE_LOG_ERROR, "logd: bind %s", path);
@@ -72,7 +74,7 @@ static int make_listener(const char *path)
 
 static void rotate_logs(void)
 {
-    char old_path[512], new_path[512];
+    char old_path[sizeof(log_file) + 16], new_path[sizeof(log_file) + 16];
     int i;
 
     /* Remove oldest */
@@ -88,7 +90,7 @@ static void rotate_logs(void)
 
     /* Current -> .1 */
     {
-        char backup[512];
+        char backup[sizeof(log_file) + 16];
         snprintf(backup, sizeof(backup), "%s.1", log_file);
         rename(log_file, backup);
     }

@@ -163,12 +163,17 @@ static void set_cloexec(int fd)
 
 static void copy_string(char *dst, size_t size, const char *src)
 {
+    size_t length;
+
     if (!size)
         return;
     if (!src)
         src = "";
-    strncpy(dst, src, size - 1);
-    dst[size - 1] = '\0';
+    length = strlen(src);
+    if (length >= size)
+        length = size - 1;
+    memcpy(dst, src, length);
+    dst[length] = '\0';
 }
 
 static int append_text(char *dst, size_t size, size_t *used, const char *fmt, ...)
@@ -508,7 +513,13 @@ static int read_wireless_rssi(const char *iface)
         return -1;
     memset(&request, 0, sizeof(request));
     memset(&statistics, 0, sizeof(statistics));
-    strncpy(request.ifr_name, iface, sizeof(request.ifr_name) - 1);
+    {
+        size_t iface_len = strlen(iface);
+        if (iface_len >= sizeof(request.ifr_name))
+            iface_len = sizeof(request.ifr_name) - 1;
+        memcpy(request.ifr_name, iface, iface_len);
+        request.ifr_name[iface_len] = '\0';
+    }
     request.u.data.pointer = &statistics;
     request.u.data.length = sizeof(statistics);
     request.u.data.flags = 1;
@@ -538,7 +549,13 @@ static int read_wireless_essid(const char *iface, char *out, size_t out_size)
         return -1;
     memset(&request, 0, sizeof(request));
     memset(essid, 0, sizeof(essid));
-    strncpy(request.ifr_name, iface, sizeof(request.ifr_name) - 1);
+    {
+        size_t iface_len = strlen(iface);
+        if (iface_len >= sizeof(request.ifr_name))
+            iface_len = sizeof(request.ifr_name) - 1;
+        memcpy(request.ifr_name, iface, iface_len);
+        request.ifr_name[iface_len] = '\0';
+    }
     request.u.essid.pointer = essid;
     request.u.essid.length = IW_ESSID_MAX_SIZE;
     request.u.essid.flags = 0;
@@ -641,7 +658,10 @@ static void read_route(struct network_state *s)
     fp = fopen("/proc/net/route", "r");
     if (!fp)
         return;
-    (void)fgets(line, sizeof(line), fp);
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return;
+    }
     while (fgets(line, sizeof(line), fp)) {
         if (sscanf(line, "%15s %lx %lx %lx", dev, &destination, &gateway,
                    &flags) != 4)

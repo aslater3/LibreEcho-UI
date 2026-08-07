@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 static volatile int running=1;
+static void copy_arg(char*dst,size_t size,const char*src){size_t n;if(!size)return;n=strlen(src?src:"");if(n>=size)n=size-1;if(n)memcpy(dst,src,n);dst[n]=0;}
 static void stop(int s){(void)s;
 running=0;
 }static void usage(const char*p){fprintf(stderr,"Usage: %s [--backend mock|linux] [--listen IP:PORT] [--web-root PATH] [--config PATH] [--mock-config PATH] [--seed N] [--dev-controls] [--auth-token-file PATH] [--users-file PATH] [--allowed-origin URL] [--user NAME] [--allow-insecure-lan] [--verbose] [--debug] [--quiet]\n",p);
@@ -54,7 +55,7 @@ return 2;
 if(!colon){usage(argv[0]);
 return 2;
 }*colon=0;
-strncpy(o.listen_host,listen,sizeof(o.listen_host)-1);
+copy_arg(o.listen_host,sizeof(o.listen_host),listen);
 o.port=atoi(colon+1);
 if(o.port<1||o.port>65535){fprintf(stderr,"Invalid port\n");
 return 2;
