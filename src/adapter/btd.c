@@ -248,6 +248,54 @@ static void stop_daemon(int signal_number)
     stopping = 1;
 }
 
+static const char *mgmt_status_name(unsigned int status)
+{
+    switch (status) {
+    case 0x00: return "success";
+    case 0x01: return "unknown-command";
+    case 0x02: return "not-connected";
+    case 0x03: return "failed";
+    case 0x04: return "connect-failed";
+    case 0x05: return "authentication-failed";
+    case 0x06: return "not-paired";
+    case 0x07: return "no-resources";
+    case 0x08: return "timeout";
+    case 0x09: return "already-connected";
+    case 0x0a: return "busy";
+    case 0x0b: return "rejected";
+    case 0x0c: return "not-supported";
+    case 0x0d: return "invalid-params";
+    case 0x0e: return "disconnected";
+    case 0x0f: return "not-powered";
+    case 0x10: return "cancelled";
+    case 0x11: return "invalid-index";
+    case 0x12: return "rfkilled";
+    case 0x13: return "already-paired";
+    case 0x14: return "permission-denied";
+    default: return "unknown-status";
+    }
+}
+
+static void record_mgmt_status(struct bt_context *context, uint16_t opcode,
+                               unsigned int status)
+{
+    if (!context)
+        return;
+    snprintf(context->last_error, sizeof(context->last_error),
+             "MGMT opcode 0x%04x status 0x%02x (%s)", opcode, status,
+             mgmt_status_name(status));
+}
+
+static void record_mgmt_io(struct bt_context *context, uint16_t opcode,
+                           const char *phase, int error_number)
+{
+    if (!context)
+        return;
+    snprintf(context->last_error, sizeof(context->last_error),
+             "MGMT opcode 0x%04x %s failed: %s", opcode, phase,
+             strerror(error_number ? error_number : EIO));
+}
+
 static int write_all(int fd, const void *data, size_t length)
 {
     const uint8_t *bytes = (const uint8_t *)data;
@@ -725,11 +773,15 @@ static int hci_device_up(void)
     }
     result = ioctl(fd, HCIDEVUP, HCI_DEV_ID);
     saved_errno = errno;
-    if (result < 0)
+    if (result < 0 && saved_errno == EALREADY) {
+        le_log_info("btd: hci%d is already up", HCI_DEV_ID);
+        result = 0;
+    } else if (result < 0) {
         le_log_warn("btd: hci%d legacy open failed: %s", HCI_DEV_ID,
                     strerror(saved_errno));
-    else
+    } else {
         le_log_info("btd: hci%d legacy open succeeded", HCI_DEV_ID);
+    }
     close(fd);
     errno = saved_errno;
     return result;
@@ -935,8 +987,9 @@ static int process_packet(struct bt_context *context, const uint8_t *packet,
     if (event == MGMT_EV_CMD_COMPLETE && length >= 3 &&
         read_le16(payload) == expected) {
         if (payload[2] != MGMT_STATUS_SUCCESS) {
-            le_log_warn("btd: management opcode 0x%04x failed (status=0x%02x)",
-                        expected, payload[2]);
+            record_mgmt_status(context, expected, payload[2]);
+            le_log_warn("btd: management opcode 0x%04x failed (status=0x%02x, %s)",
+                        expected, payload[2], mgmt_status_name(payload[2]));
             return -(int)payload[2];
         }
         if (reply && reply_size) {
@@ -951,8 +1004,9 @@ static int process_packet(struct bt_context *context, const uint8_t *packet,
     if (event == MGMT_EV_CMD_STATUS && length >= 3 &&
         read_le16(payload) == expected) {
         if (payload[2] != MGMT_STATUS_SUCCESS) {
-            le_log_warn("btd: management opcode 0x%04x rejected (status=0x%02x)",
-                        expected, payload[2]);
+            record_mgmt_status(context, expected, payload[2]);
+            le_log_warn("btd: management opcode 0x%04x rejected (status=0x%02x, %s)",
+                        expected, payload[2], mgmt_status_name(payload[2]));
             return -(int)payload[2];
         }
         return 1;
@@ -969,17 +1023,31 @@ static int mgmt_command(struct bt_context *context, uint16_t opcode,
     struct pollfd pollfd;
     size_t packet_size = sizeof(header) + payload_size;
     int waited = 0;
+    int saved_errno;
 
-    if (packet_size > sizeof(packet) || mgmt_open(context) != 0)
+    if (packet_size > sizeof(packet)) {
+        record_mgmt_io(context, opcode, "packet", EMSGSIZE);
+        errno = EMSGSIZE;
         return -1;
+    }
+    if (mgmt_open(context) != 0) {
+        saved_errno = errno;
+        record_mgmt_io(context, opcode, "open", saved_errno);
+        errno = saved_errno;
+        return -1;
+    }
     header.opcode = opcode;
     header.index = 0;
     header.length = (uint16_t)payload_size;
     memcpy(packet, &header, sizeof(header));
     if (payload_size)
         memcpy(packet + sizeof(header), payload, payload_size);
-    if (mgmt_write_all(context->mgmt_fd, packet, packet_size) != 0)
+    if (mgmt_write_all(context->mgmt_fd, packet, packet_size) != 0) {
+        saved_errno = errno;
+        record_mgmt_io(context, opcode, "write", saved_errno);
+        errno = saved_errno;
         return -1;
+    }
     while (waited < MGMT_TIMEOUT_MS) {
         uint8_t response[MGMT_PACKET_MAX];
         ssize_t count;
@@ -997,6 +1065,9 @@ static int mgmt_command(struct bt_context *context, uint16_t opcode,
             if (poll_result < 0) {
                 if (errno == EINTR)
                     continue;
+                saved_errno = errno;
+                record_mgmt_io(context, opcode, "poll", saved_errno);
+                errno = saved_errno;
                 return -1;
             }
         }
@@ -1005,14 +1076,20 @@ static int mgmt_command(struct bt_context *context, uint16_t opcode,
             waited += 250;
             continue;
         }
-        if (count <= 0)
+        if (count <= 0) {
+            record_mgmt_io(context, opcode, "read", count == 0 ? ECONNRESET : errno);
+            if (count == 0)
+                errno = ECONNRESET;
             return -1;
+        }
         result = process_packet(context, response, (size_t)count, opcode,
                                 reply, reply_size);
         if (result != 0)
             return result > 0 ? 0 : result;
         waited += 250;
     }
+    record_mgmt_io(context, opcode, "response", ETIMEDOUT);
+    errno = ETIMEDOUT;
     return -1;
 }
 
@@ -1072,7 +1149,10 @@ static int refresh_info(struct bt_context *context)
 static int controller_command(struct bt_context *context, uint16_t opcode,
                               const void *payload, size_t size)
 {
-    return mgmt_command(context, opcode, payload, size, NULL, NULL);
+    int result = mgmt_command(context, opcode, payload, size, NULL, NULL);
+    if (!result)
+        context->last_error[0] = '\0';
+    return result;
 }
 
 static int set_powered(struct bt_context *context, int enabled)

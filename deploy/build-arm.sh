@@ -42,6 +42,11 @@ if ! command -v "$COMPILER_CHECK" >/dev/null 2>&1; then
 fi
 
 cd "$ROOT"
+if [ "${ALLOW_DIRTY_SOURCE:-0}" != 1 ] && [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+    echo "error: refusing to build a dirty source tree" >&2
+    echo "       review/commit the tree or set ALLOW_DIRTY_SOURCE=1 explicitly" >&2
+    exit 1
+fi
 "$MAKE" clean
 TARGET_GC_LDFLAGS=${GC_LDFLAGS:--static -Wl,--gc-sections}
 "$MAKE" CROSS_COMPILE="$BUILD_CROSS_COMPILE" CC="$COMPILER" \

@@ -7,9 +7,13 @@ rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
 sh tests/test_bluetooth_pairing_contract.sh
+sh tests/test_network_scan_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 make build/test-wake-led
+sh tests/test_microphone_fanout_contract.sh
+sh tests/test_live_readonly_audit_contract.sh
+sh tests/test_source_provenance.sh
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 sh tests/test_airplay_led_bridge.sh

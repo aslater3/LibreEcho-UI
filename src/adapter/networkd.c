@@ -20,6 +20,8 @@
 #include <limits.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <linux/genetlink.h>
+#include <linux/nl80211.h>
 #define _LINUX_IF_H
 #ifndef IFNAMSIZ
 #define IFNAMSIZ 16
@@ -59,6 +61,9 @@
 #define WPA_TIMEOUT_MS 2500
 #define WEXT_SCAN_BUFFER_SIZE 65535
 #define WEXT_SCAN_RETRY_MS 100
+#define NL80211_SCAN_TIMEOUT_MS 12000
+#define NL80211_SCAN_RETRY_MS 150
+#define NL80211_BUFFER_SIZE 65536
 
 struct wpa_ctrl {
     int fd;
@@ -158,12 +163,17 @@ static void set_cloexec(int fd)
 
 static void copy_string(char *dst, size_t size, const char *src)
 {
+    size_t length;
+
     if (!size)
         return;
     if (!src)
         src = "";
-    strncpy(dst, src, size - 1);
-    dst[size - 1] = '\0';
+    length = strlen(src);
+    if (length >= size)
+        length = size - 1;
+    memcpy(dst, src, length);
+    dst[length] = '\0';
 }
 
 static int append_text(char *dst, size_t size, size_t *used, const char *fmt, ...)
@@ -503,7 +513,13 @@ static int read_wireless_rssi(const char *iface)
         return -1;
     memset(&request, 0, sizeof(request));
     memset(&statistics, 0, sizeof(statistics));
-    strncpy(request.ifr_name, iface, sizeof(request.ifr_name) - 1);
+    {
+        size_t iface_len = strlen(iface);
+        if (iface_len >= sizeof(request.ifr_name))
+            iface_len = sizeof(request.ifr_name) - 1;
+        memcpy(request.ifr_name, iface, iface_len);
+        request.ifr_name[iface_len] = '\0';
+    }
     request.u.data.pointer = &statistics;
     request.u.data.length = sizeof(statistics);
     request.u.data.flags = 1;
@@ -533,7 +549,13 @@ static int read_wireless_essid(const char *iface, char *out, size_t out_size)
         return -1;
     memset(&request, 0, sizeof(request));
     memset(essid, 0, sizeof(essid));
-    strncpy(request.ifr_name, iface, sizeof(request.ifr_name) - 1);
+    {
+        size_t iface_len = strlen(iface);
+        if (iface_len >= sizeof(request.ifr_name))
+            iface_len = sizeof(request.ifr_name) - 1;
+        memcpy(request.ifr_name, iface, iface_len);
+        request.ifr_name[iface_len] = '\0';
+    }
     request.u.essid.pointer = essid;
     request.u.essid.length = IW_ESSID_MAX_SIZE;
     request.u.essid.flags = 0;
@@ -636,7 +658,10 @@ static void read_route(struct network_state *s)
     fp = fopen("/proc/net/route", "r");
     if (!fp)
         return;
-    (void)fgets(line, sizeof(line), fp);
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return;
+    }
     while (fgets(line, sizeof(line), fp)) {
         if (sscanf(line, "%15s %lx %lx %lx", dev, &destination, &gateway,
                    &flags) != 4)
@@ -1243,7 +1268,432 @@ failed:
     le_log_warn("networkd: WEXT scan failed: %s", strerror(scan_errno));
     free(buffer);
     close(fd);
+    return scan_errno ? -scan_errno : -EIO;
+}
+
+/* The MT8163 6.1 driver exposes cfg80211 but returns EOPNOTSUPP from the
+ * compatibility WEXT scan ioctl.  Keep the legacy ioctl above for older
+ * images, then use the kernel's generic-netlink interface directly rather
+ * than depending on libnl or an optional `iw` binary. */
+static size_t nl_align(size_t length)
+{
+    return (length + NLA_ALIGNTO - 1) & ~(NLA_ALIGNTO - 1);
+}
+
+static int nl_put(unsigned char *buffer, size_t capacity, size_t *used,
+                  uint16_t type, const void *value, size_t value_length)
+{
+    struct nlattr *attribute;
+    size_t length = NLA_HDRLEN + value_length;
+    size_t aligned = nl_align(length);
+
+    if (!buffer || !used || *used > capacity || aligned > capacity - *used ||
+        length > UINT16_MAX)
+        return -1;
+    attribute = (struct nlattr *)(buffer + *used);
+    attribute->nla_type = type;
+    attribute->nla_len = (uint16_t)length;
+    if (value_length)
+        memcpy((unsigned char *)attribute + NLA_HDRLEN, value, value_length);
+    if (aligned > length)
+        memset((unsigned char *)attribute + length, 0, aligned - length);
+    *used += aligned;
+    return 0;
+}
+
+static int nl_put_u32(unsigned char *buffer, size_t capacity, size_t *used,
+                      uint16_t type, uint32_t value)
+{
+    return nl_put(buffer, capacity, used, type, &value, sizeof(value));
+}
+
+static const struct nlattr *nl_find(const void *payload, size_t length,
+                                    uint16_t wanted)
+{
+    const unsigned char *cursor = payload;
+
+    while (length >= NLA_HDRLEN) {
+        const struct nlattr *attribute = (const struct nlattr *)cursor;
+        size_t aligned;
+        if (attribute->nla_len < NLA_HDRLEN)
+            return NULL;
+        aligned = nl_align(attribute->nla_len);
+        if (aligned > length)
+            return NULL;
+        if ((attribute->nla_type & NLA_TYPE_MASK) == wanted)
+            return attribute;
+        cursor += aligned;
+        length -= aligned;
+    }
+    return NULL;
+}
+
+static int nl_wait_ack(int fd, unsigned char *buffer, size_t capacity,
+                       int timeout_ms)
+{
+    struct pollfd descriptor = { fd, POLLIN, 0 };
+    long long deadline = monotonic_ms() + timeout_ms;
+
+    for (;;) {
+        ssize_t received;
+        struct nlmsghdr *header;
+        int remaining;
+        int wait_ms = (int)(deadline - monotonic_ms());
+        if (wait_ms <= 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        if (poll(&descriptor, 1, wait_ms) <= 0) {
+            errno = errno == EINTR ? EINTR : ETIMEDOUT;
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        received = recv(fd, buffer, capacity, 0);
+        if (received < 0 && errno == EINTR)
+            continue;
+        if (received < 0)
+            return -1;
+        remaining = (int)received;
+        for (header = (struct nlmsghdr *)buffer;
+             NLMSG_OK(header, remaining);
+             header = NLMSG_NEXT(header, remaining)) {
+            if (header->nlmsg_type == NLMSG_ERROR) {
+                struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
+                if (header->nlmsg_len < NLMSG_LENGTH(sizeof(*error))) {
+                    errno = EPROTO;
+                    return -1;
+                }
+                if (!error->error)
+                    return 0;
+                errno = -error->error;
+                return -1;
+            }
+        }
+    }
+}
+
+static int nl80211_family_id(int fd, unsigned char *buffer, size_t capacity)
+{
+    struct nlmsghdr *header = (struct nlmsghdr *)buffer;
+    struct genlmsghdr *generic;
+    struct sockaddr_nl address;
+    size_t used = NLMSG_LENGTH(GENL_HDRLEN);
+    uint32_t sequence = 1;
+    int remaining;
+    ssize_t received;
+    struct pollfd descriptor = { fd, POLLIN, 0 };
+
+    memset(buffer, 0, capacity);
+    header->nlmsg_len = (uint32_t)used;
+    header->nlmsg_type = GENL_ID_CTRL;
+    header->nlmsg_flags = NLM_F_REQUEST;
+    header->nlmsg_seq = sequence;
+    generic = (struct genlmsghdr *)NLMSG_DATA(header);
+    generic->cmd = CTRL_CMD_GETFAMILY;
+    generic->version = 1;
+    if (nl_put(buffer, capacity, &used, CTRL_ATTR_FAMILY_NAME,
+               "nl80211", sizeof("nl80211")) < 0)
+        return -1;
+    header->nlmsg_len = (uint32_t)used;
+    memset(&address, 0, sizeof(address));
+    address.nl_family = AF_NETLINK;
+    if (sendto(fd, buffer, used, 0, (struct sockaddr *)&address,
+               sizeof(address)) < 0)
+        return -1;
+    if (poll(&descriptor, 1, NL80211_SCAN_TIMEOUT_MS) <= 0) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    received = recv(fd, buffer, capacity, 0);
+    if (received < 0)
+        return -1;
+    remaining = (int)received;
+    for (header = (struct nlmsghdr *)buffer;
+         NLMSG_OK(header, remaining);
+         header = NLMSG_NEXT(header, remaining)) {
+        const struct nlattr *attribute;
+        size_t payload_length;
+        if (header->nlmsg_type == NLMSG_ERROR) {
+            struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
+            errno = error->error ? -error->error : EPROTO;
+            return -1;
+        }
+        if (header->nlmsg_seq != sequence ||
+            header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
+            continue;
+        generic = (struct genlmsghdr *)NLMSG_DATA(header);
+        payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+        attribute = nl_find((unsigned char *)generic + GENL_HDRLEN,
+                            payload_length, CTRL_ATTR_FAMILY_ID);
+        if (attribute && attribute->nla_len >= NLA_HDRLEN + sizeof(uint16_t)) {
+            uint16_t family;
+            memcpy(&family, (unsigned char *)attribute + NLA_HDRLEN,
+                   sizeof(family));
+            return (int)family;
+        }
+    }
+    errno = EPROTO;
     return -1;
+}
+
+static int nl80211_send_request(int fd, int family, uint8_t command,
+                                uint16_t flags, unsigned char *buffer,
+                                size_t capacity, size_t used)
+{
+    struct nlmsghdr *header = (struct nlmsghdr *)buffer;
+    struct genlmsghdr *generic = (struct genlmsghdr *)NLMSG_DATA(header);
+    struct sockaddr_nl address;
+
+    header->nlmsg_len = (uint32_t)used;
+    header->nlmsg_type = (uint16_t)family;
+    header->nlmsg_flags = flags;
+    header->nlmsg_seq = 2;
+    generic->cmd = command;
+    generic->version = 1;
+    memset(&address, 0, sizeof(address));
+    address.nl_family = AF_NETLINK;
+    if (sendto(fd, buffer, used, 0, (struct sockaddr *)&address,
+               sizeof(address)) < 0)
+        return -1;
+    if (flags & NLM_F_ACK)
+        return nl_wait_ack(fd, buffer, capacity, NL80211_SCAN_TIMEOUT_MS);
+    return 0;
+}
+
+static int nl80211_trigger_scan(int fd, int family, unsigned int ifindex,
+                                unsigned char *buffer, size_t capacity)
+{
+    size_t used = NLMSG_LENGTH(GENL_HDRLEN);
+    size_t nested_start;
+    struct nlattr *nested;
+    int result;
+
+    memset(buffer, 0, capacity);
+    if (nl_put_u32(buffer, capacity, &used, NL80211_ATTR_IFINDEX,
+                   ifindex) < 0)
+        return -1;
+    nested_start = used;
+    nested = (struct nlattr *)(buffer + used);
+    nested->nla_type = NL80211_ATTR_SCAN_SSIDS | NLA_F_NESTED;
+    nested->nla_len = NLA_HDRLEN;
+    used += NLA_ALIGN(NLA_HDRLEN);
+    if (nl_put(buffer, capacity, &used, 1, NULL, 0) < 0)
+        return -1;
+    nested->nla_len = (uint16_t)(used - nested_start);
+    result = nl80211_send_request(fd, family, NL80211_CMD_TRIGGER_SCAN,
+                                  NLM_F_REQUEST | NLM_F_ACK, buffer,
+                                  capacity, used);
+    if (result < 0 && errno == EBUSY)
+        return 0;
+    return result;
+}
+
+static void nl80211_parse_ies(const unsigned char *ies, size_t length,
+                              char *ssid, size_t ssid_size, int *encrypted)
+{
+    size_t offset = 0;
+    int has_rsn = 0, has_wpa = 0;
+
+    if (ssid_size)
+        ssid[0] = '\0';
+    if (encrypted)
+        *encrypted = 0;
+    while (ies && offset + 2 <= length) {
+        unsigned int id = ies[offset];
+        size_t item_length = ies[offset + 1];
+        if (offset + 2 + item_length > length)
+            break;
+        if (id == 0 && ssid_size) {
+            size_t copy = item_length < ssid_size - 1 ? item_length : ssid_size - 1;
+            memcpy(ssid, ies + offset + 2, copy);
+            ssid[copy] = '\0';
+        } else if (id == 48) {
+            has_rsn = 1;
+        } else if (id == 221 && item_length >= 4 &&
+                   !memcmp(ies + offset + 2, "\x00\x50\xf2\x01", 4)) {
+            has_wpa = 1;
+        }
+        offset += 2 + item_length;
+    }
+    if (encrypted)
+        *encrypted = has_rsn || has_wpa;
+}
+
+static int nl80211_append_bss(const struct nlattr *bss, char *data,
+                              size_t data_size, size_t *used, int *emitted)
+{
+    const struct nlattr *bssid, *signal, *ies, *beacon;
+    char ssid[IW_ESSID_MAX_SIZE + 1];
+    int encrypted = 0;
+    int signal_dbm = -100;
+    const void *payload;
+    size_t payload_length;
+
+    if (!bss || bss->nla_len < NLA_HDRLEN)
+        return -1;
+    payload = (unsigned char *)bss + NLA_HDRLEN;
+    payload_length = bss->nla_len - NLA_HDRLEN;
+    bssid = nl_find(payload, payload_length, NL80211_BSS_BSSID);
+    ies = nl_find(payload, payload_length, NL80211_BSS_INFORMATION_ELEMENTS);
+    beacon = nl_find(payload, payload_length, NL80211_BSS_BEACON_IES);
+    if (!ies)
+        ies = beacon;
+    if (!bssid || !ies || bssid->nla_len < NLA_HDRLEN + 6)
+        return 0;
+    payload = (unsigned char *)ies + NLA_HDRLEN;
+    payload_length = ies->nla_len - NLA_HDRLEN;
+    nl80211_parse_ies(payload, payload_length, ssid, sizeof(ssid), &encrypted);
+    if (!ssid[0])
+        return 0;
+    signal = nl_find((unsigned char *)bss + NLA_HDRLEN,
+                     bss->nla_len - NLA_HDRLEN, NL80211_BSS_SIGNAL_MBM);
+    if (signal && signal->nla_len >= NLA_HDRLEN + sizeof(int32_t))
+        memcpy(&signal_dbm, (unsigned char *)signal + NLA_HDRLEN,
+               sizeof(signal_dbm));
+    signal_dbm /= 100;
+    if (*emitted && append_text(data, data_size, used, ",") < 0)
+        return -1;
+    if (append_text(data, data_size, used, "{\"ssid\":") < 0 ||
+        append_json_string(data, data_size, used, ssid) < 0 ||
+        append_text(data, data_size, used, ",\"security\":") < 0 ||
+        append_json_string(data, data_size, used, encrypted ? "wpa2" : "open") < 0 ||
+        append_text(data, data_size, used, ",\"signal\":%d}",
+                    rssi_to_percent(signal_dbm)) < 0)
+        return -1;
+    ++*emitted;
+    return 0;
+}
+
+static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
+                             unsigned char *buffer, size_t capacity,
+                             char *data, size_t data_size)
+{
+    struct nlmsghdr *header;
+    struct genlmsghdr *generic;
+    size_t used = NLMSG_LENGTH(GENL_HDRLEN), output = 0;
+    long long deadline = monotonic_ms() + NL80211_SCAN_RETRY_MS;
+    int remaining, emitted = 0;
+    ssize_t received;
+    struct pollfd descriptor = { fd, POLLIN, 0 };
+
+    memset(buffer, 0, capacity);
+    if (nl_put_u32(buffer, capacity, &used, NL80211_ATTR_IFINDEX,
+                   ifindex) < 0)
+        return -1;
+    header = (struct nlmsghdr *)buffer;
+    header->nlmsg_len = (uint32_t)used;
+    header->nlmsg_type = (uint16_t)family;
+    header->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    header->nlmsg_seq = 3;
+    generic = (struct genlmsghdr *)NLMSG_DATA(header);
+    generic->cmd = NL80211_CMD_GET_SCAN;
+    generic->version = 1;
+    if (send(fd, buffer, used, 0) < 0)
+        return -1;
+    if (append_text(data, data_size, &output, "{\"networks\":[") < 0)
+        return -1;
+    for (;;) {
+        int wait_ms = (int)(deadline - monotonic_ms());
+        if (wait_ms <= 0) {
+            errno = EAGAIN;
+            return -1;
+        }
+        if (poll(&descriptor, 1, wait_ms) <= 0) {
+            errno = errno == EINTR ? EINTR : EAGAIN;
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        received = recv(fd, buffer, capacity, 0);
+        if (received < 0 && errno == EINTR)
+            continue;
+        if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            errno = EAGAIN;
+            continue;
+        }
+        if (received < 0)
+            return -1;
+        remaining = (int)received;
+        for (header = (struct nlmsghdr *)buffer;
+             NLMSG_OK(header, remaining);
+             header = NLMSG_NEXT(header, remaining)) {
+            size_t payload_length;
+            const struct nlattr *bss;
+            if (header->nlmsg_type == NLMSG_DONE) {
+                return append_text(data, data_size, &output, "]}") < 0 ?
+                    -1 : (int)output;
+            }
+            if (header->nlmsg_type == NLMSG_ERROR) {
+                struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
+                errno = error->error ? -error->error : EPROTO;
+                return -1;
+            }
+            if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
+                continue;
+            generic = (struct genlmsghdr *)NLMSG_DATA(header);
+            payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+            bss = nl_find((unsigned char *)generic + GENL_HDRLEN,
+                          payload_length, NL80211_ATTR_BSS);
+            if (bss && emitted < SCAN_MAX &&
+                nl80211_append_bss(bss, data, data_size, &output, &emitted) < 0)
+                return -1;
+        }
+    }
+}
+
+static int nl80211_scan(const char *iface, char *data, size_t data_size)
+{
+    unsigned char *buffer;
+    struct sockaddr_nl address;
+    unsigned int ifindex;
+    long long deadline;
+    int fd, family, result;
+
+    if (!iface || !data || data_size < 16)
+        return -EINVAL;
+    ifindex = if_nametoindex(iface);
+    if (!ifindex)
+        return -errno;
+    fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+    if (fd < 0)
+        return -errno;
+    memset(&address, 0, sizeof(address));
+    address.nl_family = AF_NETLINK;
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        result = -errno;
+        close(fd);
+        return result;
+    }
+    buffer = malloc(NL80211_BUFFER_SIZE);
+    if (!buffer) {
+        close(fd);
+        return -ENOMEM;
+    }
+    family = nl80211_family_id(fd, buffer, NL80211_BUFFER_SIZE);
+    if (family < 0 || nl80211_trigger_scan(fd, family, ifindex, buffer,
+                                           NL80211_BUFFER_SIZE) < 0) {
+        result = -errno;
+        goto done;
+    }
+    deadline = monotonic_ms() + NL80211_SCAN_TIMEOUT_MS;
+    for (;;) {
+        result = nl80211_dump_scan(fd, family, ifindex, buffer,
+                                   NL80211_BUFFER_SIZE, data, data_size);
+        if (result >= 0)
+            break;
+        if (errno != EAGAIN && errno != EBUSY)
+            break;
+        if (monotonic_ms() >= deadline) {
+            result = -ETIMEDOUT;
+            break;
+        }
+        (void)poll(NULL, 0, NL80211_SCAN_RETRY_MS);
+    }
+done:
+    free(buffer);
+    close(fd);
+    return result;
 }
 
 static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
@@ -1536,14 +1986,29 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         if (scan_state == 1)
             le_log_warn("networkd: scan already active; waiting for results");
         else if (scan_state == 2) {
-            le_log_warn("networkd: wpa scan unsupported; using WEXT driver results");
-            if (wext_scan(ctx->interface, data, sizeof(data)) < 0) {
-                le_log_error("networkd: WEXT scan unavailable");
-                (void)send_err_fd(ctx->clients[ci].fd, id,
-                                  "Wi-Fi scan is unavailable");
-            } else {
+            int wext_result;
+            le_log_warn("networkd: wpa scan unsupported; trying WEXT driver results");
+            wext_result = wext_scan(ctx->interface, data, sizeof(data));
+            if (wext_result >= 0) {
                 le_log_info("networkd: WEXT scan results ready");
                 (void)send_ok_fd(ctx->clients[ci].fd, id, data);
+            } else if (wext_result == -EOPNOTSUPP ||
+                       wext_result == -ENOTSUP) {
+                le_log_warn("networkd: WEXT scan returned EOPNOTSUPP; using nl80211");
+                if (nl80211_scan(ctx->interface, data, sizeof(data)) < 0) {
+                    le_log_error("networkd: nl80211 scan unavailable: %s",
+                                 strerror(errno));
+                    (void)send_err_fd(ctx->clients[ci].fd, id,
+                                      "Wi-Fi scan is unavailable");
+                } else {
+                    le_log_info("networkd: nl80211 scan results ready");
+                    (void)send_ok_fd(ctx->clients[ci].fd, id, data);
+                }
+            } else {
+                le_log_error("networkd: WEXT scan unavailable: %s",
+                             strerror(-wext_result));
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "Wi-Fi scan is unavailable");
             }
             return;
         }
