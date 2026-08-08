@@ -24,6 +24,7 @@
 int main(void)
 {
     char directory[128];
+    char dt_directory[192];
     char socket_path[160];
     char path[160];
     char capture_path[160];
@@ -42,6 +43,7 @@ int main(void)
 
     snprintf(directory, sizeof(directory), "/tmp/libreecho-micd-test-%ld",
              (long)getpid());
+    snprintf(dt_directory, sizeof(dt_directory), "%s/dt-idme", directory);
     snprintf(socket_path, sizeof(socket_path), "%s/mic.sock", directory);
     snprintf(capture_path, sizeof(capture_path), "%s/fake-tinycap",
              directory);
@@ -52,10 +54,22 @@ int main(void)
     snprintf(mixer_args_path, sizeof(mixer_args_path),
              "%s/mixer.args", directory);
     CHECK(mkdir(directory, 0700) == 0);
+    CHECK(mkdir(dt_directory, 0700) == 0);
     for (i = 0; i < 7; ++i) {
         FILE *file;
+        char node[256];
+        char value_path[320];
+
+        snprintf(node, sizeof(node), "%s/miccal.%d", dt_directory, i);
+        CHECK(mkdir(node, 0700) == 0);
+        snprintf(value_path, sizeof(value_path), "%s/value", node);
         snprintf(path, sizeof(path), "%s/miccal.%d", directory, i);
         file = fopen(path, "w");
+        CHECK(file != NULL);
+        CHECK(fprintf(file, "%d\n", expected[i]) > 0);
+        CHECK(fclose(file) == 0);
+        unlink(path);
+        file = fopen(value_path, "w");
         CHECK(file != NULL);
         CHECK(fprintf(file, "%d\n", expected[i]) > 0);
         CHECK(fclose(file) == 0);
@@ -87,7 +101,8 @@ int main(void)
     if (child == 0) {
         execl("./build/libreecho-micd", "libreecho-micd",
               "--foreground", "--socket", socket_path,
-              "--idme-dir", directory, "--pcm-path", "/dev/null",
+              "--idme-dir", "/missing-idme", "--dt-idme-dir", dt_directory,
+              "--pcm-path", "/dev/null",
               "--capture-bin", capture_path,
               "--mixer-bin", mixer_path, (char *)NULL);
         _exit(127);
@@ -103,6 +118,9 @@ int main(void)
                           response, sizeof(response)) == LE_ADAPTER_OK);
     CHECK(strstr(response,
           "\"q14\":[16483,16746,17517,17039,16218,16339,14777]") != NULL);
+    CHECK(strstr(response,
+          "\"source\":\"/tmp/libreecho-micd-test-") != NULL);
+    CHECK(strstr(response, "/dt-idme/miccal.N/value\"") != NULL);
     CHECK(strstr(response, "\"capture\":{\"active\":false") != NULL);
     CHECK(strstr(response, "\"bits\":24,\"valid_bits\":16") != NULL);
     CHECK(strstr(response, "\"active_microphone_channels\":7") != NULL);
@@ -190,9 +208,19 @@ int main(void)
         CHECK(fclose(file) == 0);
         response[used] = '\0';
         CHECK(strstr(response,
+              "Mic PGA Switch\n1\n1\n") != NULL);
+        CHECK(strstr(response,
+              "ADCFGA Left Mute Switch\n0\n") != NULL);
+        CHECK(strstr(response,
+              "ADCFGA Right Mute Switch\n0\n") != NULL);
+        CHECK(strstr(response,
               "ADC_A Left Ip Select ADC_A DIF1_L switch\n1\n") != NULL);
         CHECK(strstr(response,
               "ADC_D Right Ip Select ADC_D DIF1_R switch\n1\n") != NULL);
+        CHECK(strstr(response,
+              "ADC_A DIF1_L Input Gain\n1\n") != NULL);
+        CHECK(strstr(response,
+              "ADC_D DIF1_R Input Gain\n1\n") != NULL);
         CHECK(strstr(response,
               "ADC_D MICPGA Volume Ctrl\n40\n40\n") != NULL);
         CHECK(strstr(response, "SpiTimeStamps\n0\n") != NULL);
@@ -217,7 +245,16 @@ cleanup:
     for (i = 0; i < 7; ++i) {
         snprintf(path, sizeof(path), "%s/miccal.%d", directory, i);
         unlink(path);
+        {
+            char node[256];
+            char value_path[320];
+            snprintf(node, sizeof(node), "%s/miccal.%d", dt_directory, i);
+            snprintf(value_path, sizeof(value_path), "%s/value", node);
+            unlink(value_path);
+            rmdir(node);
+        }
     }
+    rmdir(dt_directory);
     rmdir(directory);
     return result;
 }

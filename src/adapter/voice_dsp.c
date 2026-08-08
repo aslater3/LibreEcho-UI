@@ -4,10 +4,10 @@
 #include <string.h>
 
 /*
- * The SPI transport advertises S24_3LE, but captures from this board show
- * 16 valid bits left-aligned in each packed 24-bit word.  Decode the signed
- * 24-bit value first, then divide by 256 so the conversion is well-defined
- * for negative values as well as positive values.
+ * The MT8163 transport advertises packed S24_3LE with 16 useful bits in the
+ * low part of each word.  Preserve that observed alignment when converting to
+ * the S16 consumer contract; shifting right by eight would discard the live
+ * microphone signal.
  */
 int16_t le_voice_unpack_s24_3le(const uint8_t sample[3])
 {
@@ -17,7 +17,11 @@ int16_t le_voice_unpack_s24_3le(const uint8_t sample[3])
 
     if (value & 0x00800000)
         value -= 0x01000000;
-    return (int16_t)(value / 256);
+    if (value > INT16_MAX)
+        return INT16_MAX;
+    if (value < INT16_MIN)
+        return INT16_MIN;
+    return (int16_t)value;
 }
 
 static int16_t saturate_s16(int64_t value)
