@@ -695,7 +695,7 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
             char selected[32];
             if (fgets(selected, sizeof(selected), voice_file)) {
                 selected[strcspn(selected, "\r\n")] = '\0';
-                if (!strcmp(selected, "alan") ||
+                if (!strcmp(selected, "northern-male") ||
                     !strcmp(selected, "southern-female"))
                     strcpy(o->tts_voice, selected);
             }
@@ -743,7 +743,7 @@ static int tts_voice(struct le_backend *b, const char *voice)
     pid_t pid;
     int status;
     (void)b;
-    if (!voice || (strcmp(voice, "alan") &&
+    if (!voice || (strcmp(voice, "northern-male") &&
                    strcmp(voice, "southern-female")))
         return LE_INVALID;
     if (!script || !script[0])

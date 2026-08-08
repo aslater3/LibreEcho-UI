@@ -167,7 +167,7 @@ TTS is local sherpa-onnx with a **fixed voice whitelist**:
 # init/libreecho-ttsd.init
 valid_voice() {
     case "$1" in
-        alan|southern-female) return 0 ;;   # only two voices, ever
+        northern-male|southern-female) return 0 ;;   # only two voices, ever
         *) return 1 ;;
     esac
 }
