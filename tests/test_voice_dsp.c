@@ -13,7 +13,7 @@
 
 static void pack_s16_as_s24_3le(int16_t value, uint8_t output[3])
 {
-    uint32_t packed = (uint32_t)((int32_t)value << 8) & 0x00ffffffU;
+    uint32_t packed = (uint32_t)(int32_t)value & 0x00ffffffU;
 
     output[0] = (uint8_t)packed;
     output[1] = (uint8_t)(packed >> 8);
@@ -40,9 +40,9 @@ int main(void)
     int i;
 
     {
-        const uint8_t positive[3] = {0x00, 0xff, 0x7f};
-        const uint8_t negative[3] = {0x00, 0x00, 0x80};
-        const uint8_t minus_one[3] = {0x00, 0xff, 0xff};
+        const uint8_t positive[3] = {0xff, 0x7f, 0x00};
+        const uint8_t negative[3] = {0x00, 0x80, 0xff};
+        const uint8_t minus_one[3] = {0xff, 0xff, 0xff};
 
         CHECK(le_voice_unpack_s24_3le(positive) == 32767);
         CHECK(le_voice_unpack_s24_3le(negative) == -32768);

@@ -14,6 +14,11 @@ S24_3LE
 16 kHz
 ```
 
+The live MT8163 capture is packed S24_3LE with the useful microphone samples
+observed in the low portion of each word. Consumers must not discard the low
+byte by shifting the samples right by eight; the calibrated mono path converts
+the signed packed value directly into its S16 contract with saturation.
+
 Hardware testing established that raw lanes 0 through 6 carry the seven
 physical microphones. Lanes 7 and 8 are inactive or reserved transport lanes
 and are not offered to consumers. The stock Radar `audio_device.xml` profile
