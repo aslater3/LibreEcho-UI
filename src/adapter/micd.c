@@ -30,6 +30,7 @@
 struct micd_config {
     const char *socket_path;
     const char *idme_dir;
+    const char *dt_idme_dir;
     const char *pcm_path;
     const char *capture_bin;
     const char *mixer_bin;
@@ -90,29 +91,61 @@ static int read_request_line(int fd, char *buffer, size_t size)
     return -1;
 }
 
-static int read_miccal(const char *idme_dir, int values[7])
+static int read_miccal_file(const char *path, int *value)
+{
+    FILE *file;
+
+    file = fopen(path, "r");
+    if (!file)
+        return 0;
+    if (fscanf(file, "%d", value) != 1 || *value < 0 || *value > 65535) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    return 1;
+}
+
+static int read_miccal_list(const char *path, int values[7])
+{
+    FILE *file;
+    int count = 0;
+    int i;
+
+    file = fopen(path, "r");
+    if (!file)
+        return 0;
+    for (i = 0; i < MIC_LOGICAL_CHANNELS; ++i) {
+        int value;
+
+        if (fscanf(file, "%d", &value) != 1 ||
+            value < 0 || value > 65535)
+            break;
+        values[i] = value;
+        ++count;
+    }
+    fclose(file);
+    return count;
+}
+
+static int read_miccal(const char *idme_dir, const char *dt_idme_dir,
+                       int values[7])
 {
     char path[256];
     int count = 0;
     int i;
 
     for (i = 0; i < MIC_LOGICAL_CHANNELS; ++i) {
-        FILE *file;
         int value;
 
         values[i] = MICCAL_UNITY;
         if (snprintf(path, sizeof(path), "%s/miccal.%d",
                      idme_dir, i) >= (int)sizeof(path))
             continue;
-        file = fopen(path, "r");
-        if (!file)
-            continue;
-        if (fscanf(file, "%d", &value) == 1 &&
-            value >= 0 && value <= 65535) {
+        if (read_miccal_file(path, &value)) {
             values[i] = value;
             ++count;
         }
-        fclose(file);
     }
     if (count != 0)
         return count;
@@ -121,20 +154,55 @@ static int read_miccal(const char *idme_dir, int values[7])
                  idme_dir) >= (int)sizeof(path))
         return 0;
     {
-        FILE *file = fopen(path, "r");
-        if (!file)
-            return 0;
-        for (i = 0; i < MIC_LOGICAL_CHANNELS; ++i) {
-            int value;
-            if (fscanf(file, "%d", &value) == 1 &&
-                value >= 0 && value <= 65535) {
-                values[i] = value;
-                ++count;
-            }
+        count = read_miccal_list(path, values);
+    }
+    if (count != 0)
+        return count;
+
+    for (i = 0; i < MIC_LOGICAL_CHANNELS; ++i) {
+        int value;
+
+        if (snprintf(path, sizeof(path), "%s/miccal.%d/value",
+                     dt_idme_dir, i) >= (int)sizeof(path))
+            continue;
+        if (read_miccal_file(path, &value)) {
+            values[i] = value;
+            ++count;
         }
-        fclose(file);
     }
     return count;
+}
+
+static const char *miccal_source(const char *idme_dir,
+                                 const char *dt_idme_dir)
+{
+    static char source[256];
+    char path[256];
+    int i;
+
+    for (i = 0; i < MIC_LOGICAL_CHANNELS; ++i) {
+        if (snprintf(path, sizeof(path), "%s/miccal.%d",
+                     idme_dir, i) < (int)sizeof(path) &&
+            access(path, R_OK) == 0) {
+            snprintf(source, sizeof(source), "%s/miccal.N", idme_dir);
+            return source;
+        }
+    }
+    if (snprintf(path, sizeof(path), "%s/miccal", idme_dir) <
+            (int)sizeof(path) && access(path, R_OK) == 0) {
+        snprintf(source, sizeof(source), "%s/miccal", idme_dir);
+        return source;
+    }
+    for (i = 0; i < MIC_LOGICAL_CHANNELS; ++i) {
+        if (snprintf(path, sizeof(path), "%s/miccal.%d/value",
+                     dt_idme_dir, i) < (int)sizeof(path) &&
+            access(path, R_OK) == 0) {
+            snprintf(source, sizeof(source), "%s/miccal.N/value",
+                     dt_idme_dir);
+            return source;
+        }
+    }
+    return "unavailable";
 }
 
 struct mixer_setting {
@@ -179,6 +247,9 @@ static int apply_mixer_setting(const char *mixer_bin,
 static int configure_capture_path(const struct micd_config *config)
 {
     static const struct mixer_setting settings[] = {
+        {"Mic PGA Switch", "1", "1"},
+        {"ADCFGA Left Mute Switch", "0", NULL},
+        {"ADCFGA Right Mute Switch", "0", NULL},
         {"ADC_A Left Ip Select ADC_A DIF1_L switch", "1", NULL},
         {"ADC_A Right Ip Select ADC_A DIF1_R switch", "1", NULL},
         {"ADC_B Left Ip Select ADC_B DIF1_L switch", "1", NULL},
@@ -191,14 +262,14 @@ static int configure_capture_path(const struct micd_config *config)
         {"ADC_B MICPGA Volume Ctrl", "40", "40"},
         {"ADC_C MICPGA Volume Ctrl", "40", "40"},
         {"ADC_D MICPGA Volume Ctrl", "40", "40"},
-        {"ADC_A DIF1_L Input Gain", "0", NULL},
-        {"ADC_A DIF1_R Input Gain", "0", NULL},
-        {"ADC_B DIF1_L Input Gain", "0", NULL},
-        {"ADC_B DIF1_R Input Gain", "0", NULL},
-        {"ADC_C DIF1_L Input Gain", "0", NULL},
-        {"ADC_C DIF1_R Input Gain", "0", NULL},
-        {"ADC_D DIF1_L Input Gain", "0", NULL},
-        {"ADC_D DIF1_R Input Gain", "0", NULL},
+        {"ADC_A DIF1_L Input Gain", "1", NULL},
+        {"ADC_A DIF1_R Input Gain", "1", NULL},
+        {"ADC_B DIF1_L Input Gain", "1", NULL},
+        {"ADC_B DIF1_R Input Gain", "1", NULL},
+        {"ADC_C DIF1_L Input Gain", "1", NULL},
+        {"ADC_C DIF1_R Input Gain", "1", NULL},
+        {"ADC_D DIF1_L Input Gain", "1", NULL},
+        {"ADC_D DIF1_R Input Gain", "1", NULL},
         {"SpiTimeStamps", "0", NULL}
     };
     size_t i;
@@ -218,7 +289,7 @@ static int format_status(char *buffer, size_t size,
                          int capture_active, int capture_configured)
 {
     int values[MIC_LOGICAL_CHANNELS];
-    int count = read_miccal(config->idme_dir, values);
+    int count = read_miccal(config->idme_dir, config->dt_idme_dir, values);
     int available = access(config->pcm_path, R_OK) == 0;
     int n;
 
@@ -243,7 +314,7 @@ static int format_status(char *buffer, size_t size,
         "\"hardware_profile\":{\"name\":\"radar-audio-device-v4.02\","
         "\"configured\":%s,\"adc_codecs\":4,\"analog_pga_db\":20},"
         "\"calibration\":{\"q14\":[%d,%d,%d,%d,%d,%d,%d],"
-        "\"fallback\":16384,\"source\":\"/proc/idme/miccal\","
+        "\"fallback\":16384,\"source\":\"%s\","
         "\"values_found\":%d,\"complete\":%s,"
         "\"selected_logical_mics\":[0,3],"
         "\"polarity\":\"all-positive-measured\","
@@ -261,6 +332,7 @@ static int format_status(char *buffer, size_t size,
         capture_configured ? "true" : "false",
         values[0], values[1], values[2], values[3],
         values[4], values[5], values[6],
+        miccal_source(config->idme_dir, config->dt_idme_dir),
         count, count == MIC_LOGICAL_CHANNELS ? "true" : "false");
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
@@ -402,7 +474,7 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
      * This pinned tinycap treats "--" as a raw-stdout transport, so the
      * first byte read here is microphone PCM rather than a WAV header.
      */
-    (void)read_miccal(config->idme_dir, miccal);
+    (void)read_miccal(config->idme_dir, config->dt_idme_dir, miccal);
     le_voice_calibration_init(
         &calibration, miccal, identity_map,
         LE_VOICE_CALIBRATION_DIRECT_Q14);
@@ -494,6 +566,7 @@ int main(int argc, char **argv)
     struct micd_config config = {
         LE_ADAPTER_MIC_SOCK,
         "/proc/idme",
+        "/sys/firmware/devicetree/base/idme",
         "/dev/snd/pcmC0D24c",
         "/sbin/tinycap",
         "/sbin/tinymix"
@@ -511,6 +584,8 @@ int main(int argc, char **argv)
             config.socket_path = argv[++i];
         } else if (!strcmp(argv[i], "--idme-dir") && i + 1 < argc) {
             config.idme_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--dt-idme-dir") && i + 1 < argc) {
+            config.dt_idme_dir = argv[++i];
         } else if (!strcmp(argv[i], "--pcm-path") && i + 1 < argc) {
             config.pcm_path = argv[++i];
         } else if (!strcmp(argv[i], "--capture-bin") && i + 1 < argc) {
@@ -525,6 +600,7 @@ int main(int argc, char **argv)
         } else {
             fprintf(stderr, "Usage: %s [--foreground] [--socket PATH] "
                     "[--idme-dir DIR] [--pcm-path PATH] "
+                    "[--dt-idme-dir DIR] "
                     "[--capture-bin PATH] [--mixer-bin PATH]\n", argv[0]);
             return 2;
         }
