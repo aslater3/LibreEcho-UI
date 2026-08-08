@@ -44,8 +44,9 @@ async function refreshOverview(){if(state.page!=='Overview')return;let delay=500
 async function usersPage(){const u=await api('/auth/users');const rows=u.users.map(x=>`<div class="status-line"><span class="status-dot ok"></span><span>${esc(x.username)}${x.username===state.username?' <small>(current session)</small>':''}</span>${u.users.length>1&&x.username!==state.username?action('Remove','remove-user-'+esc(x.username),'danger-btn'):''}</div>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Local accounts',`<p class="muted">These accounts can sign in to the LibreEcho control centre. Passwords are stored as salted hashes and are never displayed.</p><div class="user-list">${rows||'<p class="muted">No users configured.</p>'}</div>`)}${panel('Add user',field('Username','','new-user-name','text','autocomplete="username" maxlength="31" pattern="[A-Za-z0-9._-]+"')+field('Password','','new-user-password','password','autocomplete="new-password" minlength="8" maxlength="128"')+field('Confirm password','','new-user-confirm','password','autocomplete="new-password" minlength="8" maxlength="128"')+`<div class="button-row">${action('Add user','add-user','primary-btn')}</div>`)} </div>`;u.users.filter(x=>x.username!==state.username).forEach(x=>{const b=$('#remove-user-'+x.username);if(b)b.onclick=async()=>{if(!confirm(`Remove user ${x.username}?`))return;try{await api('/auth/users/'+encodeURIComponent(x.username),{method:'DELETE'});toast('User removed');await usersPage()}catch(e){toast(e.message,true)}}});$('#add-user').onclick=async()=>{const username=$('#new-user-name').value.trim(),password=$('#new-user-password').value,confirmPassword=$('#new-user-confirm').value;if(password!==confirmPassword){toast('Passwords do not match',true);return}try{await api('/auth/users',{method:'POST',body:JSON.stringify({username,password,password_confirm:confirmPassword})});toast('User added');await usersPage()}catch(e){toast(e.message,true)}}}
 async function devicePage(){const d=await api('/device');content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}</div>`,'wide')}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
 async function audioPage(){const a=await api('/audio'),voices=a.tts_voices||[{id:'southern-female',name:'Southern English — female'},{id:'alan',name:'Alan — male'}],voiceOptions=voices.map(v=>`<option value="${esc(v.id)}" ${v.id===a.tts_voice?'selected':''}>${esc(v.name)}</option>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Output',range('Master volume',a.volume,'volume')+range('Notification volume',a.notification_volume,'notification-volume').replace('value="'+a.notification_volume+'"','value="'+a.notification_volume+'" disabled')+toggle('Startup sound',a.startup_sound,'startup-sound',true)+`<dl class="facts"><dt>Output</dt><dd class="${a.output_available?'connected':''}">${a.output_available?'Available':'Unavailable'}</dd><dt>Amplifier</dt><dd>${a.amplifier_on?'On':'Off'}</dd></dl><div class="button-row">${saveButton('save-output')}${action('Play test tone','test-tone')}</div>`)}${panel('Announcements',`<label class="field"><span>Voice</span><select id="tts-voice">${voiceOptions}</select></label><p class="muted">The selected British voice stays loaded for low-latency streamed announcements. Changing voice restarts the speech service.</p>${saveButton('save-voice')}`)}${panel('Microphones',range('Microphone gain',a.microphone_gain,'mic-gain')+toggle('Microphone muted',a.microphone_muted,'mic-muted')+toggle('Acoustic echo cancellation',true,'aec',true)+`<p class="muted">Echo cancellation is reported by the future audio adapter and cannot yet be changed.</p>`+saveButton('save-microphones'))}</div>`;bindRange();bindDirty(['#volume'],'#save-output');bindDirty(['#tts-voice'],'#save-voice');bindDirty(['#mic-gain','#mic-muted'],'#save-microphones');$('#save-output').onclick=()=>mutate('/audio',{volume:+$('#volume').value},'Output changes saved');$('#save-voice').onclick=()=>mutate('/audio',{tts_voice:$('#tts-voice').value},'Announcement voice changed');$('#save-microphones').onclick=()=>mutate('/audio',{microphone_gain:+$('#mic-gain').value,microphone_muted:$('#mic-muted').checked},'Microphone changes saved');$('#test-tone').onclick=()=>post('/audio/test',{},'Test tone playing')}
-const babyStream={controller:null,context:null,gain:null,nextTime:0};
-function stopBabyStream(){if(babyStream.controller)babyStream.controller.abort();babyStream.controller=null;if(babyStream.context){babyStream.context.close().catch(()=>{});babyStream.context=null}babyStream.gain=null;babyStream.nextTime=0;const status=$('#baby-status');if(status)status.textContent='Stopped'}
+const babyStream={controller:null,context:null,gain:null,nextTime:0,generation:0};
+function stopBabyStream(){const controller=babyStream.controller,context=babyStream.context;babyStream.generation++;babyStream.controller=null;babyStream.context=null;babyStream.gain=null;babyStream.nextTime=0;if(controller)controller.abort();if(context&&context.state!=='closed')context.close().catch(()=>{});const status=$('#baby-status');if(status)status.textContent='Stopped'}
+function babyAudioContract(response,source,channel){const header=response.headers.get('X-LibreEcho-Audio')||'',fields=header.split(';'),format=fields[0]||'',value=key=>{const field=fields.find(x=>x.startsWith(key+'='));return field?field.slice(key.length+1):''},bits=format==='pcm_s24_3le'?24:format==='pcm_s16_le'?16:Number(source.bits)||16,validBits=Math.max(2,Math.min(bits,Number(value('valid-bits'))||Number(source.valid_bits)||bits)),channels=Math.max(1,Number(value('channels'))||Number(source.channels)||1),rate=Number(value('rate'))||Number(source.rate)||16000,selected=Number(value('selected-channel')),selectedChannel=Number.isFinite(selected)?selected:channels===1?0:channel;return{bits,validBits,channels,rate,channel:Math.max(0,Math.min(channels-1,selectedChannel))}}
 async function babyMonitorPage(){
   const d=await api('/baby-monitor');
   if(!d.sources.length){
@@ -87,16 +88,11 @@ async function babyMonitorPage(){
     if(d.simulated){toast('Live microphone streaming is unavailable in the mock backend',true);return}
     const source=d.sources.find(x=>x.id===sourceSelect.value)||first;
     const channel=Number(channelSelect.value)||0;
-    const channels=Number(source.channels)||1;
-    const bits=Number(source.bits)||16;
-    const validBits=Math.max(2,Math.min(bits,Number(source.valid_bits)||bits));
-    const sampleScale=2**(validBits-1);
-    const rate=Number(source.rate)||16000;
-    const bytesPerSample=bits===24?3:2;
-    const frameBytes=channels*bytesPerSample;
     const context=new(window.AudioContext||window.webkitAudioContext)();
+    const controller=new AbortController();
+    const generation=babyStream.generation;
     babyStream.context=context;
-    babyStream.controller=new AbortController();
+    babyStream.controller=controller;
     babyStream.nextTime=context.currentTime+0.05;
     const gain=context.createGain();
     gain.gain.value=Number($('#baby-volume').value)/100;
@@ -106,16 +102,24 @@ async function babyMonitorPage(){
     $('#baby-dot').classList.add('ok');
     try{
       await context.resume();
+      if(generation!==babyStream.generation)return;
       const response=await fetch('/api/v1/baby-monitor/stream?source='+encodeURIComponent(source.id)+'&channel='+channel,{
         headers:{Accept:'application/octet-stream',...(state.token?{Authorization:'Bearer '+state.token}:{})},
-        signal:babyStream.controller.signal
+        signal:controller.signal
       });
       if(!response.ok)throw new Error('Microphone stream failed ('+response.status+')');
+      if(generation!==babyStream.generation)return;
+      if(!response.body)throw new Error('Microphone stream returned no audio body');
+      const contract=babyAudioContract(response,source,channel);
+      const bytesPerSample=contract.bits===24?3:2;
+      const frameBytes=contract.channels*bytesPerSample;
+      const sampleScale=2**(contract.validBits-1);
       $('#baby-status').textContent='Listening';
       const reader=response.body.getReader();
       let carry=new Uint8Array(0);
       while(true){
         const chunk=await reader.read();
+        if(generation!==babyStream.generation)return;
         if(chunk.done)break;
         const bytes=new Uint8Array(carry.length+chunk.value.length);
         bytes.set(carry);
@@ -124,12 +128,12 @@ async function babyMonitorPage(){
         const used=frames*frameBytes;
         if(!frames){carry=bytes;continue}
         carry=bytes.slice(used);
-        const audio=context.createBuffer(1,frames,rate);
+        const audio=context.createBuffer(1,frames,contract.rate);
         const samples=audio.getChannelData(0);
         for(let i=0;i<frames;i++){
-          const offset=i*frameBytes+channel*bytesPerSample;
+          const offset=i*frameBytes+contract.channel*bytesPerSample;
           let value;
-          if(bits===24){
+          if(contract.bits===24){
             value=bytes[offset]|(bytes[offset+1]<<8)|(bytes[offset+2]<<16);
             if(value&0x800000)value|=-16777216;
             samples[i]=Math.max(-1,Math.min(1,value/sampleScale));
@@ -147,8 +151,10 @@ async function babyMonitorPage(){
         babyStream.nextTime=start+audio.duration;
       }
     }catch(e){
-      if(e.name!=='AbortError'){console.error(e);toast(e.message,true)}
-      stopBabyStream();
+      if(generation===babyStream.generation){
+        if(e.name!=='AbortError'){console.error(e);toast(e.message,true)}
+        stopBabyStream();
+      }
     }
   };
   $('#baby-stop').onclick=stopBabyStream;
