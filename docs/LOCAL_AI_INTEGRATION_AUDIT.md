@@ -1,7 +1,7 @@
 # LibreEcho API Audit — Local LLM / STT / TTS Integration Gaps
 
 **Target:** `http://192.168.0.125:8080` (LibreEcho-UI web daemon, `/api/v1/`)
-**Source audited:** `/home/andy/workspace/LibreEcho-UI` (commit on `main`)
+**Source audited:** canonical `LibreEcho-UI` repository (commit on `main`)
 **Date:** 2026-07-27
 
 ---
