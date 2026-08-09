@@ -131,14 +131,15 @@ test-wyomingd: $(BUILD)/test-wyomingd
 # sherpa-onnx backed ttsd (cross-compiled ARM32, static).  Uses the real
 # ZipVoice neural TTS engine instead of the mock sine chirp.  Requires
 # SHERPA_PREFIX (sherpa-onnx install) and ORT_BUILD (onnxruntime build dir).
-SHERPA_PREFIX ?= $(HOME)/workspace/sherpa-onnx-arm32/install
-ORT_BUILD ?= $(HOME)/workspace/onnxruntime-src/build-arm32
-ESPEAK_SRC ?= $(HOME)/workspace/sherpa-onnx-src/build-arm32/_deps/espeak_ng-src
-FLITE_SRC ?= $(HOME)/workspace/flite-2.2
-SPEEX_PREFIX ?= $(HOME)/workspace/speexdsp-host
-ARM_SPEEX_PREFIX ?= $(HOME)/workspace/speexdsp-arm32
+SHERPA_PREFIX ?=
+ORT_BUILD ?=
+ORT_PREFIX ?=
+ESPEAK_SRC ?=
+FLITE_SRC ?=
+SPEEX_PREFIX ?=
+ARM_SPEEX_PREFIX ?=
 WAKE_ORT_BUILD ?= $(ORT_BUILD)
-WAKE_ORT_SOURCE ?= $(HOME)/workspace/onnxruntime-src
+WAKE_ORT_SOURCE ?=
 WAKE_ARM_CXXFLAGS = -march=armv7-a -mfpu=neon-vfpv4 \
 	-mfloat-abi=hard -std=c++17 -O3 -ffunction-sections \
 	-fdata-sections -Wall -Wextra -Wpedantic -Werror \
@@ -158,9 +159,26 @@ WAKE_ORT_ARCHIVES = \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
 	$(WAKE_ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
 	$(WAKE_ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
-	$(HOME)/workspace/onnxruntime-arm32/install/lib/libre2.a
+	$(ORT_PREFIX)/libre2.a
 WAKE_ORT_ABSEIL = $$(find $(WAKE_ORT_BUILD)/_deps/abseil_cpp-build \
 	-name '*.a')
+ORT_ARCHIVES = \
+	$(ORT_BUILD)/libonnxruntime_session.a \
+	$(ORT_BUILD)/libonnxruntime_optimizer.a \
+	$(ORT_BUILD)/libonnxruntime_providers.a \
+	$(ORT_BUILD)/libonnxruntime_graph.a \
+	$(ORT_BUILD)/libonnxruntime_framework.a \
+	$(ORT_BUILD)/libonnxruntime_common.a \
+	$(ORT_BUILD)/libonnxruntime_mlas.a \
+	$(ORT_BUILD)/libonnxruntime_util.a \
+	$(ORT_BUILD)/libonnxruntime_flatbuffers.a \
+	$(ORT_BUILD)/libonnxruntime_lora.a \
+	$(ORT_BUILD)/_deps/onnx-build/libonnx.a \
+	$(ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
+	$(ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
+	$(ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
+	$(ORT_PREFIX)/libre2.a
+ORT_ABSEIL = $$(find $(ORT_BUILD)/_deps/abseil_cpp-build -name '*.a')
 SHERPA_CXXFLAGS = -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c++17 -O2 \
 	-Isrc -Isrc/adapter -I$(SHERPA_PREFIX)/include -I$(ESPEAK_SRC)/src/include \
 	-I$(FLITE_SRC)/include
@@ -205,24 +223,7 @@ $(BUILD)/libreecho-ttsd-sherpa: $(BUILD)/ttsd.arm.o $(BUILD)/tts_engine_sherpa.a
 		-lkaldi-native-fbank-core -lkissfft-float \
 		-lsherpa-onnx-fst -lsherpa-onnx-fstfar -lsherpa-onnx-kaldifst-core \
 		-lkaldi-decoder-core -lucd \
-		-Wl,--start-group \
-		$(ORT_BUILD)/libonnxruntime_session.a \
-		$(ORT_BUILD)/libonnxruntime_optimizer.a \
-		$(ORT_BUILD)/libonnxruntime_providers.a \
-		$(ORT_BUILD)/libonnxruntime_graph.a \
-		$(ORT_BUILD)/libonnxruntime_framework.a \
-		$(ORT_BUILD)/libonnxruntime_common.a \
-		$(ORT_BUILD)/libonnxruntime_mlas.a \
-		$(ORT_BUILD)/libonnxruntime_util.a \
-		$(ORT_BUILD)/libonnxruntime_flatbuffers.a \
-		$(ORT_BUILD)/libonnxruntime_lora.a \
-		$(ORT_BUILD)/_deps/onnx-build/libonnx.a \
-		$(ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
-		$(ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
-		$(ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
-		$(HOME)/workspace/onnxruntime-arm32/install/lib/libre2.a \
-		$$(find $(ORT_BUILD)/_deps/abseil_cpp-build -name '*.a') \
-		-Wl,--end-group \
+		-Wl,--start-group $(ORT_ARCHIVES) $(ORT_ABSEIL) -Wl,--end-group \
 		-lpthread -ldl -lm -o $@
 
 $(BUILD)/libreecho-sttd-sherpa-arm32: $(BUILD)/sttd.arm.o \
@@ -235,24 +236,8 @@ $(BUILD)/libreecho-sttd-sherpa-arm32: $(BUILD)/sttd.arm.o \
 		-lsherpa-onnx-fst -lsherpa-onnx-fstfar \
 		-lsherpa-onnx-kaldifst-core -lkaldi-decoder-core \
 		-lespeak-ng -lpiper_phonemize -lssentencepiece_core -lucd \
-		-Wl,--start-group \
-		$(ORT_BUILD)/libonnxruntime_session.a \
-		$(ORT_BUILD)/libonnxruntime_optimizer.a \
-		$(ORT_BUILD)/libonnxruntime_providers.a \
-		$(ORT_BUILD)/libonnxruntime_graph.a \
-		$(ORT_BUILD)/libonnxruntime_framework.a \
-		$(ORT_BUILD)/libonnxruntime_common.a \
-		$(ORT_BUILD)/libonnxruntime_mlas.a \
-		$(ORT_BUILD)/libonnxruntime_util.a \
-		$(ORT_BUILD)/libonnxruntime_flatbuffers.a \
-		$(ORT_BUILD)/libonnxruntime_lora.a \
-		$(ORT_BUILD)/_deps/onnx-build/libonnx.a \
-		$(ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
-		$(ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
-		$(ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
-		$(HOME)/workspace/onnxruntime-arm32/install/lib/libre2.a \
-		$$(find $(ORT_BUILD)/_deps/abseil_cpp-build -name '*.a') \
-		-Wl,--end-group -lpthread -ldl -lm -o $@
+		-Wl,--start-group $(ORT_ARCHIVES) $(ORT_ABSEIL) -Wl,--end-group \
+		-lpthread -ldl -lm -o $@
 
 $(BUILD)/test-voice-aec: tests/test_voice_aec.c src/adapter/voice_aec.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \

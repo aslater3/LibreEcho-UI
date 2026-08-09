@@ -20,6 +20,11 @@ api = Path("src/api.c").read_text()
 build = Path("deploy/build-arm.sh").read_text()
 push = Path("deploy/push-adb.sh").read_text()
 assert "LE_SOURCE_COMMIT" in makefile and "LE_SOURCE_DIGEST" in makefile
+assert "$(HOME)/workspace" not in makefile
+assert "/home/andy/" not in makefile
+assert "ORT_PREFIX ?=" in makefile
+assert "$(ORT_BUILD)/_deps/onnx-build/libonnx.a" in makefile
+assert "$(ORT_PREFIX)/libre2.a" in makefile
 assert "/api/v1/provenance" in api
 assert "refusing to build a dirty source tree" in build
 assert "source-provenance.json" in push
