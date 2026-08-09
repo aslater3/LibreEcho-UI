@@ -11,5 +11,8 @@ assert 'return scan_errno ? -scan_errno : -EIO;' in source
 assert 'NL80211_CMD_TRIGGER_SCAN' in source
 assert 'NL80211_CMD_GET_SCAN' in source
 assert 'NL80211_BSS_INFORMATION_ELEMENTS' in source
-print('network scan EOPNOTSUPP/nl80211 contract: ok')
+assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
+assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));' in source
+assert 'level = normalize_rssi_dbm((int)statistics.qual.level);' in source
+print('network scan EOPNOTSUPP/nl80211 and signed RSSI contract: ok')
 PY

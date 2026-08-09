@@ -485,6 +485,13 @@ static const char *wpa_value(const char *status, const char *key,
     return NULL;
 }
 
+static int normalize_rssi_dbm(int rssi_dbm)
+{
+    if (rssi_dbm > 127 && rssi_dbm <= 255)
+        return rssi_dbm - 256;
+    return rssi_dbm;
+}
+
 static int rssi_to_percent(int rssi_dbm)
 {
     int signal;
@@ -528,9 +535,7 @@ static int read_wireless_rssi(const char *iface)
         return -1;
     }
     close(fd);
-    level = (int)statistics.qual.level;
-    if (level > 127)
-        level -= 256;
+    level = normalize_rssi_dbm((int)statistics.qual.level);
     return level <= 0 ? level : -1;
 }
 
@@ -785,7 +790,7 @@ static void refresh_wpa_info(struct daemon_ctx *ctx)
     n = wpa_ctrl_request(&ctx->wpa.command, "SIGNAL_POLL\n", reply,
                          sizeof(reply), WPA_TIMEOUT_MS);
     if (n >= 0 && wpa_value(reply, "RSSI", value, sizeof(value))) {
-        ctx->state.rssi_dbm = (int)strtol(value, NULL, 10);
+        ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));
         ctx->state.signal = rssi_to_percent(ctx->state.rssi_dbm);
     } else {
         ctx->state.rssi_dbm = -1;
