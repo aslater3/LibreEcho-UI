@@ -3,6 +3,7 @@ set -eu
 python3 - <<'PY'
 from pathlib import Path
 s = Path('tests/live_readonly_audit.sh').read_text()
+assert 'LIBREECHO_LIVE_URL:?set LIBREECHO_LIVE_URL' in s
 assert 'LIBREECHO_LIVE_USERNAME' in s
 assert 'LIBREECHO_LIVE_PASSWORD' in s
 assert 'LIBREECHO_LIVE_TOKEN' in s
