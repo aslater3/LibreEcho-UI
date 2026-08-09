@@ -157,7 +157,7 @@ code=$(curl -sS -o /tmp/le-announce-mock.out -w '%{http_code}' -X POST "$URL/api
 [ "$code" = 501 ]
 code=$(curl -sS -o /tmp/le-announce-stop.out -w '%{http_code}' -X POST "$URL/api/v1/audio/announce/stop" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 501 ]
-curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"alan"}' | grep -q '"tts_voice":"alan"'
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"northern-male"}' | grep -q '"tts_voice":"northern-male"'
 code=$(curl -sS -o /tmp/le-voice-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"not-a-voice"}')
 [ "$code" = 400 ]
 echo 'api: ok'

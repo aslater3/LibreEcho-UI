@@ -11,10 +11,14 @@ Safe by default:
     exercise flag is supplied.
 
 Examples:
-  python3 tools/live_hardware_harness.py --url http://192.168.0.145:8080
-  LIBREECHO_USERNAME=... LIBREECHO_PASSWORD=... \\
+  python3 tools/live_hardware_harness.py \
+    --url http://192.0.2.10:8080 --adb-serial DEVICE_SERIAL
+  LIBREECHO_LIVE_URL=http://192.0.2.10:8080 ADB_SERIAL=DEVICE_SERIAL \
+    LIBREECHO_USERNAME=... LIBREECHO_PASSWORD=... \
     python3 tools/live_hardware_harness.py --strict-capabilities
-  python3 tools/live_hardware_harness.py --capture --report build/live.json
+  python3 tools/live_hardware_harness.py \
+    --url http://192.0.2.10:8080 --adb-serial DEVICE_SERIAL \
+    --capture --report build/live.json
 
 `--mutate` performs same-state PUT/readback checks for reversible configuration
 routes. `--exercise-hardware` runs bounded audio, LED, wake-word, Bluetooth
@@ -91,7 +95,7 @@ class HttpResponse:
 class Harness:
     base_url: str
     timeout: float = 8.0
-    adb_serial: str = "G2A0RF0485020316"
+    adb_serial: str = ""
     strict_capabilities: bool = False
     capture: bool = False
     mutate: bool = False
@@ -690,8 +694,20 @@ def elapsed_ms(started: float) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--url", default=os.environ.get("LIBREECHO_LIVE_URL", "http://192.168.0.145:8080"))
-    parser.add_argument("--adb-serial", default=os.environ.get("ADB_SERIAL", "G2A0RF0485020316"))
+    url_default = os.environ.get("LIBREECHO_LIVE_URL")
+    adb_serial_default = os.environ.get("ADB_SERIAL")
+    parser.add_argument(
+        "--url",
+        default=url_default,
+        required=url_default is None,
+        help="live device URL (or set LIBREECHO_LIVE_URL)",
+    )
+    parser.add_argument(
+        "--adb-serial",
+        default=adb_serial_default,
+        required=adb_serial_default is None,
+        help="ADB device serial (or set ADB_SERIAL)",
+    )
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--report", help="write redacted JSON report to this path")
     parser.add_argument("--strict-capabilities", action="store_true", help="return failure for blocked/unsupported gates")

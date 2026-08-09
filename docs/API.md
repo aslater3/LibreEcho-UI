@@ -170,7 +170,7 @@ Returns current audio state.
     "tts_voice": "southern-female",
     "tts_voices": [
       { "id": "southern-female", "name": "Southern English — female" },
-      { "id": "alan", "name": "Alan — male" }
+      { "id": "northern-male", "name": "Northern English — male" }
     ]
   },
   "error": null

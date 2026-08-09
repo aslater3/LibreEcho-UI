@@ -34,7 +34,7 @@ config_string() {
 
 valid_voice() {
     case "$1" in
-        alan|southern-female) return 0 ;;
+        northern-male|southern-female) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -143,7 +143,7 @@ stop_service() {
 switch_voice() {
     selected=${2:-}
     valid_voice "$selected" || {
-        echo "libreecho-ttsd: voice must be alan or southern-female" >&2
+        echo "libreecho-ttsd: voice must be northern-male or southern-female" >&2
         return 1
     }
     mkdir -p "$(dirname "$VOICE_FILE")"
@@ -161,5 +161,5 @@ case "${1:-}" in
     restart) stop_service; start_service ;;
     switch) switch_voice "$@" ;;
     status) if is_running; then echo "running"; else echo "stopped"; exit 1; fi ;;
-    *) echo "Usage: $0 {start|stop|restart|status|switch <alan|southern-female>}"; exit 1 ;;
+    *) echo "Usage: $0 {start|stop|restart|status|switch <northern-male|southern-female>}"; exit 1 ;;
 esac

@@ -4,7 +4,8 @@ set -eu
 # This audit is read-only: it excludes /audio, /audio/test, /wake-word/test,
 # /led/test, all PUT/POST/DELETE actions, Wi-Fi connect/disconnect, restore,
 # and power operations. It supports the normal authenticated device config.
-URL=${LIBREECHO_LIVE_URL:-http://192.168.0.125:8080}
+: "${LIBREECHO_LIVE_URL:?set LIBREECHO_LIVE_URL to the explicit device URL}"
+URL=$LIBREECHO_LIVE_URL
 TMP_BASE=${TMPDIR:-/tmp}/libreecho-live-audit.$$
 AUTH_HEADER=
 TOKEN=
