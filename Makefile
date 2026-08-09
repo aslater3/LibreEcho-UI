@@ -134,6 +134,7 @@ test-wyomingd: $(BUILD)/test-wyomingd
 SHERPA_PREFIX ?=
 ORT_BUILD ?=
 ORT_PREFIX ?=
+RE2_ARCHIVE ?=
 ESPEAK_SRC ?=
 FLITE_SRC ?=
 SPEEX_PREFIX ?=
@@ -159,7 +160,7 @@ WAKE_ORT_ARCHIVES = \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
 	$(WAKE_ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
 	$(WAKE_ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
-	$(ORT_PREFIX)/libre2.a
+	$(RE2_ARCHIVE)
 WAKE_ORT_ABSEIL = $$(find $(WAKE_ORT_BUILD)/_deps/abseil_cpp-build \
 	-name '*.a')
 ORT_ARCHIVES = \
@@ -177,7 +178,7 @@ ORT_ARCHIVES = \
 	$(ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
 	$(ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
 	$(ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
-	$(ORT_PREFIX)/libre2.a
+	$(RE2_ARCHIVE)
 ORT_ABSEIL = $$(find $(ORT_BUILD)/_deps/abseil_cpp-build -name '*.a')
 SHERPA_CXXFLAGS = -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c++17 -O2 \
 	-Isrc -Isrc/adapter -I$(SHERPA_PREFIX)/include -I$(ESPEAK_SRC)/src/include \
