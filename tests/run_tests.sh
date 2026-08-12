@@ -16,6 +16,7 @@ python3 tests/test_baby_monitor_stream_contract.py
 sh tests/test_live_readonly_audit_contract.sh
 python3 tests/test_public_source_safety.py
 sh tests/test_source_provenance.sh
+sh tests/test_ota_channel_contract.sh
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 sh tests/test_airplay_led_bridge.sh
