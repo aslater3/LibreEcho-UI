@@ -53,6 +53,36 @@
       "get":{"tags":["LED and buttons"],"summary":"Read LED state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
       "put":{"tags":["LED and buttons"],"summary":"Update LED colour, brightness or music visualizer preference","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
     },
+    "/led/profile": {
+      "put": {
+        "tags": ["LED and buttons"],
+        "summary": "Save a named LED profile",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "r", "g", "b"],
+                "properties": {
+                  "name": {"type":"string","enum":["listening","thinking","error","dnd"]},
+                  "r": {"type":"integer","minimum":0,"maximum":255},
+                  "g": {"type":"integer","minimum":0,"maximum":255},
+                  "b": {"type":"integer","minimum":0,"maximum":255},
+                  "brightness": {"type":"integer","minimum":0,"maximum":100,"default":100}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "400": {"$ref":"#/components/responses/Error"},
+          "501": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
     "/led/test": {"post":{"tags":["LED and buttons"],"summary":"Run the LED test","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
     "/buttons": {
       "get":{"tags":["LED and buttons"],"summary":"Read button mappings","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}},

@@ -8,7 +8,7 @@ curl -fsS -X PUT "$URL/api/v1/led" -H "$CSRF" -H 'Content-Type: application/json
 curl -fsS -X PUT "$URL/api/v1/network" -H "$CSRF" -H 'Content-Type: application/json' --data '{"hostname":"persistent-echo","ssh":true,"api_lan":true}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data '{"short_press":"Play / pause","long_press":"Reboot device"}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"local_only":true,"diagnostic_telemetry":false,"crash_reports":false,"audio_retention":"none","log_retention_hours":168}' >/dev/null
-curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: application/json' --data '{"mode":"custom","stt_wyoming_uri":"tcp://192.168.1.10:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://192.168.1.10:10200","tts_voice":"en_GB-alan-medium"}' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: application/json' --data '{"mode":"custom","stt_wyoming_uri":"tcp://198.51.100.10:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://198.51.100.10:10200","tts_voice":"en_GB-alan-medium"}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 grep -q '"volume": 37' "$CFG"
 jq -e '
@@ -20,9 +20,9 @@ jq -e '
   .privacy_log_hours == 168 and .integrations == 5 and
   .privacy_local_only == false and
   .voice_pipeline_mode == "custom" and
-  .stt_wyoming_uri == "tcp://192.168.1.10:10300" and
+  .stt_wyoming_uri == "tcp://198.51.100.10:10300" and
   .stt_wyoming_model == "whisper-small" and
-  .tts_wyoming_uri == "tcp://192.168.1.10:10200" and
+  .tts_wyoming_uri == "tcp://198.51.100.10:10200" and
   .tts_wyoming_voice == "en_GB-alan-medium"
 ' "$CFG" >/dev/null
 ! grep -qi 'password' "$(dirname "$CFG")/test-suite-config.json"

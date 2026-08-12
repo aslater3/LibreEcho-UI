@@ -64,12 +64,12 @@ function localAssistantBody(a,selected,pipeline) {
   </div>
   <div class="settings-grid assistant-settings">
     <div>
-      ${field('Endpoint URL',a.base_url||'','local-base-url','url','placeholder="http://192.168.1.10:8000/v1"')}
+      ${field('Endpoint URL',a.base_url||'','local-base-url','url','placeholder="http://198.51.100.10:8000/v1"')}
       <label class="field"><span>API key (optional)</span><input id="local-api-key" type="password" autocomplete="off" placeholder="${a.api_key_configured?'Configured; leave blank to keep it':'Leave blank when the endpoint does not require one'}"></label>
       ${field('Model',a.model||'','local-model')}
-      ${field('Whisper Wyoming endpoint',stt.wyoming_uri||'','stt-wyoming-uri','text','placeholder="tcp://192.168.1.10:10300"')}
+      ${field('Whisper Wyoming endpoint',stt.wyoming_uri||'','stt-wyoming-uri','text','placeholder="tcp://198.51.100.10:10300"')}
       ${field('Whisper model',stt.model||'whisper-small','stt-model')}
-      ${field('Piper Wyoming endpoint',tts.wyoming_uri||'','tts-wyoming-uri','text','placeholder="tcp://192.168.1.10:10200"')}
+      ${field('Piper Wyoming endpoint',tts.wyoming_uri||'','tts-wyoming-uri','text','placeholder="tcp://198.51.100.10:10200"')}
       ${field('Piper voice',tts.voice||'en_GB-alan-medium','tts-voice')}
       <label class="field"><span>Voice response prompt</span><textarea id="local-prompt" rows="8">${esc(a.prompt||'')}</textarea></label>
       ${saveButton('save-local-assistant')}

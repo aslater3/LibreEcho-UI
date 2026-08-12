@@ -2,6 +2,7 @@
 """Fail if tracked UI source contains private workstation or device identities."""
 
 from pathlib import Path
+import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,12 @@ tracked = subprocess.run(
 
 private_home = "/" + "home" + "/" + "andy" + "/"
 device_prefix = "G2A0" + "RF"
+private_address = re.compile(
+    r"(?<![0-9])(?:10\\.(?:[0-9]{1,3}\\.){2}[0-9]{1,3}|"
+    r"172\\.(?:1[6-9]|2[0-9]|3[0-1])(?:\\.[0-9]{1,3}){2}|"
+    r"192\\.168(?:\\.[0-9]{1,3}){2})(?![0-9])"
+)
+
 for raw_path in tracked:
     if not raw_path:
         continue
@@ -24,6 +31,7 @@ for raw_path in tracked:
         continue
     assert private_home not in text, f"private workstation path in {path.relative_to(ROOT)}"
     assert device_prefix not in text, f"private device identity in {path.relative_to(ROOT)}"
+    assert private_address.search(text) is None, f"private LAN address in {path.relative_to(ROOT)}"
 
 for forbidden in (
     "docs/LOCAL_AI_INTEGRATION_AUDIT.md",
