@@ -51,6 +51,15 @@ code=$(curl -sS -o /tmp/le-invalid-visualizer.out -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     --data '{"visualizer_enabled":"yes"}')
 [ "$code" = 400 ]
+curl -fsS -X PUT "$URL/api/v1/led/profile" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"name":"listening","r":72,"g":216,"b":118,"brightness":80}' | \
+    jq -e '.ok and .data.profiles.listening != null' >/dev/null
+code=$(curl -sS -o /tmp/le-invalid-led-profile.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/led/profile" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"name":"unknown","r":72,"g":216,"b":118}')
+[ "$code" = 400 ]
 curl -fsS "$URL/api/v1/baby-monitor" | jq -e \
     '.ok and .data.sources[0].channels == 1 and
      .data.sources[0].valid_bits == 16 and

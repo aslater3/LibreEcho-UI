@@ -350,6 +350,27 @@ Update LED settings.
 }
 ```
 
+#### PUT /api/v1/led/profile
+
+Save one named LED profile. The profile name must be `listening`, `thinking`,
+`error`, or `dnd`; colour channels are 0–255 and brightness is optional from
+0–100 (default 100).
+
+**Request:**
+```json
+{
+  "name": "listening",
+  "r": 72,
+  "g": 216,
+  "b": 118,
+  "brightness": 80
+}
+```
+
+**Response:** The updated LED state using the standard success envelope. Invalid
+names, colours, or brightness values return `400`; unavailable hardware returns
+`501`. The request requires `X-LibreEcho-CSRF`.
+
 #### POST /api/v1/led/test
 
 Run LED test pattern.
