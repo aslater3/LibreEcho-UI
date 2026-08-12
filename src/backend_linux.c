@@ -93,9 +93,12 @@ static int read_line(const char *path, char *out, size_t out_size)
 
 static int read_device_serial(char *out, size_t out_size)
 {
+    const char *idme_path = getenv("LIBREECHO_IDME_SERIAL_PATH");
     size_t i;
 
-    if (read_line("/proc/idme/serial", out, out_size) != 0 || !out[0])
+    if (!idme_path || !idme_path[0])
+        idme_path = "/proc/idme/serial";
+    if (read_line(idme_path, out, out_size) != 0 || !out[0])
         return -1;
     for (i = 0; out[i]; ++i)
         if (!isalnum((unsigned char)out[i])) {
@@ -103,6 +106,40 @@ static int read_device_serial(char *out, size_t out_size)
             return -1;
         }
     return i >= 4 ? 0 : -1;
+}
+
+static int read_redacted_boot_id(char *out, size_t out_size)
+{
+    const char *cmdline_path = getenv("LIBREECHO_CMDLINE_PATH");
+    char cmdline[4096], serial[128];
+    const char *key = "androidboot.serialno=";
+    const char *start;
+    size_t i;
+    unsigned long long hash = 1469598103934665603ULL;
+
+    if (!cmdline_path || !cmdline_path[0])
+        cmdline_path = "/proc/cmdline";
+    if (read_line(cmdline_path, cmdline, sizeof(cmdline)) != 0)
+        return -1;
+    start = strstr(cmdline, key);
+    if (!start)
+        return -1;
+    start += strlen(key);
+    for (i = 0; start[i] && start[i] != ' ' && i + 1 < sizeof(serial); ++i) {
+        if (!isalnum((unsigned char)start[i]))
+            return -1;
+        serial[i] = start[i];
+    }
+    if (i < 4 || (start[i] != ' ' && start[i] != '\0'))
+        return -1;
+    serial[i] = '\0';
+    for (i = 0; serial[i]; ++i) {
+        hash ^= (unsigned char)serial[i];
+        hash *= 1099511628211ULL;
+    }
+    if (snprintf(out, out_size, "device-%016llx", hash) >= (int)out_size)
+        return -1;
+    return 0;
 }
 
 static int parse_cpu_mask(const char *text, int *online, size_t count)
@@ -615,7 +652,8 @@ static int device(struct le_backend *b, struct le_device_info *o)
     read_hostname(o->hostname, sizeof(o->hostname));
     copy_string(o->name, sizeof(o->name), "LibreEcho");
     strcpy(o->model, "LibreEcho device");
-    if (read_device_serial(o->serial, sizeof(o->serial)) != 0)
+    if (read_device_serial(o->serial, sizeof(o->serial)) != 0 &&
+        read_redacted_boot_id(o->serial, sizeof(o->serial)) != 0)
         strcpy(o->serial, "unavailable");
     strcpy(o->os_version, LE_OS_VERSION_STRING);
     if (!uname(&u))

@@ -13,6 +13,7 @@ sh tests/test_led_pattern_ownership.sh
 make build/test-wake-led
 sh tests/test_microphone_fanout_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
+sh tests/test_device_identity.sh
 # The CPU online-mask fixture requires a Linux sysfs-shaped runtime and is run
 # separately; keep the aggregate suite deterministic across CI runners.
 # sh tests/test_cpu_online_mask.sh
