@@ -10,6 +10,9 @@ assert 'wext_result == -ENOTSUP' in source
 assert 'return scan_errno ? -scan_errno : -EIO;' in source
 assert 'NL80211_CMD_TRIGGER_SCAN' in source
 assert 'NL80211_CMD_GET_SCAN' in source
+assert 'NL80211_SCAN_FRESH_WAIT_MS' in source
+assert 'TRIGGER_SCAN is only an acknowledgement' in source
+assert source.index('TRIGGER_SCAN is only an acknowledgement') < source.index('result = nl80211_dump_scan')
 assert 'NL80211_BSS_INFORMATION_ELEMENTS' in source
 assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
 assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));' in source

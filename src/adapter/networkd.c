@@ -63,6 +63,7 @@
 #define WEXT_SCAN_RETRY_MS 100
 #define NL80211_SCAN_TIMEOUT_MS 12000
 #define NL80211_SCAN_RETRY_MS 150
+#define NL80211_SCAN_FRESH_WAIT_MS 300
 #define NL80211_BUFFER_SIZE 65536
 
 struct wpa_ctrl {
@@ -1682,6 +1683,10 @@ static int nl80211_scan(const char *iface, char *data, size_t data_size)
         goto done;
     }
     deadline = monotonic_ms() + NL80211_SCAN_TIMEOUT_MS;
+    /* TRIGGER_SCAN is only an acknowledgement that the scan was queued. Give
+     * cfg80211 a bounded window to publish fresh results before the first
+     * GET_SCAN dump, otherwise the caller receives the pre-scan cache. */
+    (void)poll(NULL, 0, NL80211_SCAN_FRESH_WAIT_MS);
     for (;;) {
         result = nl80211_dump_scan(fd, family, ifindex, buffer,
                                    NL80211_BUFFER_SIZE, data, data_size);
