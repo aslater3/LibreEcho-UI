@@ -520,6 +520,17 @@ Shutdown device. Requires confirmation.
 
 Factory reset device. Requires confirmation.
 
+#### PUT /api/v1/system/update/channel
+
+Select the signed GitHub Releases channel. Changing the channel clears the
+previous check result; run the update check again before installing.
+
+```json
+{"channel":"stable"}
+```
+
+`channel` must be `stable` or `dev`.
+
 ### Configuration
 
 #### GET /api/v1/config

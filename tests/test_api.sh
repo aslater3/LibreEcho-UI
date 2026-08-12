@@ -124,6 +124,14 @@ for endpoint in check apply; do
         -H 'Content-Type: application/json' --data '{}')
     [ "$code" = 501 ]
 done
+code=$(curl -sS -o /tmp/le-update-channel.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/update/channel" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"channel":"stable"}')
+[ "$code" = 501 ]
+code=$(curl -sS -o /tmp/le-update-channel-invalid.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/update/channel" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"channel":"bogus"}')
+[ "$code" = 501 ]
 code=$(curl -sS -o /tmp/le-update-upload.out -w '%{http_code}' \
     -X POST "$URL/api/v1/system/update/upload" -H "$CSRF" \
     -H 'Content-Type: application/x-tar' --data-binary 'not-an-update')
