@@ -92,13 +92,13 @@ int main(void)
     CHECK(provider != NULL);
     CHECK(!provider->subscription_auth);
     memset(&credentials, 0, sizeof(credentials));
-    strcpy(credentials.base_url, "http://192.168.10.20:8000/v1");
+    strcpy(credentials.base_url, "http://198.51.100.20:8000/v1");
     strcpy(credentials.api_key, "local-key");
     CHECK(provider->response_request(
               &credentials, "gemma-4", "Be concise.", "Hello?",
               &request) == 0);
     CHECK(!strcmp(request.url,
-                  "http://192.168.10.20:8000/v1/chat/completions"));
+                  "http://198.51.100.20:8000/v1/chat/completions"));
     CHECK(request.allow_insecure_http);
     CHECK(!strcmp(request.authorization, "Bearer local-key"));
     CHECK(strstr(request.body, "\"role\":\"system\"") != NULL);
