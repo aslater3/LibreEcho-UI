@@ -12,5 +12,5 @@ int api_init(struct api_context*,struct le_backend*,int,int,const char*,const ch
 int api_baby_monitor_stream_authorize(struct api_context*,const struct api_request*,struct api_response*,int*,int*,int*,int*,int*);
 int api_update_upload_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_update_fetch_authorize(struct api_context*,const struct api_request*,struct api_response*);
-int api_update_channel_authorize(struct api_context*,const struct api_request*,struct api_response*);
+int api_update_channel_authorize(struct api_context*,const struct api_request*,struct api_response*,char*,size_t);
 #endif
