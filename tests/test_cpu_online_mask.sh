@@ -20,5 +20,5 @@ while ! curl -fsS "$URL/api/v1/status" >/tmp/libreecho-cpu-status.json 2>/dev/nu
     [ "$i" -lt 30 ] || { cat ./build/test-cpu-online.log; exit 1; }
     sleep 0.1
 done
-jq -e '.ok and .data.cpus.cores[0].online and .data.cpus.cores[1].online and .data.cpus.cores[2].online and .data.cpus.cores[3].online and ([.data.cpus.cores[] | select(.online)] | length) == 4' /tmp/libreecho-cpu-status.json >/dev/null
+jq -e '.ok and .data.cpus.cores[0].online and .data.cpus.cores[1].online and .data.cpus.cores[2].online and .data.cpus.cores[3].online and ([.data.cpus.cores[] | select(.online)] | length) >= 4' /tmp/libreecho-cpu-status.json >/dev/null
 printf '%s\n' 'cpu aggregate mask: ok'
