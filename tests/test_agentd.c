@@ -203,12 +203,12 @@ int main(void)
     CHECK(call(
               socket_path, "configure",
               "{\"provider\":\"openai-compatible\",\"enabled\":true,"
-              "\"base_url\":\"http://192.168.10.20:8001/v1\","
+              "\"base_url\":\"http://198.51.100.20:8001/v1\","
               "\"model\":\"Gemma-4-12B\"}",
               response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"provider\":\"openai-compatible\"") != NULL);
     CHECK(strstr(response,
-                 "\"base_url\":\"http://192.168.10.20:8001/v1\"") != NULL);
+                 "\"base_url\":\"http://198.51.100.20:8001/v1\"") != NULL);
     CHECK(call(socket_path, "respond",
                "{\"text\":\"Check the local provider.\"}",
                response, sizeof(response)) == 0);

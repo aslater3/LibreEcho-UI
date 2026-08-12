@@ -91,7 +91,7 @@ int main(void)
 
     memset(&request, 0, sizeof(request));
     strcpy(request.method, "POST");
-    strcpy(request.url, "http://192.168.10.20:8000/v1/chat/completions");
+    strcpy(request.url, "http://198.51.100.20:8000/v1/chat/completions");
     strcpy(request.content_type, "application/json");
     strcpy(request.body, "{\"stream\":true}");
     request.accept_sse = 1;
