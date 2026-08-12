@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-PORT=${LIBREECHO_CPU_TEST_PORT:-18083}
+PORT=${LIBREECHO_CPU_TEST_PORT:-$((18000 + ($$ % 1000)))}
 URL="http://127.0.0.1:$PORT"
 ROOT=./build/test-cpu-sysfs
 CFG=./build/test-cpu-config.json
