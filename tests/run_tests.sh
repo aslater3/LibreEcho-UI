@@ -13,6 +13,7 @@ sh tests/test_led_pattern_ownership.sh
 make build/test-wake-led
 sh tests/test_microphone_fanout_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
+python3 tests/test_wake_word_ui_contract.py
 sh tests/test_live_readonly_audit_contract.sh
 python3 tests/test_public_source_safety.py
 sh tests/test_source_provenance.sh
