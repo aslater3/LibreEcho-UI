@@ -35,12 +35,22 @@ struct options {
     const char *resolv_file;
     const char *network_ready_file;
     int retry_seconds;
+    int ntpd_timeout_seconds;
     int one_shot;
     int sync_hook;
 };
 
 static volatile sig_atomic_t stopping;
 static volatile sig_atomic_t child_pid;
+static volatile sig_atomic_t child_timed_out;
+
+static void on_alarm(int signo)
+{
+    (void)signo;
+    child_timed_out = 1;
+    if (child_pid > 1)
+        kill((pid_t)child_pid, SIGTERM);
+}
 
 static void on_signal(int signo)
 {
@@ -371,12 +381,14 @@ static void drain_ntpd_output(int fd, char *output, size_t size)
 }
 
 static int wait_ntpd(pid_t pid, int output_fd, int *status,
-                     char *output, size_t output_size)
+                     char *output, size_t output_size, int timeout_seconds)
 {
     int result;
 
     if (output && output_size)
         output[0] = '\0';
+    child_timed_out = 0;
+    alarm((unsigned int)timeout_seconds);
     for (;;) {
         drain_ntpd_output(output_fd, output, output_size);
         result = waitpid(pid, status, WNOHANG);
@@ -386,6 +398,7 @@ static int wait_ntpd(pid_t pid, int output_fd, int *status,
             break;
         (void)poll(NULL, 0, 100);
     }
+    alarm(0);
     drain_ntpd_output(output_fd, output, output_size);
     close(output_fd);
     return result == pid ? 0 : -1;
@@ -398,7 +411,8 @@ static void usage(const char *name)
             "  [--ntpd PATH] [--hwclock PATH] [--config PATH]\\n"
             "  [--persistent-config PATH] [--status PATH]\\n"
             "  [--rtc-device PATH] [--rtc-sysfs-dev PATH]\\n"
-            "  [--network-ready-file PATH] [--retry-seconds N]\\n", name);
+            "  [--network-ready-file PATH] [--retry-seconds N]\\n"
+            "  [--ntpd-timeout-seconds N]\\n", name);
 }
 
 static int parse_options(int argc, char **argv, struct options *options)
@@ -436,6 +450,11 @@ static int parse_options(int argc, char **argv, struct options *options)
             VALUE(); options->retry_seconds = atoi(argv[i]);
             if (options->retry_seconds < 1 || options->retry_seconds > 3600)
                 return -1;
+        } else if (!strcmp(argv[i], "--ntpd-timeout-seconds")) {
+            VALUE(); options->ntpd_timeout_seconds = atoi(argv[i]);
+            if (options->ntpd_timeout_seconds < 1 ||
+                options->ntpd_timeout_seconds > 3600)
+                return -1;
         } else if (!strcmp(argv[i], "--verbose") ||
                    !strcmp(argv[i], "--debug") ||
                    !strcmp(argv[i], "--quiet")) {
@@ -455,7 +474,7 @@ int main(int argc, char **argv)
         "/data/libreecho/config/ntp.conf",
         "/run/libreecho/time.status", "/dev/rtc0",
         "/sys/class/rtc/rtc0/dev", "/proc/net/route", "/etc/resolv.conf",
-        NULL, 30, 0, 0
+        NULL, 30, 30, 0, 0
     };
     char peers[MAX_PEERS][MAX_PEER_LEN + 1], servers[1100];
     const char *config_source = "image";
@@ -496,6 +515,7 @@ int main(int argc, char **argv)
                        rtc_available, 0, 0, config_source, servers);
     signal(SIGTERM, on_signal);
     signal(SIGINT, on_signal);
+    signal(SIGALRM, on_alarm);
     le_log_info("time daemon started (%d peers, %s configuration)",
                 count, config_source);
     while (!stopping) {
@@ -523,7 +543,8 @@ int main(int argc, char **argv)
         } else {
             child_pid = pid;
             if (wait_ntpd(pid, output_fd, &status,
-                          ntpd_error, sizeof(ntpd_error)) < 0)
+                          ntpd_error, sizeof(ntpd_error),
+                          options.ntpd_timeout_seconds) < 0)
                 status = 1;
             child_pid = 0;
             if (WIFEXITED(status)) {
@@ -537,7 +558,9 @@ int main(int argc, char **argv)
             } else {
                 (void)setenv("LIBREECHO_TIME_NTP_EXIT", "unknown", 1);
             }
-            if (ntpd_error[0])
+            if (child_timed_out)
+                (void)setenv("LIBREECHO_TIME_ERROR", "ntpd timed out", 1);
+            else if (ntpd_error[0])
                 (void)setenv("LIBREECHO_TIME_ERROR", ntpd_error, 1);
             else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
                 (void)setenv("LIBREECHO_TIME_ERROR", "ntpd exited without diagnostics", 1);
