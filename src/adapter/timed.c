@@ -22,6 +22,7 @@
 #define MAX_PEERS 4
 #define MAX_PEER_LEN 253
 #define VALID_CLOCK_EPOCH 1577836800
+#define NTPD_TERM_GRACE_MS 1000
 
 struct options {
     const char *ntpd;
@@ -43,6 +44,14 @@ struct options {
 static volatile sig_atomic_t stopping;
 static volatile sig_atomic_t child_pid;
 static volatile sig_atomic_t child_timed_out;
+
+static long long monotonic_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+        return 0;
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
 
 static void on_alarm(int signo)
 {
@@ -384,6 +393,7 @@ static int wait_ntpd(pid_t pid, int output_fd, int *status,
                      char *output, size_t output_size, int timeout_seconds)
 {
     int result;
+    long long grace_deadline = 0;
 
     if (output && output_size)
         output[0] = '\0';
@@ -396,6 +406,17 @@ static int wait_ntpd(pid_t pid, int output_fd, int *status,
             break;
         if (result < 0 && errno != EINTR)
             break;
+        if (child_timed_out && !grace_deadline) {
+            grace_deadline = monotonic_ms() + NTPD_TERM_GRACE_MS;
+            le_log_warn("ntpd did not exit after timeout; allowing bounded termination grace");
+        }
+        if (grace_deadline && monotonic_ms() >= grace_deadline) {
+            le_log_warn("ntpd ignored termination; forcing kill");
+            (void)kill(pid, SIGKILL);
+            while (waitpid(pid, status, 0) < 0 && errno == EINTR)
+                ;
+            break;
+        }
         (void)poll(NULL, 0, 100);
     }
     alarm(0);
