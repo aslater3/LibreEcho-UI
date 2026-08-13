@@ -93,9 +93,12 @@ static int read_line(const char *path, char *out, size_t out_size)
 
 static int read_device_serial(char *out, size_t out_size)
 {
+    const char *idme_path = getenv("LIBREECHO_IDME_SERIAL_PATH");
     size_t i;
 
-    if (read_line("/proc/idme/serial", out, out_size) != 0 || !out[0])
+    if (!idme_path || !idme_path[0])
+        idme_path = "/proc/idme/serial";
+    if (read_line(idme_path, out, out_size) != 0 || !out[0])
         return -1;
     for (i = 0; out[i]; ++i)
         if (!isalnum((unsigned char)out[i])) {
@@ -105,13 +108,79 @@ static int read_device_serial(char *out, size_t out_size)
     return i >= 4 ? 0 : -1;
 }
 
+static int read_redacted_boot_id(char *out, size_t out_size)
+{
+    const char *cmdline_path = getenv("LIBREECHO_CMDLINE_PATH");
+    char cmdline[4096], serial[128];
+    const char *key = "androidboot.serialno=";
+    const char *start;
+    size_t i;
+    unsigned long long hash = 1469598103934665603ULL;
+
+    if (!cmdline_path || !cmdline_path[0])
+        cmdline_path = "/proc/cmdline";
+    if (read_line(cmdline_path, cmdline, sizeof(cmdline)) != 0)
+        return -1;
+    start = strstr(cmdline, key);
+    if (!start)
+        return -1;
+    start += strlen(key);
+    for (i = 0; start[i] && start[i] != ' ' && i + 1 < sizeof(serial); ++i) {
+        if (!isalnum((unsigned char)start[i]))
+            return -1;
+        serial[i] = start[i];
+    }
+    if (i < 4 || (start[i] != ' ' && start[i] != '\0'))
+        return -1;
+    serial[i] = '\0';
+    for (i = 0; serial[i]; ++i) {
+        hash ^= (unsigned char)serial[i];
+        hash *= 1099511628211ULL;
+    }
+    if (snprintf(out, out_size, "device-%016llx", hash) >= (int)out_size)
+        return -1;
+    return 0;
+}
+
+static int parse_cpu_mask(const char *text, int *online, size_t count)
+{
+    const char *p = text;
+    int found = 0;
+
+    while (p && *p) {
+        char *end;
+        unsigned long first = strtoul(p, &end, 10);
+        unsigned long last = first;
+        if (end == p)
+            break;
+        if (*end == '-') {
+            p = end + 1;
+            last = strtoul(p, &end, 10);
+            if (end == p)
+                break;
+        }
+        if (first < count) {
+            unsigned long stop = last < count ? last : count - 1;
+            unsigned long cpu;
+            for (cpu = first; cpu <= stop; ++cpu)
+                online[cpu] = 1;
+            found = 1;
+        }
+        p = (*end == ',') ? end + 1 : end;
+    }
+    return found;
+}
+
 static void read_cpu_status(struct le_backend *b, struct le_system_status *o)
 {
     FILE *f;
-    char line[256];
+    char line[256], mask[128];
     long configured;
     size_t count, i;
+    const char *sysfs_root = getenv("LIBREECHO_CPU_SYSFS_ROOT");
 
+    if (!sysfs_root || !sysfs_root[0])
+        sysfs_root = "/sys/devices/system/cpu";
     configured = sysconf(_SC_NPROCESSORS_CONF);
     if (configured < 1)
         configured = 1;
@@ -122,19 +191,26 @@ static void read_cpu_status(struct le_backend *b, struct le_system_status *o)
 
     for (i = 0; i < count; ++i) {
         char path[PATH_MAX], online[8], frequency[32];
-        o->cpus[i].online = i == 0;
+        o->cpus[i].online = 0;
         frequency[0] = '\0';
-        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%zu/online", i);
+        snprintf(path, sizeof(path), "%s/cpu%zu/online", sysfs_root, i);
         if (!read_line(path, online, sizeof(online)))
             o->cpus[i].online = atoi(online) != 0;
-        snprintf(path, sizeof(path),
-                 "/sys/devices/system/cpu/cpu%zu/cpufreq/scaling_cur_freq", i);
+        snprintf(path, sizeof(path), "%s/cpu%zu/cpufreq/scaling_cur_freq", sysfs_root, i);
         if (read_line(path, frequency, sizeof(frequency))) {
-            snprintf(path, sizeof(path),
-                     "/sys/devices/system/cpu/cpu%zu/cpufreq/cpuinfo_cur_freq", i);
+            snprintf(path, sizeof(path), "%s/cpu%zu/cpufreq/cpuinfo_cur_freq", sysfs_root, i);
             (void)read_line(path, frequency, sizeof(frequency));
         }
         o->cpus[i].frequency_khz = atoi(frequency);
+    }
+
+    snprintf(line, sizeof(line), "%s/online", sysfs_root);
+    if (read_line(line, mask, sizeof(mask)) == 0) {
+        int aggregate[LE_MAX_CPUS] = {0};
+        if (parse_cpu_mask(mask, aggregate, count)) {
+            for (i = 0; i < count; ++i)
+                o->cpus[i].online = aggregate[i];
+        }
     }
 
     f = fopen("/proc/stat", "r");
@@ -576,7 +652,8 @@ static int device(struct le_backend *b, struct le_device_info *o)
     read_hostname(o->hostname, sizeof(o->hostname));
     copy_string(o->name, sizeof(o->name), "LibreEcho");
     strcpy(o->model, "LibreEcho device");
-    if (read_device_serial(o->serial, sizeof(o->serial)) != 0)
+    if (read_device_serial(o->serial, sizeof(o->serial)) != 0 &&
+        read_redacted_boot_id(o->serial, sizeof(o->serial)) != 0)
         strcpy(o->serial, "unavailable");
     strcpy(o->os_version, LE_OS_VERSION_STRING);
     if (!uname(&u))

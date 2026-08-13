@@ -106,7 +106,7 @@ Returns device information.
     "model": "LibreEcho device",
     "serial": "unavailable",
     "os_version": "LibreEcho OS",
-    "kernel": "3.18.140",
+    "kernel": "6.1.x",
     "hardware_revision": "adapter pending",
     "backend": "linux"
   },
@@ -350,6 +350,27 @@ Update LED settings.
 }
 ```
 
+#### PUT /api/v1/led/profile
+
+Save one named LED profile. The profile name must be `listening`, `thinking`,
+`error`, or `dnd`; colour channels are 0–255 and brightness is optional from
+0–100 (default 100).
+
+**Request:**
+```json
+{
+  "name": "listening",
+  "r": 72,
+  "g": 216,
+  "b": 118,
+  "brightness": 80
+}
+```
+
+**Response:** The updated LED state using the standard success envelope. Invalid
+names, colours, or brightness values return `400`; unavailable hardware returns
+`501`. The request requires `X-LibreEcho-CSRF`.
+
 #### POST /api/v1/led/test
 
 Run LED test pattern.
@@ -378,8 +399,8 @@ Returns network state.
     "ssid": "MyNetwork",
     "signal": 75,
     "rssi_dbm": -47,
-    "ip": "192.168.1.100",
-    "gateway": "192.168.1.1",
+    "ip": "192.0.2.10",
+    "gateway": "192.0.2.1",
     "dns": "8.8.8.8, 8.8.4.4",
     "hostname": "libreecho",
     "internet": true,
