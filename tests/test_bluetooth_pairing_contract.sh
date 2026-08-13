@@ -12,7 +12,14 @@ source = Path('src/adapter/btd.c').read_text()
 start = source.index('if (!strcmp(command, "set_enabled"))')
 end = source.index('if (!strcmp(command, "pairing_mode"))', start)
 block = source[start:end]
-assert 'hci_device_up()' in block
+assert 'set_powered(context, 1)' in block, (
+    'enabling Bluetooth must use the Linux management power-on path'
+)
+assert 'hci_device_up()' not in block, (
+    'enabling Bluetooth must not depend on the unsupported legacy HCIDEVUP ioctl'
+)
+assert 'HCI_CHANNEL_RAW' not in source
+assert '#define HCIDEVUP' not in source
 assert 'set_controller_setting(context, MGMT_OP_SET_BONDABLE, 1)' in block, (
     'enabling Bluetooth must set HCI_BONDABLE before an incoming '
     'authentication request'
@@ -20,10 +27,6 @@ assert 'set_controller_setting(context, MGMT_OP_SET_BONDABLE, 1)' in block, (
 assert 'set_controller_setting(context, MGMT_OP_SET_CONNECTABLE, 1)' in block, (
     'enabling Bluetooth must set HCI_CONNECTABLE before an inbound '
     'connection request'
-)
-assert 'saved_errno == EALREADY' in source, (
-    'an already-up HCI controller must not be reported as a failed '
-    'saved enablement'
 )
 assert 'record_mgmt_status(context, expected, payload[2])' in source
 assert 'record_mgmt_io(context, opcode, "response", ETIMEDOUT)' in source
