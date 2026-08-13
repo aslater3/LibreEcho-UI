@@ -1570,6 +1570,62 @@ static int nl80211_append_bss(const struct nlattr *bss, char *data,
     return 0;
 }
 
+static int nl80211_wait_for_scan_event(int fd, unsigned char *buffer,
+                                       size_t capacity, long long deadline)
+{
+    struct pollfd descriptor = { fd, POLLIN, 0 };
+
+    for (;;) {
+        struct nlmsghdr *header;
+        int remaining;
+        ssize_t received;
+        int wait_ms = (int)(deadline - monotonic_ms());
+
+        if (wait_ms <= 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        if (poll(&descriptor, 1, wait_ms) <= 0) {
+            if (errno == EINTR)
+                continue;
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        received = recv(fd, buffer, capacity, 0);
+        if (received < 0 && errno == EINTR)
+            continue;
+        if (received < 0)
+            return -1;
+        remaining = (int)received;
+        for (header = (struct nlmsghdr *)buffer;
+             NLMSG_OK(header, remaining);
+             header = NLMSG_NEXT(header, remaining)) {
+            struct genlmsghdr *generic;
+            const struct nlattr *attrs;
+            size_t payload_length;
+
+            if (header->nlmsg_type == NLMSG_ERROR) {
+                struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
+                errno = error->error ? -error->error : EPROTO;
+                return -1;
+            }
+            if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
+                continue;
+            generic = (struct genlmsghdr *)NLMSG_DATA(header);
+            payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+            attrs = (const struct nlattr *)((unsigned char *)generic + GENL_HDRLEN);
+            if (generic->cmd == NL80211_CMD_NEW_SCAN_RESULTS)
+                return 0;
+            if (generic->cmd == NL80211_CMD_SCAN_ABORTED) {
+                errno = ECANCELED;
+                return -1;
+            }
+            (void)attrs;
+            (void)payload_length;
+        }
+    }
+}
+
 static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
                              unsigned char *buffer, size_t capacity,
                              char *data, size_t data_size)
@@ -1682,6 +1738,11 @@ static int nl80211_scan(const char *iface, char *data, size_t data_size)
         goto done;
     }
     deadline = monotonic_ms() + NL80211_SCAN_TIMEOUT_MS;
+    if (nl80211_wait_for_scan_event(fd, buffer, NL80211_BUFFER_SIZE,
+                                    deadline) < 0) {
+        result = -errno;
+        goto done;
+    }
     for (;;) {
         result = nl80211_dump_scan(fd, family, ifindex, buffer,
                                    NL80211_BUFFER_SIZE, data, data_size);
