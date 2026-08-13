@@ -17,8 +17,10 @@ timezones.
 6. Every successful synchronization writes the UTC clock back to the PMIC RTC
    with `hwclock -u -w`; normal operation repeats this periodically.
 
-This provides RTC holdover while offline and fresh network time after Wi-Fi
-becomes available.
+Every synchronization attempt has a bounded `--ntpd-timeout-seconds`
+default of 30 seconds. A hung resolver or peer cannot block the daemon
+indefinitely; the status file records `ntpd timed out` and the signal result,
+then normal retry policy resumes.
 
 ## Default public sources
 
