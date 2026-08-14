@@ -11,8 +11,10 @@
  *      from the sequence size descriptor, not the first raw byte.
  *   3. A ServiceSearchAttribute with no matching record must return a valid
  *      empty AttributeListsList, not an error PDU.
- *   4. The response is framed as an outer DES wrapping each matching record
- *      list plus a trailing one-byte null continuation state.
+ *   4. The response body carries a 2-byte AttributeListsByteCount that
+ *      covers only the AttributeListsList (never the continuation state),
+ *      followed by an outer DES wrapping each matching record list and a
+ *      trailing one-byte null continuation state.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -155,12 +157,18 @@ int main(void)
             uint16_t plen = be16(response + 3);
             check(5 + (ssize_t)plen == n,
                   "search-attr parameter length matches the PDU body");
-            /* Payload must be an outer DES followed by a 1-byte null
-             * continuation state. */
+            /* Payload must be an AttributeListsByteCount (2 bytes) followed
+             * by an outer DES and a trailing 1-byte null continuation. */
             check(n >= 6 && response[n - 1] == 0x00,
                   "search-attr ends with a null continuation state");
-            check(n >= 6 && (response[5] == 0x35 || response[5] == 0x36),
-                  "search-attr AttributeListsList is a DataElementSequence");
+            check(n >= 8 && (response[7] == 0x35 || response[7] == 0x36),
+                  "search-attr AttributeListsList DES starts at offset 7");
+            {
+                uint16_t count = be16(response + 5);
+                check(count == n - 8,
+                      "AttributeListsByteCount covers only the list, not "
+                      "the continuation state");
+            }
         }
     }
 
@@ -192,7 +200,9 @@ int main(void)
             check(5 + (ssize_t)plen == n,
                   "browse-group parameter length matches the PDU body");
             /* The PublicBrowseRoot group must match at least one record. */
-            check(n >= 8 && response[5] == 0x35 && response[6] > 0,
+            check(n >= 8 && be16(response + 5) > 0,
+                  "browse-group query reports a non-empty list byte count");
+            check(n >= 9 && response[7] == 0x35,
                   "browse-group query returns a non-empty AttributeListsList");
         }
     }
@@ -209,7 +219,9 @@ int main(void)
             uint16_t plen = be16(response + 3);
             check(5 + (ssize_t)plen == n,
                   "uuid128 browse-group parameter length matches");
-            check(n >= 8 && response[5] == 0x35 && response[6] > 0,
+            check(n >= 8 && be16(response + 5) > 0,
+                  "uuid128 browse-group reports a non-empty list byte count");
+            check(n >= 9 && response[7] == 0x35,
                   "uuid128 browse-group returns a non-empty AttributeListsList");
         }
     }
@@ -290,6 +302,8 @@ int main(void)
                   "service-attr parameter length matches the PDU body");
             check(n >= 6 && response[n - 1] == 0x00,
                   "service-attr ends with a null continuation state");
+            check(n >= 9 && be16(response + 5) == n - 8,
+                  "service-attr AttributeListsByteCount covers only the list");
         }
     }
 

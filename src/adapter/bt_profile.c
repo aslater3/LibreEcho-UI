@@ -95,8 +95,8 @@
 
 /* SDP constants (SDP 3.0). */
 #define LE_SDP_DE_NIL 0x00
-#define LE_SDP_DE_UINT16 0x0a
-#define LE_SDP_DE_UINT32 0x0c
+#define LE_SDP_DE_UINT16 0x09
+#define LE_SDP_DE_UINT32 0x0a
 #define LE_SDP_DE_TEXT8 0x25
 #define LE_SDP_DE_UUID16 0x19
 #define LE_SDP_DE_SEQUENCE 0x35
@@ -693,6 +693,10 @@ static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
         return;
     }
 
+    /* PDU header; AttributeListsByteCount (uint16) is patched in at
+     * response[5..6] after the body is built.  Records are collected at
+     * offset 7 first, then shifted right to make room for the outer
+     * AttributeListsList DES header. */
     response[0] = LE_SDP_PDU_SERVICE_SEARCH_ATTR_RSP;
     response[1] = (uint8_t)(tid >> 8);
     response[2] = (uint8_t)tid;
@@ -710,8 +714,10 @@ static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
                               pattern_size - consumed))
             continue;
         record_header = sdp_seq_header_size(record->length);
+        /* Leave room for the outer DES header (max 3 bytes) and the
+         * trailing one-byte null continuation state. */
         if (response_offset + record_header + record->length >
-            sizeof(response) - 1)
+            sizeof(response) - 4)
             continue;
         response_offset = sdp_put_seq_header(response, sizeof(response),
                                              response_offset, record->length);
@@ -726,13 +732,20 @@ static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
      * valid empty list, not an error PDU. */
     outer_content = total_list_bytes;
     outer_header = sdp_seq_header_size(outer_content);
-    response[5] = (uint8_t)((outer_header + outer_content + 1) >> 8);
-    response[6] = (uint8_t)(outer_header + outer_content + 1);
-    memmove(response + 5 + outer_header, response + 7,
-            response_offset - 7);
-    sdp_put_seq_header(response, sizeof(response), 5, outer_content);
-    response_offset = 5 + outer_header + outer_content;
+    memmove(response + 7 + outer_header, response + 7, outer_content);
+    (void)sdp_put_seq_header(response, sizeof(response), 7, outer_content);
+    response_offset = 7 + outer_header + outer_content;
     response[response_offset++] = 0x00; /* no continuation */
+    /* SDP 3.0: AttributeListsByteCount covers the AttributeListsList only
+     * (header + content), never the continuation state.  BlueZ clients read
+     * the continuation byte at offset 7 + count, so counting it here makes
+     * them abort with "Service Search failed: Success". */
+    {
+        size_t count = outer_header + outer_content;
+
+        response[5] = (uint8_t)(count >> 8);
+        response[6] = (uint8_t)count;
+    }
     response[3] = (uint8_t)((response_offset - 5) >> 8);
     response[4] = (uint8_t)(response_offset - 5);
     (void)sdp_write_response(session, response, response_offset);
@@ -767,8 +780,12 @@ static void sdp_handle_service_attr(struct le_profile_sessions *sessions,
         response[offset++] = 0;
         response[offset++] = 0;
         header = sdp_seq_header_size(record->length);
-        if (5 + header + record->length + 1 > sizeof(response))
+        if (7 + header + record->length + 1 > sizeof(response))
             continue;
+        /* AttributeListsByteCount: the AttributeList (header + content)
+         * only; the continuation state is not counted. */
+        response[offset++] = (uint8_t)((header + record->length) >> 8);
+        response[offset++] = (uint8_t)(header + record->length);
         offset = sdp_put_seq_header(response, sizeof(response), offset,
                                     record->length);
         memcpy(response + offset, record->data, record->length);
