@@ -750,6 +750,11 @@ Update button mappings.
 
 Returns native HCI controller state, Classic/LE capability flags, active
 discovery results, stored bond records, and any pending pairing request.
+The response also includes `profile_state`, `profile_error`, and
+`profile_services`. Kernel protocol support is not reported as a userspace
+profile: `profile_services` is true only when the corresponding SDP/profile
+service is registered and supervised. The current production image reports
+`profile_state: "pairing-only"` until an SDP/profile implementation is added.
 
 #### PUT /api/v1/bluetooth
 

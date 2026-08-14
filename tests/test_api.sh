@@ -76,7 +76,15 @@ grep -q 'not_supported' /tmp/le-baby-stream-encoded.out
 code=$(curl -sS -o /tmp/le-baby-stream-invalid-encoding.out -w '%{http_code}' "$URL/api/v1/baby-monitor/stream?source=0%ZZ24&channel=0")
 [ "$code" = 400 ]
 grep -q 'invalid_request' /tmp/le-baby-stream-invalid-encoding.out
-expect "$(curl -fsS "$URL/api/v1/bluetooth")" '"capabilities":'
+curl -fsS "$URL/api/v1/bluetooth" | jq -e \
+    '.data.profile_state == "pairing-only" and
+     (.data.profile_error | length) > 0 and
+     (.data.profile_services.sdp == false) and
+     (.data.profile_services.a2dp_sink == false) and
+     (.data.profile_services.avrcp == false) and
+     (.data.profile_services.rfcomm == false) and
+     (.data.profile_services.bnep == false) and
+     (.data.profile_services.hidp == false)' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' | jq -e '.ok and .data.enabled == true' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"connectable":false}' | jq -e '.ok and .data.capabilities.connectable == false' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"discoverable":true}' | jq -e '.ok and .data.capabilities.discoverable == true' >/dev/null

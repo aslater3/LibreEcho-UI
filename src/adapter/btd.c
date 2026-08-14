@@ -119,6 +119,8 @@
 #define LIBREECHO_BT_MAJOR_CLASS 0x04
 #define LIBREECHO_BT_MINOR_CLASS 0x14
 #define LIBREECHO_BT_NAME "LibreEcho"
+#define LIBREECHO_BT_PROFILE_STATE "pairing-only"
+#define LIBREECHO_BT_PROFILE_ERROR "No userspace Bluetooth profile service is registered"
 
 /* Audio Sink (0x110B) in the Bluetooth base UUID byte order used by the
  * 3.18 management API.  0x24 advertises Audio + Rendering service classes. */
@@ -1140,7 +1142,9 @@ static int status_json(struct bt_context *context, char *data, size_t size)
                     "\"capabilities\":{\"classic\":%s,\"le\":%s,"
                     "\"ssp\":%s,\"secure_connection\":%s,"
                     "\"connectable\":%s,\"discoverable\":%s,"
-                    "\"bondable\":%s,\"rfcomm\":true,\"bnep\":true,\"hidp\":true},"
+                    "\"bondable\":%s,\"profile_state\":\"%s\",\"profile_error\":\"%s\","
+                    "\"profile_services\":{\"sdp\":%s,\"a2dp_sink\":%s,\"avrcp\":%s,"
+                    "\"rfcomm\":%s,\"bnep\":%s,\"hidp\":%s}},"
                     "\"pending_pairing\":",
                     context->enabled ? "up" :
                     context->activation_attempted ? "activation-attempted" :
@@ -1158,7 +1162,9 @@ static int status_json(struct bt_context *context, char *data, size_t size)
                     context->supported_settings & MGMT_SETTING_SECURE_CONN ? "true" : "false",
                     context->current_settings & MGMT_SETTING_CONNECTABLE ? "true" : "false",
                     context->current_settings & MGMT_SETTING_DISCOVERABLE ? "true" : "false",
-                    context->current_settings & MGMT_SETTING_BONDABLE ? "true" : "false") != 0)
+                    context->current_settings & MGMT_SETTING_BONDABLE ? "true" : "false",
+                    LIBREECHO_BT_PROFILE_STATE, LIBREECHO_BT_PROFILE_ERROR,
+                    "false", "false", "false", "false", "false", "false") != 0)
         return -1;
     if (!context->pairing.active) {
         if (append_text(data, size, &used, "null,\"discovered\":[") != 0)
