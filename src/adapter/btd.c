@@ -27,7 +27,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -44,9 +43,7 @@
 #define BTPROTO_HCI 1
 #define HCI_DEV_NONE 0xffff
 #define HCI_DEV_ID 0
-#define HCI_CHANNEL_RAW 0
 #define HCI_CHANNEL_CONTROL 3
-#define HCIDEVUP _IOW('H', 201, int)
 #define MGMT_PACKET_MAX 4096
 #define MGMT_TIMEOUT_MS 5000
 #define HELPER_TIMEOUT_TICKS 150
@@ -741,50 +738,6 @@ static void led_pattern(const char *name, unsigned int r, unsigned int g,
     if (result != LE_ADAPTER_OK)
         le_log_warn("btd: LED pattern %s failed (%d)", name, result);
     le_adapter_close(adapter);
-}
-
-/*
- * The 3.18 Bluetooth management path queues a power-on work item.  On this
- * MT8163 port that request can be consumed before WMT has installed the BTIF
- * transport, leaving HCI_SETUP pending and reporting only a generic failure
- * to the API.  The legacy raw-socket ioctl calls hci_dev_open() synchronously
- * after wmt_configure and the one-shot BT function-on helper have completed.
- */
-static int hci_device_up(void)
-{
-    struct sockaddr_hci address;
-    int fd;
-    int result;
-    int saved_errno;
-
-    fd = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
-    if (fd < 0) {
-        le_log_warn("btd: HCI raw socket failed: %s", strerror(errno));
-        return -1;
-    }
-    memset(&address, 0, sizeof(address));
-    address.hci_family = AF_BLUETOOTH;
-    address.hci_dev = HCI_DEV_NONE;
-    address.hci_channel = HCI_CHANNEL_RAW;
-    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        le_log_warn("btd: HCI raw socket bind failed: %s", strerror(errno));
-        close(fd);
-        return -1;
-    }
-    result = ioctl(fd, HCIDEVUP, HCI_DEV_ID);
-    saved_errno = errno;
-    if (result < 0 && saved_errno == EALREADY) {
-        le_log_info("btd: hci%d is already up", HCI_DEV_ID);
-        result = 0;
-    } else if (result < 0) {
-        le_log_warn("btd: hci%d legacy open failed: %s", HCI_DEV_ID,
-                    strerror(saved_errno));
-    } else {
-        le_log_info("btd: hci%d legacy open succeeded", HCI_DEV_ID);
-    }
-    close(fd);
-    errno = saved_errno;
-    return result;
 }
 
 static void pairing_clear(struct bt_context *context)
@@ -1513,10 +1466,12 @@ static int handle_request(struct bt_context *context, char *message,
             return le_adapter_respond_err(response, response_size, id,
                                            context->last_error);
         }
-        /* Open hci0 synchronously after WMT has installed BTIF.  The legacy
-         * ioctl reaches hci_dev_do_open() directly; the management SET_POWERED
-         * path is asynchronous on this old kernel and can race registration. */
-        if (hci_device_up() != 0 || refresh_info(context) != 0) {
+        /* WMT has prepared BTIF; the supported Linux 6.1 management
+         * SET_POWERED command performs the HCI open transition.  Do not use
+         * the obsolete HCIDEVUP ioctl here: this target's HCI raw socket does
+         * not implement that legacy command and returns ENOTTY, leaving the
+         * virtual controller down before the first MGMT write. */
+        if (set_powered(context, 1) != 0 || refresh_info(context) != 0) {
             snprintf(context->last_error, sizeof(context->last_error),
                      "hci0 power-on failed");
             return le_adapter_respond_err(response, response_size, id,
