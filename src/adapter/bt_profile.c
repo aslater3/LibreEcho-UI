@@ -105,7 +105,12 @@
 #define LE_SDP_PDU_SERVICE_SEARCH 0x02
 #define LE_SDP_PDU_SERVICE_ATTR 0x04
 #define LE_SDP_PDU_SERVICE_SEARCH_ATTR 0x06
-#define LE_SDP_ERROR_INVALID_REQUEST 0x0002
+/* Response PDU identifiers differ from their request counterparts. */
+#define LE_SDP_PDU_SERVICE_SEARCH_RSP 0x03
+#define LE_SDP_PDU_SERVICE_ATTR_RSP 0x05
+#define LE_SDP_PDU_SERVICE_SEARCH_ATTR_RSP 0x07
+#define LE_SDP_ERROR_INVALID_RECORD_HANDLE 0x0002
+#define LE_SDP_ERROR_INVALID_SYNTAX 0x0003
 
 #define LE_SDP_RECORD_BROWSE 0x00010000u
 #define LE_SDP_RECORD_A2DP_SINK 0x00010001u
@@ -184,6 +189,11 @@ struct le_profile_sessions {
     struct le_avrcp_session avrcp[LE_MAX_AVRCP_SESSIONS];
     struct le_sdp_record records[8];
 };
+
+static ssize_t ignore_write(int fd, const void *buffer, size_t length)
+{
+    return write(fd, buffer, length);
+}
 
 static int l2cap_seqpacket_listen(unsigned short psm)
 {
@@ -514,24 +524,73 @@ static void sdp_send_error(struct le_sdp_session *session, uint16_t tid,
     (void)sdp_write_response(session, response, sizeof(response));
 }
 
+/*
+ * Match a record against the *content* of a ServiceSearchPattern DES (the
+ * 0x35 sequence header and size bytes have already been consumed by the
+ * caller).  Any listed UUID16 equal to the record class id, the wildcard
+ * 0xffff, or an equivalent UUID32 form matches.
+ */
 static int sdp_match_record(const struct le_sdp_record *record,
                             const uint8_t *pattern, size_t pattern_length)
 {
-    size_t offset;
+    size_t offset = 0;
 
-    if (pattern_length < 1 || pattern[0] != LE_SDP_DE_SEQUENCE)
-        return 0;
-    offset = 2;
-    while (offset + 3 <= pattern_length && pattern[offset] == LE_SDP_DE_UUID16) {
-        uint16_t uuid = (uint16_t)((pattern[offset + 1] << 8) |
-                                   pattern[offset + 2]);
-        if (uuid == 0xffff) /* wildcard matches everything */
-            return 1;
-        if (record->has_class_uuid16 && uuid == record->class_uuid16)
-            return 1;
-        offset += 3;
+    while (offset < pattern_length) {
+        uint8_t type = pattern[offset];
+
+        if (type == LE_SDP_DE_UUID16) {
+            uint16_t uuid;
+
+            if (offset + 3 > pattern_length)
+                return 0;
+            uuid = (uint16_t)((pattern[offset + 1] << 8) |
+                              pattern[offset + 2]);
+            if (uuid == 0xffff) /* wildcard matches everything */
+                return 1;
+            if (record->has_class_uuid16 && uuid == record->class_uuid16)
+                return 1;
+            offset += 3;
+        } else if (type == 0x1a) { /* UUID32 */
+            if (offset + 5 > pattern_length)
+                return 0;
+            if (record->has_class_uuid16 && pattern[offset + 1] == 0x00 &&
+                pattern[offset + 2] == 0x00 &&
+                ((pattern[offset + 3] << 8) | pattern[offset + 4]) ==
+                record->class_uuid16)
+                return 1;
+            offset += 5;
+        } else if (type == 0x1c) { /* UUID128 */
+            if (offset + 17 > pattern_length)
+                return 0;
+            offset += 17;
+        } else {
+            return 0;
+        }
     }
     return 0;
+}
+
+static size_t sdp_seq_header_size(size_t content)
+{
+    return content <= 255 ? 2 : 3;
+}
+
+static size_t sdp_put_seq_header(uint8_t *out, size_t size, size_t offset,
+                                 size_t content)
+{
+    if (content <= 255) {
+        if (offset + 2 > size)
+            return offset;
+        out[offset] = LE_SDP_DE_SEQUENCE;
+        out[offset + 1] = (uint8_t)content;
+        return offset + 2;
+    }
+    if (offset + 3 > size)
+        return offset;
+    out[offset] = 0x36;
+    out[offset + 1] = (uint8_t)(content >> 8);
+    out[offset + 2] = (uint8_t)content;
+    return offset + 3;
 }
 
 static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
@@ -543,21 +602,45 @@ static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
     uint8_t response[4096];
     size_t response_offset;
     size_t total_list_bytes = 0;
+    size_t outer_header;
+    size_t outer_content;
     int record_matches = 0;
-    size_t pattern_length;
+    size_t pattern_size;
+    size_t consumed;
     int i;
 
     if (params_length < 2) {
-        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_REQUEST);
+        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
         return;
     }
-    pattern_length = params[0];
-    if (pattern_length + 1 > params_length) {
-        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_REQUEST);
+    /* ServiceSearchPattern is a DataElementSequence of UUID data elements;
+     * its length comes from the sequence size descriptor, not the first
+     * raw byte. */
+    if (params[0] != LE_SDP_DE_SEQUENCE) {
+        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
+        return;
+    }
+    if (params[1] <= 0xfd) {
+        pattern_size = 2 + params[1];
+        consumed = 2;
+    } else if (params[1] == 0xfe) {
+        if (params_length < 4) {
+            sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
+            return;
+        }
+        pattern_size = 3 + (((size_t)params[2] << 8) | params[3]);
+        consumed = 4;
+    } else {
+        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
+        return;
+    }
+    if (pattern_size > params_length ||
+        consumed + 2 > pattern_size) {
+        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
         return;
     }
 
-    response[0] = LE_SDP_PDU_SERVICE_SEARCH_ATTR;
+    response[0] = LE_SDP_PDU_SERVICE_SEARCH_ATTR_RSP;
     response[1] = (uint8_t)(tid >> 8);
     response[2] = (uint8_t)tid;
     response[3] = 0;
@@ -566,34 +649,37 @@ static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
 
     for (i = 0; i < 8; ++i) {
         const struct le_sdp_record *record = &sessions->records[i];
-        size_t record_attr_start;
+        size_t record_header;
 
         if (!record->in_use)
             continue;
-        if (!sdp_match_record(record, params + 1, pattern_length))
+        if (!sdp_match_record(record, params + consumed,
+                              pattern_size - consumed))
             continue;
-        if (record->length + response_offset + 4 > sizeof(response))
+        record_header = sdp_seq_header_size(record->length);
+        if (response_offset + record_header + record->length >
+            sizeof(response) - 1)
             continue;
-
-        record_attr_start = response_offset + 2;
-        response[response_offset] = LE_SDP_DE_SEQUENCE;
-        response[response_offset + 1] = 0;
-        response_offset += 2;
+        response_offset = sdp_put_seq_header(response, sizeof(response),
+                                             response_offset, record->length);
         memcpy(response + response_offset, record->data, record->length);
         response_offset += record->length;
-        response[record_attr_start - 1] =
-            (uint8_t)(response_offset - record_attr_start);
         record_matches++;
-        total_list_bytes += 2 + (response_offset - record_attr_start);
+        total_list_bytes += record_header + record->length;
     }
 
-    if (!record_matches) {
-        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_REQUEST);
-        return;
-    }
-
-    response[5] = (uint8_t)(total_list_bytes >> 8);
-    response[6] = (uint8_t)total_list_bytes;
+    /* AttributeListsList: one DES wrapping every matching record list,
+     * followed by a one-byte null continuation state.  An empty result is a
+     * valid empty list, not an error PDU. */
+    outer_content = total_list_bytes;
+    outer_header = sdp_seq_header_size(outer_content);
+    response[5] = (uint8_t)((outer_header + outer_content + 1) >> 8);
+    response[6] = (uint8_t)(outer_header + outer_content + 1);
+    memmove(response + 5 + outer_header, response + 7,
+            response_offset - 7);
+    sdp_put_seq_header(response, sizeof(response), 5, outer_content);
+    response_offset = 5 + outer_header + outer_content;
+    response[response_offset++] = 0x00; /* no continuation */
     response[3] = (uint8_t)((response_offset - 5) >> 8);
     response[4] = (uint8_t)(response_offset - 5);
     (void)sdp_write_response(session, response, response_offset);
@@ -607,8 +693,9 @@ static void sdp_handle_service_attr(struct le_profile_sessions *sessions,
     uint32_t handle;
     int i;
 
-    if (params_length < 4) {
-        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_REQUEST);
+    /* Handle (uint32) + MaximumAttributeByteCount (uint16) minimum. */
+    if (params_length < 6) {
+        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
         return;
     }
     handle = ((uint32_t)params[0] << 24) | ((uint32_t)params[1] << 16) |
@@ -617,29 +704,29 @@ static void sdp_handle_service_attr(struct le_profile_sessions *sessions,
         const struct le_sdp_record *record = &sessions->records[i];
         uint8_t response[4096];
         size_t offset = 0;
-        size_t list_start;
+        size_t header;
 
         if (!record->in_use || record->handle != handle)
             continue;
-        response[offset++] = LE_SDP_PDU_SERVICE_ATTR;
+        response[offset++] = LE_SDP_PDU_SERVICE_ATTR_RSP;
         response[offset++] = (uint8_t)(tid >> 8);
         response[offset++] = (uint8_t)tid;
         response[offset++] = 0;
         response[offset++] = 0;
-        list_start = offset;
-        response[offset++] = LE_SDP_DE_SEQUENCE;
-        response[offset++] = 0;
-        if (record->length + offset > sizeof(response))
+        header = sdp_seq_header_size(record->length);
+        if (5 + header + record->length + 1 > sizeof(response))
             continue;
+        offset = sdp_put_seq_header(response, sizeof(response), offset,
+                                    record->length);
         memcpy(response + offset, record->data, record->length);
         offset += record->length;
-        response[list_start + 1] = (uint8_t)(offset - list_start - 2);
+        response[offset++] = 0x00; /* null continuation state */
         response[3] = (uint8_t)((offset - 5) >> 8);
         response[4] = (uint8_t)(offset - 5);
         (void)sdp_write_response(session, response, offset);
         return;
     }
-    sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_REQUEST);
+    sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_RECORD_HANDLE);
 }
 
 static void sdp_handle_service_search(struct le_profile_sessions *sessions,
@@ -651,37 +738,56 @@ static void sdp_handle_service_search(struct le_profile_sessions *sessions,
     size_t offset;
     uint16_t total;
     uint16_t current = 0;
-    size_t pattern_length;
+    size_t pattern_size;
+    size_t consumed;
     int i;
 
-    if (params_length < 2) {
-        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_REQUEST);
+    if (params_length < 2 || params[0] != LE_SDP_DE_SEQUENCE) {
+        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
         return;
     }
-    pattern_length = params[0];
+    if (params[1] <= 0xfd) {
+        pattern_size = 2 + params[1];
+        consumed = 2;
+    } else if (params[1] == 0xfe) {
+        if (params_length < 4) {
+            sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
+            return;
+        }
+        pattern_size = 3 + (((size_t)params[2] << 8) | params[3]);
+        consumed = 4;
+    } else {
+        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
+        return;
+    }
+    if (pattern_size > params_length || consumed + 2 > pattern_size) {
+        sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
+        return;
+    }
     total = 0;
     for (i = 0; i < 8; ++i) {
         if (sessions->records[i].in_use &&
-            sdp_match_record(&sessions->records[i], params + 1, pattern_length))
+            sdp_match_record(&sessions->records[i], params + consumed,
+                             pattern_size - consumed))
             total++;
     }
 
     offset = 0;
-    response[offset++] = LE_SDP_PDU_SERVICE_SEARCH;
+    response[offset++] = LE_SDP_PDU_SERVICE_SEARCH_RSP;
     response[offset++] = (uint8_t)(tid >> 8);
     response[offset++] = (uint8_t)tid;
     response[offset++] = 0;
     response[offset++] = 0;
     response[offset++] = (uint8_t)(total >> 8);
     response[offset++] = (uint8_t)total;
-    response[offset++] = (uint8_t)(current >> 8);
-    response[offset++] = (uint8_t)current;
-    for (i = 0; i < 8 && current < total && offset + 4 <= sizeof(response);
+    offset += 2; /* CurrentServiceRecordCount patched below. */
+    for (i = 0; i < 8 && current < total && offset + 4 <= sizeof(response) - 1;
          ++i) {
         const struct le_sdp_record *record = &sessions->records[i];
         if (!record->in_use)
             continue;
-        if (!sdp_match_record(record, params + 1, pattern_length))
+        if (!sdp_match_record(record, params + consumed,
+                              pattern_size - consumed))
             continue;
         response[offset++] = (uint8_t)(record->handle >> 24);
         response[offset++] = (uint8_t)(record->handle >> 16);
@@ -689,6 +795,9 @@ static void sdp_handle_service_search(struct le_profile_sessions *sessions,
         response[offset++] = (uint8_t)record->handle;
         current++;
     }
+    response[7] = (uint8_t)(current >> 8);
+    response[8] = (uint8_t)current;
+    response[offset++] = 0x00; /* null continuation state */
     response[3] = (uint8_t)((offset - 5) >> 8);
     response[4] = (uint8_t)(offset - 5);
     (void)sdp_write_response(session, response, offset);
@@ -729,7 +838,7 @@ static void sdp_session_read(struct le_profile_sessions *sessions,
                                       param_length);
             break;
         default:
-            sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_REQUEST);
+            sdp_send_error(session, tid, LE_SDP_ERROR_INVALID_SYNTAX);
             break;
         }
         session->used -= 5 + param_length;
@@ -858,7 +967,7 @@ static void avdtp_send(struct le_avdtp_session *session, uint8_t transaction,
     packet[3] = (uint8_t)payload_length;
     if (payload_length)
         memcpy(packet + 4, payload, payload_length);
-    (void)write(session->fd, packet, total);
+    (void)ignore_write(session->fd, packet, total);
 }
 
 static void avdtp_accept(struct le_avdtp_session *session, uint8_t transaction,
@@ -1236,7 +1345,7 @@ static void avrcp_send_pdu(struct le_avrcp_session *session, uint8_t transaction
     packet[offset++] = (uint8_t)payload_length;
     if (payload_length)
         memcpy(packet + offset, payload, payload_length);
-    (void)write(session->fd, packet, offset + payload_length);
+    (void)ignore_write(session->fd, packet, offset + payload_length);
 }
 
 static void avrcp_send_passthrough(struct le_avrcp_session *session,
@@ -1253,7 +1362,7 @@ static void avrcp_send_passthrough(struct le_avrcp_session *session,
     packet[offset++] = 0x48;
     packet[offset++] = (uint8_t)(opcode | state_flag);
     packet[offset++] = 0x00; /* no operands */
-    (void)write(session->fd, packet, offset);
+    (void)ignore_write(session->fd, packet, offset);
 }
 
 static void avrcp_session_read(struct le_avrcp_session *session)
@@ -1339,7 +1448,7 @@ static void avrcp_session_read(struct le_avrcp_session *session)
         /* AV/C passthrough (play/pause/stop etc.) */
         {
             uint8_t operand_length = buffer[6];
-            if (7 + operand_length > session->used)
+            if (7 + (size_t)operand_length > session->used)
                 break;
             avrcp_send_passthrough(session, transaction, opcode & 0x7f,
                                    opcode & 0x80);
@@ -1353,22 +1462,10 @@ static void avrcp_session_read(struct le_avrcp_session *session)
 
 int le_profile_open(struct le_profiles *p, const char *service_name)
 {
-    struct le_profile_sessions *sessions;
     int fd;
 
-    memset(p, 0, sizeof(*p));
-    p->sdp_listener = -1;
-    p->avdtp_listener = -1;
-    p->avrcp_listener = -1;
-    p->media_bus_fd = -1;
-    snprintf(p->service_name, sizeof(p->service_name), "%s",
-             service_name && service_name[0] ? service_name : "LibreEcho");
-
-    sessions = calloc(1, sizeof(*sessions));
-    if (!sessions)
+    if (le_profile_test_init(p, service_name) != 0)
         return -1;
-    p->sessions = sessions;
-    build_record_set(sessions, p->service_name);
 
     fd = l2cap_seqpacket_listen(LE_PSM_SDP);
     if (fd >= 0) {
@@ -1607,4 +1704,119 @@ int le_profile_registered_avrcp(const struct le_profiles *p)
 int le_profile_stream_active(const struct le_profiles *p)
 {
     return p->stream_active;
+}
+
+/* ---- Test seam --------------------------------------------------------- */
+
+/*
+ * Initialize the profile state (records and session slots) without binding
+ * any L2CAP sockets.  Used by the host-side wire-format regression test, and
+ * shared with le_profile_open().
+ */
+int le_profile_test_init(struct le_profiles *p, const char *service_name)
+{
+    struct le_profile_sessions *sessions;
+    int i;
+
+    memset(p, 0, sizeof(*p));
+    p->sdp_listener = -1;
+    p->avdtp_listener = -1;
+    p->avrcp_listener = -1;
+    p->media_bus_fd = -1;
+    snprintf(p->service_name, sizeof(p->service_name), "%s",
+             service_name && service_name[0] ? service_name : "LibreEcho");
+    sessions = calloc(1, sizeof(*sessions));
+    if (!sessions)
+        return -1;
+    for (i = 0; i < LE_MAX_SDP_SESSIONS; ++i)
+        sessions->sdp[i].fd = -1;
+    for (i = 0; i < LE_MAX_AVDTP_SESSIONS; ++i) {
+        sessions->avdtp[i].fd = -1;
+        sessions->avdtp[i].media_fd = -1;
+    }
+    for (i = 0; i < LE_MAX_AVRCP_SESSIONS; ++i)
+        sessions->avrcp[i].fd = -1;
+    p->sessions = sessions;
+    build_record_set(sessions, p->service_name);
+    return 0;
+}
+
+void le_profile_test_cleanup(struct le_profiles *p)
+{
+    le_profile_close(p);
+}
+
+static ssize_t test_exchange(int (*reader)(struct le_profiles *,
+                                           struct le_profile_sessions *,
+                                           int slot),
+                             struct le_profiles *p,
+                             const uint8_t *request, size_t request_len,
+                             uint8_t *response, size_t response_max)
+{
+    struct le_profile_sessions *sessions = p->sessions;
+    int fds[2];
+    ssize_t n;
+    size_t used = 0;
+    int slot;
+
+    if (!sessions || request_len == 0 || response_max < 5)
+        return -1;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0)
+        return -1;
+    for (slot = 0; slot < LE_MAX_SDP_SESSIONS; ++slot)
+        if (sessions->sdp[slot].fd < 0)
+            break;
+    if (slot == LE_MAX_SDP_SESSIONS) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    sessions->sdp[slot].fd = fds[0];
+    sessions->sdp[slot].used = 0;
+    if (write(fds[1], request, request_len) < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        sessions->sdp[slot].fd = -1;
+        return -1;
+    }
+    reader(p, sessions, slot);
+    /* Read the complete response; it may arrive in pieces. */
+    while (used < response_max) {
+        struct pollfd pollfd = { .fd = fds[1], .events = POLLIN };
+        ssize_t count;
+
+        if (used >= 5) {
+            size_t param_length = ((size_t)response[3] << 8) | response[4];
+            if (used >= 5 + param_length)
+                break;
+        }
+        if (poll(&pollfd, 1, 2000) <= 0)
+            break;
+        count = read(fds[1], response + used, response_max - used);
+        if (count <= 0)
+            break;
+        used += (size_t)count;
+    }
+    n = (ssize_t)used;
+    close(fds[0]);
+    close(fds[1]);
+    sessions->sdp[slot].fd = -1;
+    sessions->sdp[slot].used = 0;
+    return n;
+}
+
+static int test_read_sdp_slot(struct le_profiles *p,
+                              struct le_profile_sessions *sessions, int slot)
+{
+    sdp_session_read(sessions, &sessions->sdp[slot]);
+    (void)p;
+    return 0;
+}
+
+ssize_t le_profile_test_sdp_exchange(struct le_profiles *p,
+                                     const uint8_t *request, size_t request_len,
+                                     uint8_t *response, size_t response_max)
+{
+    return test_exchange(test_read_sdp_slot, p, request, request_len,
+                         response, response_max);
 }

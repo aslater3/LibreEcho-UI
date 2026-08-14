@@ -21,6 +21,7 @@
 #include <poll.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 /* Maximum file descriptors the profile layer can poll on. */
 #define LE_PROFILE_MAX_FDS 24
@@ -62,5 +63,18 @@ int le_profile_registered_sdp(const struct le_profiles *p);
 int le_profile_registered_a2dp_sink(const struct le_profiles *p);
 int le_profile_registered_avrcp(const struct le_profiles *p);
 int le_profile_stream_active(const struct le_profiles *p);
+
+/*
+ * Host-test seam.  le_profile_test_init builds the record set and session
+ * slots without binding any L2CAP socket; le_profile_test_sdp_exchange feeds
+ * one SDP PDU through the server logic over a socketpair and returns the
+ * complete response bytes (or -1).  These make the SDP wire format
+ * regression-testable on hosts without a Bluetooth controller.
+ */
+int le_profile_test_init(struct le_profiles *p, const char *service_name);
+void le_profile_test_cleanup(struct le_profiles *p);
+ssize_t le_profile_test_sdp_exchange(struct le_profiles *p,
+                                     const uint8_t *request, size_t request_len,
+                                     uint8_t *response, size_t response_max);
 
 #endif /* LIBREECHO_BT_PROFILE_H */
