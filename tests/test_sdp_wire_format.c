@@ -84,6 +84,51 @@ static size_t build_search_attr(uint8_t *out, uint16_t tid, uint16_t uuid)
     return offset;
 }
 
+/* Build a ServiceSearchAttribute request whose ServiceSearchPattern carries a
+ * full 128-bit Bluetooth base UUID (type 0x1c) — the form BlueZ sdptool uses
+ * for browse groups and class UUIDs.  The 16-bit short form occupies bytes
+ * 2..3 of the 16-byte UUID payload (Bluetooth base-UUID convention). */
+static size_t build_search_attr_uuid128(uint8_t *out, uint16_t tid,
+                                        uint16_t short_uuid)
+{
+    size_t offset = 5;
+    size_t uuid_start;
+    static const uint8_t base[16] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+        0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b, 0x34, 0xfb,
+    };
+
+    out[0] = SDP_PDU_SERVICE_SEARCH_ATTR_REQ;
+    out[1] = (uint8_t)(tid >> 8);
+    out[2] = (uint8_t)tid;
+    /* ServiceSearchPattern: DES{ UUID128 } */
+    out[offset++] = 0x35; /* DES, 1-byte size */
+    out[offset++] = 0x11; /* content = 17 bytes */
+    out[offset++] = 0x1c; /* UUID128 */
+    uuid_start = offset;
+    memcpy(out + offset, base, sizeof(base));
+    /* Patch the short form into UUID bytes 2..3. */
+    out[uuid_start + 2] = (uint8_t)(short_uuid >> 8);
+    out[uuid_start + 3] = (uint8_t)short_uuid;
+    offset += sizeof(base);
+    /* MaximumServiceRecordCount */
+    out[offset++] = 0x00;
+    out[offset++] = 0x0c;
+    /* AttributeIDList: DES{ uint32 0x0000ffff } */
+    out[offset++] = 0x35;
+    out[offset++] = 0x05;
+    out[offset++] = 0x0a;
+    out[offset++] = 0x00;
+    out[offset++] = 0x00;
+    out[offset++] = 0xff;
+    out[offset++] = 0xff;
+    /* continuation state */
+    out[offset++] = 0x00;
+    out[3] = (uint8_t)((offset - 5) >> 8);
+    out[4] = (uint8_t)(offset - 5);
+    return offset;
+}
+
 int main(void)
 {
     struct le_profiles profiles;
@@ -149,6 +194,23 @@ int main(void)
             /* The PublicBrowseRoot group must match at least one record. */
             check(n >= 8 && response[5] == 0x35 && response[6] > 0,
                   "browse-group query returns a non-empty AttributeListsList");
+        }
+    }
+
+    /* --- 2c. UUID128 browse group (the form BlueZ sdptool sends) --- */
+    {
+        size_t len = build_search_attr_uuid128(request, 0x0107, 0x1002);
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check(n >= 7, "uuid128 browse-group returns a response");
+        check(n >= 7 && response[0] == SDP_PDU_SERVICE_SEARCH_ATTR_RSP,
+              "uuid128 browse-group returns a success PDU");
+        if (n >= 7) {
+            uint16_t plen = be16(response + 3);
+            check(5 + (ssize_t)plen == n,
+                  "uuid128 browse-group parameter length matches");
+            check(n >= 8 && response[5] == 0x35 && response[6] > 0,
+                  "uuid128 browse-group returns a non-empty AttributeListsList");
         }
     }
 

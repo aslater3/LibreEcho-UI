@@ -527,12 +527,51 @@ static void sdp_send_error(struct le_sdp_session *session, uint16_t tid,
 /*
  * Match a record against the *content* of a ServiceSearchPattern DES (the
  * 0x35 sequence header and size bytes have already been consumed by the
- * caller).  A record matches when any listed UUID16 equals its class id, is
+ * caller).  A record matches when any listed UUID equals its class id, is
  * the wildcard 0xffff, or is the PublicBrowseRoot group 0x1002 (the SDP spec
  * matches browse-group UUIDs against the record BrowseList; every LibreEcho
  * record belongs to the PublicBrowseRoot group, so the group UUID matches all
- * of them).  UUID32 equivalents are also accepted.
+ * of them).  UUID16, UUID32, and the base-UUID UUID128 forms are all
+ * accepted; real clients (BlueZ sdptool) send the full 128-bit base-UUID
+ * form for browse groups.
  */
+#define LE_SDP_UUID128_PUBLIC_BROWSE_ROOT \
+    { 0x00, 0x00, 0x10, 0x02, 0x00, 0x00, 0x10, 0x00, \
+      0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b, 0x34, 0xfb }
+
+/*
+ * Bluetooth base UUID 0000xxxx-0000-1000-8000-00805F9B34FB (big-endian
+ * wire order).  A UUID128 whose bytes 2..3 carry the 16-bit short form and
+ * whose remaining 12 bytes equal this base is equivalent to that short UUID.
+ * Real clients (BlueZ sdptool) send browse-group and class UUIDs in this
+ * full 128-bit form.
+ */
+static const uint8_t le_sdp_bt_base_uuid[16] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b, 0x34, 0xfb,
+};
+
+/* Returns 1 and sets *short_uuid when the 16 bytes are a base-UUID form. */
+static int sdp_uuid128_short_form(const uint8_t *uuid, uint16_t *short_uuid)
+{
+    uint8_t canonical[16];
+
+    memcpy(canonical, le_sdp_bt_base_uuid, sizeof(canonical));
+    canonical[2] = uuid[2];
+    canonical[3] = uuid[3];
+    if (memcmp(canonical, uuid, sizeof(canonical)) != 0)
+        return 0;
+    *short_uuid = (uint16_t)((uuid[2] << 8) | uuid[3]);
+    return 1;
+}
+
+static int sdp_uuid128_is_public_browse_root(const uint8_t *uuid16be)
+{
+    static const uint8_t root[16] = LE_SDP_UUID128_PUBLIC_BROWSE_ROOT;
+
+    return memcmp(uuid16be, root, sizeof(root)) == 0;
+}
+
 static int sdp_match_record(const struct le_sdp_record *record,
                             const uint8_t *pattern, size_t pattern_length)
 {
@@ -562,9 +601,20 @@ static int sdp_match_record(const struct le_sdp_record *record,
                 record->class_uuid16)
                 return 1;
             offset += 5;
-        } else if (type == 0x1c) { /* UUID128 */
+        } else if (type == 0x1c) { /* UUID128 (Bluetooth base-UUID form) */
+            uint16_t short_uuid;
+
             if (offset + 17 > pattern_length)
                 return 0;
+            if (sdp_uuid128_is_public_browse_root(pattern + offset + 1))
+                return 1;
+            if (sdp_uuid128_short_form(pattern + offset + 1, &short_uuid)) {
+                if (short_uuid == 0xffff)
+                    return 1;
+                if (record->has_class_uuid16 &&
+                    short_uuid == record->class_uuid16)
+                    return 1;
+            }
             offset += 17;
         } else {
             return 0;
