@@ -134,6 +134,24 @@ int main(void)
         }
     }
 
+    /* --- 2b. PublicBrowseRoot group query (what `sdptool browse` sends) --- */
+    {
+        size_t len = build_search_attr(request, 0x0106, 0x1002);
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check(n >= 7, "browse-group search-attr returns a response");
+        check(n >= 7 && response[0] == SDP_PDU_SERVICE_SEARCH_ATTR_RSP,
+              "browse-group search-attr returns a success PDU");
+        if (n >= 7) {
+            uint16_t plen = be16(response + 3);
+            check(5 + (ssize_t)plen == n,
+                  "browse-group parameter length matches the PDU body");
+            /* The PublicBrowseRoot group must match at least one record. */
+            check(n >= 8 && response[5] == 0x35 && response[6] > 0,
+                  "browse-group query returns a non-empty AttributeListsList");
+        }
+    }
+
     /* --- 3. ServiceSearch returns the response PDU id 0x03 --- */
     {
         size_t offset = 5;

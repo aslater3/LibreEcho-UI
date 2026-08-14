@@ -527,8 +527,11 @@ static void sdp_send_error(struct le_sdp_session *session, uint16_t tid,
 /*
  * Match a record against the *content* of a ServiceSearchPattern DES (the
  * 0x35 sequence header and size bytes have already been consumed by the
- * caller).  Any listed UUID16 equal to the record class id, the wildcard
- * 0xffff, or an equivalent UUID32 form matches.
+ * caller).  A record matches when any listed UUID16 equals its class id, is
+ * the wildcard 0xffff, or is the PublicBrowseRoot group 0x1002 (the SDP spec
+ * matches browse-group UUIDs against the record BrowseList; every LibreEcho
+ * record belongs to the PublicBrowseRoot group, so the group UUID matches all
+ * of them).  UUID32 equivalents are also accepted.
  */
 static int sdp_match_record(const struct le_sdp_record *record,
                             const uint8_t *pattern, size_t pattern_length)
@@ -545,7 +548,7 @@ static int sdp_match_record(const struct le_sdp_record *record,
                 return 0;
             uuid = (uint16_t)((pattern[offset + 1] << 8) |
                               pattern[offset + 2]);
-            if (uuid == 0xffff) /* wildcard matches everything */
+            if (uuid == 0xffff || uuid == 0x1002) /* wildcard / browse group */
                 return 1;
             if (record->has_class_uuid16 && uuid == record->class_uuid16)
                 return 1;
