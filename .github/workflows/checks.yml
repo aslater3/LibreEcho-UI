@@ -1,10 +1,10 @@
 name: LibreEcho UI checks
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+  # Push and pull_request triggers were removed on 2026-08-14 to conserve
+  # hosted-runner quota on this private repository. Everyday checks run in the
+  # zero-quota local lane in LibreEcho-Build (ci/local/run-checks.sh), which
+  # executes this same suite. Dispatch remains for on-demand hosted runs.
   workflow_dispatch:
 
 permissions:
