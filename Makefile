@@ -21,7 +21,7 @@ TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/adapter_server.c src/log.c
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
-BTD_SOURCES = src/adapter/btd.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
+BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
 TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
@@ -245,6 +245,16 @@ $(BUILD)/test-voice-aec: tests/test_voice_aec.c src/adapter/voice_aec.c
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
 		$^ $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
+$(BUILD)/test-sbc-codec: tests/test_sbc_codec.c $(BUILD)/adapter/bt-sbc/sbc.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_neon.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_armv6.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_sse.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_mmx.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_iwmmxt.o
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -lm -o $@
+
 $(BUILD)/test-voice-reference: tests/test_voice_reference.c src/adapter/voice_reference.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
@@ -426,7 +436,7 @@ $(BUILD)/libreecho-waked-onnx-arm32: $(WAKE_DAEMON_ARM_OBJECTS)
 adapters: $(ADAPTER_TARGETS)
 
 $(BUILD)/%.o: src/%.c
-	@mkdir -p $(BUILD) $(BUILD)/adapter
+	@mkdir -p $(BUILD) $(BUILD)/adapter $(BUILD)/adapter/bt-sbc
 	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc -c $< -o $@
 
 $(BUILD)/backend_linux.o $(BUILD)/backend_mock.o: VERSION src/version.h

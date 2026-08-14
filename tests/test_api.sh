@@ -5,7 +5,7 @@ CFG=${LIBREECHO_TEST_CONFIG:-./build/test-suite-config.json}
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exit 1; }; }
 expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
-expect "$(curl -fsS "$URL/api/v1/device")" '"os_version":"LibreEcho OS 0.1.1-dev"'
+expect "$(curl -fsS "$URL/api/v1/device")" '"os_version":"LibreEcho OS 0.12.0"'
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
 expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
 expect "$(curl -fsS "$URL/")" 'First-boot setup'

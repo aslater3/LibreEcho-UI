@@ -14,6 +14,8 @@
 #include "adapter.h"
 #include "log.h"
 
+#include "bt_profile.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -39,8 +41,10 @@
 #define FIRMWARE_DIR "/lib/firmware"
 #define DEVICE_DB "/etc/libreecho/bluetooth.devices"
 #define KEY_DB "/etc/libreecho/bluetooth.keys"
+#define MEDIA_BUS_PATH "/run/libreecho-audio/media.pcm"
 
 #define BTPROTO_HCI 1
+#define BTPROTO_L2CAP 0
 #define HCI_DEV_NONE 0xffff
 #define HCI_DEV_ID 0
 #define HCI_CHANNEL_CONTROL 3
@@ -50,6 +54,15 @@
 #define BT_MAX_DEVICES 24
 #define BT_MAX_KEYS 24
 #define BT_NAME_MAX 64
+
+/* L2CAP profile listeners.  PSM values follow the assigned-numbers table:
+ * SDP browsing, AVRCP control/browsing, and AVDTP signaling/transport. */
+#define LE_L2CAP_PSM_SDP 0x0001
+#define LE_L2CAP_PSM_AVRCP 0x0017
+#define LE_L2CAP_PSM_AVDTP 0x0019
+#define LE_AVDTP_LOCAL_SEID 1U
+#define LE_AVDTP_MEDIA_MTU 1024
+#define LE_MAX_PROFILE_FDS 16
 
 #define MGMT_STATUS_SUCCESS 0x00
 #define MGMT_STATUS_FAILED 0x03
@@ -119,8 +132,6 @@
 #define LIBREECHO_BT_MAJOR_CLASS 0x04
 #define LIBREECHO_BT_MINOR_CLASS 0x14
 #define LIBREECHO_BT_NAME "LibreEcho"
-#define LIBREECHO_BT_PROFILE_STATE "pairing-only"
-#define LIBREECHO_BT_PROFILE_ERROR "No userspace Bluetooth profile service is registered"
 
 /* Audio Sink (0x110B) in the Bluetooth base UUID byte order used by the
  * 3.18 management API.  0x24 advertises Audio + Rendering service classes. */
@@ -212,6 +223,8 @@ struct bt_context {
     struct bt_ltk ltks[BT_MAX_KEYS];
     size_t ltk_count;
     struct bt_pairing pairing;
+    struct le_profiles profiles;
+    int profiles_opened;
 };
 
 static volatile sig_atomic_t stopping;
@@ -1127,12 +1140,30 @@ static int status_json(struct bt_context *context, char *data, size_t size)
     int available;
     char escaped[BT_NAME_MAX * 2];
     char local_name[BT_NAME_MAX * 2];
+    const char *profile_state;
+    const char *profile_error;
+    int sdp = 0, a2dp = 0, avrcp = 0;
 
     if (hci_present() && (time(NULL) - context->last_info > 2))
         (void)refresh_info(context);
     json_escape(context->local_name, local_name, sizeof(local_name));
     available = wmt_present() && access(BT_DEVICE, F_OK) == 0 &&
                 hci_present() && context->mgmt_fd >= 0;
+    if (context->profiles_opened) {
+        sdp = le_profile_registered_sdp(&context->profiles);
+        a2dp = le_profile_registered_a2dp_sink(&context->profiles);
+        avrcp = le_profile_registered_avrcp(&context->profiles);
+    }
+    if (sdp && a2dp && avrcp) {
+        profile_state = "ready";
+        profile_error = "SDP, A2DP sink, and AVRCP profile services registered";
+    } else if (sdp || a2dp || avrcp) {
+        profile_state = "partial";
+        profile_error = "Some Bluetooth profile services could not register";
+    } else {
+        profile_state = "pairing-only";
+        profile_error = "No userspace Bluetooth profile service is registered";
+    }
     if (append_text(data, size, &used,
                     "{\"state\":\"%s\",\"available\":%s,"
                     "\"enabled\":%s,\"activation_attempted\":%s,"
@@ -1163,8 +1194,10 @@ static int status_json(struct bt_context *context, char *data, size_t size)
                     context->current_settings & MGMT_SETTING_CONNECTABLE ? "true" : "false",
                     context->current_settings & MGMT_SETTING_DISCOVERABLE ? "true" : "false",
                     context->current_settings & MGMT_SETTING_BONDABLE ? "true" : "false",
-                    LIBREECHO_BT_PROFILE_STATE, LIBREECHO_BT_PROFILE_ERROR,
-                    "false", "false", "false", "false", "false", "false") != 0)
+                    profile_state, profile_error,
+                    sdp ? "true" : "false", a2dp ? "true" : "false",
+                    avrcp ? "true" : "false",
+                    "false", "false", "false") != 0)
         return -1;
     if (!context->pairing.active) {
         if (append_text(data, size, &used, "null,\"discovered\":[") != 0)
@@ -1695,7 +1728,6 @@ int main(int argc, char **argv)
 {
     const char *socket_path = DEFAULT_SOCKET;
     struct bt_context context;
-    struct pollfd pollfds[2];
     int listener;
     int i;
 
@@ -1725,27 +1757,51 @@ int main(int argc, char **argv)
     }
     (void)mgmt_open(&context);
     (void)load_keys_into_controller(&context);
+    if (le_profile_open(&context.profiles, LIBREECHO_BT_NAME) == 0) {
+        context.profiles_opened = 1;
+        le_log_info("btd: Bluetooth profile services registered");
+    } else {
+        le_log_warn("btd: Bluetooth profile services unavailable: %s",
+                    strerror(errno));
+    }
     signal(SIGINT, stop_daemon);
     signal(SIGTERM, stop_daemon);
     signal(SIGPIPE, SIG_IGN);
     le_log_info("btd: listening on %s (manual activation, HCI management enabled)",
                 socket_path);
     while (!stopping) {
-        size_t count = 1;
+        struct pollfd pollfds[2 + LE_PROFILE_MAX_FDS];
+        int fd_map[LE_PROFILE_MAX_FDS];
+        int profile_count = 0;
+        int profile_base = 2;
+        int total;
+        int i;
+
         pollfds[0].fd = listener;
         pollfds[0].events = POLLIN;
+        total = 1;
         if (context.mgmt_fd >= 0) {
             pollfds[1].fd = context.mgmt_fd;
             pollfds[1].events = POLLIN;
-            count = 2;
+            total = 2;
+        } else {
+            profile_base = 1;
         }
-        if (poll(pollfds, count, 500) < 0) {
+        if (context.profiles_opened) {
+            profile_count = le_profile_poll_setup(&context.profiles,
+                                                  pollfds + profile_base,
+                                                  LE_PROFILE_MAX_FDS, fd_map);
+        }
+        if (poll(pollfds, (nfds_t)(total + profile_count), 500) < 0) {
             if (errno == EINTR)
                 continue;
             break;
         }
-        if (count == 2 && (pollfds[1].revents & POLLIN))
+        if (total == 2 && (pollfds[1].revents & POLLIN))
             drain_mgmt(&context);
+        if (profile_count)
+            le_profile_poll_events(&context.profiles, pollfds + profile_base,
+                                   fd_map, profile_count);
         if (pollfds[0].revents & POLLIN) {
             int client = le_adapter_accept(listener);
             if (client < 0) {
@@ -1760,6 +1816,8 @@ int main(int argc, char **argv)
     close(listener);
     if (context.mgmt_fd >= 0)
         close(context.mgmt_fd);
+    if (context.profiles_opened)
+        le_profile_close(&context.profiles);
     unlink(socket_path);
     le_log_info("btd: stopped");
     return 0;
