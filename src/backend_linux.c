@@ -1261,6 +1261,10 @@ static int bluetooth(struct le_backend *b, struct le_bluetooth_state *o)
                           sizeof(o->local_name));
     (void)json_get_string(response, "last_error", o->last_error,
                           sizeof(o->last_error));
+    (void)json_get_string(response, "profile_state", o->profile_state,
+                          sizeof(o->profile_state));
+    (void)json_get_string(response, "profile_error", o->profile_error,
+                          sizeof(o->profile_error));
     (void)json_get_bool(response, "available", &o->available);
     (void)json_get_bool(response, "enabled", &o->enabled);
     (void)json_get_bool(response, "activation_attempted",
@@ -1275,7 +1279,12 @@ static int bluetooth(struct le_backend *b, struct le_bluetooth_state *o)
     (void)json_get_bool(response, "connectable", &o->connectable);
     (void)json_get_bool(response, "discoverable", &o->discoverable);
     (void)json_get_bool(response, "bondable", &o->bondable);
-    (void)json_get_bool(response, "hidp", &o->hidp);
+    (void)json_get_bool(response, "sdp", &o->profile_sdp);
+    (void)json_get_bool(response, "a2dp_sink", &o->profile_a2dp_sink);
+    (void)json_get_bool(response, "avrcp", &o->profile_avrcp);
+    (void)json_get_bool(response, "rfcomm", &o->profile_rfcomm);
+    (void)json_get_bool(response, "bnep", &o->profile_bnep);
+    (void)json_get_bool(response, "hidp", &o->profile_hidp);
     bluetooth_parse_devices(response, "\"discovered\"", o->discovered,
                             &o->discovered_count);
     bluetooth_parse_devices(response, "\"known_devices\"", o->known,
