@@ -14,6 +14,7 @@
 #include "adapter.h"
 #include "log.h"
 
+#include "bt_mgmt_events.h"
 #include "bt_profile.h"
 
 #include <errno.h>
@@ -216,6 +217,11 @@ struct bt_context {
     time_t last_info;
     char local_name[BT_NAME_MAX];
     char last_error[96];
+    /* Issue #62 observability: most recent MGMT disconnect reason and
+     * connect-failed status, rendered as "name (0xNN)".  Empty until the
+     * first event of each kind has been observed. */
+    char last_disconnect_reason[48];
+    char last_connect_failed_status[48];
     struct bt_device devices[BT_MAX_DEVICES];
     size_t device_count;
     struct bt_link_key link_keys[BT_MAX_KEYS];
@@ -763,6 +769,8 @@ static void pairing_clear(struct bt_context *context)
 static void update_pairing(struct bt_context *context, const uint8_t *payload,
                            size_t size, const char *method, unsigned int value)
 {
+    char address[18];
+
     if (size < sizeof(struct mgmt_addr_wire))
         return;
     memcpy(context->pairing.address, payload, 6);
@@ -771,6 +779,12 @@ static void update_pairing(struct bt_context *context, const uint8_t *payload,
     strncpy(context->pairing.method, method,
             sizeof(context->pairing.method) - 1);
     context->pairing.value = value;
+    /* Issue #62: log every inbound pairing/authentication request so the
+     * pairing lifecycle is visible from the daemon without a raw monitor. */
+    address_text(payload, address, sizeof(address));
+    le_log_info("btd: MGMT pairing request: address=%s type=%u method=%s "
+                "value=%u",
+                address, payload[6], method, value);
 }
 
 static void eir_name(const uint8_t *eir, size_t size, char *name, size_t name_size)
@@ -837,21 +851,90 @@ static void process_event(struct bt_context *context, uint16_t event,
         return;
     case MGMT_EV_DEVICE_CONNECTED:
         if (size >= 7) {
+            char address[18];
+
             device = get_device(context, payload, payload[6]);
             if (device)
                 device->connected = 1;
+            address_text(payload, address, sizeof(address));
+            le_log_info("btd: MGMT device connected: address=%s type=%u",
+                        address, payload[6]);
         }
         return;
-    case MGMT_EV_DEVICE_DISCONNECTED:
-    case MGMT_EV_CONNECT_FAILED:
+    case MGMT_EV_DEVICE_DISCONNECTED: {
+        char reason_text[48];
+        char address[18];
+
         if (size >= 7) {
             device = find_device(context, payload, payload[6]);
             if (device)
                 device->connected = 0;
         }
-        if (event == MGMT_EV_CONNECT_FAILED && context->pairing.active)
+        /* Issue #62: retain and log the disconnect reason so pairing and
+         * connection triage is possible from the daemon alone. */
+        if (le_bt_mgmt_disconnect_reason_text(payload, size, reason_text,
+                                              sizeof(reason_text)) == 0) {
+            strncpy(context->last_disconnect_reason, reason_text,
+                    sizeof(context->last_disconnect_reason) - 1);
+            context->last_disconnect_reason[
+                sizeof(context->last_disconnect_reason) - 1] = '\0';
+        }
+        if (size >= 7) {
+            address_text(payload, address, sizeof(address));
+            le_log_info("btd: MGMT device disconnected: address=%s type=%u "
+                        "reason=%s",
+                        address, payload[6],
+                        context->last_disconnect_reason[0] ?
+                        context->last_disconnect_reason : "unknown");
+        } else {
+            le_log_info("btd: MGMT device disconnected: truncated event "
+                        "(size=%zu)", size);
+        }
+        return;
+    }
+    case MGMT_EV_CONNECT_FAILED: {
+        char status_text[48];
+        char address[18];
+
+        if (size >= 7) {
+            device = find_device(context, payload, payload[6]);
+            if (device)
+                device->connected = 0;
+        }
+        /* Issue #62: retain the connect-failed status in last_error and a
+         * dedicated status field; keep the pairing LED feedback unchanged. */
+        if (le_bt_mgmt_connect_failed_text(payload, size, status_text,
+                                           sizeof(status_text)) == 0) {
+            strncpy(context->last_connect_failed_status, status_text,
+                    sizeof(context->last_connect_failed_status) - 1);
+            context->last_connect_failed_status[
+                sizeof(context->last_connect_failed_status) - 1] = '\0';
+            if (size >= 7) {
+                char status_short[40];
+
+                address_text(payload, address, sizeof(address));
+                /* Bound the status text so the rendered message cannot exceed
+                 * last_error: address (17) + status (<=39) + decoration fits. */
+                strncpy(status_short, status_text, sizeof(status_short) - 1);
+                status_short[sizeof(status_short) - 1] = '\0';
+                snprintf(context->last_error, sizeof(context->last_error),
+                         "Bluetooth connection failed: %s (%s)",
+                         address, status_short);
+                le_log_warn("btd: MGMT connect failed: address=%s type=%u "
+                            "status=%s",
+                            address, payload[6], status_text);
+            } else {
+                le_log_warn("btd: MGMT connect failed: truncated event "
+                            "(size=%zu)", size);
+            }
+        } else {
+            le_log_warn("btd: MGMT connect failed: truncated event (size=%zu)",
+                        size);
+        }
+        if (context->pairing.active)
             led_pattern("flash", 255, 0, 0, 100, 1);
         return;
+    }
     case MGMT_EV_DEVICE_UNPAIRED:
         if (size >= 7) {
             device = find_device(context, payload, payload[6]);
@@ -876,7 +959,16 @@ static void process_event(struct bt_context *context, uint16_t event,
         if (size >= 11)
             update_pairing(context, payload, size, "notify", read_le32(payload + 7));
         return;
-    case MGMT_EV_AUTH_FAILED:
+    case MGMT_EV_AUTH_FAILED: {
+        char address[18];
+
+        if (size >= 7) {
+            /* Issue #62: log authentication failures with the remote address
+             * so pairing triage is possible from the daemon alone. */
+            address_text(payload, address, sizeof(address));
+            le_log_warn("btd: MGMT authentication failed: address=%s type=%u",
+                        address, payload[6]);
+        }
         if (size >= 7 && context->pairing.active &&
             same_address(context->pairing.address, payload))
             snprintf(context->last_error, sizeof(context->last_error),
@@ -885,6 +977,7 @@ static void process_event(struct bt_context *context, uint16_t event,
             led_pattern("flash", 255, 0, 0, 100, 1);
         pairing_clear(context);
         return;
+    }
     case MGMT_EV_NEW_LINK_KEY:
         if (size >= 1 + sizeof(struct mgmt_link_key_wire)) {
             const struct mgmt_link_key_wire *key =
@@ -1169,6 +1262,8 @@ static int status_json(struct bt_context *context, char *data, size_t size)
                     "\"enabled\":%s,\"activation_attempted\":%s,"
                     "\"transport\":\"mt8163-btif-hci\",\"hci\":\"%s\","
                     "\"last_error\":\"%s\","
+                    "\"last_disconnect_reason\":\"%s\","
+                    "\"last_connect_failed_status\":\"%s\","
                     "\"scanning\":%s,\"pairing\":%s,\"pairing_mode\":%s,\"local_name\":\"%s\","
                     "\"capabilities\":{\"classic\":%s,\"le\":%s,"
                     "\"ssp\":%s,\"secure_connection\":%s,"
@@ -1183,6 +1278,8 @@ static int status_json(struct bt_context *context, char *data, size_t size)
                     available ? "true" : "false", context->enabled ? "true" : "false",
                     context->activation_attempted ? "true" : "false",
                     context->enabled ? "hci0" : "none", context->last_error,
+                    context->last_disconnect_reason,
+                    context->last_connect_failed_status,
                     context->scanning ? "true" : "false",
                     context->pairing.active ? "true" : "false",
                     context->pairing_mode ? "true" : "false",

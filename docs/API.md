@@ -792,6 +792,13 @@ profile: `profile_services` is true only when the corresponding SDP/profile
 service is registered and supervised. The current production image reports
 `profile_state: "pairing-only"` until an SDP/profile implementation is added.
 
+The response also includes `last_disconnect_reason` and
+`last_connect_failed_status`: the most recent MGMT device-disconnected reason
+(for example `remote-terminated (0x03)`) and connect-failed status (for
+example `connect-failed (0x04)`), retained for pairing/connection triage. Both
+are empty strings until the first event of each kind has been observed in this
+boot. Connection failures additionally populate `last_error`.
+
 #### PUT /api/v1/bluetooth
 
 Update one controller setting:

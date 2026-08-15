@@ -42,6 +42,7 @@ struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, pa
 struct le_bluetooth_pairing { char address[18], method[24]; int type; unsigned int value; };
 struct le_bluetooth_state {
     char state[32], transport[32], hci[32], local_name[LE_TEXT], last_error[96];
+    char last_disconnect_reason[48], last_connect_failed_status[48];
     char profile_state[24], profile_error[96];
     int available, enabled, activation_attempted, scanning, pairing, pairing_mode;
     int classic, le, ssp, secure_connection, connectable, discoverable, bondable;
