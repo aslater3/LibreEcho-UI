@@ -388,7 +388,9 @@ Run LED test pattern.
 
 #### GET /api/v1/network
 
-Returns network state.
+Returns Wi-Fi association state plus an independent gateway-liveness result. A
+`connected` association is not considered healthy until the gateway probe has
+succeeded.
 
 **Response:**
 ```json
@@ -396,6 +398,10 @@ Returns network state.
   "ok": true,
   "data": {
     "state": "connected",
+    "connectivity": "healthy",
+    "recovery_stage": "none",
+    "gateway_reachable": true,
+    "liveness_failures": 0,
     "ssid": "MyNetwork",
     "signal": 75,
     "rssi_dbm": -47,
@@ -413,6 +419,36 @@ Returns network state.
   "error": null
 }
 ```
+
+`connectivity` is one of `unknown`, `healthy`, `degraded`, `recovering`, or
+`disconnected`. `gateway_reachable` is `null` until a probe can be completed.
+While no default route exists, no probe can run: before this boot has observed
+a healthy gateway the liveness result stays `unknown`, and once a healthy
+probe has been observed a lost route counts as a failed liveness result.
+After this boot has observed a healthy gateway, three consecutive failures arm
+bounded recovery: wpa reassociation, then a one-second interface down/up cycle.
+If the gateway is still unreachable after both grace periods, `networkd` tries
+to atomically reserve `/data/libreecho/network-recovery-reboot.guard` before
+submitting `/tmp/reboot.request` to the initramfs reboot supervisor. A successful
+submission reports `recovery_stage: reboot-requested`. The persistent guard is
+not cleared automatically: if recovery exhausts again after a later daemon or
+device restart, `networkd` reports `recovery_stage: exhausted` and does not
+request another recovery reboot until an operator has diagnosed the failure and
+explicitly removes the guard. A failed or colliding request also reports
+`exhausted`; liveness probes continue so a later healthy reply clears the
+recovery state without reissuing the failed reboot request. An existing request
+is accepted only when its exact content is `reboot`. Each recovery action is
+attempted at most once per cycle. The daemon never accesses `/dev/wmtWifi`
+directly, preserving the one-radio-transition-per-boot rule.
+
+Liveness probes use a raw ICMP echo on the Wi-Fi interface.
+`SO_BINDTODEVICE` is attempted to scope the probe to that interface, but the
+MT8163 kernel reports `ENOPROTOOPT` for that option on raw ICMP sockets; that
+specific failure is treated as advisory and probing continues. Reply matching
+still validates the gateway source address, ICMP identifier, sequence number,
+and both header checksums, so an unmatched reply cannot mark the gateway
+healthy. Any other bind failure remains fatal and reports the probe as
+unavailable.
 
 #### PUT /api/v1/network
 

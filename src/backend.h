@@ -31,7 +31,12 @@ struct le_led_state {
 struct le_wifi_network { char ssid[LE_TEXT], security[16]; int signal; };
 struct le_wifi_scan { struct le_wifi_network networks[LE_MAX_WIFI]; size_t count; };
 struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };
-struct le_network_state { char state[24], ssid[LE_TEXT], ip[48], gateway[48], dns[96], hostname[LE_TEXT]; int signal, rssi_dbm, internet, dhcp, ssh, api_lan; };
+struct le_network_state {
+    char state[24], connectivity[24], recovery_stage[24];
+    char ssid[LE_TEXT], ip[48], gateway[48], dns[96], hostname[LE_TEXT];
+    int signal, rssi_dbm, internet, dhcp, ssh, api_lan;
+    int gateway_reachable, liveness_failures;
+};
 struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb; };
 struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, paired, connected; };
 struct le_bluetooth_pairing { char address[18], method[24]; int type; unsigned int value; };

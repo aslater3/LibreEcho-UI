@@ -83,7 +83,7 @@ printf '%s' "$status_json" | jq -e '.ok and .data.cpus.count >= 1 and (.data.cpu
 device=$(json /api/v1/device)
 printf '%s' "$device" | jq -e '.ok and (.data.name | length) > 0 and (.data.kernel | length) > 0' >/dev/null
 network=$(json /api/v1/network)
-printf '%s' "$network" | jq -e '.ok and (.data.state | type) == "string" and (.data.ssid | type) == "string" and (.data.rssi_dbm | type) == "number" and (.data.ip | type) == "string" and (.data.api_lan | type) == "boolean" and (.data.api_lan_effective | type) == "boolean" and (.data.api_lan_forced | type) == "boolean"' >/dev/null
+printf '%s' "$network" | jq -e '.ok and (.data.state | type) == "string" and (.data.connectivity | type) == "string" and (.data.recovery_stage | type) == "string" and ((.data.gateway_reachable | type) == "boolean" or .data.gateway_reachable == null) and (.data.liveness_failures | type) == "number" and (.data.ssid | type) == "string" and (.data.rssi_dbm | type) == "number" and (.data.ip | type) == "string" and (.data.api_lan | type) == "boolean" and (.data.api_lan_effective | type) == "boolean" and (.data.api_lan_forced | type) == "boolean"' >/dev/null
 if printf '%s' "$config" | jq -e '.data.bind_policy == "lan-development"' >/dev/null; then
     printf '%s' "$network" | jq -e '.data.api_lan_effective == true and .data.api_lan_forced == true' >/dev/null
 fi
