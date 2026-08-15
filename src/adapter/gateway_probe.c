@@ -57,6 +57,11 @@ uint16_t le_gateway_probe_checksum(const void *data, size_t length)
     return (uint16_t)~sum;
 }
 
+int le_gateway_probe_bindtodevice_failure_is_advisory(int err)
+{
+    return err == ENOPROTOOPT;
+}
+
 int le_gateway_probe_reply_matches(const void *packet, size_t length,
                                    uint32_t gateway_addr,
                                    uint16_t identifier, uint16_t sequence)
@@ -239,7 +244,8 @@ int le_gateway_probe_start(struct le_gateway_probe *probe,
         return -1;
     }
     if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, interface,
-                   (socklen_t)(strlen(interface) + 1)) < 0) {
+                   (socklen_t)(strlen(interface) + 1)) < 0 &&
+        !le_gateway_probe_bindtodevice_failure_is_advisory(errno)) {
         int saved_errno = errno;
         close(fd);
         errno = saved_errno;

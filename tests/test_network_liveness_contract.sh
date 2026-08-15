@@ -29,6 +29,11 @@ assert '/data/libreecho/network-recovery-reboot.guard' in networkd
 assert 'persistent reboot budget already consumed' in networkd
 assert '/dev/wmtWifi' not in networkd
 assert networkd.count('reset_network_health(ctx, monotonic_ms());') == 2
+gateway_probe = Path('src/adapter/gateway_probe.c').read_text()
+gateway_probe_h = Path('src/adapter/gateway_probe.h').read_text()
+assert 'le_gateway_probe_bindtodevice_failure_is_advisory' in gateway_probe
+assert 'le_gateway_probe_bindtodevice_failure_is_advisory' in gateway_probe_h
+assert 'ENOPROTOOPT' in gateway_probe
 main_loop = networkd[networkd.index('int main(int argc, char **argv)'):]
 client_action = main_loop.index('read_client(&ctx, j);')
 probe_action = main_loop.index('handle_gateway_probe_event(')

@@ -438,6 +438,15 @@ is accepted only when its exact content is `reboot`. Each recovery action is
 attempted at most once per cycle. The daemon never accesses `/dev/wmtWifi`
 directly, preserving the one-radio-transition-per-boot rule.
 
+Liveness probes use a raw ICMP echo on the Wi-Fi interface.
+`SO_BINDTODEVICE` is attempted to scope the probe to that interface, but the
+MT8163 kernel reports `ENOPROTOOPT` for that option on raw ICMP sockets; that
+specific failure is treated as advisory and probing continues. Reply matching
+still validates the gateway source address, ICMP identifier, sequence number,
+and both header checksums, so an unmatched reply cannot mark the gateway
+healthy. Any other bind failure remains fatal and reports the probe as
+unavailable.
+
 #### PUT /api/v1/network
 
 `api_lan` is the persisted setting. `api_lan_effective` is the access state

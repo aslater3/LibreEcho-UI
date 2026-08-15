@@ -141,10 +141,26 @@ static int test_receive_work_is_bounded(void)
     return 0;
 }
 
+static int test_bindtodevice_failure_advisory_contract(void)
+{
+    /* The MT8163 kernel reports ENOPROTOOPT for SO_BINDTODEVICE on raw
+     * ICMP sockets.  That failure must not abort probing; every other
+     * errno stays fatal so misconfiguration and permission loss still
+     * surface as probe-unavailable instead of silently binding loosely. */
+    CHECK(le_gateway_probe_bindtodevice_failure_is_advisory(ENOPROTOOPT) == 1);
+    CHECK(le_gateway_probe_bindtodevice_failure_is_advisory(EPERM) == 0);
+    CHECK(le_gateway_probe_bindtodevice_failure_is_advisory(EACCES) == 0);
+    CHECK(le_gateway_probe_bindtodevice_failure_is_advisory(EINVAL) == 0);
+    CHECK(le_gateway_probe_bindtodevice_failure_is_advisory(ENODEV) == 0);
+    CHECK(le_gateway_probe_bindtodevice_failure_is_advisory(0) == 0);
+    return 0;
+}
+
 int main(void)
 {
     if (test_checksum_round_trip() || test_reply_matching_is_strict() ||
-        test_ipv4_envelope_is_validated() || test_receive_work_is_bounded())
+        test_ipv4_envelope_is_validated() || test_receive_work_is_bounded() ||
+        test_bindtodevice_failure_advisory_contract())
         return 1;
     puts("gateway probe packet contract: ok");
     return 0;
