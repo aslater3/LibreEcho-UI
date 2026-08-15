@@ -1287,6 +1287,12 @@ static int bluetooth(struct le_backend *b, struct le_bluetooth_state *o)
                           sizeof(o->local_name));
     (void)json_get_string(response, "last_error", o->last_error,
                           sizeof(o->last_error));
+    (void)json_get_string(response, "last_disconnect_reason",
+                          o->last_disconnect_reason,
+                          sizeof(o->last_disconnect_reason));
+    (void)json_get_string(response, "last_connect_failed_status",
+                          o->last_connect_failed_status,
+                          sizeof(o->last_connect_failed_status));
     (void)json_get_string(response, "profile_state", o->profile_state,
                           sizeof(o->profile_state));
     (void)json_get_string(response, "profile_error", o->profile_error,
