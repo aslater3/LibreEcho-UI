@@ -94,9 +94,17 @@ enum le_network_health_action le_network_health_tick(
     }
     if (health->awaiting_probe || now_ms < health->next_probe_ms)
         return LE_NETWORK_HEALTH_NONE;
-    if (!gateway_route_available)
+    if (!gateway_route_available) {
+        /* Without a default route no probe can run.  Until this boot has
+         * observed a healthy probe, keep liveness unknown instead of reporting
+         * a failed reachability result that never happened; afterwards a
+         * lost route counts as a failed liveness result again. */
+        if (!health->healthy_seen)
+            return le_network_health_record_probe(
+                health, now_ms, LE_GATEWAY_PROBE_UNAVAILABLE);
         return le_network_health_record_probe(
             health, now_ms, LE_GATEWAY_UNREACHABLE);
+    }
     health->awaiting_probe = 1;
     return LE_NETWORK_HEALTH_PROBE;
 }

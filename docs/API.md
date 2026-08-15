@@ -422,6 +422,9 @@ succeeded.
 
 `connectivity` is one of `unknown`, `healthy`, `degraded`, `recovering`, or
 `disconnected`. `gateway_reachable` is `null` until a probe can be completed.
+While no default route exists, no probe can run: before this boot has observed
+a healthy gateway the liveness result stays `unknown`, and once a healthy
+probe has been observed a lost route counts as a failed liveness result.
 After this boot has observed a healthy gateway, three consecutive failures arm
 bounded recovery: wpa reassociation, then a one-second interface down/up cycle.
 If the gateway is still unreachable after both grace periods, `networkd` tries

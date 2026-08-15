@@ -147,6 +147,42 @@ static int test_missing_gateway_route_uses_bounded_recovery(void)
     return 0;
 }
 
+static int test_missing_route_is_unknown_until_first_healthy_probe(void)
+{
+    struct le_network_health health;
+    struct le_network_health_config config = fast_config();
+    long long now = 0;
+    int poll;
+
+    /* No probe has completed yet: a missing default route means no probe can
+     * run, so liveness must stay unknown instead of accumulating failures or
+     * reporting degraded reachability. */
+    le_network_health_init(&health, &config, now);
+    for (poll = 0; poll < 6; ++poll) {
+        CHECK(le_network_health_tick(&health, now, 1, 0) ==
+              LE_NETWORK_HEALTH_NONE);
+        CHECK(le_network_health_gateway_reachable(&health) == -1);
+        CHECK(le_network_health_consecutive_failures(&health) == 0);
+        CHECK(!strcmp(le_network_health_connectivity(&health), "unknown"));
+        now += config.probe_interval_ms;
+    }
+    CHECK(!strcmp(le_network_health_recovery_stage(&health), "none"));
+    CHECK(le_network_health_reboot_requested(&health) == 0);
+
+    /* Once a healthy probe has been observed, the same missing route counts
+     * as a failed liveness result again. */
+    CHECK(le_network_health_tick(&health, now, 1, 1) ==
+          LE_NETWORK_HEALTH_PROBE);
+    CHECK(le_network_health_record_probe(&health, now,
+              LE_GATEWAY_REACHABLE) == LE_NETWORK_HEALTH_NONE);
+    CHECK(le_network_health_tick(&health, now + config.probe_interval_ms,
+              1, 0) == LE_NETWORK_HEALTH_NONE);
+    CHECK(le_network_health_gateway_reachable(&health) == 0);
+    CHECK(le_network_health_consecutive_failures(&health) == 1);
+    CHECK(!strcmp(le_network_health_connectivity(&health), "degraded"));
+    return 0;
+}
+
 static int test_unproven_gateway_never_triggers_recovery(void)
 {
     struct le_network_health health;
@@ -246,6 +282,7 @@ int main(void)
         test_sustained_failure_reassociates_then_recovers_without_reboot() ||
         test_persistent_failure_has_bounded_ordered_escalation() ||
         test_missing_gateway_route_uses_bounded_recovery() ||
+        test_missing_route_is_unknown_until_first_healthy_probe() ||
         test_unproven_gateway_never_triggers_recovery() ||
         test_unproven_failures_saturate_at_threshold() ||
         test_exhausted_state_can_observe_later_recovery() ||
