@@ -118,12 +118,20 @@ def adapter_request(path: Path, request_id: int, command: str, args=None):
 
 def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
                  fail_interface=None, invalid_reboot_path=False,
-                 barrier_at=None):
+                 barrier_at=None, preexisting_reboot=None,
+                 preexisting_guard=False, reboot_fifo=False):
     wpa_path = directory / "wpa.sock"
     adapter_path = directory / "network.sock"
     action_log = directory / "actions.log"
     reboot_path = (Path("/proc/libreecho-networkd-test/reboot.request")
                    if invalid_reboot_path else directory / "reboot.request")
+    guard_path = directory / "network-recovery-reboot.guard"
+    if preexisting_reboot is not None:
+        reboot_path.write_text(preexisting_reboot)
+    if reboot_fifo:
+        os.mkfifo(reboot_path)
+    if preexisting_guard:
+        guard_path.write_text("network-reboot-v1\n")
     wpa = FakeWpa(wpa_path, fail_reassociate=fail_reassociate)
     env = os.environ.copy()
     env.update({
@@ -140,7 +148,8 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
     process = subprocess.Popen(
         [str(BINARY), "--foreground", "--quiet",
          "--socket", str(adapter_path), "--wpa-ctrl", str(wpa_path),
-         "--interface", "test0", "--reboot-request", str(reboot_path)],
+         "--interface", "test0", "--reboot-request", str(reboot_path),
+         "--reboot-guard", str(guard_path)],
         cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
@@ -169,6 +178,8 @@ def test_ordered_recovery_and_one_shot_reboot():
                         "reboot-request"]
             assert read_actions(actions) == expected, read_actions(actions)
             assert reboot.read_text() == "reboot\n"
+            assert (directory / "network-recovery-reboot.guard").read_text() == \
+                "network-reboot-v1\n"
             time.sleep(0.15)
             assert read_actions(actions) == expected
             status = adapter_request(adapter, 1, "status")
@@ -233,6 +244,56 @@ def test_explicit_commands_cancel_pending_recovery():
                 stop_daemon(process, wpa)
 
 
+def test_persistent_reboot_guard_blocks_cross_boot_loop():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-guard-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1," + ",".join("0" for _ in range(32)),
+            preexisting_guard=True)
+        try:
+            wait_for(lambda: read_actions(actions)[-1:] == ["reboot-request"],
+                     message="guarded reboot escalation")
+            time.sleep(0.1)
+            assert not reboot.exists()
+            status = adapter_request(adapter, 4, "status")
+            assert status["data"]["recovery_stage"] == "exhausted"
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_stale_non_reboot_request_is_not_accepted():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-stale-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1," + ",".join("0" for _ in range(32)),
+            preexisting_reboot="fastboot\n")
+        try:
+            wait_for(lambda: read_actions(actions)[-1:] == ["reboot-request"],
+                     message="stale-request escalation")
+            time.sleep(0.1)
+            assert reboot.read_text() == "fastboot\n"
+            status = adapter_request(adapter, 5, "status")
+            assert status["data"]["recovery_stage"] == "exhausted"
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_non_regular_reboot_request_fails_closed_without_blocking():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-fifo-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1," + ",".join("0" for _ in range(32)),
+            reboot_fifo=True)
+        try:
+            wait_for(lambda: read_actions(actions)[-1:] == ["reboot-request"],
+                     message="FIFO-request escalation")
+            status = adapter_request(adapter, 6, "status")
+            assert status["data"]["recovery_stage"] == "exhausted"
+            assert reboot.is_fifo()
+        finally:
+            stop_daemon(process, wpa)
+
+
 def test_action_failures_remain_bounded():
     with tempfile.TemporaryDirectory(prefix="libreecho-networkd-failure-") as temp:
         directory = Path(temp)
@@ -250,7 +311,7 @@ def test_action_failures_remain_bounded():
             assert read_actions(actions) == expected
             assert not reboot.exists()
             status = adapter_request(adapter, 3, "status")
-            assert status["data"]["recovery_stage"] == "reboot-requested"
+            assert status["data"]["recovery_stage"] == "exhausted"
         finally:
             stop_daemon(process, wpa)
 
@@ -259,6 +320,9 @@ def main():
     test_ordered_recovery_and_one_shot_reboot()
     test_recovery_can_succeed_without_supervisor_request()
     test_explicit_commands_cancel_pending_recovery()
+    test_persistent_reboot_guard_blocks_cross_boot_loop()
+    test_stale_non_reboot_request_is_not_accepted()
+    test_non_regular_reboot_request_fails_closed_without_blocking()
     test_action_failures_remain_bounded()
     print("networkd event-loop recovery integration: ok")
 

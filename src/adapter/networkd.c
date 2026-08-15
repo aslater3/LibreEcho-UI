@@ -129,6 +129,7 @@ struct daemon_ctx {
     char socket_path[PATH_MAX];
     char wpa_path[PATH_MAX];
     char reboot_request_path[PATH_MAX];
+    char reboot_guard_path[PATH_MAX];
     char interface[IFNAMSIZ];
     int foreground;
     int network_id;
@@ -1011,6 +1012,69 @@ static int set_interface_enabled(const char *interface, int enabled)
     return result;
 }
 
+static int file_contains_reboot_request(const char *path)
+{
+    static const char request[] = "reboot\n";
+    char contents[sizeof(request)];
+    struct stat status;
+    ssize_t length;
+    int fd;
+
+    fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return -1;
+    if (fstat(fd, &status) < 0) {
+        int saved_errno = errno;
+        (void)close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    if (!S_ISREG(status.st_mode)) {
+        (void)close(fd);
+        errno = EINVAL;
+        return -1;
+    }
+    length = read(fd, contents, sizeof(contents));
+    if (close(fd) < 0 && length >= 0)
+        return -1;
+    return length == (ssize_t)(sizeof(request) - 1) &&
+           !memcmp(contents, request, sizeof(request) - 1);
+}
+
+static int reserve_reboot_guard(const char *guard_path)
+{
+    static const char marker[] = "network-reboot-v1\n";
+    int fd;
+    ssize_t written;
+
+    fd = open(guard_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                          O_NOFOLLOW, 0600);
+    if (fd < 0)
+        return errno == EEXIST ? 1 : -1;
+    written = write(fd, marker, sizeof(marker) - 1);
+    if (written != (ssize_t)(sizeof(marker) - 1)) {
+        int saved_errno = written < 0 ? errno : EIO;
+        (void)close(fd);
+        (void)unlink(guard_path);
+        errno = saved_errno;
+        return -1;
+    }
+    if (fsync(fd) < 0) {
+        int saved_errno = errno;
+        (void)close(fd);
+        (void)unlink(guard_path);
+        errno = saved_errno;
+        return -1;
+    }
+    if (close(fd) < 0) {
+        int saved_errno = errno;
+        (void)unlink(guard_path);
+        errno = saved_errno;
+        return -1;
+    }
+    return 0;
+}
+
 static int request_supervised_reboot(const char *request_path)
 {
     char temporary[PATH_MAX];
@@ -1024,26 +1088,41 @@ static int request_supervised_reboot(const char *request_path)
         errno = EINVAL;
         return -1;
     }
-    if (access(request_path, F_OK) == 0)
-        return 0;
     (void)unlink(temporary);
-    fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                         O_NOFOLLOW, 0600);
     if (fd < 0)
         return -1;
     written = write(fd, request, sizeof(request) - 1);
-    if (written != (ssize_t)(sizeof(request) - 1) || fsync(fd) < 0) {
+    if (written != (ssize_t)(sizeof(request) - 1)) {
         int saved_errno = written < 0 ? errno : EIO;
-        close(fd);
-        unlink(temporary);
+        (void)close(fd);
+        (void)unlink(temporary);
         errno = saved_errno;
         return -1;
     }
-    if (close(fd) < 0 || rename(temporary, request_path) < 0) {
+    if (fsync(fd) < 0) {
         int saved_errno = errno;
-        unlink(temporary);
+        (void)close(fd);
+        (void)unlink(temporary);
         errno = saved_errno;
         return -1;
     }
+    if (close(fd) < 0) {
+        int saved_errno = errno;
+        (void)unlink(temporary);
+        errno = saved_errno;
+        return -1;
+    }
+    if (link(temporary, request_path) < 0) {
+        int saved_errno = errno;
+        (void)unlink(temporary);
+        if (saved_errno == EEXIST && file_contains_reboot_request(request_path) == 1)
+            return 0;
+        errno = saved_errno;
+        return -1;
+    }
+    (void)unlink(temporary);
     return 0;
 }
 
@@ -1087,12 +1166,26 @@ static void perform_health_action(struct daemon_ctx *ctx,
                          strerror(errno));
         }
     } else if (action == LE_NETWORK_HEALTH_REQUEST_REBOOT) {
-        if (request_supervised_reboot(ctx->reboot_request_path) == 0) {
-            le_log_error("networkd: recovery exhausted; supervised reboot requested");
+        int guard = reserve_reboot_guard(ctx->reboot_guard_path);
+        int submitted = 0;
+
+        if (guard == 0) {
+            if (request_supervised_reboot(ctx->reboot_request_path) == 0) {
+                submitted = 1;
+                le_log_error("networkd: recovery exhausted; supervised reboot requested");
+            } else {
+                int saved_errno = errno;
+                (void)unlink(ctx->reboot_guard_path);
+                le_log_error("networkd: recovery exhausted; unable to request supervised reboot: %s",
+                             strerror(saved_errno));
+            }
+        } else if (guard > 0) {
+            le_log_error("networkd: recovery exhausted; persistent reboot budget already consumed");
         } else {
-            le_log_error("networkd: recovery exhausted; unable to request supervised reboot: %s",
+            le_log_error("networkd: recovery exhausted; unable to reserve persistent reboot budget: %s",
                          strerror(errno));
         }
+        le_network_health_finish_reboot_request(&ctx->health, submitted);
     }
 }
 
@@ -1155,13 +1248,20 @@ static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
     enum le_network_health_action action;
     int associated;
 
+    associated = !strcmp(ctx->state.state, "connected") &&
+                 ctx->state.ssid[0] && ctx->state.link_up;
+    if (associated && (ctx->dhcp.active || ctx->scan.active ||
+                       !ctx->state.ip[0])) {
+        if (ctx->gateway_probe.active)
+            le_gateway_probe_close(&ctx->gateway_probe);
+        record_gateway_probe(ctx, LE_GATEWAY_PROBE_UNAVAILABLE, now_ms);
+        return;
+    }
     if (le_gateway_probe_timed_out(&ctx->gateway_probe, now_ms)) {
         le_gateway_probe_close(&ctx->gateway_probe);
         record_gateway_probe(ctx, LE_GATEWAY_UNREACHABLE, now_ms);
         return;
     }
-    associated = !strcmp(ctx->state.state, "connected") &&
-                 ctx->state.ssid[0] && ctx->state.link_up;
     action = le_network_health_tick(&ctx->health, now_ms, associated,
                                     ctx->state.gateway[0] != '\0');
     if (action == LE_NETWORK_HEALTH_PROBE) {
@@ -2571,7 +2671,7 @@ static int daemonize_process(void)
 static void usage(const char *name)
 {
     fprintf(stderr,
-            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--reboot-request PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
+            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--reboot-request PATH] [--reboot-guard PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
             name);
 }
 
@@ -2583,6 +2683,8 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
                 "/var/run/wpa_supplicant/wlan0");
     copy_string(ctx->reboot_request_path, sizeof(ctx->reboot_request_path),
                 "/tmp/reboot.request");
+    copy_string(ctx->reboot_guard_path, sizeof(ctx->reboot_guard_path),
+                "/data/libreecho/network-recovery-reboot.guard");
     copy_string(ctx->interface, sizeof(ctx->interface), "wlan0");
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--foreground")) {
@@ -2590,7 +2692,8 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
         } else if ((!strcmp(argv[i], "--socket") ||
                     !strcmp(argv[i], "--wpa-ctrl") ||
                     !strcmp(argv[i], "--interface") ||
-                    !strcmp(argv[i], "--reboot-request")) && i + 1 < argc) {
+                    !strcmp(argv[i], "--reboot-request") ||
+                    !strcmp(argv[i], "--reboot-guard")) && i + 1 < argc) {
             const char *value = argv[++i];
             if (!strcmp(argv[i - 1], "--socket"))
                 copy_string(ctx->socket_path, sizeof(ctx->socket_path), value);
@@ -2599,6 +2702,9 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
             else if (!strcmp(argv[i - 1], "--reboot-request"))
                 copy_string(ctx->reboot_request_path,
                             sizeof(ctx->reboot_request_path), value);
+            else if (!strcmp(argv[i - 1], "--reboot-guard"))
+                copy_string(ctx->reboot_guard_path,
+                            sizeof(ctx->reboot_guard_path), value);
             else
                 copy_string(ctx->interface, sizeof(ctx->interface), value);
         } else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "--debug") ||

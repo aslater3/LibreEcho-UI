@@ -424,13 +424,19 @@ succeeded.
 `disconnected`. `gateway_reachable` is `null` until a probe can be completed.
 After this boot has observed a healthy gateway, three consecutive failures arm
 bounded recovery: wpa reassociation, then a one-second interface down/up cycle.
-If the gateway is still unreachable after both grace periods,
-`recovery_stage` becomes `reboot-requested` and `networkd` submits
-`/tmp/reboot.request` to the initramfs reboot supervisor. Each recovery action is
-attempted at most once per cycle; a failed supervisor-request write remains in
-the terminal `reboot-requested` state instead of retrying indefinitely. The
-daemon never accesses `/dev/wmtWifi` directly, preserving the
-one-radio-transition-per-boot rule.
+If the gateway is still unreachable after both grace periods, `networkd` tries
+to atomically reserve `/data/libreecho/network-recovery-reboot.guard` before
+submitting `/tmp/reboot.request` to the initramfs reboot supervisor. A successful
+submission reports `recovery_stage: reboot-requested`. The persistent guard is
+not cleared automatically: if recovery exhausts again after a later daemon or
+device restart, `networkd` reports `recovery_stage: exhausted` and does not
+request another recovery reboot until an operator has diagnosed the failure and
+explicitly removes the guard. A failed or colliding request also reports
+`exhausted`; liveness probes continue so a later healthy reply clears the
+recovery state without reissuing the failed reboot request. An existing request
+is accepted only when its exact content is `reboot`. Each recovery action is
+attempted at most once per cycle. The daemon never accesses `/dev/wmtWifi`
+directly, preserving the one-radio-transition-per-boot rule.
 
 #### PUT /api/v1/network
 

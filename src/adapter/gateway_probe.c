@@ -27,6 +27,7 @@
 #define ICMP_HEADER_SIZE 8U
 #define ICMP_ECHO_REPLY 0U
 #define ICMP_ECHO_REQUEST 8U
+#define MAX_PACKETS_PER_RECEIVE 16U
 
 static uint16_t read_u16(const unsigned char *p)
 {
@@ -63,13 +64,20 @@ int le_gateway_probe_reply_matches(const void *packet, size_t length,
     const unsigned char *bytes = packet;
     const unsigned char *icmp;
     size_t ip_header_length;
+    size_t ip_total_length;
+    uint16_t fragment;
 
     if (!packet || length < IPV4_MIN_HEADER + ICMP_HEADER_SIZE ||
         (bytes[0] >> 4) != 4)
         return 0;
     ip_header_length = (size_t)(bytes[0] & 0x0fU) * 4U;
+    ip_total_length = read_u16(bytes + 2);
+    fragment = read_u16(bytes + 6);
     if (ip_header_length < IPV4_MIN_HEADER ||
         length < ip_header_length + ICMP_HEADER_SIZE ||
+        ip_total_length != length || bytes[9] != IPPROTO_ICMP ||
+        (fragment & (uint16_t)~0x4000U) != 0 ||
+        le_gateway_probe_checksum(bytes, ip_header_length) != 0 ||
         memcmp(bytes + 12, &gateway_addr, sizeof(gateway_addr)))
         return 0;
     icmp = bytes + ip_header_length;
@@ -263,6 +271,7 @@ int le_gateway_probe_start(struct le_gateway_probe *probe,
 int le_gateway_probe_receive(struct le_gateway_probe *probe)
 {
     unsigned char packet[2048];
+    unsigned int packet_count;
 
     if (!probe || !probe->active || probe->fd < 0) {
         errno = EINVAL;
@@ -279,7 +288,8 @@ int le_gateway_probe_receive(struct le_gateway_probe *probe)
         return received < 0 ? -1 : 0;
     }
 #endif
-    for (;;) {
+    for (packet_count = 0; packet_count < MAX_PACKETS_PER_RECEIVE;
+         ++packet_count) {
         ssize_t received = recv(probe->fd, packet, sizeof(packet), MSG_DONTWAIT);
         if (received > 0) {
             if (le_gateway_probe_reply_matches(packet, (size_t)received,
@@ -297,6 +307,7 @@ int le_gateway_probe_receive(struct le_gateway_probe *probe)
             return 0;
         return -1;
     }
+    return 0;
 }
 
 int le_gateway_probe_timed_out(const struct le_gateway_probe *probe,

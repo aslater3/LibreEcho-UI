@@ -111,6 +111,10 @@ static int test_persistent_failure_has_bounded_ordered_escalation(void)
     CHECK(le_network_health_tick(&health, now, 0, 0) ==
           LE_NETWORK_HEALTH_REQUEST_REBOOT);
     CHECK(!strcmp(le_network_health_recovery_stage(&health),
+                  "reboot-pending"));
+    CHECK(le_network_health_reboot_requested(&health) == 0);
+    le_network_health_finish_reboot_request(&health, 1);
+    CHECK(!strcmp(le_network_health_recovery_stage(&health),
                   "reboot-requested"));
     CHECK(le_network_health_reboot_requested(&health) == 1);
     CHECK(le_network_health_tick(&health, now + 60000, 1, 1) ==
@@ -164,6 +168,45 @@ static int test_unproven_gateway_never_triggers_recovery(void)
     return 0;
 }
 
+static int test_unproven_failures_saturate_at_threshold(void)
+{
+    struct le_network_health health;
+    struct le_network_health_config config = fast_config();
+    long long now = 0;
+    int failure;
+
+    le_network_health_init(&health, &config, now);
+    for (failure = 0; failure < 100; ++failure) {
+        CHECK(le_network_health_tick(&health, now, 1, 1) ==
+              LE_NETWORK_HEALTH_PROBE);
+        CHECK(le_network_health_record_probe(&health, now,
+                  LE_GATEWAY_UNREACHABLE) == LE_NETWORK_HEALTH_NONE);
+        now += config.probe_interval_ms;
+    }
+    CHECK(le_network_health_consecutive_failures(&health) ==
+          config.failure_threshold);
+    return 0;
+}
+
+static int test_exhausted_state_can_observe_later_recovery(void)
+{
+    struct le_network_health health;
+    struct le_network_health_config config = fast_config();
+
+    le_network_health_init(&health, &config, 0);
+    health.associated = 1;
+    health.phase = LE_NETWORK_HEALTH_REBOOT_PENDING;
+    le_network_health_finish_reboot_request(&health, 0);
+    CHECK(!strcmp(le_network_health_recovery_stage(&health), "exhausted"));
+    CHECK(le_network_health_tick(&health, 0, 1, 1) ==
+          LE_NETWORK_HEALTH_PROBE);
+    CHECK(le_network_health_record_probe(&health, 0,
+              LE_GATEWAY_REACHABLE) == LE_NETWORK_HEALTH_NONE);
+    CHECK(!strcmp(le_network_health_connectivity(&health), "healthy"));
+    CHECK(!strcmp(le_network_health_recovery_stage(&health), "none"));
+    return 0;
+}
+
 static int test_disconnect_and_probe_error_never_trigger_recovery(void)
 {
     struct le_network_health health;
@@ -204,6 +247,8 @@ int main(void)
         test_persistent_failure_has_bounded_ordered_escalation() ||
         test_missing_gateway_route_uses_bounded_recovery() ||
         test_unproven_gateway_never_triggers_recovery() ||
+        test_unproven_failures_saturate_at_threshold() ||
+        test_exhausted_state_can_observe_later_recovery() ||
         test_disconnect_and_probe_error_never_trigger_recovery())
         return 1;
     puts("network health policy: ok");

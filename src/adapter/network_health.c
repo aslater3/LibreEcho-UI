@@ -72,7 +72,8 @@ enum le_network_health_action le_network_health_tick(
 {
     if (!health)
         return LE_NETWORK_HEALTH_NONE;
-    if (health->phase == LE_NETWORK_HEALTH_REBOOT_REQUESTED)
+    if (health->phase == LE_NETWORK_HEALTH_REBOOT_PENDING ||
+        health->phase == LE_NETWORK_HEALTH_REBOOT_REQUESTED)
         return LE_NETWORK_HEALTH_NONE;
     if (health->phase == LE_NETWORK_HEALTH_INTERFACE_DOWN_WAIT) {
         if (now_ms < health->transition_deadline_ms)
@@ -124,7 +125,8 @@ enum le_network_health_action le_network_health_record_probe(
     }
 
     health->gateway_reachable = 0;
-    ++health->consecutive_failures;
+    if (health->consecutive_failures < health->config.failure_threshold)
+        ++health->consecutive_failures;
     health->next_probe_ms = now_ms + health->config.probe_interval_ms;
     if (health->phase == LE_NETWORK_HEALTH_IDLE && health->healthy_seen &&
         health->consecutive_failures >= health->config.failure_threshold) {
@@ -139,7 +141,7 @@ enum le_network_health_action le_network_health_record_probe(
         return LE_NETWORK_HEALTH_INTERFACE_DOWN;
     }
     if (health->phase == LE_NETWORK_HEALTH_INTERFACE_RECOVERING) {
-        health->phase = LE_NETWORK_HEALTH_REBOOT_REQUESTED;
+        health->phase = LE_NETWORK_HEALTH_REBOOT_PENDING;
         health->next_probe_ms = 0;
         return LE_NETWORK_HEALTH_REQUEST_REBOOT;
     }
@@ -170,8 +172,12 @@ const char *le_network_health_recovery_stage(
     if (health->phase == LE_NETWORK_HEALTH_INTERFACE_DOWN_WAIT ||
         health->phase == LE_NETWORK_HEALTH_INTERFACE_RECOVERING)
         return "interface-reset";
+    if (health->phase == LE_NETWORK_HEALTH_REBOOT_PENDING)
+        return "reboot-pending";
     if (health->phase == LE_NETWORK_HEALTH_REBOOT_REQUESTED)
         return "reboot-requested";
+    if (health->phase == LE_NETWORK_HEALTH_EXHAUSTED)
+        return "exhausted";
     return "none";
 }
 
@@ -191,4 +197,13 @@ int le_network_health_reboot_requested(
     const struct le_network_health *health)
 {
     return health && health->phase == LE_NETWORK_HEALTH_REBOOT_REQUESTED;
+}
+
+void le_network_health_finish_reboot_request(
+    struct le_network_health *health, int submitted)
+{
+    if (!health || health->phase != LE_NETWORK_HEALTH_REBOOT_PENDING)
+        return;
+    health->phase = submitted ? LE_NETWORK_HEALTH_REBOOT_REQUESTED :
+                                LE_NETWORK_HEALTH_EXHAUSTED;
 }

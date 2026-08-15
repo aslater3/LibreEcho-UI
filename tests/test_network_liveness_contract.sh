@@ -25,6 +25,8 @@ for field in ('connectivity', 'gateway_reachable', 'recovery_stage', 'liveness_f
 assert 'REASSOCIATE\\n' in networkd
 assert 'SIOCSIFFLAGS' in networkd
 assert '/tmp/reboot.request' in networkd
+assert '/data/libreecho/network-recovery-reboot.guard' in networkd
+assert 'persistent reboot budget already consumed' in networkd
 assert '/dev/wmtWifi' not in networkd
 assert networkd.count('reset_network_health(ctx, monotonic_ms());') == 2
 main_loop = networkd[networkd.index('int main(int argc, char **argv)'):]
@@ -38,6 +40,8 @@ assert 'const char *connectivity = "unknown";' in backend_linux
 network_fallback = backend_linux[backend_linux.index('static int network('):
                                  backend_linux.index('static int audio(')]
 assert 'o->internet = 0;' in network_fallback
+assert '"exhausted"' in openapi
+assert 'recovery_stage: exhausted' in docs
 assert "n.connectivity==='healthy'" in ui
 assert 'n.recovery_stage' in ui
 print('network liveness/recovery cross-layer contract: ok')

@@ -29,7 +29,9 @@ enum le_network_health_phase {
     LE_NETWORK_HEALTH_REASSOCIATING,
     LE_NETWORK_HEALTH_INTERFACE_DOWN_WAIT,
     LE_NETWORK_HEALTH_INTERFACE_RECOVERING,
-    LE_NETWORK_HEALTH_REBOOT_REQUESTED
+    LE_NETWORK_HEALTH_REBOOT_PENDING,
+    LE_NETWORK_HEALTH_REBOOT_REQUESTED,
+    LE_NETWORK_HEALTH_EXHAUSTED
 };
 
 struct le_network_health {
@@ -64,5 +66,7 @@ int le_network_health_consecutive_failures(
     const struct le_network_health *health);
 int le_network_health_reboot_requested(
     const struct le_network_health *health);
+void le_network_health_finish_reboot_request(
+    struct le_network_health *health, int submitted);
 
 #endif
