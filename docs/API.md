@@ -388,7 +388,9 @@ Run LED test pattern.
 
 #### GET /api/v1/network
 
-Returns network state.
+Returns Wi-Fi association state plus an independent gateway-liveness result. A
+`connected` association is not considered healthy until the gateway probe has
+succeeded.
 
 **Response:**
 ```json
@@ -396,6 +398,10 @@ Returns network state.
   "ok": true,
   "data": {
     "state": "connected",
+    "connectivity": "healthy",
+    "recovery_stage": "none",
+    "gateway_reachable": true,
+    "liveness_failures": 0,
     "ssid": "MyNetwork",
     "signal": 75,
     "rssi_dbm": -47,
@@ -413,6 +419,18 @@ Returns network state.
   "error": null
 }
 ```
+
+`connectivity` is one of `unknown`, `healthy`, `degraded`, `recovering`, or
+`disconnected`. `gateway_reachable` is `null` until a probe can be completed.
+After this boot has observed a healthy gateway, three consecutive failures arm
+bounded recovery: wpa reassociation, then a one-second interface down/up cycle.
+If the gateway is still unreachable after both grace periods,
+`recovery_stage` becomes `reboot-requested` and `networkd` submits
+`/tmp/reboot.request` to the initramfs reboot supervisor. Each recovery action is
+attempted at most once per cycle; a failed supervisor-request write remains in
+the terminal `reboot-requested` state instead of retrying indefinitely. The
+daemon never accesses `/dev/wmtWifi` directly, preserving the
+one-radio-transition-per-boot rule.
 
 #### PUT /api/v1/network
 

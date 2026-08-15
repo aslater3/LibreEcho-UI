@@ -5,6 +5,7 @@ CFG=${LIBREECHO_TEST_CONFIG:-./build/test-suite-config.json}
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exit 1; }; }
 expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
+curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/device")" '"os_version":"LibreEcho OS 0.12.0"'
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
 expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
@@ -91,6 +92,7 @@ curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: applicatio
 curl -fsS -X POST "$URL/api/v1/bluetooth/scan" -H "$CSRF" -H 'Content-Type: application/json' --data '{}' | jq -e '.ok and .data.scanning == true' >/dev/null
 curl -fsS -X POST "$URL/api/v1/bluetooth/pair" -H "$CSRF" -H 'Content-Type: application/json' --data '{"address":"10:20:30:40:50:60","type":0,"io_capability":3}' | jq -e '.ok and (.data.known_devices | length) == 1' >/dev/null
 curl -fsS -X POST "$URL/api/v1/bluetooth/unpair" -H "$CSRF" -H 'Content-Type: application/json' --data '{"address":"10:20:30:40:50:60","type":0}' | jq -e '.ok and (.data.known_devices | length) == 0' >/dev/null
+curl -fsS "$URL/api/v1/network" | jq -e '.ok and (.data.connectivity == "unknown" or .data.connectivity == "healthy") and .data.recovery_stage == "none" and ((.data.gateway_reachable | type) == "boolean" or .data.gateway_reachable == null) and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/network/wifi/scan")" 'LibreNet-5G'
 curl -fsS "$URL/api/v1/voice-pipeline" | jq -e \
     '.ok and .data.mode == "local" and

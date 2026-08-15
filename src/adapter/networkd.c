@@ -11,7 +11,9 @@
 #endif
 
 #include "adapter.h"
+#include "gateway_probe.h"
 #include "log.h"
+#include "network_health.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -64,6 +66,11 @@
 #define NL80211_SCAN_TIMEOUT_MS 12000
 #define NL80211_SCAN_RETRY_MS 150
 #define NL80211_BUFFER_SIZE 65536
+#ifdef LE_NETWORKD_TESTING
+#define NETWORKD_POLL_MAX_MS 5
+#else
+#define NETWORKD_POLL_MAX_MS 1000
+#endif
 
 struct wpa_ctrl {
     int fd;
@@ -78,6 +85,8 @@ struct wpa_pair {
 struct network_state {
     char interface[IFNAMSIZ];
     char state[24];
+    char connectivity[24];
+    char recovery_stage[24];
     char ssid[128];
     char ip[INET_ADDRSTRLEN];
     char gateway[INET_ADDRSTRLEN];
@@ -86,6 +95,8 @@ struct network_state {
     int link_up;
     int signal;
     int rssi_dbm;
+    int gateway_reachable;
+    int liveness_failures;
 };
 
 struct client {
@@ -117,11 +128,14 @@ struct daemon_ctx {
     int netlink_fd;
     char socket_path[PATH_MAX];
     char wpa_path[PATH_MAX];
+    char reboot_request_path[PATH_MAX];
     char interface[IFNAMSIZ];
     int foreground;
     int network_id;
     struct wpa_pair wpa;
     struct network_state state;
+    struct le_network_health health;
+    struct le_gateway_probe gateway_probe;
     struct client clients[CLIENT_MAX];
     struct pending_scan scan;
     struct pending_dhcp dhcp;
@@ -222,11 +236,17 @@ static int append_json_string(char *dst, size_t size, size_t *used,
 
 static int state_json(const struct network_state *s, char *out, size_t size)
 {
+    const char *gateway_reachable = s->gateway_reachable < 0 ? "null" :
+                                    s->gateway_reachable ? "true" : "false";
     size_t n = 0;
     if (append_text(out, size, &n, "{\"interface\":") < 0 ||
         append_json_string(out, size, &n, s->interface) < 0 ||
         append_text(out, size, &n, ",\"state\":") < 0 ||
         append_json_string(out, size, &n, s->state) < 0 ||
+        append_text(out, size, &n, ",\"connectivity\":") < 0 ||
+        append_json_string(out, size, &n, s->connectivity) < 0 ||
+        append_text(out, size, &n, ",\"recovery_stage\":") < 0 ||
+        append_json_string(out, size, &n, s->recovery_stage) < 0 ||
         append_text(out, size, &n, ",\"ssid\":") < 0 ||
         append_json_string(out, size, &n, s->ssid) < 0 ||
         append_text(out, size, &n, ",\"ip\":") < 0 ||
@@ -236,8 +256,9 @@ static int state_json(const struct network_state *s, char *out, size_t size)
         append_text(out, size, &n, ",\"dns\":") < 0 ||
         append_json_string(out, size, &n, s->dns) < 0 ||
         append_text(out, size, &n,
-                    ",\"signal\":%d,\"rssi_dbm\":%d,\"mac\":",
-                    s->signal, s->rssi_dbm) < 0 ||
+                    ",\"signal\":%d,\"rssi_dbm\":%d,\"gateway_reachable\":%s,\"liveness_failures\":%d,\"mac\":",
+                    s->signal, s->rssi_dbm, gateway_reachable,
+                    s->liveness_failures) < 0 ||
         append_json_string(out, size, &n, s->mac) < 0 ||
         append_text(out, size, &n, "}") < 0)
         return -1;
@@ -249,7 +270,11 @@ static int state_equal(const struct network_state *a,
 {
     return a->link_up == b->link_up && a->signal == b->signal &&
            a->rssi_dbm == b->rssi_dbm &&
+           a->gateway_reachable == b->gateway_reachable &&
+           a->liveness_failures == b->liveness_failures &&
            !strcmp(a->interface, b->interface) && !strcmp(a->state, b->state) &&
+           !strcmp(a->connectivity, b->connectivity) &&
+           !strcmp(a->recovery_stage, b->recovery_stage) &&
            !strcmp(a->ssid, b->ssid) && !strcmp(a->ip, b->ip) &&
            !strcmp(a->gateway, b->gateway) && !strcmp(a->dns, b->dns) &&
            !strcmp(a->mac, b->mac);
@@ -752,6 +777,14 @@ static void refresh_interface_info(struct daemon_ctx *ctx)
     read_ip_fib_trie(&ctx->state);
     read_route(&ctx->state);
     read_dns(&ctx->state);
+#ifdef LE_NETWORKD_TESTING
+    if (getenv("LIBREECHO_NETWORKD_TEST_FIXTURE")) {
+        ctx->state.link_up = 1;
+        copy_string(ctx->state.ip, sizeof(ctx->state.ip), "192.0.2.10");
+        copy_string(ctx->state.gateway, sizeof(ctx->state.gateway), "192.0.2.1");
+        copy_string(ctx->state.dns, sizeof(ctx->state.dns), "192.0.2.53");
+    }
+#endif
 }
 
 static void refresh_wpa_info(struct daemon_ctx *ctx)
@@ -798,10 +831,30 @@ static void refresh_wpa_info(struct daemon_ctx *ctx)
     }
 }
 
+static void sync_health_state(struct daemon_ctx *ctx)
+{
+    copy_string(ctx->state.connectivity, sizeof(ctx->state.connectivity),
+                le_network_health_connectivity(&ctx->health));
+    copy_string(ctx->state.recovery_stage, sizeof(ctx->state.recovery_stage),
+                le_network_health_recovery_stage(&ctx->health));
+    ctx->state.gateway_reachable =
+        le_network_health_gateway_reachable(&ctx->health);
+    ctx->state.liveness_failures =
+        le_network_health_consecutive_failures(&ctx->health);
+}
+
+static void reset_network_health(struct daemon_ctx *ctx, long long now_ms)
+{
+    le_gateway_probe_close(&ctx->gateway_probe);
+    le_network_health_init(&ctx->health, NULL, now_ms);
+    sync_health_state(ctx);
+}
+
 static void refresh_state(struct daemon_ctx *ctx)
 {
     refresh_interface_info(ctx);
     refresh_wpa_info(ctx);
+    sync_health_state(ctx);
 }
 
 static int ensure_wpa(struct daemon_ctx *ctx)
@@ -907,6 +960,227 @@ static void refresh_and_broadcast(struct daemon_ctx *ctx, const char *event_type
         broadcast_state(ctx, event_type);
 }
 
+#ifdef LE_NETWORKD_TESTING
+static void test_log_health_action(const char *action)
+{
+    const char *path = getenv("LIBREECHO_NETWORKD_TEST_ACTION_LOG");
+    int fd;
+
+    if (!path || !path[0] || !action)
+        return;
+    fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return;
+    (void)write(fd, action, strlen(action));
+    (void)write(fd, "\n", 1);
+    (void)close(fd);
+}
+#endif
+
+static int set_interface_enabled(const char *interface, int enabled)
+{
+    struct ifreq request;
+    int fd;
+    int result;
+#ifdef LE_NETWORKD_TESTING
+    if (getenv("LIBREECHO_NETWORKD_TEST_FIXTURE")) {
+        const char *failure = getenv("LIBREECHO_NETWORKD_TEST_FAIL_INTERFACE");
+        const char *action = enabled ? "up" : "down";
+        if (failure && (!strcmp(failure, "all") || !strcmp(failure, action))) {
+            errno = EIO;
+            return -1;
+        }
+        return 0;
+    }
+#endif
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -1;
+    memset(&request, 0, sizeof(request));
+    copy_string(request.ifr_name, sizeof(request.ifr_name), interface);
+    result = ioctl(fd, SIOCGIFFLAGS, &request);
+    if (result == 0) {
+        if (enabled)
+            request.ifr_flags = (short)(request.ifr_flags | IFF_UP);
+        else
+            request.ifr_flags = (short)(request.ifr_flags & ~IFF_UP);
+        result = ioctl(fd, SIOCSIFFLAGS, &request);
+    }
+    close(fd);
+    return result;
+}
+
+static int request_supervised_reboot(const char *request_path)
+{
+    char temporary[PATH_MAX];
+    static const char request[] = "reboot\n";
+    int fd;
+    ssize_t written;
+
+    if (!request_path || !request_path[0] ||
+        snprintf(temporary, sizeof(temporary), "%s.networkd", request_path) >=
+            (int)sizeof(temporary)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (access(request_path, F_OK) == 0)
+        return 0;
+    (void)unlink(temporary);
+    fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    written = write(fd, request, sizeof(request) - 1);
+    if (written != (ssize_t)(sizeof(request) - 1) || fsync(fd) < 0) {
+        int saved_errno = written < 0 ? errno : EIO;
+        close(fd);
+        unlink(temporary);
+        errno = saved_errno;
+        return -1;
+    }
+    if (close(fd) < 0 || rename(temporary, request_path) < 0) {
+        int saved_errno = errno;
+        unlink(temporary);
+        errno = saved_errno;
+        return -1;
+    }
+    return 0;
+}
+
+static void perform_health_action(struct daemon_ctx *ctx,
+                                  enum le_network_health_action action)
+{
+    char reply[WPA_REPLY_MAX];
+    int result;
+#ifdef LE_NETWORKD_TESTING
+    if (action == LE_NETWORK_HEALTH_REASSOCIATE)
+        test_log_health_action("reassociate");
+    else if (action == LE_NETWORK_HEALTH_INTERFACE_DOWN)
+        test_log_health_action("interface-down");
+    else if (action == LE_NETWORK_HEALTH_INTERFACE_UP)
+        test_log_health_action("interface-up");
+    else if (action == LE_NETWORK_HEALTH_REQUEST_REBOOT)
+        test_log_health_action("reboot-request");
+#endif
+
+    if (action == LE_NETWORK_HEALTH_REASSOCIATE) {
+        result = wpa_ok(ctx, "REASSOCIATE\n", reply, sizeof(reply));
+        if (result == 0)
+            le_log_warn("networkd: gateway liveness failed; wpa reassociation requested");
+        else
+            le_log_error("networkd: gateway liveness failed; wpa reassociation request failed");
+    } else if (action == LE_NETWORK_HEALTH_INTERFACE_DOWN) {
+        result = set_interface_enabled(ctx->interface, 0);
+        if (result == 0)
+            le_log_warn("networkd: gateway still unreachable; interface reset started");
+        else
+            le_log_error("networkd: unable to bring interface down for recovery: %s",
+                         strerror(errno));
+    } else if (action == LE_NETWORK_HEALTH_INTERFACE_UP) {
+        result = set_interface_enabled(ctx->interface, 1);
+        if (result == 0) {
+            le_log_warn("networkd: interface restored; waiting for reassociation");
+            if (wpa_ok(ctx, "REASSOCIATE\n", reply, sizeof(reply)) < 0)
+                le_log_warn("networkd: post-reset wpa reassociation request failed");
+        } else {
+            le_log_error("networkd: unable to restore interface after reset: %s",
+                         strerror(errno));
+        }
+    } else if (action == LE_NETWORK_HEALTH_REQUEST_REBOOT) {
+        if (request_supervised_reboot(ctx->reboot_request_path) == 0) {
+            le_log_error("networkd: recovery exhausted; supervised reboot requested");
+        } else {
+            le_log_error("networkd: recovery exhausted; unable to request supervised reboot: %s",
+                         strerror(errno));
+        }
+    }
+}
+
+static void publish_health_change(struct daemon_ctx *ctx,
+                                  const struct network_state *before)
+{
+    sync_health_state(ctx);
+    if (!state_equal(before, &ctx->state))
+        broadcast_state(ctx, "network.health");
+}
+
+static void record_gateway_probe(struct daemon_ctx *ctx,
+                                 enum le_gateway_probe_result result,
+                                 long long now_ms)
+{
+    struct network_state before = ctx->state;
+    int prior_failures = le_network_health_consecutive_failures(&ctx->health);
+    enum le_network_health_action action =
+        le_network_health_record_probe(&ctx->health, now_ms, result);
+
+    if (result == LE_GATEWAY_REACHABLE && prior_failures > 0)
+        le_log_info("networkd: gateway liveness recovered after %d failed probe(s)",
+                    prior_failures);
+    else if (result == LE_GATEWAY_UNREACHABLE)
+        le_log_warn("networkd: gateway liveness probe failed (%d consecutive)",
+                    le_network_health_consecutive_failures(&ctx->health));
+    perform_health_action(ctx, action);
+    publish_health_change(ctx, &before);
+}
+
+static void handle_gateway_probe_event(struct daemon_ctx *ctx, short revents,
+                                       long long now_ms)
+{
+    int result;
+
+    if (!ctx->gateway_probe.active)
+        return;
+    if (revents & POLLIN) {
+        result = le_gateway_probe_receive(&ctx->gateway_probe);
+        if (result > 0) {
+            le_gateway_probe_close(&ctx->gateway_probe);
+            record_gateway_probe(ctx, LE_GATEWAY_REACHABLE, now_ms);
+            return;
+        }
+        if (result < 0) {
+            le_gateway_probe_close(&ctx->gateway_probe);
+            record_gateway_probe(ctx, LE_GATEWAY_PROBE_UNAVAILABLE, now_ms);
+            return;
+        }
+    }
+    if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        le_gateway_probe_close(&ctx->gateway_probe);
+        record_gateway_probe(ctx, LE_GATEWAY_PROBE_UNAVAILABLE, now_ms);
+    }
+}
+
+static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
+{
+    struct network_state before = ctx->state;
+    enum le_network_health_action action;
+    int associated;
+
+    if (le_gateway_probe_timed_out(&ctx->gateway_probe, now_ms)) {
+        le_gateway_probe_close(&ctx->gateway_probe);
+        record_gateway_probe(ctx, LE_GATEWAY_UNREACHABLE, now_ms);
+        return;
+    }
+    associated = !strcmp(ctx->state.state, "connected") &&
+                 ctx->state.ssid[0] && ctx->state.link_up;
+    action = le_network_health_tick(&ctx->health, now_ms, associated,
+                                    ctx->state.gateway[0] != '\0');
+    if (action == LE_NETWORK_HEALTH_PROBE) {
+        if (!ctx->state.gateway[0]) {
+            record_gateway_probe(ctx, LE_GATEWAY_UNREACHABLE, now_ms);
+        } else if (le_gateway_probe_start(&ctx->gateway_probe, ctx->interface,
+                                          ctx->state.gateway, now_ms) < 0) {
+            le_log_warn("networkd: gateway liveness probe unavailable: %s",
+                        strerror(errno));
+            record_gateway_probe(ctx, LE_GATEWAY_PROBE_UNAVAILABLE, now_ms);
+        } else {
+            publish_health_change(ctx, &before);
+        }
+        return;
+    }
+    perform_health_action(ctx, action);
+    publish_health_change(ctx, &before);
+}
+
 /* ----- DHCP child handling --------------------------------------------- */
 
 static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
@@ -954,6 +1228,12 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
     pid_t pid;
     if (ctx->dhcp.active)
         return -1;
+#ifdef LE_NETWORKD_TESTING
+    if (getenv("LIBREECHO_NETWORKD_TEST_FIXTURE")) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
+#endif
     pid = fork();
     if (pid < 0)
         return -1;
@@ -2104,6 +2384,7 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             (void)send_err_fd(ctx->clients[ci].fd, id, "wpa_supplicant rejected network");
             return;
         }
+        reset_network_health(ctx, monotonic_ms());
         copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ssid);
         copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
         ctx->clients[ci].busy = 1;
@@ -2118,6 +2399,7 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             cancel_dhcp(ctx);
         if (ctx->wpa.command.fd >= 0)
             (void)wpa_ok(ctx, "DISABLE_NETWORK all\n", reply, sizeof(reply));
+        reset_network_health(ctx, monotonic_ms());
         ctx->state.ssid[0] = '\0';
         ctx->state.ip[0] = '\0';
         ctx->state.gateway[0] = '\0';
@@ -2227,6 +2509,10 @@ static void accept_clients(struct daemon_ctx *ctx)
             ctx->clients[i].fd = fd;
             ctx->clients[i].input_len = 0;
             ctx->clients[i].busy = 0;
+            /* Consume an already-queued command before this poll iteration can
+             * perform an automatic recovery action.  A nonblocking empty read
+             * simply leaves the client for the next iteration. */
+            read_client(ctx, i);
         }
     }
 }
@@ -2285,7 +2571,7 @@ static int daemonize_process(void)
 static void usage(const char *name)
 {
     fprintf(stderr,
-            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--foreground] [--verbose] [--debug] [--quiet]\n",
+            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--reboot-request PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
             name);
 }
 
@@ -2295,18 +2581,24 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
     copy_string(ctx->socket_path, sizeof(ctx->socket_path), LE_ADAPTER_NETWORK_SOCK);
     copy_string(ctx->wpa_path, sizeof(ctx->wpa_path),
                 "/var/run/wpa_supplicant/wlan0");
+    copy_string(ctx->reboot_request_path, sizeof(ctx->reboot_request_path),
+                "/tmp/reboot.request");
     copy_string(ctx->interface, sizeof(ctx->interface), "wlan0");
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--foreground")) {
             ctx->foreground = 1;
         } else if ((!strcmp(argv[i], "--socket") ||
                     !strcmp(argv[i], "--wpa-ctrl") ||
-                    !strcmp(argv[i], "--interface")) && i + 1 < argc) {
+                    !strcmp(argv[i], "--interface") ||
+                    !strcmp(argv[i], "--reboot-request")) && i + 1 < argc) {
             const char *value = argv[++i];
             if (!strcmp(argv[i - 1], "--socket"))
                 copy_string(ctx->socket_path, sizeof(ctx->socket_path), value);
             else if (!strcmp(argv[i - 1], "--wpa-ctrl"))
                 copy_string(ctx->wpa_path, sizeof(ctx->wpa_path), value);
+            else if (!strcmp(argv[i - 1], "--reboot-request"))
+                copy_string(ctx->reboot_request_path,
+                            sizeof(ctx->reboot_request_path), value);
             else
                 copy_string(ctx->interface, sizeof(ctx->interface), value);
         } else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "--debug") ||
@@ -2332,6 +2624,7 @@ static void cleanup(struct daemon_ctx *ctx)
         if (ctx->clients[i].fd >= 0)
             close(ctx->clients[i].fd);
     wpa_close(ctx);
+    le_gateway_probe_close(&ctx->gateway_probe);
     if (ctx->netlink_fd >= 0)
         close(ctx->netlink_fd);
     if (ctx->listen_fd >= 0)
@@ -2344,7 +2637,7 @@ int main(int argc, char **argv)
 {
     struct daemon_ctx ctx;
     struct sigaction action;
-    struct pollfd pfds[3 + CLIENT_MAX];
+    struct pollfd pfds[4 + CLIENT_MAX];
     int i;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -2353,6 +2646,7 @@ int main(int argc, char **argv)
     ctx.network_id = -1;
     ctx.wpa.command.fd = -1;
     ctx.wpa.monitor.fd = -1;
+    le_gateway_probe_init(&ctx.gateway_probe);
     ctx.dhcp.pid = -1;
     ctx.scan.client_fd = -1;
     ctx.dhcp.client_fd = -1;
@@ -2361,6 +2655,7 @@ int main(int argc, char **argv)
     le_log_init("networkd", argc, argv);
     if (parse_args(&ctx, argc, argv) < 0)
         return 2;
+    le_network_health_init(&ctx.health, NULL, monotonic_ms());
     le_log_info("networkd: starting (socket=%s, interface=%s, wpa=%s)",
                 ctx.socket_path, ctx.interface, ctx.wpa_path);
 
@@ -2394,7 +2689,8 @@ int main(int argc, char **argv)
 
     while (g_running) {
         int nfds = 0;
-        int timeout = 1000;
+        int timeout = NETWORKD_POLL_MAX_MS;
+        int gateway_fd = ctx.gateway_probe.active ? ctx.gateway_probe.fd : -1;
         long long now = monotonic_ms();
         pfds[nfds].fd = ctx.listen_fd;
         pfds[nfds].events = POLLIN;
@@ -2412,6 +2708,12 @@ int main(int argc, char **argv)
             pfds[nfds].revents = 0;
             ++nfds;
         }
+        if (gateway_fd >= 0) {
+            pfds[nfds].fd = gateway_fd;
+            pfds[nfds].events = POLLIN;
+            pfds[nfds].revents = 0;
+            ++nfds;
+        }
         for (i = 0; i < CLIENT_MAX; ++i) {
             if (ctx.clients[i].fd >= 0) {
                 pfds[nfds].fd = ctx.clients[i].fd;
@@ -2424,8 +2726,13 @@ int main(int argc, char **argv)
             timeout = (int)(ctx.scan.deadline > now ? ctx.scan.deadline - now : 0);
         if (ctx.dhcp.active && ctx.dhcp.deadline - now < timeout)
             timeout = (int)(ctx.dhcp.deadline > now ? ctx.dhcp.deadline - now : 0);
+        if (ctx.gateway_probe.active &&
+            ctx.gateway_probe.deadline_ms - now < timeout)
+            timeout = (int)(ctx.gateway_probe.deadline_ms > now ?
+                            ctx.gateway_probe.deadline_ms - now : 0);
         if (poll(pfds, (nfds_t)nfds, timeout) < 0 && errno != EINTR)
             break;
+        now = monotonic_ms();
 
         if (g_child_event)
             reap_children(&ctx);
@@ -2462,6 +2769,23 @@ int main(int argc, char **argv)
                             }
                     }
             }
+            if (gateway_fd >= 0 && ctx.gateway_probe.active &&
+                ctx.gateway_probe.fd == gateway_fd) {
+                int gateway_index;
+                for (gateway_index = 0; gateway_index < nfds;
+                     ++gateway_index)
+                    if (pfds[gateway_index].fd == gateway_fd) {
+                        if (pfds[gateway_index].revents &
+                            (POLLIN | POLLERR | POLLHUP | POLLNVAL))
+                            handle_gateway_probe_event(
+                                &ctx, pfds[gateway_index].revents, now);
+                        break;
+                    }
+            }
+            /* Explicit client commands win over automatic recovery whether a
+             * probe completed, timed out, or became unavailable in this poll
+             * iteration. */
+            check_network_health(&ctx, now);
         }
     }
     cleanup(&ctx);

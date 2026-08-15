@@ -16,7 +16,8 @@ BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
 ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming
-NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/adapter_server.c src/log.c
+NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
+	src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/adapter_server.c src/log.c
@@ -112,6 +113,18 @@ $(BUILD)/libreecho-ttsd-wyoming: src/adapter/ttsd.c \
 		src/json.c src/log.c
 	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc \
 		-DLE_TTSD_ENGINE_WYOMING $^ $(LDFLAGS) -lpthread -lm -o $@
+
+$(BUILD)/test-network-health: tests/test_network_health.c \
+		src/adapter/network_health.c
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-gateway-probe: tests/test_gateway_probe.c \
+		src/adapter/gateway_probe.c
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-networkd-health: $(NETWORKD_SOURCES)
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_NETWORKD_TESTING $(CSTD) \
+		$(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
@@ -487,6 +500,8 @@ clean:
 	rm -f $(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32 \
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
+		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
+		$(BUILD)/test-networkd-health \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \

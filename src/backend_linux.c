@@ -677,9 +677,16 @@ static int networkd_status(struct le_backend *b, struct le_network_state *o)
 
     memset(o, 0, sizeof(*o));
     o->rssi_dbm = -1;
+    o->gateway_reachable = -1;
+    strcpy(o->recovery_stage, "none");
     read_hostname(o->hostname, sizeof(o->hostname));
     if (json_get_string(response, "state", o->state, sizeof(o->state)) > 0)
         found = 1;
+    if (json_get_string(response, "connectivity", o->connectivity,
+                        sizeof(o->connectivity)) > 0)
+        found = 1;
+    (void)json_get_string(response, "recovery_stage", o->recovery_stage,
+                          sizeof(o->recovery_stage));
     if (json_get_string(response, "ssid", o->ssid, sizeof(o->ssid)) > 0)
         found = 1;
     (void)json_get_string(response, "ip", o->ip, sizeof(o->ip));
@@ -687,8 +694,21 @@ static int networkd_status(struct le_backend *b, struct le_network_state *o)
     (void)json_get_string(response, "dns", o->dns, sizeof(o->dns));
     (void)json_get_int(response, "signal", &o->signal);
     (void)json_get_int(response, "rssi_dbm", &o->rssi_dbm);
+    (void)json_get_bool(response, "gateway_reachable", &o->gateway_reachable);
+    (void)json_get_int(response, "liveness_failures", &o->liveness_failures);
+    if (!o->connectivity[0]) {
+        const char *connectivity = "unknown";
+        if (!strcmp(o->state, "disconnected"))
+            connectivity = "disconnected";
+        else if (o->gateway_reachable > 0)
+            connectivity = "healthy";
+        else if (o->gateway_reachable == 0)
+            connectivity = "degraded";
+        copy_string(o->connectivity, sizeof(o->connectivity), connectivity);
+    }
     o->dhcp = o->ip[0] && (!strcmp(o->state, "connected") || o->gateway[0]);
-    o->internet = o->gateway[0] && !strcmp(o->state, "connected");
+    o->internet = o->gateway[0] && !strcmp(o->state, "connected") &&
+                  !strcmp(o->connectivity, "healthy");
     return found ? LE_OK : LE_IO;
 }
 
@@ -705,6 +725,8 @@ static int network(struct le_backend *b, struct le_network_state *o)
 
     memset(o, 0, sizeof(*o));
     o->rssi_dbm = -1;
+    o->gateway_reachable = -1;
+    strcpy(o->recovery_stage, "none");
     read_hostname(o->hostname, sizeof(o->hostname));
 
     snprintf(path, sizeof(path), "/sys/class/net/wlan0/operstate");
@@ -721,6 +743,7 @@ static int network(struct le_backend *b, struct le_network_state *o)
 
     if (!have_iface) {
         strcpy(o->state, "disconnected");
+        strcpy(o->connectivity, "disconnected");
         read_dns(o->dns, sizeof(o->dns));
         return LE_OK;
     }
@@ -730,6 +753,8 @@ static int network(struct le_backend *b, struct le_network_state *o)
         strcpy(o->state, "disconnected");
     else
         copy_string(o->state, sizeof(o->state), operstate);
+    copy_string(o->connectivity, sizeof(o->connectivity),
+                !strcmp(o->state, "disconnected") ? "disconnected" : "unknown");
 
     /* MAC is read here for the hardware adapter boundary; the public API has no MAC field. */
     snprintf(path, sizeof(path), "/sys/class/net/%s/address", iface);
@@ -739,7 +764,8 @@ static int network(struct le_backend *b, struct le_network_state *o)
     (void)read_ip_address(iface, o->ip, sizeof(o->ip));
     read_dns(o->dns, sizeof(o->dns));
     o->dhcp = o->ip[0] && (!strcmp(o->state, "connected") || o->gateway[0]);
-    o->internet = o->gateway[0] && !strcmp(o->state, "connected");
+    /* Interface and route presence cannot prove gateway liveness. */
+    o->internet = 0;
     return LE_OK;
 }
 
