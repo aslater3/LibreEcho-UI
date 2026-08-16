@@ -1908,9 +1908,17 @@ int main(int argc, char **argv)
         le_log_error("btd: cannot listen on %s: %s", socket_path, strerror(errno));
         return 1;
     }
-    (void)mgmt_open(&context);
-    if (context.mgmt_fd >= 0 && refresh_info(&context) == 0 && context.enabled &&
-        !context.capability_ready) {
+    if (mgmt_open(&context) != 0) {
+        le_log_error("btd: Bluetooth management channel unavailable");
+        close(listener);
+        return 1;
+    }
+    if (refresh_info(&context) != 0) {
+        le_log_error("btd: Bluetooth controller information unavailable");
+        close(listener);
+        return 1;
+    }
+    if (context.enabled && !context.capability_ready) {
         uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
 
         if (controller_command(&context, MGMT_OP_SET_IO_CAPABILITY,
@@ -1920,9 +1928,10 @@ int main(int argc, char **argv)
             context.capability_ready = 0;
             snprintf(context.last_error, sizeof(context.last_error),
                      "hci0 IO capability could not be configured");
-        } else {
-            context.capability_ready = 1;
+            close(listener);
+            return 1;
         }
+        context.capability_ready = 1;
     }
     (void)load_keys_into_controller(&context);
     if (le_profile_open(&context.profiles, LIBREECHO_BT_NAME) == 0) {

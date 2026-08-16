@@ -59,8 +59,11 @@ frontend = Path('web/js/bluetooth.js').read_text()
 assert "String(numeric).padStart(6,'0')" in frontend
 assert "p.method==='confirm' && p.value !== undefined && p.value !== null" in frontend
 assert 'comparisonValue' in frontend
-startup = source[source.index('    (void)mgmt_open(&context);'):source.index('    if (le_profile_open', source.index('    (void)mgmt_open(&context);'))]
+startup = source[source.index('    if (mgmt_open(&context) != 0)'):source.index('    if (le_profile_open', source.index('    if (mgmt_open(&context) != 0)'))]
 assert 'refresh_info(&context)' in startup
+assert 'if (mgmt_open(&context) != 0)' in startup
+assert 'if (refresh_info(&context) != 0)' in startup
+assert 'close(listener);' in startup
 assert 'controller_command(&context, MGMT_OP_SET_IO_CAPABILITY' in startup
 assert 'context.capability_ready = 1;' in startup
 PY
