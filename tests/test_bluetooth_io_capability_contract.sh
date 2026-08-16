@@ -59,5 +59,9 @@ frontend = Path('web/js/bluetooth.js').read_text()
 assert "String(numeric).padStart(6,'0')" in frontend
 assert "p.method==='confirm' && p.value !== undefined && p.value !== null" in frontend
 assert 'comparisonValue' in frontend
+startup = source[source.index('    (void)mgmt_open(&context);'):source.index('    if (le_profile_open', source.index('    (void)mgmt_open(&context);'))]
+assert 'refresh_info(&context)' in startup
+assert 'controller_command(&context, MGMT_OP_SET_IO_CAPABILITY' in startup
+assert 'context.capability_ready = 1;' in startup
 PY
 printf '%s\n' 'bluetooth IO capability contract: ok'
