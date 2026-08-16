@@ -95,6 +95,7 @@
 #define MGMT_OP_DISCONNECT 0x0014
 #define MGMT_OP_PIN_CODE_REPLY 0x0016
 #define MGMT_OP_PIN_CODE_NEG_REPLY 0x0017
+#define MGMT_OP_SET_IO_CAPABILITY 0x0018
 #define MGMT_OP_PAIR_DEVICE 0x0019
 #define MGMT_OP_UNPAIR_DEVICE 0x001b
 #define MGMT_OP_USER_CONFIRM_REPLY 0x001c
@@ -122,6 +123,7 @@
 #define MGMT_DISCOVERY_BREDR 0x01
 #define MGMT_DISCOVERY_LE 0x06
 #define MGMT_DISCOVERY_INTERLEAVED 0x07
+#define MGMT_IO_CAP_DISPLAY_YES_NO 0x01
 #define MGMT_IO_CAP_NO_INPUT_NO_OUTPUT 0x03
 #define MGMT_MAX_NAME_LENGTH 249
 #define MGMT_MAX_SHORT_NAME_LENGTH 11
@@ -1612,6 +1614,16 @@ static int handle_request(struct bt_context *context, char *message,
                      "hci0 power-on failed");
             return le_adapter_respond_err(response, response_size, id,
                                            context->last_error);
+        }
+        {
+            uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
+            if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
+                                   &io_capability, sizeof(io_capability)) != 0) {
+                snprintf(context->last_error, sizeof(context->last_error),
+                         "hci0 IO capability could not be configured");
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
         }
         /* Opening the management channel clears HCI_BONDABLE.  The legacy
          * HCIDEVUP path deliberately does not restore it once management is
