@@ -16,9 +16,10 @@ activation = source[start:end]
 assert '#define MGMT_OP_SET_IO_CAPABILITY 0x0018' in source
 assert '#define MGMT_IO_CAP_DISPLAY_YES_NO 0x01' in source
 
-powered = activation.index('set_powered(context, 1)')
-io_capability = activation.index('controller_command(context, MGMT_OP_SET_IO_CAPABILITY')
-bondable = activation.index('set_controller_setting(context, MGMT_OP_SET_BONDABLE, 1)')
+bringup = activation[activation.index('context->activation_attempted = 1;'):]
+powered = bringup.index('set_powered(context, 1)')
+io_capability = bringup.index('controller_command(context, MGMT_OP_SET_IO_CAPABILITY')
+bondable = bringup.index('set_controller_setting(context, MGMT_OP_SET_BONDABLE, 1)')
 assert powered < io_capability < bondable, (
     'controller IO capability must be set after HCI power-on and before '
     'inbound pairing is enabled'
@@ -33,6 +34,10 @@ assert 'context->capability_ready = 0;' in io_failure
 assert 'context->capability_ready = 1;' in activation
 pairing_mode = source[source.index('static int set_pairing_mode'):source.index('static int handle_request')]
 assert 'if (!context->enabled || !context->capability_ready)' in pairing_mode
+adopted_powered = activation[activation.index('if (context->enabled)'):activation.index('if (context->activation_attempted)')]
+assert 'controller_command(context, MGMT_OP_SET_IO_CAPABILITY' in adopted_powered
+assert 'context->capability_ready = 1;' in adopted_powered
+assert '(void)set_powered(context, 0);' in adopted_powered
 
 # USER_CONFIRM_REQUEST has address + type + confirmation hint + value; the
 # passkey notification layout has address + type + value.  Keep both offsets

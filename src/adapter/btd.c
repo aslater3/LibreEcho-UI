@@ -1593,9 +1593,26 @@ static int handle_request(struct bt_context *context, char *message,
         if (!wmt_present())
             return le_adapter_respond_err(response, response_size, id,
                                            "MT8163 WMT device is unavailable");
-        if (context->enabled)
+        if (context->enabled) {
+            uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
+
+            if (context->capability_ready)
+                return le_adapter_respond_ok(response, response_size, id,
+                                             "{\"enabled\":true}");
+            if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
+                                   &io_capability, sizeof(io_capability)) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                snprintf(context->last_error, sizeof(context->last_error),
+                         "hci0 IO capability could not be configured");
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
+            context->capability_ready = 1;
             return le_adapter_respond_ok(response, response_size, id,
                                          "{\"enabled\":true}");
+        }
         if (context->activation_attempted)
             return le_adapter_respond_err(response, response_size, id,
                                            "activation already attempted; reboot before retry");
