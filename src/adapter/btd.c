@@ -109,6 +109,7 @@
 #define MGMT_OP_SET_DISCOVERABLE 0x0006
 #define MGMT_OP_SET_CONNECTABLE 0x0007
 #define MGMT_OP_SET_BONDABLE 0x0009
+#define MGMT_OP_SET_LINK_SECURITY 0x000a
 #define MGMT_OP_SET_DEV_CLASS 0x000e
 #define MGMT_OP_SET_LOCAL_NAME 0x000f
 #define MGMT_OP_ADD_UUID 0x0010
@@ -117,6 +118,7 @@
 #define MGMT_SETTING_CONNECTABLE 0x00000002U
 #define MGMT_SETTING_DISCOVERABLE 0x00000008U
 #define MGMT_SETTING_BONDABLE 0x00000010U
+#define MGMT_SETTING_LINK_SECURITY 0x00000020U
 #define MGMT_SETTING_SSP 0x00000040U
 #define MGMT_SETTING_BREDR 0x00000080U
 #define MGMT_SETTING_LE 0x00000200U
@@ -1237,6 +1239,27 @@ static int set_powered(struct bt_context *context, int enabled)
     return result;
 }
 
+static int enable_link_security(struct bt_context *context)
+{
+    uint8_t enabled = 1;
+
+    if (!(context->supported_settings & MGMT_SETTING_LINK_SECURITY)) {
+        snprintf(context->last_error, sizeof(context->last_error),
+                 "hci0 does not support BR/EDR link security");
+        return -1;
+    }
+    if (context->current_settings & MGMT_SETTING_LINK_SECURITY)
+        return 0;
+    if (controller_command(context, MGMT_OP_SET_LINK_SECURITY, &enabled,
+                           sizeof(enabled)) != 0) {
+        snprintf(context->last_error, sizeof(context->last_error),
+                 "hci0 BR/EDR link security could not be enabled");
+        return -1;
+    }
+    context->current_settings |= MGMT_SETTING_LINK_SECURITY;
+    return 0;
+}
+
 static int enable_secure_simple_pairing(struct bt_context *context)
 {
     uint8_t enabled = 1;
@@ -1641,6 +1664,13 @@ static int handle_request(struct bt_context *context, char *message,
             if (context->capability_ready)
                 return le_adapter_respond_ok(response, response_size, id,
                                              "{\"enabled\":true}");
+            if (enable_link_security(context) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
             if (enable_secure_simple_pairing(context) != 0) {
                 (void)set_powered(context, 0);
                 context->enabled = 0;
@@ -1692,6 +1722,13 @@ static int handle_request(struct bt_context *context, char *message,
         }
         {
             uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
+            if (enable_link_security(context) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
             if (enable_secure_simple_pairing(context) != 0) {
                 (void)set_powered(context, 0);
                 context->enabled = 0;
@@ -1963,6 +2000,13 @@ int main(int argc, char **argv)
     if (context.enabled && !context.capability_ready) {
         uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
 
+        if (enable_link_security(&context) != 0) {
+            (void)set_powered(&context, 0);
+            context.enabled = 0;
+            context.capability_ready = 0;
+            close(listener);
+            return 1;
+        }
         if (enable_secure_simple_pairing(&context) != 0) {
             (void)set_powered(&context, 0);
             context.enabled = 0;
