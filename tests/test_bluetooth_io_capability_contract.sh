@@ -68,6 +68,11 @@ frontend = Path('web/js/bluetooth.js').read_text()
 assert "String(numeric).padStart(6,'0')" in frontend
 assert "p.method==='confirm' && p.value !== undefined && p.value !== null" in frontend
 assert 'comparisonValue' in frontend
+assert 'async function respondBluetoothPairing' in frontend
+assert 'state.btPairingResponding=true' in frontend
+assert "await api('/bluetooth/pairing/response'" in frontend
+assert "$('#bt-confirm').onclick=()=>respondBluetoothPairing" in frontend
+assert "$('#bt-confirm').onclick=()=>post(" not in frontend
 startup = source[source.index('    if (mgmt_open(&context) != 0)'):source.index('    if (le_profile_open', source.index('    if (mgmt_open(&context) != 0)'))]
 assert 'refresh_info(&context)' in startup
 assert 'if (mgmt_open(&context) != 0)' in startup
