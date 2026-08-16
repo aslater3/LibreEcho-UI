@@ -36,6 +36,7 @@ pairing_mode = source[source.index('static int set_pairing_mode'):source.index('
 assert 'if (!context->enabled)' in pairing_mode
 assert 'controller_command(context, MGMT_OP_SET_IO_CAPABILITY' in pairing_mode
 assert 'context->capability_ready = 1;' in pairing_mode
+assert pairing_mode.index('if (enabled == context->pairing_mode)') < pairing_mode.index('controller_command(context, MGMT_OP_SET_IO_CAPABILITY')
 adopted_powered = activation[activation.index('if (context->enabled)'):activation.index('if (context->activation_attempted)')]
 assert 'controller_command(context, MGMT_OP_SET_IO_CAPABILITY' in adopted_powered
 assert 'context->capability_ready = 1;' in adopted_powered

@@ -1492,6 +1492,8 @@ static int set_pairing_mode(struct bt_context *context, int enabled)
 
     if (!context->enabled)
         return -1;
+    if (enabled == context->pairing_mode)
+        return 0;
     if (!context->capability_ready) {
         uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
 
@@ -1506,8 +1508,6 @@ static int set_pairing_mode(struct bt_context *context, int enabled)
         }
         context->capability_ready = 1;
     }
-    if (enabled == context->pairing_mode)
-        return 0;
     if (enabled) {
         context->pairing_saved_connectable =
             (context->current_settings & MGMT_SETTING_CONNECTABLE) != 0;
