@@ -26,6 +26,9 @@ assert powered < io_capability < bondable, (
 assert 'uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;' in activation
 assert 'sizeof(io_capability)) != 0' in activation
 assert 'hci0 IO capability could not be configured' in activation
+io_failure = activation[activation.index('controller_command(context, MGMT_OP_SET_IO_CAPABILITY'):activation.index('/* Opening the management channel', activation.index('controller_command(context, MGMT_OP_SET_IO_CAPABILITY'))]
+assert '(void)set_powered(context, 0);' in io_failure
+assert 'context->enabled = 0;' in io_failure
 
 # USER_CONFIRM_REQUEST has address + type + confirmation hint + value; the
 # passkey notification layout has address + type + value.  Keep both offsets

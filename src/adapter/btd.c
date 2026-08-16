@@ -1626,6 +1626,8 @@ static int handle_request(struct bt_context *context, char *message,
             uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
             if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
                                    &io_capability, sizeof(io_capability)) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
                 snprintf(context->last_error, sizeof(context->last_error),
                          "hci0 IO capability could not be configured");
                 return le_adapter_respond_err(response, response_size, id,
