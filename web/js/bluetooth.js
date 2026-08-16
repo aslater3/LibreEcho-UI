@@ -5,12 +5,17 @@ function bluetoothDeviceCard(device, known) {
   return `<div class="wifi-network bluetooth-device"><span><strong>${esc(device.name||'Unknown device')}</strong><small>${esc(device.address)} · ${device.rssi ? `${device.rssi} dBm` : 'RSSI unavailable'}${device.connected ? ' · Connected' : ''}</small></span><span class="button-row"><button class="secondary-btn" data-bt-operation="${operation}" data-bt-address="${esc(device.address)}" data-bt-type="${device.type||0}">${actionText}</button>${known ? `<button class="danger-btn" data-bt-operation="unpair" data-bt-address="${esc(device.address)}" data-bt-type="${device.type||0}">Unpair</button>` : ''}</span></div>`;
 }
 
+function bluetoothPasskey(value) {
+  const numeric=Number(value);
+  return Number.isInteger(numeric) && numeric >= 0 && numeric <= 999999 ? String(numeric).padStart(6,'0') : String(value ?? '');
+}
+
 function bluetoothPending(b) {
   const p=b.pending_pairing;
   if (!b.pairing || !p || !p.address) return '<p class="muted">No pairing request is waiting for a response.</p>';
-  if (p.method==='notify') return `<div class="privacy-callout">Passkey ${esc(p.value)} displayed by the remote device. Waiting for completion.</div>`;
+  if (p.method==='notify') return `<div class="privacy-callout">Passkey ${esc(bluetoothPasskey(p.value))} displayed by the remote device. Waiting for completion.</div>`;
   const buttons=p.method==='confirm' ? `${action('Confirm pairing','bt-confirm','primary-btn')}${action('Reject','bt-reject','danger-btn')}` : p.method==='passkey' ? `${field('Passkey','', 'bt-pairing-value','number','min="0" max="999999" inputmode="numeric"')}${action('Send passkey','bt-send-passkey','primary-btn')}${action('Reject','bt-reject','danger-btn')}` : p.method==='pin' ? `${field('PIN','', 'bt-pairing-pin','password','maxlength="16" autocomplete="off"')}${action('Send PIN','bt-send-pin','primary-btn')}${action('Reject','bt-reject','danger-btn')}` : `${action('Reject','bt-reject','danger-btn')}`;
-  return `<div class="status-line"><span class="status-dot ok"></span><div><strong>${esc(p.method==='confirm'?'Confirm pairing':p.method==='passkey'?'Enter passkey':p.method==='pin'?'Enter PIN':'Pairing request')}</strong><small>${esc(p.address)}${p.value ? ` · ${p.value}` : ''}</small></div></div><div class="button-row">${buttons}</div>`;
+  return `<div class="status-line"><span class="status-dot ok"></span><div><strong>${esc(p.method==='confirm'?'Confirm pairing':p.method==='passkey'?'Enter passkey':p.method==='pin'?'Enter PIN':'Pairing request')}</strong><small>${esc(p.address)}${p.value !== undefined && p.value !== null ? ` · ${bluetoothPasskey(p.value)}` : ''}</small></div></div><div class="button-row">${buttons}</div>`;
 }
 
 function bluetoothMarkup(b) {
