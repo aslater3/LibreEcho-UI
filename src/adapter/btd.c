@@ -1490,8 +1490,22 @@ static int set_pairing_mode(struct bt_context *context, int enabled)
 {
     int result;
 
-    if (!context->enabled || !context->capability_ready)
+    if (!context->enabled)
         return -1;
+    if (!context->capability_ready) {
+        uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
+
+        if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
+                               &io_capability, sizeof(io_capability)) != 0) {
+            (void)set_powered(context, 0);
+            context->enabled = 0;
+            context->capability_ready = 0;
+            snprintf(context->last_error, sizeof(context->last_error),
+                     "hci0 IO capability could not be configured");
+            return -1;
+        }
+        context->capability_ready = 1;
+    }
     if (enabled == context->pairing_mode)
         return 0;
     if (enabled) {
