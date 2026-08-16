@@ -2,11 +2,12 @@
 set -eu
 URL=${LIBREECHO_TEST_URL:-http://127.0.0.1:18082}
 CFG=${LIBREECHO_TEST_CONFIG:-./build/test-suite-config.json}
+OS_VERSION=$(tr -d '\r\n' < VERSION)
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exit 1; }; }
 expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
-expect "$(curl -fsS "$URL/api/v1/device")" '"os_version":"LibreEcho OS 0.12.0"'
+expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
 expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
 expect "$(curl -fsS "$URL/")" 'First-boot setup'
