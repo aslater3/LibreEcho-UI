@@ -6,10 +6,11 @@ CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
-make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events
+make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
 ./build/test-network-health
 ./build/test-gateway-probe
 ./build/test-bt-mgmt-events
+./build/test-bt-pairing-events
 python3 tests/test_networkd_health_integration.py
 sh tests/test_network_liveness_contract.sh
 sh tests/test_bluetooth_pairing_contract.sh

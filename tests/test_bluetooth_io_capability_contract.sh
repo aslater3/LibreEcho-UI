@@ -8,6 +8,7 @@ python3 - <<'PY'
 from pathlib import Path
 
 source = Path('src/adapter/btd.c').read_text()
+decoder = Path('src/adapter/bt_pairing_events.c').read_text()
 start = source.index('if (!strcmp(command, "set_enabled"))')
 end = source.index('if (!strcmp(command, "pairing_mode"))', start)
 activation = source[start:end]
@@ -29,18 +30,15 @@ assert 'hci0 IO capability could not be configured' in activation
 # USER_CONFIRM_REQUEST has address + type + confirmation hint + value; the
 # passkey notification layout has address + type + value.  Keep both offsets
 # explicit so numeric comparison is not shifted by the hint byte.
-assert 'pairing_event_value' in source
-assert 'event == MGMT_EV_USER_CONFIRM_REQUEST ? 8U : 7U' in source
-assert 'size_t required = offset + sizeof(uint32_t);' in source
-assert 'pairing_event_value(event, payload, size, &value)' in source
+assert 'le_bt_pairing_event_value(event, payload, size, &value)' in source
 assert 'if (size >= 11)' not in source[source.index('case MGMT_EV_USER_CONFIRM_REQUEST'):source.index('case MGMT_EV_AUTH_FAILED')]
+assert 'event == LE_BT_MGMT_EV_USER_CONFIRM_REQUEST ? 8U : 7U' in decoder
+assert 'size_t required = offset + sizeof(uint32_t);' in decoder
+assert 'if (!payload || !value || size < required)' in decoder
 
-# Event-level fixture: bytes 7..10 are only the value for PASSKEY_NOTIFY;
-# USER_CONFIRM_REQUEST reserves byte 7 for the confirmation hint.
-import struct
-confirm = bytes(7) + b'\x01' + struct.pack('<I', 654321)
-notify = bytes(7) + struct.pack('<I', 123456)
-assert struct.unpack_from('<I', confirm, 8)[0] == 654321
-assert struct.unpack_from('<I', notify, 7)[0] == 123456
+# The executable fixture in tests/test_bt_pairing_events.c feeds complete and
+# truncated confirmation/notification payloads through the same C decoder.
+assert 'tests/test_bt_pairing_events.c' in Path('Makefile').read_text()
+assert 'build/test-bt-pairing-events' in Path('tests/run_tests.sh').read_text()
 PY
 printf '%s\n' 'bluetooth IO capability contract: ok'

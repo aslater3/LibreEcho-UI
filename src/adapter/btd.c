@@ -15,6 +15,7 @@
 #include "log.h"
 
 #include "bt_mgmt_events.h"
+#include "bt_pairing_events.h"
 #include "bt_profile.h"
 
 #include <errno.h>
@@ -813,18 +814,6 @@ static void eir_name(const uint8_t *eir, size_t size, char *name, size_t name_si
     }
 }
 
-static int pairing_event_value(uint16_t event, const uint8_t *payload,
-                               size_t size, unsigned int *value)
-{
-    size_t offset = event == MGMT_EV_USER_CONFIRM_REQUEST ? 8U : 7U;
-    size_t required = offset + sizeof(uint32_t);
-
-    if (!payload || !value || size < required)
-        return -1;
-    *value = read_le32(payload + offset);
-    return 0;
-}
-
 static void process_event(struct bt_context *context, uint16_t event,
                            const uint8_t *payload, size_t size)
 {
@@ -963,9 +952,9 @@ static void process_event(struct bt_context *context, uint16_t event,
         update_pairing(context, payload, size, "pin", 0);
         return;
     case MGMT_EV_USER_CONFIRM_REQUEST: {
-        unsigned int value;
+        uint32_t value;
 
-        if (pairing_event_value(event, payload, size, &value) == 0)
+        if (le_bt_pairing_event_value(event, payload, size, &value) == 0)
             update_pairing(context, payload, size, "confirm", value);
         return;
     }
@@ -973,9 +962,9 @@ static void process_event(struct bt_context *context, uint16_t event,
         update_pairing(context, payload, size, "passkey", 0);
         return;
     case MGMT_EV_PASSKEY_NOTIFY: {
-        unsigned int value;
+        uint32_t value;
 
-        if (pairing_event_value(event, payload, size, &value) == 0)
+        if (le_bt_pairing_event_value(event, payload, size, &value) == 0)
             update_pairing(context, payload, size, "notify", value);
         return;
     }
