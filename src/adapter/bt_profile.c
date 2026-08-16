@@ -112,6 +112,7 @@
 #define LE_SDP_ERROR_INVALID_RECORD_HANDLE 0x0002
 #define LE_SDP_ERROR_INVALID_SYNTAX 0x0003
 
+#define LE_SDP_RECORD_SERVER 0x00000000u
 #define LE_SDP_RECORD_BROWSE 0x00010000u
 #define LE_SDP_RECORD_A2DP_SINK 0x00010001u
 #define LE_SDP_RECORD_AVRCP 0x00010002u
@@ -122,8 +123,10 @@
 #define LE_SDP_ATTR_RECORD_STATE 0x0002
 #define LE_SDP_ATTR_PROTOCOL_LIST 0x0004
 #define LE_SDP_ATTR_BROWSE_LIST 0x0005
-#define LE_SDP_ATTR_SERVICE_NAME 0x0006
+#define LE_SDP_ATTR_SERVICE_NAME 0x0100
 #define LE_SDP_ATTR_PROFILE_LIST 0x0009
+#define LE_SDP_ATTR_VERSION_NUMBER_LIST 0x0200
+#define LE_SDP_ATTR_SERVICE_DATABASE_STATE 0x0201
 #define LE_SDP_ATTR_FEATURES 0x0311
 
 struct sockaddr_l2_local {
@@ -151,8 +154,9 @@ struct l2cap_options_local {
 struct le_sdp_record {
     int in_use;
     uint32_t handle;
-    int has_class_uuid16;
-    uint16_t class_uuid16;
+    uint16_t searchable_uuid16[6];
+    size_t searchable_uuid16_count;
+    int public_browse;
     uint8_t data[2048];
     size_t length;
 };
@@ -308,6 +312,30 @@ static size_t sdp_put_uuid_list_attr(uint8_t *out, size_t size, size_t offset,
     return offset;
 }
 
+static size_t sdp_put_uint16_list_attr(uint8_t *out, size_t size,
+                                       size_t offset, uint16_t attr,
+                                       const uint16_t *values, int count)
+{
+    size_t seq_start;
+    size_t start;
+    int i;
+
+    offset = sdp_put_attr(out, size, offset, attr);
+    if (offset + 2 > size)
+        return offset;
+    seq_start = offset;
+    out[offset] = LE_SDP_DE_SEQUENCE;
+    out[offset + 1] = 0;
+    offset += 2;
+    start = offset;
+    for (i = 0; i < count; ++i)
+        offset = sdp_put_uint16(out, size, offset, values[i]);
+    if (offset - start > 255)
+        return offset;
+    out[seq_start + 1] = (uint8_t)(offset - start);
+    return offset;
+}
+
 static size_t sdp_put_browse_list(uint8_t *out, size_t size, size_t offset)
 {
     uint16_t browse[1] = { 0x1002 };
@@ -388,6 +416,8 @@ static size_t sdp_put_profile_list(uint8_t *out, size_t size, size_t offset,
 static void build_record_set(struct le_profile_sessions *sessions,
                              const char *service_name)
 {
+    uint16_t server_classes[1] = { 0x1000 };
+    uint16_t server_versions[1] = { 0x0100 };
     uint16_t a2dp_classes[1] = { 0x110b };
     uint16_t avrcp_classes[2] = { 0x110e, 0x110c };
     uint16_t pnp_classes[1] = { 0x1200 };
@@ -398,9 +428,33 @@ static void build_record_set(struct le_profile_sessions *sessions,
 
     record = &sessions->records[0];
     record->in_use = 1;
+    record->handle = LE_SDP_RECORD_SERVER;
+    record->searchable_uuid16[0] = 0x1000;
+    record->searchable_uuid16_count = 1;
+    {
+        size_t offset = 0;
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_HANDLE);
+        offset = sdp_put_uint32(record->data, sizeof(record->data), offset,
+                                record->handle);
+        offset = sdp_put_uuid_list_attr(record->data, sizeof(record->data),
+                                        offset, LE_SDP_ATTR_CLASS_ID_LIST,
+                                        server_classes, 1);
+        offset = sdp_put_uint16_list_attr(
+            record->data, sizeof(record->data), offset,
+            LE_SDP_ATTR_VERSION_NUMBER_LIST, server_versions, 1);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_SERVICE_DATABASE_STATE);
+        offset = sdp_put_uint32(record->data, sizeof(record->data), offset, 1);
+        record->length = offset;
+    }
+
+    record = &sessions->records[1];
+    record->in_use = 1;
     record->handle = LE_SDP_RECORD_BROWSE;
-    record->has_class_uuid16 = 1;
-    record->class_uuid16 = 0x1002;
+    record->searchable_uuid16[0] = 0x1002;
+    record->searchable_uuid16_count = 1;
+    record->public_browse = 1;
     {
         size_t offset = 0;
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
@@ -413,11 +467,14 @@ static void build_record_set(struct le_profile_sessions *sessions,
         record->length = offset;
     }
 
-    record = &sessions->records[1];
+    record = &sessions->records[2];
     record->in_use = 1;
     record->handle = LE_SDP_RECORD_A2DP_SINK;
-    record->has_class_uuid16 = 1;
-    record->class_uuid16 = 0x110b;
+    record->searchable_uuid16[0] = 0x110b;
+    record->searchable_uuid16[1] = 0x0100;
+    record->searchable_uuid16[2] = 0x0019;
+    record->searchable_uuid16_count = 3;
+    record->public_browse = 1;
     {
         size_t offset = 0;
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
@@ -443,15 +500,19 @@ static void build_record_set(struct le_profile_sessions *sessions,
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
                               LE_SDP_ATTR_FEATURES);
         offset = sdp_put_uint16(record->data, sizeof(record->data), offset,
-                                0x0001); /* A2DP_SINK role bit */
+                                0x0002); /* A2DP Audio Sink: Speaker */
         record->length = offset;
     }
 
-    record = &sessions->records[2];
+    record = &sessions->records[3];
     record->in_use = 1;
     record->handle = LE_SDP_RECORD_AVRCP;
-    record->has_class_uuid16 = 1;
-    record->class_uuid16 = 0x110e;
+    record->searchable_uuid16[0] = 0x110e;
+    record->searchable_uuid16[1] = 0x110c;
+    record->searchable_uuid16[2] = 0x0100;
+    record->searchable_uuid16[3] = 0x0017;
+    record->searchable_uuid16_count = 4;
+    record->public_browse = 1;
     {
         size_t offset = 0;
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
@@ -477,11 +538,12 @@ static void build_record_set(struct le_profile_sessions *sessions,
         record->length = offset;
     }
 
-    record = &sessions->records[3];
+    record = &sessions->records[4];
     record->in_use = 1;
     record->handle = LE_SDP_RECORD_PNP;
-    record->has_class_uuid16 = 1;
-    record->class_uuid16 = 0x1200;
+    record->searchable_uuid16[0] = 0x1200;
+    record->searchable_uuid16_count = 1;
+    record->public_browse = 1;
     {
         size_t offset = 0;
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
@@ -535,10 +597,6 @@ static void sdp_send_error(struct le_sdp_session *session, uint16_t tid,
  * accepted; real clients (BlueZ sdptool) send the full 128-bit base-UUID
  * form for browse groups.
  */
-#define LE_SDP_UUID128_PUBLIC_BROWSE_ROOT \
-    { 0x00, 0x00, 0x10, 0x02, 0x00, 0x00, 0x10, 0x00, \
-      0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b, 0x34, 0xfb }
-
 /*
  * Bluetooth base UUID 0000xxxx-0000-1000-8000-00805F9B34FB (big-endian
  * wire order).  A UUID128 whose bytes 2..3 carry the 16-bit short form and
@@ -565,62 +623,69 @@ static int sdp_uuid128_short_form(const uint8_t *uuid, uint16_t *short_uuid)
     return 1;
 }
 
-static int sdp_uuid128_is_public_browse_root(const uint8_t *uuid16be)
+/* Return whether one normalized short UUID is present in this record. */
+static int sdp_record_has_uuid(const struct le_sdp_record *record,
+                               uint16_t uuid)
 {
-    static const uint8_t root[16] = LE_SDP_UUID128_PUBLIC_BROWSE_ROOT;
+    size_t i;
 
-    return memcmp(uuid16be, root, sizeof(root)) == 0;
+    if (uuid == 0xffff)
+        return 1;
+    if (uuid == 0x1002)
+        return record->public_browse;
+    for (i = 0; i < record->searchable_uuid16_count; ++i) {
+        if (record->searchable_uuid16[i] == uuid)
+            return 1;
+    }
+    return 0;
 }
 
 static int sdp_match_record(const struct le_sdp_record *record,
                             const uint8_t *pattern, size_t pattern_length)
 {
     size_t offset = 0;
+    int saw_uuid = 0;
 
+    /* SDP ServiceSearchPattern semantics are conjunctive: every UUID in the
+     * pattern must be present in the record's service-class or browse-group
+     * attributes. */
     while (offset < pattern_length) {
         uint8_t type = pattern[offset];
+        uint16_t short_uuid;
 
         if (type == LE_SDP_DE_UUID16) {
-            uint16_t uuid;
-
             if (offset + 3 > pattern_length)
                 return 0;
-            uuid = (uint16_t)((pattern[offset + 1] << 8) |
-                              pattern[offset + 2]);
-            if (uuid == 0xffff || uuid == 0x1002) /* wildcard / browse group */
-                return 1;
-            if (record->has_class_uuid16 && uuid == record->class_uuid16)
-                return 1;
+            short_uuid = (uint16_t)((pattern[offset + 1] << 8) |
+                                    pattern[offset + 2]);
             offset += 3;
         } else if (type == 0x1a) { /* UUID32 */
+            uint32_t uuid32;
+
             if (offset + 5 > pattern_length)
                 return 0;
-            if (record->has_class_uuid16 && pattern[offset + 1] == 0x00 &&
-                pattern[offset + 2] == 0x00 &&
-                ((pattern[offset + 3] << 8) | pattern[offset + 4]) ==
-                record->class_uuid16)
-                return 1;
+            uuid32 = ((uint32_t)pattern[offset + 1] << 24) |
+                     ((uint32_t)pattern[offset + 2] << 16) |
+                     ((uint32_t)pattern[offset + 3] << 8) |
+                     pattern[offset + 4];
+            if (uuid32 > 0xffff)
+                return 0;
+            short_uuid = (uint16_t)uuid32;
             offset += 5;
         } else if (type == 0x1c) { /* UUID128 (Bluetooth base-UUID form) */
-            uint16_t short_uuid;
-
             if (offset + 17 > pattern_length)
                 return 0;
-            if (sdp_uuid128_is_public_browse_root(pattern + offset + 1))
-                return 1;
-            if (sdp_uuid128_short_form(pattern + offset + 1, &short_uuid)) {
-                if (short_uuid == 0xffff)
-                    return 1;
-                if (record->has_class_uuid16 &&
-                    short_uuid == record->class_uuid16)
-                    return 1;
-            }
+            if (!sdp_uuid128_short_form(pattern + offset + 1, &short_uuid))
+                return 0;
             offset += 17;
         } else {
             return 0;
         }
+        saw_uuid = 1;
+        if (!sdp_record_has_uuid(record, short_uuid))
+            return 0;
     }
-    return 0;
+    return saw_uuid;
 }
 
 static size_t sdp_seq_header_size(size_t content)
@@ -870,6 +935,22 @@ static void sdp_handle_service_search(struct le_profile_sessions *sessions,
     response[offset++] = 0x00; /* null continuation state */
     response[3] = (uint8_t)((offset - 5) >> 8);
     response[4] = (uint8_t)(offset - 5);
+    {
+        char pattern_hex[129];
+        size_t pattern_length = pattern_size - consumed;
+        size_t logged = pattern_length < 64 ? pattern_length : 64;
+        size_t j;
+
+        for (j = 0; j < logged; ++j)
+            (void)snprintf(pattern_hex + j * 2,
+                           sizeof(pattern_hex) - j * 2, "%02x",
+                           params[consumed + j]);
+        pattern_hex[logged * 2] = '\0';
+        le_log_info("btd-profiles: SDP service-search tid=0x%04x "
+                    "pattern=%s%s total=%u current=%u",
+                    tid, pattern_hex, pattern_length > logged ? "..." : "",
+                    total, current);
+    }
     (void)sdp_write_response(session, response, offset);
 }
 
@@ -968,12 +1049,17 @@ static void sbc_decode_chunk(struct le_profiles *p,
         }
         offset += (size_t)parsed;
         if (pcm_written && session->sbc.frequency == SBC_FREQ_48000) {
-            size_t frames = pcm_written /
-                (session->sbc.mode == SBC_MODE_MONO ? 1 : 2);
+            size_t frames;
             int16_t output[LE_MEDIA_CHUNK_FRAMES * 2];
             size_t out_frames = 0;
             size_t i;
             int mono = session->sbc.mode == SBC_MODE_MONO;
+
+            /* sbc_decode() reports output bytes, while the media bus and
+             * loops below count PCM frames.  Treating bytes as samples reads
+             * beyond the decoded block and injects stale stack data. */
+            frames = pcm_written /
+                (sizeof(int16_t) * (mono ? 1U : 2U));
 
             for (i = 0; i < frames && out_frames < LE_MEDIA_CHUNK_FRAMES; ++i) {
                 output[out_frames * 2] = pcm[i * (mono ? 1 : 2)];
@@ -1000,7 +1086,8 @@ static void sbc_decode_chunk(struct le_profiles *p,
             default: source_rate = 48000; break;
             }
             mono = session->sbc.mode == SBC_MODE_MONO;
-            frames = pcm_written / (mono ? 1 : 2);
+            frames = pcm_written /
+                (sizeof(int16_t) * (mono ? 1U : 2U));
             for (i = 0; i < LE_MEDIA_CHUNK_FRAMES; ++i) {
                 size_t src = (i * source_rate) / LE_MEDIA_RATE;
                 if (src >= frames)
@@ -1027,16 +1114,19 @@ static void avdtp_send(struct le_avdtp_session *session, uint8_t transaction,
                        const uint8_t *payload, size_t payload_length)
 {
     uint8_t packet[2048];
-    size_t total = 4 + payload_length;
+    size_t total = 2 + payload_length;
 
     if (session->fd < 0 || total > sizeof(packet))
         return;
-    packet[0] = (uint8_t)((transaction << 4) | LE_AVDTP_PKT_SINGLE);
-    packet[1] = (uint8_t)((message_type << 4) | signal_id);
-    packet[2] = (uint8_t)(payload_length >> 8);
-    packet[3] = (uint8_t)payload_length;
+    /* AVDTP 1.3 section 8.4.6: SINGLE signaling packets have a two-byte
+     * header. Message type occupies byte 0 bits 1:0; signal identifier is the
+     * low six bits of byte 1. There is no per-packet payload-length field. */
+    packet[0] = (uint8_t)((transaction << 4) |
+                          (LE_AVDTP_PKT_SINGLE << 2) |
+                          (message_type & 0x03));
+    packet[1] = (uint8_t)(signal_id & 0x3f);
     if (payload_length)
-        memcpy(packet + 4, payload, payload_length);
+        memcpy(packet + 2, payload, payload_length);
     (void)ignore_write(session->fd, packet, total);
 }
 
@@ -1067,7 +1157,8 @@ static void avdtp_handle_discover(struct le_avdtp_session *session,
     uint8_t payload[2];
 
     payload[0] = (uint8_t)((LE_AVDTP_SEID << 2) | 0x00);
-    payload[1] = (uint8_t)((LE_AVDTP_MEDIA_TYPE_AUDIO << 4) | 0x00);
+    /* TSEP=1 advertises an accepting (sink) SEP. TSEP=0 is a source SEP. */
+    payload[1] = (uint8_t)((LE_AVDTP_MEDIA_TYPE_AUDIO << 4) | 0x08);
     avdtp_send(session, transaction, LE_AVDTP_MSG_ACCEPT, LE_AVDTP_DISCOVER,
                payload, sizeof(payload));
 }
@@ -1083,8 +1174,8 @@ static void avdtp_handle_get_capabilities(struct le_avdtp_session *session,
     payload[offset++] = 0;
     payload[offset++] = LE_AVDTP_CAT_MEDIA_CODEC;
     payload[offset++] = 6;
-    payload[offset++] = (uint8_t)((LE_AVDTP_MEDIA_TYPE_AUDIO << 4) |
-                                  LE_AVDTP_CODEC_SBC);
+    payload[offset++] = (uint8_t)(LE_AVDTP_MEDIA_TYPE_AUDIO << 4);
+    payload[offset++] = LE_AVDTP_CODEC_SBC;
     payload[offset++] = 0xff; /* 16/32/44.1/48 kHz, all channel modes */
     payload[offset++] = 0xff; /* all block lengths/subbands/allocation */
     payload[offset++] = 2;    /* min bitpool */
@@ -1256,15 +1347,13 @@ static void avdtp_dispatch(struct le_profiles *p,
     size_t payload_length;
     const uint8_t *payload;
 
-    if (length < 4)
+    if (length < 2)
         return;
     transaction = (uint8_t)(data[0] >> 4);
-    message_type = (uint8_t)((data[1] >> 4) & 0x0f);
-    signal_id = (uint8_t)(data[1] & 0x0f);
-    payload_length = ((size_t)data[2] << 8) | data[3];
-    payload = data + 4;
-    if (4 + payload_length > length)
-        payload_length = length - 4;
+    message_type = (uint8_t)(data[0] & 0x03);
+    signal_id = (uint8_t)(data[1] & 0x3f);
+    payload_length = length - 2;
+    payload = data + 2;
     if (message_type != LE_AVDTP_MSG_COMMAND)
         return;
 
@@ -1318,8 +1407,7 @@ static void avdtp_session_read(struct le_profiles *p,
                                struct le_avdtp_session *session)
 {
     uint8_t *buffer = session->signal_buf;
-    ssize_t received = read(session->fd, buffer + session->signal_used,
-                            sizeof(session->signal_buf) - session->signal_used);
+    ssize_t received = read(session->fd, buffer, sizeof(session->signal_buf));
 
     if (received <= 0) {
         close(session->fd);
@@ -1332,29 +1420,15 @@ static void avdtp_session_read(struct le_profiles *p,
         session->signal_used = 0;
         return;
     }
-    session->signal_used += (size_t)received;
-    while (session->signal_used >= 4) {
-        uint8_t packet_type = buffer[0] & 0x03;
-        size_t signal_length = ((size_t)buffer[2] << 8) | buffer[3];
-        size_t total = 4 + signal_length;
-
-        if (packet_type != LE_AVDTP_PKT_SINGLE &&
-            packet_type != LE_AVDTP_PKT_END) {
-            /* Fragmented signaling is not expected from compliant peers for
-             * the small responses this endpoint returns; drop and reset. */
-            session->signal_used = 0;
-            return;
-        }
-        if (total > sizeof(session->signal_buf)) {
-            session->signal_used = 0;
-            return;
-        }
-        if (session->signal_used < total)
-            break;
-        avdtp_dispatch(p, session, buffer, total);
-        session->signal_used -= total;
-        memmove(buffer, buffer + total, session->signal_used);
+    /* L2CAP SOCK_SEQPACKET preserves one signaling packet per read. Small
+     * A2DP control transactions fit in SINGLE packets; fragmented signaling
+     * is deliberately rejected until a reassembly implementation exists. */
+    if ((((uint8_t)buffer[0] >> 2) & 0x03) != LE_AVDTP_PKT_SINGLE) {
+        le_log_warn("btd-profiles: fragmented AVDTP signaling unsupported");
+        return;
     }
+    avdtp_dispatch(p, session, buffer, (size_t)received);
+    session->signal_used = 0;
 }
 
 static void avdtp_media_read(struct le_profiles *p,
@@ -1889,4 +1963,40 @@ ssize_t le_profile_test_sdp_exchange(struct le_profiles *p,
 {
     return test_exchange(test_read_sdp_slot, p, request, request_len,
                          response, response_max);
+}
+
+ssize_t le_profile_test_avdtp_exchange(struct le_profiles *p,
+                                       const uint8_t *request,
+                                       size_t request_len,
+                                       uint8_t *response,
+                                       size_t response_max)
+{
+    struct le_profile_sessions *sessions = p ? p->sessions : NULL;
+    struct le_avdtp_session *session;
+    struct pollfd pollfd;
+    int fds[2];
+    ssize_t result = -1;
+
+    if (!sessions || !request || !request_len || !response || !response_max)
+        return -1;
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fds) < 0)
+        return -1;
+    session = &sessions->avdtp[0];
+    session->fd = fds[0];
+    session->signal_used = 0;
+    if (write(fds[1], request, request_len) != (ssize_t)request_len)
+        goto done;
+    avdtp_session_read(p, session);
+    pollfd.fd = fds[1];
+    pollfd.events = POLLIN;
+    pollfd.revents = 0;
+    if (poll(&pollfd, 1, 100) > 0)
+        result = read(fds[1], response, response_max);
+
+done:
+    close(fds[0]);
+    close(fds[1]);
+    session->fd = -1;
+    session->signal_used = 0;
+    return result;
 }

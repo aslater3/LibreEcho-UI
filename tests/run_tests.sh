@@ -6,18 +6,22 @@ CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
-make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events
+make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
 ./build/test-network-health
 ./build/test-gateway-probe
 ./build/test-bt-mgmt-events
+./build/test-bt-pairing-events
 python3 tests/test_networkd_health_integration.py
 sh tests/test_network_liveness_contract.sh
 sh tests/test_bluetooth_pairing_contract.sh
+sh tests/test_bluetooth_io_capability_contract.sh
 sh tests/test_bluetooth_profile_contract.sh
 sh tests/test_bluetooth_profile_service_contract.sh
 sh tests/test_bluetooth_mgmt_observability_contract.sh
 make build/test-sdp-wire-format
 ./build/test-sdp-wire-format
+make build/test-avdtp-wire-format
+./build/test-avdtp-wire-format
 sh tests/test_network_scan_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh

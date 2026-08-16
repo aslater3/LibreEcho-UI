@@ -15,6 +15,7 @@
 #include "log.h"
 
 #include "bt_mgmt_events.h"
+#include "bt_pairing_events.h"
 #include "bt_profile.h"
 
 #include <errno.h>
@@ -90,11 +91,13 @@
 
 #define MGMT_OP_READ_INFO 0x0004
 #define MGMT_OP_SET_POWERED 0x0005
+#define MGMT_OP_SET_SSP 0x000b
 #define MGMT_OP_LOAD_LINK_KEYS 0x0012
 #define MGMT_OP_LOAD_LONG_TERM_KEYS 0x0013
 #define MGMT_OP_DISCONNECT 0x0014
 #define MGMT_OP_PIN_CODE_REPLY 0x0016
 #define MGMT_OP_PIN_CODE_NEG_REPLY 0x0017
+#define MGMT_OP_SET_IO_CAPABILITY 0x0018
 #define MGMT_OP_PAIR_DEVICE 0x0019
 #define MGMT_OP_UNPAIR_DEVICE 0x001b
 #define MGMT_OP_USER_CONFIRM_REPLY 0x001c
@@ -106,6 +109,7 @@
 #define MGMT_OP_SET_DISCOVERABLE 0x0006
 #define MGMT_OP_SET_CONNECTABLE 0x0007
 #define MGMT_OP_SET_BONDABLE 0x0009
+#define MGMT_OP_SET_LINK_SECURITY 0x000a
 #define MGMT_OP_SET_DEV_CLASS 0x000e
 #define MGMT_OP_SET_LOCAL_NAME 0x000f
 #define MGMT_OP_ADD_UUID 0x0010
@@ -114,6 +118,7 @@
 #define MGMT_SETTING_CONNECTABLE 0x00000002U
 #define MGMT_SETTING_DISCOVERABLE 0x00000008U
 #define MGMT_SETTING_BONDABLE 0x00000010U
+#define MGMT_SETTING_LINK_SECURITY 0x00000020U
 #define MGMT_SETTING_SSP 0x00000040U
 #define MGMT_SETTING_BREDR 0x00000080U
 #define MGMT_SETTING_LE 0x00000200U
@@ -122,6 +127,7 @@
 #define MGMT_DISCOVERY_BREDR 0x01
 #define MGMT_DISCOVERY_LE 0x06
 #define MGMT_DISCOVERY_INTERLEAVED 0x07
+#define MGMT_IO_CAP_DISPLAY_YES_NO 0x01
 #define MGMT_IO_CAP_NO_INPUT_NO_OUTPUT 0x03
 #define MGMT_MAX_NAME_LENGTH 249
 #define MGMT_MAX_SHORT_NAME_LENGTH 11
@@ -204,6 +210,7 @@ struct bt_pairing {
 struct bt_context {
     int activation_attempted;
     int enabled;
+    int capability_ready;
     int mgmt_fd;
     int scanning;
     int pairing_mode;
@@ -812,7 +819,7 @@ static void eir_name(const uint8_t *eir, size_t size, char *name, size_t name_si
 }
 
 static void process_event(struct bt_context *context, uint16_t event,
-                          const uint8_t *payload, size_t size)
+                           const uint8_t *payload, size_t size)
 {
     struct bt_device *device;
 
@@ -948,17 +955,23 @@ static void process_event(struct bt_context *context, uint16_t event,
     case MGMT_EV_PIN_CODE_REQUEST:
         update_pairing(context, payload, size, "pin", 0);
         return;
-    case MGMT_EV_USER_CONFIRM_REQUEST:
-        if (size >= 11)
-            update_pairing(context, payload, size, "confirm", read_le32(payload + 7));
+    case MGMT_EV_USER_CONFIRM_REQUEST: {
+        uint32_t value;
+
+        if (le_bt_pairing_event_value(event, payload, size, &value) == 0)
+            update_pairing(context, payload, size, "confirm", value);
         return;
+    }
     case MGMT_EV_USER_PASSKEY_REQUEST:
         update_pairing(context, payload, size, "passkey", 0);
         return;
-    case MGMT_EV_PASSKEY_NOTIFY:
-        if (size >= 11)
-            update_pairing(context, payload, size, "notify", read_le32(payload + 7));
+    case MGMT_EV_PASSKEY_NOTIFY: {
+        uint32_t value;
+
+        if (le_bt_pairing_event_value(event, payload, size, &value) == 0)
+            update_pairing(context, payload, size, "notify", value);
         return;
+    }
     case MGMT_EV_AUTH_FAILED: {
         char address[18];
 
@@ -1226,6 +1239,48 @@ static int set_powered(struct bt_context *context, int enabled)
     return result;
 }
 
+static int enable_link_security(struct bt_context *context)
+{
+    uint8_t enabled = 1;
+
+    if (!(context->supported_settings & MGMT_SETTING_LINK_SECURITY)) {
+        snprintf(context->last_error, sizeof(context->last_error),
+                 "hci0 does not support BR/EDR link security");
+        return -1;
+    }
+    if (context->current_settings & MGMT_SETTING_LINK_SECURITY)
+        return 0;
+    if (controller_command(context, MGMT_OP_SET_LINK_SECURITY, &enabled,
+                           sizeof(enabled)) != 0) {
+        snprintf(context->last_error, sizeof(context->last_error),
+                 "hci0 BR/EDR link security could not be enabled");
+        return -1;
+    }
+    context->current_settings |= MGMT_SETTING_LINK_SECURITY;
+    return 0;
+}
+
+static int enable_secure_simple_pairing(struct bt_context *context)
+{
+    uint8_t enabled = 1;
+
+    if (!(context->supported_settings & MGMT_SETTING_SSP)) {
+        snprintf(context->last_error, sizeof(context->last_error),
+                 "hci0 does not support Secure Simple Pairing");
+        return -1;
+    }
+    if (context->current_settings & MGMT_SETTING_SSP)
+        return 0;
+    if (controller_command(context, MGMT_OP_SET_SSP, &enabled,
+                           sizeof(enabled)) != 0) {
+        snprintf(context->last_error, sizeof(context->last_error),
+                 "hci0 Secure Simple Pairing could not be enabled");
+        return -1;
+    }
+    context->current_settings |= MGMT_SETTING_SSP;
+    return 0;
+}
+
 static int status_json(struct bt_context *context, char *data, size_t size)
 {
     size_t used = 0;
@@ -1484,6 +1539,26 @@ static int set_pairing_mode(struct bt_context *context, int enabled)
         return -1;
     if (enabled == context->pairing_mode)
         return 0;
+    if (!context->capability_ready) {
+        uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
+
+        if (enable_secure_simple_pairing(context) != 0) {
+            (void)set_powered(context, 0);
+            context->enabled = 0;
+            context->capability_ready = 0;
+            return -1;
+        }
+        if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
+                               &io_capability, sizeof(io_capability)) != 0) {
+            (void)set_powered(context, 0);
+            context->enabled = 0;
+            context->capability_ready = 0;
+            snprintf(context->last_error, sizeof(context->last_error),
+                     "hci0 IO capability could not be configured");
+            return -1;
+        }
+        context->capability_ready = 1;
+    }
     if (enabled) {
         context->pairing_saved_connectable =
             (context->current_settings & MGMT_SETTING_CONNECTABLE) != 0;
@@ -1576,15 +1651,47 @@ static int handle_request(struct bt_context *context, char *message,
                 return le_adapter_respond_err(response, response_size, id,
                                                "Bluetooth power-off failed");
             context->enabled = 0;
+            context->capability_ready = 0;
             return le_adapter_respond_ok(response, response_size, id,
                                          "{\"enabled\":false}");
         }
         if (!wmt_present())
             return le_adapter_respond_err(response, response_size, id,
                                            "MT8163 WMT device is unavailable");
-        if (context->enabled)
+        if (context->enabled) {
+            uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
+
+            if (context->capability_ready)
+                return le_adapter_respond_ok(response, response_size, id,
+                                             "{\"enabled\":true}");
+            if (enable_link_security(context) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
+            if (enable_secure_simple_pairing(context) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
+            if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
+                                   &io_capability, sizeof(io_capability)) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                snprintf(context->last_error, sizeof(context->last_error),
+                         "hci0 IO capability could not be configured");
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
+            context->capability_ready = 1;
             return le_adapter_respond_ok(response, response_size, id,
                                          "{\"enabled\":true}");
+        }
         if (context->activation_attempted)
             return le_adapter_respond_err(response, response_size, id,
                                            "activation already attempted; reboot before retry");
@@ -1613,6 +1720,34 @@ static int handle_request(struct bt_context *context, char *message,
             return le_adapter_respond_err(response, response_size, id,
                                            context->last_error);
         }
+        {
+            uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
+            if (enable_link_security(context) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
+            if (enable_secure_simple_pairing(context) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
+            if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
+                                   &io_capability, sizeof(io_capability)) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                snprintf(context->last_error, sizeof(context->last_error),
+                         "hci0 IO capability could not be configured");
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
+        }
+        context->capability_ready = 1;
         /* Opening the management channel clears HCI_BONDABLE.  The legacy
          * HCIDEVUP path deliberately does not restore it once management is
          * active, so an incoming peer would otherwise receive an immediate
@@ -1852,7 +1987,45 @@ int main(int argc, char **argv)
         le_log_error("btd: cannot listen on %s: %s", socket_path, strerror(errno));
         return 1;
     }
-    (void)mgmt_open(&context);
+    if (mgmt_open(&context) != 0) {
+        le_log_error("btd: Bluetooth management channel unavailable");
+        close(listener);
+        return 1;
+    }
+    if (refresh_info(&context) != 0 && access(HCI_DEVICE, F_OK) == 0) {
+        le_log_error("btd: Bluetooth controller information unavailable");
+        close(listener);
+        return 1;
+    }
+    if (context.enabled && !context.capability_ready) {
+        uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
+
+        if (enable_link_security(&context) != 0) {
+            (void)set_powered(&context, 0);
+            context.enabled = 0;
+            context.capability_ready = 0;
+            close(listener);
+            return 1;
+        }
+        if (enable_secure_simple_pairing(&context) != 0) {
+            (void)set_powered(&context, 0);
+            context.enabled = 0;
+            context.capability_ready = 0;
+            close(listener);
+            return 1;
+        }
+        if (controller_command(&context, MGMT_OP_SET_IO_CAPABILITY,
+                               &io_capability, sizeof(io_capability)) != 0) {
+            (void)set_powered(&context, 0);
+            context.enabled = 0;
+            context.capability_ready = 0;
+            snprintf(context.last_error, sizeof(context.last_error),
+                     "hci0 IO capability could not be configured");
+            close(listener);
+            return 1;
+        }
+        context.capability_ready = 1;
+    }
     (void)load_keys_into_controller(&context);
     if (le_profile_open(&context.profiles, LIBREECHO_BT_NAME) == 0) {
         context.profiles_opened = 1;

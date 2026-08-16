@@ -76,5 +76,10 @@ void le_profile_test_cleanup(struct le_profiles *p);
 ssize_t le_profile_test_sdp_exchange(struct le_profiles *p,
                                      const uint8_t *request, size_t request_len,
                                      uint8_t *response, size_t response_max);
+ssize_t le_profile_test_avdtp_exchange(struct le_profiles *p,
+                                       const uint8_t *request,
+                                       size_t request_len,
+                                       uint8_t *response,
+                                       size_t response_max);
 
 #endif /* LIBREECHO_BT_PROFILE_H */

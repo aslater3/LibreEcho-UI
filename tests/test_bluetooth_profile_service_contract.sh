@@ -60,7 +60,12 @@ assert 'LE_PROFILE_MAX_FDS' in header
 # Inbound protocol buffers must stay bounds-checked.
 assert 'if (offset + 2 + cap_length > length)' in profile
 assert 'if (5 + param_length > session->used)' in profile
-assert 'if (total > sizeof(session->signal_buf))' in profile
+assert 'if (session->fd < 0 || total > sizeof(packet))' in profile
+assert '(LE_AVDTP_PKT_SINGLE << 2)' in profile
+assert '(message_type & 0x03)' in profile
+assert '(signal_id & 0x3f)' in profile
+assert profile.count('frames = pcm_written /') == 2
+assert profile.count('sizeof(int16_t) * (mono ? 1U : 2U)') == 2
 PY
 
 # Live smoke check: the vendored SBC codec must encode and decode a test
