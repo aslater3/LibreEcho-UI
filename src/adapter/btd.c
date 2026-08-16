@@ -207,6 +207,7 @@ struct bt_pairing {
 struct bt_context {
     int activation_attempted;
     int enabled;
+    int capability_ready;
     int mgmt_fd;
     int scanning;
     int pairing_mode;
@@ -1489,7 +1490,7 @@ static int set_pairing_mode(struct bt_context *context, int enabled)
 {
     int result;
 
-    if (!context->enabled)
+    if (!context->enabled || !context->capability_ready)
         return -1;
     if (enabled == context->pairing_mode)
         return 0;
@@ -1585,6 +1586,7 @@ static int handle_request(struct bt_context *context, char *message,
                 return le_adapter_respond_err(response, response_size, id,
                                                "Bluetooth power-off failed");
             context->enabled = 0;
+            context->capability_ready = 0;
             return le_adapter_respond_ok(response, response_size, id,
                                          "{\"enabled\":false}");
         }
@@ -1628,12 +1630,14 @@ static int handle_request(struct bt_context *context, char *message,
                                    &io_capability, sizeof(io_capability)) != 0) {
                 (void)set_powered(context, 0);
                 context->enabled = 0;
+                context->capability_ready = 0;
                 snprintf(context->last_error, sizeof(context->last_error),
                          "hci0 IO capability could not be configured");
                 return le_adapter_respond_err(response, response_size, id,
                                                context->last_error);
             }
         }
+        context->capability_ready = 1;
         /* Opening the management channel clears HCI_BONDABLE.  The legacy
          * HCIDEVUP path deliberately does not restore it once management is
          * active, so an incoming peer would otherwise receive an immediate

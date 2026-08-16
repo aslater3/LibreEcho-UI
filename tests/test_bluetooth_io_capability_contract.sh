@@ -29,6 +29,10 @@ assert 'hci0 IO capability could not be configured' in activation
 io_failure = activation[activation.index('controller_command(context, MGMT_OP_SET_IO_CAPABILITY'):activation.index('/* Opening the management channel', activation.index('controller_command(context, MGMT_OP_SET_IO_CAPABILITY'))]
 assert '(void)set_powered(context, 0);' in io_failure
 assert 'context->enabled = 0;' in io_failure
+assert 'context->capability_ready = 0;' in io_failure
+assert 'context->capability_ready = 1;' in activation
+pairing_mode = source[source.index('static int set_pairing_mode'):source.index('static int handle_request')]
+assert 'if (!context->enabled || !context->capability_ready)' in pairing_mode
 
 # USER_CONFIRM_REQUEST has address + type + confirmation hint + value; the
 # passkey notification layout has address + type + value.  Keep both offsets
