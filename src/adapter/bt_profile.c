@@ -1108,16 +1108,19 @@ static void avdtp_send(struct le_avdtp_session *session, uint8_t transaction,
                        const uint8_t *payload, size_t payload_length)
 {
     uint8_t packet[2048];
-    size_t total = 4 + payload_length;
+    size_t total = 2 + payload_length;
 
     if (session->fd < 0 || total > sizeof(packet))
         return;
-    packet[0] = (uint8_t)((transaction << 4) | LE_AVDTP_PKT_SINGLE);
-    packet[1] = (uint8_t)((message_type << 4) | signal_id);
-    packet[2] = (uint8_t)(payload_length >> 8);
-    packet[3] = (uint8_t)payload_length;
+    /* AVDTP 1.3 section 8.4.6: SINGLE signaling packets have a two-byte
+     * header. Message type occupies byte 0 bits 1:0; signal identifier is the
+     * low six bits of byte 1. There is no per-packet payload-length field. */
+    packet[0] = (uint8_t)((transaction << 4) |
+                          (LE_AVDTP_PKT_SINGLE << 2) |
+                          (message_type & 0x03));
+    packet[1] = (uint8_t)(signal_id & 0x3f);
     if (payload_length)
-        memcpy(packet + 4, payload, payload_length);
+        memcpy(packet + 2, payload, payload_length);
     (void)ignore_write(session->fd, packet, total);
 }
 
@@ -1148,7 +1151,8 @@ static void avdtp_handle_discover(struct le_avdtp_session *session,
     uint8_t payload[2];
 
     payload[0] = (uint8_t)((LE_AVDTP_SEID << 2) | 0x00);
-    payload[1] = (uint8_t)((LE_AVDTP_MEDIA_TYPE_AUDIO << 4) | 0x00);
+    /* TSEP=1 advertises an accepting (sink) SEP. TSEP=0 is a source SEP. */
+    payload[1] = (uint8_t)((LE_AVDTP_MEDIA_TYPE_AUDIO << 4) | 0x08);
     avdtp_send(session, transaction, LE_AVDTP_MSG_ACCEPT, LE_AVDTP_DISCOVER,
                payload, sizeof(payload));
 }
@@ -1164,8 +1168,8 @@ static void avdtp_handle_get_capabilities(struct le_avdtp_session *session,
     payload[offset++] = 0;
     payload[offset++] = LE_AVDTP_CAT_MEDIA_CODEC;
     payload[offset++] = 6;
-    payload[offset++] = (uint8_t)((LE_AVDTP_MEDIA_TYPE_AUDIO << 4) |
-                                  LE_AVDTP_CODEC_SBC);
+    payload[offset++] = (uint8_t)(LE_AVDTP_MEDIA_TYPE_AUDIO << 4);
+    payload[offset++] = LE_AVDTP_CODEC_SBC;
     payload[offset++] = 0xff; /* 16/32/44.1/48 kHz, all channel modes */
     payload[offset++] = 0xff; /* all block lengths/subbands/allocation */
     payload[offset++] = 2;    /* min bitpool */
@@ -1337,15 +1341,13 @@ static void avdtp_dispatch(struct le_profiles *p,
     size_t payload_length;
     const uint8_t *payload;
 
-    if (length < 4)
+    if (length < 2)
         return;
     transaction = (uint8_t)(data[0] >> 4);
-    message_type = (uint8_t)((data[1] >> 4) & 0x0f);
-    signal_id = (uint8_t)(data[1] & 0x0f);
-    payload_length = ((size_t)data[2] << 8) | data[3];
-    payload = data + 4;
-    if (4 + payload_length > length)
-        payload_length = length - 4;
+    message_type = (uint8_t)(data[0] & 0x03);
+    signal_id = (uint8_t)(data[1] & 0x3f);
+    payload_length = length - 2;
+    payload = data + 2;
     if (message_type != LE_AVDTP_MSG_COMMAND)
         return;
 
@@ -1399,8 +1401,7 @@ static void avdtp_session_read(struct le_profiles *p,
                                struct le_avdtp_session *session)
 {
     uint8_t *buffer = session->signal_buf;
-    ssize_t received = read(session->fd, buffer + session->signal_used,
-                            sizeof(session->signal_buf) - session->signal_used);
+    ssize_t received = read(session->fd, buffer, sizeof(session->signal_buf));
 
     if (received <= 0) {
         close(session->fd);
@@ -1413,29 +1414,15 @@ static void avdtp_session_read(struct le_profiles *p,
         session->signal_used = 0;
         return;
     }
-    session->signal_used += (size_t)received;
-    while (session->signal_used >= 4) {
-        uint8_t packet_type = buffer[0] & 0x03;
-        size_t signal_length = ((size_t)buffer[2] << 8) | buffer[3];
-        size_t total = 4 + signal_length;
-
-        if (packet_type != LE_AVDTP_PKT_SINGLE &&
-            packet_type != LE_AVDTP_PKT_END) {
-            /* Fragmented signaling is not expected from compliant peers for
-             * the small responses this endpoint returns; drop and reset. */
-            session->signal_used = 0;
-            return;
-        }
-        if (total > sizeof(session->signal_buf)) {
-            session->signal_used = 0;
-            return;
-        }
-        if (session->signal_used < total)
-            break;
-        avdtp_dispatch(p, session, buffer, total);
-        session->signal_used -= total;
-        memmove(buffer, buffer + total, session->signal_used);
+    /* L2CAP SOCK_SEQPACKET preserves one signaling packet per read. Small
+     * A2DP control transactions fit in SINGLE packets; fragmented signaling
+     * is deliberately rejected until a reassembly implementation exists. */
+    if ((((uint8_t)buffer[0] >> 2) & 0x03) != LE_AVDTP_PKT_SINGLE) {
+        le_log_warn("btd-profiles: fragmented AVDTP signaling unsupported");
+        return;
     }
+    avdtp_dispatch(p, session, buffer, (size_t)received);
+    session->signal_used = 0;
 }
 
 static void avdtp_media_read(struct le_profiles *p,
@@ -1970,4 +1957,40 @@ ssize_t le_profile_test_sdp_exchange(struct le_profiles *p,
 {
     return test_exchange(test_read_sdp_slot, p, request, request_len,
                          response, response_max);
+}
+
+ssize_t le_profile_test_avdtp_exchange(struct le_profiles *p,
+                                       const uint8_t *request,
+                                       size_t request_len,
+                                       uint8_t *response,
+                                       size_t response_max)
+{
+    struct le_profile_sessions *sessions = p ? p->sessions : NULL;
+    struct le_avdtp_session *session;
+    struct pollfd pollfd;
+    int fds[2];
+    ssize_t result = -1;
+
+    if (!sessions || !request || !request_len || !response || !response_max)
+        return -1;
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fds) < 0)
+        return -1;
+    session = &sessions->avdtp[0];
+    session->fd = fds[0];
+    session->signal_used = 0;
+    if (write(fds[1], request, request_len) != (ssize_t)request_len)
+        goto done;
+    avdtp_session_read(p, session);
+    pollfd.fd = fds[1];
+    pollfd.events = POLLIN;
+    pollfd.revents = 0;
+    if (poll(&pollfd, 1, 100) > 0)
+        result = read(fds[1], response, response_max);
+
+done:
+    close(fds[0]);
+    close(fds[1]);
+    session->fd = -1;
+    session->signal_used = 0;
+    return result;
 }

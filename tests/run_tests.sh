@@ -20,6 +20,8 @@ sh tests/test_bluetooth_profile_service_contract.sh
 sh tests/test_bluetooth_mgmt_observability_contract.sh
 make build/test-sdp-wire-format
 ./build/test-sdp-wire-format
+make build/test-avdtp-wire-format
+./build/test-avdtp-wire-format
 sh tests/test_network_scan_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh

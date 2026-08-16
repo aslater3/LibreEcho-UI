@@ -288,6 +288,18 @@ $(BUILD)/test-sdp-wire-format: tests/test_sdp_wire_format.c \
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -lm -o $@
 
+$(BUILD)/test-avdtp-wire-format: tests/test_avdtp_wire_format.c \
+		$(BUILD)/adapter/bt_profile.o $(BUILD)/log.o \
+		$(BUILD)/adapter/bt-sbc/sbc.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_neon.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_armv6.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_sse.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_mmx.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_iwmmxt.o
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -lm -o $@
+
 $(BUILD)/test-voice-reference: tests/test_voice_reference.c src/adapter/voice_reference.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
