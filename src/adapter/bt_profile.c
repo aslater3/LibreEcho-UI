@@ -1049,12 +1049,17 @@ static void sbc_decode_chunk(struct le_profiles *p,
         }
         offset += (size_t)parsed;
         if (pcm_written && session->sbc.frequency == SBC_FREQ_48000) {
-            size_t frames = pcm_written /
-                (session->sbc.mode == SBC_MODE_MONO ? 1 : 2);
+            size_t frames;
             int16_t output[LE_MEDIA_CHUNK_FRAMES * 2];
             size_t out_frames = 0;
             size_t i;
             int mono = session->sbc.mode == SBC_MODE_MONO;
+
+            /* sbc_decode() reports output bytes, while the media bus and
+             * loops below count PCM frames.  Treating bytes as samples reads
+             * beyond the decoded block and injects stale stack data. */
+            frames = pcm_written /
+                (sizeof(int16_t) * (mono ? 1U : 2U));
 
             for (i = 0; i < frames && out_frames < LE_MEDIA_CHUNK_FRAMES; ++i) {
                 output[out_frames * 2] = pcm[i * (mono ? 1 : 2)];
@@ -1081,7 +1086,8 @@ static void sbc_decode_chunk(struct le_profiles *p,
             default: source_rate = 48000; break;
             }
             mono = session->sbc.mode == SBC_MODE_MONO;
-            frames = pcm_written / (mono ? 1 : 2);
+            frames = pcm_written /
+                (sizeof(int16_t) * (mono ? 1U : 2U));
             for (i = 0; i < LE_MEDIA_CHUNK_FRAMES; ++i) {
                 size_t src = (i * source_rate) / LE_MEDIA_RATE;
                 if (src >= frames)
