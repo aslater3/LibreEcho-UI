@@ -52,6 +52,20 @@ static uint16_t be16(const uint8_t *p)
     return (uint16_t)((p[0] << 8) | p[1]);
 }
 
+static int contains_bytes(const uint8_t *haystack, size_t haystack_length,
+                          const uint8_t *needle, size_t needle_length)
+{
+    size_t i;
+
+    if (!needle_length || needle_length > haystack_length)
+        return 0;
+    for (i = 0; i + needle_length <= haystack_length; ++i) {
+        if (!memcmp(haystack + i, needle, needle_length))
+            return 1;
+    }
+    return 0;
+}
+
 /* Build a ServiceSearchAttribute request: PDU 0x06, ServiceSearchPattern is
  * a DES of one UUID16 (class id), MaximumAttributeByteCount, AttributeIDList
  * wildcard, null continuation. */
@@ -145,6 +159,16 @@ int main(void)
 
     /* --- 1. ServiceSearchAttribute for Audio Sink (0x110b) --- */
     {
+        static const uint8_t service_name[] = {
+            0x09, 0x01, 0x00, 0x25, 0x09,
+            'L', 'i', 'b', 'r', 'e', 'E', 'c', 'h', 'o'
+        };
+        static const uint8_t malformed_language_base[] = {
+            0x09, 0x00, 0x06, 0x25
+        };
+        static const uint8_t speaker_features[] = {
+            0x09, 0x03, 0x11, 0x09, 0x00, 0x02
+        };
         size_t len = build_search_attr(request, 0x0101, 0x110b);
         n = le_profile_test_sdp_exchange(&profiles, request, len, response,
                                          sizeof(response));
@@ -169,6 +193,16 @@ int main(void)
                       "AttributeListsByteCount covers only the list, not "
                       "the continuation state");
             }
+            check(contains_bytes(response, (size_t)n, service_name,
+                                 sizeof(service_name)),
+                  "Audio Sink uses primary-language Service Name attribute 0x0100");
+            check(!contains_bytes(response, (size_t)n,
+                                  malformed_language_base,
+                                  sizeof(malformed_language_base)),
+                  "Audio Sink does not encode text as Language Base attribute 0x0006");
+            check(contains_bytes(response, (size_t)n, speaker_features,
+                                 sizeof(speaker_features)),
+                  "Audio Sink advertises the A2DP Speaker feature bit");
         }
     }
 

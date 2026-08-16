@@ -123,7 +123,7 @@
 #define LE_SDP_ATTR_RECORD_STATE 0x0002
 #define LE_SDP_ATTR_PROTOCOL_LIST 0x0004
 #define LE_SDP_ATTR_BROWSE_LIST 0x0005
-#define LE_SDP_ATTR_SERVICE_NAME 0x0006
+#define LE_SDP_ATTR_SERVICE_NAME 0x0100
 #define LE_SDP_ATTR_PROFILE_LIST 0x0009
 #define LE_SDP_ATTR_VERSION_NUMBER_LIST 0x0200
 #define LE_SDP_ATTR_SERVICE_DATABASE_STATE 0x0201
@@ -500,7 +500,7 @@ static void build_record_set(struct le_profile_sessions *sessions,
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
                               LE_SDP_ATTR_FEATURES);
         offset = sdp_put_uint16(record->data, sizeof(record->data), offset,
-                                0x0001); /* A2DP_SINK role bit */
+                                0x0002); /* A2DP Audio Sink: Speaker */
         record->length = offset;
     }
 
