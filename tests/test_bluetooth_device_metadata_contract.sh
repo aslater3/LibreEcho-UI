@@ -13,6 +13,7 @@ assert 'rssi_valid' in backend
 assert 'json_get_bool(item, "rssi_valid"' in linux
 assert 'update_device_from_eir' in btd
 assert 'read_remote_rssi' in btd
+assert 'nanosleep(&delay, NULL)' in btd
 assert 'MGMT_EV_DEVICE_CONNECTED' in btd
 assert 'device->rssi_valid = 1' in btd
 assert 'rssi_valid' in btd

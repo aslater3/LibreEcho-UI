@@ -880,6 +880,7 @@ static int read_remote_rssi(const uint8_t *address, uint8_t type, int *rssi)
     int fd;
     ssize_t count;
     int waited = 0;
+    int attempts = 0;
 
     if (!address || !rssi || type != 0)
         return -1;
@@ -893,8 +894,15 @@ static int read_remote_rssi(const uint8_t *address, uint8_t type, int *rssi)
     memset(&request, 0, sizeof(request));
     memcpy(request.address, address, sizeof(request.address));
     request.type = ACL_LINK;
-    if (bind(fd, (struct sockaddr *)&raw_address, sizeof(raw_address)) < 0 ||
-        ioctl(fd, HCIGETCONNINFO, &request) < 0) {
+    if (bind(fd, (struct sockaddr *)&raw_address, sizeof(raw_address)) < 0) {
+        close(fd);
+        return -1;
+    }
+    while (ioctl(fd, HCIGETCONNINFO, &request) < 0 && attempts++ < 10) {
+        struct timespec delay = { 0, 100000000L };
+        nanosleep(&delay, NULL);
+    }
+    if (attempts > 10) {
         close(fd);
         return -1;
     }
