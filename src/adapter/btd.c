@@ -939,6 +939,24 @@ static int read_remote_rssi(const uint8_t *address, uint8_t type, int *rssi)
     return -1;
 }
 
+static void refresh_connected_rssi(struct bt_context *context)
+{
+    size_t i;
+
+    for (i = 0; i < context->device_count; ++i) {
+        struct bt_device *device = &context->devices[i];
+        int rssi;
+
+        if (!device->connected ||
+            read_remote_rssi(device->address, device->type, &rssi) != 0)
+            continue;
+        device->rssi = rssi;
+        device->rssi_valid = 1;
+        if (device->paired)
+            (void)save_devices(context);
+    }
+}
+
 static void process_event(struct bt_context *context, uint16_t event,
                            const uint8_t *payload, size_t size)
 {
@@ -1434,6 +1452,7 @@ static int status_json(struct bt_context *context, char *data, size_t size)
 
     if (hci_present() && (time(NULL) - context->last_info > 2))
         (void)refresh_info(context);
+    refresh_connected_rssi(context);
     json_escape(context->local_name, local_name, sizeof(local_name));
     available = wmt_present() && access(BT_DEVICE, F_OK) == 0 &&
                 hci_present() && context->mgmt_fd >= 0;
