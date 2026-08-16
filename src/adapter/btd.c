@@ -91,6 +91,7 @@
 
 #define MGMT_OP_READ_INFO 0x0004
 #define MGMT_OP_SET_POWERED 0x0005
+#define MGMT_OP_SET_SSP 0x000b
 #define MGMT_OP_LOAD_LINK_KEYS 0x0012
 #define MGMT_OP_LOAD_LONG_TERM_KEYS 0x0013
 #define MGMT_OP_DISCONNECT 0x0014
@@ -1236,6 +1237,27 @@ static int set_powered(struct bt_context *context, int enabled)
     return result;
 }
 
+static int enable_secure_simple_pairing(struct bt_context *context)
+{
+    uint8_t enabled = 1;
+
+    if (!(context->supported_settings & MGMT_SETTING_SSP)) {
+        snprintf(context->last_error, sizeof(context->last_error),
+                 "hci0 does not support Secure Simple Pairing");
+        return -1;
+    }
+    if (context->current_settings & MGMT_SETTING_SSP)
+        return 0;
+    if (controller_command(context, MGMT_OP_SET_SSP, &enabled,
+                           sizeof(enabled)) != 0) {
+        snprintf(context->last_error, sizeof(context->last_error),
+                 "hci0 Secure Simple Pairing could not be enabled");
+        return -1;
+    }
+    context->current_settings |= MGMT_SETTING_SSP;
+    return 0;
+}
+
 static int status_json(struct bt_context *context, char *data, size_t size)
 {
     size_t used = 0;
@@ -1497,6 +1519,12 @@ static int set_pairing_mode(struct bt_context *context, int enabled)
     if (!context->capability_ready) {
         uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
 
+        if (enable_secure_simple_pairing(context) != 0) {
+            (void)set_powered(context, 0);
+            context->enabled = 0;
+            context->capability_ready = 0;
+            return -1;
+        }
         if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
                                &io_capability, sizeof(io_capability)) != 0) {
             (void)set_powered(context, 0);
@@ -1613,6 +1641,13 @@ static int handle_request(struct bt_context *context, char *message,
             if (context->capability_ready)
                 return le_adapter_respond_ok(response, response_size, id,
                                              "{\"enabled\":true}");
+            if (enable_secure_simple_pairing(context) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
             if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
                                    &io_capability, sizeof(io_capability)) != 0) {
                 (void)set_powered(context, 0);
@@ -1657,6 +1692,13 @@ static int handle_request(struct bt_context *context, char *message,
         }
         {
             uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
+            if (enable_secure_simple_pairing(context) != 0) {
+                (void)set_powered(context, 0);
+                context->enabled = 0;
+                context->capability_ready = 0;
+                return le_adapter_respond_err(response, response_size, id,
+                                               context->last_error);
+            }
             if (controller_command(context, MGMT_OP_SET_IO_CAPABILITY,
                                    &io_capability, sizeof(io_capability)) != 0) {
                 (void)set_powered(context, 0);
@@ -1921,6 +1963,13 @@ int main(int argc, char **argv)
     if (context.enabled && !context.capability_ready) {
         uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
 
+        if (enable_secure_simple_pairing(&context) != 0) {
+            (void)set_powered(&context, 0);
+            context.enabled = 0;
+            context.capability_ready = 0;
+            close(listener);
+            return 1;
+        }
         if (controller_command(&context, MGMT_OP_SET_IO_CAPABILITY,
                                &io_capability, sizeof(io_capability)) != 0) {
             (void)set_powered(&context, 0);

@@ -14,14 +14,21 @@ end = source.index('if (!strcmp(command, "pairing_mode"))', start)
 activation = source[start:end]
 
 assert '#define MGMT_OP_SET_IO_CAPABILITY 0x0018' in source
+assert '#define MGMT_OP_SET_SSP 0x000b' in source
 assert '#define MGMT_IO_CAP_DISPLAY_YES_NO 0x01' in source
+ssp_helper = source[source.index('static int enable_secure_simple_pairing'):source.index('static int status_json')]
+assert 'context->supported_settings & MGMT_SETTING_SSP' in ssp_helper
+assert 'context->current_settings & MGMT_SETTING_SSP' in ssp_helper
+assert 'controller_command(context, MGMT_OP_SET_SSP' in ssp_helper
+assert 'context->current_settings |= MGMT_SETTING_SSP;' in ssp_helper
 
 bringup = activation[activation.index('context->activation_attempted = 1;'):]
 powered = bringup.index('set_powered(context, 1)')
+ssp = bringup.index('enable_secure_simple_pairing(context)')
 io_capability = bringup.index('controller_command(context, MGMT_OP_SET_IO_CAPABILITY')
 bondable = bringup.index('set_controller_setting(context, MGMT_OP_SET_BONDABLE, 1)')
-assert powered < io_capability < bondable, (
-    'controller IO capability must be set after HCI power-on and before '
+assert powered < ssp < io_capability < bondable, (
+    'SSP and controller IO capability must be set after HCI power-on and before '
     'inbound pairing is enabled'
 )
 assert 'uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;' in activation
@@ -34,10 +41,12 @@ assert 'context->capability_ready = 0;' in io_failure
 assert 'context->capability_ready = 1;' in activation
 pairing_mode = source[source.index('static int set_pairing_mode'):source.index('static int handle_request')]
 assert 'if (!context->enabled)' in pairing_mode
+assert 'enable_secure_simple_pairing(context)' in pairing_mode
 assert 'controller_command(context, MGMT_OP_SET_IO_CAPABILITY' in pairing_mode
 assert 'context->capability_ready = 1;' in pairing_mode
 assert pairing_mode.index('if (enabled == context->pairing_mode)') < pairing_mode.index('controller_command(context, MGMT_OP_SET_IO_CAPABILITY')
 adopted_powered = activation[activation.index('if (context->enabled)'):activation.index('if (context->activation_attempted)')]
+assert 'enable_secure_simple_pairing(context)' in adopted_powered
 assert 'controller_command(context, MGMT_OP_SET_IO_CAPABILITY' in adopted_powered
 assert 'context->capability_ready = 1;' in adopted_powered
 assert '(void)set_powered(context, 0);' in adopted_powered
@@ -64,6 +73,7 @@ assert 'refresh_info(&context)' in startup
 assert 'if (mgmt_open(&context) != 0)' in startup
 assert 'if (refresh_info(&context) != 0 && access(HCI_DEVICE, F_OK) == 0)' in startup
 assert 'close(listener);' in startup
+assert 'enable_secure_simple_pairing(&context)' in startup
 assert 'controller_command(&context, MGMT_OP_SET_IO_CAPABILITY' in startup
 assert 'context.capability_ready = 1;' in startup
 PY

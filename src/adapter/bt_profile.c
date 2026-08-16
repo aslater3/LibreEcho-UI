@@ -112,6 +112,7 @@
 #define LE_SDP_ERROR_INVALID_RECORD_HANDLE 0x0002
 #define LE_SDP_ERROR_INVALID_SYNTAX 0x0003
 
+#define LE_SDP_RECORD_SERVER 0x00000000u
 #define LE_SDP_RECORD_BROWSE 0x00010000u
 #define LE_SDP_RECORD_A2DP_SINK 0x00010001u
 #define LE_SDP_RECORD_AVRCP 0x00010002u
@@ -124,6 +125,8 @@
 #define LE_SDP_ATTR_BROWSE_LIST 0x0005
 #define LE_SDP_ATTR_SERVICE_NAME 0x0006
 #define LE_SDP_ATTR_PROFILE_LIST 0x0009
+#define LE_SDP_ATTR_VERSION_NUMBER_LIST 0x0200
+#define LE_SDP_ATTR_SERVICE_DATABASE_STATE 0x0201
 #define LE_SDP_ATTR_FEATURES 0x0311
 
 struct sockaddr_l2_local {
@@ -151,8 +154,9 @@ struct l2cap_options_local {
 struct le_sdp_record {
     int in_use;
     uint32_t handle;
-    int has_class_uuid16;
-    uint16_t class_uuid16;
+    uint16_t searchable_uuid16[6];
+    size_t searchable_uuid16_count;
+    int public_browse;
     uint8_t data[2048];
     size_t length;
 };
@@ -308,6 +312,30 @@ static size_t sdp_put_uuid_list_attr(uint8_t *out, size_t size, size_t offset,
     return offset;
 }
 
+static size_t sdp_put_uint16_list_attr(uint8_t *out, size_t size,
+                                       size_t offset, uint16_t attr,
+                                       const uint16_t *values, int count)
+{
+    size_t seq_start;
+    size_t start;
+    int i;
+
+    offset = sdp_put_attr(out, size, offset, attr);
+    if (offset + 2 > size)
+        return offset;
+    seq_start = offset;
+    out[offset] = LE_SDP_DE_SEQUENCE;
+    out[offset + 1] = 0;
+    offset += 2;
+    start = offset;
+    for (i = 0; i < count; ++i)
+        offset = sdp_put_uint16(out, size, offset, values[i]);
+    if (offset - start > 255)
+        return offset;
+    out[seq_start + 1] = (uint8_t)(offset - start);
+    return offset;
+}
+
 static size_t sdp_put_browse_list(uint8_t *out, size_t size, size_t offset)
 {
     uint16_t browse[1] = { 0x1002 };
@@ -388,6 +416,8 @@ static size_t sdp_put_profile_list(uint8_t *out, size_t size, size_t offset,
 static void build_record_set(struct le_profile_sessions *sessions,
                              const char *service_name)
 {
+    uint16_t server_classes[1] = { 0x1000 };
+    uint16_t server_versions[1] = { 0x0100 };
     uint16_t a2dp_classes[1] = { 0x110b };
     uint16_t avrcp_classes[2] = { 0x110e, 0x110c };
     uint16_t pnp_classes[1] = { 0x1200 };
@@ -398,9 +428,33 @@ static void build_record_set(struct le_profile_sessions *sessions,
 
     record = &sessions->records[0];
     record->in_use = 1;
+    record->handle = LE_SDP_RECORD_SERVER;
+    record->searchable_uuid16[0] = 0x1000;
+    record->searchable_uuid16_count = 1;
+    {
+        size_t offset = 0;
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_HANDLE);
+        offset = sdp_put_uint32(record->data, sizeof(record->data), offset,
+                                record->handle);
+        offset = sdp_put_uuid_list_attr(record->data, sizeof(record->data),
+                                        offset, LE_SDP_ATTR_CLASS_ID_LIST,
+                                        server_classes, 1);
+        offset = sdp_put_uint16_list_attr(
+            record->data, sizeof(record->data), offset,
+            LE_SDP_ATTR_VERSION_NUMBER_LIST, server_versions, 1);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_SERVICE_DATABASE_STATE);
+        offset = sdp_put_uint32(record->data, sizeof(record->data), offset, 1);
+        record->length = offset;
+    }
+
+    record = &sessions->records[1];
+    record->in_use = 1;
     record->handle = LE_SDP_RECORD_BROWSE;
-    record->has_class_uuid16 = 1;
-    record->class_uuid16 = 0x1002;
+    record->searchable_uuid16[0] = 0x1002;
+    record->searchable_uuid16_count = 1;
+    record->public_browse = 1;
     {
         size_t offset = 0;
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
@@ -413,11 +467,14 @@ static void build_record_set(struct le_profile_sessions *sessions,
         record->length = offset;
     }
 
-    record = &sessions->records[1];
+    record = &sessions->records[2];
     record->in_use = 1;
     record->handle = LE_SDP_RECORD_A2DP_SINK;
-    record->has_class_uuid16 = 1;
-    record->class_uuid16 = 0x110b;
+    record->searchable_uuid16[0] = 0x110b;
+    record->searchable_uuid16[1] = 0x0100;
+    record->searchable_uuid16[2] = 0x0019;
+    record->searchable_uuid16_count = 3;
+    record->public_browse = 1;
     {
         size_t offset = 0;
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
@@ -447,11 +504,15 @@ static void build_record_set(struct le_profile_sessions *sessions,
         record->length = offset;
     }
 
-    record = &sessions->records[2];
+    record = &sessions->records[3];
     record->in_use = 1;
     record->handle = LE_SDP_RECORD_AVRCP;
-    record->has_class_uuid16 = 1;
-    record->class_uuid16 = 0x110e;
+    record->searchable_uuid16[0] = 0x110e;
+    record->searchable_uuid16[1] = 0x110c;
+    record->searchable_uuid16[2] = 0x0100;
+    record->searchable_uuid16[3] = 0x0017;
+    record->searchable_uuid16_count = 4;
+    record->public_browse = 1;
     {
         size_t offset = 0;
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
@@ -477,11 +538,12 @@ static void build_record_set(struct le_profile_sessions *sessions,
         record->length = offset;
     }
 
-    record = &sessions->records[3];
+    record = &sessions->records[4];
     record->in_use = 1;
     record->handle = LE_SDP_RECORD_PNP;
-    record->has_class_uuid16 = 1;
-    record->class_uuid16 = 0x1200;
+    record->searchable_uuid16[0] = 0x1200;
+    record->searchable_uuid16_count = 1;
+    record->public_browse = 1;
     {
         size_t offset = 0;
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
@@ -535,10 +597,6 @@ static void sdp_send_error(struct le_sdp_session *session, uint16_t tid,
  * accepted; real clients (BlueZ sdptool) send the full 128-bit base-UUID
  * form for browse groups.
  */
-#define LE_SDP_UUID128_PUBLIC_BROWSE_ROOT \
-    { 0x00, 0x00, 0x10, 0x02, 0x00, 0x00, 0x10, 0x00, \
-      0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b, 0x34, 0xfb }
-
 /*
  * Bluetooth base UUID 0000xxxx-0000-1000-8000-00805F9B34FB (big-endian
  * wire order).  A UUID128 whose bytes 2..3 carry the 16-bit short form and
@@ -565,62 +623,69 @@ static int sdp_uuid128_short_form(const uint8_t *uuid, uint16_t *short_uuid)
     return 1;
 }
 
-static int sdp_uuid128_is_public_browse_root(const uint8_t *uuid16be)
+/* Return whether one normalized short UUID is present in this record. */
+static int sdp_record_has_uuid(const struct le_sdp_record *record,
+                               uint16_t uuid)
 {
-    static const uint8_t root[16] = LE_SDP_UUID128_PUBLIC_BROWSE_ROOT;
+    size_t i;
 
-    return memcmp(uuid16be, root, sizeof(root)) == 0;
+    if (uuid == 0xffff)
+        return 1;
+    if (uuid == 0x1002)
+        return record->public_browse;
+    for (i = 0; i < record->searchable_uuid16_count; ++i) {
+        if (record->searchable_uuid16[i] == uuid)
+            return 1;
+    }
+    return 0;
 }
 
 static int sdp_match_record(const struct le_sdp_record *record,
                             const uint8_t *pattern, size_t pattern_length)
 {
     size_t offset = 0;
+    int saw_uuid = 0;
 
+    /* SDP ServiceSearchPattern semantics are conjunctive: every UUID in the
+     * pattern must be present in the record's service-class or browse-group
+     * attributes. */
     while (offset < pattern_length) {
         uint8_t type = pattern[offset];
+        uint16_t short_uuid;
 
         if (type == LE_SDP_DE_UUID16) {
-            uint16_t uuid;
-
             if (offset + 3 > pattern_length)
                 return 0;
-            uuid = (uint16_t)((pattern[offset + 1] << 8) |
-                              pattern[offset + 2]);
-            if (uuid == 0xffff || uuid == 0x1002) /* wildcard / browse group */
-                return 1;
-            if (record->has_class_uuid16 && uuid == record->class_uuid16)
-                return 1;
+            short_uuid = (uint16_t)((pattern[offset + 1] << 8) |
+                                    pattern[offset + 2]);
             offset += 3;
         } else if (type == 0x1a) { /* UUID32 */
+            uint32_t uuid32;
+
             if (offset + 5 > pattern_length)
                 return 0;
-            if (record->has_class_uuid16 && pattern[offset + 1] == 0x00 &&
-                pattern[offset + 2] == 0x00 &&
-                ((pattern[offset + 3] << 8) | pattern[offset + 4]) ==
-                record->class_uuid16)
-                return 1;
+            uuid32 = ((uint32_t)pattern[offset + 1] << 24) |
+                     ((uint32_t)pattern[offset + 2] << 16) |
+                     ((uint32_t)pattern[offset + 3] << 8) |
+                     pattern[offset + 4];
+            if (uuid32 > 0xffff)
+                return 0;
+            short_uuid = (uint16_t)uuid32;
             offset += 5;
         } else if (type == 0x1c) { /* UUID128 (Bluetooth base-UUID form) */
-            uint16_t short_uuid;
-
             if (offset + 17 > pattern_length)
                 return 0;
-            if (sdp_uuid128_is_public_browse_root(pattern + offset + 1))
-                return 1;
-            if (sdp_uuid128_short_form(pattern + offset + 1, &short_uuid)) {
-                if (short_uuid == 0xffff)
-                    return 1;
-                if (record->has_class_uuid16 &&
-                    short_uuid == record->class_uuid16)
-                    return 1;
-            }
+            if (!sdp_uuid128_short_form(pattern + offset + 1, &short_uuid))
+                return 0;
             offset += 17;
         } else {
             return 0;
         }
+        saw_uuid = 1;
+        if (!sdp_record_has_uuid(record, short_uuid))
+            return 0;
     }
-    return 0;
+    return saw_uuid;
 }
 
 static size_t sdp_seq_header_size(size_t content)
@@ -870,6 +935,22 @@ static void sdp_handle_service_search(struct le_profile_sessions *sessions,
     response[offset++] = 0x00; /* null continuation state */
     response[3] = (uint8_t)((offset - 5) >> 8);
     response[4] = (uint8_t)(offset - 5);
+    {
+        char pattern_hex[129];
+        size_t pattern_length = pattern_size - consumed;
+        size_t logged = pattern_length < 64 ? pattern_length : 64;
+        size_t j;
+
+        for (j = 0; j < logged; ++j)
+            (void)snprintf(pattern_hex + j * 2,
+                           sizeof(pattern_hex) - j * 2, "%02x",
+                           params[consumed + j]);
+        pattern_hex[logged * 2] = '\0';
+        le_log_info("btd-profiles: SDP service-search tid=0x%04x "
+                    "pattern=%s%s total=%u current=%u",
+                    tid, pattern_hex, pattern_length > logged ? "..." : "",
+                    total, current);
+    }
     (void)sdp_write_response(session, response, offset);
 }
 

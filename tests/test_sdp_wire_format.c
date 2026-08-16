@@ -263,6 +263,200 @@ int main(void)
         }
     }
 
+    /* --- 3b. Apple full-SDP discovery first asks for the SDP Server --- */
+    {
+        size_t offset = 5;
+        uint16_t tid = 0x0108;
+        size_t len;
+
+        request[0] = SDP_PDU_SERVICE_SEARCH_REQ;
+        request[1] = (uint8_t)(tid >> 8);
+        request[2] = (uint8_t)tid;
+        request[offset++] = 0x35; /* DES{ UUID16 0x1000 } */
+        request[offset++] = 0x03;
+        request[offset++] = 0x19;
+        request[offset++] = 0x10;
+        request[offset++] = 0x00;
+        request[offset++] = 0x00; /* MaximumServiceRecordCount = 12 */
+        request[offset++] = 0x0c;
+        request[offset++] = 0x00; /* continuation */
+        len = offset;
+        request[3] = (uint8_t)((len - 5) >> 8);
+        request[4] = (uint8_t)(len - 5);
+
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check(n >= 14, "SDP-server service-search returns a record handle");
+        check(n >= 14 && response[0] == SDP_PDU_SERVICE_SEARCH_RSP,
+              "SDP-server service-search returns a success PDU");
+        if (n >= 14) {
+            uint16_t total = be16(response + 5);
+            uint16_t current = be16(response + 7);
+            uint32_t handle = ((uint32_t)response[9] << 24) |
+                              ((uint32_t)response[10] << 16) |
+                              ((uint32_t)response[11] << 8) |
+                              response[12];
+
+            check(total == 1,
+                  "SDP-server service-search reports exactly one record");
+            check(current == 1,
+                  "SDP-server service-search returns one handle");
+            check(handle == 0x00000000,
+                  "SDP-server service record uses the reserved handle 0");
+            check(response[13] == 0x00,
+                  "SDP-server service-search ends with null continuation");
+        }
+    }
+
+    /* --- 3c. SDP Server attributes use their required wire types/values --- */
+    {
+        size_t offset = 5;
+        uint16_t tid = 0x010b;
+        size_t len;
+        static const uint8_t expected_attributes[] = {
+            0x35, 0x20,             /* AttributeList DES, 32 bytes */
+            0x09, 0x00, 0x00,       /* ServiceRecordHandle attribute */
+            0x0a, 0x00, 0x00, 0x00, 0x00,
+            0x09, 0x00, 0x01,       /* ServiceClassIDList attribute */
+            0x35, 0x03, 0x19, 0x10, 0x00,
+            0x09, 0x02, 0x00,       /* VersionNumberList attribute */
+            0x35, 0x03, 0x09, 0x01, 0x00,
+            0x09, 0x02, 0x01,       /* ServiceDatabaseState attribute */
+            0x0a, 0x00, 0x00, 0x00, 0x01,
+        };
+
+        request[0] = SDP_PDU_SERVICE_ATTR_REQ;
+        request[1] = (uint8_t)(tid >> 8);
+        request[2] = (uint8_t)tid;
+        request[offset++] = 0x00; /* reserved SDP Server handle */
+        request[offset++] = 0x00;
+        request[offset++] = 0x00;
+        request[offset++] = 0x00;
+        request[offset++] = 0xff; /* MaximumAttributeByteCount */
+        request[offset++] = 0xff;
+        request[offset++] = 0x35; /* AttributeIDList: 0x0000-0xffff */
+        request[offset++] = 0x05;
+        request[offset++] = 0x0a;
+        request[offset++] = 0x00;
+        request[offset++] = 0x00;
+        request[offset++] = 0xff;
+        request[offset++] = 0xff;
+        request[offset++] = 0x00; /* continuation */
+        len = offset;
+        request[3] = (uint8_t)((len - 5) >> 8);
+        request[4] = (uint8_t)(len - 5);
+
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check(n == 7 + sizeof(expected_attributes) + 1,
+              "SDP-server service-attr returns the complete record");
+        check(n > 0 && response[0] == SDP_PDU_SERVICE_ATTR_RSP,
+              "SDP-server service-attr returns a success PDU");
+        check(n == 7 + sizeof(expected_attributes) + 1 &&
+                  be16(response + 5) == sizeof(expected_attributes),
+              "SDP-server AttributeListsByteCount matches the record");
+        check(n == 7 + sizeof(expected_attributes) + 1 &&
+                  memcmp(response + 7, expected_attributes,
+                         sizeof(expected_attributes)) == 0,
+              "SDP-server attributes have the required wire encoding");
+        check(n == 7 + sizeof(expected_attributes) + 1 &&
+                  response[n - 1] == 0x00,
+              "SDP-server service-attr ends with null continuation");
+    }
+
+    /* --- 3d. Every serialized service class is directly searchable --- */
+    {
+        size_t offset = 5;
+        uint16_t tid = 0x0109;
+        size_t len;
+
+        request[0] = SDP_PDU_SERVICE_SEARCH_REQ;
+        request[1] = (uint8_t)(tid >> 8);
+        request[2] = (uint8_t)tid;
+        request[offset++] = 0x35; /* DES{ UUID16 AVRCP Target 0x110c } */
+        request[offset++] = 0x03;
+        request[offset++] = 0x19;
+        request[offset++] = 0x11;
+        request[offset++] = 0x0c;
+        request[offset++] = 0x00;
+        request[offset++] = 0x0c;
+        request[offset++] = 0x00;
+        len = offset;
+        request[3] = (uint8_t)((len - 5) >> 8);
+        request[4] = (uint8_t)(len - 5);
+
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check(n >= 14 && response[0] == SDP_PDU_SERVICE_SEARCH_RSP,
+              "AVRCP Target service-search returns a record");
+        check(n >= 14 && be16(response + 5) == 1 &&
+                  be16(response + 7) == 1,
+              "AVRCP Target service class is directly searchable");
+    }
+
+    /* --- 3e. Protocol UUIDs embedded in records are directly searchable --- */
+    {
+        size_t offset = 5;
+        uint16_t tid = 0x010c;
+        size_t len;
+
+        request[0] = SDP_PDU_SERVICE_SEARCH_REQ;
+        request[1] = (uint8_t)(tid >> 8);
+        request[2] = (uint8_t)tid;
+        request[offset++] = 0x35; /* DES{ L2CAP 0x0100 }, as sent by macOS */
+        request[offset++] = 0x03;
+        request[offset++] = 0x19;
+        request[offset++] = 0x01;
+        request[offset++] = 0x00;
+        request[offset++] = 0x00;
+        request[offset++] = 0x0c;
+        request[offset++] = 0x00;
+        len = offset;
+        request[3] = (uint8_t)((len - 5) >> 8);
+        request[4] = (uint8_t)(len - 5);
+
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check(n >= 18 && response[0] == SDP_PDU_SERVICE_SEARCH_RSP,
+              "L2CAP protocol service-search returns matching records");
+        check(n >= 18 && be16(response + 5) == 2 &&
+                  be16(response + 7) == 2,
+              "L2CAP search finds A2DP and AVRCP service records");
+    }
+
+    /* --- 3f. Multi-UUID search patterns use SDP AND semantics --- */
+    {
+        size_t offset = 5;
+        uint16_t tid = 0x010a;
+        size_t len;
+
+        request[0] = SDP_PDU_SERVICE_SEARCH_REQ;
+        request[1] = (uint8_t)(tid >> 8);
+        request[2] = (uint8_t)tid;
+        request[offset++] = 0x35; /* DES{ Audio Sink, AVRCP Target } */
+        request[offset++] = 0x06;
+        request[offset++] = 0x19;
+        request[offset++] = 0x11;
+        request[offset++] = 0x0b;
+        request[offset++] = 0x19;
+        request[offset++] = 0x11;
+        request[offset++] = 0x0c;
+        request[offset++] = 0x00;
+        request[offset++] = 0x0c;
+        request[offset++] = 0x00;
+        len = offset;
+        request[3] = (uint8_t)((len - 5) >> 8);
+        request[4] = (uint8_t)(len - 5);
+
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check(n == 10 && response[0] == SDP_PDU_SERVICE_SEARCH_RSP,
+              "multi-UUID no-match returns an empty success response");
+        check(n == 10 && be16(response + 5) == 0 &&
+                  be16(response + 7) == 0,
+              "multi-UUID service-search requires every UUID to match");
+    }
+
     /* --- 4. ServiceAttribute returns response PDU id 0x05 --- */
     {
         size_t offset = 5;
