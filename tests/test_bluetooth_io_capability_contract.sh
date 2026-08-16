@@ -62,7 +62,7 @@ assert 'comparisonValue' in frontend
 startup = source[source.index('    if (mgmt_open(&context) != 0)'):source.index('    if (le_profile_open', source.index('    if (mgmt_open(&context) != 0)'))]
 assert 'refresh_info(&context)' in startup
 assert 'if (mgmt_open(&context) != 0)' in startup
-assert 'if (refresh_info(&context) != 0)' in startup
+assert 'if (refresh_info(&context) != 0 && access(HCI_DEVICE, F_OK) == 0)' in startup
 assert 'close(listener);' in startup
 assert 'controller_command(&context, MGMT_OP_SET_IO_CAPABILITY' in startup
 assert 'context.capability_ready = 1;' in startup

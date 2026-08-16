@@ -1913,7 +1913,7 @@ int main(int argc, char **argv)
         close(listener);
         return 1;
     }
-    if (refresh_info(&context) != 0) {
+    if (refresh_info(&context) != 0 && access(HCI_DEVICE, F_OK) == 0) {
         le_log_error("btd: Bluetooth controller information unavailable");
         close(listener);
         return 1;
