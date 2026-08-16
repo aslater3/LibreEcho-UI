@@ -1261,6 +1261,7 @@ static void bluetooth_parse_devices(const char *response, const char *key,
         (void)json_get_string(item, "name", device->name, sizeof(device->name));
         (void)json_get_int(item, "type", &device->type);
         (void)json_get_int(item, "rssi", &device->rssi);
+        (void)json_get_bool(item, "rssi_valid", &device->rssi_valid);
         (void)json_get_bool(item, "paired", &device->paired);
         (void)json_get_bool(item, "connected", &device->connected);
         ++*count;

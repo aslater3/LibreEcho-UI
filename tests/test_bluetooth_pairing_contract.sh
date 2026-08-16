@@ -30,8 +30,8 @@ assert 'set_powered(context, 1)' in block, (
 assert 'hci_device_up()' not in block, (
     'enabling Bluetooth must not depend on the unsupported legacy HCIDEVUP ioctl'
 )
-assert 'HCI_CHANNEL_RAW' not in source
-assert '#define HCIDEVUP' not in source
+assert '#define HCI_CHANNEL_RAW 0' in source
+assert '#define HCIGETCONNINFO' in source
 assert 'set_controller_setting(context, MGMT_OP_SET_BONDABLE, 1)' in block, (
     'enabling Bluetooth must set HCI_BONDABLE before an incoming '
     'authentication request'

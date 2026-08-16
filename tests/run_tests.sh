@@ -17,6 +17,7 @@ sh tests/test_bluetooth_pairing_contract.sh
 sh tests/test_bluetooth_io_capability_contract.sh
 sh tests/test_bluetooth_profile_contract.sh
 sh tests/test_bluetooth_profile_service_contract.sh
+sh tests/test_bluetooth_device_metadata_contract.sh
 sh tests/test_bluetooth_mgmt_observability_contract.sh
 make build/test-sdp-wire-format
 ./build/test-sdp-wire-format

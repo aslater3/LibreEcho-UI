@@ -827,6 +827,25 @@ leaving it restores the controller settings that were active beforehand.
 Start or stop a combined Classic + LE discovery scan. Results are returned by
 `GET /api/v1/bluetooth`.
 
+Each `discovered` and `known_devices` entry includes `name`, `rssi`, and
+`rssi_valid`. Names are refreshed from the remote device's connected EIR data
+and persisted with the bond. Connected BR/EDR devices are queried with the
+controller's Read RSSI command; `rssi_valid: false` means no current or
+persisted measurement is available, not that the signal is 0 dBm. A valid RSSI
+is a signed dBm value and may be negative, for example:
+
+```json
+{
+  "address": "AA:BB:CC:DD:EE:FF",
+  "name": "iPhone",
+  "type": 0,
+  "rssi": -54,
+  "rssi_valid": true,
+  "paired": true,
+  "connected": true
+}
+```
+
 #### POST /api/v1/bluetooth/pair
 
 Start pairing with a discovered or known device:

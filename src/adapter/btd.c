@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -49,7 +50,14 @@
 #define BTPROTO_L2CAP 0
 #define HCI_DEV_NONE 0xffff
 #define HCI_DEV_ID 0
+#define HCI_CHANNEL_RAW 0
 #define HCI_CHANNEL_CONTROL 3
+#define HCIGETCONNINFO _IOR('H', 213, int)
+#define ACL_LINK 1
+#define HCI_COMMAND_PKT 0x01
+#define HCI_EVENT_PKT 0x04
+#define EVT_CMD_COMPLETE 0x0e
+#define HCI_OP_READ_RSSI 0x1405
 #define MGMT_PACKET_MAX 4096
 #define MGMT_TIMEOUT_MS 5000
 #define HELPER_TIMEOUT_TICKS 150
@@ -153,6 +161,22 @@ struct sockaddr_hci {
     unsigned short hci_channel;
 };
 
+struct hci_conn_info_local {
+    uint16_t handle;
+    uint8_t address[6];
+    uint8_t type;
+    uint8_t out;
+    uint16_t state;
+    uint32_t link_mode;
+} __attribute__((packed));
+
+struct hci_conn_info_req_local {
+    uint8_t address[6];
+    uint8_t type;
+    uint8_t alignment_pad;
+    struct hci_conn_info_local info;
+} __attribute__((packed));
+
 struct mgmt_hdr_wire {
     uint16_t opcode;
     uint16_t index;
@@ -186,6 +210,7 @@ struct bt_device {
     uint8_t type;
     char name[BT_NAME_MAX];
     int rssi;
+    int rssi_valid;
     int discovered;
     int paired;
     int connected;
@@ -608,8 +633,9 @@ static int save_devices(const struct bt_context *context)
         if (!context->devices[i].paired)
             continue;
         address_text(context->devices[i].address, address, sizeof(address));
-        if (fprintf(file, "%s %u %s\n", address, context->devices[i].type,
-                    context->devices[i].name) < 0) {
+        if (fprintf(file, "%s %u %d %d %s\n", address,
+                    context->devices[i].type, context->devices[i].rssi_valid,
+                    context->devices[i].rssi, context->devices[i].name) < 0) {
             fclose(file);
             unlink(temporary);
             return -1;
@@ -632,18 +658,26 @@ static void load_devices(struct bt_context *context)
     while (fgets(line, sizeof(line), file)) {
         char address_text_value[18], name[BT_NAME_MAX];
         unsigned int type;
+        int rssi_valid = 0;
+        int rssi = 0;
         uint8_t address[6];
         struct bt_device *device;
 
         name[0] = '\0';
-        if (sscanf(line, "%17s %u %63[^\n]", address_text_value, &type,
-                   name) < 2 || type > 255 ||
-            parse_address(address_text_value, address) != 0)
+        if (sscanf(line, "%17s %u %d %d %63[^\n]", address_text_value,
+                   &type, &rssi_valid, &rssi, name) != 5) {
+            if (sscanf(line, "%17s %u %63[^\n]", address_text_value,
+                       &type, name) < 2)
+                continue;
+        }
+        if (type > 255 || parse_address(address_text_value, address) != 0)
             continue;
         device = get_device(context, address, (uint8_t)type);
         if (!device)
             break;
         device->paired = 1;
+        device->rssi_valid = rssi_valid != 0;
+        device->rssi = rssi;
         if (name[0]) {
             strncpy(device->name, name, sizeof(device->name) - 1);
             device->name[sizeof(device->name) - 1] = '\0';
@@ -818,6 +852,85 @@ static void eir_name(const uint8_t *eir, size_t size, char *name, size_t name_si
     }
 }
 
+static int update_device_from_eir(struct bt_device *device,
+                                  const uint8_t *eir, size_t size)
+{
+    char name[BT_NAME_MAX];
+
+    if (!device || !eir)
+        return 0;
+    name[0] = '\0';
+    eir_name(eir, size, name, sizeof(name));
+    if (!name[0])
+        return 0;
+    if (!strcmp(device->name, name))
+        return 0;
+    strncpy(device->name, name, sizeof(device->name) - 1);
+    device->name[sizeof(device->name) - 1] = '\0';
+    return 1;
+}
+
+static int read_remote_rssi(const uint8_t *address, uint8_t type, int *rssi)
+{
+    struct hci_conn_info_req_local request;
+    struct sockaddr_hci raw_address;
+    struct pollfd pollfd;
+    uint8_t command[6];
+    uint8_t event[64];
+    int fd;
+    ssize_t count;
+    int waited = 0;
+
+    if (!address || !rssi || type != 0)
+        return -1;
+    fd = socket(AF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, BTPROTO_HCI);
+    if (fd < 0)
+        return -1;
+    memset(&raw_address, 0, sizeof(raw_address));
+    raw_address.hci_family = AF_BLUETOOTH;
+    raw_address.hci_dev = HCI_DEV_ID;
+    raw_address.hci_channel = HCI_CHANNEL_RAW;
+    memset(&request, 0, sizeof(request));
+    memcpy(request.address, address, sizeof(request.address));
+    request.type = ACL_LINK;
+    if (bind(fd, (struct sockaddr *)&raw_address, sizeof(raw_address)) < 0 ||
+        ioctl(fd, HCIGETCONNINFO, &request) < 0) {
+        close(fd);
+        return -1;
+    }
+    command[0] = HCI_COMMAND_PKT;
+    command[1] = (uint8_t)HCI_OP_READ_RSSI;
+    command[2] = (uint8_t)(HCI_OP_READ_RSSI >> 8);
+    command[3] = 2;
+    command[4] = (uint8_t)request.info.handle;
+    command[5] = (uint8_t)(request.info.handle >> 8);
+    if (write(fd, command, sizeof(command)) != (ssize_t)sizeof(command)) {
+        close(fd);
+        return -1;
+    }
+    while (waited < 1000) {
+        pollfd.fd = fd;
+        pollfd.events = POLLIN;
+        if (poll(&pollfd, 1, 100) <= 0) {
+            waited += 100;
+            continue;
+        }
+        count = read(fd, event, sizeof(event));
+        if (count >= 10 && event[0] == HCI_EVENT_PKT &&
+            event[1] == EVT_CMD_COMPLETE &&
+            event[4] == (uint8_t)HCI_OP_READ_RSSI &&
+            event[5] == (uint8_t)(HCI_OP_READ_RSSI >> 8) &&
+            event[6] == 0 &&
+            event[7] == command[4] && event[8] == command[5]) {
+            *rssi = (int8_t)event[9];
+            close(fd);
+            return 0;
+        }
+    }
+    close(fd);
+    return -1;
+}
+
 static void process_event(struct bt_context *context, uint16_t event,
                            const uint8_t *payload, size_t size)
 {
@@ -850,19 +963,38 @@ static void process_event(struct bt_context *context, uint16_t event,
                 return;
             device->discovered = 1;
             device->rssi = rssi;
+            device->rssi_valid = 1;
             if (name[0]) {
                 strncpy(device->name, name, sizeof(device->name) - 1);
                 device->name[sizeof(device->name) - 1] = '\0';
             }
+            if (device->paired)
+                (void)save_devices(context);
         }
         return;
     case MGMT_EV_DEVICE_CONNECTED:
         if (size >= 7) {
             char address[18];
+            int metadata_changed = 0;
 
             device = get_device(context, payload, payload[6]);
-            if (device)
+            if (device) {
                 device->connected = 1;
+                if (size >= 13) {
+                    size_t eir_size = read_le16(payload + 11);
+                    if (eir_size > size - 13)
+                        eir_size = size - 13;
+                    metadata_changed = update_device_from_eir(
+                        device, payload + 13, eir_size);
+                }
+                if (read_remote_rssi(device->address, device->type,
+                                     &device->rssi) == 0) {
+                    device->rssi_valid = 1;
+                    metadata_changed = 1;
+                }
+                if (metadata_changed && device->paired)
+                    (void)save_devices(context);
+            }
             address_text(payload, address, sizeof(address));
             le_log_info("btd: MGMT device connected: address=%s type=%u",
                         address, payload[6]);
@@ -1374,10 +1506,11 @@ static int status_json(struct bt_context *context, char *data, size_t size)
         name[sizeof(name) - 1] = '\0';
         if (append_text(data, size, &used,
                         "%s{\"address\":\"%s\",\"name\":\"%s\","
-                        "\"type\":%u,\"rssi\":%d,\"paired\":%s,"
+                        "\"type\":%u,\"rssi\":%d,\"rssi_valid\":%s,\"paired\":%s,"
                         "\"connected\":%s}",
                         used && data[used - 1] != '[' ? "," : "", address, name,
                         context->devices[i].type, context->devices[i].rssi,
+                        context->devices[i].rssi_valid ? "true" : "false",
                         context->devices[i].paired ? "true" : "false",
                         context->devices[i].connected ? "true" : "false") != 0)
             return -1;
@@ -1394,9 +1527,10 @@ static int status_json(struct bt_context *context, char *data, size_t size)
             json_escape(context->devices[i].name, escaped, sizeof(escaped));
             if (append_text(data, size, &used,
                             "%s{\"address\":\"%s\",\"name\":\"%s\","
-                            "\"type\":%u,\"rssi\":%d,\"connected\":%s}",
+                            "\"type\":%u,\"rssi\":%d,\"rssi_valid\":%s,\"connected\":%s}",
                             first ? "" : ",", address, escaped,
                             context->devices[i].type, context->devices[i].rssi,
+                            context->devices[i].rssi_valid ? "true" : "false",
                             context->devices[i].connected ? "true" : "false") != 0)
                 return -1;
             first = 0;
