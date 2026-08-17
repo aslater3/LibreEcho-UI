@@ -58,6 +58,8 @@
 #define HCI_EVENT_PKT 0x04
 #define EVT_CMD_COMPLETE 0x0e
 #define HCI_OP_READ_RSSI 0x1405
+#define SOL_HCI 0
+#define HCI_FILTER 2
 #define MGMT_PACKET_MAX 4096
 #define MGMT_TIMEOUT_MS 5000
 #define HELPER_TIMEOUT_TICKS 150
@@ -176,6 +178,12 @@ struct hci_conn_info_req_local {
     uint8_t alignment_pad;
     struct hci_conn_info_local info;
 } __attribute__((packed));
+
+struct hci_filter_local {
+    uint32_t type_mask;
+    uint32_t event_mask[2];
+    uint16_t opcode;
+};
 
 struct mgmt_hdr_wire {
     uint16_t opcode;
@@ -873,6 +881,7 @@ static int update_device_from_eir(struct bt_device *device,
 static int read_remote_rssi(const uint8_t *address, uint8_t type, int *rssi)
 {
     struct hci_conn_info_req_local request;
+    struct hci_filter_local filter;
     struct sockaddr_hci raw_address;
     struct pollfd pollfd;
     uint8_t command[6];
@@ -895,6 +904,14 @@ static int read_remote_rssi(const uint8_t *address, uint8_t type, int *rssi)
     memcpy(request.address, address, sizeof(request.address));
     request.type = ACL_LINK;
     if (bind(fd, (struct sockaddr *)&raw_address, sizeof(raw_address)) < 0) {
+        close(fd);
+        return -1;
+    }
+    memset(&filter, 0, sizeof(filter));
+    filter.type_mask = 1U << HCI_EVENT_PKT;
+    filter.event_mask[0] = 1U << EVT_CMD_COMPLETE;
+    filter.opcode = HCI_OP_READ_RSSI;
+    if (setsockopt(fd, SOL_HCI, HCI_FILTER, &filter, sizeof(filter)) < 0) {
         close(fd);
         return -1;
     }

@@ -14,6 +14,8 @@ assert 'json_get_bool(item, "rssi_valid"' in linux
 assert 'update_device_from_eir' in btd
 assert 'read_remote_rssi' in btd
 assert 'nanosleep(&delay, NULL)' in btd
+assert 'filter.type_mask = 1U << HCI_EVENT_PKT' in btd
+assert 'setsockopt(fd, SOL_HCI, HCI_FILTER' in btd
 assert 'refresh_connected_rssi' in btd
 assert 'MGMT_EV_DEVICE_CONNECTED' in btd
 assert 'device->rssi_valid = 1' in btd
