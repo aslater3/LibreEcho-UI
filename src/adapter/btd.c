@@ -1417,7 +1417,6 @@ static int refresh_info(struct bt_context *context)
     }
     context->last_info = time(NULL);
     context->enabled = (context->current_settings & MGMT_SETTING_POWERED) != 0;
-    set_controller_ready(1);
     return 0;
 }
 
@@ -1783,6 +1782,7 @@ static int set_pairing_mode(struct bt_context *context, int enabled)
             return -1;
         }
         context->capability_ready = 1;
+        set_controller_ready(1);
     }
     if (enabled) {
         context->pairing_saved_connectable =
@@ -1914,6 +1914,7 @@ static int handle_request(struct bt_context *context, char *message,
                                                context->last_error);
             }
             context->capability_ready = 1;
+            set_controller_ready(1);
             return le_adapter_respond_ok(response, response_size, id,
                                          "{\"enabled\":true}");
         }
@@ -1974,6 +1975,7 @@ static int handle_request(struct bt_context *context, char *message,
             }
         }
         context->capability_ready = 1;
+        set_controller_ready(1);
         /* Opening the management channel clears HCI_BONDABLE.  The legacy
          * HCIDEVUP path deliberately does not restore it once management is
          * active, so an incoming peer would otherwise receive an immediate
@@ -2248,6 +2250,7 @@ int main(int argc, char **argv)
             return 1;
         }
         context.capability_ready = 1;
+        set_controller_ready(1);
     }
     (void)load_keys_into_controller(&context);
     if (le_profile_open(&context.profiles, LIBREECHO_BT_NAME) == 0) {

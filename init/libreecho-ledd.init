@@ -13,7 +13,8 @@ DAEMON=${DAEMON:-/usr/local/sbin/libreecho-ledd}
 PIDFILE=${PIDFILE:-/var/run/libreecho-ledd.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-ledd.log}
 SOCKET=${SOCKET:-/run/libreecho/led.sock}
-ARGS=${ARGS:---foreground --socket $SOCKET --startup-animation --startup-ready /run/libreecho/startup-ready}
+STARTUP_READY=${STARTUP_READY:-/run/libreecho/startup-ready}
+ARGS=${ARGS:---foreground --socket $SOCKET --startup-animation --startup-ready $STARTUP_READY}
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1

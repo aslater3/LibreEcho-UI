@@ -19,7 +19,8 @@ trap cleanup EXIT INT TERM
 # The production init contract must opt into the startup animation, while the
 # final web service must publish the readiness hand-off atomically.
 grep -q -- '--startup-animation' init/libreecho-ledd.init
-grep -q -- '--startup-ready /run/libreecho/startup-ready' init/libreecho-ledd.init
+grep -q 'STARTUP_READY=.*startup-ready' init/libreecho-ledd.init
+grep -q -- '--startup-ready $STARTUP_READY' init/libreecho-ledd.init
 grep -q 'mark_startup_ready()' init/libreecho-web.init
 grep -q 'tmp="$STARTUP_READY.tmp"' init/libreecho-web.init
 grep -q 'for socket in network audio mic led bluetooth airplay' init/libreecho-web.init

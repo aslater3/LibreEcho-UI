@@ -138,6 +138,7 @@ struct daemon_context {
     int startup_animation_active;
     char startup_ready_path[MAX_PATH];
     unsigned int startup_animation_frame;
+    double startup_animation_next_frame;
     int pattern_active;
     int pattern_kind;
     struct colour pattern_colour;
@@ -1870,9 +1871,12 @@ static void update_animation(struct daemon_context *ctx, double now)
             stop_startup_animation(ctx);
             return;
         }
+        if (now < ctx->startup_animation_next_frame)
+            return;
         apply_startup_animation(ctx);
         ctx->startup_animation_frame =
             (ctx->startup_animation_frame + 1) % RING_PIXELS;
+        ctx->startup_animation_next_frame = now + STARTUP_FRAME_MS / 1000.0;
         return;
     }
 
@@ -2467,6 +2471,7 @@ int main(int argc, char **argv)
     if (startup_animation_requested && !path_is_file(ctx.startup_ready_path)) {
         ctx.startup_animation_active = 1;
         ctx.startup_animation_frame = 0;
+        ctx.startup_animation_next_frame = monotonic_seconds();
         apply_startup_animation(&ctx);
         le_log_info("green startup animation started");
     }
