@@ -63,6 +63,8 @@
 #define MGMT_PACKET_MAX 4096
 #define MGMT_TIMEOUT_MS 5000
 #define HELPER_TIMEOUT_TICKS 150
+#define STARTUP_INFO_RETRY_COUNT 12
+#define STARTUP_INFO_RETRY_DELAY_MS 500
 #define BT_MAX_DEVICES 24
 #define BT_MAX_KEYS 24
 #define BT_NAME_MAX 64
@@ -1395,6 +1397,27 @@ static int refresh_info(struct bt_context *context)
     return 0;
 }
 
+static int wait_for_controller_info(struct bt_context *context)
+{
+    int attempt;
+
+    for (attempt = 0; attempt < STARTUP_INFO_RETRY_COUNT; ++attempt) {
+        if (refresh_info(context) == 0)
+            return 0;
+        if (attempt + 1 < STARTUP_INFO_RETRY_COUNT) {
+            struct timespec delay = {
+                .tv_sec = STARTUP_INFO_RETRY_DELAY_MS / 1000,
+                .tv_nsec = (STARTUP_INFO_RETRY_DELAY_MS % 1000) * 1000000L,
+            };
+            le_log_warn("btd: startup controller-info retry %d/%d",
+                        attempt + 1, STARTUP_INFO_RETRY_COUNT - 1);
+            (void)nanosleep(&delay, NULL);
+        }
+    }
+    le_log_error("btd: startup controller-info unavailable after retries");
+    return -1;
+}
+
 static int controller_command(struct bt_context *context, uint16_t opcode,
                               const void *payload, size_t size)
 {
@@ -2170,8 +2193,8 @@ int main(int argc, char **argv)
         close(listener);
         return 1;
     }
-    if (refresh_info(&context) != 0 && access(HCI_DEVICE, F_OK) == 0) {
-        le_log_error("btd: Bluetooth controller information unavailable");
+    if (access(HCI_DEVICE, F_OK) == 0 &&
+        wait_for_controller_info(&context) != 0) {
         close(listener);
         return 1;
     }

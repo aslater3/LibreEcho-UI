@@ -27,6 +27,7 @@ ARGS=${ARGS:---backend linux --config $CONFIG_FILE --web-root /usr/local/share/l
 USERS_FILE=${USERS_FILE:-/data/libreecho/config/users}
 ARGS="$ARGS --users-file $USERS_FILE"
 STARTUP_READY=${STARTUP_READY:-/run/libreecho/startup-ready}
+STARTUP_READY_TIMEOUT_TICKS=${STARTUP_READY_TIMEOUT_TICKS:-600}
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1
@@ -69,7 +70,7 @@ wyoming_service_ready() {
 
 mark_startup_ready() {
     count=0
-    while [ "$count" -lt 100 ]; do
+    while [ "$count" -lt "$STARTUP_READY_TIMEOUT_TICKS" ]; do
         if startup_services_ready; then
             tmp="$STARTUP_READY.tmp"
             printf 'schema=1\n' >"$tmp" || return 1
