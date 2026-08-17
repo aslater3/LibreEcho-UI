@@ -1,8 +1,9 @@
 function bluetoothDeviceCard(device, known) {
   const actionText = device.connected ? 'Disconnect' : known ? 'Connect / pair' : 'Pair';
-  const actionId = device.connected ? 'bt-disconnect' : 'bt-pair';
   const operation = device.connected ? 'disconnect' : 'pair';
-  return `<div class="wifi-network bluetooth-device"><span><strong>${esc(device.name||'Unknown device')}</strong><small>${esc(device.address)} · ${device.rssi ? `${device.rssi} dBm` : 'RSSI unavailable'}${device.connected ? ' · Connected' : ''}</small></span><span class="button-row"><button class="secondary-btn" data-bt-operation="${operation}" data-bt-address="${esc(device.address)}" data-bt-type="${device.type||0}">${actionText}</button>${known ? `<button class="danger-btn" data-bt-operation="unpair" data-bt-address="${esc(device.address)}" data-bt-type="${device.type||0}">Unpair</button>` : ''}</span></div>`;
+  const name = device.name && device.name !== 'Unknown device' ? device.name : 'Unnamed device';
+  const signal = device.rssi_valid ? `${device.rssi} dBm` : 'RSSI unavailable';
+  return `<div class="wifi-network bluetooth-device"><span><strong>${esc(name)}</strong><small>${esc(device.address)} · ${signal}${device.connected ? ' · Connected' : ''}</small></span><span class="button-row"><button class="secondary-btn" data-bt-operation="${operation}" data-bt-address="${esc(device.address)}" data-bt-type="${device.type||0}">${actionText}</button>${known ? `<button class="danger-btn" data-bt-operation="unpair" data-bt-address="${esc(device.address)}" data-bt-type="${device.type||0}">Unpair</button>` : ''}</span></div>`;
 }
 
 function bluetoothPasskey(value) {

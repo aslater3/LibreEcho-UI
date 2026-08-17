@@ -38,7 +38,7 @@ struct le_network_state {
     int gateway_reachable, liveness_failures;
 };
 struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb; };
-struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, paired, connected; };
+struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, rssi_valid, paired, connected; };
 struct le_bluetooth_pairing { char address[18], method[24]; int type; unsigned int value; };
 struct le_bluetooth_state {
     char state[32], transport[32], hci[32], local_name[LE_TEXT], last_error[96];
