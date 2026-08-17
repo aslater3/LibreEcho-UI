@@ -23,6 +23,9 @@ grep -q -- '--startup-ready /run/libreecho/startup-ready' init/libreecho-ledd.in
 grep -q 'mark_startup_ready()' init/libreecho-web.init
 grep -q 'tmp="$STARTUP_READY.tmp"' init/libreecho-web.init
 grep -q 'for socket in network audio mic led bluetooth airplay' init/libreecho-web.init
+grep -q 'wyoming_service_ready()' init/libreecho-web.init
+grep -q '/proc/net/tcp' init/libreecho-web.init
+grep -q 'wyoming_service_ready' init/libreecho-web.init
 
 grep -q -- '--startup-animation' src/adapter/ledd.c
 grep -q -- '--startup-ready' src/adapter/ledd.c

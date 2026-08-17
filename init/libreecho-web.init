@@ -52,7 +52,19 @@ startup_services_ready() {
        [ -S /run/libreecho/agent.sock ]; then
         return 0
     fi
-    [ -S /run/libreecho/wyoming.sock ]
+    wyoming_service_ready
+}
+
+wyoming_service_ready() {
+    pidfile=/var/run/libreecho-wyomingd.pid
+    [ -s "$pidfile" ] || return 1
+    pid=$(sed -n '1p' "$pidfile")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    port_hex=$(printf '%04X' "${WYOMING_PORT:-10700}") || return 1
+    awk -v port="$port_hex" \
+        '$4 == "0A" && $2 ~ (":" port "$") { found = 1 }
+         END { exit found ? 0 : 1 }' /proc/net/tcp 2>/dev/null
 }
 
 mark_startup_ready() {
