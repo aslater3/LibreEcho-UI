@@ -48,6 +48,7 @@ startup_services_ready() {
     for socket in network audio mic led bluetooth airplay; do
         [ -S "/run/libreecho/$socket.sock" ] || return 1
     done
+    [ -f /run/libreecho/bluetooth-ready ] || return 1
     if [ -S /run/libreecho/stt.sock ] &&
        [ -S /run/libreecho/tts.sock ] &&
        [ -S /run/libreecho/agent.sock ]; then
