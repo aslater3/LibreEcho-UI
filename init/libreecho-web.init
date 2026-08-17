@@ -26,12 +26,77 @@ ARGS=${ARGS:---backend linux --config $CONFIG_FILE --web-root /usr/local/share/l
 # with --auth-token-file, --allowed-origin and --user.
 USERS_FILE=${USERS_FILE:-/data/libreecho/config/users}
 ARGS="$ARGS --users-file $USERS_FILE"
+STARTUP_READY=${STARTUP_READY:-/run/libreecho/startup-ready}
+STARTUP_READY_TIMEOUT_TICKS=${STARTUP_READY_TIMEOUT_TICKS:-600}
+PORT=10700
+[ -r /etc/default/libreecho-wyomingd ] && . /etc/default/libreecho-wyomingd
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1
     pid=$(sed -n '1p' "$PIDFILE")
     case "$pid" in *[!0-9]*|'') return 1 ;; esac
     kill -0 "$pid" 2>/dev/null
+}
+
+startup_services_ready() {
+    service=
+    for service in networkd timed audiod micd ledd btd airplayd web; do
+        pidfile="/var/run/libreecho-$service.pid"
+        [ -s "$pidfile" ] || return 1
+        pid=$(sed -n '1p' "$pidfile")
+        case "$pid" in *[!0-9]*|'') return 1 ;; esac
+        kill -0 "$pid" 2>/dev/null || return 1
+    done
+    for socket in network audio mic led bluetooth airplay; do
+        [ -S "/run/libreecho/$socket.sock" ] || return 1
+    done
+    [ -f /run/libreecho/bluetooth-ready ] || return 1
+    if [ -S /run/libreecho/stt.sock ] &&
+       [ -S /run/libreecho/tts.sock ] &&
+       [ -S /run/libreecho/agent.sock ]; then
+        for service in sttd ttsd agentd; do
+            pidfile="/var/run/libreecho-$service.pid"
+            [ -s "$pidfile" ] || return 1
+            pid=$(sed -n '1p' "$pidfile")
+            case "$pid" in *[!0-9]*|'') return 1 ;; esac
+            kill -0 "$pid" 2>/dev/null || return 1
+        done
+        return 0
+    fi
+    wyoming_service_ready
+}
+
+wyoming_service_ready() {
+    pidfile=/var/run/libreecho-wyomingd.pid
+    [ -s "$pidfile" ] || return 1
+    pid=$(sed -n '1p' "$pidfile")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -S /run/libreecho/wakeword.sock ] || return 1
+    wake_pidfile=/var/run/libreecho-waked.pid
+    [ -s "$wake_pidfile" ] || return 1
+    wake_pid=$(sed -n '1p' "$wake_pidfile")
+    case "$wake_pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$wake_pid" 2>/dev/null || return 1
+    port_hex=$(printf '%04X' "$PORT") || return 1
+    awk -v port="$port_hex" \
+        '$4 == "0A" && $2 ~ (":" port "$") { found = 1 }
+         END { exit found ? 0 : 1 }' /proc/net/tcp 2>/dev/null
+}
+
+mark_startup_ready() {
+    count=0
+    while :; do
+        if startup_services_ready; then
+            tmp="$STARTUP_READY.tmp"
+            printf 'schema=1\n' >"$tmp" || return 1
+            mv -f "$tmp" "$STARTUP_READY"
+            return 0
+        fi
+        sleep 0.1
+        count=$((count + 1))
+        [ "$count" -lt "$STARTUP_READY_TIMEOUT_TICKS" ] || count=0
+    done
 }
 
 start_service() {
@@ -63,9 +128,13 @@ stop_service() {
 }
 
 case "${1:-}" in
-    start) start_service ;;
+    start)
+        rm -f "$STARTUP_READY" "$STARTUP_READY.tmp"
+        start_service
+        mark_startup_ready >/dev/null 2>&1 &
+        ;;
     stop) stop_service ;;
-    restart) stop_service; start_service ;;
+    restart) stop_service; rm -f "$STARTUP_READY" "$STARTUP_READY.tmp"; start_service; mark_startup_ready >/dev/null 2>&1 & ;;
     status) if is_running; then echo "running"; else echo "stopped"; exit 1; fi ;;
     *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
 esac

@@ -39,6 +39,7 @@
 #define WMT_DEVICE "/dev/stpwmt"
 #define BT_DEVICE "/dev/stpbt"
 #define HCI_DEVICE "/sys/class/bluetooth/hci0"
+#define BT_READY_PATH "/run/libreecho/bluetooth-ready"
 #define CONFIGURE_HELPER "/sbin/wmt_configure"
 #define BT_ON_HELPER "/sbin/wmt_bt_on"
 #define FIRMWARE_DIR "/lib/firmware"
@@ -63,6 +64,8 @@
 #define MGMT_PACKET_MAX 4096
 #define MGMT_TIMEOUT_MS 5000
 #define HELPER_TIMEOUT_TICKS 150
+#define STARTUP_INFO_RETRY_COUNT 12
+#define STARTUP_INFO_RETRY_DELAY_MS 500
 #define BT_MAX_DEVICES 24
 #define BT_MAX_KEYS 24
 #define BT_NAME_MAX 64
@@ -469,6 +472,26 @@ static int wmt_present(void)
 static int hci_present(void)
 {
     return access(HCI_DEVICE, F_OK) == 0;
+}
+
+static void set_controller_ready(int ready)
+{
+    int fd;
+
+    if (!ready) {
+        unlink(BT_READY_PATH);
+        return;
+    }
+    fd = open(BT_READY_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        le_log_warn("btd: could not publish controller readiness: %s",
+                    strerror(errno));
+        return;
+    }
+    if (write(fd, "ready\n", 6) != 6)
+        le_log_warn("btd: could not write controller readiness: %s",
+                    strerror(errno));
+    close(fd);
 }
 
 static void address_text(const uint8_t *address, char *text, size_t size)
@@ -1377,8 +1400,10 @@ static int refresh_info(struct bt_context *context)
     size_t reply_size = sizeof(reply);
 
     if (!hci_present() || mgmt_command(context, MGMT_OP_READ_INFO, NULL, 0,
-                                       reply, &reply_size) != 0)
+                                       reply, &reply_size) != 0) {
+        set_controller_ready(0);
         return -1;
+    }
     if (reply_size >= 20) {
         context->supported_settings = read_le32(reply + 9);
         context->current_settings = read_le32(reply + 13);
@@ -1393,6 +1418,27 @@ static int refresh_info(struct bt_context *context)
     context->last_info = time(NULL);
     context->enabled = (context->current_settings & MGMT_SETTING_POWERED) != 0;
     return 0;
+}
+
+static int wait_for_controller_info(struct bt_context *context)
+{
+    int attempt;
+
+    for (attempt = 0; attempt < STARTUP_INFO_RETRY_COUNT; ++attempt) {
+        if (refresh_info(context) == 0)
+            return 0;
+        if (attempt + 1 < STARTUP_INFO_RETRY_COUNT) {
+            struct timespec delay = {
+                .tv_sec = STARTUP_INFO_RETRY_DELAY_MS / 1000,
+                .tv_nsec = (STARTUP_INFO_RETRY_DELAY_MS % 1000) * 1000000L,
+            };
+            le_log_warn("btd: controller-info retry %d/%d",
+                        attempt + 1, STARTUP_INFO_RETRY_COUNT - 1);
+            (void)nanosleep(&delay, NULL);
+        }
+    }
+    le_log_error("btd: controller-info unavailable after retries");
+    return -1;
 }
 
 static int controller_command(struct bt_context *context, uint16_t opcode,
@@ -1736,6 +1782,7 @@ static int set_pairing_mode(struct bt_context *context, int enabled)
             return -1;
         }
         context->capability_ready = 1;
+        set_controller_ready(1);
     }
     if (enabled) {
         context->pairing_saved_connectable =
@@ -1867,6 +1914,7 @@ static int handle_request(struct bt_context *context, char *message,
                                                context->last_error);
             }
             context->capability_ready = 1;
+            set_controller_ready(1);
             return le_adapter_respond_ok(response, response_size, id,
                                          "{\"enabled\":true}");
         }
@@ -1892,7 +1940,8 @@ static int handle_request(struct bt_context *context, char *message,
          * the obsolete HCIDEVUP ioctl here: this target's HCI raw socket does
          * not implement that legacy command and returns ENOTTY, leaving the
          * virtual controller down before the first MGMT write. */
-        if (set_powered(context, 1) != 0 || refresh_info(context) != 0) {
+        if (set_powered(context, 1) != 0 ||
+            wait_for_controller_info(context) != 0) {
             snprintf(context->last_error, sizeof(context->last_error),
                      "hci0 power-on failed");
             return le_adapter_respond_err(response, response_size, id,
@@ -1926,6 +1975,7 @@ static int handle_request(struct bt_context *context, char *message,
             }
         }
         context->capability_ready = 1;
+        set_controller_ready(1);
         /* Opening the management channel clears HCI_BONDABLE.  The legacy
          * HCIDEVUP path deliberately does not restore it once management is
          * active, so an incoming peer would otherwise receive an immediate
@@ -2170,11 +2220,8 @@ int main(int argc, char **argv)
         close(listener);
         return 1;
     }
-    if (refresh_info(&context) != 0 && access(HCI_DEVICE, F_OK) == 0) {
-        le_log_error("btd: Bluetooth controller information unavailable");
-        close(listener);
-        return 1;
-    }
+    if (access(HCI_DEVICE, F_OK) == 0 && refresh_info(&context) != 0)
+        le_log_warn("btd: controller not ready; activation remains available");
     if (context.enabled && !context.capability_ready) {
         uint8_t io_capability = MGMT_IO_CAP_DISPLAY_YES_NO;
 
@@ -2203,6 +2250,7 @@ int main(int argc, char **argv)
             return 1;
         }
         context.capability_ready = 1;
+        set_controller_ready(1);
     }
     (void)load_keys_into_controller(&context);
     if (le_profile_open(&context.profiles, LIBREECHO_BT_NAME) == 0) {

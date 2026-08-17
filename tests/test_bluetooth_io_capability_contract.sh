@@ -76,10 +76,8 @@ assert "$('#bt-confirm').onclick=()=>post(" not in frontend
 startup = source[source.index('    if (mgmt_open(&context) != 0)'):source.index('    if (le_profile_open', source.index('    if (mgmt_open(&context) != 0)'))]
 assert 'refresh_info(&context)' in startup
 assert 'if (mgmt_open(&context) != 0)' in startup
-assert 'if (refresh_info(&context) != 0 && access(HCI_DEVICE, F_OK) == 0)' in startup
-assert 'close(listener);' in startup
-assert 'enable_secure_simple_pairing(&context)' in startup
-assert 'controller_command(&context, MGMT_OP_SET_IO_CAPABILITY' in startup
-assert 'context.capability_ready = 1;' in startup
+assert 'controller not ready; activation remains available' in startup
+assert 'wait_for_controller_info(context)' in activation
+assert 'set_controller_ready(1)' in source
 PY
 printf '%s\n' 'bluetooth IO capability contract: ok'

@@ -1036,8 +1036,6 @@ static void sbc_decode_chunk(struct le_profiles *p,
             if (sbc_init(&session->sbc, 0) < 0)
                 break;
             session->sbc_ready = 1;
-        } else {
-            (void)sbc_reinit(&session->sbc, 0);
         }
         parsed = sbc_parse(&session->sbc, frame, available);
         if (parsed <= 0 || (size_t)parsed > available)
@@ -1273,6 +1271,26 @@ static void avdtp_handle_set_configuration(struct le_profiles *p,
     (void)p;
 }
 
+static int sbc_reset_stream(struct le_avdtp_session *session)
+{
+    uint8_t frequency = session->sbc.frequency;
+    uint8_t mode = session->sbc.mode;
+    uint8_t subbands = session->sbc.subbands;
+    uint8_t blocks = session->sbc.blocks;
+    uint8_t allocation = session->sbc.allocation;
+    uint8_t bitpool = session->sbc.bitpool;
+
+    if (sbc_reinit(&session->sbc, 0) < 0)
+        return -1;
+    session->sbc.frequency = frequency;
+    session->sbc.mode = mode;
+    session->sbc.subbands = subbands;
+    session->sbc.blocks = blocks;
+    session->sbc.allocation = allocation;
+    session->sbc.bitpool = bitpool;
+    return 0;
+}
+
 static void avdtp_handle_open(struct le_avdtp_session *session,
                               uint8_t transaction)
 {
@@ -1290,6 +1308,11 @@ static void avdtp_handle_start(struct le_avdtp_session *session,
                                uint8_t transaction)
 {
     if (!session->open && !session->streaming) {
+        avdtp_reject(session, transaction, LE_AVDTP_START,
+                     LE_AVDTP_ERR_BAD_STATE);
+        return;
+    }
+    if (sbc_reset_stream(session) < 0) {
         avdtp_reject(session, transaction, LE_AVDTP_START,
                      LE_AVDTP_ERR_BAD_STATE);
         return;
