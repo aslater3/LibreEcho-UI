@@ -49,6 +49,8 @@
 #define IS31_CHANNELS 36
 #define RING_PIXELS 12
 #define VISUALIZER_TIMEOUT_SECONDS 0.42
+#define STARTUP_READY_PATH "/run/libreecho/startup-ready"
+#define STARTUP_FRAME_MS 88
 
 struct colour {
     unsigned int r;
@@ -133,6 +135,9 @@ struct daemon_context {
     int animation_active;
     int animation_profile;
     double animation_started;
+    int startup_animation_active;
+    char startup_ready_path[MAX_PATH];
+    unsigned int startup_animation_frame;
     int pattern_active;
     int pattern_kind;
     struct colour pattern_colour;
@@ -384,6 +389,27 @@ static void hardware_apply_pixels(struct daemon_context *ctx,
     memcpy(ctx->rendered_pixels, pixels, sizeof(ctx->rendered_pixels));
     if (hardware_write_pixels(&ctx->hw, pixels) != 0)
         le_log_warn( "LED hardware write failed; retaining state in memory");
+}
+
+static void apply_startup_animation(struct daemon_context *ctx)
+{
+    struct pixel pixels[RING_PIXELS];
+    size_t i;
+
+    for (i = 0; i < RING_PIXELS; i++)
+        pixels[i] = (struct pixel){0, 64, 0};
+    pixels[ctx->startup_animation_frame % RING_PIXELS] =
+        (struct pixel){0, 255, 0};
+    hardware_apply_pixels(ctx, pixels);
+}
+
+static void stop_startup_animation(struct daemon_context *ctx)
+{
+    if (!ctx->startup_animation_active)
+        return;
+    ctx->startup_animation_active = 0;
+    hardware_apply(ctx, &ctx->state.current);
+    le_log_info("green startup animation complete");
 }
 
 static int contains_ci(const char *haystack, const char *needle)
@@ -1839,6 +1865,17 @@ static void update_animation(struct daemon_context *ctx, double now)
     double elapsed;
     int visualizer_was_active = ctx->visualizer_active;
 
+    if (ctx->startup_animation_active) {
+        if (path_is_file(ctx->startup_ready_path)) {
+            stop_startup_animation(ctx);
+            return;
+        }
+        apply_startup_animation(ctx);
+        ctx->startup_animation_frame =
+            (ctx->startup_animation_frame + 1) % RING_PIXELS;
+        return;
+    }
+
     expire_visualizer(ctx, now);
     if (ctx->test_active) {
         elapsed = now - ctx->test_started;
@@ -1878,6 +1915,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
     n = snprintf(out, out_size,
         "{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u,"
         "\"animation_active\":%s,\"animation_profile\":\"%s\","
+        "\"startup_animation_active\":%s,"
         "\"pattern_active\":%s,\"pattern\":\"%s\",\"pattern_owner\":\"%s\","
         "\"visualizer_enabled\":%s,\"visualizer_active\":%s,"
         "\"visualizer_owner\":\"%s\","
@@ -1889,6 +1927,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
         ctx->animation_active && ctx->animation_profile >= 0 &&
                 ctx->animation_profile < PROFILE_COUNT
             ? profile_names[ctx->animation_profile] : "none",
+        ctx->startup_animation_active ? "true" : "false",
         ctx->pattern_active ? "true" : "false", pattern_name(ctx->pattern_kind),
         ctx->pattern_owner,
         ctx->visualizer_enabled ? "true" : "false",
@@ -2341,7 +2380,7 @@ static int daemonize_process(void)
 
 static void usage(const char *program)
 {
-    fprintf(stderr, "usage: %s [--socket PATH] [--foreground] [--stub]\n",
+    fprintf(stderr, "usage: %s [--socket PATH] [--foreground] [--stub] [--startup-animation] [--startup-ready PATH]\n",
             program);
 }
 
@@ -2350,6 +2389,7 @@ int main(int argc, char **argv)
     struct daemon_context ctx;
     struct sigaction action;
     int force_stub = 0;
+    int startup_animation_requested = 0;
     int i;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -2357,6 +2397,8 @@ int main(int argc, char **argv)
     ctx.listen_fd = -1;
     strncpy(ctx.socket_path, LE_ADAPTER_LED_SOCK,
             sizeof(ctx.socket_path) - 1);
+    strncpy(ctx.startup_ready_path, STARTUP_READY_PATH,
+            sizeof(ctx.startup_ready_path) - 1);
     for (i = 0; i < MAX_CLIENTS; i++)
         ctx.clients[i].fd = -1;
     le_log_init("ledd", argc, argv);
@@ -2366,6 +2408,17 @@ int main(int argc, char **argv)
             ctx.foreground = 1;
         } else if (strcmp(argv[i], "--stub") == 0) {
             force_stub = 1;
+        } else if (strcmp(argv[i], "--startup-animation") == 0) {
+            startup_animation_requested = 1;
+        } else if (strcmp(argv[i], "--startup-ready") == 0 && i + 1 < argc) {
+            i++;
+            if (argv[i][0] == '\0' || strlen(argv[i]) >= sizeof(ctx.startup_ready_path)) {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            strncpy(ctx.startup_ready_path, argv[i],
+                    sizeof(ctx.startup_ready_path) - 1);
+            ctx.startup_ready_path[sizeof(ctx.startup_ready_path) - 1] = '\0';
         } else if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
             i++;
             if (strlen(argv[i]) >= sizeof(ctx.socket_path)) {
@@ -2411,6 +2464,12 @@ int main(int argc, char **argv)
     if (hardware_claim(&ctx.hw) != 0)
         return EXIT_FAILURE;
     hardware_apply(&ctx, &ctx.state.current);
+    if (startup_animation_requested && !path_is_file(ctx.startup_ready_path)) {
+        ctx.startup_animation_active = 1;
+        ctx.startup_animation_frame = 0;
+        apply_startup_animation(&ctx);
+        le_log_info("green startup animation started");
+    }
 
     if (!ctx.foreground && daemonize_process() != 0) {
         le_log_error( "daemonization failed: %s", strerror(errno));
@@ -2440,8 +2499,10 @@ int main(int argc, char **argv)
         fds[0].events = POLLIN;
         fds[0].revents = 0;
         slots[0] = -1;
-        if (ctx.test_active || ctx.animation_active || ctx.pattern_active ||
-            ctx.visualizer_active)
+        if (ctx.startup_animation_active)
+            timeout = STARTUP_FRAME_MS;
+        else if (ctx.test_active || ctx.animation_active || ctx.pattern_active ||
+                 ctx.visualizer_active)
             timeout = FRAME_MS;
 
         for (j = 0; j < MAX_CLIENTS; j++) {
@@ -2468,8 +2529,8 @@ int main(int argc, char **argv)
                 (fds[j].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)))
                 receive_client(&ctx, &ctx.clients[slot]);
         }
-        if (ctx.test_active || ctx.animation_active || ctx.pattern_active ||
-            ctx.visualizer_active)
+        if (ctx.startup_animation_active || ctx.test_active ||
+            ctx.animation_active || ctx.pattern_active || ctx.visualizer_active)
             update_animation(&ctx, monotonic_seconds());
     }
 

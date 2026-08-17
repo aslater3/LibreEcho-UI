@@ -26,12 +26,49 @@ ARGS=${ARGS:---backend linux --config $CONFIG_FILE --web-root /usr/local/share/l
 # with --auth-token-file, --allowed-origin and --user.
 USERS_FILE=${USERS_FILE:-/data/libreecho/config/users}
 ARGS="$ARGS --users-file $USERS_FILE"
+STARTUP_READY=${STARTUP_READY:-/run/libreecho/startup-ready}
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1
     pid=$(sed -n '1p' "$PIDFILE")
     case "$pid" in *[!0-9]*|'') return 1 ;; esac
     kill -0 "$pid" 2>/dev/null
+}
+
+startup_services_ready() {
+    service=
+    for service in networkd timed audiod micd ledd btd airplayd web; do
+        pidfile="/var/run/libreecho-$service.pid"
+        [ -s "$pidfile" ] || return 1
+        pid=$(sed -n '1p' "$pidfile")
+        case "$pid" in *[!0-9]*|'') return 1 ;; esac
+        kill -0 "$pid" 2>/dev/null || return 1
+    done
+    for socket in network audio mic led bluetooth airplay; do
+        [ -S "/run/libreecho/$socket.sock" ] || return 1
+    done
+    if [ -S /run/libreecho/stt.sock ] &&
+       [ -S /run/libreecho/tts.sock ] &&
+       [ -S /run/libreecho/agent.sock ]; then
+        return 0
+    fi
+    [ -S /run/libreecho/wyoming.sock ]
+}
+
+mark_startup_ready() {
+    count=0
+    while [ "$count" -lt 100 ]; do
+        if startup_services_ready; then
+            tmp="$STARTUP_READY.tmp"
+            printf 'schema=1\n' >"$tmp" || return 1
+            mv -f "$tmp" "$STARTUP_READY"
+            return 0
+        fi
+        sleep 0.1
+        count=$((count + 1))
+    done
+    rm -f "$STARTUP_READY.tmp"
+    return 1
 }
 
 start_service() {
@@ -63,7 +100,12 @@ stop_service() {
 }
 
 case "${1:-}" in
-    start) start_service ;;
+    start)
+        start_service
+        if ! mark_startup_ready; then
+            echo "libreecho-web: startup service graph did not become ready" >&2
+        fi
+        ;;
     stop) stop_service ;;
     restart) stop_service; start_service ;;
     status) if is_running; then echo "running"; else echo "stopped"; exit 1; fi ;;

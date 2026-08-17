@@ -27,6 +27,7 @@ make build/test-avdtp-wire-format
 sh tests/test_network_scan_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
+sh tests/test_startup_animation.sh
 make build/test-wake-led
 sh tests/test_microphone_fanout_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
