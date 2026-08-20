@@ -885,7 +885,7 @@ Update privacy settings.
 
 #### PUT /api/v1/integrations
 
-Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.
+Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the actual listener's LAN exposure, and its `forced` value is true because listener binding is fixed until the daemon is restarted. A PUT that differs from the current listener is rejected rather than reporting a state the socket does not implement.
 
 **Request:**
 ```json

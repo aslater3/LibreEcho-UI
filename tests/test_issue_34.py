@@ -41,11 +41,17 @@ def main() -> int:
         )
         try:
             deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if (root / "run/libreecho/network.sock").exists():
-                    break
-                time.sleep(0.1)
             base = f"http://127.0.0.1:{port}"
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(base + "/", timeout=1) as response:
+                        if response.status == 200:
+                            break
+                except urllib.error.URLError:
+                    pass
+                time.sleep(0.1)
+            else:
+                raise AssertionError("virtual Web API did not become ready")
             _, config = call(base, "/api/v1/config")
             csrf = config["data"]["csrf_token"]
             _, session = call(base, "/api/v1/auth/bootstrap", "POST", {
