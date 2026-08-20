@@ -104,17 +104,6 @@ int le_llm_credentials_load(const char *path,
     json[count] = '\0';
     le_llm_credentials_clear(credentials);
     {
-        int access = read_token(json, "access_token", credentials->access_token,
-                                sizeof(credentials->access_token));
-        int refresh = read_token(json, "refresh_token", credentials->refresh_token,
-                                 sizeof(credentials->refresh_token));
-        int api = read_token(json, "api_key", credentials->api_key,
-                             sizeof(credentials->api_key));
-
-        if ((access < 0 && api < 0) || (access == 0 && refresh < 0))
-            goto fail;
-    }
-    {
         const char *base = value_for(json, "base_url");
         const char *end;
         size_t length;
@@ -126,6 +115,23 @@ int le_llm_credentials_load(const char *path,
             memcpy(credentials->base_url, base, length);
             credentials->base_url[length] = '\0';
         }
+    }
+    {
+        int access = read_token(json, "access_token", credentials->access_token,
+                                sizeof(credentials->access_token));
+        int refresh = read_token(json, "refresh_token", credentials->refresh_token,
+                                 sizeof(credentials->refresh_token));
+        int api = read_token(json, "api_key", credentials->api_key,
+                             sizeof(credentials->api_key));
+
+        /* A keyless openai-compatible endpoint is identified by base_url
+           alone; only demand an access token or api key when there is no
+           base_url. Mirrors the acceptance rule in le_llm_credentials_save(),
+           so a base-url-only record round-trips instead of being rejected on
+           load (which signed the user out of a local LLM after a restart). */
+        if ((access < 0 && api < 0 && !credentials->base_url[0]) ||
+            (access == 0 && refresh < 0))
+            goto fail;
     }
     if (!credentials->api_key[0] && !credentials->base_url[0] &&
         (!credentials->access_token[0] || !credentials->refresh_token[0]))

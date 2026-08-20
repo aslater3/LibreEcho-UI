@@ -1,4 +1,20 @@
 import { defineConfig, devices } from '@playwright/test';
+import fs from 'fs';
+import path from 'path';
+
+// Minimal .env loader (no dotenv dependency): populate process.env from a
+// local .env if present, without overriding variables already exported. This
+// makes the documented `cp .env.example .env` workflow actually take effect.
+const envFile = path.join(__dirname, '.env');
+if (fs.existsSync(envFile)) {
+  for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
+    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!m || m[1] in process.env) continue;
+    let v = m[2];
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    process.env[m[1]] = v;
+  }
+}
 
 // Target device base URL. Override per run:
 //   BASE_URL=http://<device-ip>:8080 npx playwright test
