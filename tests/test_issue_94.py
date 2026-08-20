@@ -61,6 +61,15 @@ def main() -> int:
             assert status == 200, session
             auth = {"Authorization": f"Bearer {session['data']['token']}"}
 
+            # A live service fault must remain an API error, not look absent.
+            (root / "state" / "virtual.json").write_text(
+                json.dumps({"faults": ["audio"]}) + "\n"
+            )
+            status, response = call(base, "/api/v1/audio", headers=auth)
+            assert status == 503, (status, response)
+            assert response["ok"] is False, response
+            assert response["error"]["code"] == "io_error", response
+
             # Remove the disposable socket names to model absent hardware daemons.
             for service in ("led", "audio", "wakeword", "bluetooth"):
                 (root / "run/libreecho" / f"{service}.sock").unlink()
