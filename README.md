@@ -211,6 +211,55 @@ make DESTDIR=/tmp/libreecho-root PREFIX=/usr install
 
 The init files are service definitions. Image construction and device deployment are performed by the separate LibreEcho build/product repositories.
 
+## Rootless virtual Echo service target
+
+For fast host-side iteration without an Echo, `tools/virtual_echo.py` starts a
+disposable, rootless service environment. It runs the Web UI with the existing
+mock backend, provides deterministic companion-daemon JSON contracts on private
+Unix sockets, isolates absolute `/run` paths with Bubblewrap, and keeps all
+state under the selected temporary root. It does not emulate MT8163 hardware.
+
+Build and start it locally:
+
+```sh
+make build/libreecho-web
+python3 tools/virtual_echo.py start --root /tmp/libreecho-virtual --port 18080
+```
+
+For deliberate LAN exposure, pass an explicit host bind:
+
+```sh
+python3 tools/virtual_echo.py start \
+  --root /tmp/libreecho-virtual \
+  --host 0.0.0.0 \
+  --port 18080
+```
+
+This disables no host firewall and does not emulate a physical Echo. The
+process runs with development authentication enabled for the virtual target;
+do not expose it beyond a trusted LAN. Use `--host 127.0.0.1` for the safe
+default. `check`, `status`, `fault`, and `stop` manage the same root.
+
+The virtual sockets cover network, audio, microphone, LED, Bluetooth, AirPlay,
+wake-word, TTS, STT, and assistant service boundaries. Run the issue and
+service smoke tests with:
+
+```sh
+python3 tools/test_virtual_echo.py
+python3 tests/test_issue_34.py
+```
+
+The issue-34 test verifies that the Network-page `api_lan` control and the
+Integrations-page `rest` control read/write one effective state. In a forced
+development bind, the REST control is shown enabled and disabled so the user
+cannot request an ineffective change.
+
+This target is valid for Web/API behavior, service-protocol integration,
+startup/lifecycle work, persistence and deterministic failure handling. It is
+not evidence for MT8163 boot, WMT/CONSYS, WLAN firmware, USB gadget behavior,
+Radar audio, physical LEDs, Bluetooth HCI, acoustics, thermal behavior, or
+hardware acceptance.
+
 ## Testing
 
 The normal suite is:
