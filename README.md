@@ -36,15 +36,16 @@ tools/create-user.sh alice 'a-long-development-password' > /etc/libreecho/users
 chmod 0600 /etc/libreecho/users
 ```
 
-Set `LIBREECHO_WEB_USERS_FILE=/etc/libreecho/users` during the image build. The
-initramfs service bundle installs it as `/etc/libreecho/users` and starts the
-web daemon with `--users-file`. Passwords are never stored in the repository.
-The initramfs service bundle starts the five daemons in dependency order after loopback is configured; its per-
-service results are recorded in `/tmp/libreecho-*.init.log` and `/tmp/init.log`.
+Set `LIBREECHO_WEB_USERS_FILE=/etc/libreecho/users` during image packaging. The
+image service bundle installs it as `/etc/libreecho/users` and starts the web
+daemon with `--users-file`. Passwords are never stored in the repository. The
+image service bundle starts the companion daemons in dependency order after
+loopback is configured; per-service results are recorded in the target's init
+logs.
 
 Configuration writes are atomic and only happen on changes. Mock telemetry stays in memory. Stored Wi-Fi passwords are neither returned nor logged. The API consistently returns `{ "ok", "data", "error" }` envelopes.
 
-System → Configuration provides a versioned JSON backup and restore workflow. Exports include configurable audio, microphone, LED, wake-word, hostname, local-access, button, privacy and integration settings. They intentionally exclude Wi-Fi passwords, bearer tokens, logs, diagnostics and live telemetry. Imports are type/range checked as a complete schema before application and are atomically persisted with the same backup behavior as normal configuration writes. The Linux backend returns `not_supported` until all corresponding hardware adapters can safely apply a complete restore.
+System → Configuration provides a versioned JSON backup and restore workflow. Exports include configurable audio, microphone, LED, wake-word, hostname, local-access, button, privacy and integration settings. They intentionally exclude Wi-Fi passwords, bearer tokens, logs, diagnostics and live telemetry. Imports are type/range checked as a complete schema before application and are atomically persisted with the same backup behavior as normal configuration writes. On Linux, restore returns `not_supported` when the target adapters cannot safely apply the complete configuration.
 
 For authenticated LAN deployment, create a root-readable token file containing at least 16 random characters and declare the exact browser origin:
 
@@ -127,10 +128,16 @@ Set `LIBREECHO_URL` when using a port other than 8080. These routes exist only i
 
 The v1 API and mock backend cover status, device, config metadata, audio, LED, buttons, wake word, Wi-Fi scan/connect/disconnect, network identity, privacy, integrations, system/OTA model, logs, diagnostics, events, and guarded power operations. The Linux backend provides real system/network telemetry and forwards hardware operations to companion daemons where their AF_UNIX adapters are available; missing or unimplemented target adapters report `not_supported` rather than simulating success. The overview polls once every five seconds. `/api/v1/events` emits bounded SSE-formatted event snapshots, but a persistent multi-client SSE fan-out is deferred; polling avoids pretending that the initial one-shot stream is a full push service.
 
-OTA images expose signed A/B status and a streaming manual tar upload. The web
-daemon stores a bounded upload under `/data/libreecho/update/incoming` and
-executes the image-provided installer; it never writes a block device itself.
-Development images report the update adapter as unavailable.
+OTA integration is implemented through the live Linux image path as well as at
+the UI/API boundary. It exposes signed A/B
+status, current/inactive slot and rollback state, update-channel selection,
+automatic-update preference, GitHub-release check/apply actions, and a bounded
+manual `.tar` upload. The daemon passes package work to image-provided update
+helpers and never writes a block device itself. The live production UI can use
+these actions when `/usr/local/sbin/libreecho-bootctl`,
+`/usr/local/sbin/libreecho-update`, and `/usr/local/sbin/libreecho-update-fetch`
+are present and the signed release/channel policy is configured. Development
+and mock images intentionally report the update adapter as unavailable.
 
 ## Tests
 
@@ -191,8 +198,6 @@ The following Linux adapter functions deliberately return `not_supported` until 
 - Button mappings and physical mute-state input.
 - Safe reboot/shutdown/factory-reset platform adapters without assuming systemd.
 - Authenticated diagnostics adapters for kernel and service logs.
-- Automatic signed update discovery and HTTPS download once the release
-  endpoint and TLS trust policy are defined.
 - Optional privilege drop after binding, once the production user/group and writable paths are finalized.
 
 Do not add undocumented ioctl numbers. Each integration belongs behind `backend.h` or a small versioned AF_UNIX adapter.
@@ -201,7 +206,8 @@ Do not add undocumented ioctl numbers. Each integration belongs behind `backend.
 
 - Local user authentication, first-run account bootstrap and user management are implemented; TLS is expected to terminate at a small trusted LAN proxy if required.
 - SSE is currently a bounded one-shot snapshot and the UI uses five-second overview polling.
-- Privacy, integration, button and OTA panels expose the API model, but some settings are not yet persisted independently.
+- Privacy, integration, button and OTA panels expose the API model; OTA
+  actions remain image-dependent and some settings are not yet persisted independently.
 - Static IPv4 configuration, Ethernet, SSH control, restore/upload, and diagnostic bundle streaming need their future adapters.
 
 ## Public-source and security notes
