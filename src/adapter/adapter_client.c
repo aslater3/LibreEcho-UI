@@ -335,8 +335,10 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
     socklen_t error_size = (socklen_t)sizeof(error);
     int rc;
 
-    if (!sock_path || timeout_ms < 0 || strlen(sock_path) >= sizeof(address.sun_path))
+    if (!sock_path || timeout_ms < 0 || strlen(sock_path) >= sizeof(address.sun_path)) {
+        errno = EINVAL;
         return NULL;
+    }
     le_log_debug("adapter: connecting to %s (timeout %dms)", sock_path, timeout_ms);
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -351,14 +353,18 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
 
     flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        int saved_errno = errno;
         close(fd);
+        errno = saved_errno;
         return NULL;
     }
     rc = connect(fd, (struct sockaddr *)&address, address_len);
     if (rc < 0) {
         if (errno != EINPROGRESS) {
+            int saved_errno = errno;
             le_log_pdebug("adapter: connect(%s) failed", sock_path);
             close(fd);
+            errno = saved_errno;
             return NULL;
         }
         {
@@ -370,14 +376,18 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
                 rc = poll(&pfd, 1, timeout_ms);
             } while (rc < 0 && errno == EINTR);
             if (rc <= 0 || (pfd.revents & POLLNVAL)) {
+                int saved_errno = rc == 0 ? ETIMEDOUT : (rc < 0 ? errno : EBADF);
                 le_log_debug("adapter: connect(%s) timed out or invalid", sock_path);
                 close(fd);
+                errno = saved_errno;
                 return NULL;
             }
         }
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &error_size) < 0 ||
             error != 0) {
+            int saved_errno = error ? error : errno;
             close(fd);
+            errno = saved_errno ? saved_errno : EIO;
             return NULL;
         }
     }
@@ -385,6 +395,7 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
     a = (struct le_adapter *)malloc(sizeof(*a));
     if (!a) {
         close(fd);
+        errno = ENOMEM;
         return NULL;
     }
     a->fd = fd;

@@ -352,7 +352,8 @@ Browser: displays scan results
 
 | Layer | Error | Behavior |
 |-------|-------|----------|
-| Web daemon → adapter | Daemon not running | Returns `LE_NOT_SUPPORTED` → HTTP 501 |
+| Web daemon → adapter | Read-only status daemon not running | Returns HTTP 200 with `data.available=false` and `data.unavailable=true` |
+| Web daemon → adapter | State-changing operation with daemon not running | Returns `LE_NOT_SUPPORTED` → HTTP 501 |
 | Adapter → daemon | Daemon returns error | Returns `LE_IO` → HTTP 503 |
 | Daemon → hardware | Hardware missing | Returns error in `data.error` → HTTP 500 |
 | Config | Invalid JSON | Returns 400 with error message |

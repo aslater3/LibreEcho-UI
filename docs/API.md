@@ -153,7 +153,10 @@ because not every sender or future integration supplies it.
 
 #### GET /api/v1/audio
 
-Returns current audio state.
+Returns current audio state. When the audio adapter is absent, this remains a
+successful `200` response with `data.available: false` and
+`data.unavailable: true`; the browser uses that explicit capability result to
+render the existing unsupported state without logging an HTTP error.
 
 **Response:**
 ```json
@@ -300,7 +303,9 @@ text, warm local TTS, then `audiod` announcement playback.
 
 #### GET /api/v1/led
 
-Returns LED ring state.
+Returns LED ring state. When `ledd` is absent, this remains a successful `200`
+response with `data.available: false` and `data.unavailable: true`; mutating LED
+requests retain their normal unavailable-adapter error behavior.
 
 **Response:**
 ```json
@@ -707,7 +712,9 @@ Export diagnostic bundle.
 
 #### GET /api/v1/wake-word
 
-Returns wake word state.
+Returns wake word state. When the wake-word service is absent, this remains a
+successful `200` response with `data.available: false` and
+`data.unavailable: true`.
 
 **Response:**
 ```json
@@ -785,7 +792,9 @@ Update button mappings.
 #### GET /api/v1/bluetooth
 
 Returns native HCI controller state, Classic/LE capability flags, active
-discovery results, stored bond records, and any pending pairing request.
+discovery results, stored bond records, and any pending pairing request. When
+the Bluetooth adapter is absent, this remains a successful `200` response with
+`data.available: false` and `data.unavailable: true`.
 The response also includes `profile_state`, `profile_error`, and
 `profile_services`. Kernel protocol support is not reported as a userspace
 profile: `profile_services` is true only when the corresponding SDP/profile

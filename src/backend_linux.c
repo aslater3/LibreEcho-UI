@@ -375,8 +375,12 @@ static int adapter_command(const char *socket_path, const char *command,
         response[0] = '\0';
     adapter = le_adapter_connect(socket_path, 100);
     if (!adapter) {
-        le_log_debug("backend: adapter %s unavailable (daemon not running?)", command);
-        return LE_NOT_SUPPORTED;
+        if (errno == ENOENT || errno == ECONNREFUSED) {
+            le_log_debug("backend: adapter %s unavailable (daemon not running?)", command);
+            return LE_NOT_SUPPORTED;
+        }
+        le_log_debug("backend: adapter %s connection failed (errno=%d)", command, errno);
+        return LE_IO;
     }
     rc = le_adapter_call(adapter, command, args, response, response_size);
     le_adapter_close(adapter);
