@@ -58,6 +58,9 @@ struct le_adapter;
 struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms);
 void le_adapter_close(struct le_adapter *a);
 
+/* Set the per-request read/write poll timeout in milliseconds. */
+int le_adapter_set_io_timeout(struct le_adapter *a, int timeout_ms);
+
 /*
  * Send a command and wait for the matching response.
  *   cmd       – command name (e.g. "scan", "connect", "status")
