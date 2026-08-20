@@ -25,6 +25,10 @@ grep -q 'mark_startup_ready()' init/libreecho-web.init
 grep -q 'tmp="$STARTUP_READY.tmp"' init/libreecho-web.init
 grep -q 'for socket in network audio mic led bluetooth airplay' init/libreecho-web.init
 grep -q 'wyoming_service_ready()' init/libreecho-web.init
+grep -q 'WYOMING_PORT' init/libreecho-web.init
+grep -q 'configured_port=$(sh -c' init/libreecho-web.init
+grep -q 'stop_startup_ready_poller()' init/libreecho-web.init
+grep -q 'STARTUP_READY_PIDFILE' init/libreecho-web.init
 grep -q '/proc/net/tcp' init/libreecho-web.init
 grep -q 'wyoming_service_ready' init/libreecho-web.init
 

@@ -28,8 +28,29 @@ USERS_FILE=${USERS_FILE:-/data/libreecho/config/users}
 ARGS="$ARGS --users-file $USERS_FILE"
 STARTUP_READY=${STARTUP_READY:-/run/libreecho/startup-ready}
 STARTUP_READY_TIMEOUT_TICKS=${STARTUP_READY_TIMEOUT_TICKS:-600}
-PORT=10700
-[ -r /etc/default/libreecho-wyomingd ] && . /etc/default/libreecho-wyomingd
+STARTUP_READY_PIDFILE=${STARTUP_READY_PIDFILE:-/run/libreecho/web-startup-ready.pid}
+WYOMING_PIDFILE=${WYOMING_PIDFILE:-/var/run/libreecho-wyomingd.pid}
+WYOMING_WAKE_SOCKET=${WYOMING_WAKE_SOCKET:-/run/libreecho/wakeword.sock}
+WYOMING_WAKE_PIDFILE=${WYOMING_WAKE_PIDFILE:-/var/run/libreecho-waked.pid}
+WYOMING_PORT=${WYOMING_PORT:-10700}
+if [ -r /etc/default/libreecho-wyomingd ]; then
+    # Match the Wyoming init's shell semantics without importing its DAEMON,
+    # PIDFILE, LOGFILE or ARGS variables into this service.
+    configured_port=$(sh -c '
+        . /etc/default/libreecho-wyomingd || exit 1
+        set -- ${ARGS:-}
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --port) shift; printf "%s" "${1:-}"; exit 0 ;;
+                --port=*) printf "%s" "${1#--port=}"; exit 0 ;;
+            esac
+            shift
+        done
+        printf "%s" "${PORT:-}"
+    ' 2>/dev/null)
+    case "$configured_port" in ''|*[!0-9]*) ;; *) WYOMING_PORT=$configured_port ;; esac
+fi
+WYOMING_PORT=$(printf '%s' "$WYOMING_PORT" | sed 's/^0*//; s/^$/0/')
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1
@@ -50,7 +71,6 @@ startup_services_ready() {
     for socket in network audio mic led bluetooth airplay; do
         [ -S "/run/libreecho/$socket.sock" ] || return 1
     done
-    [ -f /run/libreecho/bluetooth-ready ] || return 1
     if [ -S /run/libreecho/stt.sock ] &&
        [ -S /run/libreecho/tts.sock ] &&
        [ -S /run/libreecho/agent.sock ]; then
@@ -67,30 +87,54 @@ startup_services_ready() {
 }
 
 wyoming_service_ready() {
-    pidfile=/var/run/libreecho-wyomingd.pid
+    pidfile=$WYOMING_PIDFILE
     [ -s "$pidfile" ] || return 1
     pid=$(sed -n '1p' "$pidfile")
     case "$pid" in *[!0-9]*|'') return 1 ;; esac
     kill -0 "$pid" 2>/dev/null || return 1
-    [ -S /run/libreecho/wakeword.sock ] || return 1
-    wake_pidfile=/var/run/libreecho-waked.pid
+    [ -S "$WYOMING_WAKE_SOCKET" ] || return 1
+    wake_pidfile=$WYOMING_WAKE_PIDFILE
     [ -s "$wake_pidfile" ] || return 1
     wake_pid=$(sed -n '1p' "$wake_pidfile")
     case "$wake_pid" in *[!0-9]*|'') return 1 ;; esac
     kill -0 "$wake_pid" 2>/dev/null || return 1
-    port_hex=$(printf '%04X' "$PORT") || return 1
+    case "$WYOMING_PORT" in ''|*[!0-9]*|0) return 1 ;; esac
+    [ "$WYOMING_PORT" -le 65535 ] || return 1
+    port_hex=$(printf '%04X' "$WYOMING_PORT") || return 1
     awk -v port="$port_hex" \
         '$4 == "0A" && $2 ~ (":" port "$") { found = 1 }
          END { exit found ? 0 : 1 }' /proc/net/tcp 2>/dev/null
 }
 
+stop_startup_ready_poller() {
+    [ -s "$STARTUP_READY_PIDFILE" ] || return 0
+    pid=$(sed -n '1p' "$STARTUP_READY_PIDFILE")
+    case "$pid" in *[!0-9]*|'') rm -f "$STARTUP_READY_PIDFILE"; return 0 ;; esac
+    if [ -r "/proc/$pid/cmdline" ] &&
+       tr '\000' ' ' <"/proc/$pid/cmdline" | grep -Fq "$0"; then
+        kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$STARTUP_READY_PIDFILE"
+}
+
+start_startup_ready_poller() {
+    mkdir -p "$(dirname "$STARTUP_READY_PIDFILE")" || return 1
+    (
+        while [ ! -s "$STARTUP_READY_PIDFILE" ]; do sleep 0.01; done
+        mark_startup_ready "$(sed -n '1p' "$STARTUP_READY_PIDFILE")"
+    ) >/dev/null 2>&1 &
+    printf '%s\n' "$!" >"$STARTUP_READY_PIDFILE"
+}
+
 mark_startup_ready() {
+    expected_poller_pid=$1
     count=0
     while :; do
         if startup_services_ready; then
             tmp="$STARTUP_READY.tmp"
             printf 'schema=1\n' >"$tmp" || return 1
             mv -f "$tmp" "$STARTUP_READY"
+            [ "$(sed -n '1p' "$STARTUP_READY_PIDFILE" 2>/dev/null)" = "$expected_poller_pid" ] && rm -f "$STARTUP_READY_PIDFILE"
             return 0
         fi
         sleep 0.1
@@ -111,6 +155,7 @@ start_service() {
 }
 
 stop_service() {
+    stop_startup_ready_poller
     if ! is_running; then rm -f "$PIDFILE"; return 0; fi
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
@@ -129,12 +174,18 @@ stop_service() {
 
 case "${1:-}" in
     start)
+        stop_startup_ready_poller
         rm -f "$STARTUP_READY" "$STARTUP_READY.tmp"
         start_service
-        mark_startup_ready >/dev/null 2>&1 &
+        start_startup_ready_poller
         ;;
     stop) stop_service ;;
-    restart) stop_service; rm -f "$STARTUP_READY" "$STARTUP_READY.tmp"; start_service; mark_startup_ready >/dev/null 2>&1 & ;;
+    restart)
+        stop_service
+        rm -f "$STARTUP_READY" "$STARTUP_READY.tmp"
+        start_service
+        start_startup_ready_poller
+        ;;
     status) if is_running; then echo "running"; else echo "stopped"; exit 1; fi ;;
     *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
 esac

@@ -19,6 +19,10 @@ assert 'btd: controller-info unavailable after retries' in source
 assert 'BT_READY_PATH' in source
 assert 'set_controller_ready(1)' in source
 assert 'set_controller_ready(0)' in source
+power_off = source.index('if (!enabled) {')
+power_on = source.index('if (!wmt_present())', power_off)
+assert 'set_controller_ready(0);' in source[power_off:power_on]
+assert 'set_controller_ready(0);\n    unlink(socket_path);' in source
 
 # The retry must happen before the daemon exits on its initial refresh failure.
 retry = source.index('wait_for_controller_info')
@@ -37,7 +41,8 @@ assert 'kill -0' in init
 # The startup gate must allow time for WMT/CONSYS activation while btd retries.
 assert 'STARTUP_READY_TIMEOUT_TICKS' in web
 assert 'STARTUP_READY_TIMEOUT_TICKS:-600' in web
-assert '[ -f /run/libreecho/bluetooth-ready ] || return 1' in web
+assert 'for socket in network audio mic led bluetooth airplay' in web
+assert '[ -f /run/libreecho/bluetooth-ready ] || return 1' not in web
 PY
 
 printf '%s\n' 'Bluetooth startup readiness retry contract: ok'

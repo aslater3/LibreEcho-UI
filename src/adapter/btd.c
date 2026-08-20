@@ -1877,6 +1877,7 @@ static int handle_request(struct bt_context *context, char *message,
                                                "Bluetooth power-off failed");
             context->enabled = 0;
             context->capability_ready = 0;
+            set_controller_ready(0);
             return le_adapter_respond_ok(response, response_size, id,
                                          "{\"enabled\":false}");
         }
@@ -2314,6 +2315,7 @@ int main(int argc, char **argv)
         close(context.mgmt_fd);
     if (context.profiles_opened)
         le_profile_close(&context.profiles);
+    set_controller_ready(0);
     unlink(socket_path);
     le_log_info("btd: stopped");
     return 0;
