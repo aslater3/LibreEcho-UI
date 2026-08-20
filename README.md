@@ -7,8 +7,8 @@ LibreEcho Web is a hardware-independent control centre for an Amazon Echo Gen 2-
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — System design, component interaction, data flow
 - **[API.md](docs/API.md)** — Complete HTTP API reference
 - **[HARDWARE.md](docs/HARDWARE.md)** — Adding new hardware subsystems
-- **[OPERATIONS.md](docs/OPERATIONS.md)** — Deployment, configuration, backup, troubleshooting
-- Hardware integration belongs in the product and development documentation; this repository documents the UI/API and service-daemon interfaces.
+- **[OPERATIONS.md](docs/OPERATIONS.md)** — Building, configuration, runtime operation, backup, and troubleshooting
+- Hardware integration, image construction, and device deployment belong in the separate LibreEcho product/build repositories; this repository contains the UI, API, daemon, init/service interfaces, tests, and contributor documentation.
 
 ## Architecture
 
@@ -27,7 +27,7 @@ HTTP limits + security headers + API validation
                 └── linux: /proc + statvfs + sysfs; hardware stubs
 ```
 
-Limits are fixed at 16 clients, 8 KiB headers, 16 KiB API bodies, 12 Wi-Fi scan results, 128 logs, and 64 events. Static paths reject `..` and backslashes. State-changing requests require `X-LibreEcho-CSRF`; device power actions additionally require `X-LibreEcho-Confirm`. The daemon binds to loopback by default and warns on a non-loopback bind. Development builds can use a bearer token or an opt-in local user file; local users are stored as salted SHA-256 records and receive in-memory bearer sessions. Do not expose a development image to an untrusted LAN.
+Limits are fixed at 16 clients, 8 KiB headers, 16 KiB API bodies, 12 Wi-Fi scan results, 128 logs, and 64 events. Static paths reject `..` and backslashes. State-changing requests require `X-LibreEcho-CSRF`; device power actions additionally require `X-LibreEcho-Confirm`. The daemon binds to loopback by default and warns on a non-loopback bind. Development builds can use a bearer token or an opt-in local user file; local users are stored as salted SHA-256 records and receive in-memory bearer sessions. The source is public for review and contribution; a development image or unauthenticated device control plane must not be exposed to an untrusted LAN.
 
 Create a private development users file with:
 
@@ -63,7 +63,7 @@ A reverse proxy is not required: the native daemon serves the frontend, API, Ope
 
 ## Build and run
 
-Requirements are a C99 compiler, POSIX libc, `make`, and (for API tests) `curl`.
+Requirements for the core build are a C99 compiler, POSIX libc, and `make`. API tests additionally use `curl` and `jq`; the complete voice/audio test suite also requires the relevant host development packages, including SpeexDSP. CI documents the full dependency setup in `.github/workflows/checks.yml`.
 
 ```sh
 make
@@ -83,7 +83,7 @@ For deterministic, isolated UI development:
   --dev-controls
 ```
 
-Open `http://127.0.0.1:8080`. A size-optimised production build compiles out development-control routes:
+Open `http://127.0.0.1:8080`. For a minimal UI daemon build, use `make build/libreecho-web`. A size-optimised production build compiles out development-control routes:
 
 ```sh
 make release
@@ -96,7 +96,7 @@ make CROSS_COMPILE=arm-linux-musleabihf- CC=gcc
 make DESTDIR=/tmp/libreecho-root PREFIX=/usr install
 ```
 
-`init/libreecho-web.init` is the BusyBox/SysV deployment option. `init/libreecho-web.service` is optional for development systems with systemd.
+`init/libreecho-web.init` is the BusyBox/SysV service definition and `init/libreecho-web.service` is the optional systemd service definition. The image/build repository is responsible for packaging these files into a device image.
 
 ## Backends
 
@@ -138,7 +138,7 @@ Development images report the update adapter as unavailable.
 make test
 ```
 
-The suite covers JSON/config units, API smoke behavior, malformed JSON, 16 KiB limits, CSRF, destructive confirmation, mock faults and delayed connections, secret redaction, restrictive config mode, restart persistence, Linux unsupported operations, and idle RSS. No hardware is required. See `tests/browser-checklist.md` for the responsive/accessibility smoke pass.
+The suite covers JSON/config units, API smoke behavior, malformed JSON, 16 KiB limits, CSRF, destructive confirmation, mock faults and delayed connections, Bluetooth/network/audio contracts, secret redaction, restrictive config mode, restart persistence, Linux unsupported operations, and idle RSS. No hardware is required, although the complete suite needs the host dependencies noted above. See `tests/browser-checklist.md` for the responsive/accessibility smoke pass.
 
 Binary sizes and runtime measurements are build- and target-dependent; measure
 them in the CI or release environment rather than treating historical local
@@ -205,6 +205,6 @@ Do not add undocumented ioctl numbers. Each integration belongs behind `backend.
 - Privacy, integration, button and OTA panels expose the API model, but some settings are not yet persisted independently.
 - Static IPv4 configuration, Ethernet, SSH control, restore/upload, and diagnostic bundle streaming need their future adapters.
 
-## Security notes
+## Public-source and security notes
 
-This prototype is not authorization to expose a physical-device control plane publicly. Before LAN production deployment, provision per-device authentication, store its secret separately with mode `0600`, add a login/session flow, tighten Origin validation to the configured host, and run the daemon as an unprivileged account. Never pass untrusted values through a shell, accept device paths over HTTP, or write raw partitions from this daemon.
+This repository is published as source for review and contribution; it is not a hosted service or a device image. The current daemon is still not authorization to expose a physical-device control plane to an untrusted network. Before LAN production deployment, provision per-device authentication, store its secret separately with mode `0600`, use the implemented login/session flow or bearer-token mode, tighten Origin validation to the configured host, and run the daemon as an unprivileged account. Never pass untrusted values through a shell, accept device paths over HTTP, or write raw partitions from this daemon. Wi-Fi credentials, user passwords, OAuth credentials, device identifiers, and build-local configuration must be supplied outside this source repository and image build inputs must be kept separate from public-release inputs.
