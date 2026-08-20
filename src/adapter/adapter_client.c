@@ -14,6 +14,7 @@
 struct le_adapter {
     int fd;
     unsigned long next_id;
+    int io_timeout_ms;
 };
 
 static const char *skip_ws(const char *p)
@@ -280,7 +281,7 @@ static int write_all(struct le_adapter *a, const char *buf, size_t size)
         if (n < 0 && errno == EINTR)
             continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            int rc = wait_for_fd(a->fd, POLLOUT, 5000);
+            int rc = wait_for_fd(a->fd, POLLOUT, a->io_timeout_ms);
             if (rc)
                 return rc;
             continue;
@@ -299,7 +300,7 @@ static int read_line(struct le_adapter *a, char *buf, size_t size)
     for (;;) {
         ssize_t n;
         size_t i;
-        int rc = wait_for_fd(a->fd, POLLIN, 5000);
+        int rc = wait_for_fd(a->fd, POLLIN, a->io_timeout_ms);
         if (rc)
             return rc;
         do {
@@ -389,6 +390,7 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
     }
     a->fd = fd;
     a->next_id = 1;
+    a->io_timeout_ms = 5000;
     le_log_debug("adapter: connected to %s (fd=%d)", sock_path, fd);
     return a;
 }
@@ -399,6 +401,12 @@ void le_adapter_close(struct le_adapter *a)
         return;
     close(a->fd);
     free(a);
+}
+
+void le_adapter_set_io_timeout(struct le_adapter *a, int timeout_ms)
+{
+    if (a && timeout_ms > 0)
+        a->io_timeout_ms = timeout_ms;
 }
 
 int le_adapter_call(struct le_adapter *a, const char *cmd,

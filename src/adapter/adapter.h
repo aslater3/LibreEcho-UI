@@ -59,6 +59,13 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms);
 void le_adapter_close(struct le_adapter *a);
 
 /*
+ * Override the per-IO poll timeout (default 5000 ms). Use a larger value for
+ * commands that legitimately take longer, e.g. an assistant reply that waits on
+ * a slow language model.
+ */
+void le_adapter_set_io_timeout(struct le_adapter *a, int timeout_ms);
+
+/*
  * Send a command and wait for the matching response.
  *   cmd       – command name (e.g. "scan", "connect", "status")
  *   args_json – JSON object string for "args", or NULL for {}

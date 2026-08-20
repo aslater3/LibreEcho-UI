@@ -175,7 +175,7 @@ int le_llm_credentials_save(const char *path,
     int result = -1;
 
     if (!path || !credentials ||
-        (!credentials->api_key[0] &&
+        (!credentials->api_key[0] && !credentials->base_url[0] &&
          (!token_safe(credentials->access_token) ||
           !token_safe(credentials->refresh_token))) ||
         (credentials->api_key[0] && !token_safe(credentials->api_key)) ||
