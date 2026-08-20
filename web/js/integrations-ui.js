@@ -172,9 +172,9 @@ async function integrationsPage() {
     api('/assistant').catch(error=>({unsupported:error.message})),
     api('/voice-pipeline').catch(()=>({mode:'local',stt:{},tts:{}}))
   ]);
-  const integrations=d.items.filter(x=>x.id!=='rest').map(x=>collapsiblePanel(x.name,
+  const integrations=d.items.map(x=>collapsiblePanel(x.name,
     `<p class="muted">${x.id==='rest'?'Versioned local device API.':'Optional local integration; no cloud connection required.'}</p>
-    ${toggle('Enabled',x.enabled,'int-'+x.id)}
+    ${toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
     <div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${x.enabled?'Enabled':'Not configured'}</span></div>
     ${saveButton('save-int-'+x.id)}`
   )).join('');
@@ -281,7 +281,7 @@ async function integrationsPage() {
     }
   }
 
-  d.items.filter(x=>x.id!=='rest').forEach(x=>{
+  d.items.forEach(x=>{
     bindDirty(['#int-'+x.id],'#save-int-'+x.id);
     $('#save-int-'+x.id).onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
   });
