@@ -112,6 +112,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     }
     json_escape(escaped_state,sizeof(escaped_state),state);
     json_escape(escaped_version,sizeof(escaped_version),version);
+    if(!installed_version[0])snprintf(installed_version,sizeof(installed_version),"%s",LE_OS_VERSION_STRING);
     json_escape(escaped_installed,sizeof(escaped_installed),installed_version);
     json_escape(escaped_rollback,sizeof(escaped_rollback),rollback_version);
     json_escape(escaped_latest,sizeof(escaped_latest),latest_version);
@@ -641,6 +642,12 @@ static int handle_voice_pipeline(struct api_context *c,
     if (!q->body || !q->body_len) {
         err(r, 400, LE_INVALID,
             "Voice pipeline configuration is required");
+        return 1;
+    }
+    if (access("/etc/init.d/libreecho-sttd.init", X_OK) < 0 ||
+        access("/etc/init.d/libreecho-ttsd.init", X_OK) < 0) {
+        err(r, 501, LE_NOT_SUPPORTED,
+            "The speech pipeline is not available in this image");
         return 1;
     }
     rc = voice_pipeline_update(c, q->body);
