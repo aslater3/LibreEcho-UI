@@ -35,6 +35,7 @@ sh tests/test_microphone_fanout_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_wake_word_ui_contract.py
 python3 tests/test_issue_34.py
+python3 tests/test_issue_94.py
 sh tests/test_device_identity.sh
 # The CPU online-mask fixture requires a Linux sysfs-shaped runtime and is run
 # separately; keep the aggregate suite deterministic across CI runners.
@@ -157,8 +158,8 @@ LIBREECHO_TIME_STATUS=./build/test-time.status \
 pid=$!
 sleep 1
 code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio")
-[ "$code" = 501 ]
-grep -q 'not_supported' /tmp/le-linux-audio.out
+[ "$code" = 200 ]
+jq -e '.ok == true and .data.available == false and .data.unavailable == true' /tmp/le-linux-audio.out >/dev/null
 code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/config/export")
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
