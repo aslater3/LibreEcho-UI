@@ -183,10 +183,9 @@ measurements as release claims.
 
 ## Hardware work still required
 
-The following Linux adapter functions deliberately return `not_supported` until the Echo hardware and companion-daemon protocols are researched:
+The following Linux adapter functions deliberately return `not_supported` until the Echo hardware and companion-daemon protocols are researched or available in the target image:
 
 - Audio state, volume, microphone gain/mute and test tone via `/run/libreecho/audio.sock`.
-- LED state/profile/brightness/test via `/run/libreecho/led.sock`.
 - Wi-Fi scan, credential handoff, connect/disconnect and interface state via `/run/libreecho/network.sock`.
 - Wake-word model state, sensitivity and test event via `/run/libreecho/wakeword.sock`.
 - Button mappings and physical mute-state input.
