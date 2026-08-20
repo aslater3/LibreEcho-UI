@@ -1,0 +1,294 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "LibreEcho Device API",
+    "version": "1.0.0",
+    "description": "Local administration API shared by the mock and Linux hardware backends. State-changing requests require X-LibreEcho-CSRF. Device power operations also require X-LibreEcho-Confirm."
+  },
+  "servers": [{"url":"/api/v1","description":"This LibreEcho device"}],
+  "tags": [
+    {"name":"Discovery"},{"name":"Authentication"},{"name":"Setup"},{"name":"Device"},{"name":"Audio"},{"name":"LED and buttons"},
+    {"name":"Wake word"},{"name":"Network"},{"name":"Bluetooth"},{"name":"Privacy"},{"name":"Assistant"},{"name":"Integrations"},
+    {"name":"System"},{"name":"Diagnostics"},{"name":"Development"}
+  ],
+  "paths": {
+    "/": {"get":{"tags":["Discovery"],"summary":"Discover API links","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/setup": {
+      "get":{"tags":["Setup"],"summary":"Read first-boot setup state","description":"Returns safe initial values and whether first-boot setup is complete. Wi-Fi credentials are never returned.","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "post":{"tags":["Setup"],"summary":"Complete first-boot AP-mode setup","description":"Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. This one-time operation is rejected after setup completes.","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/status": {"get":{"tags":["Device"],"summary":"Read system telemetry","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/device": {"get":{"tags":["Device"],"summary":"Read device identity","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/config": {"get":{"tags":["Discovery"],"summary":"Read API configuration metadata","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/auth": {"get":{"tags":["Authentication"],"summary":"Read current authentication session","security":[{"BearerAuth":[]}],"responses":{"200":{"$ref":"#/components/responses/Success"},"401":{"$ref":"#/components/responses/Error"}}}},
+    "/auth/login": {"post":{"tags":["Authentication"],"summary":"Create a local user session","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["username","password"],"properties":{"username":{"type":"string"},"password":{"type":"string","format":"password"}}}}}},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"}}}},
+    "/auth/bootstrap": {"post":{"tags":["Authentication"],"summary":"Create the first local administrator account","description":"Available only when the configured users file is absent or empty. The first successful request wins and immediately enables user authentication.","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["username","password","password_confirm"],"properties":{"username":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,31}$"},"password":{"type":"string","format":"password","minLength":8},"password_confirm":{"type":"string","format":"password","minLength":8}}}}}},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},
+    "/auth/users": {"get":{"tags":["Authentication"],"summary":"List local users","security":[{"BearerAuth":[]}],"responses":{"200":{"$ref":"#/components/responses/Success"},"401":{"$ref":"#/components/responses/Error"}}},"post":{"tags":["Authentication"],"summary":"Add a local user","security":[{"BearerAuth":[]}],"parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},
+    "/auth/users/{username}": {"delete":{"tags":["Authentication"],"summary":"Remove a local user","security":[{"BearerAuth":[]}],"parameters":[{"$ref":"#/components/parameters/Csrf"},{"name":"username","in":"path","required":true,"schema":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,31}$"}}],"responses":{"200":{"$ref":"#/components/responses/Success"},"401":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},
+    "/auth/logout": {"post":{"tags":["Authentication"],"summary":"Invalidate the current local user session","security":[{"BearerAuth":[]}],"parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"401":{"$ref":"#/components/responses/Error"}}}},
+    "/config/export": {"get":{"tags":["Device"],"summary":"Export portable device configuration","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/config/import": {"post":{"tags":["Device"],"summary":"Validate, apply and persist portable configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/audio": {
+      "get":{"tags":["Audio"],"summary":"Read audio state","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["Audio"],"summary":"Update volume, microphone state, or announcement voice","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/playback": {"get":{"tags":["Audio"],"summary":"Read unified playback source, priority-bus state and optional media metadata","responses":{"200":{"$ref":"#/components/responses/Success"},"503":{"$ref":"#/components/responses/Error"}}}},
+    "/audio/test": {"post":{"tags":["Audio"],"summary":"Play a test tone","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/audio/announce": {"post":{"tags":["Audio"],"summary":"Speak an announcement through the local speaker","description":"Queues text for the warm local TTS service. Audio is streamed into audiod's priority announcement bus so external local services do not need direct hardware access.","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["text"],"properties":{"text":{"type":"string","minLength":1,"maxLength":511}}}}}},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/audio/announce/stop": {"post":{"tags":["Audio"],"summary":"Stop the active spoken announcement","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/baby-monitor": {"get":{"tags":["Audio"],"summary":"List capture-capable microphone sources","description":"Returns the Echo 9-lane transport endpoint, the seven verified microphone lanes, and the seven-entry logical miccal contract. Values are read from /proc/idme/miccal.* with 16384 as the fallback. Raw browser monitoring does not apply logical gains until physical geometry ordering is verified; audio is never recorded.","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/baby-monitor/stream": {"get":{"tags":["Audio"],"summary":"Stream selected microphone audio","description":"Streams microphone audio at 16 kHz using HTTP chunked transfer encoding. When the wake-word service is running, the endpoint subscribes to its shared calibrated mono stream (pcm_s16_le, one channel) so baby monitoring does not open a second ALSA capture. If wake-word is unavailable, it falls back to the selected verified raw microphone lane using the 9-channel packed signed 24-bit little-endian PCM container (pcm_s24_3le) carrying sign-extended 16-bit samples; lanes 7 and 8 are inactive or reserved. The source query value is card:device and channel selects 0 through 6. Authentication is applied when enabled.","parameters":[{"name":"source","in":"query","required":true,"schema":{"type":"string","pattern":"^[0-9]{1,2}:[0-9]{1,2}$"}},{"name":"channel","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":6,"default":0}}],"responses":{"200":{"description":"Chunked PCM audio; format is declared by X-LibreEcho-Audio","content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth": {
+      "get":{"tags":["Bluetooth"],"summary":"Read Bluetooth controller, discovery, pairing, bond and profile-service state","description":"The response separates controller protocol capabilities from registered userspace profile services. Kernel RFCOMM, BNEP, or HIDP support alone does not make a profile service available. profile_state is pairing-only until SDP/profile services are installed and supervised.","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["Bluetooth"],"summary":"Enable Bluetooth or update discoverable/connectable settings","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/bluetooth/pairing-mode": {"post":{"tags":["Bluetooth"],"summary":"Enter or leave pairing mode and make the controller visible","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/scan": {"post":{"tags":["Bluetooth"],"summary":"Start a Classic + LE discovery scan","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"409":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/scan/stop": {"post":{"tags":["Bluetooth"],"summary":"Stop an active discovery scan","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/bluetooth/pair": {"post":{"tags":["Bluetooth"],"summary":"Start pairing with a discovered or known device","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/unpair": {"post":{"tags":["Bluetooth"],"summary":"Remove a paired device and its stored bond","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/disconnect": {"post":{"tags":["Bluetooth"],"summary":"Disconnect an active Bluetooth connection","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}},
+    "/bluetooth/pairing/response": {"post":{"tags":["Bluetooth"],"summary":"Answer a pending confirmation, passkey or PIN request","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"}}}},
+    "/led": {
+      "get":{"tags":["LED and buttons"],"summary":"Read LED state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "put":{"tags":["LED and buttons"],"summary":"Update LED colour, brightness or music visualizer preference","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/led/profile": {
+      "put": {
+        "tags": ["LED and buttons"],
+        "summary": "Save a named LED profile",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "r", "g", "b"],
+                "properties": {
+                  "name": {"type":"string","enum":["listening","thinking","error","dnd"]},
+                  "r": {"type":"integer","minimum":0,"maximum":255},
+                  "g": {"type":"integer","minimum":0,"maximum":255},
+                  "b": {"type":"integer","minimum":0,"maximum":255},
+                  "brightness": {"type":"integer","minimum":0,"maximum":100,"default":100}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "400": {"$ref":"#/components/responses/Error"},
+          "501": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/led/test": {"post":{"tags":["LED and buttons"],"summary":"Run the LED test","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/buttons": {
+      "get":{"tags":["LED and buttons"],"summary":"Read button mappings","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["LED and buttons"],"summary":"Update button mappings","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/wake-word": {
+      "get":{"tags":["Wake word"],"summary":"Read wake-word state","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "put":{"tags":["Wake word"],"summary":"Update model or sensitivity","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/wake-word/test": {"post":{"tags":["Wake word"],"summary":"Simulate wake-word detection","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/network": {
+      "get":{"tags":["Network"],"summary":"Read association, gateway liveness, and recovery state","responses":{"200":{"$ref":"#/components/responses/NetworkState"}}},
+      "put":{"tags":["Network"],"summary":"Update hostname and local access","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/network/wifi/scan": {"get":{"tags":["Network"],"summary":"Scan Wi-Fi networks","responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/network/wifi/connect": {"post":{"tags":["Network"],"summary":"Connect to Wi-Fi","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"503":{"$ref":"#/components/responses/Error"}}}},
+    "/network/wifi/disconnect": {"post":{"tags":["Network"],"summary":"Disconnect Wi-Fi","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/privacy": {
+      "get":{"tags":["Privacy"],"summary":"Read privacy configuration","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}},
+      "put":{"tags":["Privacy"],"summary":"Update privacy configuration","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/voice-pipeline": {
+      "get": {
+        "tags": ["Assistant"],
+        "summary": "Read speech pipeline configuration and endpoint health",
+        "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, and the on-device wake-word stage.",
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"}
+        }
+      },
+      "put": {
+        "tags": ["Assistant"],
+        "summary": "Configure and activate the speech pipeline",
+        "description": "Persists and applies local, custom, or Home Assistant mode. Custom mode uses remote Wyoming Whisper and Piper services while wake-word detection remains on-device.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["mode"],
+                "properties": {
+                  "mode": {"type":"string","enum":["local","custom","home-assistant"]},
+                  "stt_wyoming_uri": {"type":"string","pattern":"^tcp://.+:[0-9]+$"},
+                  "stt_model": {"type":"string","example":"whisper-small"},
+                  "tts_wyoming_uri": {"type":"string","pattern":"^tcp://.+:[0-9]+$"},
+                  "tts_voice": {"type":"string","example":"en_GB-alan-medium"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "400": {"$ref":"#/components/responses/Error"},
+          "501": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/assistant": {
+      "get": {
+        "tags": ["Assistant"],
+        "summary": "Read voice-assistant state and latency telemetry",
+        "description": "Reports subscription authentication, wake/STT stream health, and measured speech-end-to-first-PCM latency.",
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      },
+      "put": {
+        "tags": ["Assistant"],
+        "summary": "Configure the wake-to-reply assistant",
+        "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, and whether wake-to-reply is enabled. API keys are write-only and never returned.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {"type":"boolean"},
+                  "provider": {"type":"string","enum":["openai-codex","openai-compatible"]},
+                  "base_url": {"type":"string","format":"uri","description":"Configured OpenAI-compatible endpoint, usually ending in /v1"},
+                  "api_key": {"type":"string","writeOnly":true},
+                  "model": {"type":"string","minLength":1,"maxLength":95},
+                  "prompt": {"type":"string","minLength":1,"maxLength":2047}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "400": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/assistant/auth/start": {
+      "post": {
+        "tags": ["Assistant"],
+        "summary": "Start ChatGPT subscription device login",
+        "description": "Returns a verification URL and user code. LibreEcho does not request an OpenAI API key.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "502": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/assistant/auth/poll": {
+      "post": {
+        "tags": ["Assistant"],
+        "summary": "Check ChatGPT device-login completion",
+        "description": "Polls at the server-provided interval and stores successful OAuth credentials in the device's private persistent secret store.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "502": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/assistant/logout": {
+      "post": {
+        "tags": ["Assistant"],
+        "summary": "Disconnect the ChatGPT subscription",
+        "description": "Deletes the locally stored OAuth credentials and disables authenticated requests until device login is completed again.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "502": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/assistant/respond": {
+      "post": {
+        "tags": ["Assistant"],
+        "summary": "Stream a text request into spoken playback",
+        "description": "Sends text through the configured subscription provider, segments streamed response text at voice-safe boundaries, and queues it on the local announcement bus.",
+        "parameters": [{"$ref":"#/components/parameters/Csrf"}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                  "text": {"type":"string","minLength":1,"maxLength":4095}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"$ref":"#/components/responses/Success"},
+          "400": {"$ref":"#/components/responses/Error"},
+          "502": {"$ref":"#/components/responses/Error"},
+          "503": {"$ref":"#/components/responses/Error"}
+        }
+      }
+    },
+    "/integrations": {"get":{"tags":["Integrations"],"summary":"List integrations","responses":{"200":{"$ref":"#/components/responses/Success"},"405":{"$ref":"#/components/responses/Error"}}}},
+    "/integrations/{id}": {"put":{"tags":["Integrations"],"summary":"Enable or disable an integration","parameters":[{"$ref":"#/components/parameters/Csrf"},{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"},"405":{"$ref":"#/components/responses/Error"}}}},
+    "/system": {"get":{"tags":["System"],"summary":"Read OS, NTP and PMIC RTC state","description":"Reports whether network time has synchronized, the configured public peers, the last successful synchronization, and whether UTC was persisted to the hardware RTC.","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/provenance": {"get":{"tags":["System"],"summary":"Read build and source provenance","description":"Returns the OS version, source commit, clean/dirty source flag, and content digest embedded at build time.","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/system/update": {"get":{"tags":["System"],"summary":"Read signed A/B update and source-check state","description":"Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, and rollback state.","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/system/update/check": {"post":{"tags":["System"],"summary":"Check GitHub Releases for a signed update","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"501":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
+    "/system/update/apply": {"post":{"tags":["System"],"summary":"Download, verify and install the available update","description":"Requires a successful check reporting an available release, uses the same signed A/B installer as manual uploads, and does not restart the device.","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/system/update/automatic": {"put":{"tags":["System"],"summary":"Enable or disable automatic signed update installation","description":"Automatic installation is disabled by default and never restarts the device.","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/system/update/channel": {"put":{"tags":["System"],"summary":"Select the signed OTA update channel","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
+    "/system/update/upload": {"post":{"tags":["System"],"summary":"Stream a signed LibreEcho OTA tar to the inactive slot","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"required":true,"content":{"application/x-tar":{"schema":{"type":"string","format":"binary"}}}},"responses":{"200":{"$ref":"#/components/responses/Success"},"400":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"501":{"$ref":"#/components/responses/Error"}}}},
+    "/system/reboot": {"post":{"tags":["System"],"summary":"Reboot device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
+    "/system/shutdown": {"post":{"tags":["System"],"summary":"Shut down device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
+    "/system/factory-reset": {"post":{"tags":["System"],"summary":"Factory-reset device","parameters":[{"$ref":"#/components/parameters/Csrf"},{"$ref":"#/components/parameters/Confirm"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}},
+    "/logs": {"get":{"tags":["Diagnostics"],"summary":"Read bounded service logs","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/logs/stream": {"get":{"tags":["Diagnostics"],"summary":"Read log stream snapshot","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/events": {"get":{"tags":["Diagnostics"],"summary":"Read SSE event snapshot","responses":{"200":{"description":"text/event-stream"}}}},
+    "/diagnostics": {"get":{"tags":["Diagnostics"],"summary":"Run diagnostic checks","responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/diagnostics/export": {"post":{"tags":["Diagnostics"],"summary":"Prepare redacted diagnostics","parameters":[{"$ref":"#/components/parameters/Csrf"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}},
+    "/dev/mock": {"post":{"tags":["Development"],"summary":"Control mock state (development build only)","parameters":[{"$ref":"#/components/parameters/Csrf"}],"requestBody":{"$ref":"#/components/requestBodies/JsonObject"},"responses":{"200":{"$ref":"#/components/responses/Success"},"404":{"$ref":"#/components/responses/Error"}}}}
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth":{"type":"http","scheme":"bearer","description":"Optional device token enabled with --auth-token-file"}
+    },
+    "parameters": {
+      "Csrf":{"name":"X-LibreEcho-CSRF","in":"header","required":true,"description":"Use the 64-character token returned by GET /api/v1/config; it changes on daemon boot.","schema":{"type":"string","example":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}},
+      "Confirm":{"name":"X-LibreEcho-Confirm","in":"header","required":true,"schema":{"type":"string","example":"confirm-device-action"}}
+    },
+    "requestBodies": {"JsonObject":{"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}}},
+    "responses": {
+      "Success":{"description":"Successful LibreEcho response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Envelope"}}}},
+      "NetworkState":{"description":"Association and independently verified gateway-liveness state","content":{"application/json":{"schema":{"type":"object","required":["ok","data","error"],"properties":{"ok":{"type":"boolean"},"data":{"$ref":"#/components/schemas/NetworkState"},"error":{"nullable":true,"$ref":"#/components/schemas/ApiError"}}}}}},
+      "Error":{"description":"Structured error response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Envelope"}}}}
+    },
+    "schemas": {
+      "Envelope":{"type":"object","required":["ok","data","error"],"properties":{"ok":{"type":"boolean"},"data":{"nullable":true},"error":{"nullable":true,"$ref":"#/components/schemas/ApiError"}}},
+      "NetworkState":{"type":"object","required":["state","connectivity","recovery_stage","gateway_reachable","liveness_failures","ssid","signal","rssi_dbm","ip","gateway","dns","hostname","internet","dhcp","ssh","api_lan","api_lan_effective","api_lan_forced"],"properties":{"state":{"type":"string","description":"Wi-Fi association state"},"connectivity":{"type":"string","enum":["unknown","healthy","degraded","recovering","disconnected"]},"recovery_stage":{"type":"string","enum":["none","reassociate","interface-reset","reboot-requested","exhausted"]},"gateway_reachable":{"type":"boolean","nullable":true,"description":"Null until a probe can be completed"},"liveness_failures":{"type":"integer","minimum":0},"ssid":{"type":"string"},"signal":{"type":"integer","minimum":0,"maximum":100},"rssi_dbm":{"type":"integer"},"ip":{"type":"string"},"gateway":{"type":"string"},"dns":{"type":"string"},"hostname":{"type":"string"},"internet":{"type":"boolean"},"dhcp":{"type":"boolean"},"ssh":{"type":"boolean"},"api_lan":{"type":"boolean"},"api_lan_effective":{"type":"boolean"},"api_lan_forced":{"type":"boolean"}}},
+      "ApiError":{"type":"object","properties":{"code":{"type":"string"},"message":{"type":"string"}}}
+    }
+  }
+}

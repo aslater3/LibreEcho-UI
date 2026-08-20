@@ -1,0 +1,207 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          libreecho-airplayd
+# Required-Start:    $local_fs
+# Required-Stop:     $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: LibreEcho AirPlay 2 integration controller
+### END INIT INFO
+
+[ -r /etc/default/libreecho-airplayd ] && . /etc/default/libreecho-airplayd
+
+DAEMON=${DAEMON:-/usr/local/sbin/libreecho-airplayd}
+PIDFILE=${PIDFILE:-/var/run/libreecho-airplayd.pid}
+LOGFILE=${LOGFILE:-/var/log/libreecho-airplayd.log}
+LOG_MAX_BYTES=${LOG_MAX_BYTES:-2097152}
+LOG_KEEP_BYTES=${LOG_KEEP_BYTES:-262144}
+SOCKET=${SOCKET:-/run/libreecho/airplay.sock}
+PAYLOAD=${PAYLOAD:-/data/libreecho/features/airplay2/payload.squashfs}
+RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/airplay2/root}
+CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
+AVAHI_SERVICES_SOURCE=${AVAHI_SERVICES_SOURCE:-/data/libreecho/features/airplay2/avahi-services}
+AVAHI_CONFIG_SNAPSHOT=${AVAHI_CONFIG_SNAPSHOT:-/run/libreecho/airplay-avahi-daemon.conf}
+ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
+
+# The controller is always started, but the AirPlay children follow the
+# persisted integration toggle.  Bit 16 is the AirPlay 2 flag in the shared
+# integrations mask.  Keep this default-off when the persistent config is
+# absent or malformed.
+airplay_enabled_at_boot=0
+if [ -r "$CONFIG" ]; then
+    integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
+    case "$integrations" in
+        ''|*[!0-9]*) ;;
+        *)
+            if [ $((integrations & 16)) -ne 0 ]; then
+                airplay_enabled_at_boot=1
+            fi
+            ;;
+    esac
+fi
+if [ "$airplay_enabled_at_boot" -eq 1 ]; then
+    ARGS="$ARGS --enable-on-start"
+fi
+
+mount_led_socket() {
+    source_socket=/run/libreecho/led.sock
+    target_socket=$RUNTIME_ROOT/run/libreecho/led.sock
+    if grep -q " $target_socket " /proc/mounts 2>/dev/null; then
+        return 0
+    fi
+    count=0
+    while [ ! -S "$source_socket" ] && [ "$count" -lt 20 ]; do
+        sleep 0.1
+        count=$((count + 1))
+    done
+    [ -S "$source_socket" ] || {
+        echo "libreecho-airplayd: LED control socket unavailable" >&2
+        return 0
+    }
+    mkdir -p "$(dirname "$target_socket")"
+    : >"$target_socket"
+    mount --bind "$source_socket" "$target_socket" || {
+        rm -f "$target_socket"
+        echo "libreecho-airplayd: LED control socket bind failed" >&2
+        return 0
+    }
+}
+
+mount_runtime() {
+    [ -f "$PAYLOAD" ] || {
+        echo "libreecho-airplayd: feature payload missing: $PAYLOAD" >&2
+        return 1
+    }
+    mkdir -p "$RUNTIME_ROOT"
+    if grep -q " $RUNTIME_ROOT " /proc/mounts 2>/dev/null; then
+        mount_led_socket
+        return 0
+    fi
+    mount -t squashfs -o loop,ro,nosuid,nodev,noatime "$PAYLOAD" "$RUNTIME_ROOT" || {
+        echo "libreecho-airplayd: feature payload mount failed" >&2
+        return 1
+    }
+
+    # AirPlay's glibc runtime is isolated from the boot image's musl root.
+    # Share hardware/network namespaces, but give D-Bus and Avahi writable
+    # private runtime directories inside the feature root.
+    mkdir -p "$RUNTIME_ROOT/dev" "$RUNTIME_ROOT/proc" "$RUNTIME_ROOT/sys" \
+        "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/var" \
+        "$RUNTIME_ROOT/etc/avahi" "$RUNTIME_ROOT/etc/dbus-1/system.d"
+    mount --bind /dev "$RUNTIME_ROOT/dev"
+    # The /dev bind hides the payload's directory, so create the mount point
+    # after the bind and give NQPTP a private POSIX shared-memory namespace.
+    mkdir -p "$RUNTIME_ROOT/dev/shm"
+    mount -t proc proc "$RUNTIME_ROOT/proc"
+    mount --bind /sys "$RUNTIME_ROOT/sys"
+    mount -t tmpfs -o mode=0755,size=1m libreecho-airplay-run "$RUNTIME_ROOT/run"
+    mount -t tmpfs -o mode=0755,size=1m libreecho-airplay-var "$RUNTIME_ROOT/var"
+    mount -t tmpfs -o mode=1777,size=64k libreecho-airplay-shm "$RUNTIME_ROOT/dev/shm"
+    mkdir -p "$RUNTIME_ROOT/run/dbus" "$RUNTIME_ROOT/var/run" \
+        "$RUNTIME_ROOT/run/avahi-daemon" "$RUNTIME_ROOT/var/run/avahi-daemon" \
+        "$RUNTIME_ROOT/var/lib/avahi" "$RUNTIME_ROOT/run/libreecho" \
+        "$RUNTIME_ROOT/run/libreecho-audio" /run/libreecho-audio
+    # The shared directory is outside /run/libreecho so this bind cannot
+    # recurse through the feature runtime root.  It carries only the four PCM
+    # buses and source-volume state; the feature remains otherwise isolated.
+    mount --bind /run/libreecho-audio "$RUNTIME_ROOT/run/libreecho-audio"
+    prepare_avahi_runtime
+    mount_led_socket
+}
+
+prepare_avahi_runtime() {
+    [ -d "$RUNTIME_ROOT/etc/avahi/services" ] && return 0
+    mkdir -p "$(dirname "$AVAHI_CONFIG_SNAPSHOT")"
+    if [ -f "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" ]; then
+        cp "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" "$AVAHI_CONFIG_SNAPSHOT" || return 1
+    fi
+    mount -t tmpfs -o mode=0755,size=128k libreecho-airplay-avahi "$RUNTIME_ROOT/etc/avahi" || {
+        echo "libreecho-airplayd: could not create writable Avahi config root" >&2
+        return 1
+    }
+    if [ -f "$AVAHI_CONFIG_SNAPSHOT" ]; then
+        cp "$AVAHI_CONFIG_SNAPSHOT" "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" || return 1
+    fi
+    mkdir -p "$RUNTIME_ROOT/etc/avahi/services"
+    if [ -d "$AVAHI_SERVICES_SOURCE" ]; then
+        cp -a "$AVAHI_SERVICES_SOURCE/." "$RUNTIME_ROOT/etc/avahi/services/"
+    fi
+}
+
+unmount_runtime() {
+    umount "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
+    rm -f "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
+    umount "$RUNTIME_ROOT/etc/avahi" 2>/dev/null || true
+    rm -f "$AVAHI_CONFIG_SNAPSHOT" 2>/dev/null || true
+    umount "$RUNTIME_ROOT/run/libreecho-audio" 2>/dev/null || true
+    umount "$RUNTIME_ROOT/var" 2>/dev/null || true
+    umount "$RUNTIME_ROOT/run" 2>/dev/null || true
+    umount "$RUNTIME_ROOT/dev/shm" 2>/dev/null || true
+    umount "$RUNTIME_ROOT/sys" 2>/dev/null || true
+    umount "$RUNTIME_ROOT/proc" 2>/dev/null || true
+    umount "$RUNTIME_ROOT/dev" 2>/dev/null || true
+    umount "$RUNTIME_ROOT" 2>/dev/null || true
+}
+
+is_running() {
+    [ -s "$PIDFILE" ] || return 1
+    pid=$(sed -n '1p' "$PIDFILE")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+trim_log() {
+    [ -f "$LOGFILE" ] || return 0
+    size=$(wc -c <"$LOGFILE" 2>/dev/null || printf '0')
+    case "$size" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$size" -le "$LOG_MAX_BYTES" ] && return 0
+    tail -c "$LOG_KEEP_BYTES" "$LOGFILE" >"$LOGFILE.trim" || {
+        rm -f "$LOGFILE.trim"
+        return 0
+    }
+    chmod 0644 "$LOGFILE.trim"
+    mv "$LOGFILE.trim" "$LOGFILE"
+}
+
+start_service() {
+    if is_running; then echo "libreecho-airplayd already running"; return 0; fi
+    mount_runtime || true
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
+    trim_log
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        # Keep the controller and all chrooted AirPlay child stderr/stdout in
+        # one persistent log.  Without this redirection start-stop-daemon
+        # inherits the boot console and Shairport failures disappear when a
+        # real RAOP stream opens the ALSA device.
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS \
+            </dev/null >>"$LOGFILE" 2>&1
+    else
+        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+        echo $! >"$PIDFILE"
+    fi
+}
+
+stop_service() {
+    if is_running && command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
+    elif is_running; then
+        pid=$(sed -n '1p' "$PIDFILE")
+        kill "$pid" 2>/dev/null || true
+        count=0
+        while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 5 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+    unmount_runtime
+}
+
+case "${1:-}" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart) stop_service; start_service ;;
+    status) if is_running; then echo "running"; else echo "stopped"; exit 1; fi ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

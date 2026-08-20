@@ -1,0 +1,3 @@
+#include "event_bus.h"
+#include <string.h>
+void event_bus_init(struct le_event_bus*b){memset(b,0,sizeof(*b));b->next=1;}void event_bus_publish(struct le_event_bus*b,const char*t,const char*d){struct le_event*e=&b->items[(b->next-1)%LE_EVENT_COUNT];memset(e,0,sizeof(*e));e->id=b->next++;strncpy(e->type,t,sizeof(e->type)-1);strncpy(e->data,d,sizeof(e->data)-1);if(b->count<LE_EVENT_COUNT)b->count++;}size_t event_bus_since(struct le_event_bus*b,unsigned long id,struct le_event*out,size_t z){unsigned long first=b->next-b->count,i;size_t n=0;for(i=first;i<b->next&&n<z;i++)if(i>id)out[n++]=b->items[(i-1)%LE_EVENT_COUNT];return n;}

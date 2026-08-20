@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>LibreEcho Control Centre</title>
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="/css/app.css?rev=19" />
+</head>
+<body>
+<svg class="sprite" aria-hidden="true">
+  <symbol id="home" viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5M5.5 10.5V21h13V10.5M9.5 21v-6h5v6"/></symbol>
+  <symbol id="device" viewBox="0 0 24 24"><rect x="5" y="2.5" width="14" height="19" rx="2"/><path d="M9 5.5h6M11 18.5h2"/></symbol>
+  <symbol id="audio" viewBox="0 0 24 24"><path d="M4 10h4l5-4v12l-5-4H4zM17 9c1.3 1.7 1.3 4.3 0 6M19.5 6.5c3 3.1 3 7.9 0 11"/></symbol>
+  <symbol id="mic" viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="13" rx="4"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></symbol>
+  <symbol id="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></symbol>
+  <symbol id="wifi" viewBox="0 0 24 24"><path d="M2.5 8.5a15 15 0 0 1 19 0M5.5 12a10.2 10.2 0 0 1 13 0M8.7 15.4a5.2 5.2 0 0 1 6.6 0M12 19h.01"/></symbol>
+  <symbol id="bluetooth" viewBox="0 0 24 24"><path d="M12 3v18l5-5-5-5 5-5-5-5M6 7l12 10M6 17 18 7"/></symbol>
+  <symbol id="shield" viewBox="0 0 24 24"><path d="M12 3 20 6v5c0 5-3.2 8.6-8 10-4.8-1.4-8-5-8-10V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="puzzle" viewBox="0 0 24 24"><path d="M8 3h5v4a2 2 0 1 0 4 0V3h4v6h-4a2 2 0 1 0 0 4h4v8h-8v-4a2 2 0 1 0-4 0v4H3v-8h4a2 2 0 1 0 0-4H3V3z"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></symbol>
+  <symbol id="log" viewBox="0 0 24 24"><path d="M6 2.5h8l4 4V21.5H6zM14 2.5v5h5M9 12h6M9 16h6"/></symbol>
+  <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></symbol>
+</svg>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><img class="brand-mark" src="/assets/mark.svg" alt=""><div><strong><em>Libre</em>Echo</strong><small>Open. Private. Yours.</small></div></div>
+    <nav id="nav"></nav>
+    <div class="side-bottom">
+      <div class="status-card"><div class="online" id="device-online"><span></span>Connecting…</div><p id="sidebar-uptime">Uptime: —</p><div class="version-line"><p id="sidebar-version">LibreEcho OS</p><button id="update-available" class="update-available" type="button" hidden>Update available</button></div></div>
+      <a class="github-card" href="https://github.com/libreecho"><span class="github-dot">●</span><span>View on GitHub<small>github.com/libreecho</small></span></a>
+    </div>
+  </aside>
+  <main>
+    <header><button class="menu-btn" id="menu" aria-label="Toggle navigation">☰</button><div><h1 id="page-title">Overview</h1><p id="page-subtitle">Your LibreEcho at a glance</p></div><div class="header-actions"><span class="backend-badge" id="backend-badge">Connecting</span><button id="reboot" class="outline-btn">↻&nbsp; Reboot</button><button class="icon-btn" id="theme" aria-label="Toggle colour theme">☼</button><button class="outline-btn auth-control" id="auth-control" type="button">Sign in</button></div></header>
+    <section id="content" aria-live="polite"><div class="panel loading">Loading device state…</div></section>
+  </main>
+</div>
+<div class="toast" id="toast">Saved</div>
+<script src="/js/bluetooth.js?rev=2"></script>
+<script src="/js/app.js?rev=18"></script>
+<script src="/js/integrations-ui.js?rev=2"></script>
+<script src="/js/privacy-ui.js?rev=2"></script>
+</body>
+</html>

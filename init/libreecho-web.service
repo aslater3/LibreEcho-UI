@@ -1,0 +1,18 @@
+[Unit]
+Description=LibreEcho web administration interface
+After=network.target
+
+[Service]
+ExecStart=/usr/local/sbin/libreecho-web --backend linux --config /etc/libreecho/web-config.json --web-root /usr/local/share/libreecho/web --listen 127.0.0.1:8080
+User=libreecho
+Group=libreecho
+RuntimeDirectory=libreecho
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/libreecho /run/libreecho
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

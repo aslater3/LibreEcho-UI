@@ -1,0 +1,23 @@
+{
+  "device_name": "LibreEcho",
+  "hostname": "libreecho",
+  "hostname_persisted": false,
+  "volume": 50,
+  "microphone_gain": 65,
+  "microphone_muted": false,
+  "tts_voice": "southern-female",
+  "led_r": 72,
+  "led_g": 216,
+  "led_b": 118,
+  "led_brightness": 70,
+  "led_visualizer_enabled": true,
+  "wake_word": "LibreEcho",
+  "wake_enabled": true,
+  "wake_sensitivity": 68,
+  "voice_pipeline_mode": "local",
+  "stt_wyoming_uri": "",
+  "stt_wyoming_model": "whisper-small",
+  "tts_wyoming_uri": "",
+  "tts_wyoming_voice": "en_GB-alan-medium",
+  "bind": "127.0.0.1:8080"
+}
