@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible non-sensitive problem
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, Wi-Fi SSIDs/PSKs, tokens, serials, MACs, private IPs, local paths, or unredacted device logs. Use SECURITY.md for vulnerabilities.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Public version, tag, or commit tested.
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - mock
+        - linux
+        - image/target
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Give the smallest reproducible steps using redacted values.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Include safe logs, API responses, or test output only. Remove credentials and device identifiers.
+    validations:
+      required: false

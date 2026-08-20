@@ -11,6 +11,12 @@ LibreEcho UI is the browser control centre and native service layer for LibreEch
 
 This repository is **source for review and contribution**. It is not a hosted service, a complete device image, or a substitute for the separate LibreEcho product/build repositories.
 
+The root MIT license applies to LibreEcho-authored files unless a file carries
+another notice. Vendored SBC code is LGPL-2.1-or-later and retains its upstream
+copyright headers. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for
+the complete source/runtime boundary and [`SECURITY.md`](SECURITY.md) for
+private vulnerability reporting and redaction rules.
+
 ## Current state at a glance
 
 The project has several different evidence levels. They must not be confused:
