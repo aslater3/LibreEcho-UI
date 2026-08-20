@@ -42,6 +42,9 @@ def main() -> int:
                     break
                 time.sleep(0.1)
             assert http(port, "/")[0] == 200
+            css_status, css_body = http(port, "/css/app.css?rev=test")
+            assert css_status == 200
+            assert css_body.startswith(b"/*") or b"--" in css_body
             assert http(port, "/api/v1/status")[0] == 401
             status, _ = http(port, "/api/v1/network")
             assert status == 401

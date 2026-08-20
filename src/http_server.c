@@ -157,7 +157,7 @@ if(r.status>=200&&r.status<300&&!strcmp(q.method,"PUT")&&(!strcmp(q.path,"/api/v
 response(c->fd,r.status,r.type,r.body,r.length);
 if(body_len)memset(body,0,body_len);
 }else if(strcmp(q.method,"GET")&&strcmp(q.method,"HEAD"))response(c->fd,405,"text/plain","Method not allowed",18);
-else {page_path=q.path;if(!strcmp(q.path,"/login"))page_path="/login.html";else if(!strcmp(q.path,"/initial-setup"))page_path="/initial-setup.html";else if(!api->setup_completed)page_path="/setup.html";else if(api_bootstrap_required(api)&&!strcmp(q.path,"/"))page_path="/initial-setup.html";if(serve_file(c->fd,o,page_path))response(c->fd,404,"text/plain","Not found",9);}
+else {page_path=q.path;if(!strcmp(q.path,"/login"))page_path="/login.html";else if(!strcmp(q.path,"/initial-setup"))page_path="/initial-setup.html";else if(!strcmp(q.path,"/")&&!api->setup_completed)page_path="/setup.html";else if(api_bootstrap_required(api)&&!strcmp(q.path,"/"))page_path="/initial-setup.html";if(serve_file(c->fd,o,page_path))response(c->fd,404,"text/plain","Not found",9);}
 
 done:close(c->fd);
 c->fd=-1;
