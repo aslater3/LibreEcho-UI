@@ -885,7 +885,7 @@ Update privacy settings.
 
 #### PUT /api/v1/integrations
 
-Update integration toggles.
+Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.
 
 **Request:**
 ```json
@@ -904,7 +904,7 @@ Update integration toggles.
     "items": [
       { "id": "home-assistant", "name": "Home Assistant", "enabled": true },
       { "id": "mqtt", "name": "MQTT", "enabled": false },
-      { "id": "rest", "name": "Local REST API", "enabled": true },
+      { "id": "rest", "name": "Local REST API", "enabled": true, "forced": false },
       { "id": "bluetooth", "name": "Bluetooth audio", "enabled": false }
     ]
   },
