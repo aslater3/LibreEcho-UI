@@ -165,6 +165,7 @@ Core requirements:
 - C99 compiler and POSIX libc;
 - `make`;
 - `curl` and `jq` for API tests;
+- `bubblewrap` for the rootless virtual Echo service target;
 - SpeexDSP development headers/libraries for the complete voice AEC suite;
 - additional cross/inference dependencies only for the corresponding ARM32 voice targets.
 

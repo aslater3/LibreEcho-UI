@@ -153,18 +153,19 @@ def run_web(root: Path, host: str, port: int, web: Path) -> subprocess.Popen[byt
            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run",
            "--dir", "/run/libreecho", "--bind", str(runtime), "/run/libreecho",
            "--bind", str(data / "libreecho"), "/tmp/virtual-data",
-           str(web), "--backend", "mock", "--listen", f"{host}:{port}",
+           str(web), "--backend", "linux", "--listen", f"{host}:{port}",
            "--web-root", str(web.parent.parent / "web"),
            "--config", "/tmp/virtual-data/config/web-config.json",
            "--users-file", "/tmp/virtual-data/config/users", "--allow-insecure-lan"]
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
 
 
-def wait_http(port: int, timeout: float) -> bool:
+def wait_http(host: str, port: int, timeout: float) -> bool:
+    probe_host = "127.0.0.1" if host == "0.0.0.0" else "::1" if host == "::" else host
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.4) as s:
+            with socket.create_connection((probe_host, port), timeout=0.4) as s:
                 s.sendall(b"GET / HTTP/1.0\r\nHost: virtual\r\n\r\n")
                 return b"200" in s.recv(256)
         except OSError: time.sleep(0.1)
@@ -203,7 +204,7 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=True)
     state = State(root)
     if args.command == "check":
-        ok = wait_http(args.port, args.timeout)
+        ok = wait_http(args.host, args.port, args.timeout)
         print("virtual_echo_ready" if ok else "virtual_echo_not_ready")
         return 0 if ok else 1
     if pidfile.exists():
@@ -220,7 +221,7 @@ def main() -> int:
         return 2
     proc = run_web(root, args.host, args.port, web)
     pidfile.write_text(str(os.getpid()) + "\n")
-    if not wait_http(args.port, args.timeout):
+    if not wait_http(args.host, args.port, args.timeout):
         err = proc.stderr.read(4096).decode(errors="replace") if proc.stderr else ""
         proc.terminate()
         for server in servers: server.stop()
@@ -233,7 +234,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     print(json.dumps({"running": True, "pid": os.getpid(), "port": args.port,
-                      "root": str(root), "backend": "mock", "services": sorted(SERVICES)}), flush=True)
+                      "root": str(root), "backend": "linux", "services": sorted(SERVICES)}), flush=True)
     while not stopping.is_set() and proc.poll() is None:
         time.sleep(0.2)
     if proc.poll() is None:

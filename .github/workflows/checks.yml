@@ -30,7 +30,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential jq libspeexdsp-dev nodejs
+            build-essential bubblewrap jq libspeexdsp-dev nodejs
 
       - name: Stage SpeexDSP host dependency
         shell: bash

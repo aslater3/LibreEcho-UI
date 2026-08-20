@@ -62,12 +62,14 @@ def main() -> int:
             _, network_after_rest = call(base, "/api/v1/network", token=token)
             _, integrations_after_rest = call(base, "/api/v1/integrations", token=token)
             rest_after = next(item for item in integrations_after_rest["data"]["items"] if item["id"] == "rest")
+            assert network_after_rest["data"]["api_lan"] is False
             assert rest_after["enabled"] == network_after_rest["data"]["api_lan_effective"]
 
             call(base, "/api/v1/network", "PUT", {"api_lan": True}, token, csrf)
             _, network_after_network = call(base, "/api/v1/network", token=token)
             _, integrations_after_network = call(base, "/api/v1/integrations", token=token)
             rest_after_network = next(item for item in integrations_after_network["data"]["items"] if item["id"] == "rest")
+            assert network_after_network["data"]["api_lan"] is True
             assert rest_after_network["enabled"] == network_after_network["data"]["api_lan_effective"]
             print("issue_34_toggle_consistency=PASS")
             return 0

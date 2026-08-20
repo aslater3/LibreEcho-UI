@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import socket
+
 import subprocess
 import tempfile
 import time
@@ -22,14 +22,6 @@ def http(port: int, path: str) -> tuple[int, bytes]:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()
-
-
-def adapter_call(path: Path, command: str) -> dict:
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(3)
-        client.connect(str(path))
-        client.sendall((json.dumps({"v": 1, "id": 1, "cmd": command, "args": {}}) + "\n").encode())
-        return json.loads(client.makefile().readline())
 
 
 def main() -> int:
@@ -51,15 +43,39 @@ def main() -> int:
                 time.sleep(0.1)
             assert http(port, "/")[0] == 200
             assert http(port, "/api/v1/status")[0] == 401
-            network = adapter_call(root / "run/libreecho/network.sock", "status")
+            status, _ = http(port, "/api/v1/network")
+            assert status == 401
+            _, config = http(port, "/api/v1/config")
+            csrf = json.loads(config)["data"]["csrf_token"]
+            session_request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/v1/auth/bootstrap",
+                data=json.dumps({"username": "admin", "password": "test-password-123",
+                                 "password_confirm": "test-password-123"}).encode(),
+                method="POST", headers={"Content-Type": "application/json",
+                                         "X-LibreEcho-CSRF": csrf})
+            with urllib.request.urlopen(session_request, timeout=3) as response:
+                token = json.loads(response.read())["data"]["token"]
+            network_request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/v1/network",
+                headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(network_request, timeout=3) as response:
+                network = json.loads(response.read())
             assert network["ok"] is True
             assert network["data"]["connectivity"] == "healthy"
             subprocess.run(
                 ["python3", str(RUNNER), "fault", "network", "--root", str(root)],
                 check=True, stdout=subprocess.PIPE, text=True,
             )
-            failed = adapter_call(root / "run/libreecho/network.sock", "status")
-            assert failed["ok"] is False
+            network_request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/v1/network",
+                headers={"Authorization": f"Bearer {token}"})
+            try:
+                with urllib.request.urlopen(network_request, timeout=3) as response:
+                    failed = json.loads(response.read())
+            except urllib.error.HTTPError as error:
+                raise AssertionError(f"network adapter fault returned HTTP {error.code}") from error
+            assert failed["ok"] is True
+            assert failed["data"]["connectivity"] == "disconnected"
             print("virtual_echo_smoke=PASS")
             return 0
         finally:
