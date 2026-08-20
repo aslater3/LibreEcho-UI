@@ -125,7 +125,7 @@ Set `LIBREECHO_URL` when using a port other than 8080. These routes exist only i
 
 ## API and live state
 
-Implemented v1 areas include status, device, config metadata, audio, LED, buttons, wake word, Wi-Fi scan/connect/disconnect, network identity, privacy, integrations, system/OTA model, logs, diagnostics, events, and guarded power operations. The overview polls once every five seconds. `/api/v1/events` emits bounded SSE-formatted event snapshots, but a persistent multi-client SSE fan-out is deferred; polling avoids pretending that the initial one-shot stream is a full push service.
+The v1 API and mock backend cover status, device, config metadata, audio, LED, buttons, wake word, Wi-Fi scan/connect/disconnect, network identity, privacy, integrations, system/OTA model, logs, diagnostics, events, and guarded power operations. The Linux backend provides real system/network telemetry and forwards hardware operations to companion daemons where their AF_UNIX adapters are available; missing or unimplemented target adapters report `not_supported` rather than simulating success. The overview polls once every five seconds. `/api/v1/events` emits bounded SSE-formatted event snapshots, but a persistent multi-client SSE fan-out is deferred; polling avoids pretending that the initial one-shot stream is a full push service.
 
 OTA images expose signed A/B status and a streaming manual tar upload. The web
 daemon stores a bounded upload under `/data/libreecho/update/incoming` and
