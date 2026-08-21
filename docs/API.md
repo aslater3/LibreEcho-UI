@@ -588,6 +588,18 @@ previous check result; run the update check again before installing.
 
 `channel` must be `stable` or `dev`.
 
+#### POST /api/v1/system/update/upload
+
+Upload a manually selected OTA tar to the inactive slot. The upload is
+signature-verified by default and requires `X-LibreEcho-CSRF`.
+
+`GET /api/v1/system/update` reports `allow_unsigned: true` only when the
+installed update helper supports unsigned manual installation. When that flag
+is true, clients may send `X-LibreEcho-Allow-Unsigned: 1` for this upload only.
+That bypasses signature verification for the selected package; fetched and
+automatic updates never honor the header. The UI explicitly warns about this
+trust decision before uploading.
+
 ### Configuration
 
 #### GET /api/v1/config

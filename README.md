@@ -285,12 +285,6 @@ git diff --check
 
 See [`tests/browser-checklist.md`](tests/browser-checklist.md) for the responsive/accessibility pass.
 
-
-### Browser and voice-path tests
-
-- **`tests/e2e/`** — Playwright end-to-end UI tests, run against the emulation or a live device by IP (`BASE_URL=http://<host>:8080 LE_PASS=… npx playwright test`). See [`tests/e2e/README.md`](tests/e2e/README.md).
-- **`tests/integration/stt-llm/`** — end-to-end voice-path check (Wyoming STT → OpenAI-compatible LLM) with a `docker compose` stack. See [`tests/integration/stt-llm/README.md`](tests/integration/stt-llm/README.md).
-
 ## Security and public-source rules
 
 This repository is public source, not a public device control plane. The daemon binds to loopback by default. For authenticated LAN use, provision a per-device user file or bearer token outside Git, configure the exact allowed Origin, and run the daemon with the least privilege practical. Never use `--allow-insecure-lan` for a production device.

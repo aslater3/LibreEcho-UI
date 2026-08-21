@@ -655,12 +655,6 @@ static int handle_voice_pipeline(struct api_context *c,
             "Voice pipeline configuration is required");
         return 1;
     }
-    if (access("/etc/init.d/libreecho-sttd.init", X_OK) < 0 ||
-        access("/etc/init.d/libreecho-ttsd.init", X_OK) < 0) {
-        err(r, 501, LE_NOT_SUPPORTED,
-            "The speech pipeline is not available in this image");
-        return 1;
-    }
     rc = voice_pipeline_update(c, q->body);
     if (rc) {
         err(r, 400, rc,

@@ -32,10 +32,14 @@ extern int setgroups(int,const gid_t*);
 #define LE_UPDATE_PATH "/data/libreecho/update/incoming/manual.tar"
 #define LE_UPDATE_TMP "/data/libreecho/update/incoming/manual.tar.tmp"
 #define LE_UPDATE_LOCK "/data/libreecho/update/incoming/upload.lock"
+#define LE_MAX_ASSISTANT_WORKERS 4
 struct client{int fd;
 size_t used;
 char buf[LE_REQ_MAX+1];
 };
+static volatile sig_atomic_t assistant_workers;
+static volatile sig_atomic_t assistant_pids[LE_MAX_ASSISTANT_WORKERS];
+static void reap_assistant_workers(int signo){int i;int status;(void)signo;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]>0&&waitpid((pid_t)assistant_pids[i],&status,WNOHANG)>0){assistant_pids[i]=0;if(assistant_workers>0)assistant_workers--;}}
 
 static int close_on_exec(int fd)
 {
@@ -76,7 +80,7 @@ static int start_update_upload(int fd,const char*initial,size_t initial_len,size
 static const char *update_fetch_path(void){const char *p=getenv("LIBREECHO_UPDATE_FETCH");return p&&*p?p:"/usr/local/sbin/libreecho-update-fetch";}
 static int run_update_fetch(int fd,const char*action){char success[160];int status,n,channel_action=!strncmp(action,"set-channel-",12);pid_t child=fork();if(child<0){update_error(fd,503,"io_error","The update command could not start");close(fd);return 0;}if(child==0){const char *helper=update_fetch_path();execl(helper,helper,action,(char*)0);_exit(127);}if(waitpid(child,&status,0)<0||!WIFEXITED(status)||WEXITSTATUS(status)!=0){if(channel_action)update_error(fd,503,"io_error","The update channel could not be saved");else update_error(fd,!strcmp(action,"check")?503:400,!strcmp(action,"check")?"update_check_failed":"update_rejected",!strcmp(action,"check")?"The GitHub release check failed":"The signed update failed verification or installation");close(fd);return 0;}if(channel_action){n=snprintf(success,sizeof(success),"{\"ok\":true,\"data\":{\"channel\":\"%s\"},\"error\":null}",action+12);}else{n=snprintf(success,sizeof(success),"{\"ok\":true,\"data\":{\"checked\":%s,\"installed\":%s,\"state\":\"%s\"},\"error\":null}",!strcmp(action,"check")?"true":"false",!strcmp(action,"install")?"true":"false",!strcmp(action,"check")?"checked":"reboot-pending");}response(fd,200,"application/json",success,(size_t)n);close(fd);return 0;}
 static int start_update_fetch(int fd,const char*action){pid_t pid=fork();if(pid<0)return-1;if(pid==0){(void)run_update_fetch(fd,action);_exit(0);}close(fd);return 0;}
-static int start_api_worker(int fd,struct api_context*api,const struct api_request*q){pid_t pid=fork();struct api_response r;if(pid<0)return-1;if(pid==0){memset(&r,0,sizeof(r));api_handle(api,q,&r);response(fd,r.status,r.type,r.body,r.length);close(fd);_exit(0);}close(fd);return 0;}
+static int start_api_worker(int fd,struct api_context*api,const struct api_request*q){sigset_t blocked,previous;pid_t pid;int i,slot=-1;struct api_response r;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]<=0){slot=i;break;}if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);memset(&r,0,sizeof(r));api_handle(api,q,&r);response(fd,r.status,r.type,r.body,r.length);close(fd);_exit(0);}assistant_pids[slot]=pid;assistant_workers++;sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
 static char*header(char*s,const char*name){size_t n=strlen(name);
 char*p=strstr(s,"\r\n");
 while(p&&p[2]&&p[2]!='\r'){p+=2;
@@ -165,11 +169,11 @@ done:close(c->fd);
 c->fd=-1;
 c->used=0;
 }
-int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;
+int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
 struct sockaddr_in a;
 struct client c[LE_MAX_CLIENTS];
 struct pollfd p[LE_MAX_CLIENTS+1];
-time_t last_tick=0;
+time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_assistant_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
 if(max>LE_MAX_CLIENTS)max=LE_MAX_CLIENTS;
 memset(c,0,sizeof(c));
 for(i=0;
