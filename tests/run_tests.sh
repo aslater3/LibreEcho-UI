@@ -44,6 +44,7 @@ python3 tests/test_public_source_safety.py
 sh tests/test_source_provenance.sh
 sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
+sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh

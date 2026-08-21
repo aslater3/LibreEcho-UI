@@ -250,6 +250,24 @@ local streaming speech recognition, a subscription-authenticated response
 provider, and the same local announcement bus as the announce API. It never
 accepts or falls back to an OpenAI API key.
 
+#### GET /api/v1/voice-pipeline
+
+Returns speech-pipeline configuration and endpoint health. The response also
+includes the persisted `listening` object:
+
+```json
+{
+  "max_utterance_ms": 12000,
+  "end_silence_ms": 600,
+  "vad_floor_rms": 16
+}
+```
+
+`max_utterance_ms` accepts 2000–20000 milliseconds, `end_silence_ms` accepts
+200–3000 milliseconds, and `vad_floor_rms` accepts 1–1024. These values are
+read from the same persisted `web-config.json` used by `libreecho-sttd`; they
+are not inferred from the web daemon's environment.
+
 #### GET /api/v1/assistant
 
 Returns assistant configuration, ChatGPT device-login state, pipeline

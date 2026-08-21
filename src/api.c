@@ -305,21 +305,18 @@ static void ensure_voice_pipeline_config(struct api_context *c)
         strlen(value) < sizeof(c->tts_wyoming_voice))
         strcpy(c->tts_wyoming_voice, value);
 }
-/* sttd receives these through the environment (its init script exports them
-   from web-config.json), so the web daemon reads the same source of truth
-   rather than duplicating the parsing. */
-static int le_stt_setting(const char *name, int fallback)
+/* Read the persisted voice-pipeline settings used by libreecho-sttd. */
+static int le_stt_setting(const struct api_context *c, const char *key,
+                          int fallback)
 {
-    const char *value = getenv(name);
-    char *end;
-    long parsed;
+    char saved[16384];
+    int value;
 
-    if (!value || !value[0])
+    if (!c || !c->config_path[0] ||
+        config_read(c->config_path, saved, sizeof(saved)) <= 0 ||
+        json_get_int(saved, key, &value) != 1 || value < 0)
         return fallback;
-    parsed = strtol(value, &end, 10);
-    if (*end || parsed < 0 || parsed > 100000)
-        return fallback;
-    return (int)parsed;
+    return value;
 }
 static void voice_pipeline_json(struct api_context *c,
                                 struct api_response *r)
@@ -360,9 +357,9 @@ static void voice_pipeline_json(struct api_context *c,
         custom ? "wyoming" : "sherpa", tts_uri, tts_voice,
         c->tts_wyoming_uri[0] ? "true" : "false",
         tts_reachable ? "true" : "false",
-        le_stt_setting("LE_STT_MAX_UTTERANCE_MS", 8000),
-        le_stt_setting("LE_STT_END_SILENCE_MS", 600),
-        le_stt_setting("LE_STT_VAD_FLOOR_RMS", 16));
+        le_stt_setting(c, "stt_max_utterance_ms", 12000),
+        le_stt_setting(c, "stt_end_silence_ms", 600),
+        le_stt_setting(c, "stt_vad_floor_rms", 16));
 }
 static int voice_pipeline_update(struct api_context *c, const char *json)
 {

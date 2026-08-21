@@ -92,7 +92,7 @@ struct stt_engine *stt_engine_init(const char *model_dir,
     engine->start_timeout_ms = environment_unsigned(
         "LE_STT_START_TIMEOUT_MS", DEFAULT_START_TIMEOUT_MS, 1000, 15000);
     engine->max_utterance_ms = environment_unsigned(
-        "LE_STT_MAX_UTTERANCE_MS", DEFAULT_MAX_UTTERANCE_MS, 2000, 30000);
+        "LE_STT_MAX_UTTERANCE_MS", DEFAULT_MAX_UTTERANCE_MS, 2000, 20000);
     return engine;
 }
 
