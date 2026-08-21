@@ -21,7 +21,7 @@ code=$(curl -sS -o /tmp/le-repeat-setup.out -w '%{http_code}' -X POST "$URL/api/
 [ "$code" = 409 ]
 ! grep -q 'top-secret' "$CFG"
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
-expect "$(curl -fsS "$URL/swagger.html")" 'LibreEcho API Reference'
+expect "$(curl -fsS "$URL/swagger.html")" 'API reference · LibreEcho'
 expect "$(curl -fsS "$URL/js/swagger.js")" 'executeOperation'
 expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
 curl -fsS "$URL/api/v1/playback" | jq -e \

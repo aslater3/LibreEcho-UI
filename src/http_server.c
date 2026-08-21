@@ -53,6 +53,7 @@ if(!strcmp(e,".html"))return"text/html; charset=utf-8";
 if(!strcmp(e,".css"))return"text/css; charset=utf-8";
 if(!strcmp(e,".js"))return"application/javascript; charset=utf-8";
 if(!strcmp(e,".json"))return"application/json; charset=utf-8";
+if(!strcmp(e,".webmanifest"))return"application/manifest+json; charset=utf-8";
 if(!strcmp(e,".svg"))return"image/svg+xml";
 if(!strcmp(e,".png"))return"image/png";
 return"application/octet-stream";
