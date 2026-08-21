@@ -73,6 +73,7 @@ struct context {
     unsigned int hold_ms;
     unsigned int brightness;
     int held_key;        /* key code being held, 0 when idle */
+    int rescan_requested;
     long long next_repeat_ms;
 };
 
@@ -176,6 +177,18 @@ static void discover(struct context *ctx)
     if (ctx->device_count)
         le_log_info("buttond: %zu input device(s) with volume or mute keys",
                     ctx->device_count);
+}
+
+static void remove_device(struct context *ctx, size_t index)
+{
+    size_t i;
+
+    close(ctx->devices[index].fd);
+    for (i = index + 1; i < ctx->device_count; i++)
+        ctx->devices[i - 1] = ctx->devices[i];
+    --ctx->device_count;
+    ctx->held_key = 0;
+    ctx->rescan_requested = 1;
 }
 
 /* ------------------------------ Adapter calls --------------------------- */
@@ -298,15 +311,21 @@ static void handle_key(struct context *ctx, int code, int value)
     }
     switch (code) {
     case KEY_VOLUMEUP:
+        if (value == 1)
+            (void)refresh_audio(ctx);
         adjust_volume(ctx, 1);
         break;
     case KEY_VOLUMEDOWN:
+        if (value == 1)
+            (void)refresh_audio(ctx);
         adjust_volume(ctx, -1);
         break;
     case KEY_MUTE:
     case KEY_MICMUTE:
-        if (value == 1)
+        if (value == 1) {
+            (void)refresh_audio(ctx);
             toggle_mute(ctx);
+        }
         return;              /* mute does not repeat while held */
     default:
         return;
@@ -384,7 +403,9 @@ int main(int argc, char **argv)
             ctx.next_repeat_ms = monotonic_ms() + REPEAT_INTERVAL_MS;
             continue;
         }
-        if (!ctx.device_count && monotonic_ms() >= next_rescan_ms) {
+        if (!ctx.device_count &&
+            (ctx.rescan_requested || monotonic_ms() >= next_rescan_ms)) {
+            ctx.rescan_requested = 0;
             discover(&ctx);
             next_rescan_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
             continue;
@@ -394,6 +415,13 @@ int main(int argc, char **argv)
             ssize_t n;
             size_t k;
 
+            if (fds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+                le_log_warn("buttond: input device %s disconnected",
+                            ctx.devices[i].name);
+                remove_device(&ctx, i);
+                --i;
+                continue;
+            }
             if (!(fds[i].revents & POLLIN))
                 continue;
             n = read(ctx.devices[i].fd, events, sizeof(events));

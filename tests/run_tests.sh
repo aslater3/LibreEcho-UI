@@ -28,6 +28,7 @@ sh tests/test_network_scan_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 sh tests/test_startup_animation.sh
+sh tests/test_buttond_contract.sh
 sh tests/test_bluetooth_startup_readiness_contract.sh
 sh tests/test_bluetooth_decoder_state_contract.sh
 make build/test-wake-led
