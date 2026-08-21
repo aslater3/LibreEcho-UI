@@ -150,6 +150,16 @@ static int publish_transcript_event(int fd, const char *event_name,
         return -1;
     length = le_adapter_format_event(
         event, sizeof(event), event_name, data);
+    if (length >= 0 && final && getenv("LIBREECHO_STTD_FRAGMENT_TRANSCRIPT")) {
+        int split = length / 2;
+
+        struct timespec fragment_delay = {0, 10000000L};
+
+        if (write_all(fd, event, (size_t)split) < 0)
+            return -1;
+        nanosleep(&fragment_delay, NULL);
+        return write_all(fd, event + split, (size_t)(length - split));
+    }
     return length < 0
         ? -1 : write_all(fd, event, (size_t)length);
 }
