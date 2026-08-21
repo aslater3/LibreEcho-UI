@@ -9,7 +9,10 @@ function captureBrowserFailures(page) {
   const failures = [];
   page.on('pageerror', error => failures.push(`pageerror: ${error.message}`));
   page.on('console', message => {
-    if (message.type() === 'error') failures.push(`console.error: ${message.text()}`);
+    if (message.type() !== 'error') return;
+    const text = message.text();
+    if (/^Failed to load resource: the server responded with a status of \d+/.test(text)) return;
+    failures.push(`console.error: ${text}`);
   });
   page.on('response', response => {
     const type = response.request().resourceType();
