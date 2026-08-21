@@ -42,13 +42,21 @@ All responses use the same envelope:
   "ok": true|false,
   "data": { ... },
   "error": {
-    "code": "not_supported|invalid|io|busy|auth",
+    "code": "not_supported|invalid|io|busy|auth|update_rejected",
+    "reason": "Optional sanitized machine-readable reason",
     "message": "Human-readable description"
   }
 }
 ```
 
 ## Endpoints
+
+For `POST /api/v1/system/update/upload`, a rejected installer response may include
+`error.reason`, a bounded token containing only lowercase letters, digits, `_`, and
+`-`. For example, `current_slot_not_confirmed` identifies the installer check
+that refused the package; the field is omitted when the helper emits no `ERROR:`
+token. `manifest_update_channel_mismatch` also receives a channel-specific human
+message.
 
 ### System Status
 

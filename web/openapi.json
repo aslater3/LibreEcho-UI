@@ -289,7 +289,7 @@
     "schemas": {
       "Envelope":{"type":"object","required":["ok","data","error"],"properties":{"ok":{"type":"boolean"},"data":{"nullable":true},"error":{"nullable":true,"$ref":"#/components/schemas/ApiError"}}},
       "NetworkState":{"type":"object","required":["state","connectivity","recovery_stage","gateway_reachable","liveness_failures","ssid","signal","rssi_dbm","ip","gateway","dns","hostname","internet","dhcp","ssh","api_lan","api_lan_effective","api_lan_forced"],"properties":{"state":{"type":"string","description":"Wi-Fi association state"},"connectivity":{"type":"string","enum":["unknown","healthy","degraded","recovering","disconnected"]},"recovery_stage":{"type":"string","enum":["none","reassociate","interface-reset","reboot-requested","exhausted"]},"gateway_reachable":{"type":"boolean","nullable":true,"description":"Null until a probe can be completed"},"liveness_failures":{"type":"integer","minimum":0},"ssid":{"type":"string"},"signal":{"type":"integer","minimum":0,"maximum":100},"rssi_dbm":{"type":"integer"},"ip":{"type":"string"},"gateway":{"type":"string"},"dns":{"type":"string"},"hostname":{"type":"string"},"internet":{"type":"boolean"},"dhcp":{"type":"boolean"},"ssh":{"type":"boolean"},"api_lan":{"type":"boolean"},"api_lan_effective":{"type":"boolean"},"api_lan_forced":{"type":"boolean"}}},
-      "ApiError":{"type":"object","properties":{"code":{"type":"string"},"message":{"type":"string"}}}
+      "ApiError":{"type":"object","properties":{"code":{"type":"string"},"reason":{"type":"string","description":"Sanitized installer reason token when an OTA update is rejected"},"message":{"type":"string"}}}
     }
   }
 }
