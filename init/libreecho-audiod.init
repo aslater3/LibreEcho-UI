@@ -13,7 +13,34 @@ DAEMON=${DAEMON:-/usr/local/sbin/libreecho-audiod}
 PIDFILE=${PIDFILE:-/var/run/libreecho-audiod.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-audiod.log}
 SOCKET=${SOCKET:-/run/libreecho/audio.sock}
+CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
 ARGS=${ARGS:---foreground --socket $SOCKET}
+
+config_number() {
+    key=$1
+    fallback=$2
+    value=
+    if [ -r "$CONFIG" ]; then
+        value=$(sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" \
+            "$CONFIG" | sed -n '1p')
+    fi
+    case "$value" in ''|*[!0-9]*) value=$fallback ;; esac
+    printf '%s\n' "$value"
+}
+
+# The codec powers up at its own default, and audiod only ever read the mixer,
+# so a gain set through the API survived in web-config.json while the hardware
+# quietly reverted on every boot.  The configured VAD floor is chosen for a
+# particular capture gain, so a silent revert also broke voice: the floor no
+# longer matched the signal.  Hand the persisted levels to the daemon so it can
+# put the hardware back where the owner left it.
+apply_persisted_levels() {
+    LE_AUDIO_MIC_GAIN=$(config_number microphone_gain "")
+    LE_AUDIO_VOLUME=$(config_number volume "")
+    [ -n "$LE_AUDIO_MIC_GAIN" ] && export LE_AUDIO_MIC_GAIN
+    [ -n "$LE_AUDIO_VOLUME" ] && export LE_AUDIO_VOLUME
+    return 0
+}
 
 is_running() {
     [ -s "$PIDFILE" ] || return 1
@@ -25,6 +52,7 @@ is_running() {
 start_service() {
     if is_running; then echo "libreecho-audiod already running"; return 0; fi
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
+    apply_persisted_levels
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else
