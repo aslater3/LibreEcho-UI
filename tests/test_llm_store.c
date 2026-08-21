@@ -53,6 +53,19 @@ int main(void)
     CHECK(!strcmp(loaded.base_url, saved.base_url));
     CHECK(loaded.access_token[0] == '\0');
     CHECK(le_llm_credentials_remove(path) == 0);
+
+    /* Keyless openai-compatible endpoint: base_url only, no api key or OAuth
+       tokens. It must round-trip; previously load() rejected it and the local
+       LLM appeared signed-out after an agentd restart. */
+    memset(&saved, 0, sizeof(saved));
+    strcpy(saved.base_url, "http://127.0.0.1:11434/v1");
+    CHECK(le_llm_credentials_save(path, &saved) == 0);
+    memset(&loaded, 0, sizeof(loaded));
+    CHECK(le_llm_credentials_load(path, &loaded) == 0);
+    CHECK(!strcmp(loaded.base_url, saved.base_url));
+    CHECK(loaded.api_key[0] == '\0');
+    CHECK(loaded.access_token[0] == '\0');
+    CHECK(le_llm_credentials_remove(path) == 0);
     rmdir(directory);
     puts("llm store: private atomic OAuth and local credentials: ok");
     return 0;

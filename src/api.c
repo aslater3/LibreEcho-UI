@@ -51,7 +51,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         !access("/usr/local/sbin/libreecho-bootctl",X_OK)&&
         !access("/usr/local/sbin/libreecho-update",X_OK)&&
         !access("/usr/local/sbin/libreecho-update-fetch",X_OK);
-    int progress=0,pending=0,automatic=0;
+    int progress=0,pending=0,automatic=0,allow_unsigned=0;
     long last_check=0,last_success=0;
 
     if(supported){
@@ -112,8 +112,19 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     }
     json_escape(escaped_state,sizeof(escaped_state),state);
     json_escape(escaped_version,sizeof(escaped_version),version);
+    if(!installed_version[0])snprintf(installed_version,sizeof(installed_version),"%s",LE_OS_VERSION_STRING);
     json_escape(escaped_installed,sizeof(escaped_installed),installed_version);
     json_escape(escaped_rollback,sizeof(escaped_rollback),rollback_version);
+    /* Advertise unsigned manual upload only when the installed update tool
+       actually supports --allow-unsigned; an older tool prints usage on the
+       unknown 'capabilities' subcommand and exits non-zero, so the flag stays
+       off and the UI hides the checkbox. Avoids a broken side-load path when
+       this UI ships ahead of the matching platform change. */
+    if(supported&&(f=popen("/usr/local/sbin/libreecho-update capabilities 2>/dev/null","r"))){
+        char cap[64];
+        while(fgets(cap,sizeof(cap),f)){cap[strcspn(cap,"\r\n")]=0;if(!strcmp(cap,"allow-unsigned"))allow_unsigned=1;}
+        pclose(f);
+    }
     json_escape(escaped_latest,sizeof(escaped_latest),latest_version);
     json_escape(escaped_check_status,sizeof(escaped_check_status),check_status);
     json_escape(escaped_check_error,sizeof(escaped_check_error),check_error);
@@ -129,14 +140,15 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         "\"last_check_epoch\":%ld,\"last_success_epoch\":%ld,"
         "\"automatic_updates\":%s,"
         "\"rollback_available\":%s,\"rollback_version\":\"%s\","
-        "\"max_upload_bytes\":33554432},"
+        "\"allow_unsigned\":%s,\"max_upload_bytes\":33554432},"
         "\"error\":null}",supported?"true":"false",current,inactive,escaped_state,
         progress,pending?"true":"false",escaped_version,escaped_installed,
         escaped_latest,escaped_channel,escaped_source,escaped_reachable,
         escaped_check_status,escaped_check_error,last_check,last_success,
-        automatic?"true":"false",supported?"true":"false",escaped_rollback);
+        automatic?"true":"false",supported?"true":"false",escaped_rollback,
+        allow_unsigned?"true":"false");
 }
-static int agent_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*agent=le_adapter_connect(LE_ADAPTER_AGENT_SOCK,15000);int rc;if(!agent)return LE_NOT_SUPPORTED;rc=le_adapter_call(agent,command,args,output,size);le_adapter_close(agent);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
+static int agent_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*agent=le_adapter_connect(LE_ADAPTER_AGENT_SOCK,15000);int rc;if(!agent)return LE_NOT_SUPPORTED;if(!strcmp(command,"respond"))le_adapter_set_io_timeout(agent,120000);rc=le_adapter_call(agent,command,args,output,size);le_adapter_close(agent);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
 static void agent_result(struct api_response*r,const char*command,const char*args){char data[LE_ADAPTER_MSG_MAX];int rc=agent_command(command,args,data,sizeof(data));if(rc)err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?503:502,rc,rc==LE_NOT_SUPPORTED?"Voice assistant service is unavailable":rc==LE_INVALID?data:"Voice assistant service request failed");else ok(r,data);}
 static int wifi_scan_json(struct api_response*r,const struct le_wifi_scan*s){size_t i,n=0;char ssid[LE_TEXT*2],security[32];int written;if(!r||!s)return -1;written=snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"networks\":[");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;for(i=0;i<s->count&&i<LE_MAX_WIFI;i++){json_escape(ssid,sizeof(ssid),s->networks[i].ssid);json_escape(security,sizeof(security),s->networks[i].security);written=snprintf(r->body+n,sizeof(r->body)-n,"%s{\"ssid\":\"%s\",\"security\":\"%s\",\"signal\":%d}",i?",":"",ssid,security,s->networks[i].signal);if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;}written=snprintf(r->body+n,sizeof(r->body)-n,"]},\"error\":null}");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n+(size_t)written;return 0;}
 static int persist_configuration(struct api_context*);

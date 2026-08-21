@@ -5,6 +5,16 @@ CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_tok
 config=$(curl -fsS "$URL/api/v1/config")
 printf '%s' "$config" | jq -e '.data.authentication == "bootstrap-required" and .data.bootstrap_required == true' >/dev/null
 curl -fsS "$URL/" | grep -q 'Create your first local account'
+# Deep-linking to an SPA route while bootstrap is required must serve the setup
+# page, not the app shell (whose API calls would then 401 with "setup is
+# required"). Regression for the real-URL pathname routing change: the bootstrap
+# fallback must cover every extensionless route, not just "/".
+for route in /system /network /integrations; do
+    curl -fsS "$URL$route" | grep -q 'Create your first local account'
+done
+# A real asset path that does not exist must still 404 (not fall back to setup).
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/nope.js")
+[ "$code" = 404 ]
 code=$(curl -sS -o /tmp/le-bootstrap-bad.out -w '%{http_code}' \
     -X POST "$URL/api/v1/auth/bootstrap" -H "$CSRF" \
     -H 'Content-Type: application/json' \
