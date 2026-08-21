@@ -48,6 +48,11 @@
 #define FRAME_MS 33
 #define IS31_CHANNELS 36
 #define RING_PIXELS 12
+#define METER_DEFAULT_HOLD_MS 1500U
+#define METER_MAX_HOLD_MS 10000U
+/* Unlit gauge pixels keep a faint trace of the colour so the ring reads as a
+   dial with an empty section rather than as a few disconnected pixels. */
+#define METER_TRACK_PERCENT 6U
 #define VISUALIZER_TIMEOUT_SECONDS 0.42
 #define STARTUP_READY_PATH "/run/libreecho/startup-ready"
 #define STARTUP_FRAME_MS 88
@@ -175,6 +180,11 @@ struct daemon_context {
     unsigned int visualizer_mood_candidate_frames;
     double visualizer_last_frame;
     double visualizer_started;
+    int meter_active;
+    unsigned int meter_value;
+    struct colour meter_colour;
+    double meter_expires;
+    char meter_owner[32];
     struct pixel rendered_pixels[RING_PIXELS];
 };
 
@@ -1553,6 +1563,58 @@ static void expire_visualizer(struct daemon_context *ctx, double now)
     }
 }
 
+static void copy_pattern_owner(char *destination, const char *source);
+
+/*
+ * Render a 0..100 reading as a filled arc around the ring.  The IS31FL3236
+ * backend drives all twelve pixels individually, so a level can be shown as
+ * a proportion of the ring rather than as a colour change.  On the
+ * single-RGB backends hardware_write_pixels() averages the pixels down, so
+ * the same arc degrades to proportional dimming instead of being lost.
+ */
+static void apply_meter(struct daemon_context *ctx)
+{
+    struct pixel pixels[RING_PIXELS];
+    unsigned int scaled = ctx->meter_value * RING_PIXELS;
+    unsigned int filled = scaled / 100U;
+    unsigned int partial = scaled % 100U;
+    unsigned int brightness = ctx->meter_colour.brightness;
+    size_t i;
+
+    for (i = 0; i < RING_PIXELS; i++) {
+        unsigned int level;
+
+        if (i < filled)
+            level = brightness;
+        else if (i == filled && partial)
+            level = brightness * partial / 100U;
+        else
+            level = brightness * METER_TRACK_PERCENT / 100U;
+        /*
+         * A reading of zero still lights the first pixel at the track level,
+         * which keeps "volume 0" distinguishable from "ring off" -- pressing
+         * volume-down to silence should still acknowledge the press.
+         */
+        pixels[i].r = scale_channel(ctx->meter_colour.r, level);
+        pixels[i].g = scale_channel(ctx->meter_colour.g, level);
+        pixels[i].b = scale_channel(ctx->meter_colour.b, level);
+    }
+    hardware_apply_pixels(ctx, pixels);
+}
+
+static void start_meter(struct daemon_context *ctx, unsigned int value,
+                        const struct colour *colour, unsigned int hold_ms,
+                        const char *owner, double now)
+{
+    ctx->meter_value = value > 100U ? 100U : value;
+    ctx->meter_colour = *colour;
+    if (!hold_ms || hold_ms > METER_MAX_HOLD_MS)
+        hold_ms = METER_DEFAULT_HOLD_MS;
+    ctx->meter_expires = now + hold_ms / 1000.0;
+    copy_pattern_owner(ctx->meter_owner, owner);
+    ctx->meter_active = 1;
+}
+
 static void apply_base_layer(struct daemon_context *ctx, double now)
 {
     expire_visualizer(ctx, now);
@@ -1881,6 +1943,14 @@ static void update_animation(struct daemon_context *ctx, double now)
     }
 
     expire_visualizer(ctx, now);
+    if (ctx->meter_active && now >= ctx->meter_expires) {
+        ctx->meter_active = 0;
+        ctx->meter_owner[0] = '\0';
+        if (!ctx->test_active && !ctx->pattern_active) {
+            apply_base_layer(ctx, now);
+            return;
+        }
+    }
     if (ctx->test_active) {
         elapsed = now - ctx->test_started;
         if (elapsed >= 2.0) {
@@ -1900,6 +1970,8 @@ static void update_animation(struct daemon_context *ctx, double now)
         }
     } else if (ctx->pattern_active) {
         update_pattern(ctx, now);
+    } else if (ctx->meter_active) {
+        apply_meter(ctx);
     } else if (ctx->visualizer_active) {
         apply_visualizer(ctx, now);
     } else if (ctx->animation_active) {
@@ -1924,6 +1996,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
         "\"visualizer_enabled\":%s,\"visualizer_active\":%s,"
         "\"visualizer_owner\":\"%s\","
         "\"visualizer_mood\":\"%s\","
+        "\"meter_active\":%s,\"meter_value\":%u,\"meter_owner\":\"%s\","
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"profiles\":{",
         ctx->state.current.r, ctx->state.current.g, ctx->state.current.b,
@@ -1940,6 +2013,8 @@ static int status_json(const struct daemon_context *ctx, char *out,
                 ctx->visualizer_mood >= 0 &&
                 ctx->visualizer_mood < VISUALIZER_MOOD_COUNT
             ? visualizer_mood_names[ctx->visualizer_mood] : "idle",
+        ctx->meter_active ? "true" : "false", ctx->meter_value,
+        ctx->meter_owner,
         ctx->state.boot.r, ctx->state.boot.g,
         ctx->state.boot.b, ctx->state.boot.brightness);
     if (n < 0 || (size_t)n >= out_size)
@@ -2122,6 +2197,45 @@ static int handle_request(struct daemon_context *ctx, int fd,
             return send_response(fd, request.id, 0, NULL,
                                  "pattern is reserved until per-pixel LED hardware is available");
         return send_response(fd, request.id, 0, NULL, "unknown LED pattern");
+    }
+
+    if (strcmp(request.command, "meter") == 0) {
+        unsigned int value, hold = METER_DEFAULT_HOLD_MS;
+        char owner[32];
+
+        if (!request.have_args || get_arg_owner(&request, owner) != 0)
+            return send_response(fd, request.id, 0, NULL,
+                                 "meter requires a valid owner");
+        if (json_get_string(request.args, "action", pattern,
+                            sizeof(pattern)) == 0 && !strcmp(pattern, "stop")) {
+            if (ctx->meter_active &&
+                (!owner[0] || !strcmp(owner, ctx->meter_owner))) {
+                ctx->meter_active = 0;
+                ctx->meter_owner[0] = '\0';
+                if (!ctx->test_active && !ctx->pattern_active)
+                    apply_base_layer(ctx, now);
+            }
+            return send_response(fd, request.id, 1,
+                                 "{\"meter_active\":false}", NULL);
+        }
+        if (get_arg_unsigned(&request, "value", &value, 100) != 0 ||
+            get_arg_unsigned(&request, "r", &r, 255) != 0 ||
+            get_arg_unsigned(&request, "g", &g, 255) != 0 ||
+            get_arg_unsigned(&request, "b", &b, 255) != 0 ||
+            get_arg_unsigned(&request, "brightness", &brightness, 100) != 0)
+            return send_response(
+                fd, request.id, 0, NULL,
+                "meter requires value, r, g, b and brightness");
+        (void)get_arg_unsigned(&request, "hold_ms", &hold, METER_MAX_HOLD_MS);
+        colour.r = r;
+        colour.g = g;
+        colour.b = b;
+        colour.brightness = brightness;
+        start_meter(ctx, value, &colour, hold, owner, now);
+        if (!ctx->test_active && !ctx->pattern_active)
+            apply_meter(ctx);
+        return send_response(fd, request.id, 1, "{\"meter_active\":true}",
+                             NULL);
     }
 
     if (strcmp(request.command, "visualizer") == 0) {
@@ -2507,7 +2621,7 @@ int main(int argc, char **argv)
         if (ctx.startup_animation_active)
             timeout = STARTUP_FRAME_MS;
         else if (ctx.test_active || ctx.animation_active || ctx.pattern_active ||
-                 ctx.visualizer_active)
+                 ctx.visualizer_active || ctx.meter_active)
             timeout = FRAME_MS;
 
         for (j = 0; j < MAX_CLIENTS; j++) {
@@ -2535,7 +2649,8 @@ int main(int argc, char **argv)
                 receive_client(&ctx, &ctx.clients[slot]);
         }
         if (ctx.startup_animation_active || ctx.test_active ||
-            ctx.animation_active || ctx.pattern_active || ctx.visualizer_active)
+            ctx.animation_active || ctx.pattern_active ||
+            ctx.visualizer_active || ctx.meter_active)
             update_animation(&ctx, monotonic_seconds());
     }
 
