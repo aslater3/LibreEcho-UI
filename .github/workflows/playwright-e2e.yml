@@ -1,0 +1,71 @@
+name: LibreEcho browser E2E
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'src/http_server.c'
+      - 'src/api.c'
+      - 'src/auth.c'
+      - 'src/backend*.c'
+      - 'config/**'
+      - 'tests/e2e/**'
+      - '.github/workflows/playwright-e2e.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'web/**'
+      - 'src/http_server.c'
+      - 'src/api.c'
+      - 'src/auth.c'
+      - 'src/backend*.c'
+      - 'config/**'
+      - 'tests/e2e/**'
+      - '.github/workflows/playwright-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chromium_e2e:
+    name: Chromium browser smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out UI source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Install native test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential jq
+
+      - name: Install pinned Playwright runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/libreecho-playwright"
+          npm install \
+            --prefix "$RUNNER_TEMP/libreecho-playwright" \
+            --no-save \
+            --no-package-lock \
+            playwright@1.55.0
+          "$RUNNER_TEMP/libreecho-playwright/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Run browser E2E checks
+        shell: bash
+        env:
+          NODE_PATH: ${{ runner.temp }}/libreecho-playwright/node_modules
+        run: |
+          set -euo pipefail
+          sh tests/e2e/run.sh
