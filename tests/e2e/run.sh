@@ -8,7 +8,6 @@ LOG=./build/e2e-server.log
 
 mkdir -p ./build
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$LOG"
-printf '{}\n' >"$CFG"
 
 make build/libreecho-web
 
