@@ -90,10 +90,54 @@ static int level_to_syslog(enum le_log_level level)
 }
 #endif
 
+#define LE_LOG_MSG_MAX 1024
+
+/*
+ * Escape a message for interpolation into the "msg" JSON string.
+ *
+ * The line below is assembled by hand rather than by a JSON writer, so an
+ * unescaped quote in a log message closed the string early and everything
+ * after it became malformed JSON.  Readers parse the file with
+ * json_get_string(), which stops at that quote, so the rest of the message
+ * was silently dropped -- a daemon logging a quoted device name recorded
+ * only the text before it.  Backslashes and control characters have the
+ * same effect.  json_escape() lives in json.c, which most daemons do not
+ * link, so keep a local copy here rather than adding the dependency to
+ * every companion daemon.
+ */
+static void escape_json(char *out, size_t out_size, const char *in)
+{
+    size_t o = 0;
+
+    if (!out_size)
+        return;
+    for (; *in && o + 7 < out_size; in++) {
+        unsigned char c = (unsigned char)*in;
+
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c == '\n') {
+            out[o++] = '\\'; out[o++] = 'n';
+        } else if (c == '\r') {
+            out[o++] = '\\'; out[o++] = 'r';
+        } else if (c == '\t') {
+            out[o++] = '\\'; out[o++] = 't';
+        } else if (c < 0x20 || c == 0x7f) {
+            o += (size_t)snprintf(out + o, out_size - o, "\\u%04x", c);
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
 void le_log(enum le_log_level level, const char *fmt, ...)
 {
     va_list ap;
-    char msg[1024];
+    char msg[LE_LOG_MSG_MAX];
+    /* Worst case every byte becomes a six-character \u00xx escape. */
+    char escaped[LE_LOG_MSG_MAX * 6 + 1];
     char json[LE_LOGD_MSG_MAX];
     struct timespec ts, mono;
     struct tm tm;
@@ -114,9 +158,11 @@ void le_log(enum le_log_level level, const char *fmt, ...)
     localtime_r(&ts.tv_sec, &tm);
     strftime(stamp, sizeof(stamp), "%H:%M:%S", &tm);
 
+    escape_json(escaped, sizeof(escaped), msg);
     n = snprintf(json, sizeof(json),
                  "{\"ts\":%ld,\"boot_seconds\":%ld,\"level\":\"%s\",\"service\":\"%s\",\"msg\":\"%s\"}\n",
-                 (long)ts.tv_sec, (long)mono.tv_sec, level_str(level), ident_buf, msg);
+                 (long)ts.tv_sec, (long)mono.tv_sec, level_str(level), ident_buf,
+                 escaped);
 
     /* Send to central log daemon if connected */
     if (n > 0 && n < (int)sizeof(json) && logd_fd >= 0) {
@@ -150,7 +196,7 @@ void le_log(enum le_log_level level, const char *fmt, ...)
 void le_log_perror(enum le_log_level level, const char *fmt, ...)
 {
     va_list ap;
-    char msg[1024];
+    char msg[LE_LOG_MSG_MAX];
     int saved_errno = errno;
 
     if (level < threshold)

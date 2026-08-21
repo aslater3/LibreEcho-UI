@@ -170,7 +170,7 @@ static void discover(struct context *ctx)
         snprintf(ctx->devices[ctx->device_count].name,
                  sizeof(ctx->devices[ctx->device_count].name), "%s", name);
         ctx->device_count++;
-        le_log_info("buttond: watching %s (\"%s\")", path, name);
+        le_log_info("buttond: watching %s [%s]", path, name);
     }
     closedir(dir);
     if (ctx->device_count)
