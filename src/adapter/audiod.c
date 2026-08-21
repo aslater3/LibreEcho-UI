@@ -900,6 +900,63 @@ static int audio_set_mute(struct audio_hw *audio, int muted)
     return 0;
 }
 
+/*
+ * Restore the owner's capture gain and playback volume at startup.
+ *
+ * audio_init() only ever *read* the mixer, so whatever the codec powered up
+ * with became the reported state.  The values the web daemon persists were
+ * therefore decorative: a gain set through the API survived in
+ * web-config.json but the hardware reset to its own default on every boot.
+ *
+ * That is not merely cosmetic here.  The VAD floor has to sit above the
+ * noise the capture path actually produces, so it is chosen for a given
+ * gain; when the gain silently reverted, the configured floor no longer
+ * matched the signal and the device either stopped hearing speech or
+ * stopped detecting end-of-speech.  Restoring the gain keeps the two in
+ * step across a reboot.
+ *
+ * The values arrive through the environment, which is how the init scripts
+ * already pass persisted settings to the other daemons.
+ */
+static int audio_set_gain(struct audio_hw *audio, int gain);
+static int audio_set_volume(struct audio_hw *audio, int volume);
+
+static int level_from_environment(const char *name, int *value)
+{
+    const char *text = getenv(name);
+    char *end;
+    long parsed;
+
+    if (!text || !text[0])
+        return 0;
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if (errno || *end || parsed < 0 || parsed > 100)
+        return 0;
+    *value = (int)parsed;
+    return 1;
+}
+
+static void apply_persisted_levels(struct audio_hw *audio)
+{
+    int value;
+
+    if (!audio->have_card_info)
+        return;
+    if (level_from_environment("LE_AUDIO_MIC_GAIN", &value)) {
+        if (audio_set_gain(audio, value) == 0)
+            le_log_info("audiod: restored microphone gain %d", value);
+        else
+            le_log_warn("audiod: unable to restore microphone gain %d", value);
+    }
+    if (level_from_environment("LE_AUDIO_VOLUME", &value)) {
+        if (audio_set_volume(audio, value) == 0)
+            le_log_info("audiod: restored volume %d", value);
+        else
+            le_log_warn("audiod: unable to restore volume %d", value);
+    }
+}
+
 static void audio_init(struct audio_hw *audio, int card)
 {
     struct snd_ctl_card_info card_info;
@@ -934,6 +991,7 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->output_available = audio->have_card_info && audio->master.found &&
                               access(audio->pcm_path, F_OK) == 0;
     audio->amplifier_on = 0;
+    apply_persisted_levels(audio);
 }
 
 static void audio_destroy(struct audio_hw *audio)
