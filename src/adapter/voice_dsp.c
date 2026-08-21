@@ -245,7 +245,7 @@ int le_voice_vad_set_floor_rms(
 {
     uint64_t minimum_energy;
 
-    if (!vad || floor_rms < 1U || floor_rms > 1024U)
+    if (!vad || floor_rms < 1U || floor_rms > LE_VOICE_VAD_MAX_FLOOR_RMS)
         return -1;
     minimum_energy = (uint64_t)floor_rms * floor_rms;
     vad->minimum_energy = minimum_energy;

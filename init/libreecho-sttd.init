@@ -97,8 +97,8 @@ start_service() {
         # to the maximum.  Owners can shorten the cap and raise the noise floor
         # from the config rather than needing a new build.
         export LE_STT_MAX_UTTERANCE_MS=$(config_number stt_max_utterance_ms 6000)
-        export LE_STT_END_SILENCE_MS=$(config_number stt_end_silence_ms 1500)
-        export LE_STT_VAD_FLOOR_RMS=$(config_number stt_vad_floor_rms 45)
+        export LE_STT_END_SILENCE_MS=$(config_number stt_end_silence_ms 1000)
+        export LE_STT_VAD_FLOOR_RMS=$(config_number stt_vad_floor_rms 3300)
         ARGS=${ARGS:---socket $SOCKET --model-dir $ENDPOINT --threads 1}
     else
         mount_runtime || return 1
