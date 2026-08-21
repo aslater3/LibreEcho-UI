@@ -22,42 +22,9 @@ is_running() {
     kill -0 "$pid" 2>/dev/null
 }
 
-CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
-# The TLV320AIC3101 comes up with its analog capture PGA at 0, and nothing in
-# the image ever raises it -- the UI's microphone_gain is only ever reported,
-# never applied to the codec. The result is a device that is effectively deaf:
-# the wake word fires only when someone is close and loud, and end-of-speech
-# detection has almost no signal to work with. Measured on hardware: with the
-# PGA at 0 "Alexa" produced no detection at all; at 60 it scored 0.9998.
-#
-# Apply the configured gain to the codec before micd opens the device, and
-# never let it reach 0. Silencing the microphone is what microphone_muted is
-# for; a zero preamp just makes the device look broken.
-MIC_PGA_MIN=${MIC_PGA_MIN:-24}
-MIC_PGA_MAX=${MIC_PGA_MAX:-95}
-
-apply_capture_gain() {
-    command -v tinymix >/dev/null 2>&1 || return 0
-    gain=
-    if [ -r "$CONFIG" ]; then
-        gain=$(sed -n 's/.*"microphone_gain"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-            "$CONFIG" | sed -n '1p')
-    fi
-    case "$gain" in ''|*[!0-9]*) gain=50 ;; esac
-    [ "$gain" -gt 100 ] && gain=100
-    pga=$(( gain * MIC_PGA_MAX / 100 ))
-    [ "$pga" -lt "$MIC_PGA_MIN" ] && pga=$MIC_PGA_MIN
-    if tinymix -D 0 set "PGA Level Volume" "$pga" "$pga" >/dev/null 2>&1; then
-        echo "libreecho-micd: capture PGA set to $pga (gain $gain)" >&2
-    else
-        echo "libreecho-micd: could not set capture PGA" >&2
-    fi
-}
-
 start_service() {
     if is_running; then echo "libreecho-micd already running"; return 0; fi
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
-    apply_capture_gain
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else
