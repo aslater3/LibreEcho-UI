@@ -20,6 +20,20 @@ THREADS=${THREADS:-2}
 CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
 WYOMING_DAEMON=${WYOMING_DAEMON:-/usr/local/sbin/libreecho-sttd-wyoming}
 
+# Numeric settings are written unquoted in web-config.json, so they need a
+# separate matcher from config_string.
+config_number() {
+    key=$1
+    fallback=$2
+    value=
+    if [ -r "$CONFIG" ]; then
+        value=$(sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" \
+            "$CONFIG" | sed -n '1p')
+    fi
+    case "$value" in ''|*[!0-9]*) value=$fallback ;; esac
+    printf '%s\n' "$value"
+}
+
 config_string() {
     key=$1
     fallback=$2
@@ -76,6 +90,15 @@ start_service() {
         DAEMON=$WYOMING_DAEMON
         export LE_STT_WYOMING_URI=$ENDPOINT
         export LE_STT_WYOMING_MODEL=$MODEL
+        # How long the device listens after the wake word, and how it decides
+        # the speaker has finished.  These need to be tunable per room: a
+        # household with a television or other people talking keeps the VAD
+        # permanently "active", so end-of-speech never fires and the turn runs
+        # to the maximum.  Owners can shorten the cap and raise the noise floor
+        # from the config rather than needing a new build.
+        export LE_STT_MAX_UTTERANCE_MS=$(config_number stt_max_utterance_ms 12000)
+        export LE_STT_END_SILENCE_MS=$(config_number stt_end_silence_ms 600)
+        export LE_STT_VAD_FLOOR_RMS=$(config_number stt_vad_floor_rms 16)
         ARGS=${ARGS:---socket $SOCKET --model-dir $ENDPOINT --threads 1}
     else
         mount_runtime || return 1

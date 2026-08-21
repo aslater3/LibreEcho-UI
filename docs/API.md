@@ -42,13 +42,21 @@ All responses use the same envelope:
   "ok": true|false,
   "data": { ... },
   "error": {
-    "code": "not_supported|invalid|io|busy|auth",
+    "code": "not_supported|invalid|io|busy|auth|update_rejected",
+    "reason": "Optional sanitized machine-readable reason",
     "message": "Human-readable description"
   }
 }
 ```
 
 ## Endpoints
+
+For `POST /api/v1/system/update/upload`, a rejected installer response may include
+`error.reason`, a bounded token containing only lowercase letters, digits, `_`, and
+`-`. For example, `current_slot_not_confirmed` identifies the installer check
+that refused the package; the field is omitted when the helper emits no `ERROR:`
+token. `manifest_update_channel_mismatch` also receives a channel-specific human
+message.
 
 ### System Status
 
@@ -241,6 +249,24 @@ The voice assistant uses local wake-word detection, post-AEC microphone audio,
 local streaming speech recognition, a subscription-authenticated response
 provider, and the same local announcement bus as the announce API. It never
 accepts or falls back to an OpenAI API key.
+
+#### GET /api/v1/voice-pipeline
+
+Returns speech-pipeline configuration and endpoint health. The response also
+includes the persisted `listening` object:
+
+```json
+{
+  "max_utterance_ms": 12000,
+  "end_silence_ms": 600,
+  "vad_floor_rms": 16
+}
+```
+
+`max_utterance_ms` accepts 2000–20000 milliseconds, `end_silence_ms` accepts
+200–3000 milliseconds, and `vad_floor_rms` accepts 1–1024. These values are
+read from the same persisted `web-config.json` used by `libreecho-sttd`; they
+are not inferred from the web daemon's environment.
 
 #### GET /api/v1/assistant
 

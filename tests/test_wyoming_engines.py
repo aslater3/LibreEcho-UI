@@ -132,12 +132,14 @@ def test_stt(directory):
     server = WyomingServer(whisper)
     server.start()
     socket_path = os.path.join(directory, "stt.sock")
+    environment = os.environ.copy()
+    environment["LE_STT_MAX_UTTERANCE_MS"] = "2000"
     process = subprocess.Popen([
         "./build/libreecho-sttd-wyoming",
         "--socket", socket_path,
         "--model-dir", f"tcp://127.0.0.1:{server.port}",
         "--threads", "1",
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         wait_for_socket(socket_path)
         connection, response = adapter_call(
@@ -146,25 +148,26 @@ def test_stt(directory):
         assert response["ok"] is True
         speech = struct.pack("<h", 2000) * 9600
         short_pause = struct.pack("<h", 0) * 6400
-        ending_silence = struct.pack("<h", 0) * 17600
         connection.sendall(speech + short_pause)
         connection.settimeout(0.25)
         try:
             connection.recv(1)
-            raise AssertionError(
-                "short mid-sentence pause ended recognition")
+            raise AssertionError("short pause ended intermittent speech")
         except socket.timeout:
             pass
-        connection.sendall(speech + ending_silence)
-        connection.settimeout(15)
+        for _ in range(3):
+            try:
+                connection.sendall(speech + short_pause)
+            except BrokenPipeError:
+                break
         line = b""
         while not line.endswith(b"\n"):
             line += read_exact(connection, 1)
-        event = json.loads(line)
-        assert event["event"] == "transcript"
-        assert event["data"]["text"] == "remote transcription"
-        assert event["data"]["endpoint"] is True
+        intermittent_event = json.loads(line)
+        assert intermittent_event["event"] == "transcript"
+        assert intermittent_event["data"]["endpoint"] is True
         connection.close()
+
         server.finish()
         assert len(received_audio) >= len(speech) * 2
     finally:

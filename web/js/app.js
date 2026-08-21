@@ -201,7 +201,7 @@ async function systemPage(){
       const headers={'Content-Type':'application/x-tar','X-LibreEcho-CSRF':state.csrf,...(state.token?{'Authorization':'Bearer '+state.token}:{}),...(unsigned?{'X-LibreEcho-Allow-Unsigned':'1'}:{})};
       const response=await fetch('/api/v1/system/update/upload',{method:'POST',headers,body:file});
       const body=await response.json();
-      if(!response.ok||!body.ok)throw new Error(body.error?.message||'Update installation failed');
+      if(!response.ok||!body.ok){const detail=body.error?.reason?`${body.error.message||'Update installation failed'} (reason: ${body.error.reason})`:body.error?.message||'Update installation failed';throw new Error(detail);}
       toast('Update verified and installed');
       await systemPage();
     }catch(error){toast(error.message,true)}

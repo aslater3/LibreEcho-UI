@@ -108,9 +108,9 @@
       "get": {
         "tags": ["Assistant"],
         "summary": "Read speech pipeline configuration and endpoint health",
-        "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, and the on-device wake-word stage.",
+        "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, and persisted listening settings. max_utterance_ms is 2000–20000, end_silence_ms is 200–3000, and vad_floor_rms is 1–1024.",
         "responses": {
-          "200": {"$ref":"#/components/responses/Success"}
+          "200": {"description":"Speech pipeline and persisted listening settings","content":{"application/json":{"schema":{"$ref":"#/components/schemas/VoicePipelineEnvelope"}}}}
         }
       },
       "put": {
@@ -289,7 +289,9 @@
     "schemas": {
       "Envelope":{"type":"object","required":["ok","data","error"],"properties":{"ok":{"type":"boolean"},"data":{"nullable":true},"error":{"nullable":true,"$ref":"#/components/schemas/ApiError"}}},
       "NetworkState":{"type":"object","required":["state","connectivity","recovery_stage","gateway_reachable","liveness_failures","ssid","signal","rssi_dbm","ip","gateway","dns","hostname","internet","dhcp","ssh","api_lan","api_lan_effective","api_lan_forced"],"properties":{"state":{"type":"string","description":"Wi-Fi association state"},"connectivity":{"type":"string","enum":["unknown","healthy","degraded","recovering","disconnected"]},"recovery_stage":{"type":"string","enum":["none","reassociate","interface-reset","reboot-requested","exhausted"]},"gateway_reachable":{"type":"boolean","nullable":true,"description":"Null until a probe can be completed"},"liveness_failures":{"type":"integer","minimum":0},"ssid":{"type":"string"},"signal":{"type":"integer","minimum":0,"maximum":100},"rssi_dbm":{"type":"integer"},"ip":{"type":"string"},"gateway":{"type":"string"},"dns":{"type":"string"},"hostname":{"type":"string"},"internet":{"type":"boolean"},"dhcp":{"type":"boolean"},"ssh":{"type":"boolean"},"api_lan":{"type":"boolean"},"api_lan_effective":{"type":"boolean"},"api_lan_forced":{"type":"boolean"}}},
-      "ApiError":{"type":"object","properties":{"code":{"type":"string"},"message":{"type":"string"}}}
+      "ApiError":{"type":"object","properties":{"code":{"type":"string"},"reason":{"type":"string","description":"Sanitized installer reason token when an OTA update is rejected"},"message":{"type":"string"}}},
+      "ListeningSettings":{"type":"object","required":["max_utterance_ms","end_silence_ms","vad_floor_rms"],"properties":{"max_utterance_ms":{"type":"integer","minimum":2000,"maximum":20000},"end_silence_ms":{"type":"integer","minimum":200,"maximum":3000},"vad_floor_rms":{"type":"integer","minimum":1,"maximum":1024}}},
+      "VoicePipelineEnvelope":{"type":"object","required":["ok","data","error"],"properties":{"ok":{"type":"boolean"},"data":{"type":"object","properties":{"listening":{"$ref":"#/components/schemas/ListeningSettings"}}},"error":{"nullable":true,"$ref":"#/components/schemas/ApiError"}}}
     }
   }
 }

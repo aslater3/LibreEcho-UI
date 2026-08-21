@@ -305,6 +305,19 @@ static void ensure_voice_pipeline_config(struct api_context *c)
         strlen(value) < sizeof(c->tts_wyoming_voice))
         strcpy(c->tts_wyoming_voice, value);
 }
+/* Read the persisted voice-pipeline settings used by libreecho-sttd. */
+static int le_stt_setting(const struct api_context *c, const char *key,
+                          int fallback)
+{
+    char saved[16384];
+    int value;
+
+    if (!c || !c->config_path[0] ||
+        config_read(c->config_path, saved, sizeof(saved)) <= 0 ||
+        json_get_int(saved, key, &value) != 1 || value < 0)
+        return fallback;
+    return value;
+}
 static void voice_pipeline_json(struct api_context *c,
                                 struct api_response *r)
 {
@@ -331,13 +344,22 @@ static void voice_pipeline_json(struct api_context *c,
         "\"tts\":{\"engine\":\"%s\",\"wyoming_uri\":\"%s\","
         "\"voice\":\"%s\",\"configured\":%s,\"reachable\":%s},"
         "\"wake_word\":{\"engine\":\"openwakeword\","
-        "\"processing\":\"on-device\"}},\"error\":null}",
+        "\"processing\":\"on-device\"},"
+        /* How long the device keeps listening after the wake word and how it
+           decides the speaker has stopped.  Surfaced so an owner can see and
+           tune them for a room with background conversation, where the VAD
+           stays active and end-of-speech would otherwise never fire. */
+        "\"listening\":{\"max_utterance_ms\":%d,"
+        "\"end_silence_ms\":%d,\"vad_floor_rms\":%d}},\"error\":null}",
         c->voice_pipeline_mode, custom ? "wyoming" : "sherpa",
         stt_uri, stt_model, c->stt_wyoming_uri[0] ? "true" : "false",
         stt_reachable ? "true" : "false",
         custom ? "wyoming" : "sherpa", tts_uri, tts_voice,
         c->tts_wyoming_uri[0] ? "true" : "false",
-        tts_reachable ? "true" : "false");
+        tts_reachable ? "true" : "false",
+        le_stt_setting(c, "stt_max_utterance_ms", 12000),
+        le_stt_setting(c, "stt_end_silence_ms", 600),
+        le_stt_setting(c, "stt_vad_floor_rms", 16));
 }
 static int voice_pipeline_update(struct api_context *c, const char *json)
 {
@@ -529,7 +551,7 @@ static void provenance_json(struct api_response*r){
         LE_OS_VERSION_STRING,LE_SOURCE_COMMIT,
         !strcmp(LE_SOURCE_DIRTY,"1")?"true":"false",LE_SOURCE_DIGEST);
 }
-static void system_json(struct api_context*c,struct api_response*r){time_t now=time(0);int valid=now>=1577836800,linux=!strcmp(le_backend_mode(c->backend),"linux");long synchronized=0,rtc_available=0,rtc_persisted=0,last_sync=0;char state[64]="unavailable",source[64],servers[1100]="",escaped_state[128],escaped_source[128],escaped_servers[2200];strcpy(source,valid?"system-clock":"unset");if(linux){time_status_value("state",state,sizeof(state));time_status_value("source",source,sizeof(source));time_status_value("servers",servers,sizeof(servers));time_status_int("synchronized",&synchronized);time_status_int("rtc_available",&rtc_available);time_status_int("rtc_persisted",&rtc_persisted);time_status_int("last_sync_epoch",&last_sync);if(!rtc_available&&access("/sys/class/rtc/rtc0",F_OK)==0)rtc_available=1;}json_escape(escaped_state,sizeof(escaped_state),state);json_escape(escaped_source,sizeof(escaped_source),source);json_escape(escaped_servers,sizeof(escaped_servers),servers);out(r,200,"{\"ok\":true,\"data\":{\"update_channel\":\"stable\",\"ota\":{\"supported\":false,\"design\":\"A/B\",\"current_slot\":\"A\",\"inactive_slot\":\"B\",\"state\":\"idle\",\"progress\":0,\"rollback_available\":false},\"timezone\":\"UTC\",\"ntp\":%s,\"ntp_state\":\"%s\",\"ntp_servers\":\"%s\",\"last_sync_epoch\":%ld,\"clock_valid\":%s,\"clock_source\":\"%s\",\"rtc_available\":%s,\"rtc_persisted\":%s},\"error\":null}",synchronized&&valid?"true":"false",escaped_state,escaped_servers,last_sync,valid?"true":"false",escaped_source,rtc_available?"true":"false",rtc_persisted?"true":"false");}
+static void system_json(struct api_context*c,struct api_response*r){time_t now=time(0);int valid=now>=1577836800,linux=!strcmp(le_backend_mode(c->backend),"linux");long synchronized=0,rtc_available=0,rtc_persisted=0,last_sync=0;char state[64]="unavailable",source[64],servers[1100]="",escaped_state[128],escaped_source[128],escaped_servers[2200];const char*tz=getenv("TZ");char escaped_tz[128];strcpy(source,valid?"system-clock":"unset");if(linux){time_status_value("state",state,sizeof(state));time_status_value("source",source,sizeof(source));time_status_value("servers",servers,sizeof(servers));time_status_int("synchronized",&synchronized);time_status_int("rtc_available",&rtc_available);time_status_int("rtc_persisted",&rtc_persisted);time_status_int("last_sync_epoch",&last_sync);if(!rtc_available&&access("/sys/class/rtc/rtc0",F_OK)==0)rtc_available=1;}json_escape(escaped_tz,sizeof(escaped_tz),tz&&tz[0]?tz:"UTC");json_escape(escaped_state,sizeof(escaped_state),state);json_escape(escaped_source,sizeof(escaped_source),source);json_escape(escaped_servers,sizeof(escaped_servers),servers);out(r,200,"{\"ok\":true,\"data\":{\"update_channel\":\"stable\",\"ota\":{\"supported\":false,\"design\":\"A/B\",\"current_slot\":\"A\",\"inactive_slot\":\"B\",\"state\":\"idle\",\"progress\":0,\"rollback_available\":false},\"timezone\":\"%s\",\"ntp\":%s,\"ntp_state\":\"%s\",\"ntp_servers\":\"%s\",\"last_sync_epoch\":%ld,\"clock_valid\":%s,\"clock_source\":\"%s\",\"rtc_available\":%s,\"rtc_persisted\":%s},\"error\":null}",escaped_tz,synchronized&&valid?"true":"false",escaped_state,escaped_servers,last_sync,valid?"true":"false",escaped_source,rtc_available?"true":"false",rtc_persisted?"true":"false");}
 #define LE_AUTH_FAILURE_LIMIT 5
 #define LE_AUTH_FAILURE_WINDOW 60
 #define LE_AUTH_BLOCK_SECONDS 60

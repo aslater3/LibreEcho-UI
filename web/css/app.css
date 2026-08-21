@@ -16,9 +16,9 @@ body{margin:0;background:radial-gradient(circle at 58% 6%,#14233d 0,#0a1926 35%,
 .brand-mark i{left:13px;right:13px}
 .brand-mark b{left:18px;right:18px}
 nav{display:grid;gap:4px}
-#nav{flex:1 1 auto;min-height:0;overflow-y:auto}
+#nav{flex:1 1 auto;min-height:0;overflow-y:auto;align-content:start}
 .nav-item{border:0;background:transparent;color:#e4ebf1;display:flex;align-items:center;gap:16px;padding:13px 18px;border-radius:10px;font-size:15px;text-align:left;cursor:pointer;transition:.2s}
-.nav-item svg{width:24px;height:24px;fill:none;stroke:#95a8bb;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.nav-item svg{flex:0 0 auto;width:24px;height:24px;fill:none;stroke:#95a8bb;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .nav-item:hover{background:#102a31}
 .nav-item.active{background:linear-gradient(90deg,#133b2c,#12332d);color:#71df90;border-left:2px solid #4bd471}
 .nav-item.active svg{stroke:#68da85}
