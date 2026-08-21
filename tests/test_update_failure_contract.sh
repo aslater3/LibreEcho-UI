@@ -9,7 +9,7 @@ src=Path('src/http_server.c').read_text()
 start=src.index('static void update_failure_reason(')
 end=src.index('static int stream_update_upload(', start)
 parser=src[start:end]
-Path('build/test-update-failure-parser.c').write_text('''#include <fcntl.h>\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n#include <stdlib.h>\n'''+parser+'''\nint main(void){char reason[64];int f=open("build/update-stderr.txt",O_RDONLY);if(f<0)return 2;update_failure_reason(f,reason,sizeof(reason));close(f);puts(reason);return strcmp(reason,"current_slot_not_confirmed");}\n''')
+Path('build/test-update-failure-parser.c').write_text('''#include <fcntl.h>\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n#include <stdlib.h>\n'''+parser+'''\nint main(void){char reason[64];int f=open("build/update-stderr.txt",O_RDONLY);if(f<0)return 2;update_failure_reason(f,reason,sizeof(reason));close(f);if(strcmp(reason,"current_slot_not_confirmed"))return 3;f=open("build/update-stderr.txt",O_WRONLY|O_TRUNC);if(f<0)return 4;write(f,"installer failed without a reason\\n",34);close(f);f=open("build/update-stderr.txt",O_RDONLY);if(f<0)return 5;update_failure_reason(f,reason,sizeof(reason));close(f);puts(reason);return reason[0]?6:0;}\n''')
 Path('build/update-stderr.txt').write_text('x'*4096+'ERROR:bad-token!\\nERROR:current_slot_not_confirmed\\n')
 PY
 cc -std=c99 -Wall -Wextra -Werror -o build/test-update-failure-parser build/test-update-failure-parser.c
