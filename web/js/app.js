@@ -194,10 +194,11 @@ async function systemPage(){
     if(!file)return;
     $('#update-name').textContent=file.name;
     if(file.size>ota.max_upload_bytes){toast('Update exceeds 32 MiB',true);e.target.value='';return}
-    if(!confirm(`Install signed update ${file.name} to slot ${ota.inactive_slot.toUpperCase()}?`)){e.target.value='';return}
+    const unsigned=$('#allow-unsigned')?.checked;
+    if(!confirm(`${unsigned?'Install unsigned update':'Install signed update'} ${file.name} to slot ${ota.inactive_slot.toUpperCase()}?${unsigned?' This bypasses signature verification.':''}`)){e.target.value='';return}
     setBusy(true);
     try{
-      const headers={'Content-Type':'application/x-tar','X-LibreEcho-CSRF':state.csrf,...(state.token?{'Authorization':'Bearer '+state.token}:{}),...($('#allow-unsigned')?.checked?{'X-LibreEcho-Allow-Unsigned':'1'}:{})};
+      const headers={'Content-Type':'application/x-tar','X-LibreEcho-CSRF':state.csrf,...(state.token?{'Authorization':'Bearer '+state.token}:{}),...(unsigned?{'X-LibreEcho-Allow-Unsigned':'1'}:{})};
       const response=await fetch('/api/v1/system/update/upload',{method:'POST',headers,body:file});
       const body=await response.json();
       if(!response.ok||!body.ok)throw new Error(body.error?.message||'Update installation failed');

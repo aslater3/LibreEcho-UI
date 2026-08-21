@@ -26,7 +26,8 @@ setup('authenticate', async ({ request }) => {
       'Example: LE_PASS=... npx playwright test',
     );
   }
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  fs.mkdirSync(AUTH_DIR, { recursive: true, mode: 0o700 });
+  fs.chmodSync(AUTH_DIR, 0o700);
 
   // Reuse a still-valid session if one was captured recently. The device
   // rate-limits logins, so we avoid a fresh login on every run: probe an
@@ -38,7 +39,11 @@ setup('authenticate', async ({ request }) => {
         headers: { Authorization: `Bearer ${saved.token}` },
         timeout: 10_000,
       });
-      if (probe.ok()) return; // existing session still valid
+      if (probe.ok()) {
+        fs.chmodSync(TOKEN_FILE, 0o600);
+        fs.chmodSync(STORAGE_FILE, 0o600);
+        return; // existing session still valid
+      }
     } catch {
       /* fall through to a fresh login */
     }
@@ -77,7 +82,9 @@ setup('authenticate', async ({ request }) => {
 
   expect(token, `could not authenticate after retries: ${lastErr}`).toBeTruthy();
 
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token, username }));
+  fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token, username }), { mode: 0o600 });
+  fs.chmodSync(TOKEN_FILE, 0o600);
   // Persist cookies from the login so the browser context is authenticated too.
   await request.storageState({ path: STORAGE_FILE });
+  fs.chmodSync(STORAGE_FILE, 0o600);
 });
