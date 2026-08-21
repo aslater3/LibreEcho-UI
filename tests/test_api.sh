@@ -102,6 +102,24 @@ curl -fsS "$URL/api/v1/voice-pipeline" | jq -e \
      .data.wake_word.processing == "on-device"' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
     -H 'Content-Type: application/json' \
+    --data '{"mode":"local","max_utterance_ms":6000,"end_silence_ms":1500,"vad_floor_rms":45}' |
+    jq -e '.ok and .data.listening.max_utterance_ms == 6000 and
+           .data.listening.end_silence_ms == 1500 and
+           .data.listening.vad_floor_rms == 45' >/dev/null
+code=$(curl -sS -o /tmp/le-invalid-listening-type.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"mode":"local","max_utterance_ms":"7000"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-invalid-listening-atomic.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"mode":"invalid","max_utterance_ms":7000}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/voice-pipeline" |
+    jq -e '.data.listening.max_utterance_ms == 6000' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
     --data '{"mode":"custom","stt_wyoming_uri":"tcp://127.0.0.1:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://127.0.0.1:10200","tts_voice":"en_GB-alan-medium"}' |
     jq -e '.ok and .data.mode == "custom" and
            .data.stt.engine == "wyoming" and
