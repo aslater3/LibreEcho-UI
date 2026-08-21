@@ -322,7 +322,7 @@ static void ensure_voice_pipeline_config(struct api_context *c)
  */
 #define LE_STT_MAX_UTTERANCE_DEFAULT 6000
 #define LE_STT_END_SILENCE_DEFAULT 1000
-#define LE_STT_VAD_FLOOR_DEFAULT 3300
+#define LE_STT_VAD_FLOOR_DEFAULT 16
 static int stt_max_utterance_valid(int v){return v>=2000&&v<=20000;}
 static int stt_end_silence_valid(int v){return v>=200&&v<=3000;}
 static int stt_vad_floor_valid(int v){return v>=1&&v<=16384;}

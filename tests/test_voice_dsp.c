@@ -11,9 +11,16 @@
     } \
 } while (0)
 
+/*
+ * The codec left-justifies its 16 valid bits inside the 24-bit word, so a
+ * 16-bit sample occupies the top two bytes and the low byte is padding.
+ * This helper previously packed right-justified, which matched the decoder
+ * but not the hardware -- on a real device the 24-bit word routinely
+ * exceeded the int16 range and the decoder's clamp pinned it to the rails.
+ */
 static void pack_s16_as_s24_3le(int16_t value, uint8_t output[3])
 {
-    uint32_t packed = (uint32_t)(int32_t)value & 0x00ffffffU;
+    uint32_t packed = ((uint32_t)(int32_t)value << 8) & 0x00ffffffU;
 
     output[0] = (uint8_t)packed;
     output[1] = (uint8_t)(packed >> 8);
@@ -40,13 +47,22 @@ int main(void)
     int i;
 
     {
-        const uint8_t positive[3] = {0xff, 0x7f, 0x00};
-        const uint8_t negative[3] = {0x00, 0x80, 0xff};
-        const uint8_t minus_one[3] = {0xff, 0xff, 0xff};
+        /* Left-justified: the sample sits in the top 16 bits. */
+        const uint8_t positive[3] = {0x00, 0xff, 0x7f};
+        const uint8_t negative[3] = {0x00, 0x00, 0x80};
+        const uint8_t minus_one[3] = {0x00, 0xff, 0xff};
+        /* The low byte is padding and must not affect the result. */
+        const uint8_t padded[3] = {0xff, 0xff, 0x7f};
+        /* A word that overflows int16 when read as a 24-bit integer: the
+           old decoder clamped this to the rail, which is what made a quiet
+           room measure as 2.6% clipped samples. */
+        const uint8_t quiet[3] = {0x00, 0x00, 0x01};
 
         CHECK(le_voice_unpack_s24_3le(positive) == 32767);
         CHECK(le_voice_unpack_s24_3le(negative) == -32768);
         CHECK(le_voice_unpack_s24_3le(minus_one) == -1);
+        CHECK(le_voice_unpack_s24_3le(padded) == 32767);
+        CHECK(le_voice_unpack_s24_3le(quiet) == 256);
     }
 
     memset(raw, 0, sizeof(raw));
