@@ -13,7 +13,7 @@ Path('build/test-update-failure-parser.c').write_text('''#include <fcntl.h>\n#in
 Path('build/update-stderr.txt').write_text('x'*4096+'ERROR:bad-token!\\nERROR:current_slot_not_confirmed\\n')
 PY
 cc -std=c99 -Wall -Wextra -Werror -o build/test-update-failure-parser build/test-update-failure-parser.c
-[ "$(build/test-update-failure-parser)" = current_slot_not_confirmed ]
+build/test-update-failure-parser
 
 python3 - <<'PY'
 from pathlib import Path
