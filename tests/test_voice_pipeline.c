@@ -62,6 +62,8 @@ int main(void)
     int result = 0;
 
     memset(&state, 0, sizeof(state));
+    signal(SIGPIPE, SIG_IGN);
+    CHECK(setenv("LIBREECHO_STTD_FRAGMENT_TRANSCRIPT", "1", 1) == 0);
     CHECK(pthread_mutex_init(&state.mutex, NULL) == 0);
     CHECK(mkdtemp(directory) != NULL);
     snprintf(wake_socket, sizeof(wake_socket),

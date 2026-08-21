@@ -36,6 +36,8 @@ struct le_voice_pipeline {
     int16_t pcm_ring[PCM_RING_SAMPLES];
     uint64_t ring_first_sample;
     size_t ring_count;
+    size_t stt_line_used;
+    char stt_line[LE_ADAPTER_MSG_MAX * 2U];
     char pending_transcript[TRANSCRIPT_MAX];
     struct le_voice_pipeline_turn pending_turn;
     int transcript_pending;
@@ -95,6 +97,29 @@ static int read_line(int fd, char *buffer, size_t size)
         if (buffer[used++] == '\n') {
             buffer[used - 1] = '\0';
             return 0;
+        }
+    }
+    return -1;
+}
+
+static int read_nonblocking_line(
+    int fd, char *buffer, size_t size, size_t *used)
+{
+    while (*used + 1 < size) {
+        char character;
+        ssize_t count = read(fd, &character, 1);
+
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return 0;
+        if (count <= 0)
+            return -1;
+        buffer[(*used)++] = character;
+        if (character == '\n') {
+            buffer[*used - 1] = '\0';
+            *used = 0;
+            return 1;
         }
     }
     return -1;
@@ -264,6 +289,7 @@ static int start_recognition(struct le_voice_pipeline *pipeline,
 
     if (fd < 0)
         return -1;
+    pipeline->stt_line_used = 0;
     if (ring_write_from(pipeline, fd, detection_sample) < 0) {
         close(fd);
         return -1;
@@ -281,6 +307,7 @@ static void close_recognition(struct le_voice_pipeline *pipeline,
     if (*fd >= 0)
         close(*fd);
     *fd = -1;
+    pipeline->stt_line_used = 0;
     pthread_mutex_lock(&pipeline->mutex);
     pipeline->metrics.recognizing = 0;
     pthread_mutex_unlock(&pipeline->mutex);
@@ -473,11 +500,17 @@ static void *capture_worker(void *opaque)
         if (stt_fd >= 0 && descriptors[2].revents & POLLIN) {
             char line[LE_ADAPTER_MSG_MAX * 2U];
             int result;
+            int line_result = read_nonblocking_line(
+                stt_fd, pipeline->stt_line, sizeof(pipeline->stt_line),
+                &pipeline->stt_line_used);
 
-            if (read_line(stt_fd, line, sizeof(line)) < 0) {
+            if (line_result < 0) {
                 close_recognition(pipeline, &stt_fd);
                 continue;
             }
+            if (line_result == 0)
+                continue;
+            snprintf(line, sizeof(line), "%s", pipeline->stt_line);
             result = handle_stt_line(
                 pipeline, stt_fd, line, detection_sample,
                 recognition_follow_up);
