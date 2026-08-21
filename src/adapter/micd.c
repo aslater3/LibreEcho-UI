@@ -244,8 +244,46 @@ static int apply_mixer_setting(const char *mixer_bin,
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
+/*
+ * Map the owner's 0..100 microphone gain onto the codec's MICPGA control.
+ *
+ * The four MICPGA volumes were fixed at 40, and configure_capture_path()
+ * runs on every capture start -- not just at boot -- so anything that set
+ * the gain elsewhere was overwritten as soon as the wake word listener
+ * reopened the stream.  Restoring the level in audiod could never hold for
+ * that reason, whatever order the daemons started in.
+ *
+ * 50 maps to 40 so an unconfigured device keeps exactly the level it had,
+ * and the scale runs to 80 (about 40 dB) at 100.  The upper half only
+ * became usable once the 24-bit capture scaling was fixed; before that the
+ * stream saturated regardless of any gain.
+ */
+#define MICPGA_DEFAULT_VOLUME 40
+#define MICPGA_MAX_VOLUME 80
+
+static int micpga_volume_from_environment(void)
+{
+    const char *text = getenv("LE_MIC_CAPTURE_GAIN");
+    char *end;
+    long percent;
+
+    if (!text || !text[0])
+        return MICPGA_DEFAULT_VOLUME;
+    errno = 0;
+    percent = strtol(text, &end, 10);
+    if (errno || *end || percent < 0 || percent > 100)
+        return MICPGA_DEFAULT_VOLUME;
+    return (int)(percent * MICPGA_MAX_VOLUME / 100);
+}
+
 static int configure_capture_path(const struct micd_config *config)
 {
+    char micpga[8];
+    struct mixer_setting micpga_settings[4];
+    static const char *const micpga_controls[4] = {
+        "ADC_A MICPGA Volume Ctrl", "ADC_B MICPGA Volume Ctrl",
+        "ADC_C MICPGA Volume Ctrl", "ADC_D MICPGA Volume Ctrl"
+    };
     static const struct mixer_setting settings[] = {
         {"Mic PGA Switch", "1", "1"},
         {"ADCFGA Left Mute Switch", "0", NULL},
@@ -258,10 +296,6 @@ static int configure_capture_path(const struct micd_config *config)
         {"ADC_C Right Ip Select ADC_C DIF1_R switch", "1", NULL},
         {"ADC_D Left Ip Select ADC_D DIF1_L switch", "1", NULL},
         {"ADC_D Right Ip Select ADC_D DIF1_R switch", "1", NULL},
-        {"ADC_A MICPGA Volume Ctrl", "40", "40"},
-        {"ADC_B MICPGA Volume Ctrl", "40", "40"},
-        {"ADC_C MICPGA Volume Ctrl", "40", "40"},
-        {"ADC_D MICPGA Volume Ctrl", "40", "40"},
         {"ADC_A DIF1_L Input Gain", "1", NULL},
         {"ADC_A DIF1_R Input Gain", "1", NULL},
         {"ADC_B DIF1_L Input Gain", "1", NULL},
@@ -281,6 +315,19 @@ static int configure_capture_path(const struct micd_config *config)
             return -1;
         }
     }
+    (void)snprintf(micpga, sizeof(micpga), "%d",
+                   micpga_volume_from_environment());
+    for (i = 0; i < 4; ++i) {
+        micpga_settings[i].control = micpga_controls[i];
+        micpga_settings[i].value = micpga;
+        micpga_settings[i].value2 = micpga;
+        if (apply_mixer_setting(config->mixer_bin, &micpga_settings[i]) < 0) {
+            le_log_error("unable to apply microphone mixer control: %s",
+                         micpga_controls[i]);
+            return -1;
+        }
+    }
+    le_log_info("micd: capture PGA set to %s", micpga);
     return 0;
 }
 
