@@ -7,6 +7,7 @@
 #include "voice_listening_led.h"
 #include "../json.h"
 
+#include <fcntl.h>
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
@@ -73,7 +74,7 @@ static int write_all(int fd, const void *buffer, size_t size)
         if (count < 0 && errno == EINTR)
             continue;
         if (count <= 0)
-            return -1;
+            return -1;   /* errno is preserved for the caller to classify */
         position += count;
         size -= (size_t)count;
     }
@@ -251,6 +252,16 @@ static int start_recognition(struct le_voice_pipeline *pipeline,
 {
     int fd = subscribe(pipeline->stt_socket, "recognize_stream");
 
+    /* Non-blocking: while sttd is busy transcribing it stops reading, and a
+       blocking write here would stall the loop that has to collect the
+       transcript. */
+    if (fd >= 0) {
+        int flags = fcntl(fd, F_GETFL, 0);
+
+        if (flags >= 0)
+            (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
     if (fd < 0)
         return -1;
     if (ring_write_from(pipeline, fd, detection_sample) < 0) {
@@ -407,10 +418,21 @@ static void *capture_worker(void *opaque)
                 size_t offset = frame.first_sample < detection_sample
                     ? (size_t)(detection_sample - frame.first_sample) : 0;
 
+                /* sttd stops draining this socket the moment its engine
+                   endpoints, because it then blocks waiting for the STT
+                   backend to transcribe.  We keep streaming into a socket
+                   nobody is reading, and when sttd finally publishes the
+                   transcript and closes, the write fails -- and tearing the
+                   recognition down here discarded the transcript that had
+                   already been sent.  Audio after the endpoint is useless
+                   anyway, so drop it and leave the socket open for the poll
+                   loop to deliver the result. */
                 if (offset < frame.sample_count &&
                     write_all(stt_fd, frame.samples + offset,
                               (frame.sample_count - offset) *
-                                  sizeof(frame.samples[0])) < 0)
+                                  sizeof(frame.samples[0])) < 0 &&
+                    errno != EAGAIN && errno != EWOULDBLOCK &&
+                    errno != EPIPE && errno != ECONNRESET)
                     close_recognition(pipeline, &stt_fd);
             }
         }
