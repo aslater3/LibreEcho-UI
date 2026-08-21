@@ -305,6 +305,22 @@ static void ensure_voice_pipeline_config(struct api_context *c)
         strlen(value) < sizeof(c->tts_wyoming_voice))
         strcpy(c->tts_wyoming_voice, value);
 }
+/* sttd receives these through the environment (its init script exports them
+   from web-config.json), so the web daemon reads the same source of truth
+   rather than duplicating the parsing. */
+static int le_stt_setting(const char *name, int fallback)
+{
+    const char *value = getenv(name);
+    char *end;
+    long parsed;
+
+    if (!value || !value[0])
+        return fallback;
+    parsed = strtol(value, &end, 10);
+    if (*end || parsed < 0 || parsed > 100000)
+        return fallback;
+    return (int)parsed;
+}
 static void voice_pipeline_json(struct api_context *c,
                                 struct api_response *r)
 {
@@ -331,13 +347,22 @@ static void voice_pipeline_json(struct api_context *c,
         "\"tts\":{\"engine\":\"%s\",\"wyoming_uri\":\"%s\","
         "\"voice\":\"%s\",\"configured\":%s,\"reachable\":%s},"
         "\"wake_word\":{\"engine\":\"openwakeword\","
-        "\"processing\":\"on-device\"}},\"error\":null}",
+        "\"processing\":\"on-device\"},"
+        /* How long the device keeps listening after the wake word and how it
+           decides the speaker has stopped.  Surfaced so an owner can see and
+           tune them for a room with background conversation, where the VAD
+           stays active and end-of-speech would otherwise never fire. */
+        "\"listening\":{\"max_utterance_ms\":%d,"
+        "\"end_silence_ms\":%d,\"vad_floor_rms\":%d}},\"error\":null}",
         c->voice_pipeline_mode, custom ? "wyoming" : "sherpa",
         stt_uri, stt_model, c->stt_wyoming_uri[0] ? "true" : "false",
         stt_reachable ? "true" : "false",
         custom ? "wyoming" : "sherpa", tts_uri, tts_voice,
         c->tts_wyoming_uri[0] ? "true" : "false",
-        tts_reachable ? "true" : "false");
+        tts_reachable ? "true" : "false",
+        le_stt_setting("LE_STT_MAX_UTTERANCE_MS", 8000),
+        le_stt_setting("LE_STT_END_SILENCE_MS", 600),
+        le_stt_setting("LE_STT_VAD_FLOOR_RMS", 16));
 }
 static int voice_pipeline_update(struct api_context *c, const char *json)
 {
