@@ -130,7 +130,10 @@
                   "stt_wyoming_uri": {"type":"string","pattern":"^tcp://.+:[0-9]+$"},
                   "stt_model": {"type":"string","example":"whisper-small"},
                   "tts_wyoming_uri": {"type":"string","pattern":"^tcp://.+:[0-9]+$"},
-                  "tts_voice": {"type":"string","example":"en_GB-alan-medium"}
+                  "tts_voice": {"type":"string","example":"en_GB-alan-medium"},
+                  "max_utterance_ms": {"type":"integer","minimum":2000,"maximum":20000},
+                  "end_silence_ms": {"type":"integer","minimum":200,"maximum":3000},
+                  "vad_floor_rms": {"type":"integer","minimum":1,"maximum":1024}
                 }
               }
             }

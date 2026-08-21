@@ -257,9 +257,9 @@ includes the persisted `listening` object:
 
 ```json
 {
-  "max_utterance_ms": 12000,
-  "end_silence_ms": 600,
-  "vad_floor_rms": 16
+  "max_utterance_ms": 6000,
+  "end_silence_ms": 1500,
+  "vad_floor_rms": 45
 }
 ```
 
@@ -267,6 +267,23 @@ includes the persisted `listening` object:
 200–3000 milliseconds, and `vad_floor_rms` accepts 1–1024. These values are
 read from the same persisted `web-config.json` used by `libreecho-sttd`; they
 are not inferred from the web daemon's environment.
+
+#### PUT /api/v1/voice-pipeline
+
+Updates the pipeline mode and optional Wyoming settings. The listening fields
+are writable here and are validated before any setting is committed:
+
+```json
+{
+  "mode": "local",
+  "max_utterance_ms": 6000,
+  "end_silence_ms": 1500,
+  "vad_floor_rms": 45
+}
+```
+
+Malformed or out-of-range listening fields return HTTP 400 and leave the
+previous configuration unchanged. The request requires `X-LibreEcho-CSRF`.
 
 #### GET /api/v1/assistant
 
