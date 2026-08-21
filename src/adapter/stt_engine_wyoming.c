@@ -17,6 +17,7 @@
 #define MIN_STREAM_SAMPLES (STT_RATE / 2U)
 #define DEFAULT_END_SILENCE_MS 600U
 #define DEFAULT_START_TIMEOUT_MS 8000U
+#define DEFAULT_MAX_UTTERANCE_MS 12000U
 struct stt_engine {
     char endpoint[LE_WYOMING_URI_MAX];
     char model[128];
@@ -24,6 +25,7 @@ struct stt_engine {
     unsigned int vad_floor_rms;
     unsigned int end_silence_ms;
     unsigned int start_timeout_ms;
+    unsigned int max_utterance_ms;
 };
 
 struct stt_stream {
@@ -88,6 +90,8 @@ struct stt_engine *stt_engine_init(const char *model_dir,
         "LE_STT_END_SILENCE_MS", DEFAULT_END_SILENCE_MS, 200, 3000);
     engine->start_timeout_ms = environment_unsigned(
         "LE_STT_START_TIMEOUT_MS", DEFAULT_START_TIMEOUT_MS, 1000, 15000);
+    engine->max_utterance_ms = environment_unsigned(
+        "LE_STT_MAX_UTTERANCE_MS", DEFAULT_MAX_UTTERANCE_MS, 2000, 30000);
     return engine;
 }
 
@@ -156,6 +160,7 @@ int stt_engine_stream_accept(struct stt_stream *stream,
     size_t offset = 0;
     size_t end_silence_samples;
     size_t start_timeout_samples;
+    size_t max_utterance_samples;
 
     if (!stream || stream->fd < 0 || !samples || !count)
         return -1;
@@ -192,12 +197,24 @@ int stt_engine_stream_accept(struct stt_stream *stream,
         (size_t)STT_RATE * stream->engine->end_silence_ms / 1000U;
     start_timeout_samples =
         (size_t)STT_RATE * stream->engine->start_timeout_ms / 1000U;
-    return stream->speech_seen &&
-           stream->samples >= MIN_STREAM_SAMPLES &&
-           stream->quiet_samples >= end_silence_samples
-        ? 1
-        : (!stream->speech_seen &&
-           stream->samples >= start_timeout_samples);
+    max_utterance_samples =
+        (size_t)STT_RATE * stream->engine->max_utterance_ms / 1000U;
+    if (stream->speech_seen &&
+        stream->samples >= MIN_STREAM_SAMPLES &&
+        stream->quiet_samples >= end_silence_samples)
+        return 1;
+    /* Once speech has been observed the silence test above was the only way
+       out, so a room that never falls quiet -- background conversation, a
+       television, steady fan noise -- keeps quiet_samples pinned at zero and
+       the utterance never ends.  The start timeout does not apply here
+       because it is guarded on !speech_seen.  Bound the utterance so a turn
+       always terminates: it keeps the STT backend from being handed an
+       unbounded recording, and it limits how much room audio leaves the
+       device on any single wake. */
+    if (stream->speech_seen && stream->samples >= max_utterance_samples)
+        return 1;
+    return !stream->speech_seen &&
+           stream->samples >= start_timeout_samples;
 }
 
 int stt_engine_stream_finish(struct stt_stream *stream,
