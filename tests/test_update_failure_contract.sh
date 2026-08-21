@@ -25,8 +25,9 @@ assert 'mkstemp(errpath)' in c and 'unlink(errpath)' in c
 assert 'pipe(errpipe)' in c and 'captured<65536' in c
 assert 'child_reaped=0' in c and 'waited=waitpid(child,&status,WNOHANG)' in c
 assert 'pipe_open||!child_reaped' in c
-assert 'speech_samples' in Path('src/adapter/stt_engine_wyoming.c').read_text()
-assert 'stream->speech_samples >= max_utterance_samples' in Path('src/adapter/stt_engine_wyoming.c').read_text()
+stt=Path('src/adapter/stt_engine_wyoming.c').read_text()
+assert 'speech_start_samples' in stt
+assert 'stream->samples >= stream->speech_start_samples + max_utterance_samples' in stt
 assert 'RLIMIT_FSIZE' not in c and 'setrlimit' not in c
 assert 'O_CREAT|O_TRUNC' not in c and 'LE_UPDATE_ERRLOG' not in c
 assert 'lseek(f,0,SEEK_SET)' in c and 'read(f,buf,sizeof(buf))' in c
