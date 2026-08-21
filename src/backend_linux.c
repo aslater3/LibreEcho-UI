@@ -659,7 +659,11 @@ static int device(struct le_backend *b, struct le_device_info *o)
     if (read_device_serial(o->serial, sizeof(o->serial)) != 0 &&
         read_redacted_boot_id(o->serial, sizeof(o->serial)) != 0)
         strcpy(o->serial, "unavailable");
-    strcpy(o->os_version, LE_OS_VERSION_STRING);
+    /* os_version is a fixed 32-byte field immediately followed by
+       kernel[64]; strcpy of a longer build string silently ran past it
+       and corrupted the kernel field. Bound the copy. */
+    snprintf(o->os_version, sizeof(o->os_version), "%s",
+             LE_OS_VERSION_STRING);
     if (!uname(&u))
         copy_string(o->kernel, sizeof(o->kernel), u.release);
     strcpy(o->hardware_revision, "adapter pending");
