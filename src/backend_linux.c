@@ -1014,11 +1014,19 @@ static int led(struct le_backend *b, struct le_led_state *o)
     if (json_object(response, "boot", object, sizeof(object)) ||
         json_object(response, "boot_profile", object, sizeof(object)))
         parse_profile(object, &o->boot);
+    if (json_object(response, "night", object, sizeof(object))) {
+        int v;
+        if (json_get_bool(object, "enabled", &v) > 0) o->night_enabled = v;
+        if (json_get_bool(object, "active", &v) > 0) o->night_active = v;
+        if (json_get_int(object, "start_minute", &v) > 0) o->night_start_minute = v;
+        if (json_get_int(object, "end_minute", &v) > 0) o->night_end_minute = v;
+    }
     if (json_object(response, "profiles", profiles, sizeof(profiles))) {
         if (json_object(profiles, "listening", object, sizeof(object))) parse_profile(object, &o->listening);
         if (json_object(profiles, "thinking", object, sizeof(object))) parse_profile(object, &o->thinking);
         if (json_object(profiles, "error", object, sizeof(object))) parse_profile(object, &o->error);
         if (json_object(profiles, "dnd", object, sizeof(object))) parse_profile(object, &o->dnd);
+        if (json_object(profiles, "night", object, sizeof(object))) parse_profile(object, &o->night);
     }
     if (!parse_led_pixels(response, o->pixels)) {
         size_t i;
@@ -1082,13 +1090,27 @@ static int led_profile(struct le_backend *b, const char *name,
     (void)b;
     if (!name || !profile ||
         (strcmp(name, "listening") && strcmp(name, "thinking") &&
-         strcmp(name, "error") && strcmp(name, "dnd")) ||
+         strcmp(name, "error") && strcmp(name, "dnd") &&
+         strcmp(name, "night")) ||
         profile->brightness < 0 || profile->brightness > 100)
         return LE_INVALID;
     snprintf(args, sizeof(args),
              "{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%d}",
              name, profile->r, profile->g, profile->b, profile->brightness);
     return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_profile", args);
+}
+
+static int night(struct le_backend *b, int enabled, int start, int end)
+{
+    char args[128];
+
+    (void)b;
+    if (start < 0 || start > 1439 || end < 0 || end > 1439)
+        return LE_INVALID;
+    snprintf(args, sizeof(args),
+             "{\"enabled\":%d,\"start_minute\":%d,\"end_minute\":%d}",
+             enabled ? 1 : 0, start, end);
+    return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_night", args);
 }
 
 static int led_test(struct le_backend *b)
@@ -1630,7 +1652,8 @@ static void destroy(struct le_backend *b)
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
-    led, colour, brightness, visualizer_enabled, boot_led, led_profile, led_test,
+    led, colour, brightness, visualizer_enabled, boot_led, led_profile, night,
+    led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,
     wake, wake_set, sensitivity, wake_test,
     bluetooth, bluetooth_set, bluetooth_scan, bluetooth_pair,
