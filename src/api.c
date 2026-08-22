@@ -486,12 +486,23 @@ static int hex_digit(unsigned char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&
 static int query_component_decode(char*outbuf,size_t out_size,const char*value,size_t value_len){size_t i=0,o=0;if(!outbuf||!out_size||!value)return -1;while(i<value_len){unsigned char c=(unsigned char)value[i++];if(c=='%'){int hi,lo;if(i+1>=value_len||(hi=hex_digit((unsigned char)value[i]))<0||(lo=hex_digit((unsigned char)value[i+1]))<0)return -1;c=(unsigned char)((hi<<4)|lo);i+=2;if(!c)return -1;}else if(c=='+')c=' ';if(o+1>=out_size)return -1;outbuf[o++]=(char)c;}outbuf[o]='\0';return 0;}
 static void setup_json(struct api_context*c,struct api_response*r){struct le_audio_state a;struct le_network_state n;struct le_wake_word_state w;char host[128],wake[128],ssid[LE_TEXT*2],state[48];int rc;if((rc=le_get_audio_state(c->backend,&a))||(rc=le_get_network_state(c->backend,&n))||(rc=le_get_wake_word_state(c->backend,&w))){err(r,503,rc,"Setup state is unavailable");return;}json_escape(host,sizeof(host),n.hostname);json_escape(wake,sizeof(wake),w.wake_word);json_escape(ssid,sizeof(ssid),n.ssid);json_escape(state,sizeof(state),n.state);out(r,200,"{\"ok\":true,\"data\":{\"completed\":%s,\"mode\":\"first-boot-ap\",\"backend\":\"%s\",\"hostname\":\"%s\",\"volume\":%d,\"wake_word\":\"%s\",\"wake_sensitivity\":%d,\"local_only\":%s,\"diagnostic_telemetry\":%s,\"network_state\":\"%s\",\"ssid\":\"%s\",\"password_stored\":false},\"error\":null}",c->setup_completed?"true":"false",le_backend_mode(c->backend),host,a.volume,wake,w.sensitivity,c->privacy_local_only?"true":"false",c->privacy_telemetry?"true":"false",state,ssid);}
 static int setup_apply(struct api_context*c,const char*j){struct le_wifi_credentials wifi;char hostname[LE_TEXT],wake[LE_TEXT];int volume,sensitivity,local_only,telemetry,rc;memset(&wifi,0,sizeof(wifi));if(c->setup_completed)return LE_BUSY;if(json_get_string(j,"hostname",hostname,sizeof(hostname))<1||!valid_hostname(hostname)||json_get_string(j,"ssid",wifi.ssid,sizeof(wifi.ssid))<1||!wifi.ssid[0]||json_get_string(j,"security",wifi.security,sizeof(wifi.security))<1||json_get_string(j,"password",wifi.password,sizeof(wifi.password))<1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||!wake[0]||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_bool(j,"local_only",&local_only)<1||json_get_bool(j,"diagnostic_telemetry",&telemetry)<1){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strlen(wifi.password)<8){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strcmp(wifi.security,"wpa2")&&strcmp(wifi.security,"wpa3")){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if((rc=le_set_hostname(c->backend,hostname))||(rc=le_set_volume(c->backend,volume))||(rc=le_set_wake_word(c->backend,wake))||(rc=le_set_wake_word_sensitivity(c->backend,sensitivity))||(rc=le_connect_wifi(c->backend,&wifi))){memset(wifi.password,0,sizeof(wifi.password));return rc;}memset(wifi.password,0,sizeof(wifi.password));c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;c->setup_completed=1;rc=persist_configuration(c);if(rc)c->setup_completed=0;return rc;}
-int api_apply_persisted_configuration(struct api_context *c)
+/*
+ * Re-apply the saved settings to the hardware daemons at startup.
+ *
+ * `unrestored`, when given, is filled with the names of the settings that did
+ * not take, so the caller can say which ones rather than "one or more".
+ */
+int api_apply_persisted_configuration(struct api_context *c, char *unrestored,
+                                      size_t unrestored_size)
 {
     char saved[16384], text[LE_TEXT];
     int value, red, green, blue, brightness;
     int hostname_persisted = 0;
     int rc, failed = 0;
+    size_t used = 0;
+
+    if (unrestored && unrestored_size)
+        unrestored[0] = '\0';
 
     if (!c || !c->backend || strcmp(le_backend_mode(c->backend), "linux") ||
         geteuid() != 0 || access("/proc/idme/serial", R_OK) != 0 ||
@@ -499,43 +510,74 @@ int api_apply_persisted_configuration(struct api_context *c)
         config_read(c->config_path, saved, sizeof(saved)) <= 0)
         return LE_OK;
 
-#define APPLY_CONFIG(call) do { \
+/*
+ * LE_NOT_SUPPORTED used to count as success here, which quietly threw away
+ * every setting whose daemon had not finished starting: adapter_command maps
+ * a missing or refused socket onto LE_NOT_SUPPORTED, so at boot the wake word
+ * and its sensitivity were dropped, the caller's retry loop saw success and
+ * stopped after one pass, and nothing was logged. The saved value survived in
+ * the file and was never applied, so every reboot came back on the daemon
+ * default.
+ *
+ * This function only runs against the linux backend on real hardware, where
+ * the image ships all of these daemons -- LE_NOT_SUPPORTED here means "not up
+ * yet", not "this device cannot do that" -- so treat it as retryable. Record
+ * the name either way, so a setting that never applies is diagnosable.
+ */
+#define APPLY_CONFIG(name, call) do { \
     rc = (call); \
-    if (rc != LE_OK && rc != LE_NOT_SUPPORTED) failed = 1; \
+    if (rc != LE_OK) { \
+        failed = 1; \
+        if (unrestored && unrestored_size && used + 2 < unrestored_size) { \
+            int n = snprintf(unrestored + used, unrestored_size - used, \
+                             "%s%s", used ? ", " : "", (name)); \
+            if (n > 0 && (size_t)n < unrestored_size - used) \
+                used += (size_t)n; \
+        } \
+    } \
 } while (0)
 
     if (json_get_int(saved, "volume", &value) > 0 &&
         value >= 0 && value <= 100)
-        APPLY_CONFIG(le_set_volume(c->backend, value));
+        APPLY_CONFIG("volume",
+                 le_set_volume(c->backend, value));
     if (json_get_int(saved, "microphone_gain", &value) > 0 &&
         value >= 0 && value <= 100)
-        APPLY_CONFIG(le_set_microphone_gain(c->backend, value));
+        APPLY_CONFIG("microphone gain",
+                 le_set_microphone_gain(c->backend, value));
     if (json_get_bool(saved, "microphone_muted", &value) > 0)
-        APPLY_CONFIG(le_set_microphone_muted(c->backend, value));
+        APPLY_CONFIG("microphone mute",
+                 le_set_microphone_muted(c->backend, value));
     if (json_get_int(saved, "led_r", &red) > 0 &&
         json_get_int(saved, "led_g", &green) > 0 &&
         json_get_int(saved, "led_b", &blue) > 0 &&
         red >= 0 && red <= 255 && green >= 0 && green <= 255 &&
         blue >= 0 && blue <= 255)
-        APPLY_CONFIG(le_set_led_colour(c->backend, (uint8_t)red,
+        APPLY_CONFIG("LED colour",
+                 le_set_led_colour(c->backend, (uint8_t)red,
                                       (uint8_t)green, (uint8_t)blue));
     if (json_get_int(saved, "led_brightness", &brightness) > 0 &&
         brightness >= 0 && brightness <= 100)
-        APPLY_CONFIG(le_set_led_brightness(c->backend, brightness));
+        APPLY_CONFIG("LED brightness",
+                 le_set_led_brightness(c->backend, brightness));
     if (json_get_bool(saved, "led_visualizer_enabled", &value) > 0)
-        APPLY_CONFIG(le_set_led_visualizer_enabled(c->backend, value));
+        APPLY_CONFIG("LED visualizer",
+                 le_set_led_visualizer_enabled(c->backend, value));
     if (json_get_string(saved, "wake_word", text, sizeof(text)) > 0 &&
         text[0])
-        APPLY_CONFIG(le_set_wake_word(c->backend, text));
+        APPLY_CONFIG("wake word",
+                 le_set_wake_word(c->backend, text));
     if (json_get_int(saved, "wake_sensitivity", &value) > 0 &&
         value >= 0 && value <= 100)
-        APPLY_CONFIG(le_set_wake_word_sensitivity(c->backend, value));
+        APPLY_CONFIG("wake sensitivity",
+                 le_set_wake_word_sensitivity(c->backend, value));
     if (json_get_bool(saved, "hostname_persisted",
                       &hostname_persisted) > 0 &&
         hostname_persisted &&
         json_get_string(saved, "hostname", text, sizeof(text)) > 0 &&
         valid_hostname(text))
-        APPLY_CONFIG(le_set_hostname(c->backend, text));
+        APPLY_CONFIG("hostname",
+                 le_set_hostname(c->backend, text));
 
 #undef APPLY_CONFIG
     return failed ? LE_IO : LE_OK;
