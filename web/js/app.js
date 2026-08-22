@@ -620,14 +620,72 @@ function wxId(label){const m=WX_PROVIDERS.find(p=>p[1]===label);return m?m[0]:'o
  * to hide.
  */
 function weatherCard(a){if(a.unsupported)return '';
-return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Both providers are free and need no account, and nothing is sent until a location is set.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Austin, Texas"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}${saveButton('save-wx')}</div>`,'weather-provider',true)}
+return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Both providers are free and need no account, and nothing is sent until a location is set.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Austin, Texas"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}</div><div class="button-row">${action('Look up coordinates','wx-lookup')}<span class="muted" id="wx-lookup-note"></span></div><p class="muted" id="wx-warn"></p><div class="settings-grid">${saveButton('save-wx')}</div>`,'weather-provider',true)}
 function bindWeather(a){
  if(a.unsupported||!$('#wx-provider'))return;
  $('#wx-location').value=a.home_location||'';
  $('#wx-lat').value=a.latitude||'';
  $('#wx-lon').value=a.longitude||'';
  bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
- $('#save-wx').onclick=()=>mutate('/assistant',{weather_provider:wxId($('#wx-provider').value),home_location:$('#wx-location').value.trim(),latitude:$('#wx-lat').value.trim(),longitude:$('#wx-lon').value.trim()},'Home location saved');}
+ /*
+  * Coordinates are what the weather provider actually queries; the place name
+  * is only what the assistant says back. They can therefore disagree
+  * silently, and the device will confidently report the wrong town's weather
+  * under the right town's name.
+  *
+  * agentd makes that worse: it applies each field with json_get_string and
+  * ignores the return, so an empty value leaves the previous one in place.
+  * Clearing a coordinate does nothing at all. Since it cannot be cleared, it
+  * has to be replaced -- hence a lookup rather than a "clear and let the
+  * device work it out".
+  */
+ const startLoc=(a.home_location||'').trim();
+ const warn=()=>{
+  const el=$('#wx-warn'); if(!el)return;
+  const loc=$('#wx-location').value.trim();
+  const lat=$('#wx-lat').value.trim(), lon=$('#wx-lon').value.trim();
+  if(loc&&(!lat||!lon)){
+   el.textContent='This place has no coordinates yet. Look them up before saving — an empty coordinate is ignored by the device, so the previous location would stay in use.';
+   el.className='muted error-text';
+  }else if(loc&&startLoc&&loc!==startLoc&&lat===(a.latitude||'')&&lon===(a.longitude||'')){
+   el.textContent='The place changed but the coordinates did not. Weather would still come from the old location.';
+   el.className='muted error-text';
+  }else{ el.textContent=''; el.className='muted'; }
+ };
+ ['#wx-location','#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=warn});
+ warn();
+ $('#wx-lookup').onclick=async()=>{
+  const place=$('#wx-location').value.trim();
+  const note=$('#wx-lookup-note');
+  if(!place){note.textContent='Enter a place first';return}
+  note.textContent='Looking up…';
+  try{
+   /* Queried from this browser rather than the device: the daemon is a
+      single bounded poll() loop with no threads, and a blocking lookup
+      inside it would stall every other request. Explicit button, so no
+      request leaves the browser unless it is asked for. */
+   const r=await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name='
+                       +encodeURIComponent(place),{cache:'no-store'});
+   const j=await r.json();
+   const hits=j.results||[];
+   if(!hits.length){note.textContent='No match for that place';return}
+   const h=hits[0];
+   $('#wx-lat').value=(+h.latitude).toFixed(4);
+   $('#wx-lon').value=(+h.longitude).toFixed(4);
+   $('#wx-location').value=[h.name,h.admin1].filter(Boolean).join(', ');
+   note.textContent=hits.length>1
+     ? `Using ${h.name}, ${h.admin1||''} ${h.country_code||''} — ${hits.length-1} other match(es); edit and look up again if wrong`
+     : `Found ${h.name}, ${h.admin1||''} ${h.country_code||''}`;
+   $('#save-wx').disabled=false;
+   warn();
+  }catch(e){ note.textContent='Lookup failed: '+e.message; }
+ };
+ $('#save-wx').onclick=()=>{
+  const loc=$('#wx-location').value.trim();
+  const lat=$('#wx-lat').value.trim(), lon=$('#wx-lon').value.trim();
+  if(loc&&(!lat||!lon)){toast('Look up the coordinates first — an empty coordinate is ignored by the device',true);return}
+  mutate('/assistant',{weather_provider:wxId($('#wx-provider').value),home_location:loc,
+                       latitude:lat,longitude:lon},'Home location saved');};}
 /*
  * Internet radio stations.
  *
