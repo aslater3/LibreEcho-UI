@@ -92,8 +92,15 @@ static pid_t spawn_capture(const char *bin, int *out_fd)
         return -1;
     }
     if (child == 0) {
+        /*
+         * Byte-for-byte what micd passes, including argv[0] and the "--"
+         * separator. This process stands in for micd as tinycap's parent, so
+         * any difference here is a difference tinycap can see -- and a capture
+         * binary that refuses to start costs the device its microphone.
+         */
         char *const argv[] = {
-            (char *)bin, (char *)"-D", (char *)"0", (char *)"-d", (char *)"24",
+            (char *)"tinycap", (char *)"--",
+            (char *)"-D", (char *)"0", (char *)"-d", (char *)"24",
             (char *)"-c", (char *)"9", (char *)"-r", (char *)"16000",
             (char *)"-b", (char *)"24", (char *)"-p", (char *)"640",
             (char *)"-n", (char *)"4", NULL
