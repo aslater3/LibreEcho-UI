@@ -168,6 +168,10 @@ struct audio_hw {
     int gain;
     int muted;
     int notification_volume;
+    /* Last level explicitly asked for, by the API or the buttons; -1 until
+       something asks.  Used to notice an outside writer changing the mixer. */
+    int requested_volume;
+    int volume_guard_warned;
     int startup_sound;
     int amplifier_on;
 };
@@ -794,6 +798,8 @@ static const char *control_name_or_default(const struct audio_control *control,
     return control->found && control->name[0] ? control->name : fallback;
 }
 
+static int audio_set_volume(struct audio_hw *audio, int volume);
+
 static void refresh_state(struct audio_hw *audio)
 {
     long long value;
@@ -808,6 +814,31 @@ static void refresh_state(struct audio_hw *audio)
         audio->volume = is_speaker_pcm_volume(&audio->master)
                       ? speaker_percent_from_value(value, min, max)
                       : percent_from_range(value, min, max);
+        /*
+         * Something outside audiod writes this mixer.  Any playback -- a
+         * plain test tone is enough -- leaves the level at full, so a
+         * volume set through the API or the buttons does not survive a
+         * single spoken reply.  The writer has not been identified
+         * (aslater3/LibreEcho#57), and until it is, hold the line: audiod
+         * owns this control for the API and the physical buttons, so put
+         * back the level that was actually asked for.
+         *
+         * This is a guard, not a fix.  It restores only a level someone
+         * explicitly requested, so a device nobody has configured is left
+         * alone, and it logs the first divergence so the underlying writer
+         * stays visible instead of being silently papered over.
+         */
+        if (audio->requested_volume >= 0 &&
+            audio->volume != audio->requested_volume) {
+            if (!audio->volume_guard_warned) {
+                le_log_warn("audiod: volume changed underneath us "
+                            "(%d%% -> %d%%); restoring the requested level",
+                            audio->requested_volume, audio->volume);
+                audio->volume_guard_warned = 1;
+            }
+            if (audio_set_volume(audio, audio->requested_volume) == 0)
+                audio->volume = audio->requested_volume;
+        }
         audio->notification_volume = audio->volume;
     }
     if (read_control_value(audio, &audio->capture, &value) == 0) {
@@ -867,6 +898,7 @@ static int audio_set_volume(struct audio_hw *audio, int volume)
     }
     audio->volume = volume;
     audio->notification_volume = volume;
+    audio->requested_volume = volume;
     return 0;
 }
 
@@ -909,6 +941,8 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->ctl_fd = -1;
     audio->volume = 50;
     audio->gain = 65;
+    audio->requested_volume = -1;
+    audio->volume_guard_warned = 0;
     audio->muted = 0;
     audio->notification_volume = audio->volume;
     /* Boot playback is a hard-disabled image policy.  Keep the UI truthful

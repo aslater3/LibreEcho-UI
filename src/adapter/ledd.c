@@ -41,7 +41,18 @@
 #endif
 
 #define MAX_CLIENTS 4
-#define STATE_PATH "/etc/libreecho/led-state.json"
+/*
+ * The ring colour, brightness and the four state themes are persisted here.
+ *
+ * This used to be /etc/libreecho/led-state.json, which lives in the ramdisk
+ * and is recreated from the boot image on every boot, so every reboot -- and
+ * certainly every OTA -- silently reset the settings to their defaults.  A
+ * brightness saved minutes earlier came back at 100%.  /data is the volume
+ * that survives, and is where the web and assistant configuration already
+ * live.
+ */
+#define STATE_PATH "/data/libreecho/config/led-state.json"
+#define LEGACY_STATE_PATH "/etc/libreecho/led-state.json"
 #define SYSFS_LED_DIR "/sys/class/leds"
 #define SYSFS_I2C_DIR "/sys/bus/i2c/devices"
 #define MAX_PATH 512
@@ -1010,6 +1021,13 @@ static void load_state(struct led_state *state)
     size_t i;
 
     fd = open(STATE_PATH, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        /* Carry a device forward from the old ramdisk location once; it is
+           read-only here and the next save writes to the persistent path. */
+        fd = open(LEGACY_STATE_PATH, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0)
+            le_log_info("ledd: loading LED state from the legacy path");
+    }
     if (fd < 0)
         return;
     n = read(fd, text, sizeof(text) - 1);
@@ -1045,6 +1063,11 @@ static void load_state(struct led_state *state)
 
 static int persist_state(const struct led_state *state)
 {
+    /* The persistent config directory exists on a provisioned device, but
+       create it rather than losing the first save if it does not. */
+    (void)mkdir("/data/libreecho", 0755);
+    (void)mkdir("/data/libreecho/config", 0755);
+
     char text[4096];
     char temp_path[MAX_PATH];
     int n, fd;
@@ -1075,7 +1098,6 @@ static int persist_state(const struct led_state *state)
     text[n++] = '}';
     text[n] = '\0';
 
-    (void)mkdir("/etc/libreecho", 0755);
     snprintf(temp_path, sizeof(temp_path), "%s.tmp.%ld", STATE_PATH,
              (long)getpid());
     fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
