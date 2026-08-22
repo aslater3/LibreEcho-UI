@@ -432,7 +432,9 @@ async function simulationPage(){
    const entry=await simRun(phrase,cap,t=>{timing.innerHTML='<dt>Status</dt><dd>'+esc(t)+'</dd>'});
    timing.innerHTML=simTimingHtml(entry,cap);
    toast(entry.wake?'Wake detected':'No wake detected',!entry.wake);
-  }catch(e){ timing.innerHTML='<dt>Status</dt><dd>'+esc(e.message)+'</dd>'; toast(e.message,true); }
+  }catch(e){ const busy=/already playing/i.test(e.message);
+    timing.innerHTML='<dt>Status</dt><dd>'+esc(e.message)+'</dd>';
+    toast(busy?'Still playing the previous phrase — try again in a moment':e.message,true); }
   finally{ state.simBusy=false; }
  };
  /*
@@ -451,7 +453,12 @@ async function simulationPage(){
     if(state.simStop){toast('Stopped after '+done+' phrases');break}
     timing.innerHTML='<dt>Running</dt><dd>'+esc(label)+' ('+(done+1)+' of '+SIM_PHRASES.length+')</dd>';
     try{ const e=await simRun(phrase,cap); if(e.wake)woke++; }
-    catch(err){ /* record nothing; keep going so one failure does not end the sweep */ }
+    catch(err){ if(/already playing/i.test(err.message||'')){
+        /* The device was still speaking. Wait it out and retry once,
+           rather than recording a failure that is really contention. */
+        await new Promise(r=>setTimeout(r,6000));
+        try{ const e2=await simRun(phrase,cap); if(e2.wake)woke++; }catch(_){}
+      } }
     done++;
     if(!state.simStop&&done<SIM_PHRASES.length)await new Promise(r=>setTimeout(r,3000));
    }
