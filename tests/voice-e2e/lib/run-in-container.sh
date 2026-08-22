@@ -102,6 +102,7 @@ touch "$RUN/pcm-endpoint"           # micd only checks this path is readable
 if [ "$STT_MODE" = fake ]; then
     python3 /harness/lib/fake_wyoming_stt.py --port 31310 \
         --transcript "what time is it" --record "$RUN/stt-audio.log" \
+        --turn-audio "$RUN/turn-audio.raw" \
         >"$RUN/fake-stt.log" 2>&1 &
     PIDS+=($!)
     STT_URI=tcp://127.0.0.1:31310
@@ -109,9 +110,21 @@ if [ "$STT_MODE" = fake ]; then
 fi
 
 # ----------------------------------------------------------------------- micd
+# MUX=1 puts libreecho-capture-mux between micd and the fake codec and delivers
+# the fixture by injection instead of as the codec's source, which is how the
+# device's Simulation page works. The codec then emits only room tone, so a
+# wake in this mode can only have come through the injection path.
+CAPTURE_BIN="$B/fake-tinycap"
+if [ -n "${MUX:-}" ]; then
+    mkdir -p "$RUN/ctl"
+    CAPTURE_BIN="$B/libreecho-capture-mux"
+    export LE_CAPTURE_MUX_BIN="$B/fake-tinycap"
+    export LE_CAPTURE_MUX_CONTROL_DIR="$RUN/ctl"
+    unset LE_FAKE_TINYCAP_SOURCE
+fi
 "$B/libreecho-micd" --foreground --socket "$RUN/mic.sock" \
     --pcm-path "$RUN/pcm-endpoint" \
-    --capture-bin "$B/fake-tinycap" \
+    --capture-bin "$CAPTURE_BIN" \
     --mixer-bin "$B/fake-tinymix" \
     --idme-dir "$RUN/no-idme" --dt-idme-dir "$RUN/no-idme" \
     >"$RUN/micd.log" 2>&1 &
@@ -223,7 +236,13 @@ print("  wake sensitivity set to %s: %s" % (sys.argv[2], s.recv(4096).decode().s
 PY
 fi
 
+if [ -n "${MUX:-}" ]; then
+    cp "$RUN/source.raw" "$RUN/ctl/inject.tmp"
+    mv "$RUN/ctl/inject.tmp" "$RUN/ctl/pending.raw"
+    echo "  daemons up; injecting the fixture through capture-mux..."
+else
 echo "  daemons up; feeding the fixture..."
+fi
 echo
 
 # -------------------------------------------------------------- stage 2: wake

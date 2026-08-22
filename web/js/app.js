@@ -294,40 +294,175 @@ const SIM_PHRASES=[
  ['Wake word only','Alexa'],
  ['False start','Alexa, uh, set a timer'],
  ['Self-correction','Alexa, set a five, no, ten minute timer']];
+const SIM_HISTORY_KEY='libreecho-simulation-history';
+const SIM_HISTORY_MAX=100;
+function simHistory(){
+ try{const raw=localStorage.getItem(SIM_HISTORY_KEY);const v=raw?JSON.parse(raw):[];
+     return Array.isArray(v)?v:[]}catch(_){return []}}
+function simHistorySave(list){
+ try{localStorage.setItem(SIM_HISTORY_KEY,JSON.stringify(list.slice(0,SIM_HISTORY_MAX)))}catch(_){/* private mode, quota */}}
+function ms(v){return (v===null||v===undefined)?'—':(v>=1000?(v/1000).toFixed(2)+' s':Math.round(v)+' ms')}
+/*
+ * Pull the turn's real timings out of the device log rather than inferring
+ * them from poll intervals. agentd reports audio_ms, processing_ms and
+ * total_ms for the turn, and ttsd marks when the first PCM chunk reaches the
+ * bus -- which is the moment a person actually hears an answer. Correlated by
+ * boot_seconds, taking only lines newer than the mark taken before the run.
+ */
+function simParseLogs(entries,since){
+ const out={};
+ for(const e of entries){
+  if(e.boot_seconds<since)continue;
+  const m=e.message||'';
+  let g;
+  if((g=m.match(/audio_ms=(\d+)\s+processing_ms=(\d+)\s+total_ms=(\d+)/))){
+   out.audio_ms=+g[1]; out.processing_ms=+g[2]; out.total_ms=+g[3];
+   out.transcript_at=e.boot_seconds;
+   const chars=m.match(/text_chars=(\d+)/); if(chars)out.text_chars=+chars[1];
+  }
+  if(/speak requested/.test(m)&&out.speak_at===undefined)out.speak_at=e.boot_seconds;
+  if(/streaming first PCM chunk/.test(m)&&out.first_audio_at===undefined)out.first_audio_at=e.boot_seconds;
+  if(/Simulated audio queued/.test(m)&&out.queued_at===undefined)out.queued_at=e.boot_seconds;
+ }
+ if(out.queued_at!==undefined&&out.transcript_at!==undefined)
+  out.queue_to_transcript_ms=(out.transcript_at-out.queued_at)*1000;
+ if(out.transcript_at!==undefined&&out.first_audio_at!==undefined)
+  out.transcript_to_audio_ms=(out.first_audio_at-out.transcript_at)*1000;
+ if(out.queued_at!==undefined&&out.first_audio_at!==undefined)
+  out.queue_to_first_audio_ms=(out.first_audio_at-out.queued_at)*1000;
+ return out;
+}
+function simRow(r){
+ const cap=r.audio_ms&&r.max_utterance_ms&&r.audio_ms>=r.max_utterance_ms-100;
+ return `<tr><td>${esc(new Date(r.at).toLocaleTimeString())}</td>`+
+  `<td class="${r.wake?'connected':''}">${r.wake?'yes':'no'}</td>`+
+  `<td>${esc(r.text.length>34?r.text.slice(0,34)+'…':r.text)}</td>`+
+  `<td>${ms(r.wake_latency_ms)}</td>`+
+  `<td class="${cap?'error-text':''}">${ms(r.audio_ms)}${cap?' (cap)':''}</td>`+
+  `<td>${ms(r.processing_ms)}</td>`+
+  `<td>${ms(r.queue_to_first_audio_ms)}</td></tr>`;
+}
+function simRender(){
+ const h=simHistory();
+ const el=$('#sim-history'); if(!el)return;
+ if(!h.length){el.innerHTML='<p class="muted">No runs yet.</p>';return}
+ el.innerHTML='<div class="table-scroll"><table class="sim-table"><thead><tr>'+
+  '<th>time</th><th>wake</th><th>phrase</th><th>wake latency</th>'+
+  '<th>turn audio</th><th>stt+llm</th><th>to first audio</th></tr></thead><tbody>'+
+  h.map(simRow).join('')+'</tbody></table></div>';
+ const c=$('#sim-count-runs'); if(c)c.textContent=h.length+' of '+SIM_HISTORY_MAX;
+}
+/*
+ * One simulated utterance, start to finish. Shared by the single-phrase button
+ * and the run-all sweep so both record exactly the same fields -- a history
+ * where some rows were measured differently is worse than no history.
+ */
+async function simRun(phrase,cap,onStatus){
+ const pre=await api('/logs').catch(()=>({entries:[]}));
+ const mark=(pre.entries||[]).reduce((m,e)=>Math.max(m,e.boot_seconds||0),0);
+ const before=(await api('/wake-word').catch(()=>({}))).detected_count??0;
+ const t0=performance.now();
+ await api('/audio/simulate',{method:'POST',body:JSON.stringify({text:phrase})});
+ let wake=false,wakeLatency=null;
+ for(let i=0;i<40&&!wake;i++){
+  await new Promise(r=>setTimeout(r,250));
+  const st=await api('/wake-word').catch(()=>null);
+  if(st&&(st.detected_count??before)>before){wake=true;wakeLatency=performance.now()-t0}
+ }
+ if(onStatus)onStatus(wake?'Wake detected, waiting for the answer…':'No wake yet…');
+ await new Promise(r=>setTimeout(r,7000));
+ const post=await api('/logs').catch(()=>({entries:[]}));
+ const entry={at:new Date().toISOString(),text:phrase,wake,
+   wake_latency_ms:wakeLatency?Math.round(wakeLatency):null,
+   max_utterance_ms:cap,...simParseLogs(post.entries||[],mark)};
+ simHistorySave([entry,...simHistory()]);
+ simRender();
+ return entry;
+}
+function simTimingHtml(entry,cap){
+ const capped=entry.audio_ms&&cap&&entry.audio_ms>=cap-100;
+ return '<dt>Wake</dt><dd class="'+(entry.wake?'connected':'')+'">'+(entry.wake?'detected':'not detected')+'</dd>'+
+  '<dt>Wake latency</dt><dd>'+ms(entry.wake_latency_ms)+'</dd>'+
+  '<dt>Turn audio</dt><dd class="'+(capped?'error-text':'')+'">'+ms(entry.audio_ms)+
+    (capped?' — hit the utterance cap, endpointing did not fire':'')+'</dd>'+
+  '<dt>STT + model</dt><dd>'+ms(entry.processing_ms)+'</dd>'+
+  '<dt>Queue to transcript</dt><dd>'+ms(entry.queue_to_transcript_ms)+'</dd>'+
+  '<dt>Transcript to audio</dt><dd>'+ms(entry.transcript_to_audio_ms)+'</dd>'+
+  '<dt>Queue to first audio</dt><dd>'+ms(entry.queue_to_first_audio_ms)+'</dd>';
+}
 async function simulationPage(){
  const w=await api('/wake-word').catch(()=>({}));
+ const vp=await api('/voice-pipeline').catch(()=>({}));
+ const cap=vp?.listening?.max_utterance_ms;
  content.innerHTML=`<div class="settings-grid">${panel('Speak a phrase',
    `<label class="field"><span>Phrase</span><select id="sim-preset">`+
-   SIM_PHRASES.map(([l,t],i)=>`<option value="${i}">${esc(l)}</option>`).join('')+
+   SIM_PHRASES.map(([l],i)=>`<option value="${i}">${esc(l)}</option>`).join('')+
    `<option value="custom">Custom…</option></select></label>`+
    field('Text','Alexa, what time is it?','sim-text')+
    `<p class="muted">Rendered by the device's own text-to-speech and played into the microphone path. Nothing is recorded and nothing leaves the device.</p>`+
-   `<div class="button-row">${action('Speak into the microphone','sim-send','primary-btn')}</div>`+
-   `<dl class="facts"><dt>Wake word</dt><dd>${esc(w.wake_word||'—')}</dd><dt>Sensitivity</dt><dd>${w.sensitivity??'—'}</dd><dt>Detections</dt><dd id="sim-count">${w.detected_count??0}</dd></dl>`)}
-   ${panel('What happened',`<div id="sim-log" class="facts"><dt>Status</dt><dd>Nothing sent yet</dd></div>`+
-   `<p class="muted">After speaking, watch the Logs page or the light ring. A detection increments the counter above.</p>`)}</div>`;
+   `<div class="button-row">${action('Speak into the microphone','sim-send','primary-btn')}${action('Run all '+SIM_PHRASES.length+' phrases','sim-run-all')}<button class="secondary-btn" id="sim-stop-all" hidden>Stop</button></div>`+
+   `<dl class="facts"><dt>Wake word</dt><dd>${esc(w.wake_word||'—')}</dd><dt>Sensitivity</dt><dd>${w.sensitivity??'—'}</dd><dt>Utterance cap</dt><dd>${ms(cap)}</dd></dl>`)}
+   ${panel('Last run',`<dl class="facts" id="sim-timing"><dt>Status</dt><dd>Nothing sent yet</dd></dl>`)}
+   </div>
+   ${panel('History',`<div class="button-row"><span class="muted" id="sim-count-runs">0 of ${SIM_HISTORY_MAX}</span>`+
+     action('Download JSON','sim-download')+action('Clear','sim-clear')+`</div><div id="sim-history"></div>`,'sim-history-panel')}`;
  const preset=$('#sim-preset'),text=$('#sim-text');
  preset.onchange=()=>{ if(preset.value!=='custom') text.value=SIM_PHRASES[+preset.value][1]; };
  text.oninput=()=>{ preset.value='custom'; };
+ simRender();
+ $('#sim-download').onclick=()=>{
+  const blob=new Blob([JSON.stringify({exported:new Date().toISOString(),
+    device:location.host,max_utterance_ms:cap,runs:simHistory()},null,2)],
+    {type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='libreecho-simulation-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+ };
+ $('#sim-clear').onclick=()=>{ simHistorySave([]); simRender(); toast('History cleared') };
  $('#sim-send').onclick=async()=>{
   const phrase=text.value.trim();
   if(!phrase){toast('Enter a phrase first',true);return}
-  const log=$('#sim-log');
-  log.innerHTML='<dt>Status</dt><dd>Rendering and playing…</dd>';
+  if(state.simBusy)return;
+  const timing=$('#sim-timing');
+  state.simBusy=true;
+  timing.innerHTML='<dt>Status</dt><dd>Rendering and playing…</dd>';
   try{
-   await api('/audio/simulate',{method:'POST',body:JSON.stringify({text:phrase})});
-   const before=+($('#sim-count').textContent||0);
-   toast('Playing into the microphone');
-   /* Give the phrase time to play and the pipeline time to react. */
-   await new Promise(r=>setTimeout(r,6000));
-   const after=await api('/wake-word').catch(()=>({}));
-   const fired=(after.detected_count??before)>before;
-   $('#sim-count').textContent=after.detected_count??before;
-   log.innerHTML='<dt>Status</dt><dd class="'+(fired?'connected':'')+'">'+
-     (fired?'Wake word detected':'No wake word detected')+'</dd>'+
-     '<dt>Phrase</dt><dd>'+esc(phrase)+'</dd>';
-  }catch(e){ log.innerHTML='<dt>Status</dt><dd>'+esc(e.message)+'</dd>'; toast(e.message,true); }
+   const entry=await simRun(phrase,cap,t=>{timing.innerHTML='<dt>Status</dt><dd>'+esc(t)+'</dd>'});
+   timing.innerHTML=simTimingHtml(entry,cap);
+   toast(entry.wake?'Wake detected':'No wake detected',!entry.wake);
+  }catch(e){ timing.innerHTML='<dt>Status</dt><dd>'+esc(e.message)+'</dd>'; toast(e.message,true); }
+  finally{ state.simBusy=false; }
  };
+ /*
+  * Run every preset in turn. Each utterance makes the device answer out loud,
+  * so leave a gap between them: starting the next phrase while the speaker is
+  * still going would be testing barge-in, not the phrase.
+  */
+ $('#sim-run-all').onclick=async()=>{
+  if(state.simBusy)return;
+  state.simBusy=true; state.simStop=false;
+  const timing=$('#sim-timing'),btn=$('#sim-run-all'),stop=$('#sim-stop-all');
+  btn.disabled=true; if(stop)stop.hidden=false;
+  let done=0,woke=0;
+  try{
+   for(const [label,phrase] of SIM_PHRASES){
+    if(state.simStop){toast('Stopped after '+done+' phrases');break}
+    timing.innerHTML='<dt>Running</dt><dd>'+esc(label)+' ('+(done+1)+' of '+SIM_PHRASES.length+')</dd>';
+    try{ const e=await simRun(phrase,cap); if(e.wake)woke++; }
+    catch(err){ /* record nothing; keep going so one failure does not end the sweep */ }
+    done++;
+    if(!state.simStop&&done<SIM_PHRASES.length)await new Promise(r=>setTimeout(r,3000));
+   }
+   timing.innerHTML='<dt>Sweep complete</dt><dd>'+woke+' of '+done+' phrases woke the device</dd>';
+   toast(woke+' of '+done+' woke the device');
+  } finally {
+   state.simBusy=false; btn.disabled=false; if(stop)stop.hidden=true;
+  }
+ };
+ if($('#sim-stop-all'))$('#sim-stop-all').onclick=()=>{state.simStop=true};
+
 }
 async function wakePage(){let w;try{w=await api('/wake-word')}catch(e){if(/not available|not supported/i.test(e.message)){content.innerHTML=`<div class="settings-grid">${panel('Wake-word engine',unsupported('The wake-word adapter is not installed in this image. No microphone processing is running.'))}</div>`;return}throw e}const approved=['LibreEcho','Computer','Echo','Custom model'],current=String(w.wake_word||''),wakeOptions=approved.includes(current)?approved:[current+' (current)',...approved];content.innerHTML=`<div class="settings-grid">${panel('Wake-word engine',`<dl class="facts"><dt>Detection</dt><dd class="${w.enabled?'connected':''}">${w.enabled?'Enabled':'Disabled'}</dd></dl><p class="muted">Detection enablement is reported by the live wake-word adapter and is not configurable through this API.</p>`+select('Active wake word',current,'wake-word',wakeOptions)+range('Detection sensitivity',w.sensitivity,'sensitivity')+`<dl class="facts"><dt>Detection cooldown</dt><dd>${w.cooldown_ms} ms</dd></dl>`+`<div class="button-row">${saveButton('save-wake')}${action('Simulate detection','wake-test')}</div>`)}${panel('Local processing',`<div class="privacy-callout">✓ Audio remains on this device</div><dl class="facts"><dt>Model status</dt><dd class="connected">${esc(w.model_status)}</dd><dt>Detections</dt><dd>${w.detected_count}</dd><dt>Estimated CPU cost</dt><dd>${w.cpu_cost_percent}%</dd><dt>Estimated memory cost</dt><dd>${w.memory_cost_mb} MB</dd></dl>`)}</div>`;bindRange();bindDirty(['#wake-word','#sensitivity'],'#save-wake');$('#save-wake').onclick=()=>mutate('/wake-word',{wake_word:$('#wake-word').value.replace(/ \(current\)$/,''),sensitivity:+$('#sensitivity').value},'Wake-word changes saved');$('#wake-test').onclick=()=>post('/wake-word/test',{},'Wake word detected')}
 function ledRing(l){const physical=Array.isArray(l.pixels)&&l.pixels.length===12,colours=physical?l.pixels:Array.from({length:24},()=>l.colour),count=colours.length,opacity=physical?1:Math.max(0,Math.min(1,Number(l.brightness??0)/100));const dots=colours.map((colour,i)=>{const angle=(i/count)*Math.PI*2-Math.PI/2,x=50+38*Math.cos(angle),y=50+38*Math.sin(angle);return `<circle class="led-pixel" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${physical?'6.4':'5.5'}" fill="${rgb(colour)}" opacity="${opacity.toFixed(2)}"></circle>`}).join('');const label=l.pattern_active?`Pattern · ${esc(l.pattern||'pattern')}`:l.visualizer_active?`Music visualizer · ${esc(l.visualizer_mood||'balanced')}`:l.animation_active?`Animating · ${esc(l.animation_profile||'profile')}`:'Steady',moving=l.animation_active||l.pattern_active;return `<div class="led-ring-view${moving?' animating':''}${l.visualizer_active?' reactive':''}" role="img" aria-label="${esc(label)} LED ring"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="led-ring-track" cx="50" cy="50" r="38"></circle>${dots}<circle class="led-ring-centre" cx="50" cy="50" r="24"></circle></svg><span>${esc(label)}</span></div>`}

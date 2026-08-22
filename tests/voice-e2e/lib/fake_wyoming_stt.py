@@ -72,6 +72,12 @@ class Handler(socketserver.StreamRequestHandler):
                     values = struct.unpack("<%dh" % n, payload[:n * 2])
                     samples += n
                     sum_squares += sum(float(v) * v for v in values)
+                    # Keep the turn audio when asked. Whether the command
+                    # survived a long pause is a question about what actually
+                    # reached the recogniser, and only the audio answers it.
+                    if self.server.turn_audio:
+                        with open(self.server.turn_audio, "ab") as fh:
+                            fh.write(payload[:n * 2])
             elif t == "audio-stop":
                 rms = math.sqrt(sum_squares / samples) if samples else 0.0
                 with LOCK:
@@ -99,10 +105,12 @@ def main():
     ap.add_argument("--port", type=int, default=31310)
     ap.add_argument("--transcript", default="what time is it")
     ap.add_argument("--record")
+    ap.add_argument("--turn-audio")
     args = ap.parse_args()
     server = Server(("127.0.0.1", args.port), Handler)
     server.transcript = args.transcript
     server.record = args.record
+    server.turn_audio = args.turn_audio
     print("fake-stt: listening on 127.0.0.1:%d" % args.port, flush=True)
     server.serve_forever()
 
