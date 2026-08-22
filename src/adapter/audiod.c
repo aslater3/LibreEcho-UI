@@ -33,6 +33,10 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#if defined(__linux__)
+# include <sys/prctl.h>
+#endif
+#include <time.h>
 #include <unistd.h>
 
 #if defined(__has_include)
@@ -141,6 +145,9 @@ struct snd_ctl_elem_value {
 #define LE_TONE_CHANNELS 2
 #define LE_TONE_CHUNK_FRAMES 1024
 #define LE_SYSTEM_AUDIO_BUS "/run/libreecho-audio/system.pcm"
+#ifndef LE_AIRPLAY_ACTIVE_PATH
+# define LE_AIRPLAY_ACTIVE_PATH "/run/libreecho-audio/airplay.active"
+#endif
 
 /*
  * Wake acknowledgement chirp.
@@ -238,10 +245,29 @@ static void signal_child(int signo)
     (void)signo;
 }
 
-static void reap_children(void)
+static void clear_noise_state(struct audio_hw *audio)
 {
-    while (waitpid(-1, NULL, WNOHANG) > 0)
-        ;
+    audio->noise_pid = 0;
+    audio->noise_seconds = 0;
+    audio->noise_level = 0;
+    audio->noise_started = 0;
+}
+
+static void reap_children(struct audio_hw *audio)
+{
+    pid_t done;
+
+    for (;;) {
+        done = waitpid(-1, NULL, WNOHANG);
+        if (done > 0) {
+            if (done == audio->noise_pid)
+                clear_noise_state(audio);
+            continue;
+        }
+        if (done < 0 && errno == EINTR)
+            continue;
+        break;
+    }
 }
 
 static int set_nonblocking(int fd)
@@ -845,6 +871,7 @@ static const char *control_name_or_default(const struct audio_control *control,
 #define VOLUME_GUARD_TOLERANCE 2
 
 static int audio_set_volume(struct audio_hw *audio, int volume);
+static int airplay_media_active(void);
 
 static void refresh_state(struct audio_hw *audio)
 {
@@ -886,7 +913,7 @@ static void refresh_state(struct audio_hw *audio)
          * below min+67 reads as 1% -- so the raw number is what identifies
          * an outside writer.
          */
-        if (audio->requested_volume >= 0 &&
+        if (!airplay_media_active() && audio->requested_volume >= 0 &&
             abs(audio->volume - audio->requested_volume) >
                 VOLUME_GUARD_TOLERANCE) {
             le_log_warn("audiod: volume changed underneath us: requested "
@@ -935,6 +962,15 @@ static int amplifier_active(const struct audio_hw *audio)
         return 0;
     status[n] = '\0';
     return strstr(status, "closed") == NULL;
+}
+
+static int airplay_media_active(void)
+{
+    struct stat state;
+
+    /* The AirPlay bridge publishes this only after both PCM ends connect. */
+    return lstat(LE_AIRPLAY_ACTIVE_PATH, &state) == 0 &&
+           S_ISREG(state.st_mode);
 }
 
 static int audio_set_volume(struct audio_hw *audio, int volume)
@@ -1092,8 +1128,11 @@ static void audio_init(struct audio_hw *audio, int card)
     apply_persisted_levels(audio);
 }
 
+static void stop_noise(struct audio_hw *audio);
+
 static void audio_destroy(struct audio_hw *audio)
 {
+    stop_noise(audio);
     if (audio->ctl_fd >= 0)
         close(audio->ctl_fd);
     audio->ctl_fd = -1;
@@ -1323,10 +1362,10 @@ static time_t monotonic_seconds(void)
 
 /*
  * A timed generator exits on its own when the sleep timer runs out.  Nothing
- * was reaping it, so the child stayed a zombie and noise_pid stayed set --
- * status would keep reporting noise long after the room went quiet, and the
- * next start would SIGTERM a pid that no longer existed.  Reap without
- * blocking before anything reads or changes the state.
+ * The generic reaper also handles this child, so it must clear the tracked
+ * state when it collects this particular PID.  The explicit reap below is
+ * still needed before a stop or status transition that must synchronise the
+ * state immediately.
  */
 static void reap_noise(struct audio_hw *audio)
 {
@@ -1338,24 +1377,40 @@ static void reap_noise(struct audio_hw *audio)
         done = waitpid(audio->noise_pid, NULL, WNOHANG);
     } while (done < 0 && errno == EINTR);
     if (done == audio->noise_pid || (done < 0 && errno == ECHILD)) {
-        audio->noise_pid = 0;
-        audio->noise_seconds = 0;
-        audio->noise_level = 0;
-        audio->noise_started = 0;
+        clear_noise_state(audio);
     }
 }
 
 static void stop_noise(struct audio_hw *audio)
 {
-    if (audio->noise_pid > 0) {
-        kill(audio->noise_pid, SIGTERM);
-        while (waitpid(audio->noise_pid, NULL, 0) < 0 && errno == EINTR)
-            ;
-        audio->noise_pid = 0;
+    pid_t pid;
+    pid_t waited;
+
+    reap_noise(audio);
+    pid = audio->noise_pid;
+    if (pid > 0) {
+        if (kill(pid, SIGTERM) < 0 && errno != ESRCH)
+            le_log_warn("audiod: unable to stop noise child: %s", strerror(errno));
+        do {
+            waited = waitpid(pid, NULL, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited < 0 && errno != ECHILD)
+            le_log_warn("audiod: unable to reap noise child: %s", strerror(errno));
+        clear_noise_state(audio);
+    } else {
+        clear_noise_state(audio);
     }
-    audio->noise_seconds = 0;
-    audio->noise_level = 0;
-    audio->noise_started = 0;
+}
+
+static void configure_noise_child(void)
+{
+#if defined(__linux__) && defined(PR_SET_PDEATHSIG)
+    pid_t parent = getppid();
+
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0 || getppid() != parent)
+        _exit(1);
+#endif
+    signal(SIGTERM, SIG_DFL);
 }
 
 static int start_noise(struct audio_hw *audio, int colour, int level,
@@ -1390,7 +1445,7 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
     if (pid == 0) {
         int result;
 
-        signal(SIGTERM, SIG_DFL);
+        configure_noise_child();
         result = write_noise_fd(fd, colour, amplitude, seconds);
         close(fd);
         _exit(result == 0 ? 0 : 1);
@@ -1836,7 +1891,7 @@ int main(int argc, char **argv)
         nfds_t nfds = 1;
         int poll_result;
 
-        reap_children();
+        reap_children(&audio);
 
         pollfds[0].fd = listen_fd;
         pollfds[0].events = POLLIN;

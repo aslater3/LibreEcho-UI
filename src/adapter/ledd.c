@@ -67,6 +67,7 @@
 #define VISUALIZER_TIMEOUT_SECONDS 0.42
 #define STARTUP_READY_PATH "/run/libreecho/startup-ready"
 #define STARTUP_FRAME_MS 88
+#define NIGHT_POLL_MS 60000
 
 struct colour {
     unsigned int r;
@@ -464,11 +465,40 @@ static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
         le_log_warn( "LED hardware write failed; retaining state in memory");
 }
 
-static void hardware_apply_pixels(struct daemon_context *ctx,
-                                  const struct pixel pixels[RING_PIXELS])
+static void night_cap_pixels(const struct daemon_context *ctx,
+                             struct pixel pixels[RING_PIXELS],
+                             unsigned int source_brightness)
 {
-    memcpy(ctx->rendered_pixels, pixels, sizeof(ctx->rendered_pixels));
-    if (hardware_write_pixels(&ctx->hw, pixels) != 0)
+    size_t i;
+
+    if (night_mode_active(&ctx->state) && source_brightness > 0U) {
+        unsigned int cap = (unsigned int)ctx->state.profiles[PROFILE_NIGHT].brightness;
+
+        if (cap > 100U)
+            cap = 100U;
+        if (source_brightness > cap) {
+            for (i = 0; i < RING_PIXELS; i++) {
+                pixels[i].r = (pixels[i].r * cap + source_brightness / 2U) /
+                             source_brightness;
+                pixels[i].g = (pixels[i].g * cap + source_brightness / 2U) /
+                             source_brightness;
+                pixels[i].b = (pixels[i].b * cap + source_brightness / 2U) /
+                             source_brightness;
+            }
+        }
+    }
+}
+
+static void hardware_apply_pixels(struct daemon_context *ctx,
+                                  const struct pixel pixels[RING_PIXELS],
+                                  unsigned int source_brightness)
+{
+    struct pixel capped[RING_PIXELS];
+
+    memcpy(capped, pixels, sizeof(capped));
+    night_cap_pixels(ctx, capped, source_brightness);
+    memcpy(ctx->rendered_pixels, capped, sizeof(ctx->rendered_pixels));
+    if (hardware_write_pixels(&ctx->hw, capped) != 0)
         le_log_warn( "LED hardware write failed; retaining state in memory");
 }
 
@@ -481,7 +511,7 @@ static void apply_startup_animation(struct daemon_context *ctx)
         pixels[i] = (struct pixel){0, 64, 0};
     pixels[ctx->startup_animation_frame % RING_PIXELS] =
         (struct pixel){0, 255, 0};
-    hardware_apply_pixels(ctx, pixels);
+    hardware_apply_pixels(ctx, pixels, 100U);
 }
 
 static void stop_startup_animation(struct daemon_context *ctx)
@@ -1651,7 +1681,7 @@ static void apply_visualizer(struct daemon_context *ctx, double now)
         ctx->visualizer_rhythm_pulse = 0;
     ctx->visualizer_impact = ctx->visualizer_impact > 12U
                            ? ctx->visualizer_impact - 12U : 0U;
-    hardware_apply_pixels(ctx, pixels);
+    hardware_apply_pixels(ctx, pixels, ctx->visualizer_brightness);
 }
 
 static void expire_visualizer(struct daemon_context *ctx, double now)
@@ -1706,7 +1736,7 @@ static void apply_meter(struct daemon_context *ctx)
         pixels[i].g = scale_channel(ctx->meter_colour.g, level);
         pixels[i].b = scale_channel(ctx->meter_colour.b, level);
     }
-    hardware_apply_pixels(ctx, pixels);
+    hardware_apply_pixels(ctx, pixels, ctx->meter_colour.brightness);
 }
 
 static void start_meter(struct daemon_context *ctx, unsigned int value,
@@ -2757,6 +2787,7 @@ int main(int argc, char **argv)
         int slots[1 + MAX_CLIENTS];
         nfds_t nfds = 1;
         int timeout = -1;
+        int poll_result;
         size_t j;
 
         fds[0].fd = ctx.listen_fd;
@@ -2768,6 +2799,8 @@ int main(int argc, char **argv)
         else if (ctx.test_active || ctx.animation_active || ctx.pattern_active ||
                  ctx.visualizer_active || ctx.meter_active)
             timeout = FRAME_MS;
+        else if (ctx.state.night_enabled)
+            timeout = NIGHT_POLL_MS;
 
         for (j = 0; j < MAX_CLIENTS; j++) {
             if (ctx.clients[j].fd >= 0) {
@@ -2779,7 +2812,8 @@ int main(int argc, char **argv)
             }
         }
 
-        if (poll(fds, nfds, timeout) < 0) {
+        poll_result = poll(fds, nfds, timeout);
+        if (poll_result < 0) {
             if (errno == EINTR)
                 continue;
             le_log_error( "poll failed: %s", strerror(errno));
@@ -2797,6 +2831,8 @@ int main(int argc, char **argv)
             ctx.animation_active || ctx.pattern_active ||
             ctx.visualizer_active || ctx.meter_active)
             update_animation(&ctx, monotonic_seconds());
+        else if (poll_result == 0 && ctx.state.night_enabled)
+            hardware_apply(&ctx, &ctx.state.current);
     }
 
     for (i = 0; i < MAX_CLIENTS; i++)

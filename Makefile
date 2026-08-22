@@ -77,7 +77,7 @@ $(BUILD)/libreecho-timed: $(TIMED_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(TIMED_OBJECTS) $(LDFLAGS) -o $@
 
 $(BUILD)/libreecho-audiod: $(AUDIOD_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AUDIOD_OBJECTS) $(LDFLAGS) -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AUDIOD_OBJECTS) $(LDFLAGS) -lm -o $@
 
 $(BUILD)/libreecho-micd: $(MICD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(MICD_OBJECTS) $(LDFLAGS) -o $@
@@ -158,6 +158,18 @@ $(BUILD)/test-wyomingd: tests/test_wyomingd.c $(BUILD)/libreecho-wyomingd
 
 test-wyomingd: $(BUILD)/test-wyomingd
 	./$(BUILD)/test-wyomingd
+
+$(BUILD)/test-audiod-review: tests/test_audiod_review.c \
+		src/adapter/audiod.c src/adapter/adapter_client.c \
+		src/adapter/adapter_server.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
+
+$(BUILD)/test-led-night-review: tests/test_led_night_review.c \
+		src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_server.c src/log.c -o $@
 
 # sherpa-onnx backed ttsd (cross-compiled ARM32, static).  Uses the real
 # ZipVoice neural TTS engine instead of the mock sine chirp.  Requires
@@ -546,6 +558,7 @@ clean:
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
 		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
+		$(BUILD)/test-audiod-review $(BUILD)/test-led-night-review \
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \
 		$(BUILD)/test-agentd \
