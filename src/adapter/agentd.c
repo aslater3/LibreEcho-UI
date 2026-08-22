@@ -763,28 +763,39 @@ static const char *weather_description(int code)
 /* MET Norway reports Celsius and metres per second. */
 static int fetch_met_no(struct agent_state *state, char *out, size_t size)
 {
-    struct le_llm_http_request request;
-    struct le_llm_http_response response;
+    /*
+     * These two structures carry a 16 KiB body each.  Declaring them on the
+     * stack costs about 32 KiB per call, and this runs on a pthread whose
+     * default stack under musl is 128 KiB rather than the 8 MiB a glibc
+     * main thread would give it.  That overflowed the thread stack and took
+     * agentd down mid-turn: the fetch logged its reading and the process
+     * died before the reply was generated.  Keep them on the heap.
+     */
+    struct le_llm_http_request *request;
+    struct le_llm_http_response *response;
+    int outcome = 0;
     char symbol[64] = "";
     double celsius = 0.0, mps = 0.0;
     size_t i;
 
-    memset(&request, 0, sizeof(request));
-    memset(&response, 0, sizeof(response));
-    (void)snprintf(request.method, sizeof(request.method), "GET");
-    if (snprintf(request.url, sizeof(request.url),
+    request = calloc(1, sizeof(*request));
+    response = calloc(1, sizeof(*response));
+    if (!request || !response)
+        goto done;
+    (void)snprintf(request->method, sizeof(request->method), "GET");
+    if (snprintf(request->url, sizeof(request->url),
                  "https://api.met.no/weatherapi/locationforecast/2.0/compact"
                  "?lat=%s&lon=%s",
                  state->config.latitude,
-                 state->config.longitude) >= (int)sizeof(request.url))
-        return 0;
-    if (le_llm_http_execute(state->curl_path, &request, NULL, NULL,
-                            &response) < 0 || response.status != 200)
-        return 0;
-    if (!json_number(response.body, "air_temperature", &celsius))
-        return 0;
-    (void)json_number(response.body, "wind_speed", &mps);
-    (void)json_get_string(response.body, "symbol_code", symbol,
+                 state->config.longitude) >= (int)sizeof(request->url))
+        goto done;
+    if (le_llm_http_execute(state->curl_path, request, NULL, NULL,
+                            response) < 0 || response->status != 200)
+        goto done;
+    if (!json_number(response->body, "air_temperature", &celsius))
+        goto done;
+    (void)json_number(response->body, "wind_speed", &mps);
+    (void)json_get_string(response->body, "symbol_code", symbol,
                           sizeof(symbol));
     /* "partlycloudy_day" reads badly aloud; make it speakable. */
     for (i = 0; symbol[i]; ++i) {
@@ -796,39 +807,58 @@ static int fetch_met_no(struct agent_state *state, char *out, size_t size)
                    (int)(celsius * 9.0 / 5.0 + 32.0 + 0.5),
                    symbol[0] ? " and " : "", symbol,
                    (int)(mps * 2.23694 + 0.5));
-    return 1;
+    outcome = 1;
+done:
+    free(request);
+    free(response);
+    return outcome;
 }
 
 static int fetch_open_meteo(struct agent_state *state, char *out, size_t size)
 {
-    struct le_llm_http_request request;
-    struct le_llm_http_response response;
+    /*
+     * These two structures carry a 16 KiB body each.  Declaring them on the
+     * stack costs about 32 KiB per call, and this runs on a pthread whose
+     * default stack under musl is 128 KiB rather than the 8 MiB a glibc
+     * main thread would give it.  That overflowed the thread stack and took
+     * agentd down mid-turn: the fetch logged its reading and the process
+     * died before the reply was generated.  Keep them on the heap.
+     */
+    struct le_llm_http_request *request;
+    struct le_llm_http_response *response;
+    int outcome = 0;
     double temperature = 0.0, wind = 0.0, coded = 0.0;
 
-    memset(&request, 0, sizeof(request));
-    memset(&response, 0, sizeof(response));
-    (void)snprintf(request.method, sizeof(request.method), "GET");
-    if (snprintf(request.url, sizeof(request.url),
+    request = calloc(1, sizeof(*request));
+    response = calloc(1, sizeof(*response));
+    if (!request || !response)
+        goto done;
+    (void)snprintf(request->method, sizeof(request->method), "GET");
+    if (snprintf(request->url, sizeof(request->url),
                  "https://api.open-meteo.com/v1/forecast"
                  "?latitude=%s&longitude=%s"
                  "&current=temperature_2m,weather_code,wind_speed_10m"
                  "&temperature_unit=fahrenheit&wind_speed_unit=mph",
                  state->config.latitude,
-                 state->config.longitude) >= (int)sizeof(request.url))
-        return 0;
-    if (le_llm_http_execute(state->curl_path, &request, NULL, NULL,
-                            &response) < 0 || response.status != 200)
-        return 0;
-    if (!json_number(response.body, "temperature_2m", &temperature) ||
-        !json_number(response.body, "weather_code", &coded))
-        return 0;
-    (void)json_number(response.body, "wind_speed_10m", &wind);
+                 state->config.longitude) >= (int)sizeof(request->url))
+        goto done;
+    if (le_llm_http_execute(state->curl_path, request, NULL, NULL,
+                            response) < 0 || response->status != 200)
+        goto done;
+    if (!json_number(response->body, "temperature_2m", &temperature) ||
+        !json_number(response->body, "weather_code", &coded))
+        goto done;
+    (void)json_number(response->body, "wind_speed_10m", &wind);
     (void)snprintf(out, size,
                    "%d degrees Fahrenheit and %s, wind %d miles per hour",
                    (int)(temperature + (temperature < 0 ? -0.5 : 0.5)),
                    weather_description((int)coded),
                    (int)(wind + 0.5));
-    return 1;
+    outcome = 1;
+done:
+    free(request);
+    free(response);
+    return outcome;
 }
 
 static void refresh_weather(struct agent_state *state)
