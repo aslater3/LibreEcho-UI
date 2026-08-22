@@ -149,6 +149,13 @@ def run_web(root: Path, host: str, port: int, web: Path) -> subprocess.Popen[byt
     runtime, data = root / "run" / "libreecho", root / "data"
     for p in (runtime, data / "libreecho" / "config", data / "libreecho" / "userdata"):
         p.mkdir(parents=True, exist_ok=True)
+    # The daemon uses the config file's existence as its setup-completed
+    # marker. Keep that marker persistent alongside users so a reused virtual
+    # root cannot serve the Wi-Fi setup page while requiring account auth.
+    config_path = data / "libreecho" / "config" / "web-config.json"
+    if not config_path.exists():
+        config_path.write_text("{}\n")
+        os.chmod(config_path, 0o600)
     cmd = ["bwrap", "--die-with-parent", "--new-session", "--ro-bind", "/", "/",
            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run",
            "--dir", "/run/libreecho", "--bind", str(runtime), "/run/libreecho",
