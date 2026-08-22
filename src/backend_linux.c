@@ -658,6 +658,76 @@ static int status(struct le_backend *b, struct le_system_status *o)
 }
 
 /* device() reports the kernel, host, and immutable IDME board identity. */
+/*
+ * Real hardware identity, rather than the placeholders this used to report.
+ *
+ * The device tree carries both the board model and a compatible list whose
+ * last entry is the SoC ("mediatek,mt8163"). compatible is a NUL-separated
+ * list, not a string, so it is read by length and walked entry by entry.
+ */
+static int read_dt_string(const char *name, char *out, size_t size)
+{
+    char path[256];
+    FILE *f;
+    size_t n;
+
+    if (snprintf(path, sizeof(path),
+                 "/sys/firmware/devicetree/base/%s", name) >= (int)sizeof(path))
+        return -1;
+    f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    n = fread(out, 1, size - 1, f);
+    fclose(f);
+    if (!n)
+        return -1;
+    out[n] = '\0';
+    return (int)n;
+}
+
+static void read_hardware_identity(char *model, size_t model_size,
+                                   char *revision, size_t revision_size)
+{
+    char buffer[256], soc[96];
+    int n;
+
+    soc[0] = '\0';
+    n = read_dt_string("compatible", buffer, sizeof(buffer));
+    if (n > 0) {
+        int i = 0;
+        /* Walk the NUL-separated entries; the SoC is the last one. */
+        while (i < n) {
+            size_t len = strlen(buffer + i);
+            if (!len)
+                break;
+            snprintf(soc, sizeof(soc), "%s", buffer + i);
+            i += (int)len + 1;
+        }
+    }
+    if (read_dt_string("model", buffer, sizeof(buffer)) > 0 && buffer[0])
+        snprintf(model, model_size, "%s", buffer);
+    else if (soc[0])
+        snprintf(model, model_size, "%s", soc);
+    else
+        snprintf(model, model_size, "%s", "LibreEcho device");
+
+    if (soc[0]) {
+        /* "mediatek,mt8163" reads better as "MediaTek MT8163". */
+        char *comma = strchr(soc, ',');
+        if (comma) {
+            *comma = '\0';
+            if (!strcmp(soc, "mediatek"))
+                snprintf(revision, revision_size, "MediaTek %s", comma + 1);
+            else
+                snprintf(revision, revision_size, "%s %s", soc, comma + 1);
+        } else {
+            snprintf(revision, revision_size, "%s", soc);
+        }
+    } else {
+        snprintf(revision, revision_size, "%s", "unknown");
+    }
+}
+
 static int device(struct le_backend *b, struct le_device_info *o)
 {
     struct utsname u;
@@ -666,7 +736,9 @@ static int device(struct le_backend *b, struct le_device_info *o)
     memset(o, 0, sizeof(*o));
     read_hostname(o->hostname, sizeof(o->hostname));
     copy_string(o->name, sizeof(o->name), "LibreEcho");
-    strcpy(o->model, "LibreEcho device");
+    read_hardware_identity(o->model, sizeof(o->model),
+                           o->hardware_revision,
+                           sizeof(o->hardware_revision));
     if (read_device_serial(o->serial, sizeof(o->serial)) != 0 &&
         read_redacted_boot_id(o->serial, sizeof(o->serial)) != 0)
         strcpy(o->serial, "unavailable");
@@ -677,7 +749,6 @@ static int device(struct le_backend *b, struct le_device_info *o)
              LE_OS_VERSION_STRING);
     if (!uname(&u))
         copy_string(o->kernel, sizeof(o->kernel), u.release);
-    strcpy(o->hardware_revision, "adapter pending");
     strcpy(o->backend, "linux");
     return LE_OK;
 }
@@ -1266,6 +1337,16 @@ static int simulate_audio(struct le_backend *b, const char *text)
     json_escape(escaped, sizeof(escaped), text);
     if (mkdir("/run/libreecho/mic-inject", 0755) < 0 && errno != EEXIST)
         return LE_IO;
+    /*
+     * One slot, so refuse rather than overwrite. pending.raw is audio the mux
+     * has not started yet and active.raw is audio it is playing; rendering
+     * over either one silently discards or delays an utterance, and the
+     * caller -- watching for a wake that never comes for the phrase it
+     * thinks it sent -- reads that as the phrase having failed.
+     */
+    if (!access("/run/libreecho/mic-inject/pending.raw", F_OK) ||
+        !access("/run/libreecho/mic-inject/active.raw", F_OK))
+        return LE_BUSY;
     snprintf(args, sizeof(args),
              "{\"text\":\"%s\",\"path\":\"%s\"}",
              escaped, "/run/libreecho/mic-inject/pending.raw");
