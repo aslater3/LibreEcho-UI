@@ -61,6 +61,12 @@ static int16_t room_tone(int rms)
     return (int16_t)(((a - b) * rms) / 16384);
 }
 
+/* Ring of recent samples, so channel 3 can lag channel 0 by the array delay. */
+#define HISTORY 64
+static int16_t history[HISTORY];
+static int history_pos;
+static int array_delay = 4;      /* matches micd relative_delay_samples {0:4,3:0} */
+
 int main(int argc, char **argv)
 {
     const char *source = getenv("LE_FAKE_TINYCAP_SOURCE");
@@ -100,6 +106,15 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    {
+        const char *text = getenv("LE_FAKE_TINYCAP_ARRAY_DELAY");
+        if (text && *text) {
+            char *end = NULL;
+            long parsed = strtol(text, &end, 10);
+            if (end && *end == '\0' && parsed >= 0 && parsed < HISTORY)
+                array_delay = (int)parsed;
+        }
+    }
     clock_gettime(CLOCK_MONOTONIC, &next);
     for (;;) {
         unsigned char frame[CHUNK * CHANNELS * 3];
@@ -125,9 +140,31 @@ int main(int argc, char **argv)
         }
         for (i = 0; i < CHUNK; ++i) {
             int16_t sample = (int16_t)(mono[i] / attenuate);
+            int16_t lagged;
+
+            /*
+             * Model the array's propagation delay.
+             *
+             * micd beamforms logical mics 0 and 3 with
+             * relative_delay_samples {0:4, 3:0}: it holds mic 0 back by four
+             * samples so a wavefront that reached mic 0 first lines up with
+             * mic 3 before they are summed. Feeding every channel the same
+             * instant of audio does not model that -- it makes micd cancel a
+             * delay that was never there, which turns delay-and-sum into a
+             * comb filter with a null at rate/(2*4) = 2 kHz. Measured at
+             * -13.6 dB, right in the consonant band, on every run.
+             *
+             * So delay mic 3 here by the same four samples. That is what a
+             * real off-axis source does, micd's compensation then aligns the
+             * two, and they add rather than cancel.
+             */
+            history[history_pos] = sample;
+            lagged = history[(history_pos + HISTORY - array_delay) % HISTORY];
+            history_pos = (history_pos + 1) % HISTORY;
 
             for (c = 0; c < CHANNELS; ++c)
-                put24(frame + (size_t)(i * CHANNELS + c) * 3, sample);
+                put24(frame + (size_t)(i * CHANNELS + c) * 3,
+                      c == 3 ? lagged : sample);
         }
         if (fwrite(frame, 1, sizeof(frame), stdout) != sizeof(frame))
             return 0;

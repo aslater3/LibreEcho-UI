@@ -52,6 +52,22 @@ That is 256× hot capture, a degraded wake margin, and a VAD latched active so
 every turn runs to `max_utterance_ms` — the "it keeps listening after I stop
 talking" symptom, caught automatically.
 
+## Capture path frequency response (#37 part 3)
+
+```sh
+tests/voice-e2e/bin/capture-response.sh          # TOLERANCE=6 by default
+```
+
+Plays stepped tones through the real DSP chain and reports magnitude vs
+frequency, writing `build/harness/capture-response.json` so builds can be
+diffed. It measures the **software** capture chain — unpack scaling,
+calibration, beamforming, the 80 Hz high-pass, digital gain — not the acoustic
+path, and needs no measurement microphone. The band stops at 8 kHz because
+capture runs at 16 kHz; the 20 Hz–20 kHz in #37 describes the output path.
+
+Current baseline is flat to ±0.0 dB from 200 Hz to 7 kHz, with the 80 Hz
+high-pass visible below that (−3.0 dB at 80 Hz, −7.0 dB at 40 Hz).
+
 ## Notes
 
 - Runs `linux/arm64` by default. Under emulated `linux/amd64` on Apple Silicon
