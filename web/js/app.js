@@ -491,10 +491,26 @@ function ms(v){return (v===null||v===undefined)?'—':(v>=1000?(v/1000).toFixed(
  */
 function simParseLogs(entries,since){
  const out={};
+ /*
+  * Every marker below must come from the turn being measured, so nothing is
+  * read until this turn's queue line has gone by. boot_seconds is stamped in
+  * whole seconds, so `since` alone does not separate turns: when the previous
+  * reply was still being spoken in the same second the request went out, its
+  * "streaming first PCM chunk" line passed the filter and was paired with this
+  * turn's queue line, reporting first audio several seconds before the request
+  * that supposedly caused it. Anchoring on the queue line is the best split
+  * available at this resolution; a turn whose queue line never arrives reports
+  * nothing rather than a number attributed to the wrong turn.
+  */
+ let started=false;
  for(const e of entries){
   if(e.boot_seconds<since)continue;
   const m=e.message||'';
   let g;
+  if(/Simulated audio queued/.test(m)&&out.queued_at===undefined){
+   out.queued_at=e.boot_seconds;started=true;continue;
+  }
+  if(!started)continue;
   if((g=m.match(/audio_ms=(\d+)\s+processing_ms=(\d+)\s+total_ms=(\d+)/))){
    out.audio_ms=+g[1]; out.processing_ms=+g[2]; out.total_ms=+g[3];
    out.transcript_at=e.boot_seconds;
@@ -502,14 +518,13 @@ function simParseLogs(entries,since){
   }
   if(/speak requested/.test(m)&&out.speak_at===undefined)out.speak_at=e.boot_seconds;
   if(/streaming first PCM chunk/.test(m)&&out.first_audio_at===undefined)out.first_audio_at=e.boot_seconds;
-  if(/Simulated audio queued/.test(m)&&out.queued_at===undefined)out.queued_at=e.boot_seconds;
  }
- if(out.queued_at!==undefined&&out.transcript_at!==undefined)
-  out.queue_to_transcript_ms=(out.transcript_at-out.queued_at)*1000;
- if(out.transcript_at!==undefined&&out.first_audio_at!==undefined)
-  out.transcript_to_audio_ms=(out.first_audio_at-out.transcript_at)*1000;
- if(out.queued_at!==undefined&&out.first_audio_at!==undefined)
-  out.queue_to_first_audio_ms=(out.first_audio_at-out.queued_at)*1000;
+ /* Time does not run backwards. A negative span means the markers were not
+    both from this turn after all, so drop it rather than render it. */
+ const span=(a,b)=>(a===undefined||b===undefined||b<a)?undefined:(b-a)*1000;
+ out.queue_to_transcript_ms=span(out.queued_at,out.transcript_at);
+ out.transcript_to_audio_ms=span(out.transcript_at,out.first_audio_at);
+ out.queue_to_first_audio_ms=span(out.queued_at,out.first_audio_at);
  return out;
 }
 function simRow(r){
