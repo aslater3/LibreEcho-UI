@@ -200,8 +200,7 @@ async function integrationsPage() {
       toggleLabel:'Use Local LLM',
       toggleId:'use-local-provider',
       enabled:localEnabled,
-      body:localAssistantBody(a,localSelected,pipeline),
-      open:localSelected
+      body:localAssistantBody(a,localSelected,pipeline)
     });
     const devicePanel=assistantProviderPanel({
       title:'On Device Voice Assistant',
@@ -211,8 +210,7 @@ async function integrationsPage() {
       toggleLabel:'Use On Device Voice Assistant',
       toggleId:'use-device-provider',
       enabled:deviceEnabled,
-      body:deviceAssistantBody(a,deviceSelected),
-      open:deviceSelected
+      body:deviceAssistantBody(a,deviceSelected)
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}</section>

@@ -21,11 +21,79 @@ function unsupported(msg){return `<div class="notice unsupported"><strong>Not su
 function applyCssVars(root){const r=root||content;r.querySelectorAll('[data-level]').forEach(el=>{el.style.setProperty('--level',el.dataset.level+'%');el.style.setProperty('--band',el.dataset.band)});r.querySelectorAll('[data-led]').forEach(el=>el.style.setProperty('--led',el.dataset.led))}
 function errorView(e){content.innerHTML=panel('Unable to load this section',`<div class="empty-state"><p>${esc(e.message)}</p>${action('Try again','retry','primary-btn')}</div>`);$('#retry').onclick=()=>render()}
 function storageDisplay(value){const text=String(value??''),match=text.match(/^(null|\d+) \/ (null|\d+) MB$/);if(!match)return text==='undefined'||text==='null'||text==='NaN'?'Unavailable':text;const used=match[1]==='null'?null:Number(match[1]),total=match[2]==='null'?null:Number(match[2]);if(total===null||total<=0)return'Unavailable';return used===null?`${total} MB capacity · usage unavailable`:`${used} / ${total} MB`}
+/*
+ * Binary units, because the upload cap is 33554432 bytes -- a "32 MB" that is
+ * really 32 MiB. Rounding it the decimal way would print 33.6 MB and make a
+ * file that fits look like one that does not.
+ */
+function mib(bytes){const n=Number(bytes);return Number.isFinite(n)&&n>=0?(n/1048576).toFixed(1)+' MiB':'—'}
 function storageValue(s){const total=Number(s?.storage_total_mb);if(!Number.isFinite(total)||total<=0)return'Unavailable';if(s.storage_available&&Number.isFinite(Number(s.storage_used_mb)))return`${Number(s.storage_used_mb)} / ${total} MB`;return`${total} MB capacity · usage unavailable`}
 function metric(icon,label,value,percent,connected=false,powerLed=false){if(label==='Storage')value=storageDisplay(value);const numericPercent=Number(percent),hasPercent=Number.isFinite(numericPercent);return `<div class="metric ${powerLed?'binary-metric':''}"><svg><use href="#${icon}"></use></svg><span>${label}</span><span class="value ${connected?'connected':''}">${esc(value)}</span>${powerLed?`<span class="power-led ${connected?'on':'off'}" role="img" aria-label="${connected?'Available':'Unavailable'}"></span>`:hasPercent?`<progress class="bar" max="100" value="${Math.max(0,Math.min(100,numericPercent))}" aria-label="${esc(label)}: ${esc(value)}"></progress>`:''}</div>`}
 function cpuDashboard(s){const cores=Array.isArray(s.cpus)?s.cpus:(Array.isArray(s.cpus?.cores)?s.cpus.cores:[]);return `<section class="panel cpu-panel" id="cpu-dashboard"><div class="cpu-heading"><h3>CPU cores</h3><span>${cores.filter(c=>c.online).length}/${cores.length} online</span></div><div class="cpu-core-grid">${cores.map(c=>`<article class="cpu-core ${c.online?'online':'offline'}"><div><strong>CPU${esc(c.id)}</strong><small>${c.online?'Up':'Down'} · ${c.frequency_khz?Math.round(c.frequency_khz/1000)+' MHz':'—'}</small></div><b>${c.online?Number(c.utilization_percent??c.utilization??0)+'%':'—'}</b><progress class="bar" max="100" value="${c.online?Math.max(0,Math.min(100,Number(c.utilization_percent??c.utilization??0))):0}" aria-label="CPU${c.id} utilization"></progress></article>`).join('')}</div></section>`}
-function playbackSource(source){return ({airplay2:'AirPlay 2',bluetooth:'Bluetooth',media:'Media',system:'System',announcement:'Announcement',alarm:'Alarm'})[source]||source||'LibreEcho'}
-function nowPlaying(p={},l={}){const active=p.state&&p.state!=='idle',metadata=p.metadata||{},levels=Array.isArray(l.visualizer_levels)&&l.visualizer_levels.length===12?l.visualizer_levels:Array(12).fill(0);let title='Nothing playing',detail='Your audio sources will appear here',source='Idle';if(p.state==='playing'){title=metadata.title||`${playbackSource(p.source)} audio`;detail=[metadata.artist,metadata.album].filter(Boolean).join(' · ')||'Playing now';source=playbackSource(p.source)}else if(p.state==='announcing'){title='Announcement in progress';detail='Voice and notification audio has priority';source='Announcement'}else if(p.state==='alarm'){title='Alarm active';detail='Alarm audio has priority';source='Alarm'}else if(p.state==='system'){title='System audio';detail='LibreEcho is playing a system sound';source='System'}return `<section class="panel now-playing ${active?'active':'idle'}" id="now-playing"><div class="now-playing-mark" aria-hidden="true"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="36"></circle><circle cx="50" cy="50" r="8"></circle></svg></div><div class="now-playing-copy"><span class="source-pill">${esc(source)}</span><h3>${esc(title)}</h3><p>${esc(detail)}</p></div><div class="spectrum-mini" aria-label="${l.visualizer_active?'Live 12-band music spectrum':'Audio spectrum inactive'}">${levels.map((v,i)=>`<i data-level="${Math.max(4,Math.min(100,Math.round(Number(v)||0)))}" data-band="${i}"></i>`).join('')}</div><div class="now-playing-state"><span class="status-dot ${active?'ok':''}"></span>${esc(p.state||'idle')}</div></section>`}
+function playbackSource(source){return ({airplay2:'AirPlay 2',bluetooth:'Bluetooth',radio:'Internet radio',media:'Media',system:'System',announcement:'Announcement',alarm:'Alarm'})[source]||source||'LibreEcho'}
+/*
+ * What is playing, and what can be done about it.
+ *
+ * A track title is shown only when the source actually sent one. AirPlay and
+ * Bluetooth senders push metadata; an internet radio station does so only when
+ * it interleaves ICY StreamTitle blocks, and plenty do not. When the stream
+ * said nothing the station name stands in and the card says which of the two
+ * happened, rather than dressing "media audio is playing" up as a track.
+ */
+function nowPlayingCopy(p){
+ const m=p.metadata||{},source=playbackSource(p.source);
+ if(p.state==='playing'){
+  if(m.title)return{source,title:m.title,detail:[m.artist,m.album].filter(Boolean).join(' · ')||(m.station?'on '+m.station:'Playing now')};
+  if(m.station)return{source,title:m.station,detail:'The station is not sending a track title'};
+  return{source,title:`${source} audio`,detail:'This source is not sending track information'};}
+ if(p.state==='announcing')return{source:'Announcement',title:'Announcement in progress',detail:'Voice and notification audio has priority'};
+ if(p.state==='alarm')return{source:'Alarm',title:'Alarm active',detail:'Alarm audio has priority'};
+ if(p.state==='system')return{source:'System',title:'System audio',detail:'LibreEcho is playing a system sound'};
+ return{source:'Idle',title:'Nothing playing',detail:'Your audio sources will appear here'};}
+/*
+ * The transport is whatever the device reported in `transport`, never a guess.
+ * A live stream can be stopped and started again but not paused -- there is no
+ * buffered position to resume from -- and AirPlay and Bluetooth are driven by
+ * the phone that started them, so the button is disabled and carries the
+ * device's own reason instead of failing when pressed.
+ */
+function nowPlayingTransport(p,l){
+ const t=p.transport||{},reason=t.reason||'LibreEcho cannot start or stop this source.';
+ const act=t.stop?{action:'stop',label:'Stop'}:t.play?{action:'play',label:'Play'}:null;
+ /* The light-ring toggle lives here because this is where the music is. It is
+    the same setting as "Music visualizer" on the LED & Buttons page and the
+    same endpoint, so the two always agree. */
+ const lights=l&&!l.unsupported&&l.visualizer_enabled!==undefined?
+  toggle('Lights with music',l.visualizer_enabled!==false,'now-playing-visualizer'):'';
+ return `<div class="now-playing-transport"><button class="secondary-btn" id="playback-transport" type="button" data-action="${act?act.action:'play'}" title="${esc(reason)}"${act?'':' disabled'}>${act?act.label:'Play'}</button>${lights}${act?'':`<small>${esc(reason)}</small>`}</div>`;}
+function nowPlaying(p={},l={}){const active=p.state&&p.state!=='idle',copy=nowPlayingCopy(p),levels=Array.isArray(l.visualizer_levels)&&l.visualizer_levels.length===12?l.visualizer_levels:Array(12).fill(0);return `<section class="panel now-playing ${active?'active':'idle'}" id="now-playing"><div class="now-playing-mark" aria-hidden="true"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="36"></circle><circle cx="50" cy="50" r="8"></circle></svg></div><div class="now-playing-copy"><span class="source-pill">${esc(copy.source)}</span><h3>${esc(copy.title)}</h3><p>${esc(copy.detail)}</p></div>${nowPlayingTransport(p,l)}<div class="spectrum-mini" aria-label="${l.visualizer_active?'Live 12-band music spectrum':'Audio spectrum inactive'}">${levels.map((v,i)=>`<i data-level="${Math.max(4,Math.min(100,Math.round(Number(v)||0)))}" data-band="${i}"></i>`).join('')}</div><div class="now-playing-state"><span class="status-dot ${active?'ok':''}"></span>${esc(p.state||'idle')}</div></section>`}
+/*
+ * The card is replaced wholesale on every poll, so its handlers are bound
+ * after every render rather than once. A refresh landing while a request is in
+ * flight would also throw away what the user just did, which is why the poll
+ * leaves the card alone while state.busy is set.
+ */
+function renderNowPlaying(){const card=$('#now-playing');if(!card)return;card.outerHTML=nowPlaying(state.data.playback||{},state.data.led||{});applyCssVars(content);bindNowPlaying()}
+function bindNowPlaying(){
+ const b=$('#playback-transport');
+ if(b&&!b.disabled)b.onclick=()=>playbackTransport(b.dataset.action);
+ const v=$('#now-playing-visualizer');
+ if(v)v.onchange=()=>setMusicLights(v.checked);}
+async function playbackTransport(action){
+ if(state.busy)return;
+ setBusy(true);
+ try{state.data.playback=await api('/playback/transport',{method:'POST',body:JSON.stringify({action})});
+  toast(action==='stop'?'Playback stopped':'Playback started')}
+ catch(e){toast(e.message,true)}
+ finally{setBusy(false);renderNowPlaying()}}
+async function setMusicLights(enabled){
+ if(state.busy)return;
+ setBusy(true);
+ try{state.data.led=await api('/led',{method:'PUT',body:JSON.stringify({visualizer_enabled:enabled})});
+  toast(enabled?'The light ring follows music':'The light ring stays still during music')}
+ catch(e){toast(e.message,true)}
+ finally{setBusy(false);renderNowPlaying()}}
+
 function uptime(s){s=Math.max(0,Number(s)||0);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return `${d?d+'d ':''}${h}h ${m}m`}
 function logTime(t,boot){const seconds=Number(t),relative=Number(boot);if(relative>0)return `Boot +${relative}s`;return seconds>=1577836800?new Date(seconds*1000).toLocaleTimeString():'Clock unset'}
 function rgb(c){return `rgb(${c.r}, ${c.g}, ${c.b})`}
@@ -141,9 +209,12 @@ async function power(path,name){
  await Promise.race([fired,new Promise(r=>setTimeout(r,1500))]);
  if(refused){toast(refused.message,true);return}
  await waitForDevice(estimate,'Restarting your LibreEcho');}
-async function overview(){const [s,n,a,l,d,p,ota]=await Promise.all([api('/status'),api('/network'),api('/audio').catch(e=>({unsupported:e.message})),api('/led').catch(e=>({unsupported:e.message})),api('/device'),api('/playback').catch(()=>({state:'idle',source:null,metadata:{available:false}})),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'}))]);state.data.status=s;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);updateVersionDisplay(d,ota);content.innerHTML=`<div class="grid-top"><div class="panel hero"><div class="sim-label" id="hero-device-label">${esc(d.hostname||d.name||'LibreEcho')}</div><h2>LibreEcho</h2><p>Open source voice assistant<br>built for privacy and freedom.</p><img class="device-img" src="/assets/device.png" alt="Amazon Echo device"><div class="hero-actions">${action('Device details','device-details','primary-btn')}${linkAction('API','/api/v1')}${linkAction('Swagger','/swagger.html')}</div></div><div class="panel status-panel"><h3>System Status</h3>${metric('device','CPU Load',s.cpu_percent+'%',s.cpu_percent)}${metric('device','Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent)}${metric('device','Storage',storageValue(s),s.storage_available?s.storage_percent:null)}${metric('sun','Temperature',s.temperature_c+' °C',s.temperature_c)}${metric('wifi','Wi-Fi',networkLabel(n),n.signal,n.state==='connected',true)}${metric('info','Internet',n.internet?'Reachable':'Unavailable',0,n.internet,true)}</div></div>${nowPlaying(p,l)}${cpuDashboard(s)}<div class="cards">${items.slice(2,10).map(([name,icon],i)=>`<button class="panel shortcut" data-page="${name}"><svg class="${['green','purple','blue','sky','green','orange','grey','orange'][i]}"><use href="#${icon}"></use></svg><span><strong>${name}</strong><small>${descriptions[name]}</small></span><span class="arrow">›</span></button>`).join('')}</div><div class="panel community"><img src="/assets/mark.svg" alt="" class="community-mark"><div><h3>Open Source. Community Driven.</h3><p>Configuration stays on your device. ${s.simulated?'This development session uses deterministic mock-capable hardware state.':'Values shown come from the Linux backend.'}</p></div></div>`;$$('[data-page]').forEach(b=>b.onclick=()=>showPage(b.dataset.page));$('#device-details').onclick=()=>showPage('Device')}
+async function overview(){const [s,n,a,l,d,p,ota]=await Promise.all([api('/status'),api('/network'),api('/audio').catch(e=>({unsupported:e.message})),api('/led').catch(e=>({unsupported:e.message})),api('/device'),api('/playback').catch(()=>({state:'idle',source:null,metadata:{available:false}})),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'}))]);state.data.status=s;state.data.playback=p;state.data.led=l;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);updateVersionDisplay(d,ota);content.innerHTML=`<div class="grid-top"><div class="panel hero"><div class="sim-label" id="hero-device-label">${esc(d.hostname||d.name||'LibreEcho')}</div><h2>LibreEcho</h2><p>Open source voice assistant<br>built for privacy and freedom.</p><img class="device-img" src="/assets/device.png" alt="Amazon Echo device"><div class="hero-actions">${action('Device details','device-details','primary-btn')}${linkAction('API','/api/v1')}${linkAction('Swagger','/swagger.html')}</div></div><div class="panel status-panel"><h3>System Status</h3>${metric('device','CPU Load',s.cpu_percent+'%',s.cpu_percent)}${metric('device','Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent)}${metric('device','Storage',storageValue(s),s.storage_available?s.storage_percent:null)}${metric('sun','Temperature',s.temperature_c+' °C',s.temperature_c)}${metric('wifi','Wi-Fi',networkLabel(n),n.signal,n.state==='connected',true)}${metric('info','Internet',n.internet?'Reachable':'Unavailable',0,n.internet,true)}</div></div>${nowPlaying(p,l)}${cpuDashboard(s)}<div class="cards">${items.slice(2,10).map(([name,icon],i)=>`<button class="panel shortcut" data-page="${name}"><svg class="${['green','purple','blue','sky','green','orange','grey','orange'][i]}"><use href="#${icon}"></use></svg><span><strong>${name}</strong><small>${descriptions[name]}</small></span><span class="arrow">›</span></button>`).join('')}</div><div class="panel community"><img src="/assets/mark.svg" alt="" class="community-mark"><div><h3>Open Source. Community Driven.</h3><p>Configuration stays on your device. ${s.simulated?'This development session uses deterministic mock-capable hardware state.':'Values shown come from the Linux backend.'}</p></div></div>`;$$('[data-page]').forEach(b=>b.onclick=()=>showPage(b.dataset.page));$('#device-details').onclick=()=>showPage('Device');bindNowPlaying()}
 function updateOverviewMetric(label,value,percent,connected){const row=$$('.status-panel .metric').find(x=>x.querySelector('span')?.textContent===label);if(!row)return;if(label==='Storage')value=storageDisplay(value);const output=row.querySelector('.value');output.textContent=value;if(connected!==undefined)output.classList.toggle('connected',connected);const bar=row.querySelector('progress');if(bar)bar.value=Math.max(0,Math.min(100,percent));const led=row.querySelector('.power-led');if(led){led.classList.toggle('on',!!connected);led.classList.toggle('off',!connected);led.setAttribute('aria-label',connected?'Available':'Unavailable')}}
-async function refreshOverview(){if(state.page!=='Overview')return;let delay=5000;try{const [s,n,d,p,l]=await Promise.all([api('/status'),api('/network'),api('/device'),api('/playback'),api('/led').catch(()=>({}))]);if(state.page!=='Overview')return;state.data.status=s;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);$('#sidebar-version').textContent=d.os_version;if(Date.now()-(state.data.otaCheckedAt||0)>=60000)updateVersionDisplay(d,await api('/system/update').catch(()=>state.data.ota));const deviceLabel=$('#hero-device-label');if(deviceLabel)deviceLabel.textContent=d.hostname||d.name||'LibreEcho';updateOverviewMetric('CPU Load',s.cpu_percent+'%',s.cpu_percent);updateOverviewMetric('Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent);updateOverviewMetric('Storage',storageValue(s),s.storage_available?s.storage_percent:null);updateOverviewMetric('Temperature',s.temperature_c+' °C',s.temperature_c);updateOverviewMetric('Wi-Fi',networkLabel(n),0,n.state==='connected');updateOverviewMetric('Internet',n.internet?'Reachable':'Unavailable',0,n.internet);const playing=$('#now-playing');if(playing)playing.outerHTML=nowPlaying(p,l);const cpu=$('#cpu-dashboard');if(cpu)cpu.outerHTML=cpuDashboard(s);applyCssVars(content);if(p.state!=='idle'||l.visualizer_active)delay=1000}catch(_){/* Preserve the last good telemetry when a background refresh fails. */}finally{if(state.page==='Overview')state.timer=setTimeout(refreshOverview,delay)}}
+async function refreshOverview(){if(state.page!=='Overview')return;let delay=5000;try{const [s,n,d,p,l]=await Promise.all([api('/status'),api('/network'),api('/device'),api('/playback'),api('/led').catch(()=>({}))]);if(state.page!=='Overview')return;state.data.status=s;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);$('#sidebar-version').textContent=d.os_version;if(Date.now()-(state.data.otaCheckedAt||0)>=60000)updateVersionDisplay(d,await api('/system/update').catch(()=>state.data.ota));const deviceLabel=$('#hero-device-label');if(deviceLabel)deviceLabel.textContent=d.hostname||d.name||'LibreEcho';updateOverviewMetric('CPU Load',s.cpu_percent+'%',s.cpu_percent);updateOverviewMetric('Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent);updateOverviewMetric('Storage',storageValue(s),s.storage_available?s.storage_percent:null);updateOverviewMetric('Temperature',s.temperature_c+' °C',s.temperature_c);updateOverviewMetric('Wi-Fi',networkLabel(n),0,n.state==='connected');updateOverviewMetric('Internet',n.internet?'Reachable':'Unavailable',0,n.internet);state.data.playback=p;state.data.led=l;
+ /* A poll landing mid-interaction would throw away the click that is still in
+    flight, so the card keeps whatever the user just did until it settles. */
+ if(!state.busy)renderNowPlaying();const cpu=$('#cpu-dashboard');if(cpu)cpu.outerHTML=cpuDashboard(s);applyCssVars(content);if(p.state!=='idle'||l.visualizer_active)delay=1000}catch(_){/* Preserve the last good telemetry when a background refresh fails. */}finally{if(state.page==='Overview')state.timer=setTimeout(refreshOverview,delay)}}
 async function usersPage(){const u=await api('/auth/users');const rows=u.users.map(x=>`<div class="status-line"><span class="status-dot ok"></span><span>${esc(x.username)}${x.username===state.username?' <small>(current session)</small>':''}</span>${u.users.length>1&&x.username!==state.username?action('Remove','remove-user-'+esc(x.username),'danger-btn'):''}</div>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Local accounts',`<p class="muted">These accounts can sign in to the LibreEcho control centre. Passwords are stored as salted hashes and are never displayed.</p><div class="user-list">${rows||'<p class="muted">No users configured.</p>'}</div>`)}${panel('Add user',field('Username','','new-user-name','text','autocomplete="username" maxlength="31" pattern="[A-Za-z0-9._-]+"')+field('Password','','new-user-password','password','autocomplete="new-password" minlength="8" maxlength="128"')+field('Confirm password','','new-user-confirm','password','autocomplete="new-password" minlength="8" maxlength="128"')+`<div class="button-row">${action('Add user','add-user','primary-btn')}</div>`)} </div>`;u.users.filter(x=>x.username!==state.username).forEach(x=>{const b=$('#remove-user-'+x.username);if(b)b.onclick=async()=>{if(!confirm(`Remove user ${x.username}?`))return;try{await api('/auth/users/'+encodeURIComponent(x.username),{method:'DELETE'});toast('User removed');await usersPage()}catch(e){toast(e.message,true)}}});$('#add-user').onclick=async()=>{const username=$('#new-user-name').value.trim(),password=$('#new-user-password').value,confirmPassword=$('#new-user-confirm').value;if(password!==confirmPassword){toast('Passwords do not match',true);return}try{await api('/auth/users',{method:'POST',body:JSON.stringify({username,password,password_confirm:confirmPassword})});toast('User added');await usersPage()}catch(e){toast(e.message,true)}}}
 /*
  * Hardware and audio capability, shown on the Device page as reference
@@ -375,7 +446,12 @@ const SIM_PHRASES=[
  ['No wake word','What time is it?'],
  ['Wake word only','Alexa'],
  ['False start','Alexa, uh, set a timer'],
- ['Self-correction','Alexa, set a five, no, ten minute timer']];
+ ['Self-correction','Alexa, set a five, no, ten minute timer'],
+ /* An ordered pair, and last on purpose: the first half leaves a station
+    playing and the second half is the only thing that stops it. See the
+    block below simRun for what the two halves actually measure. */
+ ['Play the radio','Alexa, play the radio',simRadioStart],
+ ['Stop the radio while it plays','Alexa, stop',simRadioStop]];
 /*
  * The response-time goal: under one second from the end of the user's speech
  * to the first audio out of the speaker.
@@ -440,7 +516,11 @@ function simRow(r){
  const cap=r.audio_ms&&r.max_utterance_ms&&r.audio_ms>=r.max_utterance_ms-100;
  return `<tr><td>${esc(new Date(r.at).toLocaleTimeString())}</td>`+
   `<td class="${r.wake?'connected':''}">${r.wake?'yes':'no'}</td>`+
-  `<td>${esc(r.text.length>34?r.text.slice(0,34)+'…':r.text)}</td>`+
+  `<td>${esc(r.text.length>34?r.text.slice(0,34)+'…':r.text)}`+
+   /* The radio pair is the only row kind with a verdict the columns cannot
+      hold, so it is written under the phrase rather than given a column that
+      is empty on every other row. */
+   (r.radio_status?`<small class="${r.voice_stopped===false?'error-text':''}">${esc(r.radio_status)}${r.radio_stop_ms!=null?' in '+ms(r.radio_stop_ms):''}</small>`:'')+`</td>`+
   `<td>${ms(r.wake_latency_ms)}</td>`+
   `<td class="${cap?'error-text':''}">${ms(r.audio_ms)}${cap?' (cap)':''}</td>`+
   `<td class="${simGoalClass(r.processing_ms)}">${ms(r.processing_ms)}</td>`+
@@ -478,13 +558,19 @@ function simRender(){
  * One simulated utterance, start to finish. Shared by the single-phrase button
  * and the run-all sweep so both record exactly the same fields -- a history
  * where some rows were measured differently is worse than no history.
+ *
+ * onSent fires the instant the device accepted the phrase. A caller that wants
+ * to time the device's reaction to the utterance needs that anchor: simRun's
+ * own t0 is one request earlier, and everything after it is inside this
+ * function's poll loop.
  */
-async function simRun(phrase,cap,onStatus){
+async function simRun(phrase,cap,onStatus,onSent){
  const pre=await api('/logs').catch(()=>({entries:[]}));
  const mark=(pre.entries||[]).reduce((m,e)=>Math.max(m,e.boot_seconds||0),0);
  const before=(await api('/wake-word').catch(()=>({}))).detected_count??0;
  const t0=performance.now();
  await api('/audio/simulate',{method:'POST',body:JSON.stringify({text:phrase})});
+ if(onSent)onSent();
  let wake=false,wakeLatency=null;
  for(let i=0;i<40&&!wake;i++){
   await new Promise(r=>setTimeout(r,250));
@@ -501,6 +587,158 @@ async function simRun(phrase,cap,onStatus){
  simRender();
  return entry;
 }
+/*
+ * Internet radio, as an ordered pair.
+ *
+ * "Play the radio" and the "Alexa, stop" that follows it are one test in two
+ * halves and only mean anything run in that order: the first leaves a station
+ * playing, the second says stop into that music and checks that the music
+ * actually stopped. Having sent the phrase proves nothing on its own -- the
+ * failure worth catching is a turn that is woken, transcribed and answered
+ * while the stream carries straight on -- so the verdict comes from radiod's
+ * own playing flag over the API, not from a log line.
+ *
+ * agentd has no radio path: nothing in it refers to radio at all, and it ships
+ * inside a squashfs payload that OTA cannot replace, so a spoken "play the
+ * radio" cannot reach radiod on this image. The first half therefore speaks
+ * the phrase, looks to see whether that started anything, falls back to the
+ * API when it did not, and records which of the two actually did it. Read the
+ * pair as a measurement of the stop path over music, not as evidence that
+ * voice can start playback.
+ */
+const SIM_RADIO_POLL_MS=250;
+/* 40 ticks is 10 s, the same window simRun already watches for a wake. */
+const SIM_RADIO_TICKS=40;
+/*
+ * Two independent witnesses that the stream really stopped: radiod's playing
+ * flag, and the amplifier, which powers up only when PCM is actually flowing.
+ * They are allowed to disagree, and it is worth knowing when they do -- the
+ * amplifier also stays up while the device speaks its own reply, so it lags
+ * the stream rather than contradicting it. Both are recorded; only the playing
+ * flag decides the verdict.
+ */
+async function simRadioWitness(){
+ const [r,a]=await Promise.all([api('/integrations/radio').catch(()=>null),
+                               api('/audio').catch(()=>null)]);
+ return {playing:r?r.playing===true:null,supported:r?r.playback_supported!==false:null,
+         url:r?(r.playing_url||''):'',amplifier_on:a?a.amplifier_on===true:null};}
+/* Bounded by tick count rather than by a deadline, so the loop still ends on a
+   device that never changes its mind. */
+async function simRadioAwait(want,ticks){
+ let w=await simRadioWitness();
+ for(let i=0;i<ticks&&!want(w);i++){
+  await new Promise(r=>setTimeout(r,SIM_RADIO_POLL_MS));
+  w=await simRadioWitness();}
+ return w;}
+/* The default station is the first enabled one in the device's own list --
+   the one the shortest "play <word>" would reach for. */
+function simRadioDefault(r){
+ const s=Array.isArray(r&&r.stations)?r.stations:[];
+ return s.find(x=>x.enabled!==false)||null;}
+/* simRun has already stored the row by the time the radio verdict is known, so
+   the stored copy is rewritten in place rather than appended a second time. */
+function simHistoryAmend(entry){
+ const h=simHistory();
+ if(h.length&&h[0].at===entry.at)h[0]=entry;
+ simHistorySave(h); simRender();}
+/*
+ * Unconditional, pass or fail: a stop against a stream that already stopped is
+ * harmless, and skipping it on the strength of the last poll would leave the
+ * radio playing whenever that poll was wrong. Every later phrase in the sweep
+ * would then be measured over music.
+ */
+async function simRadioCleanup(){
+ await api('/integrations/radio/stop',{method:'POST',body:'{}'}).catch(()=>null);
+ return simRadioAwait(w=>w.playing!==true,8);}
+async function simRadioStart(phrase,cap,onStatus){
+ const r=await api('/integrations/radio').catch(()=>null);
+ const station=simRadioDefault(r);
+ /* Whether a stream was already running before the phrase. Without this, a
+    radio someone had left on would be recorded as one the turn started, which
+    is the one result here worth being careful not to invent. */
+ const already=!!(r&&r.playing);
+ const entry=await simRun(phrase,cap,onStatus);
+ entry.radio_station=station?station.word:null;
+ entry.radio_started_by=null; entry.radio_playing=false;
+ if(!r||r.playback_supported===false||!station){
+  entry.radio_status=!r?'radio unavailable':r.playback_supported===false?
+    'no stream player on this image':'no station configured';
+  state.simRadio={playing:false};
+  simHistoryAmend(entry); return entry;}
+ let w=await simRadioWitness();
+ if(w.playing)entry.radio_started_by=already?'already playing':'voice';
+ else{
+  if(onStatus)onStatus('The turn started nothing; starting “'+station.word+'” over the API…');
+  try{ await api('/integrations/radio/play',{method:'POST',body:JSON.stringify({word:station.word})});
+       entry.radio_started_by='api'; }
+  catch(e){ entry.radio_status='could not start: '+e.message;
+            state.simRadio={playing:false};
+            simHistoryAmend(entry); return entry; }
+  w=await simRadioAwait(x=>x.playing===true,SIM_RADIO_TICKS);}
+ entry.radio_playing=w.playing===true;
+ entry.radio_url=w.url; entry.amplifier_on=w.amplifier_on;
+ entry.radio_status=entry.radio_playing?'playing ('+entry.radio_started_by+')':'did not start';
+ state.simRadio={playing:entry.radio_playing,station:station.word};
+ simHistoryAmend(entry); return entry;}
+/*
+ * "Alexa, stop" spoken into a playing stream. The clock starts when the device
+ * accepts the phrase, so the recorded duration also covers the phrase playing
+ * into the microphone in real time, the wake, the transcript and the model --
+ * the same upper-bound caveat as request → first audio. It is polled at
+ * SIM_RADIO_POLL_MS, so it is no finer than a quarter second either; unlike
+ * the log-derived rows it is at least not quantised to whole seconds.
+ *
+ * It measures a coincidence, not a cause: a stream that died of its own accord
+ * during the turn would read the same way. What it can do reliably is fail --
+ * a stream still playing at the end of the turn did not stop.
+ */
+async function simRadioStop(phrase,cap,onStatus){
+ const before=await simRadioWitness();
+ let entry=null,t0=null,stoppedAt=null,ampAt=null,watching=true;
+ if(before.playing!==true){
+  /* Nothing was playing, so nothing here would be barge-in. Say that, rather
+     than speaking into silence and recording it as a pass. */
+  entry=await simRun(phrase,cap,onStatus);
+  entry.radio_status='skipped — no stream was playing';
+  entry.voice_stopped=null; entry.radio_stop_ms=null; entry.amplifier_off_ms=null;
+  state.simRadio={playing:false};
+  simHistoryAmend(entry); return entry;}
+ try{
+  const turn=simRun(phrase,cap,onStatus,()=>{t0=performance.now()});
+  /* Watched while the turn is still in flight. Waiting for simRun to return
+     would put its whole answer window between the stop and the measurement. */
+  const watch=(async()=>{
+   for(let i=0;i<SIM_RADIO_TICKS&&watching&&(stoppedAt===null||ampAt===null);i++){
+    await new Promise(r=>setTimeout(r,SIM_RADIO_POLL_MS));
+    if(t0===null)continue;   /* the phrase has not been accepted yet */
+    const w=await simRadioWitness();
+    if(stoppedAt===null&&w.playing===false)stoppedAt=performance.now();
+    if(ampAt===null&&w.amplifier_on===false)ampAt=performance.now();}})();
+  entry=await turn; await watch;
+  entry.voice_stopped=stoppedAt!==null;
+  entry.radio_stop_ms=stoppedAt!==null&&t0!==null?Math.round(stoppedAt-t0):null;
+  entry.amplifier_off_ms=ampAt!==null&&t0!==null?Math.round(ampAt-t0):null;
+  entry.radio_status=entry.voice_stopped?'stopped by voice':'still playing after the turn';
+ }finally{
+  /* A turn that threw leaves the watcher polling; stop it before the
+     cleanup rather than letting it outlive the run. */
+  watching=false;
+  const after=await simRadioCleanup();
+  if(entry){
+   entry.radio_stopped_by=entry.voice_stopped?'voice':after.playing!==true?'API cleanup':'not stopped';
+   entry.radio_playing_after=after.playing;
+   simHistoryAmend(entry);}
+  state.simRadio={playing:after.playing===true};}
+ return entry;}
+function simRadioTimingHtml(e){
+ if(!e||e.radio_status===undefined)return '';
+ const good=e.voice_stopped===true||e.radio_playing===true;
+ return '<dt>Radio</dt><dd class="'+(e.voice_stopped===null?'':good?'connected':'error-text')+'">'+esc(e.radio_status)+'</dd>'+
+  (e.radio_station?'<dt>Station</dt><dd>'+esc(e.radio_station)+'</dd>':'')+
+  (e.radio_started_by?'<dt>Started by</dt><dd class="'+(e.radio_started_by==='voice'?'connected':'')+'">'+esc(e.radio_started_by)+'</dd>':'')+
+  (e.radio_stopped_by?'<dt>Stopped by</dt><dd class="'+(e.voice_stopped?'connected':'error-text')+'">'+esc(e.radio_stopped_by)+'</dd>':'')+
+  (e.radio_stop_ms!==undefined?'<dt>Stop → playback ceased</dt><dd>'+ms(e.radio_stop_ms)+'</dd>':'')+
+  (e.amplifier_off_ms!==undefined?'<dt>Stop → amplifier off</dt><dd>'+ms(e.amplifier_off_ms)+'</dd>':'');}
 function simTimingHtml(entry,cap){
  const capped=entry.audio_ms&&cap&&entry.audio_ms>=cap-100;
  return '<dt>Wake</dt><dd class="'+(entry.wake?'connected':'')+'">'+(entry.wake?'detected':'not detected')+'</dd>'+
@@ -510,7 +748,8 @@ function simTimingHtml(entry,cap){
   '<dt>STT + model</dt><dd class="'+simGoalClass(entry.processing_ms)+'">'+ms(entry.processing_ms)+'</dd>'+
   '<dt>Request → transcript</dt><dd>'+ms(entry.queue_to_transcript_ms)+'</dd>'+
   '<dt>Transcript → first audio</dt><dd>'+ms(entry.transcript_to_audio_ms)+'</dd>'+
-  '<dt>Request → first audio</dt><dd class="'+simGoalClass(entry.queue_to_first_audio_ms)+'">'+ms(entry.queue_to_first_audio_ms)+'</dd>';
+  '<dt>Request → first audio</dt><dd class="'+simGoalClass(entry.queue_to_first_audio_ms)+'">'+ms(entry.queue_to_first_audio_ms)+'</dd>'+
+  simRadioTimingHtml(entry);
 }
 async function simulationPage(){
  const w=await api('/wake-word').catch(()=>({}));
@@ -522,6 +761,7 @@ async function simulationPage(){
    `<option value="custom">Custom…</option></select></label>`+
    field('Text','Alexa, what time is it?','sim-text')+
    `<p class="muted">Rendered by the device's own text-to-speech and played into the microphone path. Nothing is recorded and nothing leaves the device.</p>`+
+   `<p class="muted">The last two presets are one test in two halves and are meant to run in that order: the first leaves a station playing, the second says stop into that music and checks with radiod that playback really ceased. The radio is stopped again afterwards either way.</p>`+
    `<div class="button-row">${action('Speak into the microphone','sim-send','primary-btn')}${action('Run all '+SIM_PHRASES.length+' phrases','sim-run-all')}<button class="secondary-btn" id="sim-stop-all" hidden>Stop</button></div>`+
    `<dl class="facts"><dt>Wake word</dt><dd>${esc(w.wake_word||'—')}</dd><dt>Sensitivity</dt><dd>${w.sensitivity??'—'}</dd><dt>Utterance cap</dt><dd>${ms(cap)}</dd></dl>`)}
    ${panel('Last run',`<p class="muted sim-goal">Goal: under ${SIM_RESPONSE_GOAL_TEXT} from the end of speech to the first audio out of the speaker.</p><dl class="facts" id="sim-timing"><dt>Status</dt><dd>Nothing sent yet</dd></dl><p class="muted">The device does not report end-of-speech to first audio, so it is not shown. The log-derived rows here are stamped in whole seconds, and <em>request → first audio</em> also covers the phrase playing into the microphone in real time, which a person speaking in the room would not pay — read it as an upper bound. <em>STT + model</em> is measured by agentd in milliseconds and is the closest honest proxy, and the dominant cost.</p>`)}
@@ -550,8 +790,11 @@ async function simulationPage(){
   const timing=$('#sim-timing');
   state.simBusy=true;
   timing.innerHTML='<dt>Status</dt><dd>Rendering and playing…</dd>';
+  /* A preset with its own runner keeps it only while its text is unedited: an
+     edited phrase is a custom phrase and gets the plain run. */
+  const run=(preset.value!=='custom'&&SIM_PHRASES[+preset.value][1]===phrase&&SIM_PHRASES[+preset.value][2])||simRun;
   try{
-   const entry=await simRun(phrase,cap,t=>{timing.innerHTML='<dt>Status</dt><dd>'+esc(t)+'</dd>'});
+   const entry=await run(phrase,cap,t=>{timing.innerHTML='<dt>Status</dt><dd>'+esc(t)+'</dd>'});
    timing.innerHTML=simTimingHtml(entry,cap);
    toast(entry.wake?'Wake detected':'No wake detected',!entry.wake);
   }catch(e){ const busy=/already playing/i.test(e.message);
@@ -563,30 +806,42 @@ async function simulationPage(){
   * Run every preset in turn. Each utterance makes the device answer out loud,
   * so leave a gap between them: starting the next phrase while the speaker is
   * still going would be testing barge-in, not the phrase.
+  *
+  * The radio pair at the end is the exception -- it is barge-in on purpose --
+  * and it carries its own runner, so the sweep dispatches to the third element
+  * of the preset when there is one. It runs last and stops the radio when it
+  * finishes, so nothing after it is measured over music.
   */
  $('#sim-run-all').onclick=async()=>{
   if(state.simBusy)return;
   state.simBusy=true; state.simStop=false;
   const timing=$('#sim-timing'),btn=$('#sim-run-all'),stop=$('#sim-stop-all');
   btn.disabled=true; if(stop)stop.hidden=false;
-  let done=0,woke=0;
+  let done=0,woke=0,barge='';
   try{
-   for(const [label,phrase] of SIM_PHRASES){
+   for(const [label,phrase,runner] of SIM_PHRASES){
     if(state.simStop){toast('Stopped after '+done+' phrases');break}
     timing.innerHTML='<dt>Running</dt><dd>'+esc(label)+' ('+(done+1)+' of '+SIM_PHRASES.length+')</dd>';
-    try{ const e=await simRun(phrase,cap); if(e.wake)woke++; }
+    const run=runner||simRun;
+    const note=e=>{ if(!e)return; if(e.wake)woke++;
+      if(run===simRadioStop)barge=e.voice_stopped===null?'; the stop half was skipped, nothing was playing'
+        :'; the radio '+(e.voice_stopped?'stopped':'did not stop')+' on voice'; };
+    try{ note(await run(phrase,cap)); }
     catch(err){ if(/already playing/i.test(err.message||'')){
         /* The device was still speaking. Wait it out and retry once,
            rather than recording a failure that is really contention. */
         await new Promise(r=>setTimeout(r,6000));
-        try{ const e2=await simRun(phrase,cap); if(e2.wake)woke++; }catch(_){}
+        try{ note(await run(phrase,cap)); }catch(_){}
       } }
     done++;
     if(!state.simStop&&done<SIM_PHRASES.length)await new Promise(r=>setTimeout(r,3000));
    }
-   timing.innerHTML='<dt>Sweep complete</dt><dd>'+woke+' of '+done+' phrases woke the device</dd>';
+   timing.innerHTML='<dt>Sweep complete</dt><dd>'+woke+' of '+done+' phrases woke the device'+esc(barge)+'</dd>';
    toast(woke+' of '+done+' woke the device');
   } finally {
+   /* A sweep stopped part-way through can be stopped between the two halves
+      of the radio pair, which would leave the stream running. */
+   if(state.simRadio&&state.simRadio.playing)await simRadioCleanup().catch(()=>null);
    state.simBusy=false; btn.disabled=false; if(stop)stop.hidden=true;
   }
  };
@@ -620,7 +875,7 @@ function wxId(label){const m=WX_PROVIDERS.find(p=>p[1]===label);return m?m[0]:'o
  * to hide.
  */
 function weatherCard(a){if(a.unsupported)return '';
-return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Both providers are free and need no account, and nothing is sent until a location is set.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Austin, Texas"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}</div><div class="button-row">${action('Look up coordinates','wx-lookup')}<span class="muted" id="wx-lookup-note"></span></div><p class="muted" id="wx-warn"></p><div class="settings-grid">${saveButton('save-wx')}</div>`,'weather-provider',true)}
+return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Both providers are free and need no account, and nothing is sent until a location is set.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Austin, Texas"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}</div><div class="button-row">${action('Look up coordinates','wx-lookup')}<span class="muted" id="wx-lookup-note"></span></div><p class="muted" id="wx-warn"></p><div class="settings-grid">${saveButton('save-wx')}</div>`,'weather-provider')}
 function bindWeather(a){
  if(a.unsupported||!$('#wx-provider'))return;
  $('#wx-location').value=a.home_location||'';
@@ -721,6 +976,7 @@ function radioRowHtml(st,i){
   `<label class="field"><span>Name</span><input class="radio-name" value="${esc(st.name||'')}" placeholder="Groove Salad" aria-label="Station ${i+1} name"></label>`+
   `<label class="field"><span>Stream URL</span><input class="radio-url" value="${esc(st.url||'')}" placeholder="https://" spellcheck="false" aria-label="Station ${i+1} stream URL"></label>`+
   `<label class="switch-row"><span>Enabled</span><input class="toggle-input radio-enabled" type="checkbox" ${st.enabled===false?'':'checked'} aria-label="Station ${i+1} enabled"><span class="switch" aria-hidden="true"></span></label>`+
+  `<button class="secondary-btn radio-play" type="button" aria-label="Play station ${i+1}">Play</button>`+
   `<button class="danger-btn radio-remove" type="button" aria-label="Remove station ${i+1}">Remove</button>`+
   `<p class="error-text radio-row-error" hidden></p>`+
   `</div>`;}
@@ -733,7 +989,9 @@ function radioPanelBody(r){
   (r.playback_supported?'':unsupported('Stations are saved but cannot be played yet — stream playback is not on this image.'))+
   (seeded?`<div class="notice"><strong>Example station</strong><span>The list is empty, so one example is filled in below: SomaFM Groove Salad. Treat the URL as an example to verify rather than a guaranteed-live stream — save it once you have checked it, or replace it with your own.</span></div>`:'')+
   `<div class="radio-list" id="radio-list">${(seeded?[RADIO_EXAMPLE]:stations).map(radioRowHtml).join('')}</div>`+
-  `<div class="button-row">${action('Add station','radio-add')}<span class="muted" id="radio-count"></span></div>`+
+  `<div class="button-row">${action('Add station','radio-add')}`+
+  `${r.playback_supported?action('Stop','radio-stop'):''}<span class="muted" id="radio-count"></span></div>`+
+  `<p class="muted" id="radio-now" aria-live="polite"></p>`+
   saveButton('save-radio');}
 function bindRadio(r){
  const list=$('#radio-list'),save=$('#save-radio');
@@ -755,6 +1013,37 @@ function bindRadio(r){
  bindDirty(['#radio-list'],'#save-radio');
  list.addEventListener('input',validate);
  list.addEventListener('click',e=>{const b=e.target.closest('.radio-remove');if(!b)return;b.closest('[data-radio-row]').remove();save.disabled=false;validate()});
+ /*
+  * Playback resolves a station by the word the device has stored, not by what
+  * is typed in the row -- so an edited or newly added row cannot be played
+  * until it is saved, and saying so beats a 404 the user has to interpret.
+  */
+ const saved=new Set(stations.filter(st=>st.enabled!==false).map(st=>st.word));
+ function showNow(data){
+  const now=$('#radio-now'),stop=$('#radio-stop');
+  if(!now)return;
+  const playing=data&&data.playing,url=(data&&data.playing_url)||'';
+  const match=stations.find(st=>st.url===url);
+  now.textContent=playing?('Playing '+(match?match.name||match.word:url)):'';
+  if(stop)stop.hidden=!playing;}
+ if(r.playback_supported)showNow(r);
+ list.addEventListener('click',async e=>{
+  const b=e.target.closest('.radio-play');
+  if(!b)return;
+  const row=b.closest('[data-radio-row]'),v=read(row);
+  if(!saved.has(v.word)){toast(v.word&&stations.some(st=>st.word===v.word)?'That station is switched off':'Save the station before playing it',true);return}
+  if(state.busy)return;
+  setBusy(true);
+  try{showNow(await api('/integrations/radio/play',{method:'POST',body:JSON.stringify({word:v.word})}))}
+  catch(err){toast(err.message,true)}
+  finally{setBusy(false)}});
+ const stopButton=$('#radio-stop');
+ if(stopButton)stopButton.onclick=async()=>{
+  if(state.busy)return;
+  setBusy(true);
+  try{showNow(await api('/integrations/radio/stop',{method:'POST',body:'{}'}))}
+  catch(err){toast(err.message,true)}
+  finally{setBusy(false)}};
  $('#radio-add').onclick=()=>{
   if(rows().length>=max){toast(`At most ${max} stations`,true);return}
   list.insertAdjacentHTML('beforeend',radioRowHtml({enabled:true},rows().length));
@@ -778,7 +1067,7 @@ async function radioPanel(host){
  if($('.radio-stations',host))return;
  const r=await api('/integrations/radio').catch(e=>({unsupported:e.message}));
  if(!host.isConnected)return;
- host.insertAdjacentHTML('beforeend',collapsiblePanel('Internet radio',radioPanelBody(r),'radio-stations wide',true));
+ host.insertAdjacentHTML('beforeend',collapsiblePanel('Internet radio',radioPanelBody(r),'radio-stations wide'));
  bindRadio(r);}
 /*
  * integrations-ui.js renders the live Integrations page and never draws the
@@ -845,7 +1134,7 @@ async function systemPage(){
     toggle('Simulation',!!features.simulation,'feature-simulation')+
     `<p class="muted">Simulation renders a phrase with the device's own text-to-speech and plays it into the <strong>microphone</strong> path, so wake word detection, speech-to-text and the assistant handle it exactly as though it had been spoken in the room. Nothing is recorded and nothing leaves the device.</p><p class="muted">It is off by default and is meant for testing. Switching it on adds the Simulation page to the menu; switching it off hides that page again and the device refuses simulated audio.</p>`+
     saveButton('save-features'));
-  content.innerHTML=`<div class="settings-grid">${panel('Software',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Time zone</dt><dd>${esc(s.timezone)}</dd><dt>NTP</dt><dd class="${s.ntp?'connected':''}">${s.ntp?'Synchronized':esc(s.ntp_state||'Unavailable')}</dd><dt>Last synchronization</dt><dd>${esc(syncTime)}</dd><dt>Clock source</dt><dd>${esc(s.clock_source||'unknown')}</dd><dt>RTC</dt><dd class="${s.rtc_available?'connected':''}">${s.rtc_available?(s.rtc_persisted?'Available · synchronized':'Available'):'Unavailable'}</dd><dt>Time servers</dt><dd>${esc(s.ntp_servers||'Not configured')}</dd></dl>`)}${panel('System update',`<dl class="facts"><dt>Installed version</dt><dd>${esc(installedVersion)}</dd><dt>Latest version</dt><dd>${esc(ota.latest_version||'Unknown')}</dd><dt>Channel</dt><dd>${esc(ota.channel||s.update_channel)}</dd><dt>Source</dt><dd>${esc(sourceName)}</dd><dt>Source status</dt><dd class="${ota.source_reachable==='true'?'connected':''}">${esc(sourceStatus)}</dd><dt>Check result</dt><dd>${esc(checkResult)}</dd><dt>Last checked</dt><dd>${esc(checkTime)}</dd><dt>Last successful check</dt><dd>${esc(successTime)}</dd><dt>Automatic updates</dt><dd>${ota.automatic_updates?'Enabled':'Off'}</dd><dt>Current slot</dt><dd>${esc(ota.current_slot.toUpperCase())}</dd><dt>Inactive slot</dt><dd>${esc(ota.inactive_slot.toUpperCase())}</dd><dt>Install state</dt><dd>${esc(ota.state)}</dd><dt>Rollback</dt><dd>${ota.rollback_available?'Available':'Unavailable'}</dd>${ota.rollback_version?`<dt>Last rollback</dt><dd>${esc(ota.rollback_version)}</dd>`:''}</dl><progress class="progress" max="100" value="${ota.progress}" aria-label="Update progress"></progress>${updateControls}`)}${featuresPanel}${panel('Configuration and diagnostics',`<input id="restore-file" type="file" accept="application/json,.json" hidden><div class="button-row">${action('Download configuration','backup','primary-btn')}${action('Restore configuration','restore')}${action('Download diagnostic bundle','export-diag','primary-btn')}${action('Copy health summary','copy-diag')}</div><p class="muted">Configuration exports are versioned JSON and exclude Wi-Fi passwords, authentication tokens, logs and live telemetry. Diagnostic bundles are bounded JSON with release identity and health evidence; SSIDs, addresses, owner identifiers, tokens, private paths, media metadata and signing material are omitted or redacted.</p>`,'wide')}</div>`;
+  content.innerHTML=`<div class="settings-grid">${panel('Software',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Time zone</dt><dd>${esc(s.timezone)}</dd><dt>NTP</dt><dd class="${s.ntp?'connected':''}">${s.ntp?'Synchronized':esc(s.ntp_state||'Unavailable')}</dd><dt>Last synchronization</dt><dd>${esc(syncTime)}</dd><dt>Clock source</dt><dd>${esc(s.clock_source||'unknown')}</dd><dt>RTC</dt><dd class="${s.rtc_available?'connected':''}">${s.rtc_available?(s.rtc_persisted?'Available · synchronized':'Available'):'Unavailable'}</dd><dt>Time servers</dt><dd>${esc(s.ntp_servers||'Not configured')}</dd></dl>`)}${panel('System update',`<dl class="facts"><dt>Installed version</dt><dd>${esc(installedVersion)}</dd><dt>Latest version</dt><dd>${esc(ota.latest_version||'Unknown')}</dd><dt>Channel</dt><dd>${esc(ota.channel||s.update_channel)}</dd><dt>Source</dt><dd>${esc(sourceName)}</dd><dt>Source status</dt><dd class="${ota.source_reachable==='true'?'connected':''}">${esc(sourceStatus)}</dd><dt>Check result</dt><dd>${esc(checkResult)}</dd><dt>Last checked</dt><dd>${esc(checkTime)}</dd><dt>Last successful check</dt><dd>${esc(successTime)}</dd><dt>Automatic updates</dt><dd>${ota.automatic_updates?'Enabled':'Off'}</dd><dt>Current slot</dt><dd>${esc(ota.current_slot.toUpperCase())}</dd><dt>Inactive slot</dt><dd>${esc(ota.inactive_slot.toUpperCase())}</dd><dt>Install state</dt><dd>${esc(ota.state)}</dd><dt>Update image</dt><dd id="update-size">${updateSizeText(null,ota)}</dd><dt>Rollback</dt><dd>${ota.rollback_available?'Available':'Unavailable'}</dd>${ota.rollback_version?`<dt>Last rollback</dt><dd>${esc(ota.rollback_version)}</dd>`:''}</dl><progress class="progress" max="100" value="${ota.progress}" aria-label="Update progress"></progress>${updateControls}`)}${featuresPanel}${panel('Configuration and diagnostics',`<input id="restore-file" type="file" accept="application/json,.json" hidden><div class="button-row">${action('Download configuration','backup','primary-btn')}${action('Restore configuration','restore')}${action('Download diagnostic bundle','export-diag','primary-btn')}${action('Copy health summary','copy-diag')}</div><p class="muted">Configuration exports are versioned JSON and exclude Wi-Fi passwords, authentication tokens, logs and live telemetry. Diagnostic bundles are bounded JSON with release identity and health evidence; SSIDs, addresses, owner identifiers, tokens, private paths, media metadata and signing material are omitted or redacted.</p>`,'wide')}</div>`;
   if($('#save-update-settings')){bindDirty(['#automatic-updates','#update-channel'],'#save-update-settings');$('#save-update-settings').onclick=async()=>{const channel=$('#update-channel').value,automatic=$('#automatic-updates').checked;if(state.busy)return;setBusy(true);try{if(channel!==(ota.channel||'stable'))await api('/system/update/channel',{method:'PUT',body:JSON.stringify({channel})});if(automatic!==ota.automatic_updates)await api('/system/update/automatic',{method:'PUT',body:JSON.stringify({enabled:automatic})});toast('Update settings saved');await render()}catch(e){toast(e.message,true);await render()}finally{setBusy(false)}}}
   if($('#save-features')){bindDirty(['#feature-simulation'],'#save-features');$('#save-features').onclick=async()=>{if(state.busy)return;setBusy(true);try{const saved=await api('/system/features',{method:'PUT',body:JSON.stringify({simulation:$('#feature-simulation').checked})});applyFeatures(saved);toast(saved.simulation?'Simulation enabled':'Simulation disabled');await render()}catch(e){toast(e.message,true);await render()}finally{setBusy(false)}}}
   if($('#check-update'))$('#check-update').onclick=()=>post('/system/update/check',{},'Update check completed');
@@ -855,7 +1144,10 @@ async function systemPage(){
     const file=e.target.files[0];
     if(!file)return;
     $('#update-name').textContent=file.name;
-    if(file.size>ota.max_upload_bytes){toast('Update exceeds 32 MiB',true);e.target.value='';return}
+    updateSizeShow(file,ota);
+    if(ota.max_upload_bytes&&file.size>ota.max_upload_bytes){
+      toast('Update is '+mib(file.size)+', over the '+mib(ota.max_upload_bytes)+' limit',true);
+      e.target.value='';return}
     const unsigned=$('#allow-unsigned')?.checked;
     if(!confirm(`${unsigned?'Install unsigned update':'Install signed update'} ${file.name} to slot ${ota.inactive_slot.toUpperCase()}?${unsigned?' This bypasses signature verification.':''}`)){e.target.value='';return}
     setBusy(true);
