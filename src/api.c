@@ -487,6 +487,32 @@ static int query_component_decode(char*outbuf,size_t out_size,const char*value,s
 static void setup_json(struct api_context*c,struct api_response*r){struct le_audio_state a;struct le_network_state n;struct le_wake_word_state w;char host[128],wake[128],ssid[LE_TEXT*2],state[48];int rc;if((rc=le_get_audio_state(c->backend,&a))||(rc=le_get_network_state(c->backend,&n))||(rc=le_get_wake_word_state(c->backend,&w))){err(r,503,rc,"Setup state is unavailable");return;}json_escape(host,sizeof(host),n.hostname);json_escape(wake,sizeof(wake),w.wake_word);json_escape(ssid,sizeof(ssid),n.ssid);json_escape(state,sizeof(state),n.state);out(r,200,"{\"ok\":true,\"data\":{\"completed\":%s,\"mode\":\"first-boot-ap\",\"backend\":\"%s\",\"hostname\":\"%s\",\"volume\":%d,\"wake_word\":\"%s\",\"wake_sensitivity\":%d,\"local_only\":%s,\"diagnostic_telemetry\":%s,\"network_state\":\"%s\",\"ssid\":\"%s\",\"password_stored\":false},\"error\":null}",c->setup_completed?"true":"false",le_backend_mode(c->backend),host,a.volume,wake,w.sensitivity,c->privacy_local_only?"true":"false",c->privacy_telemetry?"true":"false",state,ssid);}
 static int setup_apply(struct api_context*c,const char*j){struct le_wifi_credentials wifi;char hostname[LE_TEXT],wake[LE_TEXT];int volume,sensitivity,local_only,telemetry,rc;memset(&wifi,0,sizeof(wifi));if(c->setup_completed)return LE_BUSY;if(json_get_string(j,"hostname",hostname,sizeof(hostname))<1||!valid_hostname(hostname)||json_get_string(j,"ssid",wifi.ssid,sizeof(wifi.ssid))<1||!wifi.ssid[0]||json_get_string(j,"security",wifi.security,sizeof(wifi.security))<1||json_get_string(j,"password",wifi.password,sizeof(wifi.password))<1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||!wake[0]||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_bool(j,"local_only",&local_only)<1||json_get_bool(j,"diagnostic_telemetry",&telemetry)<1){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strlen(wifi.password)<8){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strcmp(wifi.security,"wpa2")&&strcmp(wifi.security,"wpa3")){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if((rc=le_set_hostname(c->backend,hostname))||(rc=le_set_volume(c->backend,volume))||(rc=le_set_wake_word(c->backend,wake))||(rc=le_set_wake_word_sensitivity(c->backend,sensitivity))||(rc=le_connect_wifi(c->backend,&wifi))){memset(wifi.password,0,sizeof(wifi.password));return rc;}memset(wifi.password,0,sizeof(wifi.password));c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;c->setup_completed=1;rc=persist_configuration(c);if(rc)c->setup_completed=0;return rc;}
 /*
+ * Is this the real device?
+ *
+ * The guard below used to test /proc/idme/serial alone. This hardware exposes
+ * idme through the device tree instead, at
+ * /sys/firmware/devicetree/base/idme/serial/value, so that test never passed
+ * and the whole persisted-settings restore was skipped on every boot -- with
+ * no log line, because being skipped is a success. Nothing noticed for a long
+ * time: audiod and ledd restore their own state, so volume, gain and the LED
+ * ring came back anyway, and the wake sensitivity, which has no daemon-side
+ * persistence, was the only visible casualty.
+ *
+ * Accept either location, and honour the same override backend_linux uses so
+ * a test can point this at a fixture.
+ */
+static int device_idme_present(void)
+{
+    const char *override = getenv("LIBREECHO_IDME_SERIAL_PATH");
+
+    if (override && override[0])
+        return access(override, R_OK) == 0;
+    return access("/proc/idme/serial", R_OK) == 0 ||
+           access("/sys/firmware/devicetree/base/idme/serial/value",
+                  R_OK) == 0;
+}
+
+/*
  * Re-apply the saved settings to the hardware daemons at startup.
  *
  * `unrestored`, when given, is filled with the names of the settings that did
@@ -505,7 +531,7 @@ int api_apply_persisted_configuration(struct api_context *c, char *unrestored,
         unrestored[0] = '\0';
 
     if (!c || !c->backend || strcmp(le_backend_mode(c->backend), "linux") ||
-        geteuid() != 0 || access("/proc/idme/serial", R_OK) != 0 ||
+        geteuid() != 0 || !device_idme_present() ||
         !c->config_path[0] ||
         config_read(c->config_path, saved, sizeof(saved)) <= 0)
         return LE_OK;
