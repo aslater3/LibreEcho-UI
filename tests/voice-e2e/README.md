@@ -68,6 +68,29 @@ capture runs at 16 kHz; the 20 Hz–20 kHz in #37 describes the output path.
 Current baseline is flat to ±0.0 dB from 200 Hz to 7 kHz, with the 80 Hz
 high-pass visible below that (−3.0 dB at 80 Hz, −7.0 dB at 40 Hz).
 
+```sh
+tests/voice-e2e/bin/capture-response.sh quality   # GAIN_TOL=5 THDN_TOL=1
+```
+
+Noise floor, gain linearity, THD+N and clipping headroom, from one buffer per
+level so no cross-recording alignment is involved. Baseline:
+
+| in amp | in rms | out rms | gain | THD+N | clipped |
+|---|---|---|---|---|---|
+| 500 | 354 | 1384 | 3.91x | 0.20% | 0 |
+| 2000 | 1414 | 5549 | 3.92x | 0.02% | 0 |
+| 8000 | 5657 | 22201 | 3.92x | 0.01% | 0 |
+| 16000 | 11314 | 28684 | 2.54x | 21.76% | 4700 |
+
+Noise floor −65.3 dBFS; gain spread 0.28% over the five unclipped levels;
+clipping from input amplitude 16000. The 3.92x confirms micd's
+`MIC_DIGITAL_GAIN_DEFAULT` of 4.00x, the ~2% shortfall being the Q14 per-mic
+calibration and the beamformer average. Speech runs at 70–105 rms, so there is
+roughly 35 dB of headroom before distortion.
+
+Only unclipped levels are judged — above the ceiling the chain is *supposed* to
+distort, and recording where that starts is the measurement.
+
 ## Notes
 
 - Runs `linux/arm64` by default. Under emulated `linux/amd64` on Apple Silicon

@@ -10,19 +10,31 @@ UI=${UI:-$(cd "$H/../.." && pwd)}
 PLATFORM=${PLATFORM:-linux/arm64}
 IMAGE=libreecho-voice-harness:4
 TOLERANCE=${TOLERANCE:-6}
+GAIN_TOL=${GAIN_TOL:-5}
+THDN_TOL=${THDN_TOL:-1}
 
 [ -x "$UI/build/harness/libreecho-micd" ] || {
     echo "build first: $H/bin/build.sh" >&2; exit 1; }
 
-python3 "$H/bin/make-sweep.py" \
-    --out "$H/fixtures/capture-sweep.wav" --meta "$H/fixtures/capture-sweep.json"
+MODE=${1:-response}
+case "$MODE" in
+  response)
+    python3 "$H/bin/make-sweep.py" \
+      --out "$H/fixtures/capture-sweep.wav" --meta "$H/fixtures/capture-sweep.json"
+    FIXTURE=capture-sweep ;;
+  quality)
+    python3 "$H/bin/make-levels.py" \
+      --out "$H/fixtures/capture-levels.wav" --meta "$H/fixtures/capture-levels.json"
+    FIXTURE=capture-levels ;;
+  *) echo "usage: capture-response.sh [response|quality]" >&2; exit 2 ;;
+esac
 
 docker run --rm --platform "$PLATFORM" \
-    -v "$UI":/work -v "$H":/harness:ro -w /work "$IMAGE" \
+    -v "$UI":/work -v "$H":/harness:ro -e FIXTURE="$FIXTURE" -e MODE="$MODE" -e GAIN_TOL="$GAIN_TOL" -e THDN_TOL="$THDN_TOL" -w /work "$IMAGE" \
     bash -euo pipefail -c '
 RUN=/tmp/capture-run; rm -rf "$RUN"; mkdir -p "$RUN/no-idme"
 B=/work/build/harness
-python3 - /harness/fixtures/capture-sweep.wav "$RUN/source.raw" <<"PY"
+python3 - "/harness/fixtures/$FIXTURE.wav" "$RUN/source.raw" <<"PY"
 import sys, wave
 w = wave.open(sys.argv[1], "rb")
 open(sys.argv[2], "wb").write(w.readframes(w.getnframes()))
@@ -40,10 +52,19 @@ for i in $(seq 1 50); do [ -S "$RUN/mic.sock" ] && break; sleep 0.2; done
 # Capture the whole fixture plus a margin
 python3 /harness/lib/mic_probe.py --socket "$RUN/mic.sock" --seconds 9 \
     --out "$RUN/captured.raw"
-python3 /harness/lib/capture_response.py \
-    --source /harness/fixtures/capture-sweep.wav \
-    --captured "$RUN/captured.raw" \
-    --meta /harness/fixtures/capture-sweep.json \
-    --tolerance-db '"$TOLERANCE"' \
-    --json /work/build/harness/capture-response.json
+if [ "$MODE" = response ]; then
+  python3 /harness/lib/capture_response.py \
+      --source "/harness/fixtures/$FIXTURE.wav" \
+      --captured "$RUN/captured.raw" \
+      --meta "/harness/fixtures/$FIXTURE.json" \
+      --tolerance-db '"$TOLERANCE"' \
+      --json /work/build/harness/capture-response.json
+else
+  cp "$RUN/captured.raw" /work/build/harness/capture-levels.raw 2>/dev/null || true
+  python3 /harness/lib/capture_quality.py \
+      --captured "$RUN/captured.raw" \
+      --meta "/harness/fixtures/$FIXTURE.json" \
+      --gain-tolerance-pct "$GAIN_TOL" --thdn-tolerance-pct "$THDN_TOL" \
+      --json /work/build/harness/capture-quality.json
+fi
 '
