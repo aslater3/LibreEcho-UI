@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -140,6 +141,21 @@ struct snd_ctl_elem_value {
 #define LE_TONE_CHANNELS 2
 #define LE_TONE_CHUNK_FRAMES 1024
 #define LE_SYSTEM_AUDIO_BUS "/run/libreecho-audio/system.pcm"
+
+/*
+ * Wake acknowledgement chirp.
+ *
+ * Short and quiet on purpose.  It is an acknowledgement, not an alert: it
+ * has to be audible across a room without being startling at night, and it
+ * has to finish well before the speaker starts talking, because the same
+ * audio is captured by the microphone and only the echo canceller keeps it
+ * out of the transcript.  90ms of a rising two-tone pair is enough to be
+ * recognised as "I heard you" and short enough not to overlap a command.
+ */
+#define LE_CHIRP_MS 90
+#define LE_CHIRP_LOW_HZ 880.0
+#define LE_CHIRP_HIGH_HZ 1320.0
+#define LE_CHIRP_AMPLITUDE 4200.0
 
 static volatile sig_atomic_t g_stop;
 
@@ -798,6 +814,10 @@ static const char *control_name_or_default(const struct audio_control *control,
     return control->found && control->name[0] ? control->name : fallback;
 }
 
+/* Percent is not a round trip through the raw control, so ignore a point
+   of rounding rather than reacting to it. */
+#define VOLUME_GUARD_TOLERANCE 2
+
 static int audio_set_volume(struct audio_hw *audio, int volume);
 
 static void refresh_state(struct audio_hw *audio)
@@ -828,14 +848,27 @@ static void refresh_state(struct audio_hw *audio)
          * alone, and it logs the first divergence so the underlying writer
          * stays visible instead of being silently papered over.
          */
+        /*
+         * A tolerance, because the percentage is not a round trip: the
+         * control is a raw range and converting percent -> raw -> percent
+         * can land a point away.  Without it the guard fired on that
+         * rounding on every boot and, being one-shot, burned its warning on
+         * an artefact and hid the real event.
+         *
+         * The raw control value is logged alongside the percentages.  The
+         * percentage collapses the bottom of the range -- everything at or
+         * below min+67 reads as 1% -- so the raw number is what identifies
+         * an outside writer.
+         */
         if (audio->requested_volume >= 0 &&
-            audio->volume != audio->requested_volume) {
-            if (!audio->volume_guard_warned) {
-                le_log_warn("audiod: volume changed underneath us "
-                            "(%d%% -> %d%%); restoring the requested level",
-                            audio->requested_volume, audio->volume);
-                audio->volume_guard_warned = 1;
-            }
+            abs(audio->volume - audio->requested_volume) >
+                VOLUME_GUARD_TOLERANCE) {
+            le_log_warn("audiod: volume changed underneath us: requested "
+                        "%d%%, control now reads %d%% (raw %lld of %lld..%lld)"
+                        "; restoring",
+                        audio->requested_volume, audio->volume,
+                        value, min, max);
+            audio->volume_guard_warned = 1;
             if (audio_set_volume(audio, audio->requested_volume) == 0)
                 audio->volume = audio->requested_volume;
         }
@@ -1094,6 +1127,92 @@ static int write_tone_fd(int fd)
     return 0;
 }
 
+static int write_chirp_fd(int fd)
+{
+    unsigned char buffer[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS *
+                         sizeof(int16_t)];
+    size_t total = (size_t)LE_PCM_RATE * LE_CHIRP_MS / 1000U;
+    size_t done = 0;
+
+    while (done < total) {
+        size_t frames = total - done < LE_TONE_CHUNK_FRAMES
+                      ? total - done : LE_TONE_CHUNK_FRAMES;
+        int16_t *samples = (int16_t *)buffer;
+        size_t bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t);
+        size_t sent = 0;
+        size_t i;
+
+        for (i = 0; i < frames; ++i) {
+            size_t index = done + i;
+            /* Second half steps up a fifth, which reads as a question
+               being acknowledged rather than an error. */
+            double hz = index * 2U < total ? LE_CHIRP_LOW_HZ
+                                           : LE_CHIRP_HIGH_HZ;
+            /* Ramp both ends so the bus does not get a click, which is
+               louder and more startling than the tone itself. */
+            double ramp = 1.0;
+            size_t edge = total / 8U ? total / 8U : 1U;
+            int16_t value;
+
+            if (index < edge)
+                ramp = (double)index / (double)edge;
+            else if (index + edge > total)
+                ramp = (double)(total - index) / (double)edge;
+            value = (int16_t)(sin(2.0 * 3.14159265358979323846 * hz *
+                                  (double)index / (double)LE_PCM_RATE) *
+                              LE_CHIRP_AMPLITUDE * ramp);
+            samples[i * 2] = value;
+            samples[i * 2 + 1] = value;
+        }
+        while (sent < bytes) {
+            ssize_t n = write(fd, buffer + sent, bytes - sent);
+
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pfd = { fd, POLLOUT, 0 };
+                int rc;
+
+                do {
+                    rc = poll(&pfd, 1, 200);
+                } while (rc < 0 && errno == EINTR);
+                if (rc > 0)
+                    continue;
+            }
+            if (n <= 0)
+                return -1;
+            sent += (size_t)n;
+        }
+        done += frames;
+    }
+    return 0;
+}
+
+static int start_wake_chirp(const struct audio_hw *audio)
+{
+    int fd;
+    pid_t pid;
+
+    if (!audio->output_available ||
+        access(LE_SYSTEM_AUDIO_BUS, F_OK) < 0)
+        return -1;
+    fd = open(LE_SYSTEM_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    pid = fork();
+    if (pid < 0) {
+        close(fd);
+        return -1;
+    }
+    if (pid == 0) {
+        int result = write_chirp_fd(fd);
+        close(fd);
+        _exit(result == 0 ? 0 : 1);
+    }
+    close(fd);
+    return 0;
+}
+
 static int start_test_tone(const struct audio_hw *audio)
 {
     int fd;
@@ -1181,6 +1300,12 @@ static int handle_request(struct audio_hw *audio, char *message,
             return response_error(response, response_size, id, "muted must be boolean");
         if (audio_set_mute(audio, boolean) < 0)
             return response_error(response, response_size, id, "microphone mute unavailable");
+        return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "wake_chirp")) {
+        if (start_wake_chirp(audio) < 0)
+            return response_error(response, response_size, id,
+                                  "audio output unavailable");
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "test_tone")) {
