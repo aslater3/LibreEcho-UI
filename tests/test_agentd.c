@@ -34,6 +34,70 @@ static int call(const char *socket_path, const char *command,
     return result;
 }
 
+static int write_text(const char *path, const char *text)
+{
+    FILE *file = fopen(path, "w");
+
+    if (!file)
+        return -1;
+    if (fputs(text, file) < 0 || fclose(file) != 0)
+        return -1;
+    return 0;
+}
+
+static unsigned long read_count(const char *path)
+{
+    FILE *file = fopen(path, "r");
+    unsigned long count = 0;
+
+    if (!file)
+        return 0;
+    if (fscanf(file, "%lu", &count) != 1)
+        count = 0;
+    fclose(file);
+    return count;
+}
+
+static unsigned int line_count(const char *path)
+{
+    FILE *file = fopen(path, "r");
+    char line[512];
+    unsigned int count = 0;
+
+    if (!file)
+        return 0;
+    while (fgets(line, sizeof(line), file))
+        ++count;
+    fclose(file);
+    return count;
+}
+
+static int wait_for_lines(const char *path, unsigned int target)
+{
+    struct timespec delay = {0, 10000000L};
+    unsigned int i;
+
+    for (i = 0; i < 300; ++i) {
+        if (line_count(path) >= target) {
+            nanosleep(&delay, NULL);
+            return 0;
+        }
+        nanosleep(&delay, NULL);
+    }
+    return -1;
+}
+
+static int respond_and_wait(const char *socket_path, const char *args,
+                            char *response, size_t response_size,
+                            const char *audio_path,
+                            unsigned int *expected_audio_lines)
+{
+    if (call(socket_path, "respond", args, response, response_size) != 0)
+        return -1;
+    ++*expected_audio_lines;
+    return wait_for_lines(audio_path, *expected_audio_lines);
+}
+
 int main(void)
 {
     char directory[] = "/tmp/libreecho-agentd-test-XXXXXX";
@@ -47,6 +111,9 @@ int main(void)
     char stt_socket[256];
     char voice_trigger[256];
     char first_pcm_path[256];
+    char weather_mode_path[256];
+    char weather_count_path[256];
+    char body_capture_path[256];
     char response[LE_ADAPTER_MSG_MAX];
     struct stat status;
     struct timespec delay = {0, 10000000L};
@@ -55,6 +122,7 @@ int main(void)
     pid_t stt_child = -1;
     pid_t source_child = -1;
     size_t i;
+    unsigned int expected_audio_lines;
     int result = 0;
 
     CHECK(mkdtemp(directory) != NULL);
@@ -75,7 +143,18 @@ int main(void)
              "%s/voice.trigger", directory);
     snprintf(first_pcm_path, sizeof(first_pcm_path),
              "%s/first-pcm", directory);
+    snprintf(weather_mode_path, sizeof(weather_mode_path),
+             "%s/weather-mode", directory);
+    snprintf(weather_count_path, sizeof(weather_count_path),
+             "%s/weather-count", directory);
+    snprintf(body_capture_path, sizeof(body_capture_path),
+             "%s/body.txt", directory);
+    CHECK(write_text(weather_count_path, "0\n") == 0);
+    CHECK(write_text(body_capture_path, "") == 0);
     CHECK(setenv("LE_TEST_CURL_CAPTURE", capture_path, 1) == 0);
+    CHECK(setenv("LE_TEST_CURL_WEATHER_MODE_FILE", weather_mode_path, 1) == 0);
+    CHECK(setenv("LE_TEST_CURL_WEATHER_COUNT", weather_count_path, 1) == 0);
+    CHECK(setenv("LE_TEST_CURL_BODY_CAPTURE", body_capture_path, 1) == 0);
     CHECK(unsetenv("LE_TEST_CURL_MODE") == 0);
     CHECK(setenv("LE_AGENT_AUTH_POLL_MIN_SECONDS", "0", 1) == 0);
     CHECK(setenv("LE_TEST_TTS_MARKER", first_pcm_path, 1) == 0);
@@ -143,6 +222,7 @@ int main(void)
     CHECK(strstr(response, "\"authenticated\":true") != NULL);
     CHECK(stat(credentials_path, &status) == 0);
     CHECK((status.st_mode & 0777) == 0600);
+    CHECK(write_text(weather_mode_path, "sse\n") == 0);
     CHECK(call(
               socket_path, "configure",
               "{\"enabled\":true,\"model\":\"gpt-5.4\","
@@ -189,6 +269,7 @@ int main(void)
         nanosleep(&delay, NULL);
     }
     CHECK(i < 500);
+    expected_audio_lines = line_count(audio_capture);
     CHECK(call(socket_path, "status", NULL,
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"voice_pipeline\":true") != NULL);
@@ -200,6 +281,103 @@ int main(void)
     CHECK(strstr(response, "\"last_stt_total_ms\":") != NULL);
     CHECK(strstr(response, "\"latency_target_met\":true") != NULL);
     CHECK(strstr(response, "\"latency_violations\":0") != NULL);
+
+    CHECK(write_text(weather_mode_path, "weather-open-meteo\n") == 0);
+    CHECK(call(
+              socket_path, "configure",
+              "{\"weather_provider\":\"open-meteo\","
+              "\"home_location\":\"Austin, Texas\","
+              "\"latitude\":\"30.2672\",\"longitude\":\"-97.7431\"}",
+              response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"weather_provider\":\"open-meteo\"") != NULL);
+    CHECK(respond_and_wait(
+              socket_path, "{\"text\":\"What is the weather?\"}",
+              response, sizeof(response), audio_capture,
+              &expected_audio_lines) == 0);
+    CHECK(strstr(response, "\"text\":\"Hello\"") != NULL);
+    CHECK(read_count(weather_count_path) == 1);
+    {
+        FILE *body_file = fopen(body_capture_path, "r");
+        char request_body[4096];
+        size_t body_size;
+
+        CHECK(body_file != NULL);
+        body_size = fread(request_body, 1, sizeof(request_body) - 1, body_file);
+        fclose(body_file);
+        request_body[body_size] = '\0';
+        CHECK(strstr(request_body, "current weather there is") != NULL);
+    }
+    CHECK(respond_and_wait(
+              socket_path, "{\"text\":\"What is the weather again?\"}",
+              response, sizeof(response), audio_capture,
+              &expected_audio_lines) == 0);
+    CHECK(read_count(weather_count_path) == 1);
+    CHECK(call(
+              socket_path, "configure",
+              "{\"latitude\":\"31.0000\"}",
+              response, sizeof(response)) == 0);
+    CHECK(respond_and_wait(
+              socket_path, "{\"text\":\"How is the weather there?\"}",
+              response, sizeof(response), audio_capture,
+              &expected_audio_lines) == 0);
+    CHECK(read_count(weather_count_path) == 2);
+    CHECK(call(socket_path, "configure",
+               "{\"latitude\":\"nan\"}",
+               response, sizeof(response)) != 0);
+    CHECK(call(socket_path, "configure",
+               "{\"longitude\":\"0x1p2\"}",
+               response, sizeof(response)) != 0);
+
+    CHECK(write_text(weather_mode_path, "weather-met-no-large\n") == 0);
+    CHECK(call(socket_path, "configure",
+               "{\"weather_provider\":\"met-no\"}",
+               response, sizeof(response)) == 0);
+    CHECK(respond_and_wait(
+              socket_path, "{\"text\":\"What is the weather in MET format?\"}",
+              response, sizeof(response), audio_capture,
+              &expected_audio_lines) == 0);
+    CHECK(strstr(response, "\"text\":\"Hello\"") != NULL);
+    CHECK(read_count(weather_count_path) == 3);
+
+    CHECK(write_text(weather_mode_path, "weather-open-meteo\n") == 0);
+    CHECK(call(socket_path, "configure",
+               "{\"weather_provider\":\"off\",\"latitude\":\"\","
+               "\"longitude\":\"\"}",
+               response, sizeof(response)) == 0);
+    CHECK(respond_and_wait(
+              socket_path, "{\"text\":\"Is weather disabled?\"}",
+              response, sizeof(response), audio_capture,
+              &expected_audio_lines) == 0);
+    CHECK(read_count(weather_count_path) == 3);
+    {
+        FILE *body_file = fopen(body_capture_path, "r");
+        char request_body[4096];
+        size_t body_size;
+
+        CHECK(body_file != NULL);
+        body_size = fread(request_body, 1, sizeof(request_body) - 1, body_file);
+        fclose(body_file);
+        request_body[body_size] = '\0';
+        CHECK(strstr(request_body, "current weather there is") == NULL);
+    }
+
+    CHECK(write_text(weather_mode_path, "weather-fail\n") == 0);
+    CHECK(call(socket_path, "configure",
+               "{\"weather_provider\":\"open-meteo\","
+               "\"latitude\":\"30.2672\",\"longitude\":\"-97.7431\"}",
+               response, sizeof(response)) == 0);
+    CHECK(respond_and_wait(
+              socket_path, "{\"text\":\"Weather provider is down.\"}",
+              response, sizeof(response), audio_capture,
+              &expected_audio_lines) == 0);
+    CHECK(read_count(weather_count_path) == 4);
+    CHECK(respond_and_wait(
+              socket_path, "{\"text\":\"Weather provider is still down.\"}",
+              response, sizeof(response), audio_capture,
+              &expected_audio_lines) == 0);
+    CHECK(read_count(weather_count_path) == 4);
+
+    CHECK(write_text(weather_mode_path, "buffered\n") == 0);
     CHECK(call(
               socket_path, "configure",
               "{\"provider\":\"openai-compatible\",\"enabled\":true,"
@@ -209,9 +387,10 @@ int main(void)
     CHECK(strstr(response, "\"provider\":\"openai-compatible\"") != NULL);
     CHECK(strstr(response,
                  "\"base_url\":\"http://198.51.100.20:8001/v1\"") != NULL);
-    CHECK(call(socket_path, "respond",
-               "{\"text\":\"Check the local provider.\"}",
-               response, sizeof(response)) == 0);
+    CHECK(respond_and_wait(
+              socket_path, "{\"text\":\"Check the local provider.\"}",
+              response, sizeof(response), audio_capture,
+              &expected_audio_lines) == 0);
     CHECK(strstr(response, "\"text\":\"Local ready\"") != NULL);
     CHECK(call(socket_path, "logout", NULL,
                response, sizeof(response)) == 0);
@@ -246,6 +425,9 @@ cleanup:
     unlink(stt_socket);
     unlink(voice_trigger);
     unlink(first_pcm_path);
+    unlink(weather_mode_path);
+    unlink(weather_count_path);
+    unlink(body_capture_path);
     rmdir(directory);
     return result;
 }

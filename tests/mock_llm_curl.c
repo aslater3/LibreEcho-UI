@@ -8,7 +8,12 @@ int main(int argc, char **argv)
 {
     const char *config_path = NULL;
     const char *capture = getenv("LE_TEST_CURL_CAPTURE");
-    const char *mode = getenv("LE_TEST_CURL_MODE");
+    const char *mode_env = getenv("LE_TEST_CURL_MODE");
+    const char *mode = mode_env;
+    const char *weather_mode_file = getenv("LE_TEST_CURL_WEATHER_MODE_FILE");
+    const char *weather_count = getenv("LE_TEST_CURL_WEATHER_COUNT");
+    const char *body_capture = getenv("LE_TEST_CURL_BODY_CAPTURE");
+    char dynamic_mode[64] = "";
     char buffer[16384];
     char body[16384];
     size_t config_used = 0;
@@ -17,8 +22,12 @@ int main(int argc, char **argv)
     FILE *output;
     int response_route;
     int compatible_route;
+    int weather_open_route;
+    int weather_met_route;
+    int weather_failure;
     int poll_route;
     int token_route;
+    int status = 200;
     int i;
 
     for (i = 1; i + 1 < argc; ++i)
@@ -41,6 +50,16 @@ int main(int argc, char **argv)
     buffer[config_used] = '\0';
     fclose(input);
     fclose(output);
+    if (weather_mode_file) {
+        FILE *mode_input = fopen(weather_mode_file, "r");
+
+        if (mode_input) {
+            if (fgets(dynamic_mode, sizeof(dynamic_mode), mode_input))
+                dynamic_mode[strcspn(dynamic_mode, "\r\n")] = '\0';
+            fclose(mode_input);
+            mode = dynamic_mode;
+        }
+    }
     response_route =
         strstr(buffer, "/backend-api/codex/responses") != NULL;
     compatible_route =
@@ -57,8 +76,51 @@ int main(int argc, char **argv)
         body_used += count;
     }
     body[body_used] = '\0';
+    weather_open_route = strstr(buffer, "api.open-meteo.com") != NULL;
+    weather_met_route = strstr(buffer, "api.met.no") != NULL;
+    weather_failure = mode && !strcmp(mode, "weather-fail");
+    if (weather_open_route || weather_met_route) {
+        if (weather_count) {
+            FILE *count_file = fopen(weather_count, "r+");
+            unsigned long count = 0;
+
+            if (count_file) {
+                if (fscanf(count_file, "%lu", &count) != 1)
+                    count = 0;
+                rewind(count_file);
+                fprintf(count_file, "%lu\n", count + 1);
+                fclose(count_file);
+            }
+        }
+        if (weather_failure) {
+            fputs("{\"error\":\"weather unavailable\"}\n", stdout);
+            status = 503;
+        } else if (weather_open_route) {
+            fputs("{\"current\":{\"temperature_2m\":72.4,"
+                  "\"weather_code\":1,\"wind_speed_10m\":5.6}}\n",
+                  stdout);
+        } else {
+            fputs("{\"properties\":{\"timeseries\":[{\"data\":{"
+                  "\"instant\":{\"details\":{\"air_temperature\":12.5,"
+                  "\"wind_speed\":3.1}},\"next_1_hours\":{\"summary\":{"
+                  "\"symbol_code\":\"partlycloudy_day\"}}}}}", stdout);
+            if (mode && !strcmp(mode, "weather-met-no-large")) {
+                for (i = 0; i < 20000; ++i)
+                    fputc(' ', stdout);
+            }
+            fputs("]}}\n", stdout);
+        }
+    } else if (body_capture) {
+        FILE *body_output = fopen(body_capture, "w");
+
+        if (body_output) {
+            fputs(body, body_output);
+            fclose(body_output);
+        }
+    }
     if ((mode && !strcmp(mode, "sse")) ||
-        (!mode && response_route)) {
+        (!mode && response_route) ||
+        (mode && !strncmp(mode, "weather-", 8) && response_route)) {
         const char *reply = strstr(body, "Previous assistant:")
             ? "Thanks." : strstr(body, "mock transcription")
                 ? "What else?" : "Hello";
@@ -87,6 +149,6 @@ int main(int argc, char **argv)
               "\"device_auth_id\":\"test-device\",\"interval\":3}\n",
               stdout);
     }
-    fputs("\n__LE_HTTP_STATUS__:200\n", stdout);
+    fprintf(stdout, "\n__LE_HTTP_STATUS__:%d\n", status);
     return 0;
 }

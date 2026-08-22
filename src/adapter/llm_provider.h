@@ -20,6 +20,9 @@ struct le_llm_http_request {
     int accept_sse;
     /* Set only after endpoint validation permits a configured LAN HTTP URL. */
     int allow_insecure_http;
+    /* Zero selects the conservative transport defaults. */
+    int connect_timeout_seconds;
+    int max_time_seconds;
 };
 
 struct le_llm_auth_session {

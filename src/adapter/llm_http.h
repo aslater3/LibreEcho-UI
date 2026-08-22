@@ -6,6 +6,8 @@
 #include <stddef.h>
 
 typedef int (*le_llm_http_event_fn)(void *context, const char *data);
+typedef int (*le_llm_http_body_fn)(void *context, const char *data,
+                                   size_t size);
 
 struct le_llm_http_response {
     int status;
@@ -18,4 +20,10 @@ int le_llm_http_execute(const char *curl_path,
                         void *event_context,
                         struct le_llm_http_response *response);
 
+/* Stream a bounded-body-independent response to body_fn without buffering it. */
+int le_llm_http_execute_stream(const char *curl_path,
+                               const struct le_llm_http_request *request,
+                               le_llm_http_body_fn body_fn,
+                               void *body_context,
+                               struct le_llm_http_response *response);
 #endif

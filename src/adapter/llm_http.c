@@ -14,6 +14,7 @@
 
 #define STATUS_PREFIX "__LE_HTTP_STATUS__:"
 #define HTTP_LINE_MAX 32768
+#define HTTP_STREAM_TAIL_MAX 64
 
 static int write_all(int fd, const void *buffer, size_t size)
 {
@@ -63,6 +64,15 @@ static int build_config(const struct le_llm_http_request *request,
 {
     const char *ca_bundle = getenv("LE_AGENT_CA_BUNDLE");
     size_t used = 0;
+    int connect_timeout;
+    int max_time;
+
+    if (!request || request->connect_timeout_seconds < 0 ||
+        request->max_time_seconds < 0)
+        return -1;
+    connect_timeout = request->connect_timeout_seconds
+        ? request->connect_timeout_seconds : 10;
+    max_time = request->max_time_seconds ? request->max_time_seconds : 45;
 
     /*
      * GET is allowed alongside POST so the assistant can read a small
@@ -112,10 +122,11 @@ static int build_config(const struct le_llm_http_request *request,
     if (used >= size ||
         snprintf(config + used, size - used,
                  "silent\nshow-error\nno-buffer\n"
-                 "connect-timeout = 10\nmax-time = 45\n"
+                 "connect-timeout = %d\nmax-time = %d\n"
                  "proto = \"=%s\"\nproto-redir = \"=%s\"\n"
                  "%s"
                  "write-out = \"\\n%s%%{http_code}\\n\"\n",
+                 connect_timeout, max_time,
                  request->allow_insecure_http ? "http,https" : "https",
                  request->allow_insecure_http ? "http,https" : "https",
                  request->allow_insecure_http ? "" : "tlsv1.2\n",
@@ -223,10 +234,79 @@ static int read_output(int fd,
     return 0;
 }
 
-int le_llm_http_execute(const char *curl_path,
+static int read_stream_output(
+    int fd, const struct le_llm_http_request *request,
+    le_llm_http_body_fn body_fn, void *body_context,
+    struct le_llm_http_response *response)
+{
+    char input[4096];
+    char chunk[4096];
+    char tail[HTTP_STREAM_TAIL_MAX + 1];
+    size_t chunk_used = 0;
+    size_t tail_used = 0;
+
+    for (;;) {
+        ssize_t count = read(fd, input, sizeof(input));
+        size_t i;
+
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count < 0)
+            return -1;
+        if (count == 0)
+            break;
+        for (i = 0; i < (size_t)count; ++i) {
+            if (tail_used == HTTP_STREAM_TAIL_MAX) {
+                if (chunk_used == sizeof(chunk)) {
+                    if (body_fn(body_context, chunk, chunk_used) != 0)
+                        return -1;
+                    chunk_used = 0;
+                }
+                chunk[chunk_used++] = tail[0];
+                memmove(tail, tail + 1, tail_used - 1);
+                --tail_used;
+            }
+            tail[tail_used++] = input[i];
+        }
+    }
+
+    tail[tail_used] = '\0';
+    {
+        char *status_marker = strstr(tail, "\n" STATUS_PREFIX);
+        char status_line[HTTP_STREAM_TAIL_MAX + 1];
+        size_t body_tail;
+        size_t status_length;
+        size_t i;
+
+        if (!status_marker)
+            return -1;
+        body_tail = (size_t)(status_marker - tail);
+        for (i = 0; i < body_tail; ++i) {
+            if (chunk_used == sizeof(chunk)) {
+                if (body_fn(body_context, chunk, chunk_used) != 0)
+                    return -1;
+                chunk_used = 0;
+            }
+            chunk[chunk_used++] = tail[i];
+        }
+        if (chunk_used && body_fn(body_context, chunk, chunk_used) != 0)
+            return -1;
+        status_marker += 1;
+        status_length = tail + tail_used - status_marker;
+        if (status_length >= sizeof(status_line))
+            return -1;
+        memcpy(status_line, status_marker, status_length);
+        status_line[status_length] = '\0';
+        return process_line(request, status_line, NULL, NULL, response);
+    }
+}
+
+static int execute_http(const char *curl_path,
                         const struct le_llm_http_request *request,
                         le_llm_http_event_fn event_fn,
                         void *event_context,
+                        le_llm_http_body_fn body_fn,
+                        void *body_context,
                         struct le_llm_http_response *response)
 {
     char config[LE_LLM_TOKEN_MAX + 2048];
@@ -285,12 +365,15 @@ int le_llm_http_execute(const char *curl_path,
     config_pipe[1] = -1;
     close(body_pipe[1]);
     body_pipe[1] = -1;
-    if (read_output(output_pipe[0], request, event_fn, event_context,
-                    response) < 0)
+    if ((body_fn
+            ? read_stream_output(output_pipe[0], request, body_fn,
+                                 body_context, response)
+            : read_output(output_pipe[0], request, event_fn, event_context,
+                          response)) < 0)
         goto cleanup;
     close(output_pipe[0]);
     output_pipe[0] = -1;
-    if (request->accept_sse && response->body[0] && event_fn &&
+    if (!body_fn && request->accept_sse && response->body[0] && event_fn &&
         event_fn(event_context, response->body) != 0)
         goto cleanup;
     while (waitpid(child, &child_status, 0) < 0) {
@@ -317,4 +400,26 @@ cleanup:
     }
     memset(config, 0, sizeof(config));
     return result;
+}
+
+int le_llm_http_execute(const char *curl_path,
+                        const struct le_llm_http_request *request,
+                        le_llm_http_event_fn event_fn,
+                        void *event_context,
+                        struct le_llm_http_response *response)
+{
+    return execute_http(curl_path, request, event_fn, event_context,
+                         NULL, NULL, response);
+}
+
+int le_llm_http_execute_stream(const char *curl_path,
+                               const struct le_llm_http_request *request,
+                               le_llm_http_body_fn body_fn,
+                               void *body_context,
+                               struct le_llm_http_response *response)
+{
+    if (!body_fn)
+        return -1;
+    return execute_http(curl_path, request, NULL, NULL,
+                         body_fn, body_context, response);
 }

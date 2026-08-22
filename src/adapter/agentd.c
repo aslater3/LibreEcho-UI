@@ -11,7 +11,9 @@
 #include "../json.h"
 #include "../log.h"
 
+#include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +35,9 @@
 #define DEFAULT_TTS_FIRST_PCM_FILE "/run/libreecho/tts-first-pcm"
 #define FOLLOW_UP_PLAYBACK_WAIT_MS 60000U
 #define FOLLOW_UP_MAX_DEPTH 2U
+#define WEATHER_REFRESH_SECONDS 600
+#define WEATHER_HTTP_TIMEOUT_SECONDS 1
+#define WEATHER_PREFIX_MAX 4096
 
 enum auth_state {
     AUTH_SIGNED_OUT,
@@ -69,6 +74,7 @@ struct agent_state {
     char config_path[384];
     char weather_text[160];
     time_t weather_fetched;
+    int weather_cache_valid;
     char credentials_path[384];
     char curl_path[384];
     char audio_socket[256];
@@ -186,20 +192,42 @@ static void config_defaults(struct agent_config *config)
 
 /*
  * Coordinates arrive as strings so they can be handed straight to the
- * weather query without reformatting a double.  Validate the text rather
- * than trusting it: it ends up in a URL, so anything that is not a plain
- * signed decimal is rejected outright.
+ * weather query without reformatting a double. Empty text means "unset";
+ * otherwise accept only a finite signed decimal, never NaN, infinity or a
+ * C hexadecimal float that strtod would also accept.
  */
 static int coordinate_valid(const char *text, double limit)
 {
+    const char *p;
+    int before = 0;
+    int after = 0;
     char *end;
     double value;
 
-    if (!text || !text[0] || strlen(text) > 15)
+    if (!text || strlen(text) >= 16)
+        return 0;
+    if (!text[0])
+        return 1;
+    p = text;
+    if (*p == '+' || *p == '-')
+        ++p;
+    while (isdigit((unsigned char)*p)) {
+        before = 1;
+        ++p;
+    }
+    if (*p == '.') {
+        ++p;
+        while (isdigit((unsigned char)*p)) {
+            after = 1;
+            ++p;
+        }
+    }
+    if (*p || (!before && !after))
         return 0;
     errno = 0;
     value = strtod(text, &end);
-    if (errno || *end || value < -limit || value > limit)
+    if (errno || end == text || !isfinite(value) ||
+        value < -limit || value > limit)
         return 0;
     return 1;
 }
@@ -701,7 +729,6 @@ static int generate_response(struct agent_state *state,
  * device, and only when a location has actually been configured: with no
  * location set nothing is sent and the prompt is unchanged.
  */
-#define WEATHER_REFRESH_SECONDS 600
 
 /*
  * The shared JSON helpers expose int, bool and string but not a real
@@ -760,42 +787,60 @@ static const char *weather_description(int code)
     return "thunderstorms";
 }
 
+struct met_weather_parser {
+    char prefix[WEATHER_PREFIX_MAX];
+    size_t used;
+};
+
+static int met_weather_chunk(void *context, const char *data, size_t size)
+{
+    struct met_weather_parser *parser = context;
+    size_t available;
+
+    if (!parser || !data)
+        return -1;
+    available = sizeof(parser->prefix) - 1U - parser->used;
+    if (size > available)
+        size = available;
+    if (size) {
+        memcpy(parser->prefix + parser->used, data, size);
+        parser->used += size;
+        parser->prefix[parser->used] = '\0';
+    }
+    return 0;
+}
+
 /* MET Norway reports Celsius and metres per second. */
 static int fetch_met_no(struct agent_state *state, char *out, size_t size)
 {
-    /*
-     * These two structures carry a 16 KiB body each.  Declaring them on the
-     * stack costs about 32 KiB per call, and this runs on a pthread whose
-     * default stack under musl is 128 KiB rather than the 8 MiB a glibc
-     * main thread would give it.  That overflowed the thread stack and took
-     * agentd down mid-turn: the fetch logged its reading and the process
-     * died before the reply was generated.  Keep them on the heap.
-     */
-    struct le_llm_http_request *request;
-    struct le_llm_http_response *response;
+    struct le_llm_http_request request;
+    struct le_llm_http_response response;
+    struct met_weather_parser parser;
     int outcome = 0;
     char symbol[64] = "";
     double celsius = 0.0, mps = 0.0;
     size_t i;
 
-    request = calloc(1, sizeof(*request));
-    response = calloc(1, sizeof(*response));
-    if (!request || !response)
-        goto done;
-    (void)snprintf(request->method, sizeof(request->method), "GET");
-    if (snprintf(request->url, sizeof(request->url),
+    memset(&request, 0, sizeof(request));
+    memset(&response, 0, sizeof(response));
+    memset(&parser, 0, sizeof(parser));
+    (void)snprintf(request.method, sizeof(request.method), "GET");
+    request.connect_timeout_seconds = WEATHER_HTTP_TIMEOUT_SECONDS;
+    request.max_time_seconds = WEATHER_HTTP_TIMEOUT_SECONDS;
+    if (snprintf(request.url, sizeof(request.url),
                  "https://api.met.no/weatherapi/locationforecast/2.0/compact"
                  "?lat=%s&lon=%s",
                  state->config.latitude,
-                 state->config.longitude) >= (int)sizeof(request->url))
-        goto done;
-    if (le_llm_http_execute(state->curl_path, request, NULL, NULL,
-                            response) < 0 || response->status != 200)
-        goto done;
-    if (!json_number(response->body, "air_temperature", &celsius))
-        goto done;
-    (void)json_number(response->body, "wind_speed", &mps);
-    (void)json_get_string(response->body, "symbol_code", symbol,
+                 state->config.longitude) >= (int)sizeof(request.url))
+        return 0;
+    if (le_llm_http_execute_stream(
+            state->curl_path, &request, met_weather_chunk, &parser,
+            &response) < 0 || response.status != 200)
+        return 0;
+    if (!json_number(parser.prefix, "air_temperature", &celsius))
+        return 0;
+    (void)json_number(parser.prefix, "wind_speed", &mps);
+    (void)json_get_string(parser.prefix, "symbol_code", symbol,
                           sizeof(symbol));
     /* "partlycloudy_day" reads badly aloud; make it speakable. */
     for (i = 0; symbol[i]; ++i) {
@@ -808,9 +853,6 @@ static int fetch_met_no(struct agent_state *state, char *out, size_t size)
                    symbol[0] ? " and " : "", symbol,
                    (int)(mps * 2.23694 + 0.5));
     outcome = 1;
-done:
-    free(request);
-    free(response);
     return outcome;
 }
 
@@ -834,6 +876,8 @@ static int fetch_open_meteo(struct agent_state *state, char *out, size_t size)
     if (!request || !response)
         goto done;
     (void)snprintf(request->method, sizeof(request->method), "GET");
+    request->connect_timeout_seconds = WEATHER_HTTP_TIMEOUT_SECONDS;
+    request->max_time_seconds = WEATHER_HTTP_TIMEOUT_SECONDS;
     if (snprintf(request->url, sizeof(request->url),
                  "https://api.open-meteo.com/v1/forecast"
                  "?latitude=%s&longitude=%s"
@@ -861,17 +905,26 @@ done:
     return outcome;
 }
 
+static void invalidate_weather_cache(struct agent_state *state)
+{
+    state->weather_text[0] = '\0';
+    state->weather_fetched = 0;
+    state->weather_cache_valid = 0;
+}
+
 static void refresh_weather(struct agent_state *state)
 {
     char reading[sizeof(state->weather_text)];
     time_t now = time(NULL);
     int ok;
 
-    if (!strcmp(state->config.weather_provider, "off"))
+    if (!strcmp(state->config.weather_provider, "off") ||
+        !state->config.latitude[0] || !state->config.longitude[0]) {
+        invalidate_weather_cache(state);
         return;
-    if (!state->config.latitude[0] || !state->config.longitude[0])
-        return;
-    if (state->weather_text[0] &&
+    }
+    if (state->weather_cache_valid && state->weather_fetched > 0 &&
+        now >= state->weather_fetched &&
         now - state->weather_fetched < WEATHER_REFRESH_SECONDS)
         return;
     reading[0] = '\0';
@@ -881,17 +934,15 @@ static void refresh_weather(struct agent_state *state)
     if (!ok) {
         le_log_warn("agentd: %s weather lookup failed",
                     state->config.weather_provider);
-        /*
-         * Keep whatever was last known rather than clearing it.  A stale
-         * reading a few minutes old answers the question far better than
-         * refusing it, and the retry is only ten minutes away.
-         */
+        /* Back off after failure so an unavailable provider cannot delay every turn. */
         state->weather_fetched = now;
+        state->weather_cache_valid = 1;
         return;
     }
     (void)snprintf(state->weather_text, sizeof(state->weather_text),
                    "%s", reading);
     state->weather_fetched = now;
+    state->weather_cache_valid = 1;
     le_log_info("agentd: weather via %s for %s: %s",
                 state->config.weather_provider,
                 state->config.home_location[0]
@@ -1153,6 +1204,7 @@ static int command_configure(struct agent_state *state, const char *args,
     char value[2048];
     int boolean;
     int parsed;
+    int weather_changed;
 
     parsed = json_get_bool(args, "enabled", &boolean);
     if (parsed < 0)
@@ -1214,7 +1266,13 @@ static int command_configure(struct agent_state *state, const char *args,
                sizeof(state->credentials.api_key));
         strcpy(state->credentials.api_key, value);
     }
+    weather_changed =
+        strcmp(state->config.latitude, updated.latitude) ||
+        strcmp(state->config.longitude, updated.longitude) ||
+        strcmp(state->config.weather_provider, updated.weather_provider);
     state->config = updated;
+    if (weather_changed)
+        invalidate_weather_cache(state);
     state->provider = le_llm_provider_by_id(state->config.provider);
     if (!state->provider)
         return respond(fd, id, 0, "unsupported provider");

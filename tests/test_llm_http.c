@@ -20,6 +20,27 @@ struct events {
     char joined[256];
 };
 
+struct body_capture {
+    size_t bytes;
+    size_t stored;
+    char prefix[128];
+};
+
+static int collect_body(void *context, const char *data, size_t size)
+{
+    struct body_capture *capture = context;
+    size_t room = sizeof(capture->prefix) - 1U - capture->stored;
+    size_t copy = size < room ? size : room;
+
+    capture->bytes += size;
+    if (copy) {
+        memcpy(capture->prefix + capture->stored, data, copy);
+        capture->stored += copy;
+        capture->prefix[capture->stored] = '\0';
+    }
+    return 0;
+}
+
 static int collect(void *context, const char *data)
 {
     struct events *events = context;
@@ -41,6 +62,7 @@ int main(void)
     struct le_llm_http_request request;
     struct le_llm_http_response response;
     struct events events;
+    struct body_capture streamed;
     FILE *file;
     int fd;
     size_t count;
@@ -114,6 +136,30 @@ int main(void)
     CHECK(events.count == 1);
     CHECK(strstr(events.joined,
                  "\"content\":\"Local ready\"") != NULL);
+
+    memset(&request, 0, sizeof(request));
+    strcpy(request.method, "GET");
+    strcpy(request.url,
+           "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+           "?lat=30.2672&lon=-97.7431");
+    request.connect_timeout_seconds = 1;
+    request.max_time_seconds = 1;
+    memset(&streamed, 0, sizeof(streamed));
+    CHECK(setenv("LE_TEST_CURL_MODE", "weather-met-no-large", 1) == 0);
+    CHECK(le_llm_http_execute_stream(
+              "./build/mock-llm-curl", &request, collect_body, &streamed,
+              &response) == 0);
+    CHECK(response.status == 200);
+    CHECK(streamed.bytes > 16384);
+    CHECK(strstr(streamed.prefix, "air_temperature") != NULL);
+    file = fopen(capture, "r");
+    CHECK(file != NULL);
+    count = fread(config, 1, sizeof(config) - 1, file);
+    fclose(file);
+    config[count] = '\0';
+    CHECK(strstr(config, "connect-timeout = 1") != NULL);
+    CHECK(strstr(config, "max-time = 1") != NULL);
+
     unlink(capture);
     puts("llm http: private pipe config, TLS, SSE and JSON fallback: ok");
     return 0;

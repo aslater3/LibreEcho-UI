@@ -151,7 +151,7 @@
       "get": {
         "tags": ["Assistant"],
         "summary": "Read voice-assistant state and latency telemetry",
-        "description": "Reports subscription authentication, wake/STT stream health, and measured speech-end-to-first-PCM latency.",
+        "description": "Reports subscription authentication, wake/STT stream health, measured speech-end-to-first-PCM latency, and optional weather context configuration. Weather uses the selected provider only when both coordinates are set, with a one-second transport deadline and a ten-minute cache including failed lookups.",
         "responses": {
           "200": {"$ref":"#/components/responses/Success"},
           "503": {"$ref":"#/components/responses/Error"}
@@ -160,7 +160,7 @@
       "put": {
         "tags": ["Assistant"],
         "summary": "Configure the wake-to-reply assistant",
-        "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, and whether wake-to-reply is enabled. API keys are write-only and never returned.",
+        "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, whether wake-to-reply is enabled, and optional weather context. Weather coordinates are finite signed decimal strings; empty values clear the configured location. API keys are write-only and never returned.",
         "parameters": [{"$ref":"#/components/parameters/Csrf"}],
         "requestBody": {
           "required": true,
@@ -174,7 +174,11 @@
                   "base_url": {"type":"string","format":"uri","description":"Configured OpenAI-compatible endpoint, usually ending in /v1"},
                   "api_key": {"type":"string","writeOnly":true},
                   "model": {"type":"string","minLength":1,"maxLength":95},
-                  "prompt": {"type":"string","minLength":1,"maxLength":2047}
+                  "prompt": {"type":"string","minLength":1,"maxLength":2047},
+                  "home_location": {"type":"string","maxLength":95},
+                  "latitude": {"type":"string","pattern":"^(?:[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+))?$","maxLength":15,"description":"Optional signed decimal latitude from -90 to 90; empty clears it."},
+                  "longitude": {"type":"string","pattern":"^(?:[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+))?$","maxLength":15,"description":"Optional signed decimal longitude from -180 to 180; empty clears it."},
+                  "weather_provider": {"type":"string","enum":["open-meteo","met-no","off"]}
                 }
               }
             }

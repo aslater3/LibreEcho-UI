@@ -288,9 +288,18 @@ previous configuration unchanged. The request requires `X-LibreEcho-CSRF`.
 #### GET /api/v1/assistant
 
 Returns assistant configuration, ChatGPT device-login state, pipeline
-connectivity, local STT timing, and first-audio latency telemetry. The latency
-measurement is from the estimated end of speech to the first PCM submitted to
-the announcement bus; the current target is 3000 ms.
+connectivity, local STT timing, first-audio latency telemetry, and the optional
+weather context configuration. The latency measurement is from the estimated
+end of speech to the first PCM submitted to the announcement bus; the current
+target is 3000 ms. Weather lookups use the selected provider only when both
+coordinates are set, are bounded independently from the assistant request, and
+are cached for ten minutes (including failed lookups to avoid retrying on every
+turn).
+
+`weather_provider` is `open-meteo`, `met-no`, or `off`. `home_location` is the
+spoken place name, while `latitude` and `longitude` are signed decimal strings
+in the ranges -90..90 and -180..180. Empty coordinate strings mean that no
+weather lookup is configured.
 
 #### PUT /api/v1/assistant
 
@@ -301,9 +310,21 @@ Updates the provider-neutral assistant configuration:
   "enabled": true,
   "provider": "openai-codex",
   "model": "gpt-5.4",
-  "prompt": "Reply in concise, natural spoken English without markdown."
+  "prompt": "Reply in concise, natural spoken English without markdown.",
+  "home_location": "Austin, Texas",
+  "latitude": "30.2672",
+  "longitude": "-97.7431",
+  "weather_provider": "open-meteo"
 }
 ```
+
+`home_location` is optional display/speech context. `latitude` and `longitude`
+may be empty to clear the weather location; otherwise they must be finite signed
+decimal strings within their geographic ranges. Set `weather_provider` to
+`off` to disable weather context and clear any cached reading. The supported
+providers are `open-meteo` and `met-no`; neither requires an API key. Weather
+requests use a one-second transport deadline and never make the assistant wait
+for the normal 45-second LLM transport limit.
 
 The prompt is sent as the response provider's instruction text. Keep it
 voice-safe: concise prose, no markdown, URLs, citations, emoji, or claims that
