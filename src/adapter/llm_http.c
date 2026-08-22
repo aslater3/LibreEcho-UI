@@ -64,12 +64,22 @@ static int build_config(const struct le_llm_http_request *request,
     const char *ca_bundle = getenv("LE_AGENT_CA_BUNDLE");
     size_t used = 0;
 
-    if (!request || strcmp(request->method, "POST") ||
-        !request->url[0] || !request->content_type[0] ||
+    /*
+     * GET is allowed alongside POST so the assistant can read a small
+     * amount of context from a plain HTTP API -- current weather for the
+     * configured location -- without a second HTTP implementation.  A GET
+     * carries no body, so it needs no Content-Type.
+     */
+    int is_get = request && !strcmp(request->method, "GET");
+
+    if (!request || (strcmp(request->method, "POST") && !is_get) ||
+        !request->url[0] || (!is_get && !request->content_type[0]) ||
         append_config(config, size, &used, "url = \"%s\"\n",
                       request->url) < 0 ||
         append_config(config, size, &used, "request = \"%s\"\n",
-                      request->method) < 0 ||
+                      request->method) < 0)
+        return -1;
+    if (!is_get &&
         append_config(config, size, &used,
                       "header = \"Content-Type: %s\"\n",
                       request->content_type) < 0)
