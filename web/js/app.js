@@ -71,24 +71,41 @@ async function waitForDevice(estimate,title){
  dlg.showModal();
  const status=dlg.querySelector('#reboot-status'),bar=dlg.querySelector('#reboot-progress'),
        hint=dlg.querySelector('#reboot-hint'),started=Date.now();
- const alive=async()=>{try{const r=await fetch('/healthz',{cache:'no-store'});return r.ok}catch(_){return false}};
- const left=()=>Math.max(0,Math.ceil(estimate-(Date.now()-started)/1000));
- let wentDown=false;
- for(;;){
-  await new Promise(r=>setTimeout(r,1000));
-  const elapsed=(Date.now()-started)/1000, up=await alive();
-  /* The daemon answers for a moment after accepting the request, so a
-     single early 200 means nothing. Only start looking for it to come
-     back once it has actually gone away. */
-  if(!up)wentDown=true;
-  else if(wentDown){status.textContent='Back online. Reloading…';bar.value=1000;
-   await new Promise(r=>setTimeout(r,600));location.reload();return}
+ let wentDown=false,finished=false;
+ /* Bound every probe. When the device drops off the network the request is
+    not refused, it simply never answers, so an unbounded fetch parks the
+    loop on its first poll: the modal appears and then sits on its opening
+    message with the bar at zero for the whole reboot. Refused connections
+    fail fast and hid this -- only a real device does the silent kind. */
+ const alive=async()=>{
+  const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),2000);
+  try{const r=await fetch('/healthz',{cache:'no-store',signal:abort.signal});return r.ok}
+  catch(_){return false}
+  finally{clearTimeout(timer)}};
+ /* Drive the display off its own clock rather than off the poll, so the
+    countdown stays smooth however long a probe takes. */
+ const paint=()=>{
+  if(finished)return;
+  const elapsed=(Date.now()-started)/1000;
   bar.value=Math.min(990,Math.round(elapsed/estimate*1000));
-  if(!wentDown)status.textContent='Waiting for the device to go down…';
-  else if(elapsed<estimate)status.textContent=`Restarting — about ${left()} second${left()===1?'':'s'} left`;
+  if(!wentDown){status.textContent='Waiting for the device to go down…';return}
+  const left=Math.max(0,Math.ceil(estimate-elapsed));
+  if(elapsed<estimate)status.textContent=`Restarting — about ${left} second${left===1?'':'s'} left`;
   else{status.textContent='Still restarting…';
-   hint.textContent='This is taking longer than the last boot did. It will reconnect as soon as the device answers.'}
- }}
+   hint.textContent='This is taking longer than the last boot did. It will reconnect as soon as the device answers.'}};
+ const ticker=setInterval(paint,500);
+ paint();
+ try{
+  for(;;){
+   const up=await alive();
+   if(!up)wentDown=true;
+   else if(wentDown){
+    finished=true;status.textContent='Back online. Reloading…';bar.value=1000;
+    await new Promise(r=>setTimeout(r,600));location.reload();return}
+   paint();
+   await new Promise(r=>setTimeout(r,1000));
+  }
+ }finally{clearInterval(ticker)}}
 async function power(path,name){
  if(!confirm(`${name} this LibreEcho device?`))return;
  if(state.busy)return;
