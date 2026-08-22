@@ -86,7 +86,8 @@ struct stt_engine *stt_engine_init(const char *model_dir,
     snprintf(engine->model, sizeof(engine->model), "%s", model);
     snprintf(engine->language, sizeof(engine->language), "%s", language);
     engine->vad_floor_rms = environment_unsigned(
-        "LE_STT_VAD_FLOOR_RMS", LE_VOICE_VAD_DEFAULT_FLOOR_RMS, 1, 1024);
+        "LE_STT_VAD_FLOOR_RMS", LE_VOICE_VAD_DEFAULT_FLOOR_RMS, 1,
+        LE_VOICE_VAD_MAX_FLOOR_RMS);
     engine->end_silence_ms = environment_unsigned(
         "LE_STT_END_SILENCE_MS", DEFAULT_END_SILENCE_MS, 200, 3000);
     engine->start_timeout_ms = environment_unsigned(

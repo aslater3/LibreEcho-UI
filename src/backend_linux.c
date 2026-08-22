@@ -795,6 +795,12 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
     if (json_get_bool(response, "startup_sound", &v) > 0) { o->startup_sound = v; found = 1; }
     if (json_get_bool(response, "amplifier_on", &v) > 0) { o->amplifier_on = v; found = 1; }
     if (json_get_bool(response, "output_available", &v) > 0) { o->output_available = v; found = 1; }
+    strcpy(o->noise_colour, "white");
+    o->noise_remaining_seconds = -1;
+    if (json_get_bool(response, "noise_active", &v) > 0) { o->noise_active = v; found = 1; }
+    if (json_get_int(response, "noise_level", &v) > 0) o->noise_level = v;
+    if (json_get_int(response, "noise_remaining_seconds", &v) > 0) o->noise_remaining_seconds = v;
+    (void)json_get_string(response, "noise_colour", o->noise_colour, sizeof(o->noise_colour));
     {
         const char *path = getenv("LE_TTS_VOICE_FILE");
         FILE *voice_file;
@@ -1014,11 +1020,19 @@ static int led(struct le_backend *b, struct le_led_state *o)
     if (json_object(response, "boot", object, sizeof(object)) ||
         json_object(response, "boot_profile", object, sizeof(object)))
         parse_profile(object, &o->boot);
+    if (json_object(response, "night", object, sizeof(object))) {
+        int v;
+        if (json_get_bool(object, "enabled", &v) > 0) o->night_enabled = v;
+        if (json_get_bool(object, "active", &v) > 0) o->night_active = v;
+        if (json_get_int(object, "start_minute", &v) > 0) o->night_start_minute = v;
+        if (json_get_int(object, "end_minute", &v) > 0) o->night_end_minute = v;
+    }
     if (json_object(response, "profiles", profiles, sizeof(profiles))) {
         if (json_object(profiles, "listening", object, sizeof(object))) parse_profile(object, &o->listening);
         if (json_object(profiles, "thinking", object, sizeof(object))) parse_profile(object, &o->thinking);
         if (json_object(profiles, "error", object, sizeof(object))) parse_profile(object, &o->error);
         if (json_object(profiles, "dnd", object, sizeof(object))) parse_profile(object, &o->dnd);
+        if (json_object(profiles, "night", object, sizeof(object))) parse_profile(object, &o->night);
     }
     if (!parse_led_pixels(response, o->pixels)) {
         size_t i;
@@ -1082,13 +1096,27 @@ static int led_profile(struct le_backend *b, const char *name,
     (void)b;
     if (!name || !profile ||
         (strcmp(name, "listening") && strcmp(name, "thinking") &&
-         strcmp(name, "error") && strcmp(name, "dnd")) ||
+         strcmp(name, "error") && strcmp(name, "dnd") &&
+         strcmp(name, "night")) ||
         profile->brightness < 0 || profile->brightness > 100)
         return LE_INVALID;
     snprintf(args, sizeof(args),
              "{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%d}",
              name, profile->r, profile->g, profile->b, profile->brightness);
     return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_profile", args);
+}
+
+static int night(struct le_backend *b, int enabled, int start, int end)
+{
+    char args[128];
+
+    (void)b;
+    if (start < 0 || start > 1439 || end < 0 || end > 1439)
+        return LE_INVALID;
+    snprintf(args, sizeof(args),
+             "{\"enabled\":%d,\"start_minute\":%d,\"end_minute\":%d}",
+             enabled ? 1 : 0, start, end);
+    return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_night", args);
 }
 
 static int led_test(struct le_backend *b)
@@ -1196,6 +1224,53 @@ static int wake_set(struct le_backend *b, const char *word)
     json_escape(escaped, sizeof(escaped), word);
     if (snprintf(args, sizeof(args), "{\"word\":\"%s\"}", escaped) >= (int)sizeof(args)) return LE_INVALID;
     return adapter_json_command(LE_ADAPTER_WAKEWORD_SOCK, "set_word", args);
+}
+
+/*
+ * Render a phrase and leave it where the capture mux will pick it up. The mux
+ * plays it into the pipeline in place of the microphones without interrupting
+ * the stream, so wake, STT and the assistant see it exactly as if it had been
+ * spoken in the room.
+ */
+static int simulate_audio(struct le_backend *b, const char *text)
+{
+    char args[1024], escaped[768];
+
+    (void)b;
+    if (!text || !text[0])
+        return LE_INVALID;
+    if (strlen(text) >= sizeof(escaped) / 2)
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), text);
+    if (mkdir("/run/libreecho/mic-inject", 0755) < 0 && errno != EEXIST)
+        return LE_IO;
+    snprintf(args, sizeof(args),
+             "{\"text\":\"%s\",\"path\":\"%s\"}",
+             escaped, "/run/libreecho/mic-inject/pending.raw");
+    return adapter_json_command(LE_ADAPTER_TTS_SOCK, "render", args);
+}
+
+static int noise_start(struct le_backend *b, const char *colour, int level,
+                       int minutes)
+{
+    char args[128];
+
+    (void)b;
+    if (!colour || (strcmp(colour, "white") && strcmp(colour, "pink") &&
+                    strcmp(colour, "brown")))
+        return LE_INVALID;
+    if (level < 1 || level > 100 || minutes < 0 || minutes > 600)
+        return LE_INVALID;
+    snprintf(args, sizeof(args),
+             "{\"colour\":\"%s\",\"level\":%d,\"minutes\":%d}",
+             colour, level, minutes);
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "noise_start", args);
+}
+
+static int noise_stop(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "noise_stop", NULL);
 }
 
 static int sensitivity(struct le_backend *b, int value)
@@ -1630,7 +1705,9 @@ static void destroy(struct le_backend *b)
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
-    led, colour, brightness, visualizer_enabled, boot_led, led_profile, led_test,
+    noise_start, noise_stop, simulate_audio,
+    led, colour, brightness, visualizer_enabled, boot_led, led_profile, night,
+    led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,
     wake, wake_set, sensitivity, wake_test,
     bluetooth, bluetooth_set, bluetooth_scan, bluetooth_pair,

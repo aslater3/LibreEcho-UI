@@ -46,6 +46,16 @@ struct agent_config {
     char provider[64];
     char model[96];
     char prompt[2048];
+    /*
+     * Where the device is.  Without this the assistant has no way to
+     * resolve "outside" and correctly refuses to answer weather questions;
+     * it is stored here rather than in web-config.json because agentd is
+     * the only consumer and already owns a persisted config.
+     */
+    char home_location[96];
+    char latitude[16];
+    char longitude[16];
+    char weather_provider[24];
 };
 
 struct agent_state {
@@ -57,6 +67,8 @@ struct agent_state {
     char auth_error[256];
     char socket_path[256];
     char config_path[384];
+    char weather_text[160];
+    time_t weather_fetched;
     char credentials_path[384];
     char curl_path[384];
     char audio_socket[256];
@@ -158,6 +170,9 @@ static const char *auth_state_name(enum auth_state state)
     }
 }
 
+static void build_turn_prompt(struct agent_state *state, char *out,
+                              size_t size);
+
 static void config_defaults(struct agent_config *config)
 {
     memset(config, 0, sizeof(*config));
@@ -166,6 +181,27 @@ static void config_defaults(struct agent_config *config)
     strcpy(config->model, DEFAULT_MODEL);
     snprintf(config->prompt, sizeof(config->prompt), "%s",
              le_llm_default_voice_prompt());
+    strcpy(config->weather_provider, "open-meteo");
+}
+
+/*
+ * Coordinates arrive as strings so they can be handed straight to the
+ * weather query without reformatting a double.  Validate the text rather
+ * than trusting it: it ends up in a URL, so anything that is not a plain
+ * signed decimal is rejected outright.
+ */
+static int coordinate_valid(const char *text, double limit)
+{
+    char *end;
+    double value;
+
+    if (!text || !text[0] || strlen(text) > 15)
+        return 0;
+    errno = 0;
+    value = strtod(text, &end);
+    if (errno || *end || value < -limit || value > limit)
+        return 0;
+    return 1;
 }
 
 static int endpoint_valid(const char *url)
@@ -212,19 +248,26 @@ static int save_config(const struct agent_state *state)
 {
     char prompt[sizeof(state->config.prompt) * 2U];
     char model[sizeof(state->config.model) * 2U];
+    char location[sizeof(state->config.home_location) * 2U];
     char json[sizeof(prompt) + 512U];
     int length;
 
     if (escape_json(prompt, sizeof(prompt), state->config.prompt) < 0 ||
-        escape_json(model, sizeof(model), state->config.model) < 0)
+        escape_json(model, sizeof(model), state->config.model) < 0 ||
+        escape_json(location, sizeof(location),
+                    state->config.home_location) < 0)
         return -1;
     length = snprintf(
         json, sizeof(json),
         "{\"version\":1,\"enabled\":%s,"
         "\"provider\":\"%s\",\"model\":\"%s\","
-        "\"prompt\":\"%s\"}\n",
+        "\"prompt\":\"%s\","
+        "\"home_location\":\"%s\","
+        "\"latitude\":\"%s\",\"longitude\":\"%s\","
+        "\"weather_provider\":\"%s\"}\n",
         state->config.enabled ? "true" : "false", state->config.provider,
-        model, prompt);
+        model, prompt, location, state->config.latitude,
+        state->config.longitude, state->config.weather_provider);
     return length > 0 && length < (int)sizeof(json)
         ? config_write_atomic(state->config_path, json, (size_t)length)
         : -1;
@@ -246,6 +289,17 @@ static void load_config(struct agent_state *state)
                           sizeof(state->config.model));
     (void)json_get_string(json, "prompt", state->config.prompt,
                           sizeof(state->config.prompt));
+    (void)json_get_string(json, "home_location", state->config.home_location,
+                          sizeof(state->config.home_location));
+    (void)json_get_string(json, "latitude", state->config.latitude,
+                          sizeof(state->config.latitude));
+    (void)json_get_string(json, "longitude", state->config.longitude,
+                          sizeof(state->config.longitude));
+    (void)json_get_string(json, "weather_provider",
+                          state->config.weather_provider,
+                          sizeof(state->config.weather_provider));
+    if (!state->config.weather_provider[0])
+        strcpy(state->config.weather_provider, "open-meteo");
     if (!state->config.model[0])
         strcpy(state->config.model, DEFAULT_MODEL);
     if (!state->config.prompt[0])
@@ -354,6 +408,7 @@ static int command_status(struct agent_state *state, int fd,
     char prompt[sizeof(state->config.prompt) * 2U];
     char model[sizeof(state->config.model) * 2U];
     char base_url[sizeof(state->credentials.base_url) * 2U];
+    char location[sizeof(state->config.home_location) * 2U];
     char code[sizeof(state->auth.user_code) * 2U];
     char url[sizeof(state->auth.verification_url) * 2U];
     char error[sizeof(state->auth_error) * 2U];
@@ -381,6 +436,8 @@ static int command_status(struct agent_state *state, int fd,
         escape_json(code, sizeof(code), state->auth.user_code) < 0 ||
         escape_json(url, sizeof(url), state->auth.verification_url) < 0 ||
         escape_json(error, sizeof(error), state->auth_error) < 0 ||
+        escape_json(location, sizeof(location),
+                    state->config.home_location) < 0 ||
         snprintf(
             payload, sizeof(payload),
             "{\"ready\":true,\"enabled\":%s,"
@@ -389,6 +446,9 @@ static int command_status(struct agent_state *state, int fd,
             "\"auth_state\":\"%s\",\"user_code\":\"%s\","
             "\"verification_url\":\"%s\",\"auth_error\":\"%s\","
             "\"model\":\"%s\",\"prompt\":\"%s\","
+            "\"home_location\":\"%s\","
+            "\"latitude\":\"%s\",\"longitude\":\"%s\","
+            "\"weather_provider\":\"%s\","
             "\"base_url\":\"%s\",\"api_key_configured\":%s,"
             "\"voice_pipeline\":true,\"text_streaming\":true,"
             "\"wake_connected\":%s,\"audio_connected\":%s,"
@@ -411,7 +471,9 @@ static int command_status(struct agent_state *state, int fd,
             state->provider->subscription_auth ? "true" : "false",
             state->auth_state == AUTH_SIGNED_IN ? "true" : "false",
             auth_state_name(state->auth_state), code, url, error,
-            model, prompt, base_url,
+            model, prompt, location, state->config.latitude,
+            state->config.longitude, state->config.weather_provider,
+            base_url,
             state->credentials.api_key[0] ? "true" : "false",
             voice_metrics.wake_connected ? "true" : "false",
             voice_metrics.audio_connected ? "true" : "false",
@@ -533,6 +595,7 @@ static int generate_response(struct agent_state *state,
                              char *full_text, size_t full_text_size,
                              char *error, size_t error_size)
 {
+    char turn_prompt[sizeof(state->config.prompt) + 512U];
     struct le_llm_http_request request;
     struct le_llm_http_response response;
     struct response_stream stream;
@@ -569,9 +632,10 @@ static int generate_response(struct agent_state *state,
     pthread_mutex_unlock(&state->metrics_mutex);
     (void)unlink(state->tts_first_pcm_file);
     memset(&response, 0, sizeof(response));
+    build_turn_prompt(state, turn_prompt, sizeof(turn_prompt));
     if (state->provider->response_request(
             &state->credentials, state->config.model,
-            state->config.prompt, transcript, &request) < 0 ||
+            turn_prompt, transcript, &request) < 0 ||
         le_llm_http_execute(
             state->curl_path, &request, response_event,
             &stream, &response) < 0 ||
@@ -580,7 +644,7 @@ static int generate_response(struct agent_state *state,
             refresh_credentials(state, 1) == 0 &&
             state->provider->response_request(
                 &state->credentials, state->config.model,
-                state->config.prompt, transcript, &request) == 0) {
+                turn_prompt, transcript, &request) == 0) {
             memset(&stream, 0, sizeof(stream));
             stream.state = state;
             stream.aggregate_tts = getenv("LE_AGENT_TTS_AGGREGATE") &&
@@ -620,6 +684,249 @@ static int generate_response(struct agent_state *state,
     ++state->completed_turns;
     pthread_mutex_unlock(&state->metrics_mutex);
     return 0;
+}
+
+/* ------------------------- Situational context -------------------------- */
+
+/*
+ * The assistant knows nothing about where or when it is, so it correctly
+ * refuses location-dependent questions: asked for the weather it answers
+ * that it cannot check without a weather location service.  Give it the
+ * two facts it is missing -- the configured place and the current
+ * conditions there -- as a short line appended to the system prompt.
+ *
+ * open-meteo is used because it needs no account and no API key, so the
+ * device does not have to hold a credential tied to an identity in order
+ * to answer "what is it like outside".  Only coarse coordinates leave the
+ * device, and only when a location has actually been configured: with no
+ * location set nothing is sent and the prompt is unchanged.
+ */
+#define WEATHER_REFRESH_SECONDS 600
+
+/*
+ * The shared JSON helpers expose int, bool and string but not a real
+ * number, and these readings are fractional and nested under "current".
+ * Scan for the key and parse the literal that follows it.
+ */
+static int json_number(const char *json, const char *key, double *out)
+{
+    char needle[64];
+    const char *at;
+    char *end;
+    double value;
+
+    if (!json || !key || !out ||
+        (size_t)snprintf(needle, sizeof(needle), "\"%s\"", key) >=
+            sizeof(needle))
+        return 0;
+    /*
+     * Every key also appears in the response's "current_units" object with
+     * a string value such as "\u00b0F", and that copy comes first.  Scope the
+     * search to the readings, and skip any match whose value is a string
+     * rather than a number, so a units block can never be parsed as one.
+     */
+    at = strstr(json, "\"current\":{");
+    if (at)
+        json = at;
+    for (at = strstr(json, needle); at; at = strstr(at + 1, needle)) {
+        const char *p = at + strlen(needle);
+
+        while (*p == ' ' || *p == ':' || *p == '\t')
+            ++p;
+        if (*p == '"')
+            continue;
+        errno = 0;
+        value = strtod(p, &end);
+        if (errno || end == p)
+            continue;
+        *out = value;
+        return 1;
+    }
+    return 0;
+}
+
+static const char *weather_description(int code)
+{
+    /* WMO codes, collapsed to what is worth saying out loud. */
+    if (code == 0) return "clear";
+    if (code <= 2) return "partly cloudy";
+    if (code == 3) return "overcast";
+    if (code <= 48) return "foggy";
+    if (code <= 57) return "drizzling";
+    if (code <= 67) return "raining";
+    if (code <= 77) return "snowing";
+    if (code <= 82) return "rain showers";
+    if (code <= 86) return "snow showers";
+    return "thunderstorms";
+}
+
+/* MET Norway reports Celsius and metres per second. */
+static int fetch_met_no(struct agent_state *state, char *out, size_t size)
+{
+    /*
+     * These two structures carry a 16 KiB body each.  Declaring them on the
+     * stack costs about 32 KiB per call, and this runs on a pthread whose
+     * default stack under musl is 128 KiB rather than the 8 MiB a glibc
+     * main thread would give it.  That overflowed the thread stack and took
+     * agentd down mid-turn: the fetch logged its reading and the process
+     * died before the reply was generated.  Keep them on the heap.
+     */
+    struct le_llm_http_request *request;
+    struct le_llm_http_response *response;
+    int outcome = 0;
+    char symbol[64] = "";
+    double celsius = 0.0, mps = 0.0;
+    size_t i;
+
+    request = calloc(1, sizeof(*request));
+    response = calloc(1, sizeof(*response));
+    if (!request || !response)
+        goto done;
+    (void)snprintf(request->method, sizeof(request->method), "GET");
+    if (snprintf(request->url, sizeof(request->url),
+                 "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+                 "?lat=%s&lon=%s",
+                 state->config.latitude,
+                 state->config.longitude) >= (int)sizeof(request->url))
+        goto done;
+    if (le_llm_http_execute(state->curl_path, request, NULL, NULL,
+                            response) < 0 || response->status != 200)
+        goto done;
+    if (!json_number(response->body, "air_temperature", &celsius))
+        goto done;
+    (void)json_number(response->body, "wind_speed", &mps);
+    (void)json_get_string(response->body, "symbol_code", symbol,
+                          sizeof(symbol));
+    /* "partlycloudy_day" reads badly aloud; make it speakable. */
+    for (i = 0; symbol[i]; ++i) {
+        if (symbol[i] == '_')
+            symbol[i] = ' ';
+    }
+    (void)snprintf(out, size,
+                   "%d degrees Fahrenheit%s%s, wind %d miles per hour",
+                   (int)(celsius * 9.0 / 5.0 + 32.0 + 0.5),
+                   symbol[0] ? " and " : "", symbol,
+                   (int)(mps * 2.23694 + 0.5));
+    outcome = 1;
+done:
+    free(request);
+    free(response);
+    return outcome;
+}
+
+static int fetch_open_meteo(struct agent_state *state, char *out, size_t size)
+{
+    /*
+     * These two structures carry a 16 KiB body each.  Declaring them on the
+     * stack costs about 32 KiB per call, and this runs on a pthread whose
+     * default stack under musl is 128 KiB rather than the 8 MiB a glibc
+     * main thread would give it.  That overflowed the thread stack and took
+     * agentd down mid-turn: the fetch logged its reading and the process
+     * died before the reply was generated.  Keep them on the heap.
+     */
+    struct le_llm_http_request *request;
+    struct le_llm_http_response *response;
+    int outcome = 0;
+    double temperature = 0.0, wind = 0.0, coded = 0.0;
+
+    request = calloc(1, sizeof(*request));
+    response = calloc(1, sizeof(*response));
+    if (!request || !response)
+        goto done;
+    (void)snprintf(request->method, sizeof(request->method), "GET");
+    if (snprintf(request->url, sizeof(request->url),
+                 "https://api.open-meteo.com/v1/forecast"
+                 "?latitude=%s&longitude=%s"
+                 "&current=temperature_2m,weather_code,wind_speed_10m"
+                 "&temperature_unit=fahrenheit&wind_speed_unit=mph",
+                 state->config.latitude,
+                 state->config.longitude) >= (int)sizeof(request->url))
+        goto done;
+    if (le_llm_http_execute(state->curl_path, request, NULL, NULL,
+                            response) < 0 || response->status != 200)
+        goto done;
+    if (!json_number(response->body, "temperature_2m", &temperature) ||
+        !json_number(response->body, "weather_code", &coded))
+        goto done;
+    (void)json_number(response->body, "wind_speed_10m", &wind);
+    (void)snprintf(out, size,
+                   "%d degrees Fahrenheit and %s, wind %d miles per hour",
+                   (int)(temperature + (temperature < 0 ? -0.5 : 0.5)),
+                   weather_description((int)coded),
+                   (int)(wind + 0.5));
+    outcome = 1;
+done:
+    free(request);
+    free(response);
+    return outcome;
+}
+
+static void refresh_weather(struct agent_state *state)
+{
+    char reading[sizeof(state->weather_text)];
+    time_t now = time(NULL);
+    int ok;
+
+    if (!strcmp(state->config.weather_provider, "off"))
+        return;
+    if (!state->config.latitude[0] || !state->config.longitude[0])
+        return;
+    if (state->weather_text[0] &&
+        now - state->weather_fetched < WEATHER_REFRESH_SECONDS)
+        return;
+    reading[0] = '\0';
+    ok = !strcmp(state->config.weather_provider, "met-no")
+        ? fetch_met_no(state, reading, sizeof(reading))
+        : fetch_open_meteo(state, reading, sizeof(reading));
+    if (!ok) {
+        le_log_warn("agentd: %s weather lookup failed",
+                    state->config.weather_provider);
+        /*
+         * Keep whatever was last known rather than clearing it.  A stale
+         * reading a few minutes old answers the question far better than
+         * refusing it, and the retry is only ten minutes away.
+         */
+        state->weather_fetched = now;
+        return;
+    }
+    (void)snprintf(state->weather_text, sizeof(state->weather_text),
+                   "%s", reading);
+    state->weather_fetched = now;
+    le_log_info("agentd: weather via %s for %s: %s",
+                state->config.weather_provider,
+                state->config.home_location[0]
+                    ? state->config.home_location : "the configured location",
+                state->weather_text);
+}
+
+/*
+ * Build the prompt actually sent for this turn: the operator's prompt plus
+ * whatever situational facts are known.  The base prompt is left untouched
+ * in the config so this never accumulates across turns.
+ */
+static void build_turn_prompt(struct agent_state *state, char *out,
+                              size_t size)
+{
+    char when[64] = "";
+    time_t now = time(NULL);
+    struct tm tm;
+
+    (void)snprintf(out, size, "%s", state->config.prompt);
+    if (localtime_r(&now, &tm))
+        (void)strftime(when, sizeof(when), "%A %e %B, %H:%M", &tm);
+    if (when[0])
+        (void)snprintf(out + strlen(out), size - strlen(out),
+                       " The current local date and time is %s.", when);
+    if (state->config.home_location[0])
+        (void)snprintf(out + strlen(out), size - strlen(out),
+                       " The device is located in %s.",
+                       state->config.home_location);
+    refresh_weather(state);
+    if (state->weather_text[0])
+        (void)snprintf(out + strlen(out), size - strlen(out),
+                       " The current weather there is %s. Answer weather "
+                       "questions from this reading rather than declining.",
+                       state->weather_text);
 }
 
 static int response_asks_question(const char *text)
@@ -870,6 +1177,29 @@ static int command_configure(struct agent_state *state, const char *args,
         return respond(fd, id, 0, "invalid prompt");
     if (parsed > 0)
         strcpy(updated.prompt, value);
+    parsed = json_get_string(args, "home_location", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 && strlen(value) >=
+                       sizeof(updated.home_location)))
+        return respond(fd, id, 0, "invalid home_location");
+    if (parsed > 0)
+        strcpy(updated.home_location, value);
+    parsed = json_get_string(args, "latitude", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 && !coordinate_valid(value, 90.0)))
+        return respond(fd, id, 0, "latitude must be between -90 and 90");
+    if (parsed > 0)
+        strcpy(updated.latitude, value);
+    parsed = json_get_string(args, "longitude", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 && !coordinate_valid(value, 180.0)))
+        return respond(fd, id, 0, "longitude must be between -180 and 180");
+    if (parsed > 0)
+        strcpy(updated.longitude, value);
+    parsed = json_get_string(args, "weather_provider", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 && strcmp(value, "open-meteo") &&
+                       strcmp(value, "met-no") && strcmp(value, "off")))
+        return respond(fd, id, 0,
+                       "weather_provider must be open-meteo, met-no or off");
+    if (parsed > 0)
+        strcpy(updated.weather_provider, value);
     parsed = json_get_string(args, "base_url", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 &&
         (!endpoint_valid(value) || strlen(value) >= sizeof(state->credentials.base_url))))

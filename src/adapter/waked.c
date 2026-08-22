@@ -855,10 +855,24 @@ int main(int argc, char **argv)
             char *end = NULL;
             long floor_rms = strtol(argv[++i], &end, 10);
 
-            if (!end || *end != '\0' ||
-                floor_rms < 1 || floor_rms > 1024) {
+            if (!end || *end != '\0' || floor_rms < 1) {
                 fprintf(stderr, "waked: invalid VAD floor RMS\n");
                 return 2;
+            }
+            /*
+             * Clamp rather than refuse. This value arrives from a persisted
+             * user setting by way of the init script, and the ceiling here
+             * used to be 1024 while the API accepted up to
+             * LE_VOICE_VAD_MAX_FLOOR_RMS -- so a floor set anywhere above
+             * 1024 in the UI made this daemon exit at boot and the device
+             * came back with no wake word at all. Losing wake entirely is
+             * never the right answer to a number being too big.
+             */
+            if (floor_rms > (long)LE_VOICE_VAD_MAX_FLOOR_RMS) {
+                fprintf(stderr, "waked: VAD floor %ld above maximum %u; "
+                        "clamping\n", floor_rms,
+                        (unsigned int)LE_VOICE_VAD_MAX_FLOOR_RMS);
+                floor_rms = (long)LE_VOICE_VAD_MAX_FLOOR_RMS;
             }
             config.vad_floor_rms = (unsigned int)floor_rms;
         } else if (!strcmp(argv[i], "--dump-pcm") && i + 1 < argc) {
@@ -877,7 +891,7 @@ int main(int argc, char **argv)
                     "[--mic-socket PATH] "
                     "[--reference-socket PATH] "
                     "[--model-dir PATH] [--wake-threads 1..4] "
-                    "[--vad-floor-rms 1..1024] "
+                    "[--vad-floor-rms 1..16384] "
                     "[--wake-threshold 0..1] "
                     "[--dump-pcm PATH --dump-seconds N]\n", argv[0]);
             return 2;
