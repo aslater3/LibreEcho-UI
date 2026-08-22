@@ -1098,8 +1098,14 @@ static int persist_state(const struct led_state *state)
     text[n++] = '}';
     text[n] = '\0';
 
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp.%ld", STATE_PATH,
-             (long)getpid());
+    /*
+     * A fixed temporary name, not one suffixed with the pid.  The data
+     * contract that guards /data matches file names exactly, so a uniquely
+     * named leftover from an interrupted save would be an unknown file and
+     * would block every service at the next boot.  There is a single writer
+     * here, so a constant name is safe and always recognisable.
+     */
+    snprintf(temp_path, sizeof(temp_path), "%s.tmp", STATE_PATH);
     fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) {
         le_log_warn( "cannot persist LED state at %s: %s",
