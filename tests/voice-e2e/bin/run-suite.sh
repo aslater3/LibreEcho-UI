@@ -33,6 +33,13 @@ run "hermetic positive" --stt fake
 echo
 echo "### negative: the wake word must not fire"
 run "negative" --negative --stt fake
+
+# Someone reporting that "only the first Alexa works" is the hardest kind of
+# report to act on, because the obvious test -- feed one utterance -- passes.
+# This one plays two, and only the count distinguishes a wake engine that
+# stopped listening from a harness that stopped feeding.
+echo "### repeat: a second wake word must fire too"
+run "repeat wake" --fixture alexa-twice.wav --stt fake --llm fake --expect-wakes 2
 if [ "$LIVE" = 1 ]; then
     echo
     echo "### live Whisper, stub LLM"

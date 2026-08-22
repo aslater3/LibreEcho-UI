@@ -246,6 +246,35 @@ if [ "$MODE" = negative ]; then
     [ "$FAILURES" = 0 ] && { echo "RESULT: PASS"; exit 0; } || { echo "RESULT: FAIL ($FAILURES stage(s))"; exit 1; }
 fi
 
+# Counting mode: let the whole fixture play, then assert how many times the
+# wake word fired. The positive path below stops at the first wake and tears
+# the daemons down a second later, so it cannot tell "the second wake never
+# fired" from "we stopped listening before it was spoken" -- which is exactly
+# the question when someone reports that only the first Alexa works.
+if [ -n "${EXPECT_WAKES:-}" ]; then
+    # source.raw is 16 kHz mono S16, so bytes/32000 is its length in seconds
+    fixture_s=$(( $(stat -c %s "$RUN/source.raw") / 32000 ))
+    listen=${LISTEN_SECONDS:-$(( fixture_s + 6 ))}
+    echo "  listening for ${listen}s (fixture is ${fixture_s}s)..."
+    sleep "$listen"
+    kill -TERM "$WAKED_PID" 2>/dev/null
+    wait_for 5 'grep -q max_wake_score "$RUN/waked.log"' || true
+    got=$(grep -c "wake_event " "$RUN/waked.log" 2>/dev/null || echo 0)
+    SUMMARY=$(grep -o "wake_scores=[0-9]* wake_events=[0-9]* max_wake_score=[0-9.]*" "$RUN/waked.log" | tail -1)
+    detail="$got wake event(s) in ${listen}s, expected $EXPECT_WAKES -- ${SUMMARY:-no metrics}"
+    if [ "$got" = "$EXPECT_WAKES" ]; then stage 2 wake 0 "$detail"; else stage 2 wake 1 "$detail"; fi
+    grep "wake_event " "$RUN/waked.log" | sed 's/^/      /'
+    if [ -n "${KEEP_RUN:-}" ]; then
+        dest=/work/build/harness-run; rm -rf "$dest"; mkdir -p "$dest"
+        cp -a "$RUN"/. "$dest"/ 2>/dev/null || true
+        echo "  run directory kept in build/harness-run"
+    fi
+    echo
+    printf '%s\n' "${RESULTS[@]}"
+    echo
+    [ "$FAILURES" = 0 ] && { echo "RESULT: PASS"; exit 0; } || { echo "RESULT: FAIL ($FAILURES stage(s))"; exit 1; }
+fi
+
 if wait_for "$WAKE_TIMEOUT" 'grep -q "wake_event" "$RUN/waked.log"'; then
     WAKE_LINE=$(grep -m1 'wake_event' "$RUN/waked.log")
     stage 2 wake 0 "$(echo "$WAKE_LINE" | sed 's/^waked: //')"
@@ -331,6 +360,16 @@ fi
 echo
 printf '%s\n' "${RESULTS[@]}"
 echo
+# The run directory holds every daemon log and the captured requests, and it
+# dies with the container. A passing run that is still not doing what you
+# expected -- a second wake that never fires, say -- is only diagnosable from
+# those logs, so let the caller keep them.
+if [ -n "${KEEP_RUN:-}" ]; then
+    dest=/work/build/harness-run
+    rm -rf "$dest"; mkdir -p "$dest"
+    cp -a "$RUN"/. "$dest"/ 2>/dev/null || true
+    echo "  run directory kept in build/harness-run"
+fi
 if [ "$FAILURES" = 0 ]; then
     echo "RESULT: PASS"
     exit 0

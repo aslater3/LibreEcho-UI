@@ -29,6 +29,14 @@ tests/voice-e2e/bin/run-suite.sh --live   # adds live Whisper and Ollama
 Exit code is 0/1 and every stage prints its measured evidence, so a failure
 names the stage that broke rather than just the outcome.
 
+`--expect-wakes N` plays the whole fixture and asserts how many times the wake
+word fired, instead of stopping at the first. The default positive path tears
+the daemons down a second after stage 5, so it cannot tell "the second wake
+never fired" from "we stopped listening before it was spoken" — which is the
+only question that matters when someone reports that only the first Alexa
+works. `KEEP_RUN=1` copies the run directory, with every daemon log and
+captured request, to `build/harness-run`.
+
 ## Why it is worth keeping
 
 Re-introducing the historic 24-bit unpack bug (dropping `value >>= 8` from

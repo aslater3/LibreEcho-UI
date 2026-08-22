@@ -42,6 +42,8 @@ while [ $# -gt 0 ]; do
         --expect)    EXTRA+=(-e "EXPECT_TRANSCRIPT=$2"); shift 2 ;;
         --attenuate) EXTRA+=(-e "ATTENUATE=$2"); shift 2 ;;
         --sensitivity) EXTRA+=(-e "SENSITIVITY=$2"); shift 2 ;;
+        --expect-wakes) EXTRA+=(-e "EXPECT_WAKES=$2"); shift 2 ;;
+        --listen)       EXTRA+=(-e "LISTEN_SECONDS=$2"); shift 2 ;;
         -e)          EXTRA+=(-e "$2"); shift 2 ;;
         -h|--help)   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --keep)      KEEP=1; shift ;;
