@@ -55,6 +55,7 @@ struct agent_config {
     char home_location[96];
     char latitude[16];
     char longitude[16];
+    char weather_provider[24];
 };
 
 struct agent_state {
@@ -180,6 +181,7 @@ static void config_defaults(struct agent_config *config)
     strcpy(config->model, DEFAULT_MODEL);
     snprintf(config->prompt, sizeof(config->prompt), "%s",
              le_llm_default_voice_prompt());
+    strcpy(config->weather_provider, "open-meteo");
 }
 
 /*
@@ -261,10 +263,11 @@ static int save_config(const struct agent_state *state)
         "\"provider\":\"%s\",\"model\":\"%s\","
         "\"prompt\":\"%s\","
         "\"home_location\":\"%s\","
-        "\"latitude\":\"%s\",\"longitude\":\"%s\"}\n",
+        "\"latitude\":\"%s\",\"longitude\":\"%s\","
+        "\"weather_provider\":\"%s\"}\n",
         state->config.enabled ? "true" : "false", state->config.provider,
         model, prompt, location, state->config.latitude,
-        state->config.longitude);
+        state->config.longitude, state->config.weather_provider);
     return length > 0 && length < (int)sizeof(json)
         ? config_write_atomic(state->config_path, json, (size_t)length)
         : -1;
@@ -292,6 +295,11 @@ static void load_config(struct agent_state *state)
                           sizeof(state->config.latitude));
     (void)json_get_string(json, "longitude", state->config.longitude,
                           sizeof(state->config.longitude));
+    (void)json_get_string(json, "weather_provider",
+                          state->config.weather_provider,
+                          sizeof(state->config.weather_provider));
+    if (!state->config.weather_provider[0])
+        strcpy(state->config.weather_provider, "open-meteo");
     if (!state->config.model[0])
         strcpy(state->config.model, DEFAULT_MODEL);
     if (!state->config.prompt[0])
@@ -400,6 +408,7 @@ static int command_status(struct agent_state *state, int fd,
     char prompt[sizeof(state->config.prompt) * 2U];
     char model[sizeof(state->config.model) * 2U];
     char base_url[sizeof(state->credentials.base_url) * 2U];
+    char location[sizeof(state->config.home_location) * 2U];
     char code[sizeof(state->auth.user_code) * 2U];
     char url[sizeof(state->auth.verification_url) * 2U];
     char error[sizeof(state->auth_error) * 2U];
@@ -427,6 +436,8 @@ static int command_status(struct agent_state *state, int fd,
         escape_json(code, sizeof(code), state->auth.user_code) < 0 ||
         escape_json(url, sizeof(url), state->auth.verification_url) < 0 ||
         escape_json(error, sizeof(error), state->auth_error) < 0 ||
+        escape_json(location, sizeof(location),
+                    state->config.home_location) < 0 ||
         snprintf(
             payload, sizeof(payload),
             "{\"ready\":true,\"enabled\":%s,"
@@ -435,6 +446,9 @@ static int command_status(struct agent_state *state, int fd,
             "\"auth_state\":\"%s\",\"user_code\":\"%s\","
             "\"verification_url\":\"%s\",\"auth_error\":\"%s\","
             "\"model\":\"%s\",\"prompt\":\"%s\","
+            "\"home_location\":\"%s\","
+            "\"latitude\":\"%s\",\"longitude\":\"%s\","
+            "\"weather_provider\":\"%s\","
             "\"base_url\":\"%s\",\"api_key_configured\":%s,"
             "\"voice_pipeline\":true,\"text_streaming\":true,"
             "\"wake_connected\":%s,\"audio_connected\":%s,"
@@ -457,7 +471,9 @@ static int command_status(struct agent_state *state, int fd,
             state->provider->subscription_auth ? "true" : "false",
             state->auth_state == AUTH_SIGNED_IN ? "true" : "false",
             auth_state_name(state->auth_state), code, url, error,
-            model, prompt, base_url,
+            model, prompt, location, state->config.latitude,
+            state->config.longitude, state->config.weather_provider,
+            base_url,
             state->credentials.api_key[0] ? "true" : "false",
             voice_metrics.wake_connected ? "true" : "false",
             voice_metrics.audio_connected ? "true" : "false",
@@ -744,19 +760,51 @@ static const char *weather_description(int code)
     return "thunderstorms";
 }
 
-static void refresh_weather(struct agent_state *state)
+/* MET Norway reports Celsius and metres per second. */
+static int fetch_met_no(struct agent_state *state, char *out, size_t size)
 {
     struct le_llm_http_request request;
     struct le_llm_http_response response;
-    time_t now = time(NULL);
-    double temperature = 0.0, wind = 0.0;
-    int code = 0;
+    char symbol[64] = "";
+    double celsius = 0.0, mps = 0.0;
+    size_t i;
 
-    if (!state->config.latitude[0] || !state->config.longitude[0])
-        return;
-    if (state->weather_text[0] &&
-        now - state->weather_fetched < WEATHER_REFRESH_SECONDS)
-        return;
+    memset(&request, 0, sizeof(request));
+    memset(&response, 0, sizeof(response));
+    (void)snprintf(request.method, sizeof(request.method), "GET");
+    if (snprintf(request.url, sizeof(request.url),
+                 "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+                 "?lat=%s&lon=%s",
+                 state->config.latitude,
+                 state->config.longitude) >= (int)sizeof(request.url))
+        return 0;
+    if (le_llm_http_execute(state->curl_path, &request, NULL, NULL,
+                            &response) < 0 || response.status != 200)
+        return 0;
+    if (!json_number(response.body, "air_temperature", &celsius))
+        return 0;
+    (void)json_number(response.body, "wind_speed", &mps);
+    (void)json_get_string(response.body, "symbol_code", symbol,
+                          sizeof(symbol));
+    /* "partlycloudy_day" reads badly aloud; make it speakable. */
+    for (i = 0; symbol[i]; ++i) {
+        if (symbol[i] == '_')
+            symbol[i] = ' ';
+    }
+    (void)snprintf(out, size,
+                   "%d degrees Fahrenheit%s%s, wind %d miles per hour",
+                   (int)(celsius * 9.0 / 5.0 + 32.0 + 0.5),
+                   symbol[0] ? " and " : "", symbol,
+                   (int)(mps * 2.23694 + 0.5));
+    return 1;
+}
+
+static int fetch_open_meteo(struct agent_state *state, char *out, size_t size)
+{
+    struct le_llm_http_request request;
+    struct le_llm_http_response response;
+    double temperature = 0.0, wind = 0.0, coded = 0.0;
+
     memset(&request, 0, sizeof(request));
     memset(&response, 0, sizeof(response));
     (void)snprintf(request.method, sizeof(request.method), "GET");
@@ -767,35 +815,55 @@ static void refresh_weather(struct agent_state *state)
                  "&temperature_unit=fahrenheit&wind_speed_unit=mph",
                  state->config.latitude,
                  state->config.longitude) >= (int)sizeof(request.url))
-        return;
+        return 0;
     if (le_llm_http_execute(state->curl_path, &request, NULL, NULL,
-                            &response) < 0 || response.status != 200) {
-        le_log_warn("agentd: weather lookup failed (status %d)",
-                    response.status);
+                            &response) < 0 || response.status != 200)
+        return 0;
+    if (!json_number(response.body, "temperature_2m", &temperature) ||
+        !json_number(response.body, "weather_code", &coded))
+        return 0;
+    (void)json_number(response.body, "wind_speed_10m", &wind);
+    (void)snprintf(out, size,
+                   "%d degrees Fahrenheit and %s, wind %d miles per hour",
+                   (int)(temperature + (temperature < 0 ? -0.5 : 0.5)),
+                   weather_description((int)coded),
+                   (int)(wind + 0.5));
+    return 1;
+}
+
+static void refresh_weather(struct agent_state *state)
+{
+    char reading[sizeof(state->weather_text)];
+    time_t now = time(NULL);
+    int ok;
+
+    if (!strcmp(state->config.weather_provider, "off"))
+        return;
+    if (!state->config.latitude[0] || !state->config.longitude[0])
+        return;
+    if (state->weather_text[0] &&
+        now - state->weather_fetched < WEATHER_REFRESH_SECONDS)
+        return;
+    reading[0] = '\0';
+    ok = !strcmp(state->config.weather_provider, "met-no")
+        ? fetch_met_no(state, reading, sizeof(reading))
+        : fetch_open_meteo(state, reading, sizeof(reading));
+    if (!ok) {
+        le_log_warn("agentd: %s weather lookup failed",
+                    state->config.weather_provider);
         /*
          * Keep whatever was last known rather than clearing it.  A stale
-         * reading a few minutes old is far more useful to the answer than
-         * no reading at all, and the alternative is refusing the question.
+         * reading a few minutes old answers the question far better than
+         * refusing it, and the retry is only ten minutes away.
          */
         state->weather_fetched = now;
         return;
     }
-    {
-        double coded = 0.0;
-
-        if (!json_number(response.body, "temperature_2m", &temperature) ||
-            !json_number(response.body, "weather_code", &coded))
-            return;
-        code = (int)coded;
-    }
-    (void)json_number(response.body, "wind_speed_10m", &wind);
     (void)snprintf(state->weather_text, sizeof(state->weather_text),
-                   "%d degrees Fahrenheit and %s, wind %d miles per hour",
-                   (int)(temperature + (temperature < 0 ? -0.5 : 0.5)),
-                   weather_description(code),
-                   (int)(wind + 0.5));
+                   "%s", reading);
     state->weather_fetched = now;
-    le_log_info("agentd: weather for %s: %s",
+    le_log_info("agentd: weather via %s for %s: %s",
+                state->config.weather_provider,
                 state->config.home_location[0]
                     ? state->config.home_location : "the configured location",
                 state->weather_text);
@@ -1095,6 +1163,13 @@ static int command_configure(struct agent_state *state, const char *args,
         return respond(fd, id, 0, "longitude must be between -180 and 180");
     if (parsed > 0)
         strcpy(updated.longitude, value);
+    parsed = json_get_string(args, "weather_provider", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 && strcmp(value, "open-meteo") &&
+                       strcmp(value, "met-no") && strcmp(value, "off")))
+        return respond(fd, id, 0,
+                       "weather_provider must be open-meteo, met-no or off");
+    if (parsed > 0)
+        strcpy(updated.weather_provider, value);
     parsed = json_get_string(args, "base_url", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 &&
         (!endpoint_valid(value) || strlen(value) >= sizeof(state->credentials.base_url))))
