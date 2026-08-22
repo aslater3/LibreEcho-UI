@@ -35,7 +35,20 @@ function pageFromLocation(){const slug=decodeURIComponent(location.pathname.slic
 function updateVersionDisplay(d,ota=state.data.ota){const full=String(d.os_version||'LibreEcho OS'),version=full.replace(/^LibreEcho OS\s*/,'')||full,badge=$('#backend-badge'),available=ota?.check_status==='update-available'&&!ota.pending_reboot;$('#sidebar-version').textContent=full;badge.dataset.version=version;badge.title=full;badge.setAttribute('aria-label',full);$('#update-available').hidden=!available;state.data.ota=ota;state.data.otaCheckedAt=Date.now()}
 function bindRange(){ $$('.range-field input').forEach(el=>el.oninput=()=>el.parentElement.querySelector('output').textContent=el.value+'%') }
 function bindDirty(ids,button){const b=$(button);ids.map(id=>$(id)).filter(Boolean).forEach(el=>el.addEventListener('input',()=>b.disabled=false));}
-function setBusy(b){state.busy=b;$$('button,input,select',content).forEach(x=>x.disabled=b)}
+/*
+ * Disabling every control while a request is in flight is right, but
+ * re-enabling every control afterwards was not: it cleared disabled state
+ * the page had set deliberately.  Every Save button came back enabled with
+ * nothing dirty, and controls marked unsupported (the notification volume
+ * slider, the echo-cancellation toggle) became editable after any action.
+ *
+ * Mark only what this function disabled, and re-enable only that.  After a
+ * re-render the fresh nodes carry no mark, so their state is left alone --
+ * which is what the callers that re-render want.  The update-upload error
+ * path does not re-render, and its original nodes are still marked, so it
+ * still recovers.
+ */
+function setBusy(b){state.busy=b;if(b){$$('button,input,select',content).forEach(x=>{if(!x.disabled){x.disabled=true;x.dataset.busyDisabled='1'}})}else{$$('[data-busy-disabled]',content).forEach(x=>{x.disabled=false;delete x.dataset.busyDisabled})}}
 async function mutate(path,data,message,headers={}){if(state.busy)return;setBusy(true);try{await api(path,{method:'PUT',body:JSON.stringify(data),headers});toast(message);await render()}catch(e){toast(e.message,true);await render()}finally{setBusy(false)}}
 async function post(path,data={},message='Action accepted',headers={}){if(state.busy)return;setBusy(true);try{const r=await api(path,{method:'POST',body:JSON.stringify(data),headers});toast(message);await render();return r}catch(e){toast(e.message,true);await render()}finally{setBusy(false)}}
 function power(path,name){if(!confirm(`${name} this LibreEcho device?`))return;post(`/system/${path}`,{},`${name} requested`,{'X-LibreEcho-Confirm':'confirm-device-action'})}
