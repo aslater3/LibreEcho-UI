@@ -116,11 +116,50 @@ Returns device information.
     "os_version": "LibreEcho OS",
     "kernel": "6.1.x",
     "hardware_revision": "adapter pending",
-    "backend": "linux"
+    "backend": "linux",
+    "audio": {
+      "capture": {
+        "rate_hz": 16000,
+        "raw_channels": 9,
+        "microphones": 7,
+        "transport_channels": 2,
+        "format": "pcm_s24_3le",
+        "valid_bits": 16,
+        "beamforming": "measured delay-and-sum on logical mics 0 and 3",
+        "high_pass_hz": 80,
+        "digital_gain": "4.0x",
+        "response": "flat within 0.5 dB, 200 Hz to 7 kHz",
+        "noise_floor_dbfs": -65.3,
+        "thd_n_percent_max": 0.2,
+        "clipping_from_input_amplitude": 16000
+      },
+      "output": {
+        "rate_hz": 48000,
+        "channels": 2,
+        "format": "pcm_s16_le",
+        "mixer_volume_range": "0-175, unity at 127",
+        "buses": ["media", "system", "announcement", "alarm"]
+      },
+      "streaming": {
+        "decoders": [],
+        "available": ["airplay2", "bluetooth-a2dp"],
+        "note": "no compressed-audio decoder on this image; AirPlay 2 and Bluetooth A2DP provide streaming playback"
+      }
+    }
   },
   "error": null
 }
 ```
+
+`audio` describes what the hardware and this image can do; it is reference
+information and none of it is settable here. Every member is optional: an older
+daemon omits `audio` entirely and the mock backend does not synthesize one, so
+clients must render what is present rather than assume a field exists.
+
+`streaming.decoders` being empty is the meaningful case today — the device has
+no compressed-audio decoder, so it cannot play a stream URL itself.
+`streaming.available` lists how audio does reach it: already decoded, over
+AirPlay 2 and Bluetooth A2DP.
 
 On supported devices, the first-boot hostname is platform-defined and can be
 changed by the user. A selected hostname is stored in
@@ -726,6 +765,38 @@ Daemons read `TZ` when they start, so the response reports
 `"applies": "after restart"`. Anything that is not a plausible TZ string is
 rejected with 400 rather than written.
 
+#### GET /api/v1/system/features
+
+Reports the optional feature switches. They are off by default.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": { "simulation": false },
+  "error": null
+}
+```
+
+`simulation` gates `POST /api/v1/audio/simulate`, which plays rendered speech
+into the microphone path so wake-word detection, speech-to-text and the
+assistant can be exercised without speaking in the room. It is a testing
+capability rather than something a live device should offer, so while it is off
+the endpoint answers `403` and the web interface hides its Simulation page.
+
+#### PUT /api/v1/system/features
+
+Switches a feature on or off. The value is persisted with the rest of the
+configuration, and the response is the new feature state.
+
+```json
+{ "simulation": true }
+```
+
+`simulation` must be a boolean; anything else is rejected with `400`. Hiding the
+menu entry without gating the endpoint would be decoration, so both move
+together: the toggle is the only thing that opens `POST /api/v1/audio/simulate`.
+
 ### Configuration
 
 #### GET /api/v1/config
@@ -1150,6 +1221,75 @@ Update integration toggles. The `rest` integration is the canonical LAN REST API
   "error": null
 }
 ```
+
+#### GET /api/v1/integrations/radio
+
+Returns the stored internet radio stations. A station is asked for by its
+`word`; `name` is what is displayed and `url` is the stream.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "max_stations": 32,
+    "playback_supported": false,
+    "stations": [
+      {
+        "word": "groove",
+        "name": "Groove Salad",
+        "url": "https://ice1.somafm.com/groovesalad-128-mp3",
+        "enabled": true
+      }
+    ]
+  },
+  "error": null
+}
+```
+
+`playback_supported` is currently `false`: the list is stored and served, but
+this image carries no stream decoder, so nothing plays these URLs yet. Clients
+should say so rather than implying playback works.
+
+#### PUT /api/v1/integrations/radio
+
+Replaces the whole list. The body is **flat and numbered** rather than an array:
+the daemon reads JSON scalars by key and has no array parser, and hand-rolling
+one for client-supplied nested data is the sort of code that turns into a buffer
+bug. Reads still return a proper array, which is what clients want.
+
+**Request:**
+```json
+{
+  "station_count": 2,
+  "station_0_word": "groove",
+  "station_0_name": "Groove Salad",
+  "station_0_url": "https://ice1.somafm.com/groovesalad-128-mp3",
+  "station_0_enabled": true,
+  "station_1_word": "drone zone",
+  "station_1_name": "Drone Zone",
+  "station_1_url": "https://ice1.somafm.com/dronezone-128-mp3",
+  "station_1_enabled": false
+}
+```
+
+For every index `i` below `station_count`, `station_i_word` and `station_i_url`
+are required; `station_i_name` and `station_i_enabled` are optional.
+
+| Field | Rule |
+| --- | --- |
+| `station_count` | 0 to 32 |
+| `station_i_word` | 1-31 characters of lowercase letters, digits, spaces or hyphens; no leading or trailing space; unique across the list |
+| `station_i_name` | under 64 characters; defaults to the word when blank or absent |
+| `station_i_url` | starts `http://` or `https://`, printable ASCII with no spaces, under 512 characters |
+| `station_i_enabled` | boolean; defaults to `true` |
+
+Nothing is written unless every station validates, so a rejected request leaves
+the stored list untouched. A failure answers `400` with a message describing the
+rule that was broken; surface that message rather than a generic error. The
+successful response has the same shape as `GET`.
+
+The list is stored beside the other configuration as `radio-stations.json`.
 
 ### Events
 

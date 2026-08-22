@@ -1163,7 +1163,8 @@
     "tags": [
      "Device"
     ],
-    "summary": "Read device identity",
+    "summary": "Read device identity and audio capability",
+    "description": "Identity plus an optional `audio` object describing capture, output and streaming capability. `audio` and every member of it are optional: older daemons omit it and the mock backend does not synthesize one, so clients render what is present. An empty `audio.streaming.decoders` means the device cannot decode compressed streams itself; `audio.streaming.available` lists the transports that deliver already-decoded audio.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1233,6 +1234,107 @@
       "$ref": "#/components/responses/Success"
      },
      "405": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/integrations/radio": {
+   "get": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "List the internet radio stations",
+    "description": "Returns `max_stations`, `playback_supported` and the `stations` array. `playback_supported` is currently false: stations are stored and returned, but this image has no stream decoder, so nothing plays them yet.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Replace the internet radio station list",
+    "description": "Replaces the whole list. The request body is flat and numbered rather than an array: the daemon reads JSON scalars by key and has no array parser. For every index i below `station_count`, send `station_i_word` and `station_i_url`, optionally `station_i_name` and `station_i_enabled`. The response is the stored list in the same shape as GET. Validation failures answer 400 with a message describing the rule that was broken.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "station_count"
+        ],
+        "properties": {
+         "station_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+         },
+         "station_0_word": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 31,
+          "pattern": "^[a-z0-9 -]+$",
+          "description": "What the station is asked for by. Lowercase letters, digits, spaces and hyphens; no leading or trailing space; unique across the list."
+         },
+         "station_0_name": {
+          "type": "string",
+          "maxLength": 63,
+          "description": "Display name. Defaults to the word when blank or absent."
+         },
+         "station_0_url": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 511,
+          "pattern": "^https?://[!-~]+$",
+          "description": "Stream URL. Printable ASCII with no spaces."
+         },
+         "station_0_enabled": {
+          "type": "boolean",
+          "default": true
+         }
+        },
+        "additionalProperties": true,
+        "example": {
+         "station_count": 2,
+         "station_0_word": "groove",
+         "station_0_name": "Groove Salad",
+         "station_0_url": "https://ice1.somafm.com/groovesalad-128-mp3",
+         "station_0_enabled": true,
+         "station_1_word": "drone zone",
+         "station_1_name": "Drone Zone",
+         "station_1_url": "https://ice1.somafm.com/dronezone-128-mp3",
+         "station_1_enabled": false
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -1751,6 +1853,66 @@
       "$ref": "#/components/responses/Success"
      },
      "403": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/system/features": {
+   "get": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Report optional feature switches",
+    "description": "Optional features are off by default. `simulation` enables POST /audio/simulate; while it is off that endpoint answers 403 and the web interface hides its Simulation page.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Switch an optional feature on or off",
+    "description": "Persisted with the rest of the configuration. The response is the new feature state.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "simulation"
+        ],
+        "properties": {
+         "simulation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Play rendered speech into the microphone path for testing wake word, speech-to-text and the assistant."
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
