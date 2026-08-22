@@ -485,11 +485,23 @@ $(BUILD)/libreecho-waked-onnx-arm32: $(WAKE_DAEMON_ARM_OBJECTS)
 
 adapters: $(ADAPTER_TARGETS)
 
+# -MMD -MP records which headers each object was built from, so editing a
+# header rebuilds what included it.  Without this the tree compiled
+# cleanly against stale objects: adding a field to struct api_context
+# left main.o holding the old layout, and the daemon failed at runtime
+# with "Unable to initialise authentication" for no visible reason.
+# -MP emits a phony target per header so a deleted or renamed header
+# does not wedge the build with "No rule to make target".
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(BUILD) $(BUILD)/adapter $(BUILD)/adapter/bt-sbc
-	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc -c $< -o $@
+	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -MMD -MP -Isrc -c $< -o $@
 
 $(BUILD)/backend_linux.o $(BUILD)/backend_mock.o: VERSION src/version.h
+
+# Pull in the header dependencies recorded by -MMD.  Wildcard rather than a
+# computed list so it works before anything has been built, and -include so
+# a first build with no .d files present is not an error.
+-include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
 release: clean
 	$(MAKE) CROSS_COMPILE="$(CROSS_COMPILE)" CC="$(CC)" CFLAGS="-Os -ffunction-sections -fdata-sections" LDFLAGS="$(GC_LDFLAGS)" $(TARGET) $(LOGD_TARGET) $(ADAPTER_TARGETS)
@@ -515,6 +527,7 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
 
 clean:
+	rm -f $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 	rm -f $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
 		$(LOGD_OBJECTS) $(BTD_OBJECTS) $(AIRPLAYD_OBJECTS) $(TTSD_OBJECTS) \
 		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(WYOMINGD_OBJECTS) $(ADAPTER_TARGETS) \
