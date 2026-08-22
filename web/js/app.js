@@ -1,6 +1,6 @@
 'use strict';
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
-const state={page:'Overview',csrf:'',token:sessionStorage.getItem('libreecho-token')||'',username:sessionStorage.getItem('libreecho-username')||'',authMode:'development-disabled',timer:null,data:{},busy:false};
+const state={page:'Overview',csrf:'',token:sessionStorage.getItem('libreecho-token')||'',username:sessionStorage.getItem('libreecho-username')||'',authMode:'development-disabled',timer:null,data:{},busy:false,features:{simulation:false}};
 const items=[['Overview','home'],['Device','device'],['Users','shield'],['Audio','audio'],['Baby Monitor','mic'],['Wake Word','mic'],['Simulation','mic'],['LED & Buttons','sun'],['Network','wifi'],['Bluetooth','bluetooth'],['Privacy','shield'],['Integrations','puzzle'],['System','gear'],['Logs','log'],['About','info']];
 const descriptions={Overview:'Your LibreEcho at a glance',Device:'Identity, hardware and power controls',Users:'Manage local accounts and access',Audio:'Playback, microphone and volume controls','Baby Monitor':'Listen to selected microphones locally','Wake Word':'Configure local wake-word detection',Simulation:'Speak test phrases into the microphone path','LED & Buttons':'Customise light-ring behaviour and controls',Network:'Wi-Fi, addressing and connectivity',Bluetooth:'Scan, pair and manage nearby devices',Privacy:'Local processing and data retention controls',Integrations:'Connect services and home automation',System:'Updates, backup and advanced settings',Logs:'Diagnostics and troubleshooting',About:'Project, licences and version information'};
 const nav=$('#nav'),content=$('#content');
@@ -30,6 +30,20 @@ function uptime(s){s=Math.max(0,Number(s)||0);const d=Math.floor(s/86400),h=Math
 function logTime(t,boot){const seconds=Number(t),relative=Number(boot);if(relative>0)return `Boot +${relative}s`;return seconds>=1577836800?new Date(seconds*1000).toLocaleTimeString():'Clock unset'}
 function rgb(c){return `rgb(${c.r}, ${c.g}, ${c.b})`}
 function networkLabel(n){return n.ssid?`${n.state} · ${n.ssid}`:n.state}
+/*
+ * Optional features are off by default and the menu follows them: Simulation
+ * plays audio into the microphone path, which is a testing capability rather
+ * than something a live device should offer, so its entry is absent until the
+ * feature is switched on. The endpoint is gated server-side as well, so this
+ * is presentation -- but a menu entry that leads to a 403 is still wrong.
+ *
+ * The nav used to be built once from the constant `items`; it is rebuilt from
+ * a filtered view of that array instead, so the entry can come and go without
+ * a reload.
+ */
+function navItems(){return items.filter(([name])=>name!=='Simulation'||state.features.simulation)}
+function renderNav(){nav.innerHTML='';navItems().forEach(([name,icon])=>{const b=document.createElement('button');b.className='nav-item'+(name===state.page?' active':'');b.dataset.page=name;b.innerHTML=`<svg><use href="#${icon}"></use></svg><span>${name}</span>`;b.onclick=()=>showPage(name);nav.appendChild(b)})}
+function applyFeatures(f){state.features={simulation:!!(f&&f.simulation)};renderNav();if(!navItems().some(([n])=>n===state.page))showPage('Overview');return state.features}
 function pageSlug(name){return name.toLowerCase().replace(/ & /g,'-').replace(/ /g,'-')}
 function pageFromLocation(){const slug=decodeURIComponent(location.pathname.slice(1));return items.find(([name])=>pageSlug(name)===slug)?.[0]||'Overview'}
 function updateVersionDisplay(d,ota=state.data.ota){const full=String(d.os_version||'LibreEcho OS'),version=full.replace(/^LibreEcho OS\s*/,'')||full,badge=$('#backend-badge'),available=ota?.check_status==='update-available'&&!ota.pending_reboot;$('#sidebar-version').textContent=full;badge.dataset.version=version;badge.title=full;badge.setAttribute('aria-label',full);$('#update-available').hidden=!available;state.data.ota=ota;state.data.otaCheckedAt=Date.now()}
@@ -131,7 +145,75 @@ async function overview(){const [s,n,a,l,d,p,ota]=await Promise.all([api('/statu
 function updateOverviewMetric(label,value,percent,connected){const row=$$('.status-panel .metric').find(x=>x.querySelector('span')?.textContent===label);if(!row)return;if(label==='Storage')value=storageDisplay(value);const output=row.querySelector('.value');output.textContent=value;if(connected!==undefined)output.classList.toggle('connected',connected);const bar=row.querySelector('progress');if(bar)bar.value=Math.max(0,Math.min(100,percent));const led=row.querySelector('.power-led');if(led){led.classList.toggle('on',!!connected);led.classList.toggle('off',!connected);led.setAttribute('aria-label',connected?'Available':'Unavailable')}}
 async function refreshOverview(){if(state.page!=='Overview')return;let delay=5000;try{const [s,n,d,p,l]=await Promise.all([api('/status'),api('/network'),api('/device'),api('/playback'),api('/led').catch(()=>({}))]);if(state.page!=='Overview')return;state.data.status=s;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);$('#sidebar-version').textContent=d.os_version;if(Date.now()-(state.data.otaCheckedAt||0)>=60000)updateVersionDisplay(d,await api('/system/update').catch(()=>state.data.ota));const deviceLabel=$('#hero-device-label');if(deviceLabel)deviceLabel.textContent=d.hostname||d.name||'LibreEcho';updateOverviewMetric('CPU Load',s.cpu_percent+'%',s.cpu_percent);updateOverviewMetric('Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent);updateOverviewMetric('Storage',storageValue(s),s.storage_available?s.storage_percent:null);updateOverviewMetric('Temperature',s.temperature_c+' °C',s.temperature_c);updateOverviewMetric('Wi-Fi',networkLabel(n),0,n.state==='connected');updateOverviewMetric('Internet',n.internet?'Reachable':'Unavailable',0,n.internet);const playing=$('#now-playing');if(playing)playing.outerHTML=nowPlaying(p,l);const cpu=$('#cpu-dashboard');if(cpu)cpu.outerHTML=cpuDashboard(s);applyCssVars(content);if(p.state!=='idle'||l.visualizer_active)delay=1000}catch(_){/* Preserve the last good telemetry when a background refresh fails. */}finally{if(state.page==='Overview')state.timer=setTimeout(refreshOverview,delay)}}
 async function usersPage(){const u=await api('/auth/users');const rows=u.users.map(x=>`<div class="status-line"><span class="status-dot ok"></span><span>${esc(x.username)}${x.username===state.username?' <small>(current session)</small>':''}</span>${u.users.length>1&&x.username!==state.username?action('Remove','remove-user-'+esc(x.username),'danger-btn'):''}</div>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Local accounts',`<p class="muted">These accounts can sign in to the LibreEcho control centre. Passwords are stored as salted hashes and are never displayed.</p><div class="user-list">${rows||'<p class="muted">No users configured.</p>'}</div>`)}${panel('Add user',field('Username','','new-user-name','text','autocomplete="username" maxlength="31" pattern="[A-Za-z0-9._-]+"')+field('Password','','new-user-password','password','autocomplete="new-password" minlength="8" maxlength="128"')+field('Confirm password','','new-user-confirm','password','autocomplete="new-password" minlength="8" maxlength="128"')+`<div class="button-row">${action('Add user','add-user','primary-btn')}</div>`)} </div>`;u.users.filter(x=>x.username!==state.username).forEach(x=>{const b=$('#remove-user-'+x.username);if(b)b.onclick=async()=>{if(!confirm(`Remove user ${x.username}?`))return;try{await api('/auth/users/'+encodeURIComponent(x.username),{method:'DELETE'});toast('User removed');await usersPage()}catch(e){toast(e.message,true)}}});$('#add-user').onclick=async()=>{const username=$('#new-user-name').value.trim(),password=$('#new-user-password').value,confirmPassword=$('#new-user-confirm').value;if(password!==confirmPassword){toast('Passwords do not match',true);return}try{await api('/auth/users',{method:'POST',body:JSON.stringify({username,password,password_confirm:confirmPassword})});toast('User added');await usersPage()}catch(e){toast(e.message,true)}}}
-async function devicePage(){const d=await api('/device');content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}</div>`,'wide')}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
+/*
+ * Hardware and audio capability, shown on the Device page as reference
+ * information rather than settings -- none of it is adjustable from here.
+ *
+ * Every field is optional: an older daemon returns no `audio` object at all
+ * and the mock backend does not fill one in either, so each row is dropped
+ * when its value is missing rather than rendered as "undefined".
+ */
+function factList(pairs){
+ const rows=pairs.filter(([,v])=>v!==undefined&&v!==null&&v!==''&&!(Array.isArray(v)&&!v.length))
+  .map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(Array.isArray(v)?v.join(', '):v)}</dd>`).join('');
+ return rows?`<dl class="facts">${rows}</dl>`:'';}
+function rateText(v){const n=Number(v);return Number.isFinite(n)&&n>0?(n%1000?n+' Hz':(n/1000)+' kHz'):null}
+function captureChannelText(c){
+ const raw=Number(c.raw_channels),mics=Number(c.microphones),transport=Number(c.transport_channels);
+ if(!Number.isFinite(raw))return Number.isFinite(mics)?mics+' microphones':null;
+ const parts=[];
+ if(Number.isFinite(mics))parts.push(mics+' microphone'+(mics===1?'':'s'));
+ if(Number.isFinite(transport))parts.push(transport+' transport');
+ return raw+' raw channels'+(parts.length?' — '+parts.join(' + '):'');}
+function formatText(c){
+ const f=c.format,bits=Number(c.valid_bits);
+ if(!f)return null;
+ return Number.isFinite(bits)?`${f} (${bits} valid bits)`:f;}
+const AUDIO_TRANSPORTS={'airplay2':'AirPlay 2','bluetooth-a2dp':'Bluetooth A2DP','bluetooth':'Bluetooth'};
+function transportName(id){return AUDIO_TRANSPORTS[id]||id}
+/*
+ * "Can it play a stream URL?" is a question people actually ask, so answer it
+ * in a sentence instead of printing an empty `decoders` array at them.
+ */
+function streamingText(st){
+ const decoders=Array.isArray(st.decoders)?st.decoders:null;
+ const available=(Array.isArray(st.available)?st.available:[]).map(transportName);
+ if(!decoders&&!available.length)return '';
+ const inputs=available.length?`Audio reaches it already decoded, over ${available.join(' and ')}.`:'';
+ if(decoders&&!decoders.length)
+  return `<p class="muted">This image carries no compressed-audio decoder, so the device cannot play a stream URL by itself. ${inputs}</p>`;
+ if(decoders&&decoders.length)
+  return `<p class="muted">Decodes ${decoders.join(', ')} on the device. ${inputs}</p>`;
+ return `<p class="muted">${inputs}</p>`;}
+function hardwareCard(d){
+ const audio=d.audio||{},capture=audio.capture||{},output=audio.output||{},streaming=audio.streaming||{};
+ const hardware=factList([['Model',d.model],['System on chip',d.hardware_revision],['Kernel',d.kernel],['Serial',d.serial]]);
+ const captureFacts=factList([
+  ['Sample rate',rateText(capture.rate_hz)],['Channels',captureChannelText(capture)],
+  ['Format',formatText(capture)],['Beamforming',capture.beamforming],
+  ['High-pass filter',Number.isFinite(Number(capture.high_pass_hz))?capture.high_pass_hz+' Hz':null],
+  ['Digital gain',capture.digital_gain],['Frequency response',capture.response],
+  ['Noise floor',Number.isFinite(Number(capture.noise_floor_dbfs))?capture.noise_floor_dbfs+' dBFS':null],
+  ['THD+N',Number.isFinite(Number(capture.thd_n_percent_max))?'up to '+capture.thd_n_percent_max+' %':null],
+  ['Clips above',Number.isFinite(Number(capture.clipping_from_input_amplitude))?'input amplitude '+capture.clipping_from_input_amplitude:null]]);
+ const outputFacts=factList([
+  ['Sample rate',rateText(output.rate_hz)],['Channels',output.channels],['Format',output.format],
+  ['Mixer volume',output.mixer_volume_range],['Mixing buses',output.buses]]);
+ const streamingFacts=factList([
+  ['Decoders',Array.isArray(streaming.decoders)?(streaming.decoders.length?streaming.decoders:'None on this image'):undefined],
+  ['Inputs',(Array.isArray(streaming.available)?streaming.available:[]).map(transportName)]]);
+ const groups=[
+  captureFacts?`<div><h4>Capture</h4>${captureFacts}</div>`:'',
+  outputFacts?`<div><h4>Output</h4>${outputFacts}</div>`:'',
+  (streamingFacts||streamingText(streaming))?`<div><h4>Streaming</h4>${streamingText(streaming)}${streamingFacts}</div>`:''
+ ].filter(Boolean).join('');
+ return panel('Hardware and audio capability',
+  `<p class="muted">Reported by the device. Reference information, not settings.</p>`+
+  (hardware?`<h4>Hardware</h4>${hardware}`:'')+
+  (groups?`<h4>Audio capability</h4><div class="hardware-groups">${groups}</div>`
+         :`<p class="muted">This daemon does not report audio capability.</p>`),
+  'wide hardware-card');}
+async function devicePage(){const d=await api('/device');content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${hardwareCard(d)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}</div>`,'wide')}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
 const NOISE_COLOURS=[['white','White'],['pink','Pink'],['brown','Brown']];
 const NOISE_TIMERS=[[0,'No timer'],[15,'15 minutes'],[30,'30 minutes'],[45,'45 minutes'],[60,'1 hour'],[90,'1.5 hours'],[120,'2 hours'],[480,'8 hours']];
 function noiseRemainingText(n){
@@ -486,9 +568,149 @@ async function assistantAction(path,message){if(state.busy)return;setBusy(true);
 const WX_PROVIDERS=[['open-meteo','Open-Meteo'],['met-no','MET Norway'],['off','Off']];
 function wxLabel(id){const m=WX_PROVIDERS.find(p=>p[0]===id);return m?m[1]:'Open-Meteo'}
 function wxId(label){const m=WX_PROVIDERS.find(p=>p[1]===label);return m?m[0]:'open-meteo'}
+/*
+ * Home location.
+ *
+ * This card used to be titled "Weather" with a field called "Location name",
+ * so anyone looking for where their home address goes did not find it: they
+ * were hunting for an address and reading a weather-provider setting. The
+ * location is not a weather setting -- it feeds weather, local time and, later,
+ * directions -- so the title says location first and the field asks for an
+ * address. The panel stays expanded; a collapsed panel is another place for it
+ * to hide.
+ */
 function weatherCard(a){if(a.unsupported)return '';
-return collapsiblePanel('Weather',`<p class="muted">Lets the assistant answer questions about conditions where the device is. Both providers are free and need no account; only the coordinates below are sent, and only when a location is set.</p><div class="settings-grid">${select('Provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Location name','','wx-location','text','placeholder="Austin, Texas"')}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}${saveButton('save-wx')}</div>`,'weather-provider',true)}
-async function integrationsPage(){const [d,a]=await Promise.all([api('/integrations'),api('/assistant').catch(e=>({unsupported:e.message}))]);content.innerHTML=`<div class="integration-grid">${assistantCard(a)}${weatherCard(a)}${d.items.map(x=>collapsiblePanel(x.name,`<p class="muted">${x.id==='rest'?'Versioned local device API.':'Optional local integration; no cloud connection required.'}</p>${toggle('Enabled',x.enabled,'int-'+x.id)}<div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${x.enabled?'Enabled':'Not configured'}</span></div>${saveButton('save-int-'+x.id)}`)).join('')}</div>`;d.items.forEach(x=>{bindDirty(['#int-'+x.id],'#save-int-'+x.id);$('#save-int-'+x.id).onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved')});if(!a.unsupported&&$('#wx-provider')){$('#wx-location').value=a.home_location||'';$('#wx-lat').value=a.latitude||'';$('#wx-lon').value=a.longitude||'';bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');$('#save-wx').onclick=()=>mutate('/assistant',{weather_provider:wxId($('#wx-provider').value),home_location:$('#wx-location').value.trim(),latitude:$('#wx-lat').value.trim(),longitude:$('#wx-lon').value.trim()},'Weather settings saved')}
+return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Both providers are free and need no account, and nothing is sent until a location is set.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Austin, Texas"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}${saveButton('save-wx')}</div>`,'weather-provider',true)}
+function bindWeather(a){
+ if(a.unsupported||!$('#wx-provider'))return;
+ $('#wx-location').value=a.home_location||'';
+ $('#wx-lat').value=a.latitude||'';
+ $('#wx-lon').value=a.longitude||'';
+ bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+ $('#save-wx').onclick=()=>mutate('/assistant',{weather_provider:wxId($('#wx-provider').value),home_location:$('#wx-location').value.trim(),latitude:$('#wx-lat').value.trim(),longitude:$('#wx-lon').value.trim()},'Home location saved');}
+/*
+ * Internet radio stations.
+ *
+ * The write format is flat and numbered (station_count, station_0_word, ...)
+ * rather than an array: the C daemon reads JSON scalars by key and has no
+ * array parser, and adding one for client-supplied nested data is exactly the
+ * kind of code that turns into a buffer bug. Reads come back as a proper
+ * array. The validation below mirrors the daemon's rules so a mistake is
+ * pointed at before a request is made -- the server still decides, and its
+ * message is what the toast shows when it refuses.
+ */
+const RADIO_MAX_STATIONS=32;
+const RADIO_EXAMPLE={word:'groove',name:'Groove Salad',url:'https://ice1.somafm.com/groovesalad-128-mp3',enabled:true};
+/* The word and the URL are trimmed before they are validated or sent, which
+   satisfies the daemon's no-leading-or-trailing-space rule without making
+   anyone hunt for an invisible character. */
+function radioWordError(word,index,words){
+ if(!word)return 'Every station needs a word';
+ if(word.length>31)return 'The word must be under 32 characters';
+ if(!/^[a-z0-9 -]+$/.test(word))return 'Use lowercase letters, digits, spaces and hyphens only';
+ if(words.indexOf(word)!==index)return `Another station already uses the word “${word}”`;
+ return '';}
+function radioUrlError(url){
+ if(!url)return 'Every station needs a stream URL';
+ if(!/^https?:\/\//.test(url))return 'The stream URL must start with http:// or https://';
+ if(url.length>511)return 'The stream URL must be under 512 characters';
+ if(!/^[\x21-\x7e]+$/.test(url))return 'The stream URL cannot contain spaces or non-ASCII characters';
+ return '';}
+function radioNameError(name){return name.length>63?'The name must be under 64 characters':''}
+function radioRowHtml(st,i){
+ return `<div class="radio-row" data-radio-row>`+
+  `<label class="field"><span>Word</span><input class="radio-word" value="${esc(st.word||'')}" placeholder="groove" spellcheck="false" aria-label="Station ${i+1} word"></label>`+
+  `<label class="field"><span>Name</span><input class="radio-name" value="${esc(st.name||'')}" placeholder="Groove Salad" aria-label="Station ${i+1} name"></label>`+
+  `<label class="field"><span>Stream URL</span><input class="radio-url" value="${esc(st.url||'')}" placeholder="https://" spellcheck="false" aria-label="Station ${i+1} stream URL"></label>`+
+  `<label class="switch-row"><span>Enabled</span><input class="toggle-input radio-enabled" type="checkbox" ${st.enabled===false?'':'checked'} aria-label="Station ${i+1} enabled"><span class="switch" aria-hidden="true"></span></label>`+
+  `<button class="danger-btn radio-remove" type="button" aria-label="Remove station ${i+1}">Remove</button>`+
+  `<p class="error-text radio-row-error" hidden></p>`+
+  `</div>`;}
+function radioPanelBody(r){
+ if(r.unsupported)return `<p class="muted">Stations are stored on the device and asked for by word.</p>${unsupported(r.unsupported)}`;
+ const max=Number(r.max_stations)||RADIO_MAX_STATIONS;
+ const stations=Array.isArray(r.stations)?r.stations:[];
+ const seeded=!stations.length;
+ return `<p class="muted">Each station has a <strong>word</strong> you say to ask for it — “play groove” — plus a display name and a stream URL. Words must be unique; up to ${max} stations.</p>`+
+  (r.playback_supported?'':unsupported('Stations are saved but cannot be played yet — stream playback is not on this image.'))+
+  (seeded?`<div class="notice"><strong>Example station</strong><span>The list is empty, so one example is filled in below: SomaFM Groove Salad. Treat the URL as an example to verify rather than a guaranteed-live stream — save it once you have checked it, or replace it with your own.</span></div>`:'')+
+  `<div class="radio-list" id="radio-list">${(seeded?[RADIO_EXAMPLE]:stations).map(radioRowHtml).join('')}</div>`+
+  `<div class="button-row">${action('Add station','radio-add')}<span class="muted" id="radio-count"></span></div>`+
+  saveButton('save-radio');}
+function bindRadio(r){
+ const list=$('#radio-list'),save=$('#save-radio');
+ if(!list||!save)return;
+ const max=Number(r.max_stations)||RADIO_MAX_STATIONS,stations=Array.isArray(r.stations)?r.stations:[];
+ const rows=()=>$$('[data-radio-row]',list);
+ const read=row=>({word:$('.radio-word',row).value.trim(),name:$('.radio-name',row).value.trim(),url:$('.radio-url',row).value.trim(),enabled:$('.radio-enabled',row).checked});
+ function validate(){
+  const current=rows(),values=current.map(read),words=values.map(v=>v.word);
+  let first='';
+  current.forEach((row,i)=>{
+   const v=values[i],message=radioWordError(v.word,i,words)||radioUrlError(v.url)||radioNameError(v.name),box=$('.radio-row-error',row);
+   box.textContent=message;box.hidden=!message;row.classList.toggle('invalid',!!message);
+   if(message&&!first)first=message;});
+  $('#radio-count').textContent=`${current.length} of ${max} stations`;
+  return first;}
+ /* Rows are added and removed, so the dirty listener goes on the container:
+    input events from the fields inside it bubble up to it. */
+ bindDirty(['#radio-list'],'#save-radio');
+ list.addEventListener('input',validate);
+ list.addEventListener('click',e=>{const b=e.target.closest('.radio-remove');if(!b)return;b.closest('[data-radio-row]').remove();save.disabled=false;validate()});
+ $('#radio-add').onclick=()=>{
+  if(rows().length>=max){toast(`At most ${max} stations`,true);return}
+  list.insertAdjacentHTML('beforeend',radioRowHtml({enabled:true},rows().length));
+  save.disabled=false;validate();
+  const added=rows().pop();if(added)$('.radio-word',added).focus();};
+ save.onclick=async()=>{
+  const problem=validate();
+  if(problem){toast(problem,true);return}
+  const values=rows().map(read),body={station_count:values.length};
+  values.forEach((v,i)=>{body['station_'+i+'_word']=v.word;body['station_'+i+'_name']=v.name;body['station_'+i+'_url']=v.url;body['station_'+i+'_enabled']=v.enabled});
+  if(state.busy)return;
+  setBusy(true);
+  try{await api('/integrations/radio',{method:'PUT',body:JSON.stringify(body)});toast(values.length===1?'1 station saved':values.length+' stations saved');await integrationsPage()}
+  catch(e){toast(e.message,true)}
+  finally{setBusy(false)}};
+ /* The seeded example is not on the device yet, so it is unsaved work and the
+    save button starts enabled; a list that came from the device is not. */
+ if(!stations.length)save.disabled=false;
+ validate();}
+async function radioPanel(){
+ if($('.radio-stations',content))return;
+ const r=await api('/integrations/radio').catch(e=>({unsupported:e.message}));
+ const host=$('.integration-grid',content)||content;
+ host.insertAdjacentHTML('beforeend',collapsiblePanel('Internet radio',radioPanelBody(r),'radio-stations wide',true));
+ bindRadio(r);}
+/*
+ * integrations-ui.js renders the live Integrations page and never draws the
+ * home-location card, so on the shipped UI there is nowhere to set a home
+ * address at all. Add it here, high on the page, when the renderer that ran
+ * did not already produce one.
+ */
+async function homeLocationPanel(){
+ if($('.weather-provider',content))return;
+ const a=await api('/assistant').catch(e=>({unsupported:e.message}));
+ const card=weatherCard(a);
+ if(!card)return;
+ const anchor=$('.voice-assistants',content),host=$('.integration-grid',content)||content;
+ if(anchor)anchor.insertAdjacentHTML('afterend',card);else host.insertAdjacentHTML('afterbegin',card);
+ bindWeather(a);}
+async function integrationsExtras(){await homeLocationPanel();await radioPanel()}
+/*
+ * The Integrations page is rendered by integrations-ui.js, which loads after
+ * this file and replaces the integrationsPage defined below. Its own handlers
+ * re-render by calling integrationsPage() again, so appending these panels
+ * once from render() would lose them on the next save. Wrap whichever
+ * definition won instead, on first use: the inner re-renders resolve the same
+ * global and so come back through the wrapper.
+ */
+function installIntegrationsExtras(){
+ if(integrationsPage.extrasWrapped)return;
+ const inner=integrationsPage,wrapped=async function(){const out=await inner.apply(this,arguments);await integrationsExtras();return out};
+ wrapped.extrasWrapped=true;
+ globalThis.integrationsPage=wrapped;}
+async function integrationsPage(){const [d,a]=await Promise.all([api('/integrations'),api('/assistant').catch(e=>({unsupported:e.message}))]);content.innerHTML=`<div class="integration-grid">${assistantCard(a)}${weatherCard(a)}${d.items.map(x=>collapsiblePanel(x.name,`<p class="muted">${x.id==='rest'?'Versioned local device API.':'Optional local integration; no cloud connection required.'}</p>${toggle('Enabled',x.enabled,'int-'+x.id)}<div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${x.enabled?'Enabled':'Not configured'}</span></div>${saveButton('save-int-'+x.id)}`)).join('')}</div>`;d.items.forEach(x=>{bindDirty(['#int-'+x.id],'#save-int-'+x.id);$('#save-int-'+x.id).onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved')});bindWeather(a);
 if(!a.unsupported){bindDirty(['#assistant-enabled','#assistant-model','#assistant-prompt'],'#save-assistant');$('#save-assistant').onclick=()=>mutate('/assistant',{enabled:$('#assistant-enabled').checked,provider:'openai-codex',model:$('#assistant-model').value.trim(),prompt:$('#assistant-prompt').value.trim()},'Voice assistant settings saved');if($('#assistant-auth-start'))$('#assistant-auth-start').onclick=()=>assistantAction('/assistant/auth/start','ChatGPT device sign-in started');if($('#assistant-auth-poll'))$('#assistant-auth-poll').onclick=()=>assistantAction('/assistant/auth/poll','Sign-in status checked');if($('#assistant-logout'))$('#assistant-logout').onclick=()=>assistantAction('/assistant/logout','ChatGPT disconnected');if($('#assistant-test'))$('#assistant-test').onclick=()=>post('/assistant/respond',{text:$('#assistant-test-text').value},'Test response queued');if(a.auth_state==='waiting')state.timer=setTimeout(async()=>{if(state.page!=='Integrations')return;try{await api('/assistant/auth/poll',{method:'POST',body:'{}'});await integrationsPage()}catch(e){toast(e.message,true)}},3000)}}
 async function copyTextCompat(text){
   if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return;}
@@ -497,7 +719,7 @@ async function copyTextCompat(text){
   document.body.removeChild(area);
 }
 async function systemPage(){
-  const [s,d,ota]=await Promise.all([api('/system'),api('/device'),api('/system/update')]);
+  const [s,d,ota,features]=await Promise.all([api('/system'),api('/device'),api('/system/update'),api('/system/features').catch(e=>({unsupported:e.message}))]);
   updateVersionDisplay(d,ota);
   const syncTime=s.last_sync_epoch?new Date(s.last_sync_epoch*1000).toLocaleString():'Never';
   const checkTime=ota.last_check_epoch?new Date(ota.last_check_epoch*1000).toLocaleString():'Not checked';
@@ -509,8 +731,13 @@ async function systemPage(){
   const sourceName=ota.source==='github-releases'?'GitHub Releases':ota.source||'Not configured';
   const installedVersion=ota.installed_version||d.os_version;
   const updateControls=ota.supported?`<input id="update-file" type="file" accept="application/x-tar,.tar" hidden>${select('Update channel',ota.channel||'stable','update-channel',['stable','dev'])}${toggle('Install new updates automatically',ota.automatic_updates,'automatic-updates')}<p class="muted">Automatic installation is disabled by default and never restarts the device.</p>${saveButton('save-update-settings')}${ota.allow_unsigned?toggle('Allow unsigned image (side-load a locally-built package)',false,'allow-unsigned')+`<p class="muted">Only applies to a manually selected update file; fetched updates always verify signatures.</p>`:''}<div class="button-row">${!ota.pending_reboot?action('Check for updates','check-update'):''}${ota.check_status==='update-available'&&!ota.pending_reboot?action('Install update','install-update','primary-btn'):''}${action('Select update file','select-update')}${ota.pending_reboot?action('Restart into update','restart-update','primary-btn'):''}</div><p id="update-name" class="muted">${ota.pending_version?'Version '+esc(ota.pending_version)+' is ready to boot.':ota.check_status==='update-available'?'Version '+esc(ota.latest_version)+' is available from GitHub Releases.':'No update selected.'}</p>`:unsupported('Signed updates are unavailable on this development image.');
-  content.innerHTML=`<div class="settings-grid">${panel('Software',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Time zone</dt><dd>${esc(s.timezone)}</dd><dt>NTP</dt><dd class="${s.ntp?'connected':''}">${s.ntp?'Synchronized':esc(s.ntp_state||'Unavailable')}</dd><dt>Last synchronization</dt><dd>${esc(syncTime)}</dd><dt>Clock source</dt><dd>${esc(s.clock_source||'unknown')}</dd><dt>RTC</dt><dd class="${s.rtc_available?'connected':''}">${s.rtc_available?(s.rtc_persisted?'Available · synchronized':'Available'):'Unavailable'}</dd><dt>Time servers</dt><dd>${esc(s.ntp_servers||'Not configured')}</dd></dl>`)}${panel('System update',`<dl class="facts"><dt>Installed version</dt><dd>${esc(installedVersion)}</dd><dt>Latest version</dt><dd>${esc(ota.latest_version||'Unknown')}</dd><dt>Channel</dt><dd>${esc(ota.channel||s.update_channel)}</dd><dt>Source</dt><dd>${esc(sourceName)}</dd><dt>Source status</dt><dd class="${ota.source_reachable==='true'?'connected':''}">${esc(sourceStatus)}</dd><dt>Check result</dt><dd>${esc(checkResult)}</dd><dt>Last checked</dt><dd>${esc(checkTime)}</dd><dt>Last successful check</dt><dd>${esc(successTime)}</dd><dt>Automatic updates</dt><dd>${ota.automatic_updates?'Enabled':'Off'}</dd><dt>Current slot</dt><dd>${esc(ota.current_slot.toUpperCase())}</dd><dt>Inactive slot</dt><dd>${esc(ota.inactive_slot.toUpperCase())}</dd><dt>Install state</dt><dd>${esc(ota.state)}</dd><dt>Rollback</dt><dd>${ota.rollback_available?'Available':'Unavailable'}</dd>${ota.rollback_version?`<dt>Last rollback</dt><dd>${esc(ota.rollback_version)}</dd>`:''}</dl><progress class="progress" max="100" value="${ota.progress}" aria-label="Update progress"></progress>${updateControls}`)}${panel('Configuration and diagnostics',`<input id="restore-file" type="file" accept="application/json,.json" hidden><div class="button-row">${action('Download configuration','backup','primary-btn')}${action('Restore configuration','restore')}${action('Download diagnostic bundle','export-diag','primary-btn')}${action('Copy health summary','copy-diag')}</div><p class="muted">Configuration exports are versioned JSON and exclude Wi-Fi passwords, authentication tokens, logs and live telemetry. Diagnostic bundles are bounded JSON with release identity and health evidence; SSIDs, addresses, owner identifiers, tokens, private paths, media metadata and signing material are omitted or redacted.</p>`,'wide')}</div>`;
+  const featuresPanel=panel('Features',features.unsupported?unsupported(features.unsupported):
+    toggle('Simulation',!!features.simulation,'feature-simulation')+
+    `<p class="muted">Simulation renders a phrase with the device's own text-to-speech and plays it into the <strong>microphone</strong> path, so wake word detection, speech-to-text and the assistant handle it exactly as though it had been spoken in the room. Nothing is recorded and nothing leaves the device.</p><p class="muted">It is off by default and is meant for testing. Switching it on adds the Simulation page to the menu; switching it off hides that page again and the device refuses simulated audio.</p>`+
+    saveButton('save-features'));
+  content.innerHTML=`<div class="settings-grid">${panel('Software',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Time zone</dt><dd>${esc(s.timezone)}</dd><dt>NTP</dt><dd class="${s.ntp?'connected':''}">${s.ntp?'Synchronized':esc(s.ntp_state||'Unavailable')}</dd><dt>Last synchronization</dt><dd>${esc(syncTime)}</dd><dt>Clock source</dt><dd>${esc(s.clock_source||'unknown')}</dd><dt>RTC</dt><dd class="${s.rtc_available?'connected':''}">${s.rtc_available?(s.rtc_persisted?'Available · synchronized':'Available'):'Unavailable'}</dd><dt>Time servers</dt><dd>${esc(s.ntp_servers||'Not configured')}</dd></dl>`)}${panel('System update',`<dl class="facts"><dt>Installed version</dt><dd>${esc(installedVersion)}</dd><dt>Latest version</dt><dd>${esc(ota.latest_version||'Unknown')}</dd><dt>Channel</dt><dd>${esc(ota.channel||s.update_channel)}</dd><dt>Source</dt><dd>${esc(sourceName)}</dd><dt>Source status</dt><dd class="${ota.source_reachable==='true'?'connected':''}">${esc(sourceStatus)}</dd><dt>Check result</dt><dd>${esc(checkResult)}</dd><dt>Last checked</dt><dd>${esc(checkTime)}</dd><dt>Last successful check</dt><dd>${esc(successTime)}</dd><dt>Automatic updates</dt><dd>${ota.automatic_updates?'Enabled':'Off'}</dd><dt>Current slot</dt><dd>${esc(ota.current_slot.toUpperCase())}</dd><dt>Inactive slot</dt><dd>${esc(ota.inactive_slot.toUpperCase())}</dd><dt>Install state</dt><dd>${esc(ota.state)}</dd><dt>Rollback</dt><dd>${ota.rollback_available?'Available':'Unavailable'}</dd>${ota.rollback_version?`<dt>Last rollback</dt><dd>${esc(ota.rollback_version)}</dd>`:''}</dl><progress class="progress" max="100" value="${ota.progress}" aria-label="Update progress"></progress>${updateControls}`)}${featuresPanel}${panel('Configuration and diagnostics',`<input id="restore-file" type="file" accept="application/json,.json" hidden><div class="button-row">${action('Download configuration','backup','primary-btn')}${action('Restore configuration','restore')}${action('Download diagnostic bundle','export-diag','primary-btn')}${action('Copy health summary','copy-diag')}</div><p class="muted">Configuration exports are versioned JSON and exclude Wi-Fi passwords, authentication tokens, logs and live telemetry. Diagnostic bundles are bounded JSON with release identity and health evidence; SSIDs, addresses, owner identifiers, tokens, private paths, media metadata and signing material are omitted or redacted.</p>`,'wide')}</div>`;
   if($('#save-update-settings')){bindDirty(['#automatic-updates','#update-channel'],'#save-update-settings');$('#save-update-settings').onclick=async()=>{const channel=$('#update-channel').value,automatic=$('#automatic-updates').checked;if(state.busy)return;setBusy(true);try{if(channel!==(ota.channel||'stable'))await api('/system/update/channel',{method:'PUT',body:JSON.stringify({channel})});if(automatic!==ota.automatic_updates)await api('/system/update/automatic',{method:'PUT',body:JSON.stringify({enabled:automatic})});toast('Update settings saved');await render()}catch(e){toast(e.message,true);await render()}finally{setBusy(false)}}}
+  if($('#save-features')){bindDirty(['#feature-simulation'],'#save-features');$('#save-features').onclick=async()=>{if(state.busy)return;setBusy(true);try{const saved=await api('/system/features',{method:'PUT',body:JSON.stringify({simulation:$('#feature-simulation').checked})});applyFeatures(saved);toast(saved.simulation?'Simulation enabled':'Simulation disabled');await render()}catch(e){toast(e.message,true);await render()}finally{setBusy(false)}}}
   if($('#check-update'))$('#check-update').onclick=()=>post('/system/update/check',{},'Update check completed');
   if($('#install-update'))$('#install-update').onclick=()=>confirm(`Install signed update ${ota.latest_version} to slot ${ota.inactive_slot.toUpperCase()}?`)&&post('/system/update/apply',{},'Update verified and installed');
   if($('#select-update'))$('#select-update').onclick=()=>$('#update-file').click();
@@ -541,9 +768,12 @@ async function systemPage(){
 }
 async function logsPage(){const [l,d]=await Promise.all([api('/logs'),api('/diagnostics')]);const clock=l.entries.some(x=>Number(x.timestamp)<1577836800)?'Device clock unset; relative boot time is shown where available':'Device clock available';content.innerHTML=`${panel('Service logs',`<div class="log-toolbar"><input id="log-filter" placeholder="Filter logs" aria-label="Filter logs">${action('Refresh','log-refresh')}</div><div class="log-viewer" id="log-viewer">${l.entries.length?l.entries.map(x=>`<div data-log="${esc(x.message.toLowerCase())}"><time>${logTime(x.timestamp,x.boot_seconds)}</time><span class="level ${x.level}">${x.level}</span><span>${esc(x.message)}</span></div>`).join(''):'<p class="muted">No logs available.</p>'}</div><p class="muted">Source: ${esc(l.source||'web-memory')}; bounded to ${l.capacity} entries. ${clock}. Relative time is from boot; secrets are redacted before logging.</p>`)}<div class="settings-grid diagnostics">${panel('Diagnostic checks',d.checks.map(x=>`<div class="status-line"><span class="status-dot ${x.status==='ok'?'ok':''}"></span><span>${esc(x.name)}</span><strong>${esc(x.status)}</strong></div>`).join(''))}${panel('Mock fault injection',state.data.status?.simulated?`<p class="muted">Use <code>tools/mockctl.sh</code> with <code>--dev-controls</code> to inject deterministic faults.</p>${action('Fail next Wi-Fi scan','fail-wifi','danger-btn')}`:unsupported('Fault injection is only available in mock development builds.'))}</div>`;$('#log-filter').oninput=e=>$$('[data-log]').forEach(x=>x.hidden=!x.dataset.log.includes(e.target.value.toLowerCase()));$('#log-refresh').onclick=render;if($('#fail-wifi'))$('#fail-wifi').onclick=()=>post('/dev/mock',{action:'fail-next',value:'wifi-scan'},'Next Wi-Fi scan will fail')}
 function aboutPage(){content.innerHTML=`<div class="settings-grid">${panel('LibreEcho',`<img class="about-mark" src="/assets/mark.svg" alt="LibreEcho mark"><p>Open source voice-assistant software built for privacy, repairability and local control.</p><dl class="facts"><dt>Web API</dt><dd>v1</dd><dt>Frontend</dt><dd>Dependency-free HTML, CSS and JavaScript</dd><dt>Daemon</dt><dd>Portable C99</dd><dt>Licence</dt><dd>MIT</dd></dl>`)}${panel('Hardware independence',`<p class="muted">The same frontend API works with both the realistic mock backend and the conservative Linux hardware adapter.</p><div class="privacy-callout">Open. Private. Yours.</div>`)}</div>`}
-async function render(){clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations')await integrationsPage();else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000)}
-function showPage(name,updateRoute=true){if(!descriptions[name])name='Overview';if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();state.page=name;if(updateRoute&&location.pathname!=='/'+pageSlug(name))history.pushState(null,'','/'+pageSlug(name));$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===name));$('#page-title').textContent=name;$('#page-subtitle').textContent=descriptions[name];document.title=`${name} · LibreEcho`;document.body.classList.remove('nav-open');render()}
-items.forEach(([name,icon],i)=>{const b=document.createElement('button');b.className='nav-item'+(i?'':' active');b.dataset.page=name;b.innerHTML=`<svg><use href="#${icon}"></use></svg><span>${name}</span>`;b.onclick=()=>showPage(name);nav.appendChild(b)});
+async function render(){clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations'){installIntegrationsExtras();await integrationsPage()}else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000)}
+function showPage(name,updateRoute=true){let corrected=false;if(!descriptions[name]||!navItems().some(([n])=>n===name)){name='Overview';corrected=true}if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();state.page=name;const path='/'+pageSlug(name);
+ /* A route to a page that is not in the menu is not a route. Replace it, so a
+    reload or a back button does not land on it again. */
+ if(location.pathname!==path){if(corrected)history.replaceState(null,'',path);else if(updateRoute)history.pushState(null,'',path)}$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===name));$('#page-title').textContent=name;$('#page-subtitle').textContent=descriptions[name];document.title=`${name} · LibreEcho`;document.body.classList.remove('nav-open');render()}
+renderNav();
 $('#reboot').onclick=()=>power('reboot','Reboot');$('#theme').onclick=()=>{const light=document.body.classList.toggle('light');localStorage.setItem('libreecho-theme',light?'light':'dark');$('#theme').textContent=light?'☾':'☼'};$('#menu').onclick=()=>document.body.classList.toggle('nav-open');
 $('#update-available').onclick=()=>showPage('System');
 window.addEventListener('popstate',()=>showPage(pageFromLocation(),false));
@@ -555,4 +785,4 @@ async function ensureAuth(c){state.authMode=c.authentication;updateAuthControl()
 async function signOut(){if(!state.token){redirectToLogin();return}try{await api('/auth/logout',{method:'POST',body:'{}'})}catch(_){/* The local session is cleared even if the server is unreachable. */}finally{redirectToLogin()}}
 $('#auth-control').onclick=()=>state.token?signOut():redirectToLogin();
 if(location.hash.length>1){const legacy=decodeURIComponent(location.hash.slice(1));if(items.some(([n])=>pageSlug(n)===legacy))history.replaceState(null,'','/'+legacy);}
-api('/config').then(async c=>{state.csrf=c.csrf_token;await ensureAuth(c);return Promise.all([api('/status'),api('/device'),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'}))])}).then(([,d,ota])=>{updateVersionDisplay(d,ota);return showPage(pageFromLocation(),false)}).catch(error=>{if(state.authMode==='users'||state.authMode==='bearer-token')redirectToLogin();else{document.body.classList.remove('auth-pending');errorView(error)}});
+api('/config').then(async c=>{state.csrf=c.csrf_token;await ensureAuth(c);return Promise.all([api('/status'),api('/device'),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'})),api('/system/features').catch(()=>({simulation:false}))])}).then(([,d,ota,features])=>{applyFeatures(features);updateVersionDisplay(d,ota);return showPage(pageFromLocation(),false)}).catch(error=>{if(state.authMode==='users'||state.authMode==='bearer-token')redirectToLogin();else{document.body.classList.remove('auth-pending');errorView(error)}});
