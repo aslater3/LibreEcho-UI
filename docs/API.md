@@ -342,6 +342,40 @@ This endpoint is primarily a setup and diagnostics path. Normal operation is:
 wake event, continuous post-AEC audio, local streaming STT, streamed response
 text, warm local TTS, then `audiod` announcement playback.
 
+#### POST /api/v1/audio/noise
+
+Starts the built-in sleep-noise generator. `colour` is `white`, `pink` or
+`brown`; `level` is 1-100; `minutes` is a sleep timer, 0 to play until stopped.
+Synthesis is on-device, so it keeps playing with no network.
+
+```json
+{ "colour": "brown", "level": 40, "minutes": 30 }
+```
+
+The generator is reported by `GET /api/v1/audio` under `noise`, where
+`remaining_seconds` is -1 when running untimed. A timed generator stops on its
+own and the state clears without a further request.
+
+#### DELETE /api/v1/audio/noise
+
+Stops the generator.
+
+#### POST /api/v1/audio/simulate
+
+Renders `text` with the device's own text-to-speech and plays it into the
+**microphone** path, so wake-word detection, speech-to-text and the assistant
+process it exactly as though it had been spoken in the room. Intended for
+testing; nothing is recorded and nothing leaves the device.
+
+```json
+{ "text": "Alexa, what time is it?" }
+```
+
+The audio is substituted for the microphones without interrupting the capture
+stream, so no daemon is restarted and wake detection continues throughout. If
+the capture mux is not present on the image, the request fails with 501 and the
+microphones are unaffected.
+
 ### LED
 
 #### GET /api/v1/led
@@ -431,6 +465,22 @@ Run LED test pattern.
   "error": null
 }
 ```
+
+#### PUT /api/v1/led/night
+
+Configures night mode, which caps the ring to a dim theme on a local-time
+schedule. `start_minute` and `end_minute` are minutes past local midnight, so a
+window may wrap midnight (for example 1320 to 420 is 22:00-07:00).
+
+```json
+{ "enabled": true, "start_minute": 1320, "end_minute": 420,
+  "r": 255, "g": 40, "b": 0, "brightness": 10 }
+```
+
+The schedule is evaluated in **local** time, so the device timezone must be
+correct or the window fires at the wrong hour. See
+`PUT /api/v1/system/timezone`. Current state is reported by `GET /api/v1/led`
+under `night`, including whether the cap is currently `active`.
 
 ### Network
 
@@ -647,6 +697,25 @@ is true, clients may send `X-LibreEcho-Allow-Unsigned: 1` for this upload only.
 That bypasses signature verification for the selected package; fetched and
 automatic updates never honor the header. The UI explicitly warns about this
 trust decision before uploading.
+
+#### GET /api/v1/system/timezone
+
+Returns the configured timezone.
+
+#### PUT /api/v1/system/timezone
+
+Sets the timezone as a POSIX TZ string, for example `CST6CDT,M3.2.0,M11.1.0`.
+There is no zoneinfo database on the device, so Olson names such as
+`America/Chicago` are **not** accepted; busybox honours `TZ` from the
+environment and that is what this sets.
+
+```json
+{ "timezone": "CST6CDT,M3.2.0,M11.1.0" }
+```
+
+Daemons read `TZ` when they start, so the response reports
+`"applies": "after restart"`. Anything that is not a plausible TZ string is
+rejected with 400 rather than written.
 
 ### Configuration
 
