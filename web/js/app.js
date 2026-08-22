@@ -376,6 +376,28 @@ const SIM_PHRASES=[
  ['Wake word only','Alexa'],
  ['False start','Alexa, uh, set a timer'],
  ['Self-correction','Alexa, set a five, no, ten minute timer']];
+/*
+ * The response-time goal: under one second from the end of the user's speech
+ * to the first audio out of the speaker.
+ *
+ * The device does not report that quantity, and this page does not pretend it
+ * does. What it records is derived from log lines, and api_log stamps
+ * boot_seconds as whole seconds -- so every log-derived duration here lands on
+ * a 1000 ms boundary and cannot resolve a sub-second target at all. On top of
+ * that, "request to first audio" starts when the simulate request is accepted,
+ * which means it also contains the phrase playing into the microphone in real
+ * time; a person speaking in the room never pays that. It is an upper bound,
+ * not the goal's number.
+ *
+ * processing_ms is different: agentd measures speech-to-text plus the model
+ * itself and reports it in milliseconds. It is a genuine component of the
+ * goal's interval and, at 2.8-3.1 s on this hardware, the dominant one. That
+ * makes it the closest honest proxy, so it is shown and marked alongside.
+ */
+const SIM_RESPONSE_GOAL_MS=1000;
+/* The prose form of the same number; ms() would render it as "1.00 s". */
+const SIM_RESPONSE_GOAL_TEXT='1 s';
+function simGoalClass(v){const n=Number(v);return Number.isFinite(n)?(n<SIM_RESPONSE_GOAL_MS?'connected':'error-text'):''}
 const SIM_HISTORY_KEY='libreecho-simulation-history';
 const SIM_HISTORY_MAX=100;
 function simHistory(){
@@ -421,16 +443,34 @@ function simRow(r){
   `<td>${esc(r.text.length>34?r.text.slice(0,34)+'…':r.text)}</td>`+
   `<td>${ms(r.wake_latency_ms)}</td>`+
   `<td class="${cap?'error-text':''}">${ms(r.audio_ms)}${cap?' (cap)':''}</td>`+
-  `<td>${ms(r.processing_ms)}</td>`+
-  `<td>${ms(r.queue_to_first_audio_ms)}</td></tr>`;
+  `<td class="${simGoalClass(r.processing_ms)}">${ms(r.processing_ms)}</td>`+
+  `<td class="${simGoalClass(r.queue_to_first_audio_ms)}">${ms(r.queue_to_first_audio_ms)}</td></tr>`;
 }
+/* Best and median rather than a mean: one run that hit the utterance cap or
+   lost the network would drag an average somewhere no run actually was. */
+function simStat(list,key){
+ const v=list.map(r=>Number(r[key])).filter(n=>Number.isFinite(n)).sort((a,b)=>a-b);
+ if(!v.length)return null;
+ const mid=v.length>>1;
+ return {best:v[0],median:v.length%2?v[mid]:Math.round((v[mid-1]+v[mid])/2),count:v.length};}
+function simStatRow(label,stat){
+ if(!stat)return '';
+ return `<dt>${esc(label)}</dt><dd>best <span class="${simGoalClass(stat.best)}">${ms(stat.best)}</span>`+
+  ` · median <span class="${simGoalClass(stat.median)}">${ms(stat.median)}</span>`+
+  ` <small>over ${stat.count} run${stat.count===1?'':'s'}</small></dd>`;}
+function simSummaryHtml(h){
+ const rows=simStatRow('STT + model',simStat(h,'processing_ms'))+
+   simStatRow('Request → first audio',simStat(h,'queue_to_first_audio_ms'));
+ if(!rows)return '';
+ return `<dl class="facts sim-summary">${rows}</dl>`+
+  `<p class="muted">Measured against the goal of under ${SIM_RESPONSE_GOAL_TEXT}. The largest cost today is speech-to-text plus the model.</p>`;}
 function simRender(){
  const h=simHistory();
  const el=$('#sim-history'); if(!el)return;
  if(!h.length){el.innerHTML='<p class="muted">No runs yet.</p>';return}
- el.innerHTML='<div class="table-scroll"><table class="sim-table"><thead><tr>'+
+ el.innerHTML=simSummaryHtml(h)+'<div class="table-scroll"><table class="sim-table"><thead><tr>'+
   '<th>time</th><th>wake</th><th>phrase</th><th>wake latency</th>'+
-  '<th>turn audio</th><th>stt+llm</th><th>to first audio</th></tr></thead><tbody>'+
+  '<th>turn audio</th><th>stt + model</th><th>request → first audio</th></tr></thead><tbody>'+
   h.map(simRow).join('')+'</tbody></table></div>';
  const c=$('#sim-count-runs'); if(c)c.textContent=h.length+' of '+SIM_HISTORY_MAX;
 }
@@ -467,10 +507,10 @@ function simTimingHtml(entry,cap){
   '<dt>Wake latency</dt><dd>'+ms(entry.wake_latency_ms)+'</dd>'+
   '<dt>Turn audio</dt><dd class="'+(capped?'error-text':'')+'">'+ms(entry.audio_ms)+
     (capped?' — hit the utterance cap, endpointing did not fire':'')+'</dd>'+
-  '<dt>STT + model</dt><dd>'+ms(entry.processing_ms)+'</dd>'+
-  '<dt>Queue to transcript</dt><dd>'+ms(entry.queue_to_transcript_ms)+'</dd>'+
-  '<dt>Transcript to audio</dt><dd>'+ms(entry.transcript_to_audio_ms)+'</dd>'+
-  '<dt>Queue to first audio</dt><dd>'+ms(entry.queue_to_first_audio_ms)+'</dd>';
+  '<dt>STT + model</dt><dd class="'+simGoalClass(entry.processing_ms)+'">'+ms(entry.processing_ms)+'</dd>'+
+  '<dt>Request → transcript</dt><dd>'+ms(entry.queue_to_transcript_ms)+'</dd>'+
+  '<dt>Transcript → first audio</dt><dd>'+ms(entry.transcript_to_audio_ms)+'</dd>'+
+  '<dt>Request → first audio</dt><dd class="'+simGoalClass(entry.queue_to_first_audio_ms)+'">'+ms(entry.queue_to_first_audio_ms)+'</dd>';
 }
 async function simulationPage(){
  const w=await api('/wake-word').catch(()=>({}));
@@ -484,7 +524,7 @@ async function simulationPage(){
    `<p class="muted">Rendered by the device's own text-to-speech and played into the microphone path. Nothing is recorded and nothing leaves the device.</p>`+
    `<div class="button-row">${action('Speak into the microphone','sim-send','primary-btn')}${action('Run all '+SIM_PHRASES.length+' phrases','sim-run-all')}<button class="secondary-btn" id="sim-stop-all" hidden>Stop</button></div>`+
    `<dl class="facts"><dt>Wake word</dt><dd>${esc(w.wake_word||'—')}</dd><dt>Sensitivity</dt><dd>${w.sensitivity??'—'}</dd><dt>Utterance cap</dt><dd>${ms(cap)}</dd></dl>`)}
-   ${panel('Last run',`<dl class="facts" id="sim-timing"><dt>Status</dt><dd>Nothing sent yet</dd></dl>`)}
+   ${panel('Last run',`<p class="muted sim-goal">Goal: under ${SIM_RESPONSE_GOAL_TEXT} from the end of speech to the first audio out of the speaker.</p><dl class="facts" id="sim-timing"><dt>Status</dt><dd>Nothing sent yet</dd></dl><p class="muted">The device does not report end-of-speech to first audio, so it is not shown. The log-derived rows here are stamped in whole seconds, and <em>request → first audio</em> also covers the phrase playing into the microphone in real time, which a person speaking in the room would not pay — read it as an upper bound. <em>STT + model</em> is measured by agentd in milliseconds and is the closest honest proxy, and the dominant cost.</p>`)}
    </div>
    ${panel('History',`<div class="button-row"><span class="muted" id="sim-count-runs">0 of ${SIM_HISTORY_MAX}</span>`+
      action('Download JSON','sim-download')+action('Clear','sim-clear')+`</div><div id="sim-history"></div>`,'sim-history-panel')}`;

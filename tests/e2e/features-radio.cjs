@@ -154,7 +154,7 @@ async function main() {
   assert.equal(await page.locator('.radio-row').count(), 1);
   assert.equal(await page.locator('.radio-row .radio-word').first().inputValue(), 'groove');
   assert.equal(await page.locator('.radio-row .radio-name').first().inputValue(), 'Groove Salad');
-  assert.equal(await page.locator('.radio-row .radio-url').first().inputValue(), 'https://ice1.somafm.com/groovesalad-128-mp3');
+  assert.equal(await page.locator('.radio-row .radio-url').first().inputValue(), 'http://ice1.somafm.com/groovesalad-128-mp3');
   assert.equal(await page.locator('#radio-count').innerText(), '1 of 32 stations');
   assert.equal(await page.locator('#save-radio').isDisabled(), false, 'the unsaved example counts as dirty');
   pass('radio: empty list seeds the Groove Salad example and says playback is unavailable');
@@ -193,7 +193,7 @@ async function main() {
   assert.deepEqual(puts.radio[0], {
     station_count: 2,
     station_0_word: 'groove', station_0_name: 'Groove Salad',
-    station_0_url: 'https://ice1.somafm.com/groovesalad-128-mp3', station_0_enabled: true,
+    station_0_url: 'http://ice1.somafm.com/groovesalad-128-mp3', station_0_enabled: true,
     station_1_word: 'news', station_1_name: '',
     station_1_url: 'http://example.invalid/news.mp3', station_1_enabled: false
   });
@@ -322,6 +322,60 @@ async function main() {
   );
   pass('home location: retitled, expanded, labelled as an address, prefilled and dirty-tracked');
 
+
+  // ---- Simulation page: the response-time goal -----------------------------
+  // Deliberately mixed: one run under the 1 s goal on stt+llm, the rest over,
+  // so both markings are exercised and the median is not the same as the best.
+  const simRuns = [
+    { at: '2026-08-22T20:09:00.000Z', text: 'Alexa, what time is it?', wake: true, wake_latency_ms: 1200,
+      max_utterance_ms: 6000, audio_ms: 5000, processing_ms: 2800, queue_to_transcript_ms: 8000,
+      transcript_to_audio_ms: 1000, queue_to_first_audio_ms: 9000 },
+    { at: '2026-08-22T20:08:00.000Z', text: 'Alexa, what is the weather?', wake: true, wake_latency_ms: 1240,
+      max_utterance_ms: 6000, audio_ms: 5000, processing_ms: 3100, queue_to_transcript_ms: 8000,
+      transcript_to_audio_ms: 1000, queue_to_first_audio_ms: 7000 },
+    { at: '2026-08-22T20:07:00.000Z', text: 'Alexa, stop', wake: true, wake_latency_ms: 900,
+      max_utterance_ms: 6000, audio_ms: 2000, processing_ms: 800, queue_to_transcript_ms: 2000,
+      transcript_to_audio_ms: 1000, queue_to_first_audio_ms: 3000 }
+  ];
+  backend.simulation = true;
+  await page.goto('/');
+  await page.evaluate(h => localStorage.setItem('libreecho-simulation-history', JSON.stringify(h)), simRuns);
+  await page.goto('/simulation');
+  await waitForPage(page, 'Simulation');
+  await page.waitForSelector('#sim-history table', { timeout: 8000 });
+
+  const lastRun = await page.locator('.setting-panel', { has: page.getByRole('heading', { name: 'Last run' }) }).innerText();
+  assert.match(lastRun, /Goal: under 1 s from the end of speech to the first audio out of the speaker/);
+  assert.match(lastRun, /does not report end-of-speech to first audio, so it is not shown/);
+  assert.match(lastRun, /stamped in whole seconds/);
+  assert.match(lastRun, /upper bound/);
+  assert.match(lastRun, /closest honest proxy/);
+  pass('simulation: the goal is stated and the recorded value is labelled honestly');
+
+  // stt+llm: 800 under goal (connected), 2800 and 3100 over (error-text)
+  const sttCells = page.locator('.sim-table tbody tr td:nth-child(6)');
+  assert.deepEqual(await sttCells.allInnerTexts(), ['2.80 s', '3.10 s', '800 ms']);
+  assert.deepEqual(await sttCells.evaluateAll(els => els.map(e => e.className)),
+    ['error-text', 'error-text', 'connected']);
+  // request -> first audio: all three over the goal
+  const firstAudioCells = page.locator('.sim-table tbody tr td:nth-child(7)');
+  assert.deepEqual(await firstAudioCells.evaluateAll(els => els.map(e => e.className)),
+    ['error-text', 'error-text', 'error-text']);
+  assert.equal(await page.locator('.sim-table thead th').nth(6).innerText(), 'REQUEST → FIRST AUDIO');
+  pass('simulation: both goal columns are marked with connected / error-text, no new colours');
+
+  const summary = page.locator('.sim-summary');
+  await summary.waitFor({ timeout: 5000 });
+  const summaryText = await summary.innerText();
+  // stt+llm: best 800 ms, median of [800, 2800, 3100] = 2800
+  assert.match(summaryText, /STT \+ model\s+best 800 ms · median 2\.80 s over 3 runs/);
+  // request -> first audio: best 3.00 s, median of [3000, 7000, 9000] = 7000
+  assert.match(summaryText, /Request → first audio\s+best 3\.00 s · median 7\.00 s over 3 runs/);
+  assert.equal(await summary.locator('span.connected').count(), 1, 'only the sub-second best is green');
+  assert.match(await page.locator('#sim-history').innerText(), /largest cost today is speech-to-text plus the model/);
+  pass('simulation: best and median summary over the stored runs, marked against the goal');
+
+  await page.evaluate(() => localStorage.removeItem('libreecho-simulation-history'));
   if (failures.length) {
     console.error('browser failures:\n' + failures.join('\n'));
     process.exitCode = 1;
