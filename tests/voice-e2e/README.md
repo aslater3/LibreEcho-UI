@@ -91,6 +91,28 @@ roughly 35 dB of headroom before distortion.
 Only unclipped levels are judged — above the ceiling the chain is *supposed* to
 distort, and recording where that starts is the measurement.
 
+## Endpointing latency
+
+`END_SILENCE_MS=<ms>` overrides the endpoint wait for a run. Sweeping it against
+the `alexa-what-time` fixture gives a straight line:
+
+| end_silence_ms | turn length |
+|---|---|
+| 400 | 1840 ms |
+| 700 | 2140 ms |
+| 1000 | 2440 ms |
+| 1500 | 2940 ms |
+
+`turn = end_silence_ms + 1440 ms`, exactly, at every point — so endpointing
+carries **no hidden overhead**. The 1440 ms constant is command audio plus
+preroll, i.e. real content. If a turn feels like it lingers, the whole of the
+tail is that one setting; the valid range is 200–3000 ms.
+
+Note the endpoint decision is made by production `stt_engine_wyoming.c`, not by
+the harness: the fake STT is a passive sink that accumulates chunks until the
+client sends `audio-stop`. So this measures the shipping logic even in a
+hermetic run.
+
 ## Notes
 
 - Runs `linux/arm64` by default. Under emulated `linux/amd64` on Apple Silicon
