@@ -254,12 +254,19 @@ static int apply_mixer_setting(const char *mixer_bin,
  * that reason, whatever order the daemons started in.
  *
  * 50 maps to 40 so an unconfigured device keeps exactly the level it had,
- * and the scale runs to 80 (about 40 dB) at 100.  The upper half only
+ * and the scale runs to 110 -- about 55 dB -- at 100.  The upper half only
  * became usable once the 24-bit capture scaling was fixed; before that the
  * stream saturated regardless of any gain.
+ *
+ * The top of the range matters.  Scoring real captured audio through the
+ * openwakeword alexa model, the device's own stream peaked at 0.41 against
+ * a 0.45 gate with a single supporting frame -- a near miss on every
+ * attempt.  The same audio amplified three times scores 0.70 with two
+ * supporting frames and would fire, and six times scores 0.80.  The word
+ * was being recognised all along and simply arriving too quiet.
  */
 #define MICPGA_DEFAULT_VOLUME 40
-#define MICPGA_MAX_VOLUME 80
+#define MICPGA_MAX_VOLUME 110
 
 static int micpga_volume_from_environment(void)
 {
@@ -279,6 +286,7 @@ static int micpga_volume_from_environment(void)
 static int configure_capture_path(const struct micd_config *config)
 {
     char micpga[8];
+    char default_micpga[8];
     struct mixer_setting micpga_settings[4];
     static const char *const micpga_controls[4] = {
         "ADC_A MICPGA Volume Ctrl", "ADC_B MICPGA Volume Ctrl",
@@ -317,14 +325,33 @@ static int configure_capture_path(const struct micd_config *config)
     }
     (void)snprintf(micpga, sizeof(micpga), "%d",
                    micpga_volume_from_environment());
+    (void)snprintf(default_micpga, sizeof(default_micpga), "%d",
+                   MICPGA_DEFAULT_VOLUME);
     for (i = 0; i < 4; ++i) {
         micpga_settings[i].control = micpga_controls[i];
         micpga_settings[i].value = micpga;
         micpga_settings[i].value2 = micpga;
         if (apply_mixer_setting(config->mixer_bin, &micpga_settings[i]) < 0) {
-            le_log_error("unable to apply microphone mixer control: %s",
-                         micpga_controls[i]);
-            return -1;
+            /*
+             * The control's usable maximum is a property of the codec, not
+             * of this scale.  If a value is refused, fall back to the level
+             * the capture path used before rather than failing the whole
+             * profile -- an unusable microphone is far worse than a quiet
+             * one, and configure_capture_path() failing leaves the device
+             * with no capture at all.
+             */
+            struct mixer_setting fallback;
+
+            le_log_warn("micd: capture PGA %s refused for %s; using %d",
+                        micpga, micpga_controls[i], MICPGA_DEFAULT_VOLUME);
+            fallback.control = micpga_controls[i];
+            fallback.value = default_micpga;
+            fallback.value2 = default_micpga;
+            if (apply_mixer_setting(config->mixer_bin, &fallback) < 0) {
+                le_log_error("unable to apply microphone mixer control: %s",
+                             micpga_controls[i]);
+                return -1;
+            }
         }
     }
     le_log_info("micd: capture PGA set to %s", micpga);
