@@ -869,6 +869,8 @@ static const char *control_name_or_default(const struct audio_control *control,
 /* Percent is not a round trip through the raw control, so ignore a point
    of rounding rather than reacting to it. */
 #define VOLUME_GUARD_TOLERANCE 2
+/* How often the guard re-reads the mixer while idle, in milliseconds. */
+#define VOLUME_GUARD_POLL_MS 250
 
 static int audio_set_volume(struct audio_hw *audio, int volume);
 static int airplay_media_active(void);
@@ -1909,11 +1911,32 @@ int main(int argc, char **argv)
             ++nfds;
         }
 
-        poll_result = poll(pollfds, nfds, -1);
+        /*
+         * Bounded rather than infinite, so the volume guard in refresh_state
+         * runs on a clock instead of only when something asks for status.
+         *
+         * Something outside this daemon resets the codec mixer to unity when
+         * playback starts -- 26% became 100% mid-answer, which is deafening
+         * at close range. The guard already detected and restored it, but it
+         * only ran on a status request, so the window stayed open for as long
+         * as nothing happened to poll. Checking four times a second closes it
+         * to a quarter of a second.
+         *
+         * This is a mitigation, not the fix. The writer is in the AirPlay
+         * audio engine, which ships in a feature squashfs and cannot be
+         * replaced by an OTA, so the real repair cannot reach a device this
+         * way. Two mixer reads a second is a cheap price for not being
+         * startled.
+         */
+        poll_result = poll(pollfds, nfds, VOLUME_GUARD_POLL_MS);
         if (poll_result < 0) {
             if (errno == EINTR)
                 continue;
             break;
+        }
+        if (poll_result == 0) {
+            refresh_state(&audio);
+            continue;
         }
         if (pollfds[0].revents & POLLIN)
             (void)accept_client(listen_fd, clients);
