@@ -600,7 +600,7 @@ function bindWeather(a){
  * message is what the toast shows when it refuses.
  */
 const RADIO_MAX_STATIONS=32;
-const RADIO_EXAMPLE={word:'groove',name:'Groove Salad',url:'https://ice1.somafm.com/groovesalad-128-mp3',enabled:true};
+const RADIO_EXAMPLE={word:'groove',name:'Groove Salad',url:'http://ice1.somafm.com/groovesalad-128-mp3',enabled:true};
 /* The word and the URL are trimmed before they are validated or sent, which
    satisfies the daemon's no-leading-or-trailing-space rule without making
    anyone hunt for an invisible character. */
