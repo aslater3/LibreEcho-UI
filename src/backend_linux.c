@@ -1353,6 +1353,49 @@ static int simulate_audio(struct le_backend *b, const char *text)
     return adapter_json_command(LE_ADAPTER_TTS_SOCK, "render", args);
 }
 
+/*
+ * Internet radio. The player is a separate daemon so a stalled stream cannot
+ * block this one; these are thin pass-throughs to its control socket.
+ */
+static int radio_play(struct le_backend *b, const char *url)
+{
+    char args[1024], escaped[768];
+
+    (void)b;
+    if (!url || !url[0] || strlen(url) >= sizeof(escaped) / 2)
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), url);
+    snprintf(args, sizeof(args), "{\"url\":\"%s\"}", escaped);
+    return adapter_json_command(LE_ADAPTER_RADIO_SOCK, "play", args);
+}
+
+static int radio_stop(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_RADIO_SOCK, "stop", NULL);
+}
+
+static int radio_playing(struct le_backend *b, int *playing, char *url,
+                         size_t url_size)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc, v;
+
+    (void)b;
+    *playing = 0;
+    if (url && url_size)
+        url[0] = '\0';
+    rc = adapter_command(LE_ADAPTER_RADIO_SOCK, "status", NULL,
+                         response, sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_bool(response, "playing", &v) > 0)
+        *playing = v;
+    if (url && url_size)
+        (void)json_get_string(response, "url", url, url_size);
+    return LE_OK;
+}
+
 static int noise_start(struct le_backend *b, const char *colour, int level,
                        int minutes)
 {
@@ -1808,7 +1851,7 @@ static void destroy(struct le_backend *b)
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
-    noise_start, noise_stop, simulate_audio,
+    noise_start, noise_stop, simulate_audio, radio_play, radio_stop, radio_playing,
     led, colour, brightness, visualizer_enabled, boot_led, led_profile, night,
     led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,

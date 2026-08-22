@@ -820,13 +820,27 @@ static int radio_save(struct api_context *c)
 static void radio_json(struct api_context *c, struct api_response *r)
 {
     char body[16384], word[80], name[160], url[1200];
+    char raw_url[512], playing_url[1200];
     size_t i, used = 0;
-    int n;
+    int n, playing = 0, radio_available;
+
+    /*
+     * playback_supported is answered by asking the player, not by a constant.
+     * radiod may be absent from an image, and a UI that promises playback the
+     * device cannot do is worse than one that says so.
+     */
+    radio_available = le_radio_playing(c->backend, &playing,
+                                       raw_url, sizeof(raw_url)) == LE_OK;
+    json_escape(playing_url, sizeof(playing_url),
+                radio_available ? raw_url : "");
 
     n = snprintf(body, sizeof(body),
                  "{\"ok\":true,\"data\":{\"max_stations\":%d,"
-                 "\"playback_supported\":false,\"stations\":[",
-                 LE_MAX_RADIO_STATIONS);
+                 "\"playback_supported\":%s,\"playing\":%s,"
+                 "\"playing_url\":\"%s\",\"stations\":[",
+                 LE_MAX_RADIO_STATIONS,
+                 radio_available ? "true" : "false",
+                 playing ? "true" : "false", playing_url);
     if (n < 0)
         { err(r, 503, LE_IO, "Station list could not be rendered"); return; }
     used = (size_t)n;
@@ -1079,7 +1093,7 @@ static void buttons_json(struct api_context *c, struct api_response *r)
     out(r, 200, "{\"ok\":true,\"data\":{\"short_press\":\"%s\",\"long_press\":\"%s\",\"available\":%s,\"state\":\"%s\",\"volume_capable\":%s,\"hardware_mute\":%s,\"action_capable\":%s,\"stale\":%s},\"error\":null}", escaped_short, escaped_long, fresh && !strcmp(state, "connected") ? "true" : "false", state, volume ? "true" : "false", mute ? "true" : "false", action ? "true" : "false", !fresh ? "true" : "false");
 }
 
-void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strcmp(p,"/api/v1/integrations/radio")&&strcmp(q->method,"PUT"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7))le_auth_logout(&c->auth,q->authorization+7);ok(r,"{\"logged_out\":true}");return;}
+void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7))le_auth_logout(&c->auth,q->authorization+7);ok(r,"{\"logged_out\":true}");return;}
  if(!strcmp(p,"/api/v1/config/export")&&!strcmp(q->method,"GET")){char config[4096];rc=configuration_json(c,config,sizeof(config));if(rc)err(r,501,rc,"Configuration export is unavailable for this backend");else ok(r,config);return;}if(!strcmp(p,"/api/v1/config/import")&&!strcmp(q->method,"POST")){rc=import_configuration(c,q->body);if(rc)err(r,rc==LE_INVALID?400:501,rc,rc==LE_INVALID?"Configuration file is invalid or incomplete":"Configuration restore is unavailable for this backend");else{api_log(c,"warning","Configuration restored from uploaded JSON");ok(r,"{\"restored\":true,\"schema_version\":1}");}return;}
  if(!strcmp(p,"/api/v1/assistant")){if(!strcmp(q->method,"GET")){agent_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){agent_result(r,"configure",q->body);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/assistant/auth/start")&&!strcmp(q->method,"POST")){agent_result(r,"auth_start",NULL);return;}
@@ -1119,6 +1133,22 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
    out(r,200,"{\"ok\":true,\"data\":{\"simulation\":%s},\"error\":null}",
        c->feature_simulation?"true":"false");return;}
   method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/integrations/radio/play")&&!strcmp(q->method,"POST")){
+  char word[32];size_t i;
+  if(json_get_string(q->body,"word",word,sizeof(word))<1||!word[0]){err(r,400,LE_INVALID,"word is required");return;}
+  for(i=0;i<c->radio_count;i++){
+   if(strcmp(c->radio[i].word,word))continue;
+   if(!c->radio[i].enabled){err(r,409,LE_BUSY,"That station is switched off");return;}
+   rc=le_radio_play(c->backend,c->radio[i].url);
+   if(rc){err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,
+              rc==LE_NOT_SUPPORTED?"Stream playback is not available on this image":
+              "The station could not be played");return;}
+   api_log(c,"info","Radio station started");radio_json(c,r);return;}
+  err(r,404,LE_INVALID,"No station with that word");return;}
+ if(!strcmp(p,"/api/v1/integrations/radio/stop")&&!strcmp(q->method,"POST")){
+  rc=le_radio_stop(c->backend);
+  if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,"Playback could not be stopped");return;}
+  api_log(c,"info","Radio stopped");radio_json(c,r);return;}
  if(!strcmp(p,"/api/v1/integrations/radio")){
   if(!strcmp(q->method,"GET")){radio_json(c,r);return;}
   if(!strcmp(q->method,"PUT")){

@@ -65,5 +65,13 @@ static int noise_stop_mock(struct le_backend*b){
  return LE_OK;}
 static int simulate_audio_mock(struct le_backend*b,const char*text){
  (void)b; if(!text||!text[0])return LE_INVALID; return LE_OK;}
-static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,mute,tone,tts_voice,0,0,noise_start_mock,noise_stop_mock,simulate_audio_mock,led,colour,brightness,visualizer_enabled,boot_led,led_profile,night_mock,led_test,network,scan,connect_wifi,disconnect_wifi,hostname,wake,wake_set,sensitivity,wake_test,bluetooth,bluetooth_set,bluetooth_scan_mock,bluetooth_pair_mock,bluetooth_unpair_mock,bluetooth_disconnect_mock,bluetooth_pairing_response_mock,bluetooth_discoverable_mock,bluetooth_connectable_mock,bluetooth_pairing_mode_mock,airplay,airplay_set,playback,reboot,shutdown,reset,tick,control};
+static char mock_radio_url[512]; static int mock_radio_playing_flag;
+static int radio_play_mock(struct le_backend*b,const char*url){(void)b;
+ if(!url||!url[0])return LE_INVALID;
+ snprintf(mock_radio_url,sizeof(mock_radio_url),"%s",url);mock_radio_playing_flag=1;return LE_OK;}
+static int radio_stop_mock(struct le_backend*b){(void)b;
+ mock_radio_playing_flag=0;mock_radio_url[0]='\0';return LE_OK;}
+static int radio_playing_mock(struct le_backend*b,int*p,char*u,size_t n){(void)b;
+ *p=mock_radio_playing_flag; if(u&&n)snprintf(u,n,"%s",mock_radio_url); return LE_OK;}
+static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,mute,tone,tts_voice,0,0,noise_start_mock,noise_stop_mock,simulate_audio_mock,radio_play_mock,radio_stop_mock,radio_playing_mock,led,colour,brightness,visualizer_enabled,boot_led,led_profile,night_mock,led_test,network,scan,connect_wifi,disconnect_wifi,hostname,wake,wake_set,sensitivity,wake_test,bluetooth,bluetooth_set,bluetooth_scan_mock,bluetooth_pair_mock,bluetooth_unpair_mock,bluetooth_disconnect_mock,bluetooth_pairing_response_mock,bluetooth_discoverable_mock,bluetooth_connectable_mock,bluetooth_pairing_mode_mock,airplay,airplay_set,playback,reboot,shutdown,reset,tick,control};
 int le_mock_create(struct le_backend*b,const char*mock,const char*cfg,unsigned seed){struct mock_state*m=calloc(1,sizeof(*m));if(!m)return LE_IO;defaults(m,seed);load_profile(m,mock,seed);if(cfg){strncpy(m->config_path,cfg,sizeof(m->config_path)-1);load(m,cfg);}b->data=m;b->ops=&ops;return LE_OK;}

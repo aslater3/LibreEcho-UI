@@ -1,0 +1,65 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          libreecho-radiod
+# Required-Start:    $remote_fs $network
+# Required-Stop:     $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+### END INIT INFO
+
+[ -r /etc/default/libreecho-radiod ] && . /etc/default/libreecho-radiod
+
+DAEMON=${DAEMON:-/usr/local/sbin/libreecho-radiod}
+PIDFILE=${PIDFILE:-/var/run/libreecho-radiod.pid}
+LOGFILE=${LOGFILE:-/var/log/libreecho-radiod.log}
+SOCKET=${SOCKET:-/run/libreecho/radio.sock}
+
+ARGS=${ARGS:---socket $SOCKET}
+
+is_running() {
+    [ -s "$PIDFILE" ] || return 1
+    pid=$(sed -n '1p' "$PIDFILE")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+start_service() {
+    if is_running; then echo "libreecho-radiod already running"; return 0; fi
+    # The daemon idles on its control socket until asked to play, so starting
+    # it costs nothing. It is the API that is gated by the radio feature flag,
+    # not this service -- a daemon that is not running cannot report why it
+    # refused, and "no such socket" is a worse error than a clear refusal.
+    [ -x "$DAEMON" ] || { echo "libreecho-radiod: not on this image"; return 0; }
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
+    else
+        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+        echo $! >"$PIDFILE"
+    fi
+}
+
+stop_service() {
+    if ! is_running; then rm -f "$PIDFILE"; return 0; fi
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
+    else
+        pid=$(sed -n '1p' "$PIDFILE")
+        kill "$pid" 2>/dev/null || true
+        count=0
+        while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 5 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE" "$SOCKET"
+}
+
+case "${1:-}" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart) stop_service; start_service ;;
+    status) is_running && echo "running" || { echo "stopped"; exit 3; } ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
