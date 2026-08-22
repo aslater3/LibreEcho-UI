@@ -22,9 +22,58 @@ def http(port: int, path: str) -> tuple[int, bytes]:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()
+    except urllib.error.URLError:
+        return 0, b""
+
+
+def test_persisted_auth_root() -> None:
+    with tempfile.TemporaryDirectory(prefix="libreecho-virtual-auth-") as temp:
+        root = Path(temp)
+        port = 18182
+        users = root / "data/libreecho/config/users"
+        users.parent.mkdir(parents=True)
+        record = subprocess.check_output(
+            ["sh", str(HERE / "create-user.sh"), "admin", "test-password-123"],
+            text=True,
+        )
+        users.write_text(record)
+        users.chmod(0o600)
+        process = subprocess.Popen(
+            ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            ready = False
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    assert process.stderr is not None
+                    raise RuntimeError(process.stderr.read())
+                if (root / "run/libreecho/network.sock").exists() and http(port, "/")[0] == 200:
+                    ready = True
+                    break
+                time.sleep(0.1)
+            assert ready
+            assert (root / "data/libreecho/config/web-config.json").is_file()
+            status, page = http(port, "/")
+            assert status == 200
+            assert b"LibreEcho Control Centre" in page
+            status, body = http(port, "/api/v1/config")
+            assert status == 200
+            config = json.loads(body)["data"]
+            assert config["authentication"] == "users"
+            assert config["bootstrap_required"] is False
+            assert http(port, "/api/v1/status")[0] == 401
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 def main() -> int:
+    test_persisted_auth_root()
     with tempfile.TemporaryDirectory(prefix="libreecho-virtual-") as temp:
         root = Path(temp)
         port = 18181
@@ -34,13 +83,16 @@ def main() -> int:
         )
         try:
             deadline = time.monotonic() + 10
+            ready = False
             while time.monotonic() < deadline:
                 if process.poll() is not None:
                     assert process.stderr is not None
                     raise RuntimeError(process.stderr.read())
-                if (root / "run/libreecho/network.sock").exists():
+                if (root / "run/libreecho/network.sock").exists() and http(port, "/")[0] == 200:
+                    ready = True
                     break
                 time.sleep(0.1)
+            assert ready
             assert http(port, "/")[0] == 200
             css_status, css_body = http(port, "/css/app.css?rev=test")
             assert css_status == 200

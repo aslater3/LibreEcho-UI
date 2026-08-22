@@ -218,7 +218,10 @@ For fast host-side iteration without an Echo, `tools/virtual_echo.py` starts a
 disposable, rootless service environment. It runs the Web UI with the existing
 mock backend, provides deterministic companion-daemon JSON contracts on private
 Unix sockets, isolates absolute `/run` paths with Bubblewrap, and keeps all
-state under the selected temporary root. It does not emulate MT8163 hardware.
+disposable temporary root. It does not emulate MT8163 hardware. The launcher
+creates a missing `web-config.json` marker when starting a reused root, keeping
+persisted users and setup state consistent instead of showing the Wi-Fi setup
+page while requiring authentication.
 
 Build and start it locally:
 

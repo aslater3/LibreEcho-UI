@@ -35,6 +35,7 @@ make build/test-wake-led
 sh tests/test_microphone_fanout_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_wake_word_ui_contract.py
+python3 tools/test_virtual_echo.py
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 sh tests/test_device_identity.sh
