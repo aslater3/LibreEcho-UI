@@ -2605,7 +2605,20 @@ int main(int argc, char **argv)
 
     default_state(&ctx.state);
     load_state(&ctx.state);
-    ctx.state.current = ctx.state.boot;
+    /*
+     * Do not overwrite the restored ring colour with the boot profile.
+     *
+     * The two mean different things: "boot" is what shows while the device
+     * starts, "current" is the resting state the owner chose.  Assigning
+     * boot over current discarded the setting that had just been loaded, so
+     * a ring deliberately turned down to 0% came back at the boot profile's
+     * brightness after every restart -- the saved value was read from disk
+     * and thrown away on the next line.
+     *
+     * The startup animation below still uses the boot profile for the boot
+     * display; stop_startup_animation() then applies "current", which now
+     * really is the owner's setting.
+     */
     hardware_detect(&ctx.hw, force_stub);
     if (hardware_claim(&ctx.hw) != 0)
         return EXIT_FAILURE;
