@@ -315,11 +315,14 @@ static void apply_digital_gain(int16_t *samples, size_t count,
  * that reason, whatever order the daemons started in.
  *
  * 50 maps to 40 so an unconfigured device keeps exactly the level it had,
- * and the scale runs to 80 at 100.  Do not raise this ceiling: measured on
- * hardware, MICPGA 110 produces a noise floor about seven times *lower*
- * than 80, so the control is not monotonic across its nominal range and a
- * higher number is not a higher gain.  Level beyond this comes from the
- * digital stage above.  The upper half only
+ * and the scale runs to 80 at 100, which is the control's maximum:
+ *
+ *   ADC_A MICPGA Volume Ctrl   080, 80  (range 0->80)
+ *
+ * Do not raise this ceiling.  An earlier attempt at 110 was out of range,
+ * and rather than being clamped it left the capture about seven times
+ * quieter than 80 -- so an out-of-range write here is not a no-op, it is
+ * actively harmful.  Level beyond this comes from the digital stage above.  The upper half only
  * became usable once the 24-bit capture scaling was fixed; before that the
  * stream saturated regardless of any gain.
  *
