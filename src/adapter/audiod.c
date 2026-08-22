@@ -210,6 +210,10 @@ struct audio_hw {
     pid_t noise_pid;
     int noise_colour;
     long noise_seconds;
+    int noise_level;
+    /* CLOCK_MONOTONIC, so the sleep timer keeps counting correctly across an
+       NTP step -- a wall-clock start would make the remaining time jump. */
+    time_t noise_started;
     int startup_sound;
     int amplifier_on;
 };
@@ -1058,6 +1062,8 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->noise_pid = 0;
     audio->noise_colour = LE_NOISE_WHITE;
     audio->noise_seconds = 0;
+    audio->noise_level = 0;
+    audio->noise_started = 0;
     audio->muted = 0;
     audio->notification_volume = audio->volume;
     /* Boot playback is a hard-disabled image policy.  Keep the UI truthful
@@ -1306,6 +1312,39 @@ static int write_noise_fd(int fd, int colour, double amplitude,
     }
 }
 
+static time_t monotonic_seconds(void)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return 0;
+    return now.tv_sec;
+}
+
+/*
+ * A timed generator exits on its own when the sleep timer runs out.  Nothing
+ * was reaping it, so the child stayed a zombie and noise_pid stayed set --
+ * status would keep reporting noise long after the room went quiet, and the
+ * next start would SIGTERM a pid that no longer existed.  Reap without
+ * blocking before anything reads or changes the state.
+ */
+static void reap_noise(struct audio_hw *audio)
+{
+    pid_t done;
+
+    if (audio->noise_pid <= 0)
+        return;
+    do {
+        done = waitpid(audio->noise_pid, NULL, WNOHANG);
+    } while (done < 0 && errno == EINTR);
+    if (done == audio->noise_pid || (done < 0 && errno == ECHILD)) {
+        audio->noise_pid = 0;
+        audio->noise_seconds = 0;
+        audio->noise_level = 0;
+        audio->noise_started = 0;
+    }
+}
+
 static void stop_noise(struct audio_hw *audio)
 {
     if (audio->noise_pid > 0) {
@@ -1314,6 +1353,9 @@ static void stop_noise(struct audio_hw *audio)
             ;
         audio->noise_pid = 0;
     }
+    audio->noise_seconds = 0;
+    audio->noise_level = 0;
+    audio->noise_started = 0;
 }
 
 static int start_noise(struct audio_hw *audio, int colour, int level,
@@ -1357,6 +1399,8 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
     audio->noise_pid = pid;
     audio->noise_colour = colour;
     audio->noise_seconds = seconds;
+    audio->noise_level = level;
+    audio->noise_started = monotonic_seconds();
     return 0;
 }
 
@@ -1410,6 +1454,32 @@ static int start_test_tone(const struct audio_hw *audio)
     return 0;
 }
 
+static const char *noise_colour_name(int colour)
+{
+    if (colour == LE_NOISE_PINK)
+        return "pink";
+    if (colour == LE_NOISE_BROWN)
+        return "brown";
+    return "white";
+}
+
+/*
+ * Seconds left on the sleep timer, or -1 when the generator is running
+ * untimed.  Clamped at zero so a child that has finished writing but has not
+ * been reaped yet cannot report a negative remainder.
+ */
+static long noise_remaining(const struct audio_hw *audio)
+{
+    time_t elapsed;
+
+    if (audio->noise_pid <= 0 || audio->noise_seconds <= 0)
+        return -1;
+    elapsed = monotonic_seconds() - audio->noise_started;
+    if (elapsed < 0 || elapsed >= audio->noise_seconds)
+        return 0;
+    return (long)(audio->noise_seconds - elapsed);
+}
+
 static int queue_output(struct client *client, const char *message, size_t length)
 {
     size_t pending = client->output_used - client->output_sent;
@@ -1438,17 +1508,23 @@ static int handle_request(struct audio_hw *audio, char *message,
 
     if (!strcmp(command, "status")) {
         refresh_state(audio);
+        reap_noise(audio);
         audio->amplifier_on = amplifier_active(audio);
         (void)snprintf(data, sizeof(data),
                        "{\"volume\":%d,\"microphone_gain\":%d,"
                        "\"notification_volume\":%d,\"muted\":%s,"
                        "\"startup_sound\":%s,\"amplifier_on\":%s,"
-                       "\"output_available\":%s}",
+                       "\"output_available\":%s,"
+                       "\"noise_active\":%s,\"noise_colour\":\"%s\","
+                       "\"noise_level\":%d,\"noise_remaining_seconds\":%ld}",
                        audio->volume, audio->gain, audio->notification_volume,
                        audio->muted ? "true" : "false",
                        audio->startup_sound ? "true" : "false",
                        audio->amplifier_on ? "true" : "false",
-                       audio->output_available ? "true" : "false");
+                       audio->output_available ? "true" : "false",
+                       audio->noise_pid > 0 ? "true" : "false",
+                       noise_colour_name(audio->noise_colour),
+                       audio->noise_level, noise_remaining(audio));
         return response_ok(response, response_size, id, data);
     }
     if (!strcmp(command, "set_volume")) {
@@ -1479,6 +1555,7 @@ static int handle_request(struct audio_hw *audio, char *message,
         long level = 40, minutes = 0;
         int colour;
 
+        reap_noise(audio);
         (void)json_string(message, "colour", colour_name, sizeof(colour_name));
         (void)json_long(message, "level", &level);
         (void)json_long(message, "minutes", &minutes);

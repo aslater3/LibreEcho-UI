@@ -795,6 +795,12 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
     if (json_get_bool(response, "startup_sound", &v) > 0) { o->startup_sound = v; found = 1; }
     if (json_get_bool(response, "amplifier_on", &v) > 0) { o->amplifier_on = v; found = 1; }
     if (json_get_bool(response, "output_available", &v) > 0) { o->output_available = v; found = 1; }
+    strcpy(o->noise_colour, "white");
+    o->noise_remaining_seconds = -1;
+    if (json_get_bool(response, "noise_active", &v) > 0) { o->noise_active = v; found = 1; }
+    if (json_get_int(response, "noise_level", &v) > 0) o->noise_level = v;
+    if (json_get_int(response, "noise_remaining_seconds", &v) > 0) o->noise_remaining_seconds = v;
+    (void)json_get_string(response, "noise_colour", o->noise_colour, sizeof(o->noise_colour));
     {
         const char *path = getenv("LE_TTS_VOICE_FILE");
         FILE *voice_file;
@@ -1218,6 +1224,29 @@ static int wake_set(struct le_backend *b, const char *word)
     json_escape(escaped, sizeof(escaped), word);
     if (snprintf(args, sizeof(args), "{\"word\":\"%s\"}", escaped) >= (int)sizeof(args)) return LE_INVALID;
     return adapter_json_command(LE_ADAPTER_WAKEWORD_SOCK, "set_word", args);
+}
+
+static int noise_start(struct le_backend *b, const char *colour, int level,
+                       int minutes)
+{
+    char args[128];
+
+    (void)b;
+    if (!colour || (strcmp(colour, "white") && strcmp(colour, "pink") &&
+                    strcmp(colour, "brown")))
+        return LE_INVALID;
+    if (level < 1 || level > 100 || minutes < 0 || minutes > 600)
+        return LE_INVALID;
+    snprintf(args, sizeof(args),
+             "{\"colour\":\"%s\",\"level\":%d,\"minutes\":%d}",
+             colour, level, minutes);
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "noise_start", args);
+}
+
+static int noise_stop(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "noise_stop", NULL);
 }
 
 static int sensitivity(struct le_backend *b, int value)
@@ -1652,6 +1681,7 @@ static void destroy(struct le_backend *b)
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
+    noise_start, noise_stop,
     led, colour, brightness, visualizer_enabled, boot_led, led_profile, night,
     led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,
