@@ -245,6 +245,67 @@ static int apply_mixer_setting(const char *mixer_bin,
 }
 
 /*
+ * Post-mixdown digital gain for the calibrated mono stream.
+ *
+ * The analogue PGA cannot reach the level the wake model needs.  Scoring
+ * the device's own capture through the openwakeword alexa_v0.1 model, the
+ * stream peaks at 0.41 against a 0.45 accept gate with one supporting
+ * frame where two are required -- a near miss on every attempt.  The same
+ * audio amplified scores 0.70 at three times and 0.80 at six, both of
+ * which fire.  Raising the PGA further does not work: measured on
+ * hardware, MICPGA 110 is about seven times quieter than 80, so the
+ * control is not monotonic across its nominal range.
+ *
+ * Applying the gain here instead reproduces exactly what was measured,
+ * and it lands on both consumers of this stream -- the wake detector and
+ * speech recognition, which was transcribing single characters from the
+ * same too-quiet audio.
+ *
+ * Digital gain does not improve signal to noise; it scales both.  That is
+ * fine for a level-sensitive model, but it means any VAD floor configured
+ * against the old level has to scale with it, or end-of-speech detection
+ * breaks in the way it did before.
+ */
+#define MIC_DIGITAL_GAIN_UNITY 100U
+#define MIC_DIGITAL_GAIN_DEFAULT 400U
+#define MIC_DIGITAL_GAIN_MAX 1600U
+
+static unsigned int digital_gain_from_environment(void)
+{
+    const char *text = getenv("LE_MIC_DIGITAL_GAIN");
+    char *end;
+    unsigned long parsed;
+
+    if (!text || !text[0])
+        return MIC_DIGITAL_GAIN_DEFAULT;
+    errno = 0;
+    parsed = strtoul(text, &end, 10);
+    if (errno || *end || parsed < MIC_DIGITAL_GAIN_UNITY ||
+        parsed > MIC_DIGITAL_GAIN_MAX)
+        return MIC_DIGITAL_GAIN_DEFAULT;
+    return (unsigned int)parsed;
+}
+
+static void apply_digital_gain(int16_t *samples, size_t count,
+                               unsigned int gain_hundredths)
+{
+    size_t i;
+
+    if (gain_hundredths == MIC_DIGITAL_GAIN_UNITY)
+        return;
+    for (i = 0; i < count; ++i) {
+        int32_t scaled = (int32_t)((samples[i] * (int32_t)gain_hundredths) /
+                                   (int32_t)MIC_DIGITAL_GAIN_UNITY);
+
+        if (scaled > INT16_MAX)
+            scaled = INT16_MAX;
+        else if (scaled < INT16_MIN)
+            scaled = INT16_MIN;
+        samples[i] = (int16_t)scaled;
+    }
+}
+
+/*
  * Map the owner's 0..100 microphone gain onto the codec's MICPGA control.
  *
  * The four MICPGA volumes were fixed at 40, and configure_capture_path()
@@ -254,7 +315,11 @@ static int apply_mixer_setting(const char *mixer_bin,
  * that reason, whatever order the daemons started in.
  *
  * 50 maps to 40 so an unconfigured device keeps exactly the level it had,
- * and the scale runs to 110 -- about 55 dB -- at 100.  The upper half only
+ * and the scale runs to 80 at 100.  Do not raise this ceiling: measured on
+ * hardware, MICPGA 110 produces a noise floor about seven times *lower*
+ * than 80, so the control is not monotonic across its nominal range and a
+ * higher number is not a higher gain.  Level beyond this comes from the
+ * digital stage above.  The upper half only
  * became usable once the 24-bit capture scaling was fixed; before that the
  * stream saturated regardless of any gain.
  *
@@ -266,7 +331,7 @@ static int apply_mixer_setting(const char *mixer_bin,
  * was being recognised all along and simply arriving too quiet.
  */
 #define MICPGA_DEFAULT_VOLUME 40
-#define MICPGA_MAX_VOLUME 110
+#define MICPGA_MAX_VOLUME 80
 
 static int micpga_volume_from_environment(void)
 {
@@ -532,6 +597,7 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
     int pipe_fds[2];
     pid_t capture;
     ssize_t count = 0;
+    unsigned int digital_gain = digital_gain_from_environment();
     int result = -1;
 
     if (pipe(pipe_fds) < 0)
@@ -565,6 +631,7 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
             le_voice_process_beamformed_interleaved(
                 input, frames, &calibration, &beamformer,
                 &highpass, output);
+            apply_digital_gain(output, frames, digital_gain);
             if (write_all(client_fd, output,
                           frames * sizeof(output[0])) < 0)
                 break;
