@@ -42,13 +42,21 @@ CI workflow. A host/mock pass does not prove target hardware behavior.
 
 ## Pull requests
 
-Describe the evidence boundary explicitly:
+Branching, PR, and versioning rules are defined in
+[`AGENTS.md`](AGENTS.md) under "Branching, Pull Requests, and Versioning" and
+apply to every PR in this repository. In particular:
 
-- source implementation;
-- host build/tests;
-- image packaging, if applicable;
-- target/service readiness;
-- real hardware or external-client acceptance.
+- Feature branches target the active major release branch; fix branches target
+  the active minor release branch; release branches merge into `main` when
+  release-ready.
+- Every PR declares `Release impact:` and `Release note:` and keeps the
+  `VERSION` file consistent with the release it targets.
+- Describe the evidence boundary explicitly:
+  - source implementation;
+  - host build/tests;
+  - image packaging, if applicable;
+  - target/service readiness;
+  - real hardware or external-client acceptance.
 
 Use redacted examples only. Do not include secrets or unredacted device logs.
 See [`SECURITY.md`](SECURITY.md) for sensitive reports.
