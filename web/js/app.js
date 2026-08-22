@@ -447,6 +447,13 @@ const SIM_PHRASES=[
  ['Wake word only','Alexa'],
  ['False start','Alexa, uh, set a timer'],
  ['Self-correction','Alexa, set a five, no, ten minute timer'],
+ /* Three ways to ask for one named station. The device matches a station by
+    its configured word, so these vary where that word sits in the sentence:
+    buried mid-phrase, alone, and trailing. Each cleans up after itself, so
+    they are safe to run ahead of the ordered pair below. */
+ ['Play a named station','Alexa, play classical radio',simRadioSay('classical')],
+ ['Named station alone','Alexa, classical',simRadioSay('classical')],
+ ['Play a named station, short','Alexa, play classical',simRadioSay('classical')],
  /* An ordered pair, and last on purpose: the first half leaves a station
     playing and the second half is the only thing that stops it. See the
     block below simRun for what the two halves actually measure. */
@@ -665,6 +672,43 @@ function simHistoryAmend(entry){
 async function simRadioCleanup(){
  await api('/integrations/radio/stop',{method:'POST',body:'{}'}).catch(()=>null);
  return simRadioAwait(w=>w.playing!==true,8);}
+/*
+ * "Play <station>" by name. Unlike simRadioStart this never falls back to the
+ * API: the question is whether speech alone reaches the player, and a fallback
+ * would record the same "playing" for a device that ignored the phrase
+ * entirely. It also checks which stream came up -- "play classical" that
+ * starts FIP is a failure, and matching on playing alone would call it a pass.
+ */
+function simRadioSay(word){
+ return async function(phrase,cap,onStatus){
+  const r=await api('/integrations/radio').catch(()=>null);
+  const stations=Array.isArray(r&&r.stations)?r.stations:[];
+  const station=stations.find(x=>String(x.word||'').toLowerCase()===word)||null;
+  const before=await simRadioWitness();
+  const entry=await simRun(phrase,cap,onStatus);
+  entry.radio_station=word; entry.radio_started_by=null; entry.radio_playing=false;
+  if(!r||r.playback_supported===false||!station){
+   entry.radio_status=!r?'radio unavailable':r.playback_supported===false?
+     'no stream player on this image':'no \u201c'+word+'\u201d station configured';
+   simHistoryAmend(entry); return entry;}
+  if(before.playing===true){
+   /* Something was already streaming, so nothing this turn does can be told
+      apart from it. Say so rather than crediting the phrase. */
+   entry.radio_status='inconclusive \u2014 a stream was already playing';
+   const left=await simRadioCleanup();
+   state.simRadio={playing:left.playing===true};
+   simHistoryAmend(entry); return entry;}
+  const w=await simRadioAwait(x=>x.playing===true,SIM_RADIO_TICKS);
+  entry.radio_playing=w.playing===true; entry.radio_url=w.url; entry.amplifier_on=w.amplifier_on;
+  if(!entry.radio_playing)entry.radio_status='did not start';
+  else{entry.radio_started_by='voice';
+       entry.radio_status=station.url&&w.url&&w.url!==station.url?
+         'started, but not \u201c'+word+'\u201d':'playing (voice)';}
+  /* Left playing, it would put music under every later phrase in the sweep. */
+  const after=await simRadioCleanup();
+  entry.radio_playing_after=after.playing;
+  state.simRadio={playing:after.playing===true};
+  simHistoryAmend(entry); return entry;};}
 async function simRadioStart(phrase,cap,onStatus){
  const r=await api('/integrations/radio').catch(()=>null);
  const station=simRadioDefault(r);
