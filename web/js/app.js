@@ -676,10 +676,10 @@ function bindRadio(r){
     save button starts enabled; a list that came from the device is not. */
  if(!stations.length)save.disabled=false;
  validate();}
-async function radioPanel(){
- if($('.radio-stations',content))return;
+async function radioPanel(host){
+ if($('.radio-stations',host))return;
  const r=await api('/integrations/radio').catch(e=>({unsupported:e.message}));
- const host=$('.integration-grid',content)||content;
+ if(!host.isConnected)return;
  host.insertAdjacentHTML('beforeend',collapsiblePanel('Internet radio',radioPanelBody(r),'radio-stations wide',true));
  bindRadio(r);}
 /*
@@ -688,15 +688,27 @@ async function radioPanel(){
  * address at all. Add it here, high on the page, when the renderer that ran
  * did not already produce one.
  */
-async function homeLocationPanel(){
- if($('.weather-provider',content))return;
+async function homeLocationPanel(host){
+ if($('.weather-provider',host))return;
  const a=await api('/assistant').catch(e=>({unsupported:e.message}));
  const card=weatherCard(a);
- if(!card)return;
- const anchor=$('.voice-assistants',content),host=$('.integration-grid',content)||content;
+ if(!card||!host.isConnected)return;
+ const anchor=$('.voice-assistants',host);
  if(anchor)anchor.insertAdjacentHTML('afterend',card);else host.insertAdjacentHTML('afterbegin',card);
  bindWeather(a);}
-async function integrationsExtras(){await homeLocationPanel();await radioPanel()}
+/*
+ * Both panels fetch before they insert, and a re-render can start during that
+ * fetch -- the sign-in poll on this page does exactly that. Two invocations
+ * would then both see no panel and both append one. Claim the grid
+ * synchronously, before the first await, and drop the result if the grid it
+ * was meant for has since been replaced.
+ */
+async function integrationsExtras(){
+ const grid=$('.integration-grid',content),host=grid||content;
+ if(!host)return;
+ if(grid){if(grid.dataset.extras)return;grid.dataset.extras='1'}
+ await homeLocationPanel(host);
+ await radioPanel(host);}
 /*
  * The Integrations page is rendered by integrations-ui.js, which loads after
  * this file and replaces the integrationsPage defined below. Its own handlers
