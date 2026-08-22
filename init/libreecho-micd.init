@@ -14,7 +14,31 @@ PIDFILE=${PIDFILE:-/var/run/libreecho-micd.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-micd.log}
 SOCKET=${SOCKET:-/run/libreecho/mic.sock}
 CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
+CAPTURE_MUX=${CAPTURE_MUX:-/usr/local/sbin/libreecho-capture-mux}
+CAPTURE_BIN=${CAPTURE_BIN:-/sbin/tinycap}
+MIC_INJECT_DIR=${MIC_INJECT_DIR:-/run/libreecho/mic-inject}
 ARGS=${ARGS:---foreground --socket $SOCKET}
+
+# The mux forwards the codec unchanged, and substitutes rendered audio for it
+# on request without ever ending the stream. That last part is not a nicety:
+# waked connects to micd's mono stream once, has no reconnect path, and its
+# init has no supervisor, so anything that ends the stream costs the device its
+# wake word until something restarts waked by hand.
+#
+# Fall back to the codec if the mux is missing. A capture path that does not
+# start is far worse than losing the ability to inject test audio, so the mux
+# is only used when it is actually present and executable.
+select_capture_path() {
+    if [ -x "$CAPTURE_MUX" ]; then
+        mkdir -p "$MIC_INJECT_DIR"
+        LE_CAPTURE_MUX_BIN=$CAPTURE_BIN
+        LE_CAPTURE_MUX_CONTROL_DIR=$MIC_INJECT_DIR
+        export LE_CAPTURE_MUX_BIN LE_CAPTURE_MUX_CONTROL_DIR
+        printf '%s\n' "$CAPTURE_MUX"
+    else
+        printf '%s\n' "$CAPTURE_BIN"
+    fi
+}
 
 config_number() {
     key=$1
@@ -48,6 +72,7 @@ start_service() {
     if is_running; then echo "libreecho-micd already running"; return 0; fi
     export_capture_gain
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
+    ARGS="$ARGS --capture-bin $(select_capture_path)"
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else

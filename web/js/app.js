@@ -1,8 +1,8 @@
 'use strict';
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
 const state={page:'Overview',csrf:'',token:sessionStorage.getItem('libreecho-token')||'',username:sessionStorage.getItem('libreecho-username')||'',authMode:'development-disabled',timer:null,data:{},busy:false};
-const items=[['Overview','home'],['Device','device'],['Users','shield'],['Audio','audio'],['Baby Monitor','mic'],['Wake Word','mic'],['LED & Buttons','sun'],['Network','wifi'],['Bluetooth','bluetooth'],['Privacy','shield'],['Integrations','puzzle'],['System','gear'],['Logs','log'],['About','info']];
-const descriptions={Overview:'Your LibreEcho at a glance',Device:'Identity, hardware and power controls',Users:'Manage local accounts and access',Audio:'Playback, microphone and volume controls','Baby Monitor':'Listen to selected microphones locally','Wake Word':'Configure local wake-word detection','LED & Buttons':'Customise light-ring behaviour and controls',Network:'Wi-Fi, addressing and connectivity',Bluetooth:'Scan, pair and manage nearby devices',Privacy:'Local processing and data retention controls',Integrations:'Connect services and home automation',System:'Updates, backup and advanced settings',Logs:'Diagnostics and troubleshooting',About:'Project, licences and version information'};
+const items=[['Overview','home'],['Device','device'],['Users','shield'],['Audio','audio'],['Baby Monitor','mic'],['Wake Word','mic'],['Simulation','mic'],['LED & Buttons','sun'],['Network','wifi'],['Bluetooth','bluetooth'],['Privacy','shield'],['Integrations','puzzle'],['System','gear'],['Logs','log'],['About','info']];
+const descriptions={Overview:'Your LibreEcho at a glance',Device:'Identity, hardware and power controls',Users:'Manage local accounts and access',Audio:'Playback, microphone and volume controls','Baby Monitor':'Listen to selected microphones locally','Wake Word':'Configure local wake-word detection',Simulation:'Speak test phrases into the microphone path','LED & Buttons':'Customise light-ring behaviour and controls',Network:'Wi-Fi, addressing and connectivity',Bluetooth:'Scan, pair and manage nearby devices',Privacy:'Local processing and data retention controls',Integrations:'Connect services and home automation',System:'Updates, backup and advanced settings',Logs:'Diagnostics and troubleshooting',About:'Project, licences and version information'};
 const nav=$('#nav'),content=$('#content');
 document.body.classList.add('auth-pending');
 function esc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
@@ -268,6 +268,67 @@ async function babyMonitorPage(){
   };
   $('#baby-stop').onclick=stopBabyStream;
 }
+
+/*
+ * Simulation: render a phrase with the device's own TTS and play it into the
+ * capture path, so wake, STT and the assistant see it exactly as if it had
+ * been spoken in the room. The capture mux substitutes it for the microphones
+ * without interrupting the stream, so nothing has to be restarted and the wake
+ * daemon -- which connects to the mic stream once and never reconnects --
+ * keeps running throughout.
+ */
+const SIM_PHRASES=[
+ ['Weather now','Alexa, what is the weather?'],
+ ['Weather forecast','Alexa, what is the forecast for tomorrow?'],
+ ['Current time','Alexa, what time is it?'],
+ ['Current date','Alexa, what is the date today?'],
+ ['Set a timer','Alexa, set a timer for five minutes'],
+ ['Cancel a timer','Alexa, cancel the timer'],
+ ['Set an alarm','Alexa, set an alarm for seven in the morning'],
+ ['Play music','Alexa, play some music'],
+ ['Pause playback','Alexa, pause'],
+ ['Set volume','Alexa, set the volume to four'],
+ ['Factual question','Alexa, how tall is the Eiffel Tower?'],
+ ['Stop','Alexa, stop'],
+ ['No wake word','What time is it?'],
+ ['Wake word only','Alexa'],
+ ['False start','Alexa, uh, set a timer'],
+ ['Self-correction','Alexa, set a five, no, ten minute timer']];
+async function simulationPage(){
+ const w=await api('/wake-word').catch(()=>({}));
+ content.innerHTML=`<div class="settings-grid">${panel('Speak a phrase',
+   `<label class="field"><span>Phrase</span><select id="sim-preset">`+
+   SIM_PHRASES.map(([l,t],i)=>`<option value="${i}">${esc(l)}</option>`).join('')+
+   `<option value="custom">Custom…</option></select></label>`+
+   field('Text','Alexa, what time is it?','sim-text')+
+   `<p class="muted">Rendered by the device's own text-to-speech and played into the microphone path. Nothing is recorded and nothing leaves the device.</p>`+
+   `<div class="button-row">${action('Speak into the microphone','sim-send','primary-btn')}</div>`+
+   `<dl class="facts"><dt>Wake word</dt><dd>${esc(w.wake_word||'—')}</dd><dt>Sensitivity</dt><dd>${w.sensitivity??'—'}</dd><dt>Detections</dt><dd id="sim-count">${w.detected_count??0}</dd></dl>`)}
+   ${panel('What happened',`<div id="sim-log" class="facts"><dt>Status</dt><dd>Nothing sent yet</dd></div>`+
+   `<p class="muted">After speaking, watch the Logs page or the light ring. A detection increments the counter above.</p>`)}</div>`;
+ const preset=$('#sim-preset'),text=$('#sim-text');
+ preset.onchange=()=>{ if(preset.value!=='custom') text.value=SIM_PHRASES[+preset.value][1]; };
+ text.oninput=()=>{ preset.value='custom'; };
+ $('#sim-send').onclick=async()=>{
+  const phrase=text.value.trim();
+  if(!phrase){toast('Enter a phrase first',true);return}
+  const log=$('#sim-log');
+  log.innerHTML='<dt>Status</dt><dd>Rendering and playing…</dd>';
+  try{
+   await api('/audio/simulate',{method:'POST',body:JSON.stringify({text:phrase})});
+   const before=+($('#sim-count').textContent||0);
+   toast('Playing into the microphone');
+   /* Give the phrase time to play and the pipeline time to react. */
+   await new Promise(r=>setTimeout(r,6000));
+   const after=await api('/wake-word').catch(()=>({}));
+   const fired=(after.detected_count??before)>before;
+   $('#sim-count').textContent=after.detected_count??before;
+   log.innerHTML='<dt>Status</dt><dd class="'+(fired?'connected':'')+'">'+
+     (fired?'Wake word detected':'No wake word detected')+'</dd>'+
+     '<dt>Phrase</dt><dd>'+esc(phrase)+'</dd>';
+  }catch(e){ log.innerHTML='<dt>Status</dt><dd>'+esc(e.message)+'</dd>'; toast(e.message,true); }
+ };
+}
 async function wakePage(){let w;try{w=await api('/wake-word')}catch(e){if(/not available|not supported/i.test(e.message)){content.innerHTML=`<div class="settings-grid">${panel('Wake-word engine',unsupported('The wake-word adapter is not installed in this image. No microphone processing is running.'))}</div>`;return}throw e}const approved=['LibreEcho','Computer','Echo','Custom model'],current=String(w.wake_word||''),wakeOptions=approved.includes(current)?approved:[current+' (current)',...approved];content.innerHTML=`<div class="settings-grid">${panel('Wake-word engine',`<dl class="facts"><dt>Detection</dt><dd class="${w.enabled?'connected':''}">${w.enabled?'Enabled':'Disabled'}</dd></dl><p class="muted">Detection enablement is reported by the live wake-word adapter and is not configurable through this API.</p>`+select('Active wake word',current,'wake-word',wakeOptions)+range('Detection sensitivity',w.sensitivity,'sensitivity')+`<dl class="facts"><dt>Detection cooldown</dt><dd>${w.cooldown_ms} ms</dd></dl>`+`<div class="button-row">${saveButton('save-wake')}${action('Simulate detection','wake-test')}</div>`)}${panel('Local processing',`<div class="privacy-callout">✓ Audio remains on this device</div><dl class="facts"><dt>Model status</dt><dd class="connected">${esc(w.model_status)}</dd><dt>Detections</dt><dd>${w.detected_count}</dd><dt>Estimated CPU cost</dt><dd>${w.cpu_cost_percent}%</dd><dt>Estimated memory cost</dt><dd>${w.memory_cost_mb} MB</dd></dl>`)}</div>`;bindRange();bindDirty(['#wake-word','#sensitivity'],'#save-wake');$('#save-wake').onclick=()=>mutate('/wake-word',{wake_word:$('#wake-word').value.replace(/ \(current\)$/,''),sensitivity:+$('#sensitivity').value},'Wake-word changes saved');$('#wake-test').onclick=()=>post('/wake-word/test',{},'Wake word detected')}
 function ledRing(l){const physical=Array.isArray(l.pixels)&&l.pixels.length===12,colours=physical?l.pixels:Array.from({length:24},()=>l.colour),count=colours.length,opacity=physical?1:Math.max(0,Math.min(1,Number(l.brightness??0)/100));const dots=colours.map((colour,i)=>{const angle=(i/count)*Math.PI*2-Math.PI/2,x=50+38*Math.cos(angle),y=50+38*Math.sin(angle);return `<circle class="led-pixel" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${physical?'6.4':'5.5'}" fill="${rgb(colour)}" opacity="${opacity.toFixed(2)}"></circle>`}).join('');const label=l.pattern_active?`Pattern · ${esc(l.pattern||'pattern')}`:l.visualizer_active?`Music visualizer · ${esc(l.visualizer_mood||'balanced')}`:l.animation_active?`Animating · ${esc(l.animation_profile||'profile')}`:'Steady',moving=l.animation_active||l.pattern_active;return `<div class="led-ring-view${moving?' animating':''}${l.visualizer_active?' reactive':''}" role="img" aria-label="${esc(label)} LED ring"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="led-ring-track" cx="50" cy="50" r="38"></circle>${dots}<circle class="led-ring-centre" cx="50" cy="50" r="24"></circle></svg><span>${esc(label)}</span></div>`}
 function updateLedVisual(l){const ring=$('.led-ring-view');if(ring)ring.outerHTML=ledRing(l);const preview=$('.led-preview');if(preview)preview.style.setProperty('--led',rgb(l.colour))}
@@ -331,7 +392,7 @@ async function systemPage(){
 }
 async function logsPage(){const [l,d]=await Promise.all([api('/logs'),api('/diagnostics')]);const clock=l.entries.some(x=>Number(x.timestamp)<1577836800)?'Device clock unset; relative boot time is shown where available':'Device clock available';content.innerHTML=`${panel('Service logs',`<div class="log-toolbar"><input id="log-filter" placeholder="Filter logs" aria-label="Filter logs">${action('Refresh','log-refresh')}</div><div class="log-viewer" id="log-viewer">${l.entries.length?l.entries.map(x=>`<div data-log="${esc(x.message.toLowerCase())}"><time>${logTime(x.timestamp,x.boot_seconds)}</time><span class="level ${x.level}">${x.level}</span><span>${esc(x.message)}</span></div>`).join(''):'<p class="muted">No logs available.</p>'}</div><p class="muted">Source: ${esc(l.source||'web-memory')}; bounded to ${l.capacity} entries. ${clock}. Relative time is from boot; secrets are redacted before logging.</p>`)}<div class="settings-grid diagnostics">${panel('Diagnostic checks',d.checks.map(x=>`<div class="status-line"><span class="status-dot ${x.status==='ok'?'ok':''}"></span><span>${esc(x.name)}</span><strong>${esc(x.status)}</strong></div>`).join(''))}${panel('Mock fault injection',state.data.status?.simulated?`<p class="muted">Use <code>tools/mockctl.sh</code> with <code>--dev-controls</code> to inject deterministic faults.</p>${action('Fail next Wi-Fi scan','fail-wifi','danger-btn')}`:unsupported('Fault injection is only available in mock development builds.'))}</div>`;$('#log-filter').oninput=e=>$$('[data-log]').forEach(x=>x.hidden=!x.dataset.log.includes(e.target.value.toLowerCase()));$('#log-refresh').onclick=render;if($('#fail-wifi'))$('#fail-wifi').onclick=()=>post('/dev/mock',{action:'fail-next',value:'wifi-scan'},'Next Wi-Fi scan will fail')}
 function aboutPage(){content.innerHTML=`<div class="settings-grid">${panel('LibreEcho',`<img class="about-mark" src="/assets/mark.svg" alt="LibreEcho mark"><p>Open source voice-assistant software built for privacy, repairability and local control.</p><dl class="facts"><dt>Web API</dt><dd>v1</dd><dt>Frontend</dt><dd>Dependency-free HTML, CSS and JavaScript</dd><dt>Daemon</dt><dd>Portable C99</dd><dt>Licence</dt><dd>MIT</dd></dl>`)}${panel('Hardware independence',`<p class="muted">The same frontend API works with both the realistic mock backend and the conservative Linux hardware adapter.</p><div class="privacy-callout">Open. Private. Yours.</div>`)}</div>`}
-async function render(){clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations')await integrationsPage();else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000)}
+async function render(){clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations')await integrationsPage();else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000)}
 function showPage(name,updateRoute=true){if(!descriptions[name])name='Overview';if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();state.page=name;if(updateRoute&&location.pathname!=='/'+pageSlug(name))history.pushState(null,'','/'+pageSlug(name));$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===name));$('#page-title').textContent=name;$('#page-subtitle').textContent=descriptions[name];document.title=`${name} · LibreEcho`;document.body.classList.remove('nav-open');render()}
 items.forEach(([name,icon],i)=>{const b=document.createElement('button');b.className='nav-item'+(i?'':' active');b.dataset.page=name;b.innerHTML=`<svg><use href="#${icon}"></use></svg><span>${name}</span>`;b.onclick=()=>showPage(name);nav.appendChild(b)});
 $('#reboot').onclick=()=>power('reboot','Reboot');$('#theme').onclick=()=>{const light=document.body.classList.toggle('light');localStorage.setItem('libreecho-theme',light?'light':'dark');$('#theme').textContent=light?'☾':'☼'};$('#menu').onclick=()=>document.body.classList.toggle('nav-open');

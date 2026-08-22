@@ -1226,6 +1226,30 @@ static int wake_set(struct le_backend *b, const char *word)
     return adapter_json_command(LE_ADAPTER_WAKEWORD_SOCK, "set_word", args);
 }
 
+/*
+ * Render a phrase and leave it where the capture mux will pick it up. The mux
+ * plays it into the pipeline in place of the microphones without interrupting
+ * the stream, so wake, STT and the assistant see it exactly as if it had been
+ * spoken in the room.
+ */
+static int simulate_audio(struct le_backend *b, const char *text)
+{
+    char args[1024], escaped[768];
+
+    (void)b;
+    if (!text || !text[0])
+        return LE_INVALID;
+    if (strlen(text) >= sizeof(escaped) / 2)
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), text);
+    if (mkdir("/run/libreecho/mic-inject", 0755) < 0 && errno != EEXIST)
+        return LE_IO;
+    snprintf(args, sizeof(args),
+             "{\"text\":\"%s\",\"path\":\"%s\"}",
+             escaped, "/run/libreecho/mic-inject/pending.raw");
+    return adapter_json_command(LE_ADAPTER_TTS_SOCK, "render", args);
+}
+
 static int noise_start(struct le_backend *b, const char *colour, int level,
                        int minutes)
 {
@@ -1681,7 +1705,7 @@ static void destroy(struct le_backend *b)
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
-    noise_start, noise_stop,
+    noise_start, noise_stop, simulate_audio,
     led, colour, brightness, visualizer_enabled, boot_led, led_profile, night,
     led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,

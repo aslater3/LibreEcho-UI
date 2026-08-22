@@ -793,6 +793,17 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  if(!strcmp(p,"/api/v1/audio/test")&&!strcmp(q->method,"POST")){rc=le_play_test_tone(c->backend);if(rc)err(r,501,rc,"Test tone could not be played");else ok(r,"{\"playing\":true}");return;}
  if(!strcmp(p,"/api/v1/audio/announce")&&!strcmp(q->method,"POST")){char text[512];if(json_get_string(q->body,"text",text,sizeof(text))<1){err(r,400,LE_INVALID,"Text is required");return;}rc=le_announce(c->backend,text);if(rc)err(r,rc==LE_INVALID?400:501,rc,"Announcement could not be spoken");else{api_log(c,"info","Announcement spoken");ok(r,"{\"speaking\":true}");}return;}
  if(!strcmp(p,"/api/v1/audio/announce/stop")&&!strcmp(q->method,"POST")){rc=le_stop_speech(c->backend);if(rc)err(r,501,rc,"Speech could not be stopped");else ok(r,"{\"speaking\":false}");return;}
+
+ if(!strcmp(p,"/api/v1/audio/simulate")&&!strcmp(q->method,"POST")){
+  char text[512];
+  if(json_get_string(q->body,"text",text,sizeof(text))<1||!text[0]){err(r,400,LE_INVALID,"text is required");return;}
+  rc=le_simulate_audio(c->backend,text);
+  if(rc){err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,
+             rc==LE_INVALID?"text is empty or too long":
+             rc==LE_NOT_SUPPORTED?"Audio simulation is not available on this image":
+             "The phrase could not be rendered");return;}
+  api_log(c,"info","Simulated audio queued for the microphone path");
+  ok(r,"{\"queued\":true}");return;}
  if(!strcmp(p,"/api/v1/audio/noise")){
   if(!strcmp(q->method,"POST")){
    char colour[16]="white";int level=40,minutes=0;
