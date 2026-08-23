@@ -16,6 +16,8 @@ of each segment is exact, needs no alignment, and cannot drift.
 """
 import argparse, array, json, math, struct, sys, wave
 
+MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+
 
 def segments(samples, rate, count, floor_ratio=0.15):
     """Split a stepped-tone recording into its tones.
@@ -61,9 +63,53 @@ def read_wav_mono(path):
 
 def read_raw_s16(path):
     with open(path, 'rb') as fh:
-        raw = fh.read()
+        raw = fh.read(MAX_CAPTURE_BYTES + 1)
+    if len(raw) > MAX_CAPTURE_BYTES:
+        raise SystemExit("capture exceeds %d-byte artifact limit" % MAX_CAPTURE_BYTES)
     n = len(raw) // 2
     return list(struct.unpack("<%dh" % n, raw[:n * 2]))
+
+
+def estimate_impulse_latency(source, captured, rate, source_index=None,
+                             response_window=65, capture_lead_samples=0):
+    """Find the marked impulse in the captured software stream.
+
+    The marker makes this a bounded stream-alignment measurement, not an
+    acoustic speaker/microphone latency claim.  A coarse onset locates the
+    capture window, then the peak is selected only around the known marker.
+    """
+    if not source or not captured:
+        raise ValueError("source and capture must contain samples")
+    if source_index is None:
+        source_index = max(range(len(source)), key=lambda i: abs(source[i]))
+    if source_index < 0 or source_index >= len(source):
+        raise ValueError("source impulse index is outside the source")
+    source_peak = abs(source[source_index])
+    if source_peak == 0:
+        raise ValueError("source impulse must be non-zero")
+    threshold = max(1, source_peak // 4)
+    source_onset = next((i for i, v in enumerate(source)
+                         if abs(v) >= threshold), source_index)
+    capture_threshold = max(1, threshold)
+    capture_onset = next((i for i, v in enumerate(captured)
+                          if abs(v) >= capture_threshold), None)
+    if capture_onset is None:
+        raise ValueError("capture does not contain the impulse marker")
+    coarse = capture_onset - source_onset
+    radius = max(1, rate // 20)
+    expected = source_index + coarse
+    lo = max(0, expected - radius)
+    hi = min(len(captured), expected + radius + 1)
+    observed_index = max(range(lo, hi), key=lambda i: abs(captured[i]))
+    half = response_window // 2
+    response = captured[max(0, observed_index - half):
+                        min(len(captured), observed_index + half + 1)]
+    latency = observed_index - source_index - capture_lead_samples
+    return {"latency_samples": latency,
+            "latency_ms": latency * 1000.0 / rate,
+            "source_impulse_index": source_index,
+            "captured_impulse_index": observed_index,
+            "response_samples": response}
 
 
 def main():
@@ -119,8 +165,23 @@ def main():
         print("    %7.1f Hz  %+6.1f dB  %s%s" % (f, rel, bar, flag))
         out.append({"hz": f, "rel_db": round(rel, 2)})
 
+    capture_lead_samples = int(round(
+        float(meta.get("capture_lead_ms", 0)) * rate / 1000.0
+    ))
+    impulse = estimate_impulse_latency(
+        src, cap, rate, meta.get("impulse_index"),
+        capture_lead_samples=capture_lead_samples,
+    )
+    print("  software stream impulse: %+d samples (%.3f ms)"
+          % (impulse["latency_samples"], impulse["latency_ms"]))
     if args.json:
-        json.dump({"reference_db": round(ref, 2), "points": out},
+        json.dump({"evidence_class": "software_capture_chain",
+                   "acoustic_path_measured": False,
+                   "hardware_acceptance": "not_measured",
+                   "measurement_band_hz": [min(meta["freqs"]),
+                                           max(meta["freqs"])],
+                   "reference_db": round(ref, 2), "points": out,
+                   "impulse_response": impulse},
                   open(args.json, "w"), indent=2)
     if worst:
         print("  FAIL: passband deviates by %.1f dB" % worst)

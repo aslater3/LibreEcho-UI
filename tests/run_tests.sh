@@ -45,6 +45,7 @@ python3 tests/test_wake_word_ui_contract.py
 python3 tools/test_virtual_echo.py
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
+python3 tests/voice-e2e/test_audio_quality.py
 sh tests/test_device_identity.sh
 # The CPU online-mask fixture requires a Linux sysfs-shaped runtime and is run
 # separately; keep the aggregate suite deterministic across CI runners.
