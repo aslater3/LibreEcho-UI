@@ -24,6 +24,13 @@ checks = {
         'recompute_capabilities(ctx);' in buttond[buttond.index('static void remove_device'):],
     'buttond wakes idle devices for heartbeat':
         'buttond_poll_timeout_ms' in buttond and 'next_status_ms' in buttond,
+    'buttond waits for repeat deadline':
+        'buttond_repeat_due' in buttond and
+        '!ready && buttond_repeat_due' in buttond,
+    'buttond rescans without duplicating watched devices':
+        'device_path_watched' in buttond and
+        'if (ctx.rescan_requested || monotonic_ms() >= next_rescan_ms)' in buttond and
+        'if (!ctx.device_count &&' not in buttond,
     'buttond reports disconnected/unavailable state':
         'state=%s' in buttond and 'write_capability_status(ctx)' in buttond,
     'API rejects stale capability state':

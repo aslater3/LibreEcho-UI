@@ -64,6 +64,7 @@
 struct device {
     int fd;
     char name[64];
+    char path[286];
     int volume_capable;
     int mute_capable;
 };
@@ -134,6 +135,16 @@ static void recompute_capabilities(struct context *ctx)
     }
 }
 
+static int device_path_watched(const struct context *ctx, const char *path)
+{
+    size_t i;
+
+    for (i = 0; i < ctx->device_count; i++)
+        if (!strcmp(ctx->devices[i].path, path))
+            return 1;
+    return 0;
+}
+
 static int device_is_interesting(int fd, char *name, size_t name_size,
                                  int *volume_capable, int *mute_capable)
 {
@@ -187,6 +198,8 @@ static void discover(struct context *ctx)
         if (snprintf(path, sizeof(path), "%s/%s", INPUT_DIR, entry->d_name) >=
             (int)sizeof(path))
             continue;
+        if (device_path_watched(ctx, path))
+            continue;
         fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0) {
             le_log_debug("buttond: %s not readable: %s", path,
@@ -201,6 +214,8 @@ static void discover(struct context *ctx)
         ctx->devices[ctx->device_count].fd = fd;
         snprintf(ctx->devices[ctx->device_count].name,
                  sizeof(ctx->devices[ctx->device_count].name), "%s", name);
+        snprintf(ctx->devices[ctx->device_count].path,
+                 sizeof(ctx->devices[ctx->device_count].path), "%s", path);
         ctx->devices[ctx->device_count].volume_capable = volume_capable;
         ctx->devices[ctx->device_count].mute_capable = mute_capable;
         ctx->device_count++;
@@ -463,13 +478,14 @@ int main(int argc, char **argv)
             write_capability_status(&ctx);
             next_status_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
         }
-        if (!ready && ctx.held_key) {
+        if (!ready && buttond_repeat_due(monotonic_ms(),
+                                         ctx.next_repeat_ms,
+                                         ctx.held_key)) {
             handle_key(&ctx, ctx.held_key, 2);
             ctx.next_repeat_ms = monotonic_ms() + REPEAT_INTERVAL_MS;
             continue;
         }
-        if (!ctx.device_count &&
-            (ctx.rescan_requested || monotonic_ms() >= next_rescan_ms)) {
+        if (ctx.rescan_requested || monotonic_ms() >= next_rescan_ms) {
             ctx.rescan_requested = 0;
             discover(&ctx);
             next_rescan_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
