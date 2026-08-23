@@ -35,6 +35,13 @@ checks = {
         'audio_retention_hours' in ui and
         'audio_retention_max_mb' in ui and
         "audio_remote_url:$('#audio-retention-destination').value" in ui,
+    'legacy retention flag is local-only for downgrade safety':
+        'strcmp(c->privacy_audio_mode,"local")' in api_c,
+    'partial URL clearing is checked against effective remote mode':
+        'effective_mode' in api_c and 'effective_remote_url' in api_c,
+    'Retention panel Save persists log retention':
+        "$('#save-retention').onclick=async()=>" in ui and
+        "log_retention_hours:parseInt($('#retention').value,10)" in ui,
     'UI surfaces unavailable remote transport':
         'transport unavailable' in ui.lower(),
     'OpenAPI and API docs describe the contract':
