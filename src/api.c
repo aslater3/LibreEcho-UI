@@ -18,6 +18,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <sys/ioctl.h>
+#include <linux/input.h>
 #include <sys/mount.h>
 #include <sys/klog.h>
 #include <fcntl.h>
@@ -1205,6 +1207,43 @@ static void usb_storage_json(struct api_context*c,const struct api_request*q,str
  * and the UI polls constantly, so the first request past the window applies it.
  * If nothing ever asks, nothing is using the device either.
  */
+/*
+ * The escape hatch: hold any button during the boot window to keep the port in
+ * device mode and forget the stored preference.
+ *
+ * Host mode costs ADB, and the preference now survives reboots, so a careless
+ * toggle could leave a device that comes up unreachable every time. This runs
+ * in the same daemon that applies the preference, so the hatch is available
+ * exactly whenever the risk is -- if this process is not running, nothing
+ * switches the port either.
+ *
+ * EVIOCGKEY reads the current key state directly, so a held button is seen
+ * without waiting on an event stream. Clearing rather than deferring is
+ * deliberate: an override that lasted one boot could still be re-applied on the
+ * next one, which is the loop this is meant to break.
+ */
+static int boot_button_held(int*code_out)
+{
+ DIR*d=opendir("/dev/input");struct dirent*e;int held=0;
+ if(!d)return 0;
+ while((e=readdir(d))!=NULL&&!held){
+  char path[96];int fd;unsigned long keys[(KEY_MAX+8*sizeof(long))/(8*sizeof(long))];
+  if(strncmp(e->d_name,"event",5))continue;
+  snprintf(path,sizeof(path),"/dev/input/%s",e->d_name);
+  fd=open(path,O_RDONLY|O_NONBLOCK|O_CLOEXEC);
+  if(fd<0)continue;
+  memset(keys,0,sizeof(keys));
+  if(ioctl(fd,EVIOCGKEY(sizeof(keys)),keys)>=0){
+   size_t i,bit;
+   for(i=0;i<sizeof(keys)/sizeof(keys[0])&&!held;i++)
+    for(bit=0;keys[i]&&bit<8*sizeof(long);bit++)
+     if(keys[i]&(1UL<<bit)){held=1;if(code_out)*code_out=(int)(i*8*sizeof(long)+bit);break;}
+  }
+  close(fd);
+ }
+ closedir(d);
+ return held;
+}
 #define LE_USB_HOST_BOOT_HOLD_SECONDS 60
 
 static long uptime_seconds(void)
@@ -1218,10 +1257,19 @@ static long uptime_seconds(void)
 
 static void usb_host_restore(struct api_context*c)
 {
- long up;
+ long up;int code=0;
  if(c->usb_host_applied||!c->feature_usb_host)return;
  up=uptime_seconds();
- if(up<0||up<LE_USB_HOST_BOOT_HOLD_SECONDS)return;
+ if(up<0)return;
+ if(boot_button_held(&code)){
+  char detail[96];
+  c->usb_host_applied=1;c->feature_usb_host=0;
+  api_persist_configuration(c);
+  usb_role_write("device");
+  snprintf(detail,sizeof(detail),"USB storage mode cleared: button %d held during boot",code);
+  api_log(c,"warn",detail);
+  return;}
+ if(up<LE_USB_HOST_BOOT_HOLD_SECONDS)return;
  c->usb_host_applied=1;
  if(usb_role_write("host")==LE_OK)
   api_log(c,"info","USB storage mode restored after the boot window");

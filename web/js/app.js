@@ -1209,7 +1209,17 @@ async function systemPage(){
   if($('#save-features')){bindDirty(['#feature-simulation'],'#save-features');$('#save-features').onclick=async()=>{if(state.busy)return;setBusy(true);try{const saved=await api('/system/features',{method:'PUT',body:JSON.stringify({simulation:$('#feature-simulation').checked})});applyFeatures(saved);toast(saved.simulation?'Simulation enabled':'Simulation disabled');await render()}catch(e){toast(e.message,true);await render()}finally{setBusy(false)}}}
   /* Immediate, and deliberately outside the Save flow: the role is a live
      hardware switch the daemon applies now, not a stored preference. */
-  if($('#feature-usb-host'))$('#feature-usb-host').onchange=()=>mutate('/system/features',{usb_host:$('#feature-usb-host').checked},$('#feature-usb-host').checked?'USB port switched to host mode':'USB port switched to device mode');
+  /* Turning host mode on costs ADB and now survives reboots, so a stray click
+     would leave the device unreachable over USB on every boot until it is
+     turned off again. Confirm that, and say how to undo it without the UI. */
+  if($('#feature-usb-host'))$('#feature-usb-host').onchange=()=>{
+   const el=$('#feature-usb-host');
+   if(el.checked&&!confirm('Switch the USB port to storage mode?\n\n'
+     +'The port cannot be a drive reader and an ADB device at once, so ADB will stop working. '
+     +'This setting is remembered, so it applies on every boot after the first minute.\n\n'
+     +'To undo it without the UI, hold any button on the device while it boots.')){
+    el.checked=false;return}
+   mutate('/system/features',{usb_host:el.checked},el.checked?'USB port switched to host mode':'USB port switched to device mode');};
   /*
    * The drive panel. Rendered only while host mode is on, because in device
    * mode there is nothing to read and saying "no disk" would suggest a fault
