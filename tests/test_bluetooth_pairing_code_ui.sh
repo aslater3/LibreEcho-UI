@@ -9,16 +9,25 @@ python3 - <<'PY'
 from pathlib import Path
 
 ui = Path('web/js/bluetooth.js').read_text()
+html = Path('web/index.html').read_text()
 css = Path('web/css/app.css').read_text()
 
 assert 'function bluetoothPairingCode(value)' in ui
 assert 'class="pairing-code"' in ui
 assert 'class="pairing-code-value"' in ui
-assert "live.setAttribute('role','status')" in ui
+assert "live.setAttribute('role','status')" not in ui
 assert 'aria-hidden="true"' in ui
 assert 'updateBluetoothLiveRegion' in ui
+assert "const live=document.getElementById('bt-pairing-live')" in ui
+assert 'document.createElement' not in ui
+assert 'appendChild(live)' not in ui
 assert "(p.method==='confirm'||p.method==='notify')" in ui
 assert 'bluetoothPairingCode(p.value)' in ui
+
+live = '<div id="bt-pairing-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>'
+assert html.count('id="bt-pairing-live"') == 1
+assert live in html
+assert html.index(live) < html.index('<script src="/js/bluetooth.js')
 
 pairing_code = css[css.index('.pairing-code{'):]
 assert 'text-align:left' in pairing_code

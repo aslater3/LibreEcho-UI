@@ -16,8 +16,8 @@ function bluetoothPairingCode(value) {
 }
 
 function updateBluetoothLiveRegion(b) {
-  let live=document.getElementById('bt-pairing-live');
-  if(!live){live=document.createElement('div');live.id='bt-pairing-live';live.setAttribute('role','status');live.setAttribute('aria-live','polite');live.setAttribute('aria-atomic','true');live.className='sr-only';document.body.appendChild(live);}
+  const live=document.getElementById('bt-pairing-live');
+  if(!live) return;
   const p=b&&b.pending_pairing;
   const value=b&&b.pairing&&p&&p.address&&((p.method==='confirm'||p.method==='notify')&&p.value!==undefined&&p.value!==null)?`${p.method==='notify'?'Passkey notification':'Pairing confirmation'}: ${bluetoothPasskey(p.value)}`:'';
   if(live.dataset.value!==value){live.textContent=value;live.dataset.value=value;}
