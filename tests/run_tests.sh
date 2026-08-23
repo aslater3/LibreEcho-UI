@@ -12,6 +12,7 @@ make build/test-network-health build/test-gateway-probe build/test-networkd-heal
 ./build/test-bt-mgmt-events
 ./build/test-bt-pairing-events
 python3 tests/test_networkd_health_integration.py
+python3 tests/test_backend_linux_wifi_contract.py
 sh tests/test_network_liveness_contract.sh
 sh tests/test_bluetooth_pairing_contract.sh
 sh tests/test_bluetooth_io_capability_contract.sh

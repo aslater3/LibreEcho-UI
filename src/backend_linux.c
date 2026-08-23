@@ -1165,12 +1165,18 @@ static int scan(struct le_backend *b, struct le_wifi_scan *o)
 static int connect_wifi(struct le_backend *b, const struct le_wifi_credentials *credentials)
 {
     char ssid[LE_TEXT * 2], psk[sizeof(credentials->password) * 2];
-    char args[sizeof(ssid) + sizeof(psk) + 32];
+    char security[sizeof(credentials->security) * 2];
+    char args[sizeof(ssid) + sizeof(psk) + sizeof(security) + 64];
+    const char *security_value;
     (void)b;
     if (!credentials || !credentials->ssid[0]) return LE_INVALID;
+    security_value = credentials->security[0] ? credentials->security : "wpa2";
     json_escape(ssid, sizeof(ssid), credentials->ssid);
     json_escape(psk, sizeof(psk), credentials->password);
-    if (snprintf(args, sizeof(args), "{\"ssid\":\"%s\",\"psk\":\"%s\"}", ssid, psk) >= (int)sizeof(args))
+    json_escape(security, sizeof(security), security_value);
+    if (snprintf(args, sizeof(args),
+                 "{\"ssid\":\"%s\",\"psk\":\"%s\",\"security\":\"%s\"}",
+                 ssid, psk, security) >= (int)sizeof(args))
         return LE_INVALID;
     return adapter_json_command(LE_ADAPTER_NETWORK_SOCK, "connect", args);
 }
