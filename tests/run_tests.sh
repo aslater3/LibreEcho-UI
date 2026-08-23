@@ -9,6 +9,8 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/con
 make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
 ./build/test-network-health
 ./build/test-gateway-probe
+make build/test-backend-linux-wifi-emission
+./build/test-backend-linux-wifi-emission
 ./build/test-bt-mgmt-events
 ./build/test-bt-pairing-events
 python3 tests/test_networkd_health_integration.py

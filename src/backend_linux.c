@@ -390,11 +390,22 @@ static int adapter_command(const char *socket_path, const char *command,
     return result;
 }
 
+#ifdef LE_BACKEND_LINUX_TESTING
+extern int le_backend_linux_test_adapter_json_command(const char *socket_path,
+                                                       const char *command,
+                                                       const char *args);
+static int adapter_json_command(const char *socket_path, const char *command,
+                                const char *args)
+{
+    return le_backend_linux_test_adapter_json_command(socket_path, command, args);
+}
+#else
 static int adapter_json_command(const char *socket_path, const char *command,
                                 const char *args)
 {
     return adapter_command(socket_path, command, args, NULL, 0);
 }
+#endif
 
 static int read_wireless_signal(const char *iface)
 {

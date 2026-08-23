@@ -1534,11 +1534,14 @@
      }
     ],
     "requestBody": {
-     "$ref": "#/components/requestBodies/JsonObject"
+     "$ref": "#/components/requestBodies/WifiConnect"
     },
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
      },
      "503": {
       "$ref": "#/components/responses/Error"
@@ -2212,6 +2215,41 @@
    }
   },
   "requestBodies": {
+   "WifiConnect": {
+    "required": true,
+    "description": "Wi-Fi credentials. `security` accepts exactly `open`, `wpa2`, or `wpa3`; when omitted it defaults to `wpa2`.",
+    "content": {
+     "application/json": {
+      "schema": {
+       "type": "object",
+       "required": [
+        "ssid"
+       ],
+       "additionalProperties": false,
+       "properties": {
+        "ssid": {
+         "type": "string",
+         "maxLength": 255
+        },
+        "psk": {
+         "type": "string",
+         "maxLength": 127,
+         "writeOnly": true
+        },
+        "security": {
+         "type": "string",
+         "enum": [
+          "open",
+          "wpa2",
+          "wpa3"
+         ],
+         "default": "wpa2"
+        }
+       }
+      }
+     }
+    }
+   },
    "JsonObject": {
     "required": true,
     "content": {

@@ -26,7 +26,9 @@
 #define LE_ADAPTER_PATH_MAX      128
 
 /* Default socket paths (overridable via environment for testing). */
+#ifndef LE_ADAPTER_NETWORK_SOCK
 #define LE_ADAPTER_NETWORK_SOCK  "/run/libreecho/network.sock"
+#endif
 #define LE_ADAPTER_AUDIO_SOCK    "/run/libreecho/audio.sock"
 #define LE_ADAPTER_LED_SOCK      "/run/libreecho/led.sock"
 #define LE_ADAPTER_WAKEWORD_SOCK "/run/libreecho/wakeword.sock"
