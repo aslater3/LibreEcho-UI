@@ -390,11 +390,22 @@ static int adapter_command(const char *socket_path, const char *command,
     return result;
 }
 
+#ifdef LE_BACKEND_LINUX_TESTING
+extern int le_backend_linux_test_adapter_json_command(const char *socket_path,
+                                                       const char *command,
+                                                       const char *args);
+static int adapter_json_command(const char *socket_path, const char *command,
+                                const char *args)
+{
+    return le_backend_linux_test_adapter_json_command(socket_path, command, args);
+}
+#else
 static int adapter_json_command(const char *socket_path, const char *command,
                                 const char *args)
 {
     return adapter_command(socket_path, command, args, NULL, 0);
 }
+#endif
 
 static int read_wireless_signal(const char *iface)
 {
@@ -1165,12 +1176,23 @@ static int scan(struct le_backend *b, struct le_wifi_scan *o)
 static int connect_wifi(struct le_backend *b, const struct le_wifi_credentials *credentials)
 {
     char ssid[LE_TEXT * 2], psk[sizeof(credentials->password) * 2];
-    char args[sizeof(ssid) + sizeof(psk) + 32];
+    char security[sizeof(credentials->security) * 2];
+    char args[sizeof(ssid) + sizeof(psk) + sizeof(security) + 64];
+    const char *security_value;
     (void)b;
     if (!credentials || !credentials->ssid[0]) return LE_INVALID;
+    if (credentials->security[0] &&
+        strcmp(credentials->security, "open") &&
+        strcmp(credentials->security, "wpa2") &&
+        strcmp(credentials->security, "wpa3"))
+        return LE_INVALID;
+    security_value = credentials->security[0] ? credentials->security : "wpa2";
     json_escape(ssid, sizeof(ssid), credentials->ssid);
     json_escape(psk, sizeof(psk), credentials->password);
-    if (snprintf(args, sizeof(args), "{\"ssid\":\"%s\",\"psk\":\"%s\"}", ssid, psk) >= (int)sizeof(args))
+    json_escape(security, sizeof(security), security_value);
+    if (snprintf(args, sizeof(args),
+                 "{\"ssid\":\"%s\",\"psk\":\"%s\",\"security\":\"%s\"}",
+                 ssid, psk, security) >= (int)sizeof(args))
         return LE_INVALID;
     return adapter_json_command(LE_ADAPTER_NETWORK_SOCK, "connect", args);
 }
