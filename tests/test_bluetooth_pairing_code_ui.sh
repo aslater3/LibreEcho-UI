@@ -22,7 +22,9 @@ assert 'bluetoothPairingCode(p.value)' in ui
 
 pairing_code = css[css.index('.pairing-code{'):]
 assert 'text-align:left' in pairing_code
-assert '.pairing-code-value{' in pairing_code
+assert '.sr-only{' in css
+assert 'clip:rect(0,0,0,0)' in css
+assert '.pairing-code-value{' in css
 value_style = pairing_code[pairing_code.index('.pairing-code-value{'):]
 assert 'font-size:' in value_style
 assert 'font-weight:800' in value_style
