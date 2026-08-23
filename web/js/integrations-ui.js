@@ -166,6 +166,26 @@ function bindProviderToggle(id,provider,pipeline) {
   input.onchange=()=>setAssistantProvider(provider,input.checked,pipeline);
 }
 
+/*
+ * app.js owns the existing Home location & weather card and its provider
+ * helpers. integrations-ui.js replaces app.js's Integrations renderer, so it
+ * must render and bind that existing card itself rather than silently hiding
+ * the released configuration surface.
+ */
+function bindHomeLocation(a) {
+  if(a.unsupported||!$('#wx-provider'))return;
+  $('#wx-location').value=a.home_location||'';
+  $('#wx-lat').value=a.latitude||'';
+  $('#wx-lon').value=a.longitude||'';
+  bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+  $('#save-wx').onclick=()=>mutate('/assistant',{
+    weather_provider:wxId($('#wx-provider').value),
+    home_location:$('#wx-location').value.trim(),
+    latitude:$('#wx-lat').value.trim(),
+    longitude:$('#wx-lon').value.trim()
+  },'Home location saved');
+}
+
 async function integrationsPage() {
   const [d,a,pipeline]=await Promise.all([
     api('/integrations'),
@@ -216,11 +236,13 @@ async function integrationsPage() {
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}</section>
+      ${weatherCard(a)}
       ${integrations}
     </div>`;
 
     bindProviderToggle('#use-local-provider','openai-compatible',pipeline);
     bindProviderToggle('#use-device-provider','openai-codex',pipeline);
+    bindHomeLocation(a);
 
     bindDirty(['#local-base-url','#local-model','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
     $('#save-local-assistant').onclick=async()=>{
