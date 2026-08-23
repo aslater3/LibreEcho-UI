@@ -49,6 +49,7 @@ sh tests/test_device_identity.sh
 # separately; keep the aggregate suite deterministic across CI runners.
 # sh tests/test_cpu_online_mask.sh
 python3 tests/test_public_source_safety.py
+python3 tests/test_diagnostic_export_contract.py
 sh tests/test_source_provenance.sh
 sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
@@ -104,6 +105,7 @@ trap cleanup EXIT INT TERM
 i=0
 while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-server.log; exit 1; }; sleep 0.1; done
 LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_limits.sh
@@ -174,7 +176,8 @@ jq -e '.ok == true and .data.available == false and .data.unavailable == true' /
 code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/config/export")
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
-curl -fsS "$URL/api/v1/system" | jq -e \
+LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export_linux.sh
+curl -fsS "$URL/api/v1/system" | jq -e \\
     '.ok and .data.ntp == true and .data.ntp_state == "synchronized" and
      .data.clock_source == "ntp" and .data.rtc_available == true and
      .data.rtc_persisted == true and .data.last_sync_epoch == 1700000000 and

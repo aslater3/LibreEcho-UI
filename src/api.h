@@ -13,4 +13,5 @@ int api_baby_monitor_stream_authorize(struct api_context*,const struct api_reque
 int api_update_upload_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_update_fetch_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_update_channel_authorize(struct api_context*,const struct api_request*,struct api_response*,char*,size_t);
+void diagnostics_export_json(struct api_context*,struct api_response*);
 #endif

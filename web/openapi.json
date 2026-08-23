@@ -1190,6 +1190,12 @@
      "Diagnostics"
     ],
     "summary": "Prepare redacted diagnostics",
+    "description": "Authenticated action returning a bounded, deterministic-ordered JSON diagnostic bundle. It includes public-safe release identity and available runtime, network, audio, wake-word, Bluetooth, playback, privacy, reset/pstore-summary and bounded log evidence. Wi-Fi credentials, SSID/BSSID, IP/MAC/Bluetooth addresses, owner identifiers, tokens, private paths, media metadata, signing material and raw pstore are omitted or redacted. Missing or malformed subsystem data is represented as unavailable without failing the export.",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
