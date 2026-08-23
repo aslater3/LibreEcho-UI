@@ -8,6 +8,8 @@ the same samples.
 """
 import argparse, array, json, math, struct
 
+MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+
 
 def goertzel_rms(samples, freq, rate):
     """RMS of one frequency component over this exact buffer."""
@@ -73,7 +75,9 @@ def main():
 
     meta = json.load(open(args.meta))
     rate, freq, levels = meta["rate"], meta["freq"], meta["levels"]
-    raw = open(args.captured, "rb").read()
+    raw = open(args.captured, "rb").read(MAX_CAPTURE_BYTES + 1)
+    if len(raw) > MAX_CAPTURE_BYTES:
+        raise SystemExit("capture exceeds %d-byte artifact limit" % MAX_CAPTURE_BYTES)
     n = len(raw) // 2
     cap = list(struct.unpack("<%dh" % n, raw[:n * 2]))
     if n < rate:
@@ -149,7 +153,12 @@ def main():
         for f in failures:
             print("  FAIL: %s" % f)
     if args.json:
-        json.dump({"noise_floor_rms": round(floor, 2),
+        json.dump({"evidence_class": "software_capture_chain",
+                   "acoustic_path_measured": False,
+                   "hardware_acceptance": "not_measured",
+                   "artifact_limits": {"max_capture_bytes": MAX_CAPTURE_BYTES,
+                                       "max_levels": len(levels)},
+                   "noise_floor_rms": round(floor, 2),
                    "noise_floor_dbfs": round(dbfs(floor), 2),
                    "clipping_from_input": headroom, "levels": out},
                   open(args.json, "w"), indent=2)

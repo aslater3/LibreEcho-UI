@@ -32,12 +32,17 @@ def main():
     ap.add_argument("--steps", type=int, default=16)
     ap.add_argument("--seconds", type=float, default=0.35)
     ap.add_argument("--amplitude", type=int, default=6000)
+    ap.add_argument("--impulse-amplitude", type=int, default=3000)
     args = ap.parse_args()
 
     freqs = [args.low * (args.high / args.low) ** (i / (args.steps - 1))
              for i in range(args.steps)]
     pcm = array.array('h')
-    pcm.extend(array.array('h', [0]) * int(RATE * 0.3))      # settle
+    settle = int(RATE * 0.3)
+    impulse_index = settle
+    pcm.extend(array.array('h', [0]) * settle)
+    pcm.append(args.impulse_amplitude)
+    pcm.extend(array.array('h', [0]) * int(RATE * 0.1))
     for f in freqs:
         pcm.extend(tone(f, args.seconds, args.amplitude))
         pcm.extend(array.array('h', [0]) * int(RATE * 0.05))
@@ -47,8 +52,16 @@ def main():
     w.writeframes(pcm.tobytes()); w.close()
     with open(args.meta, 'w') as fh:
         json.dump({"rate": RATE, "amplitude": args.amplitude,
+                   "impulse_amplitude": args.impulse_amplitude,
+                   "impulse_index": impulse_index,
                    "seconds_per_tone": args.seconds,
-                   "freqs": [round(f, 1) for f in freqs]}, fh)
+                   "freqs": [round(f, 1) for f in freqs],
+                   "evidence_class": "software_capture_chain",
+                   "acoustic_path_measured": False,
+                   "hardware_acceptance": "not_measured",
+                   "artifact_limits": {"max_capture_bytes": 8 * 1024 * 1024,
+                                       "max_response_points": len(freqs),
+                                       "max_impulse_samples": 65}}, fh)
     print("wrote %s: %d tones %.0f-%.0f Hz, %.1fs"
           % (args.out, len(freqs), freqs[0], freqs[-1], len(pcm) / RATE))
 
