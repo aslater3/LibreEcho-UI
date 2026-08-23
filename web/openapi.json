@@ -1045,7 +1045,7 @@
     "tags": [
      "LED and buttons"
     ],
-    "summary": "Read button mappings",
+    "summary": "Read button mappings and live physical-input capability state",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"

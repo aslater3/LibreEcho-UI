@@ -914,11 +914,23 @@ Update button mappings.
   "data": {
     "short_press": "Start listening",
     "long_press": "Open pairing mode",
-    "hardware_mute": true
+    "available": false,
+    "state": "stale",
+    "volume_capable": false,
+    "hardware_mute": false,
+    "action_capable": false,
+    "stale": true
   },
   "error": null
 }
 ```
+
+`available` and the capability fields are derived from the evdev devices
+currently discovered by `libreecho-buttond`. A missing, disconnected, or older
+than 15-second status record is reported as unavailable/stale; the API never
+claims a physical mute/privacy control from a hard-coded default. Physical
+press behavior, fail-safe capture muting, and reboot persistence remain
+hardware-validation gates.
 
 ### Bluetooth
 

@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -51,6 +52,8 @@
    driver is unbound.  Rescan rather than exiting, so a late-appearing button
    is still picked up without an operator having to restart the daemon. */
 #define RESCAN_INTERVAL_MS 5000
+#define STATUS_PATH "/run/libreecho/buttond-status"
+#define STATUS_TMP_PATH "/run/libreecho/buttond-status.tmp"
 
 #define BITS_PER_LONG (8 * (int)sizeof(long))
 #define NBITS(x) (((x) - 1) / BITS_PER_LONG + 1)
@@ -74,10 +77,13 @@ struct context {
     unsigned int brightness;
     int held_key;        /* key code being held, 0 when idle */
     int rescan_requested;
+    int volume_capable;
+    int mute_capable;
     long long next_repeat_ms;
 };
 
 static volatile sig_atomic_t stop_requested;
+static void write_capability_status(const struct context *ctx);
 
 static void on_signal(int signo)
 {
@@ -113,7 +119,8 @@ static unsigned int environment_unsigned(const char *name, unsigned int fallback
 
 /* ---------------------------- Device discovery -------------------------- */
 
-static int device_is_interesting(int fd, char *name, size_t name_size)
+static int device_is_interesting(int fd, char *name, size_t name_size,
+                                 int *volume_capable, int *mute_capable)
 {
     unsigned long ev_bits[NBITS(EV_MAX)];
     unsigned long key_bits[NBITS(KEY_MAX)];
@@ -130,6 +137,12 @@ static int device_is_interesting(int fd, char *name, size_t name_size)
         !TEST_BIT(KEY_MUTE, key_bits) &&
         !TEST_BIT(KEY_MICMUTE, key_bits))
         return 0;
+    if (volume_capable)
+        *volume_capable = TEST_BIT(KEY_VOLUMEUP, key_bits) ||
+                          TEST_BIT(KEY_VOLUMEDOWN, key_bits);
+    if (mute_capable)
+        *mute_capable = TEST_BIT(KEY_MUTE, key_bits) ||
+                        TEST_BIT(KEY_MICMUTE, key_bits);
     if (ioctl(fd, EVIOCGNAME(name_size), name) < 0)
         snprintf(name, name_size, "unknown");
     name[name_size - 1] = '\0';
@@ -151,6 +164,8 @@ static void discover(struct context *ctx)
         char path[286];
         char name[64] = "";
         int fd;
+        int volume_capable = 0;
+        int mute_capable = 0;
 
         if (strncmp(entry->d_name, "event", 5) != 0)
             continue;
@@ -163,7 +178,8 @@ static void discover(struct context *ctx)
                          strerror(errno));
             continue;
         }
-        if (!device_is_interesting(fd, name, sizeof(name))) {
+        if (!device_is_interesting(fd, name, sizeof(name),
+                                   &volume_capable, &mute_capable)) {
             close(fd);
             continue;
         }
@@ -171,12 +187,39 @@ static void discover(struct context *ctx)
         snprintf(ctx->devices[ctx->device_count].name,
                  sizeof(ctx->devices[ctx->device_count].name), "%s", name);
         ctx->device_count++;
+        ctx->volume_capable |= volume_capable;
+        ctx->mute_capable |= mute_capable;
         le_log_info("buttond: watching %s [%s]", path, name);
     }
     closedir(dir);
     if (ctx->device_count)
         le_log_info("buttond: %zu input device(s) with volume or mute keys",
                     ctx->device_count);
+    write_capability_status(ctx);
+}
+
+static void write_capability_status(const struct context *ctx)
+{
+    FILE *file;
+    int fd;
+    int connected = ctx && ctx->device_count > 0;
+
+    if (!ctx)
+        return;
+    (void)mkdir("/run/libreecho", 0755);
+    file = fopen(STATUS_TMP_PATH, "w");
+    if (!file)
+        return;
+    fprintf(file, "schema=1\nstate=%s\nvolume=%d\nmicrophone_mute=%d\naction=0\n",
+            connected ? "connected" : "unavailable",
+            connected && ctx->volume_capable,
+            connected && ctx->mute_capable);
+    fflush(file);
+    fd = fileno(file);
+    if (fd >= 0)
+        (void)fsync(fd);
+    fclose(file);
+    (void)rename(STATUS_TMP_PATH, STATUS_PATH);
 }
 
 static void remove_device(struct context *ctx, size_t index)
@@ -187,8 +230,13 @@ static void remove_device(struct context *ctx, size_t index)
     for (i = index + 1; i < ctx->device_count; i++)
         ctx->devices[i - 1] = ctx->devices[i];
     --ctx->device_count;
+    if (!ctx->device_count) {
+        ctx->volume_capable = 0;
+        ctx->mute_capable = 0;
+    }
     ctx->held_key = 0;
     ctx->rescan_requested = 1;
+    write_capability_status(ctx);
 }
 
 /* ------------------------------ Adapter calls --------------------------- */
@@ -341,6 +389,7 @@ int main(int argc, char **argv)
     struct context ctx;
     struct sigaction sa;
     long long next_rescan_ms;
+    long long next_status_ms;
     size_t i;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -371,6 +420,8 @@ int main(int argc, char **argv)
         le_log_warn("buttond: no input device reports volume or mute keys yet; "
                     "rescanning every %d ms", RESCAN_INTERVAL_MS);
     next_rescan_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
+    next_status_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
+    write_capability_status(&ctx);
     (void)refresh_audio(&ctx);
 
     while (!stop_requested) {
@@ -397,6 +448,10 @@ int main(int argc, char **argv)
                 continue;
             le_log_error("buttond: poll failed: %s", strerror(errno));
             break;
+        }
+        if (monotonic_ms() >= next_status_ms) {
+            write_capability_status(&ctx);
+            next_status_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
         }
         if (!ready && ctx.held_key) {
             handle_key(&ctx, ctx.held_key, 2);
