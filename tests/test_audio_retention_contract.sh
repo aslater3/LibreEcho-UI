@@ -33,7 +33,8 @@ checks = {
     'UI exposes destination and bounded controls':
         'audio-retention-destination' in ui and
         'audio_retention_hours' in ui and
-        'audio_retention_max_mb' in ui,
+        'audio_retention_max_mb' in ui and
+        "audio_remote_url:$('#audio-retention-destination').value" in ui,
     'UI surfaces unavailable remote transport':
         'transport unavailable' in ui.lower(),
     'OpenAPI and API docs describe the contract':

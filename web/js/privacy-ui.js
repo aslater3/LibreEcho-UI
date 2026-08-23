@@ -24,5 +24,5 @@ async function privacyPage(){
       toast(allowNetwork?'Network AI services allowed':'Network AI services disabled');
     } catch(error) { toast(error.message,true); } finally { await privacyPage(); setBusy(false); }
   };
-  $('#save-retention').onclick=()=>mutate('/privacy',{log_retention_hours:parseInt($('#retention').value,10)},'Retention changes saved');
+  $('#save-retention').onclick=async()=>{if(state.busy)return;setBusy(true);try{await api('/privacy',{method:'PUT',body:JSON.stringify({audio_retention:$('#audio-retention-mode').value,audio_retention_hours:parseInt($('#audio-retention-hours').value,10),audio_retention_max_mb:parseInt($('#audio-retention-max-mb').value,10),audio_remote_url:$('#audio-retention-destination').value,log_retention_hours:parseInt($('#retention').value,10)})});toast('Retention changes saved')}catch(error){toast(error.message,true)}finally{await privacyPage();setBusy(false)}};
 }
