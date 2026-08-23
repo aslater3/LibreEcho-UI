@@ -166,6 +166,60 @@ function bindProviderToggle(id,provider,pipeline) {
   input.onchange=()=>setAssistantProvider(provider,input.checked,pipeline);
 }
 
+/*
+ * app.js owns the existing Home location & weather card and its provider
+ * helpers. integrations-ui.js replaces app.js's Integrations renderer, so it
+ * must render and bind that existing card itself rather than silently hiding
+ * the released configuration surface.
+ */
+function bindHomeLocation(a) {
+  if(a.unsupported||!$('#wx-provider'))return;
+  const original={
+    location:String(a.home_location||'').trim(),
+    latitude:String(a.latitude||'').trim(),
+    longitude:String(a.longitude||'').trim()
+  };
+  $('#wx-location').value=original.location;
+  $('#wx-lat').value=original.latitude;
+  $('#wx-lon').value=original.longitude;
+  bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+  $('#save-wx').onclick=()=>{
+    const provider=wxId($('#wx-provider').value);
+    const location=$('#wx-location').value.trim();
+    const latitude=$('#wx-lat').value.trim();
+    const longitude=$('#wx-lon').value.trim();
+    const haveLatitude=latitude.length>0;
+    const haveLongitude=longitude.length>0;
+    const lat=haveLatitude?Number(latitude):null;
+    const lon=haveLongitude?Number(longitude):null;
+    const originalLat=original.latitude?Number(original.latitude):null;
+    const originalLon=original.longitude?Number(original.longitude):null;
+    let problem='';
+
+    if(haveLatitude!==haveLongitude) {
+      problem='Enter both latitude and longitude, or leave both unchanged.';
+    } else if(haveLatitude&&(!Number.isFinite(lat)||!Number.isFinite(lon)||
+              lat<-90||lat>90||lon<-180||lon>180)) {
+      problem='Latitude must be -90 to 90 and longitude must be -180 to 180.';
+    } else if(location&&!haveLatitude&&provider!=='off') {
+      problem='This place needs coordinates before weather can be enabled.';
+    } else if(original.location&&location!==original.location&&haveLatitude&&
+              lat===originalLat&&lon===originalLon) {
+      problem='The place changed but the coordinates did not. Update both coordinates before saving.';
+    } else if(!location&&!haveLatitude&&
+              (original.location||original.latitude||original.longitude)) {
+      problem='This image cannot clear old coordinates safely. Select Off or replace them with the new location.';
+    }
+    if(problem){toast(problem,true);return;}
+    mutate('/assistant',{
+      weather_provider:provider,
+      home_location:location,
+      latitude,
+      longitude
+    },'Home location saved');
+  };
+}
+
 async function integrationsPage() {
   const [d,a,pipeline]=await Promise.all([
     api('/integrations'),
@@ -216,11 +270,13 @@ async function integrationsPage() {
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}</section>
+      ${weatherCard(a)}
       ${integrations}
     </div>`;
 
     bindProviderToggle('#use-local-provider','openai-compatible',pipeline);
     bindProviderToggle('#use-device-provider','openai-codex',pipeline);
+    bindHomeLocation(a);
 
     bindDirty(['#local-base-url','#local-model','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
     $('#save-local-assistant').onclick=async()=>{
