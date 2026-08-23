@@ -42,6 +42,8 @@ checks = {
     'Retention panel Save persists log retention':
         "$('#save-retention').onclick=async()=>" in ui and
         "log_retention_hours:parseInt($('#retention').value,10)" in ui,
+    'Retention panel Save enables microphone retention controls':
+        "bindDirty(['#retention','#audio-retention-mode','#audio-retention-hours','#audio-retention-max-mb','#audio-retention-destination'],'#save-retention')" in ui,
     'UI surfaces unavailable remote transport':
         'transport unavailable' in ui.lower(),
     'OpenAPI and API docs describe the contract':
