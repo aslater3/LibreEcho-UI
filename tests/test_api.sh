@@ -19,6 +19,16 @@ expect "$(curl -fsS "$URL/api/v1/config")" '"setup_completed":true'
 expect "$(curl -fsS "$URL/")" 'LibreEcho Control Centre'
 code=$(curl -sS -o /tmp/le-repeat-setup.out -w '%{http_code}' -X POST "$URL/api/v1/setup" -H "$CSRF" -H 'Content-Type: application/json' --data "$setup")
 [ "$code" = 409 ]
+code=$(curl -sS -o /tmp/le-invalid-wifi-security.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/network/wifi/connect" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"ssid":"LibreNet-IoT","password":"top-secret","security":"none"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-wifi-security.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/network/wifi/connect" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"ssid":"LibreNet-IoT","password":"top-secret","security":"open\\nrest"}')
+[ "$code" = 400 ]
 ! grep -q 'top-secret' "$CFG"
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
 expect "$(curl -fsS "$URL/swagger.html")" 'API reference · LibreEcho'

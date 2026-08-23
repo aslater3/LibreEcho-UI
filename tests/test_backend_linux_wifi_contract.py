@@ -6,6 +6,7 @@ import re
 
 
 SOURCE = Path(__file__).parents[1] / "src/backend_linux.c"
+API_SOURCE = Path(__file__).parents[1] / "src/api.c"
 
 
 def main() -> None:
@@ -28,6 +29,18 @@ def main() -> None:
     if missing:
         raise SystemExit(
             "Linux Wi-Fi backend drops security selection: " + ", ".join(missing)
+        )
+    api = API_SOURCE.read_text(encoding="utf-8")
+    api_required = (
+        "valid_wifi_security",
+        "security_result<0",
+        "security must be open, wpa2, or wpa3",
+        "if(security_result==0)strcpy(w.security,\"wpa2\")",
+    )
+    missing = [fragment for fragment in api_required if fragment not in api]
+    if missing:
+        raise SystemExit(
+            "API Wi-Fi security validation is incomplete: " + ", ".join(missing)
         )
     print("Linux Wi-Fi security propagation contract: PASS")
 

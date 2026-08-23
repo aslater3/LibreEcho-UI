@@ -1170,6 +1170,11 @@ static int connect_wifi(struct le_backend *b, const struct le_wifi_credentials *
     const char *security_value;
     (void)b;
     if (!credentials || !credentials->ssid[0]) return LE_INVALID;
+    if (credentials->security[0] &&
+        strcmp(credentials->security, "open") &&
+        strcmp(credentials->security, "wpa2") &&
+        strcmp(credentials->security, "wpa3"))
+        return LE_INVALID;
     security_value = credentials->security[0] ? credentials->security : "wpa2";
     json_escape(ssid, sizeof(ssid), credentials->ssid);
     json_escape(psk, sizeof(psk), credentials->password);
