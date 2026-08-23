@@ -43,6 +43,11 @@ struct le_wifi_scan { struct le_wifi_network networks[LE_MAX_WIFI]; size_t count
 struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };
 struct le_network_state {
     char state[24], connectivity[24], recovery_stage[24];
+    /* factory_* is what idme records for this board; the plain field is what
+       the interface is using now. They differ whenever the driver invents an
+       address instead of taking the board's, which is what makes the device
+       land on a new DHCP lease after most reboots. */
+    char wifi_mac[24], wifi_mac_factory[24], bt_mac[24], bt_mac_factory[24];
     char ssid[LE_TEXT], ip[48], gateway[48], dns[96], hostname[LE_TEXT];
     int signal, rssi_dbm, internet, dhcp, ssh, api_lan;
     int gateway_reachable, liveness_failures;

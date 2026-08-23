@@ -155,16 +155,15 @@ static int mac_text_valid(const char *s)
     return digits == 12 && (seps == 0 || seps == 5);
 }
 
-static int read_device_mac(char *out, size_t out_size, char *source,
-                           size_t source_size)
+static int read_idme_mac(const char *const *fields, size_t field_count,
+                         char *out, size_t out_size, char *source,
+                         size_t source_size)
 {
-    static const char *fields[] = { "mac_addr", "macaddr", "wifi_mac",
-                                    "wifi_mac_addr", "mac", "eth_mac_addr" };
     char raw[64];
     size_t f, i, n = 0;
 
     if (source && source_size) source[0] = '\0';
-    for (f = 0; f < sizeof(fields) / sizeof(fields[0]); ++f) {
+    for (f = 0; f < field_count; ++f) {
         if (read_idme_field(fields[f], raw, sizeof(raw)) != 0)
             continue;
         if (!mac_text_valid(raw))
@@ -183,6 +182,35 @@ static int read_device_mac(char *out, size_t out_size, char *source,
     }
     out[0] = '\0';
     return -1;
+}
+
+static int read_device_mac(char *out, size_t out_size, char *source,
+                           size_t source_size)
+{
+    static const char *const fields[] = { "mac_addr", "macaddr", "wifi_mac",
+                                          "wifi_mac_addr", "mac" };
+    return read_idme_mac(fields, sizeof(fields) / sizeof(fields[0]),
+                         out, out_size, source, source_size);
+}
+
+static int read_bt_factory_mac(char *out, size_t out_size)
+{
+    static const char *const fields[] = { "bt_mac_addr", "bt_mac", "btmac" };
+    return read_idme_mac(fields, sizeof(fields) / sizeof(fields[0]),
+                         out, out_size, NULL, 0);
+}
+
+/* The address the interface is actually using, which is what differs from the
+   board's when the driver has generated one. */
+static int read_live_mac(const char *path, char *out, size_t out_size)
+{
+    size_t i;
+
+    if (read_line(path, out, out_size) != 0 || !out[0])
+        return -1;
+    for (i = 0; out[i]; ++i)
+        out[i] = (char)tolower((unsigned char)out[i]);
+    return mac_text_valid(out) ? 0 : -1;
 }
 
 static int read_redacted_boot_id(char *out, size_t out_size)
@@ -881,6 +909,22 @@ static int networkd_status(struct le_backend *b, struct le_network_state *o)
     return found ? LE_OK : LE_IO;
 }
 
+/*
+ * The board's addresses and the ones actually in use. Reported for both radios
+ * so the UI can show them side by side: they differ whenever the driver has
+ * generated an address instead of taking the board's, which is why this device
+ * lands on a new DHCP lease after most reboots.
+ */
+static void fill_mac_fields(struct le_network_state *o)
+{
+    read_device_mac(o->wifi_mac_factory, sizeof(o->wifi_mac_factory), NULL, 0);
+    read_bt_factory_mac(o->bt_mac_factory, sizeof(o->bt_mac_factory));
+    read_live_mac("/sys/class/net/wlan0/address", o->wifi_mac,
+                  sizeof(o->wifi_mac));
+    read_live_mac("/sys/class/bluetooth/hci0/address", o->bt_mac,
+                  sizeof(o->bt_mac));
+}
+
 static int network(struct le_backend *b, struct le_network_state *o)
 {
     char path[PATH_MAX];
@@ -889,10 +933,13 @@ static int network(struct le_backend *b, struct le_network_state *o)
     char iface[IFNAMSIZ];
     int have_iface = 0;
 
-    if (networkd_status(b, o) == LE_OK)
+    if (networkd_status(b, o) == LE_OK) {
+        fill_mac_fields(o);
         return LE_OK;
+    }
 
     memset(o, 0, sizeof(*o));
+    fill_mac_fields(o);
     o->rssi_dbm = -1;
     o->gateway_reachable = -1;
     strcpy(o->recovery_stage, "none");
