@@ -15,14 +15,15 @@ CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
-ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming
+ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/adapter_server.c src/log.c
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
-BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/adapter_client.c src/json.c src/log.c
+BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
+CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
 BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
@@ -40,7 +41,7 @@ WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
 	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
-SOURCES = src/main.c src/http_server.c src/api.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+SOURCES = src/main.c src/http_server.c src/api.c src/diagnostic_export.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -48,6 +49,7 @@ AUDIOD_OBJECTS = $(AUDIOD_SOURCES:src/%.c=$(BUILD)/%.o)
 MICD_OBJECTS = $(MICD_SOURCES:src/%.c=$(BUILD)/%.o)
 LEDD_OBJECTS = $(LEDD_SOURCES:src/%.c=$(BUILD)/%.o)
 BUTTOND_OBJECTS = $(BUTTOND_SOURCES:src/%.c=$(BUILD)/%.o)
+CAPTURE_MUX_OBJECTS = $(CAPTURE_MUX_SOURCES:src/%.c=$(BUILD)/%.o)
 BTD_OBJECTS = $(BTD_SOURCES:src/%.c=$(BUILD)/%.o)
 AIRPLAYD_OBJECTS = $(AIRPLAYD_SOURCES:src/%.c=$(BUILD)/%.o)
 TTSD_OBJECTS = $(TTSD_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -75,7 +77,7 @@ $(BUILD)/libreecho-timed: $(TIMED_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(TIMED_OBJECTS) $(LDFLAGS) -o $@
 
 $(BUILD)/libreecho-audiod: $(AUDIOD_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AUDIOD_OBJECTS) $(LDFLAGS) -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AUDIOD_OBJECTS) $(LDFLAGS) -lm -o $@
 
 $(BUILD)/libreecho-micd: $(MICD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(MICD_OBJECTS) $(LDFLAGS) -o $@
@@ -85,6 +87,9 @@ $(BUILD)/libreecho-ledd: $(LEDD_OBJECTS)
 
 $(BUILD)/libreecho-buttond: $(BUTTOND_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(BUTTOND_OBJECTS) $(LDFLAGS) -o $@
+
+$(BUILD)/libreecho-capture-mux: $(CAPTURE_MUX_OBJECTS)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(CAPTURE_MUX_OBJECTS) $(LDFLAGS) -o $@
 
 $(BUILD)/libreecho-btd: $(BTD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(BTD_OBJECTS) $(LDFLAGS) -o $@
@@ -119,6 +124,10 @@ $(BUILD)/libreecho-ttsd-wyoming: src/adapter/ttsd.c \
 	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc \
 		-DLE_TTSD_ENGINE_WYOMING $^ $(LDFLAGS) -lpthread -lm -o $@
 
+$(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
+		src/adapter/buttond_timing.c
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
+
 $(BUILD)/test-network-health: tests/test_network_health.c \
 		src/adapter/network_health.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
@@ -139,6 +148,13 @@ $(BUILD)/test-networkd-health: $(NETWORKD_SOURCES)
 	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_NETWORKD_TESTING $(CSTD) \
 		$(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
+$(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emission.c \
+		src/json.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-DLE_ADAPTER_NETWORK_SOCK='"/tmp/libreecho-network-backend-test.sock"' \
+		-Isrc -Isrc/adapter $^ -o $@
+
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
@@ -153,6 +169,18 @@ $(BUILD)/test-wyomingd: tests/test_wyomingd.c $(BUILD)/libreecho-wyomingd
 
 test-wyomingd: $(BUILD)/test-wyomingd
 	./$(BUILD)/test-wyomingd
+
+$(BUILD)/test-audiod-review: tests/test_audiod_review.c \
+		src/adapter/audiod.c src/adapter/adapter_client.c \
+		src/adapter/adapter_server.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
+
+$(BUILD)/test-led-night-review: tests/test_led_night_review.c \
+		src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_server.c src/log.c -o $@
 
 # sherpa-onnx backed ttsd (cross-compiled ARM32, static).  Uses the real
 # ZipVoice neural TTS engine instead of the mock sine chirp.  Requires
@@ -485,11 +513,23 @@ $(BUILD)/libreecho-waked-onnx-arm32: $(WAKE_DAEMON_ARM_OBJECTS)
 
 adapters: $(ADAPTER_TARGETS)
 
+# -MMD -MP records which headers each object was built from, so editing a
+# header rebuilds what included it.  Without this the tree compiled
+# cleanly against stale objects: adding a field to struct api_context
+# left main.o holding the old layout, and the daemon failed at runtime
+# with "Unable to initialise authentication" for no visible reason.
+# -MP emits a phony target per header so a deleted or renamed header
+# does not wedge the build with "No rule to make target".
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(BUILD) $(BUILD)/adapter $(BUILD)/adapter/bt-sbc
-	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc -c $< -o $@
+	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -MMD -MP -Isrc -c $< -o $@
 
 $(BUILD)/backend_linux.o $(BUILD)/backend_mock.o: VERSION src/version.h
+
+# Pull in the header dependencies recorded by -MMD.  Wildcard rather than a
+# computed list so it works before anything has been built, and -include so
+# a first build with no .d files present is not an error.
+-include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
 release: clean
 	$(MAKE) CROSS_COMPILE="$(CROSS_COMPILE)" CC="$(CC)" CFLAGS="-Os -ffunction-sections -fdata-sections" LDFLAGS="$(GC_LDFLAGS)" $(TARGET) $(LOGD_TARGET) $(ADAPTER_TARGETS)
@@ -515,7 +555,8 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
 
 clean:
-	rm -f $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
+	rm -f $(shell find $(BUILD) -name '*.d' 2>/dev/null)
+	rm -f $(CAPTURE_MUX_OBJECTS) $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
 		$(LOGD_OBJECTS) $(BTD_OBJECTS) $(AIRPLAYD_OBJECTS) $(TTSD_OBJECTS) \
 		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(WYOMINGD_OBJECTS) $(ADAPTER_TARGETS) \
 		$(TARGET) $(LOGD_TARGET)
@@ -523,11 +564,12 @@ clean:
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
-		$(BUILD)/test-networkd-health \
+		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
 		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
+		$(BUILD)/test-audiod-review $(BUILD)/test-led-night-review \
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \
 		$(BUILD)/test-agentd \

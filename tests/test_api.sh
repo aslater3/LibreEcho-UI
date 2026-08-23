@@ -19,6 +19,16 @@ expect "$(curl -fsS "$URL/api/v1/config")" '"setup_completed":true'
 expect "$(curl -fsS "$URL/")" 'LibreEcho Control Centre'
 code=$(curl -sS -o /tmp/le-repeat-setup.out -w '%{http_code}' -X POST "$URL/api/v1/setup" -H "$CSRF" -H 'Content-Type: application/json' --data "$setup")
 [ "$code" = 409 ]
+code=$(curl -sS -o /tmp/le-invalid-wifi-security.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/network/wifi/connect" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"ssid":"LibreNet-IoT","password":"top-secret","security":"none"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-wifi-security.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/network/wifi/connect" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"ssid":"LibreNet-IoT","password":"top-secret","security":"open\\nrest"}')
+[ "$code" = 400 ]
 ! grep -q 'top-secret' "$CFG"
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
 expect "$(curl -fsS "$URL/swagger.html")" 'API reference · LibreEcho'
@@ -130,6 +140,26 @@ code=$(curl -sS -o /tmp/le-local-only-conflict.out -w '%{http_code}' \
     -X PUT "$URL/api/v1/privacy" -H "$CSRF" \
     -H 'Content-Type: application/json' --data '{"local_only":true}')
 [ "$code" = 409 ]
+curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"audio_retention":"local","audio_retention_hours":168,"audio_retention_max_mb":16}' |
+    jq -e '.ok and .data.audio_retention_mode == "local" and .data.audio_retention_hours == 168 and .data.audio_retention_max_mb == 16 and .data.audio_remote_destination.effective_mode == "local"' >/dev/null
+code=$(curl -sS -o /tmp/le-retention-http.out -w '%{http_code}' -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"audio_retention":"remote","audio_remote_url":"http://nas.example/audio"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-retention-no-url.out -w '%{http_code}' -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"audio_retention":"remote"}')
+[ "$code" = 400 ]
+curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"audio_retention":"remote","audio_retention_hours":720,"audio_retention_max_mb":256,"audio_remote_url":"https://nas.example/retained-audio"}' |
+    jq -e '.ok and .data.audio_retention_mode == "remote" and .data.audio_retention_hours == 720 and .data.audio_retention_max_mb == 256 and .data.audio_remote_destination.available == false and .data.audio_remote_destination.state == "unavailable" and .data.audio_remote_destination.effective_mode == "none" and .data.audio_remote_destination.fallback == "disabled" and (.data.audio_remote_destination.last_error | contains("unavailable"))' >/dev/null
+code=$(curl -sS -o /tmp/le-retention-clear-url.out -w '%{http_code}' -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"audio_remote_url":""}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/privacy" | jq -e '.data.audio_retention_mode == "remote" and .data.audio_remote_destination.url == "https://nas.example/retained-audio"' >/dev/null
+code=$(curl -sS -o /tmp/le-retention-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/privacy" -H 'Content-Type: application/json' --data '{"audio_retention":"none"}')
+[ "$code" = 403 ]
+curl -fsS "$URL/api/v1/config/export" | jq -e '.ok and .data.privacy_audio_mode == "remote" and .data.privacy_audio_remote_url == "https://nas.example/retained-audio"' >/dev/null
+! curl -fsS "$URL/api/v1/config/export" | grep -Eqi 'password|secret|bearer|api[_-]?key'
+exported=$(curl -fsS "$URL/api/v1/config/export" | jq -c '.data')
+curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" -H 'Content-Type: application/json' --data "$exported" | jq -e '.ok and .data.restored == true' >/dev/null
+curl -fsS "$URL/api/v1/privacy" | jq -e '.data.audio_retention_mode == "remote" and .data.audio_remote_destination.effective_mode == "none"' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
     -H 'Content-Type: application/json' --data '{"mode":"local"}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" \
@@ -195,6 +225,7 @@ code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' "$URL/api/v1/integration
 [ "$code" = 405 ]
 escaped=$(curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data '{"short_press":"say \"hi\"","long_press":"path\\test"}')
 printf '%s' "$escaped" | jq -e '.ok and .data.short_press == "say \"hi\"" and .data.long_press == "path\\test"' >/dev/null
+curl -fsS "$URL/api/v1/buttons" | jq -e '.ok and .data.short_press == "say \"hi\"" and .data.long_press == "path\\test"' >/dev/null
 # Announce API: mock backend returns 501 (not supported), but the endpoint
 # must exist and reject empty text with 400.
 code=$(curl -sS -o /tmp/le-announce-empty.out -w '%{http_code}' -X POST "$URL/api/v1/audio/announce" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')

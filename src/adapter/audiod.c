@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -32,6 +33,10 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#if defined(__linux__)
+# include <sys/prctl.h>
+#endif
+#include <time.h>
 #include <unistd.h>
 
 #if defined(__has_include)
@@ -140,6 +145,41 @@ struct snd_ctl_elem_value {
 #define LE_TONE_CHANNELS 2
 #define LE_TONE_CHUNK_FRAMES 1024
 #define LE_SYSTEM_AUDIO_BUS "/run/libreecho-audio/system.pcm"
+#ifndef LE_AIRPLAY_ACTIVE_PATH
+# define LE_AIRPLAY_ACTIVE_PATH "/run/libreecho-audio/airplay.active"
+#endif
+
+/*
+ * Wake acknowledgement chirp.
+ *
+ * Short and quiet on purpose.  It is an acknowledgement, not an alert: it
+ * has to be audible across a room without being startling at night, and it
+ * has to finish well before the speaker starts talking, because the same
+ * audio is captured by the microphone and only the echo canceller keeps it
+ * out of the transcript.  90ms of a rising two-tone pair is enough to be
+ * recognised as "I heard you" and short enough not to overlap a command.
+ */
+#define LE_CHIRP_MS 90
+#define LE_CHIRP_LOW_HZ 880.0
+#define LE_CHIRP_HIGH_HZ 1320.0
+#define LE_CHIRP_AMPLITUDE 4200.0
+
+/*
+ * Sleep-noise generator.
+ *
+ * Written to the media bus rather than the system bus, because this is
+ * content the device is playing rather than a notification: it should duck
+ * for an announcement and stop when something else takes over media, which
+ * is what the media bus already gives us for free.
+ *
+ * Synthesis is deliberately trivial -- a PRNG plus a one-pole filter -- so
+ * it costs no image space and no network.  The whole point of this feature
+ * is that it keeps working with the internet down and no account.
+ */
+#define LE_MEDIA_AUDIO_BUS "/run/libreecho-audio/media.pcm"
+#define LE_NOISE_WHITE 0
+#define LE_NOISE_PINK 1
+#define LE_NOISE_BROWN 2
 
 static volatile sig_atomic_t g_stop;
 
@@ -168,6 +208,19 @@ struct audio_hw {
     int gain;
     int muted;
     int notification_volume;
+    /* Last level explicitly asked for, by the API or the buttons; -1 until
+       something asks.  Used to notice an outside writer changing the mixer. */
+    int requested_volume;
+    int volume_guard_warned;
+    /* The running sleep-noise child, so a second start replaces the first
+       rather than layering two generators onto the same bus. */
+    pid_t noise_pid;
+    int noise_colour;
+    long noise_seconds;
+    int noise_level;
+    /* CLOCK_MONOTONIC, so the sleep timer keeps counting correctly across an
+       NTP step -- a wall-clock start would make the remaining time jump. */
+    time_t noise_started;
     int startup_sound;
     int amplifier_on;
 };
@@ -192,10 +245,29 @@ static void signal_child(int signo)
     (void)signo;
 }
 
-static void reap_children(void)
+static void clear_noise_state(struct audio_hw *audio)
 {
-    while (waitpid(-1, NULL, WNOHANG) > 0)
-        ;
+    audio->noise_pid = 0;
+    audio->noise_seconds = 0;
+    audio->noise_level = 0;
+    audio->noise_started = 0;
+}
+
+static void reap_children(struct audio_hw *audio)
+{
+    pid_t done;
+
+    for (;;) {
+        done = waitpid(-1, NULL, WNOHANG);
+        if (done > 0) {
+            if (done == audio->noise_pid)
+                clear_noise_state(audio);
+            continue;
+        }
+        if (done < 0 && errno == EINTR)
+            continue;
+        break;
+    }
 }
 
 static int set_nonblocking(int fd)
@@ -794,6 +866,13 @@ static const char *control_name_or_default(const struct audio_control *control,
     return control->found && control->name[0] ? control->name : fallback;
 }
 
+/* Percent is not a round trip through the raw control, so ignore a point
+   of rounding rather than reacting to it. */
+#define VOLUME_GUARD_TOLERANCE 2
+
+static int audio_set_volume(struct audio_hw *audio, int volume);
+static int airplay_media_active(void);
+
 static void refresh_state(struct audio_hw *audio)
 {
     long long value;
@@ -808,6 +887,44 @@ static void refresh_state(struct audio_hw *audio)
         audio->volume = is_speaker_pcm_volume(&audio->master)
                       ? speaker_percent_from_value(value, min, max)
                       : percent_from_range(value, min, max);
+        /*
+         * Something outside audiod writes this mixer.  Any playback -- a
+         * plain test tone is enough -- leaves the level at full, so a
+         * volume set through the API or the buttons does not survive a
+         * single spoken reply.  The writer has not been identified
+         * (aslater3/LibreEcho#57), and until it is, hold the line: audiod
+         * owns this control for the API and the physical buttons, so put
+         * back the level that was actually asked for.
+         *
+         * This is a guard, not a fix.  It restores only a level someone
+         * explicitly requested, so a device nobody has configured is left
+         * alone, and it logs the first divergence so the underlying writer
+         * stays visible instead of being silently papered over.
+         */
+        /*
+         * A tolerance, because the percentage is not a round trip: the
+         * control is a raw range and converting percent -> raw -> percent
+         * can land a point away.  Without it the guard fired on that
+         * rounding on every boot and, being one-shot, burned its warning on
+         * an artefact and hid the real event.
+         *
+         * The raw control value is logged alongside the percentages.  The
+         * percentage collapses the bottom of the range -- everything at or
+         * below min+67 reads as 1% -- so the raw number is what identifies
+         * an outside writer.
+         */
+        if (!airplay_media_active() && audio->requested_volume >= 0 &&
+            abs(audio->volume - audio->requested_volume) >
+                VOLUME_GUARD_TOLERANCE) {
+            le_log_warn("audiod: volume changed underneath us: requested "
+                        "%d%%, control now reads %d%% (raw %lld of %lld..%lld)"
+                        "; restoring",
+                        audio->requested_volume, audio->volume,
+                        value, min, max);
+            audio->volume_guard_warned = 1;
+            if (audio_set_volume(audio, audio->requested_volume) == 0)
+                audio->volume = audio->requested_volume;
+        }
         audio->notification_volume = audio->volume;
     }
     if (read_control_value(audio, &audio->capture, &value) == 0) {
@@ -847,6 +964,15 @@ static int amplifier_active(const struct audio_hw *audio)
     return strstr(status, "closed") == NULL;
 }
 
+static int airplay_media_active(void)
+{
+    struct stat state;
+
+    /* The AirPlay bridge publishes this only after both PCM ends connect. */
+    return lstat(LE_AIRPLAY_ACTIVE_PATH, &state) == 0 &&
+           S_ISREG(state.st_mode);
+}
+
 static int audio_set_volume(struct audio_hw *audio, int volume)
 {
     char setting[16];
@@ -867,6 +993,7 @@ static int audio_set_volume(struct audio_hw *audio, int volume)
     }
     audio->volume = volume;
     audio->notification_volume = volume;
+    audio->requested_volume = volume;
     return 0;
 }
 
@@ -900,6 +1027,63 @@ static int audio_set_mute(struct audio_hw *audio, int muted)
     return 0;
 }
 
+/*
+ * Restore the owner's capture gain and playback volume at startup.
+ *
+ * audio_init() only ever *read* the mixer, so whatever the codec powered up
+ * with became the reported state.  The values the web daemon persists were
+ * therefore decorative: a gain set through the API survived in
+ * web-config.json but the hardware reset to its own default on every boot.
+ *
+ * That is not merely cosmetic here.  The VAD floor has to sit above the
+ * noise the capture path actually produces, so it is chosen for a given
+ * gain; when the gain silently reverted, the configured floor no longer
+ * matched the signal and the device either stopped hearing speech or
+ * stopped detecting end-of-speech.  Restoring the gain keeps the two in
+ * step across a reboot.
+ *
+ * The values arrive through the environment, which is how the init scripts
+ * already pass persisted settings to the other daemons.
+ */
+static int audio_set_gain(struct audio_hw *audio, int gain);
+static int audio_set_volume(struct audio_hw *audio, int volume);
+
+static int level_from_environment(const char *name, int *value)
+{
+    const char *text = getenv(name);
+    char *end;
+    long parsed;
+
+    if (!text || !text[0])
+        return 0;
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if (errno || *end || parsed < 0 || parsed > 100)
+        return 0;
+    *value = (int)parsed;
+    return 1;
+}
+
+static void apply_persisted_levels(struct audio_hw *audio)
+{
+    int value;
+
+    if (!audio->have_card_info)
+        return;
+    if (level_from_environment("LE_AUDIO_MIC_GAIN", &value)) {
+        if (audio_set_gain(audio, value) == 0)
+            le_log_info("audiod: restored microphone gain %d", value);
+        else
+            le_log_warn("audiod: unable to restore microphone gain %d", value);
+    }
+    if (level_from_environment("LE_AUDIO_VOLUME", &value)) {
+        if (audio_set_volume(audio, value) == 0)
+            le_log_info("audiod: restored volume %d", value);
+        else
+            le_log_warn("audiod: unable to restore volume %d", value);
+    }
+}
+
 static void audio_init(struct audio_hw *audio, int card)
 {
     struct snd_ctl_card_info card_info;
@@ -909,6 +1093,13 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->ctl_fd = -1;
     audio->volume = 50;
     audio->gain = 65;
+    audio->requested_volume = -1;
+    audio->volume_guard_warned = 0;
+    audio->noise_pid = 0;
+    audio->noise_colour = LE_NOISE_WHITE;
+    audio->noise_seconds = 0;
+    audio->noise_level = 0;
+    audio->noise_started = 0;
     audio->muted = 0;
     audio->notification_volume = audio->volume;
     /* Boot playback is a hard-disabled image policy.  Keep the UI truthful
@@ -934,10 +1125,14 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->output_available = audio->have_card_info && audio->master.found &&
                               access(audio->pcm_path, F_OK) == 0;
     audio->amplifier_on = 0;
+    apply_persisted_levels(audio);
 }
+
+static void stop_noise(struct audio_hw *audio);
 
 static void audio_destroy(struct audio_hw *audio)
 {
+    stop_noise(audio);
     if (audio->ctl_fd >= 0)
         close(audio->ctl_fd);
     audio->ctl_fd = -1;
@@ -1002,6 +1197,293 @@ static int write_tone_fd(int fd)
     return 0;
 }
 
+static int write_chirp_fd(int fd)
+{
+    unsigned char buffer[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS *
+                         sizeof(int16_t)];
+    size_t total = (size_t)LE_PCM_RATE * LE_CHIRP_MS / 1000U;
+    size_t done = 0;
+
+    while (done < total) {
+        size_t frames = total - done < LE_TONE_CHUNK_FRAMES
+                      ? total - done : LE_TONE_CHUNK_FRAMES;
+        int16_t *samples = (int16_t *)buffer;
+        size_t bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t);
+        size_t sent = 0;
+        size_t i;
+
+        for (i = 0; i < frames; ++i) {
+            size_t index = done + i;
+            /* Second half steps up a fifth, which reads as a question
+               being acknowledged rather than an error. */
+            double hz = index * 2U < total ? LE_CHIRP_LOW_HZ
+                                           : LE_CHIRP_HIGH_HZ;
+            /* Ramp both ends so the bus does not get a click, which is
+               louder and more startling than the tone itself. */
+            double ramp = 1.0;
+            size_t edge = total / 8U ? total / 8U : 1U;
+            int16_t value;
+
+            if (index < edge)
+                ramp = (double)index / (double)edge;
+            else if (index + edge > total)
+                ramp = (double)(total - index) / (double)edge;
+            value = (int16_t)(sin(2.0 * 3.14159265358979323846 * hz *
+                                  (double)index / (double)LE_PCM_RATE) *
+                              LE_CHIRP_AMPLITUDE * ramp);
+            samples[i * 2] = value;
+            samples[i * 2 + 1] = value;
+        }
+        while (sent < bytes) {
+            ssize_t n = write(fd, buffer + sent, bytes - sent);
+
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pfd = { fd, POLLOUT, 0 };
+                int rc;
+
+                do {
+                    rc = poll(&pfd, 1, 200);
+                } while (rc < 0 && errno == EINTR);
+                if (rc > 0)
+                    continue;
+            }
+            if (n <= 0)
+                return -1;
+            sent += (size_t)n;
+        }
+        done += frames;
+    }
+    return 0;
+}
+
+static uint32_t noise_random(uint32_t *state)
+{
+    /* xorshift32: cheap, no libc dependency, and the spectral quality of
+       the PRNG is far below what matters once it is filtered. */
+    uint32_t x = *state;
+
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+static int write_noise_fd(int fd, int colour, double amplitude,
+                          long seconds)
+{
+    unsigned char buffer[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS *
+                         sizeof(int16_t)];
+    uint32_t state = 0x1234567u;
+    double brown = 0.0;
+    double pink_a = 0.0, pink_b = 0.0, pink_c = 0.0;
+    long frames_left = seconds > 0
+        ? (long)LE_PCM_RATE * seconds : -1;
+
+    for (;;) {
+        size_t frames = LE_TONE_CHUNK_FRAMES;
+        int16_t *samples = (int16_t *)buffer;
+        size_t bytes;
+        size_t sent = 0;
+        size_t i;
+
+        if (frames_left >= 0) {
+            if (frames_left == 0)
+                return 0;
+            if ((long)frames > frames_left)
+                frames = (size_t)frames_left;
+        }
+        bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t);
+        for (i = 0; i < frames; ++i) {
+            /* -1..1 */
+            double white = (double)(int32_t)noise_random(&state) /
+                           2147483648.0;
+            double value;
+
+            if (colour == LE_NOISE_BROWN) {
+                /* Integrate with a leak so it cannot wander to the rails. */
+                brown = (brown + white * 0.05);
+                if (brown > 1.0) brown = 1.0;
+                if (brown < -1.0) brown = -1.0;
+                brown *= 0.995;
+                value = brown * 6.0;
+            } else if (colour == LE_NOISE_PINK) {
+                /* Three one-pole sections: a standard cheap approximation
+                   of -3 dB per octave, close enough to sound right. */
+                pink_a = 0.99765 * pink_a + white * 0.0990460;
+                pink_b = 0.96300 * pink_b + white * 0.2965164;
+                pink_c = 0.57000 * pink_c + white * 1.0526913;
+                value = (pink_a + pink_b + pink_c + white * 0.1848) * 0.25;
+            } else {
+                value = white;
+            }
+            if (value > 1.0) value = 1.0;
+            if (value < -1.0) value = -1.0;
+            samples[i * 2] = (int16_t)(value * amplitude);
+            samples[i * 2 + 1] = (int16_t)(value * amplitude);
+        }
+        while (sent < bytes) {
+            ssize_t n = write(fd, buffer + sent, bytes - sent);
+
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pfd = { fd, POLLOUT, 0 };
+                int rc;
+
+                do {
+                    rc = poll(&pfd, 1, 1000);
+                } while (rc < 0 && errno == EINTR);
+                if (rc > 0)
+                    continue;
+                if (rc == 0)
+                    continue;
+            }
+            /* A closed reader means playback moved on; stop quietly. */
+            if (n <= 0)
+                return 0;
+            sent += (size_t)n;
+        }
+        if (frames_left > 0)
+            frames_left -= (long)frames;
+    }
+}
+
+static time_t monotonic_seconds(void)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return 0;
+    return now.tv_sec;
+}
+
+/*
+ * A timed generator exits on its own when the sleep timer runs out.  Nothing
+ * The generic reaper also handles this child, so it must clear the tracked
+ * state when it collects this particular PID.  The explicit reap below is
+ * still needed before a stop or status transition that must synchronise the
+ * state immediately.
+ */
+static void reap_noise(struct audio_hw *audio)
+{
+    pid_t done;
+
+    if (audio->noise_pid <= 0)
+        return;
+    do {
+        done = waitpid(audio->noise_pid, NULL, WNOHANG);
+    } while (done < 0 && errno == EINTR);
+    if (done == audio->noise_pid || (done < 0 && errno == ECHILD)) {
+        clear_noise_state(audio);
+    }
+}
+
+static void stop_noise(struct audio_hw *audio)
+{
+    pid_t pid;
+    pid_t waited;
+
+    reap_noise(audio);
+    pid = audio->noise_pid;
+    if (pid > 0) {
+        if (kill(pid, SIGTERM) < 0 && errno != ESRCH)
+            le_log_warn("audiod: unable to stop noise child: %s", strerror(errno));
+        do {
+            waited = waitpid(pid, NULL, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited < 0 && errno != ECHILD)
+            le_log_warn("audiod: unable to reap noise child: %s", strerror(errno));
+        clear_noise_state(audio);
+    } else {
+        clear_noise_state(audio);
+    }
+}
+
+static void configure_noise_child(void)
+{
+#if defined(__linux__) && defined(PR_SET_PDEATHSIG)
+    pid_t parent = getppid();
+
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0 || getppid() != parent)
+        _exit(1);
+#endif
+    signal(SIGTERM, SIG_DFL);
+}
+
+static int start_noise(struct audio_hw *audio, int colour, int level,
+                       long seconds)
+{
+    double amplitude;
+    int fd;
+    pid_t pid;
+
+    if (!audio->output_available ||
+        access(LE_MEDIA_AUDIO_BUS, F_OK) < 0)
+        return -1;
+    /* Replace rather than layer: two generators on one bus is noise in the
+       unhelpful sense. */
+    stop_noise(audio);
+    if (level < 1)
+        level = 1;
+    if (level > 100)
+        level = 100;
+    /* Cap well below full scale.  This plays for hours next to someone
+       asleep; headroom matters more than loudness, and the device volume
+       is the control people will actually reach for. */
+    amplitude = 8000.0 * (double)level / 100.0;
+    fd = open(LE_MEDIA_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    pid = fork();
+    if (pid < 0) {
+        close(fd);
+        return -1;
+    }
+    if (pid == 0) {
+        int result;
+
+        configure_noise_child();
+        result = write_noise_fd(fd, colour, amplitude, seconds);
+        close(fd);
+        _exit(result == 0 ? 0 : 1);
+    }
+    close(fd);
+    audio->noise_pid = pid;
+    audio->noise_colour = colour;
+    audio->noise_seconds = seconds;
+    audio->noise_level = level;
+    audio->noise_started = monotonic_seconds();
+    return 0;
+}
+
+static int start_wake_chirp(const struct audio_hw *audio)
+{
+    int fd;
+    pid_t pid;
+
+    if (!audio->output_available ||
+        access(LE_SYSTEM_AUDIO_BUS, F_OK) < 0)
+        return -1;
+    fd = open(LE_SYSTEM_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    pid = fork();
+    if (pid < 0) {
+        close(fd);
+        return -1;
+    }
+    if (pid == 0) {
+        int result = write_chirp_fd(fd);
+        close(fd);
+        _exit(result == 0 ? 0 : 1);
+    }
+    close(fd);
+    return 0;
+}
+
 static int start_test_tone(const struct audio_hw *audio)
 {
     int fd;
@@ -1025,6 +1507,32 @@ static int start_test_tone(const struct audio_hw *audio)
     }
     close(fd);
     return 0;
+}
+
+static const char *noise_colour_name(int colour)
+{
+    if (colour == LE_NOISE_PINK)
+        return "pink";
+    if (colour == LE_NOISE_BROWN)
+        return "brown";
+    return "white";
+}
+
+/*
+ * Seconds left on the sleep timer, or -1 when the generator is running
+ * untimed.  Clamped at zero so a child that has finished writing but has not
+ * been reaped yet cannot report a negative remainder.
+ */
+static long noise_remaining(const struct audio_hw *audio)
+{
+    time_t elapsed;
+
+    if (audio->noise_pid <= 0 || audio->noise_seconds <= 0)
+        return -1;
+    elapsed = monotonic_seconds() - audio->noise_started;
+    if (elapsed < 0 || elapsed >= audio->noise_seconds)
+        return 0;
+    return (long)(audio->noise_seconds - elapsed);
 }
 
 static int queue_output(struct client *client, const char *message, size_t length)
@@ -1055,17 +1563,23 @@ static int handle_request(struct audio_hw *audio, char *message,
 
     if (!strcmp(command, "status")) {
         refresh_state(audio);
+        reap_noise(audio);
         audio->amplifier_on = amplifier_active(audio);
         (void)snprintf(data, sizeof(data),
                        "{\"volume\":%d,\"microphone_gain\":%d,"
                        "\"notification_volume\":%d,\"muted\":%s,"
                        "\"startup_sound\":%s,\"amplifier_on\":%s,"
-                       "\"output_available\":%s}",
+                       "\"output_available\":%s,"
+                       "\"noise_active\":%s,\"noise_colour\":\"%s\","
+                       "\"noise_level\":%d,\"noise_remaining_seconds\":%ld}",
                        audio->volume, audio->gain, audio->notification_volume,
                        audio->muted ? "true" : "false",
                        audio->startup_sound ? "true" : "false",
                        audio->amplifier_on ? "true" : "false",
-                       audio->output_available ? "true" : "false");
+                       audio->output_available ? "true" : "false",
+                       audio->noise_pid > 0 ? "true" : "false",
+                       noise_colour_name(audio->noise_colour),
+                       audio->noise_level, noise_remaining(audio));
         return response_ok(response, response_size, id, data);
     }
     if (!strcmp(command, "set_volume")) {
@@ -1089,6 +1603,42 @@ static int handle_request(struct audio_hw *audio, char *message,
             return response_error(response, response_size, id, "muted must be boolean");
         if (audio_set_mute(audio, boolean) < 0)
             return response_error(response, response_size, id, "microphone mute unavailable");
+        return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "noise_start")) {
+        char colour_name[16] = "white";
+        long level = 40, minutes = 0;
+        int colour;
+
+        reap_noise(audio);
+        (void)json_string(message, "colour", colour_name, sizeof(colour_name));
+        (void)json_long(message, "level", &level);
+        (void)json_long(message, "minutes", &minutes);
+        if (!strcmp(colour_name, "pink")) colour = LE_NOISE_PINK;
+        else if (!strcmp(colour_name, "brown")) colour = LE_NOISE_BROWN;
+        else if (!strcmp(colour_name, "white")) colour = LE_NOISE_WHITE;
+        else return response_error(response, response_size, id,
+                                   "colour must be white, pink or brown");
+        if (level < 1 || level > 100 || minutes < 0 || minutes > 600)
+            return response_error(response, response_size, id,
+                                  "level must be 1-100 and minutes 0-600");
+        if (start_noise(audio, colour, (int)level, minutes * 60) < 0)
+            return response_error(response, response_size, id,
+                                  "audio output unavailable");
+        le_log_info("audiod: %s noise started (level %d, %s)",
+                    colour_name, (int)level,
+                    minutes ? "timed" : "until stopped");
+        return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "noise_stop")) {
+        stop_noise(audio);
+        le_log_info("audiod: noise stopped");
+        return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "wake_chirp")) {
+        if (start_wake_chirp(audio) < 0)
+            return response_error(response, response_size, id,
+                                  "audio output unavailable");
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "test_tone")) {
@@ -1341,7 +1891,7 @@ int main(int argc, char **argv)
         nfds_t nfds = 1;
         int poll_result;
 
-        reap_children();
+        reap_children(&audio);
 
         pollfds[0].fd = listen_fd;
         pollfds[0].events = POLLIN;

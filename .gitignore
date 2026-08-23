@@ -2,3 +2,6 @@
 build/
 *.tmp
 config/runtime.json
+tests/voice-e2e/vendor/
+tests/voice-e2e/models/
+tests/voice-e2e/out/

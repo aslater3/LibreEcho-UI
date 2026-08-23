@@ -342,6 +342,40 @@ This endpoint is primarily a setup and diagnostics path. Normal operation is:
 wake event, continuous post-AEC audio, local streaming STT, streamed response
 text, warm local TTS, then `audiod` announcement playback.
 
+#### POST /api/v1/audio/noise
+
+Starts the built-in sleep-noise generator. `colour` is `white`, `pink` or
+`brown`; `level` is 1-100; `minutes` is a sleep timer, 0 to play until stopped.
+Synthesis is on-device, so it keeps playing with no network.
+
+```json
+{ "colour": "brown", "level": 40, "minutes": 30 }
+```
+
+The generator is reported by `GET /api/v1/audio` under `noise`, where
+`remaining_seconds` is -1 when running untimed. A timed generator stops on its
+own and the state clears without a further request.
+
+#### DELETE /api/v1/audio/noise
+
+Stops the generator.
+
+#### POST /api/v1/audio/simulate
+
+Renders `text` with the device's own text-to-speech and plays it into the
+**microphone** path, so wake-word detection, speech-to-text and the assistant
+process it exactly as though it had been spoken in the room. Intended for
+testing; nothing is recorded and nothing leaves the device.
+
+```json
+{ "text": "Alexa, what time is it?" }
+```
+
+The audio is substituted for the microphones without interrupting the capture
+stream, so no daemon is restarted and wake detection continues throughout. If
+the capture mux is not present on the image, the request fails with 501 and the
+microphones are unaffected.
+
 ### LED
 
 #### GET /api/v1/led
@@ -431,6 +465,22 @@ Run LED test pattern.
   "error": null
 }
 ```
+
+#### PUT /api/v1/led/night
+
+Configures night mode, which caps the ring to a dim theme on a local-time
+schedule. `start_minute` and `end_minute` are minutes past local midnight, so a
+window may wrap midnight (for example 1320 to 420 is 22:00-07:00).
+
+```json
+{ "enabled": true, "start_minute": 1320, "end_minute": 420,
+  "r": 255, "g": 40, "b": 0, "brightness": 10 }
+```
+
+The schedule is evaluated in **local** time, so the device timezone must be
+correct or the window fires at the wrong hour. See
+`PUT /api/v1/system/timezone`. Current state is reported by `GET /api/v1/led`
+under `night`, including whether the cap is currently `active`.
 
 ### Network
 
@@ -535,7 +585,10 @@ Scan for WiFi networks.
 
 #### POST /api/v1/network/wifi/connect
 
-Connect to WiFi network.
+Connect to a WiFi network. The `security` field accepts exactly `open`, `wpa2`,
+or `wpa3`; if omitted, it defaults to `wpa2` for backward compatibility.
+Malformed or unsupported security values are rejected with HTTP 400 before any
+adapter request is made.
 
 **Request:**
 ```json
@@ -546,6 +599,10 @@ Connect to WiFi network.
 }
 ```
 
+For an open network, use `"security": "open"` and omit `password`. WPA3 uses
+`"security": "wpa3"`. The endpoint never silently converts an invalid security
+value to an open or WPA2 network.
+
 **Response:**
 ```json
 {
@@ -554,6 +611,8 @@ Connect to WiFi network.
   "error": null
 }
 ```
+
+Invalid security values return the standard error envelope with HTTP 400.
 
 #### POST /api/v1/network/wifi/disconnect
 
@@ -647,6 +706,25 @@ is true, clients may send `X-LibreEcho-Allow-Unsigned: 1` for this upload only.
 That bypasses signature verification for the selected package; fetched and
 automatic updates never honor the header. The UI explicitly warns about this
 trust decision before uploading.
+
+#### GET /api/v1/system/timezone
+
+Returns the configured timezone.
+
+#### PUT /api/v1/system/timezone
+
+Sets the timezone as a POSIX TZ string, for example `CST6CDT,M3.2.0,M11.1.0`.
+There is no zoneinfo database on the device, so Olson names such as
+`America/Chicago` are **not** accepted; busybox honours `TZ` from the
+environment and that is what this sets.
+
+```json
+{ "timezone": "CST6CDT,M3.2.0,M11.1.0" }
+```
+
+Daemons read `TZ` when they start, so the response reports
+`"applies": "after restart"`. Anything that is not a plausible TZ string is
+rejected with 400 rather than written.
 
 ### Configuration
 
@@ -749,19 +827,54 @@ Returns diagnostic information.
 
 #### POST /api/v1/diagnostics/export
 
-Export diagnostic bundle.
+Create and return a bounded structured diagnostic bundle for attachment to a
+private or public report. The action requires the normal authenticated API
+session (when authentication is configured) and `X-LibreEcho-CSRF`; an empty
+JSON object is the request body. The response is ordered consistently and is
+capped at 24 KiB of bundle data, so this endpoint does not create a server-side
+temporary file or archive.
+
+The bundle includes public-safe product/release identity (including source
+commit/digest, running web-service identity, channel, slot/update state and
+kernel/UI/platform fields when available), system resource summaries,
+reset/pstore summaries, network liveness without SSID/addresses, audio and
+voice health, Bluetooth/profile state without remote identifiers, playback
+state without media metadata, privacy/button capability state, and up to eight
+recent web log entries. Unavailable or malformed subsystem data is represented
+as `available: false` or a bounded placeholder and does not abort the export.
 
 **Response:**
 ```json
 {
   "ok": true,
   "data": {
-    "filename": "libreecho-diagnostics.json",
-    "redacted": true
+    "schema_version": 1,
+    "format": "libreecho-diagnostic-bundle",
+    "bounded": true,
+    "max_bytes": 24576,
+    "summary": "backend=mock;network=healthy;audio=available;bluetooth=disabled",
+    "release_identity": {
+      "product_version": "LibreEcho OS 0.13.5",
+      "channel": "stable",
+      "active_slot": "unavailable",
+      "pending_slot": "unavailable",
+      "ota_state": "idle",
+      "source_commit": "public-build-identity",
+      "running_service": { "name": "libreecho-web", "version": "LibreEcho OS 0.13.5" }
+    },
+    "network": { "available": true, "connectivity": "healthy", "gateway_reachable": true },
+    "manifest": {
+      "redactions": ["wifi_credentials", "ssid_bssid", "ip_addresses", "bluetooth_addresses", "owner_identifiers", "tokens_cookies", "private_paths", "media_metadata"]
+    }
   },
   "error": null
 }
 ```
+
+The manifest also lists omitted private keys, OTA signing material, raw pstore
+and requester-supplied paths. The browser's **Download diagnostic bundle**
+action downloads this response as JSON and offers its short `summary` for
+copying into an issue template. No server-side temporary file is created.
 
 ### Wake Word
 
@@ -836,11 +949,23 @@ Update button mappings.
   "data": {
     "short_press": "Start listening",
     "long_press": "Open pairing mode",
-    "hardware_mute": true
+    "available": false,
+    "state": "stale",
+    "volume_capable": false,
+    "hardware_mute": false,
+    "action_capable": false,
+    "stale": true
   },
   "error": null
 }
 ```
+
+`available` and the capability fields are derived from the evdev devices
+currently discovered by `libreecho-buttond`. A missing, disconnected, or older
+than 15-second status record is reported as unavailable/stale; the API never
+claims a physical mute/privacy control from a hard-coded default. Physical
+press behavior, fail-safe capture muting, and reboot persistence remain
+hardware-validation gates.
 
 ### Bluetooth
 
@@ -930,20 +1055,70 @@ them explicitly rather than pretending to render them.
 
 ### Privacy
 
+#### GET /api/v1/privacy
+
+Returns the privacy settings and the effective audio-retention state. Audio
+retention is explicit: `none`, `local`, or `remote`. `remote` is only a
+configuration contract in this release: the destination uses an HTTPS URL and
+credentials are supplied out of band, but the upload transport is not shipped
+on the host-verifiable image. Therefore a configured remote target reports
+`state: "unavailable"`, `available: false`, `effective_mode: "none"`, and
+`fallback: "disabled"`; the device does not silently fill local storage or
+pretend that audio was delivered.
+
+The duration is bounded to `24`, `168`, or `720` hours and the size cap is
+bounded to `16`, `64`, or `256` MiB. Remote URLs are limited to 255 characters,
+require `https://`, and cannot contain embedded credentials, query strings, or
+fragments. Configuration exports may include the destination URL, but never
+contain remote credentials, API keys, or microphone audio.
+
+**Response (remote configured but unavailable):**
+```json
+{
+  "ok": true,
+  "data": {
+    "audio_retention": "remote",
+    "audio_retention_mode": "remote",
+    "audio_retention_hours": 24,
+    "audio_retention_max_mb": 64,
+    "audio_remote_destination": {
+      "configured": true,
+      "url": "https://nas.example/retained-audio",
+      "transport": "https-post",
+      "authentication": "required-out-of-band",
+      "credential_state": "not-configured",
+      "available": false,
+      "state": "unavailable",
+      "effective_mode": "none",
+      "fallback": "disabled",
+      "last_error": "Remote retention transport is unavailable on this release"
+    }
+  }
+}
+```
+
 #### PUT /api/v1/privacy
 
-Update privacy settings.
+Update privacy settings. The request requires `X-LibreEcho-CSRF` and the normal
+same-origin/authentication checks. `audio_retention: "24h"` remains accepted as
+a compatibility alias for `local`.
 
 **Request:**
 ```json
 {
   "local_only": true,
-  "audio_retention": "24h",
+  "audio_retention": "remote",
+  "audio_retention_hours": 168,
+  "audio_retention_max_mb": 64,
+  "audio_remote_url": "https://nas.example/retained-audio",
   "diagnostic_telemetry": false,
   "crash_reports": false,
   "log_retention_hours": 24
 }
 ```
+
+Remote mode without a valid HTTPS destination is rejected with `400`. All
+mutations persist atomically using the existing `0600` configuration store.
 
 ### Integrations
 

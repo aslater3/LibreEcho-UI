@@ -1173,6 +1173,125 @@ static int queue_output(struct client *client, const char *message, size_t lengt
     return 0;
 }
 
+/*
+ * Render synthesised speech to a file at the microphone's rate, for the
+ * Simulation page: the capture mux plays the result into the pipeline as if it
+ * had come from the array. That is 16 kHz mono, not the 48 kHz stereo bus, so
+ * resample_to_bus is not reusable here.
+ */
+#define LE_RENDER_MIC_RATE 16000
+
+static int16_t *resample_mono(const int16_t *src, size_t src_frames,
+                              int src_rate, int dst_rate, size_t *out_frames)
+{
+    double ratio;
+    size_t dst_frames, i;
+    int16_t *dst;
+
+    if (!src || !src_frames || src_rate <= 0 || dst_rate <= 0)
+        return NULL;
+    ratio = (double)dst_rate / (double)src_rate;
+    dst_frames = (size_t)((double)src_frames * ratio);
+    if (!dst_frames)
+        return NULL;
+    dst = (int16_t *)malloc(dst_frames * sizeof(int16_t));
+    if (!dst)
+        return NULL;
+    for (i = 0; i < dst_frames; ++i) {
+        double position = (double)i / ratio;
+        size_t index = (size_t)position;
+        double fraction = position - (double)index;
+        int16_t a = src[index < src_frames ? index : src_frames - 1];
+        int16_t b = src[index + 1 < src_frames ? index + 1 : src_frames - 1];
+        dst[i] = (int16_t)((double)a + ((double)b - (double)a) * fraction);
+    }
+    *out_frames = dst_frames;
+    return dst;
+}
+
+/*
+ * Only under the runtime directory. This path arrives from an authenticated
+ * API caller, but "authenticated" is not "allowed to choose where the device
+ * writes files", and /run is tmpfs so nothing here can outlive a reboot or
+ * reach the /data contract.
+ */
+static int render_path_allowed(const char *path)
+{
+    return path && !strncmp(path, "/run/libreecho/", 15) && !strstr(path, "..");
+}
+
+/* write_pcm_fd assumes the stereo bus; the mic path is mono. */
+static int write_mono_fd(int fd, const int16_t *pcm, size_t frames)
+{
+    size_t total = frames * sizeof(int16_t), sent = 0;
+
+    while (sent < total) {
+        ssize_t n = write(fd, (const char *)pcm + sent, total - sent);
+        if (n > 0) {
+            sent += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        return -1;
+    }
+    return 0;
+}
+
+static int render_to_file(struct tts_engine *engine, const char *text,
+                          const char *path, size_t *frames_out)
+{
+    short *mono = NULL;
+    size_t mono_frames = 0, out_frames = 0;
+    int16_t *resampled = NULL;
+    const int16_t *payload;
+    char temporary[512];
+    int src_rate, fd, rc;
+
+    *frames_out = 0;
+    if (tts_engine_synthesize(engine, text, &mono, &mono_frames) < 0 ||
+        !mono || !mono_frames)
+        return -1;
+    src_rate = tts_engine_sample_rate(engine);
+    if (src_rate == LE_RENDER_MIC_RATE) {
+        payload = (const int16_t *)mono;
+        out_frames = mono_frames;
+    } else {
+        resampled = resample_mono((const int16_t *)mono, mono_frames,
+                                  src_rate, LE_RENDER_MIC_RATE, &out_frames);
+        if (!resampled) {
+            tts_engine_free_samples(mono);
+            return -1;
+        }
+        payload = resampled;
+    }
+    /* Write then rename, so a reader can never pick up a partial file. */
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp", path)
+            >= (int)sizeof(temporary)) {
+        free(resampled);
+        tts_engine_free_samples(mono);
+        return -1;
+    }
+    fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        free(resampled);
+        tts_engine_free_samples(mono);
+        return -1;
+    }
+    rc = write_mono_fd(fd, payload, out_frames);
+    close(fd);
+    if (rc < 0 || rename(temporary, path) < 0) {
+        (void)unlink(temporary);
+        free(resampled);
+        tts_engine_free_samples(mono);
+        return -1;
+    }
+    free(resampled);
+    tts_engine_free_samples(mono);
+    *frames_out = out_frames;
+    return 0;
+}
+
 static int handle_request(struct tts_engine *engine, char *message,
                           char *response, size_t response_size)
 {
@@ -1214,6 +1333,29 @@ static int handle_request(struct tts_engine *engine, char *message,
             return response_error(response, response_size, id,
                                   "failed to start speech");
         return response_ok(response, response_size, id, "{\"speaking\":true}");
+    }
+    if (!strcmp(command, "render")) {
+        char path[512];
+        size_t frames = 0;
+
+        if (json_string(message, "text", text, sizeof(text)) < 0 || !text[0])
+            return response_error(response, response_size, id,
+                                  "missing or invalid text field");
+        if (json_string(message, "path", path, sizeof(path)) < 0 ||
+            !render_path_allowed(path))
+            return response_error(response, response_size, id,
+                                  "path must be under /run/libreecho/");
+        if (render_to_file(engine, text, path, &frames) < 0)
+            return response_error(response, response_size, id,
+                                  "synthesis failed");
+        {
+            char data[128];
+            snprintf(data, sizeof(data),
+                     "{\"frames\":%zu,\"rate\":%d,\"ms\":%zu}",
+                     frames, LE_RENDER_MIC_RATE,
+                     frames * 1000 / LE_RENDER_MIC_RATE);
+            return response_ok(response, response_size, id, data);
+        }
     }
     if (!strcmp(command, "stop_speech")) {
         kill_active_child();

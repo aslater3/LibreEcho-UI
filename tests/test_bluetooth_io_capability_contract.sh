@@ -66,8 +66,7 @@ assert 'tests/test_bt_pairing_events.c' in Path('Makefile').read_text()
 assert 'build/test-bt-pairing-events' in Path('tests/run_tests.sh').read_text()
 frontend = Path('web/js/bluetooth.js').read_text()
 assert "String(numeric).padStart(6,'0')" in frontend
-assert "p.method==='confirm' && p.value !== undefined && p.value !== null" in frontend
-assert 'comparisonValue' in frontend
+assert "const hasPairingCode=(p.method==='confirm'||p.method==='notify') && p.value !== undefined && p.value !== null" in frontend
 assert 'async function respondBluetoothPairing' in frontend
 assert 'state.btPairingResponding=true' in frontend
 assert "await api('/bluetooth/pairing/response'" in frontend

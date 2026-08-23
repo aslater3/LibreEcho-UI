@@ -19,7 +19,14 @@ SOCKET=${SOCKET:-/run/libreecho/wakeword.sock}
 MIC_SOCKET=${MIC_SOCKET:-/run/libreecho/mic.sock}
 REFERENCE_SOCKET=${REFERENCE_SOCKET:-/run/libreecho-audio/aec-reference.sock}
 VAD_FLOOR_FILE=${VAD_FLOOR_FILE:-/data/libreecho/config/vad-floor-rms}
-VAD_FLOOR_RMS=${VAD_FLOOR_RMS:-16}
+VAD_FLOOR_DEFAULT=16
+# Must not exceed what the waked binary accepts, or it exits at startup and
+# the device comes back with no wake word. That binary ships inside the wake
+# feature squashfs rather than the ramdisk, so an OTA cannot raise its limit:
+# keep this at 1024 until that payload is rebuilt, then it can go to
+# LE_VOICE_VAD_MAX_FLOOR_RMS (16384) in src/adapter/voice_dsp.h.
+VAD_FLOOR_MAX=1024
+VAD_FLOOR_RMS=${VAD_FLOOR_RMS:-$VAD_FLOOR_DEFAULT}
 
 mount_runtime() {
     [ -f "$PAYLOAD" ] || {
@@ -75,15 +82,26 @@ start_service() {
     if [ -r "$VAD_FLOOR_FILE" ]; then
         VAD_FLOOR_RMS=$(sed -n '1p' "$VAD_FLOOR_FILE")
     fi
+    # A bad floor must never cost the device its wake word. This used to
+    # return 1 on anything unparseable or outside the range, which stops the
+    # daemon and leaves the device silent to its wake word, explained only by
+    # a line in this log. The value is hand-provisioned in $VAD_FLOOR_FILE and
+    # nothing validates it on the way in, so treat a bad one as a bad setting
+    # rather than a reason to have no wake word: fall back on junk, clamp when
+    # out of range.
     case "$VAD_FLOOR_RMS" in
         *[!0-9]*|'')
-            echo "libreecho-waked: invalid VAD floor: $VAD_FLOOR_RMS" >&2
-            return 1
+            echo "libreecho-waked: unreadable VAD floor '$VAD_FLOOR_RMS'; using $VAD_FLOOR_DEFAULT" >&2
+            VAD_FLOOR_RMS=$VAD_FLOOR_DEFAULT
             ;;
     esac
-    if [ "$VAD_FLOOR_RMS" -lt 1 ] || [ "$VAD_FLOOR_RMS" -gt 1024 ]; then
-        echo "libreecho-waked: VAD floor outside 1..1024 RMS" >&2
-        return 1
+    if [ "$VAD_FLOOR_RMS" -lt 1 ]; then
+        echo "libreecho-waked: VAD floor below 1; using 1" >&2
+        VAD_FLOOR_RMS=1
+    fi
+    if [ "$VAD_FLOOR_RMS" -gt "$VAD_FLOOR_MAX" ]; then
+        echo "libreecho-waked: VAD floor above $VAD_FLOOR_MAX; clamping" >&2
+        VAD_FLOOR_RMS=$VAD_FLOOR_MAX
     fi
     ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET --reference-socket $REFERENCE_SOCKET --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS}
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" \

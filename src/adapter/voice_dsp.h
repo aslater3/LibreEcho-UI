@@ -14,6 +14,17 @@
 #define LE_VOICE_MICCAL_UNITY 16384
 #define LE_VOICE_FRAME_SAMPLES 160
 #define LE_VOICE_VAD_DEFAULT_FLOOR_RMS 16U
+/*
+ * The floor was capped at 1024, which assumes a microphone path that idles
+ * near silence.  On hardware whose capture saturates, the idle stream sits
+ * far above that -- measured here at 2400-3300 RMS in a quiet room, against
+ * roughly 19000 for speech.  A cap of 1024 puts the six-times-energy gate at
+ * about 2500 RMS, at or below the room's own noise, so the detector latches
+ * active on the first frame and never releases: end-of-speech cannot fire and
+ * every turn runs to its maximum length.  Allow the floor to reach the noise
+ * level such hardware actually produces.
+ */
+#define LE_VOICE_VAD_MAX_FLOOR_RMS 16384U
 #define LE_VOICE_WAKE_MIC_MASK \
     ((1U << 0) | (1U << 1) | (1U << 3) | (1U << 4))
 #define LE_VOICE_BEAM_CHANNEL_EARLY 0

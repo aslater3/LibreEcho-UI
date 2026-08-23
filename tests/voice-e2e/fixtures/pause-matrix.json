@@ -1,0 +1,33 @@
+{
+  "rate": 16000,
+  "fixtures": [
+    {
+      "gap_ms": 3500,
+      "file": "pause-3500.wav",
+      "wake_ms": 580,
+      "command_ms": 1030,
+      "command_starts_ms": 4780
+    },
+    {
+      "gap_ms": 3800,
+      "file": "pause-3800.wav",
+      "wake_ms": 580,
+      "command_ms": 1030,
+      "command_starts_ms": 5080
+    },
+    {
+      "gap_ms": 4000,
+      "file": "pause-4000.wav",
+      "wake_ms": 580,
+      "command_ms": 1030,
+      "command_starts_ms": 5280
+    },
+    {
+      "gap_ms": 4500,
+      "file": "pause-4500.wav",
+      "wake_ms": 580,
+      "command_ms": 1030,
+      "command_starts_ms": 5780
+    }
+  ]
+}

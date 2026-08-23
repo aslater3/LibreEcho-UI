@@ -244,8 +244,122 @@ static int apply_mixer_setting(const char *mixer_bin,
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
+/*
+ * Post-mixdown digital gain for the calibrated mono stream.
+ *
+ * The analogue PGA cannot reach the level the wake model needs.  Scoring
+ * the device's own capture through the openwakeword alexa_v0.1 model, the
+ * stream peaks at 0.41 against a 0.45 accept gate with one supporting
+ * frame where two are required -- a near miss on every attempt.  The same
+ * audio amplified scores 0.70 at three times and 0.80 at six, both of
+ * which fire.  Raising the PGA further does not work: measured on
+ * hardware, MICPGA 110 is about seven times quieter than 80, so the
+ * control is not monotonic across its nominal range.
+ *
+ * Applying the gain here instead reproduces exactly what was measured,
+ * and it lands on both consumers of this stream -- the wake detector and
+ * speech recognition, which was transcribing single characters from the
+ * same too-quiet audio.
+ *
+ * Digital gain does not improve signal to noise; it scales both.  That is
+ * fine for a level-sensitive model, but it means any VAD floor configured
+ * against the old level has to scale with it, or end-of-speech detection
+ * breaks in the way it did before.
+ */
+#define MIC_DIGITAL_GAIN_UNITY 100U
+#define MIC_DIGITAL_GAIN_DEFAULT 400U
+#define MIC_DIGITAL_GAIN_MAX 1600U
+
+static unsigned int digital_gain_from_environment(void)
+{
+    const char *text = getenv("LE_MIC_DIGITAL_GAIN");
+    char *end;
+    unsigned long parsed;
+
+    if (!text || !text[0])
+        return MIC_DIGITAL_GAIN_DEFAULT;
+    errno = 0;
+    parsed = strtoul(text, &end, 10);
+    if (errno || *end || parsed < MIC_DIGITAL_GAIN_UNITY ||
+        parsed > MIC_DIGITAL_GAIN_MAX)
+        return MIC_DIGITAL_GAIN_DEFAULT;
+    return (unsigned int)parsed;
+}
+
+static void apply_digital_gain(int16_t *samples, size_t count,
+                               unsigned int gain_hundredths)
+{
+    size_t i;
+
+    if (gain_hundredths == MIC_DIGITAL_GAIN_UNITY)
+        return;
+    for (i = 0; i < count; ++i) {
+        int32_t scaled = (int32_t)((samples[i] * (int32_t)gain_hundredths) /
+                                   (int32_t)MIC_DIGITAL_GAIN_UNITY);
+
+        if (scaled > INT16_MAX)
+            scaled = INT16_MAX;
+        else if (scaled < INT16_MIN)
+            scaled = INT16_MIN;
+        samples[i] = (int16_t)scaled;
+    }
+}
+
+/*
+ * Map the owner's 0..100 microphone gain onto the codec's MICPGA control.
+ *
+ * The four MICPGA volumes were fixed at 40, and configure_capture_path()
+ * runs on every capture start -- not just at boot -- so anything that set
+ * the gain elsewhere was overwritten as soon as the wake word listener
+ * reopened the stream.  Restoring the level in audiod could never hold for
+ * that reason, whatever order the daemons started in.
+ *
+ * 50 maps to 40 so an unconfigured device keeps exactly the level it had,
+ * and the scale runs to 80 at 100, which is the control's maximum:
+ *
+ *   ADC_A MICPGA Volume Ctrl   080, 80  (range 0->80)
+ *
+ * Do not raise this ceiling.  An earlier attempt at 110 was out of range,
+ * and rather than being clamped it left the capture about seven times
+ * quieter than 80 -- so an out-of-range write here is not a no-op, it is
+ * actively harmful.  Level beyond this comes from the digital stage above.  The upper half only
+ * became usable once the 24-bit capture scaling was fixed; before that the
+ * stream saturated regardless of any gain.
+ *
+ * The top of the range matters.  Scoring real captured audio through the
+ * openwakeword alexa model, the device's own stream peaked at 0.41 against
+ * a 0.45 gate with a single supporting frame -- a near miss on every
+ * attempt.  The same audio amplified three times scores 0.70 with two
+ * supporting frames and would fire, and six times scores 0.80.  The word
+ * was being recognised all along and simply arriving too quiet.
+ */
+#define MICPGA_DEFAULT_VOLUME 40
+#define MICPGA_MAX_VOLUME 80
+
+static int micpga_volume_from_environment(void)
+{
+    const char *text = getenv("LE_MIC_CAPTURE_GAIN");
+    char *end;
+    long percent;
+
+    if (!text || !text[0])
+        return MICPGA_DEFAULT_VOLUME;
+    errno = 0;
+    percent = strtol(text, &end, 10);
+    if (errno || *end || percent < 0 || percent > 100)
+        return MICPGA_DEFAULT_VOLUME;
+    return (int)(percent * MICPGA_MAX_VOLUME / 100);
+}
+
 static int configure_capture_path(const struct micd_config *config)
 {
+    char micpga[8];
+    char default_micpga[8];
+    struct mixer_setting micpga_settings[4];
+    static const char *const micpga_controls[4] = {
+        "ADC_A MICPGA Volume Ctrl", "ADC_B MICPGA Volume Ctrl",
+        "ADC_C MICPGA Volume Ctrl", "ADC_D MICPGA Volume Ctrl"
+    };
     static const struct mixer_setting settings[] = {
         {"Mic PGA Switch", "1", "1"},
         {"ADCFGA Left Mute Switch", "0", NULL},
@@ -258,10 +372,6 @@ static int configure_capture_path(const struct micd_config *config)
         {"ADC_C Right Ip Select ADC_C DIF1_R switch", "1", NULL},
         {"ADC_D Left Ip Select ADC_D DIF1_L switch", "1", NULL},
         {"ADC_D Right Ip Select ADC_D DIF1_R switch", "1", NULL},
-        {"ADC_A MICPGA Volume Ctrl", "40", "40"},
-        {"ADC_B MICPGA Volume Ctrl", "40", "40"},
-        {"ADC_C MICPGA Volume Ctrl", "40", "40"},
-        {"ADC_D MICPGA Volume Ctrl", "40", "40"},
         {"ADC_A DIF1_L Input Gain", "1", NULL},
         {"ADC_A DIF1_R Input Gain", "1", NULL},
         {"ADC_B DIF1_L Input Gain", "1", NULL},
@@ -281,6 +391,38 @@ static int configure_capture_path(const struct micd_config *config)
             return -1;
         }
     }
+    (void)snprintf(micpga, sizeof(micpga), "%d",
+                   micpga_volume_from_environment());
+    (void)snprintf(default_micpga, sizeof(default_micpga), "%d",
+                   MICPGA_DEFAULT_VOLUME);
+    for (i = 0; i < 4; ++i) {
+        micpga_settings[i].control = micpga_controls[i];
+        micpga_settings[i].value = micpga;
+        micpga_settings[i].value2 = micpga;
+        if (apply_mixer_setting(config->mixer_bin, &micpga_settings[i]) < 0) {
+            /*
+             * The control's usable maximum is a property of the codec, not
+             * of this scale.  If a value is refused, fall back to the level
+             * the capture path used before rather than failing the whole
+             * profile -- an unusable microphone is far worse than a quiet
+             * one, and configure_capture_path() failing leaves the device
+             * with no capture at all.
+             */
+            struct mixer_setting fallback;
+
+            le_log_warn("micd: capture PGA %s refused for %s; using %d",
+                        micpga, micpga_controls[i], MICPGA_DEFAULT_VOLUME);
+            fallback.control = micpga_controls[i];
+            fallback.value = default_micpga;
+            fallback.value2 = default_micpga;
+            if (apply_mixer_setting(config->mixer_bin, &fallback) < 0) {
+                le_log_error("unable to apply microphone mixer control: %s",
+                             micpga_controls[i]);
+                return -1;
+            }
+        }
+    }
+    le_log_info("micd: capture PGA set to %s", micpga);
     return 0;
 }
 
@@ -458,6 +600,7 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
     int pipe_fds[2];
     pid_t capture;
     ssize_t count = 0;
+    unsigned int digital_gain = digital_gain_from_environment();
     int result = -1;
 
     if (pipe(pipe_fds) < 0)
@@ -491,6 +634,7 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
             le_voice_process_beamformed_interleaved(
                 input, frames, &calibration, &beamformer,
                 &highpass, output);
+            apply_digital_gain(output, frames, digital_gain);
             if (write_all(client_fd, output,
                           frames * sizeof(output[0])) < 0)
                 break;

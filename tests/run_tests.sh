@@ -9,11 +9,15 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/con
 make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
 ./build/test-network-health
 ./build/test-gateway-probe
+make build/test-backend-linux-wifi-emission
+./build/test-backend-linux-wifi-emission
 ./build/test-bt-mgmt-events
 ./build/test-bt-pairing-events
 python3 tests/test_networkd_health_integration.py
+python3 tests/test_backend_linux_wifi_contract.py
 sh tests/test_network_liveness_contract.sh
 sh tests/test_bluetooth_pairing_contract.sh
+sh tests/test_bluetooth_pairing_code_ui.sh
 sh tests/test_bluetooth_io_capability_contract.sh
 sh tests/test_bluetooth_profile_contract.sh
 sh tests/test_bluetooth_profile_service_contract.sh
@@ -27,22 +31,31 @@ make build/test-avdtp-wire-format
 sh tests/test_network_scan_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
+make build/test-audiod-review build/test-led-night-review
+./build/test-audiod-review
+./build/test-led-night-review
 sh tests/test_startup_animation.sh
+make build/test-buttond-timing
+./build/test-buttond-timing
 sh tests/test_buttond_contract.sh
+sh tests/test_input_capability_state_contract.sh
 sh tests/test_bluetooth_startup_readiness_contract.sh
 sh tests/test_bluetooth_decoder_state_contract.sh
 make build/test-wake-led
 sh tests/test_microphone_fanout_contract.sh
+sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_wake_word_ui_contract.py
 python3 tools/test_virtual_echo.py
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
+python3 tests/voice-e2e/test_audio_quality.py
 sh tests/test_device_identity.sh
 # The CPU online-mask fixture requires a Linux sysfs-shaped runtime and is run
 # separately; keep the aggregate suite deterministic across CI runners.
 # sh tests/test_cpu_online_mask.sh
 python3 tests/test_public_source_safety.py
+python3 tests/test_diagnostic_export_contract.py
 sh tests/test_source_provenance.sh
 sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
@@ -98,6 +111,7 @@ trap cleanup EXIT INT TERM
 i=0
 while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-server.log; exit 1; }; sleep 0.1; done
 LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_limits.sh
@@ -168,6 +182,7 @@ jq -e '.ok == true and .data.available == false and .data.unavailable == true' /
 code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/config/export")
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
+LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export_linux.sh
 curl -fsS "$URL/api/v1/system" | jq -e \
     '.ok and .data.ntp == true and .data.ntp_state == "synchronized" and
      .data.clock_source == "ntp" and .data.rtc_available == true and
