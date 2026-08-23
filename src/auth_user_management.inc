@@ -133,7 +133,7 @@ int le_auth_remove_user(struct le_auth_db *db, const char *path,
     db->user_count = count;
     db->enabled = count > 0;
     for (i = 0; i < LE_AUTH_MAX_SESSIONS; ++i)
-        if (!strcmp(db->sessions[i].username, username))
+        if (!strcmp(db->sessions[i].username, folded))
             db->sessions[i].token[0] = '\0';
     return 0;
 }

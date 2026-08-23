@@ -41,7 +41,7 @@ static int changing(const char*m){return strcmp(m,"GET")&&strcmp(m,"HEAD");}stat
  * is unchanged; the scheme was never the part doing the work.
  */
 static int origin_matches_host(const char*origin,const char*host){const char*rest=0;if(!host[0])return 0;if(!strncmp(origin,"http://",7))rest=origin+7;else if(!strncmp(origin,"https://",8))rest=origin+8;return rest&&constant_equal(rest,host);}
-static int loopback_origin(const char*o){return !strncmp(o,"http://127.0.0.1",16)||!strncmp(o,"http://localhost",16)||!strncmp(o,"https://127.0.0.1",17)||!strncmp(o,"https://localhost",17);}
+static int loopback_origin(const char*o){const char*host;if(!strncmp(o,"http://",7))host=o+7;else if(!strncmp(o,"https://",8))host=o+8;else return 0;if(!strncmp(host,"127.0.0.1",9))host+=9;else if(!strncmp(host,"localhost",9))host+=9;else return 0;return !*host||*host==':';}
 static int allowed_origin(const struct api_context*c,const struct api_request*q){const char*origin=q->origin;if(!origin[0]||c->allow_insecure_lan)return 1;if(c->allowed_origin[0])return constant_equal(origin,c->allowed_origin);if(origin_matches_host(origin,q->host))return 1;return loopback_origin(origin);}static int security(const struct api_context*c,const struct api_request*q,struct api_response*r){int authorized=0,bootstrap_path=!strcmp(q->path,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST"),login_path=!strcmp(q->path,"/api/v1/auth/login")&&!strcmp(q->method,"POST");if(!strcmp(q->path,"/api/v1/config")||bootstrap_path||login_path)authorized=1;if(!authorized&&c->auth_token[0]){char expected[256];snprintf(expected,sizeof(expected),"Bearer %s",c->auth_token);authorized=constant_equal(q->authorization,expected);}if(!authorized&&c->auth.enabled&&!strncmp(q->authorization,"Bearer ",7))authorized=le_auth_session((struct le_auth_db*)&c->auth,q->authorization+7,0,0);if(api_bootstrap_required_internal(c)&&!authorized){err(r,401,LE_AUTH,"Initial account setup is required");return 0;}if((c->auth_token[0]||c->auth.enabled)&&!authorized){err(r,401,LE_AUTH,"Authentication is required");return 0;}if(!changing(q->method))return 1;if(!constant_equal(q->csrf,c->csrf_token)){err(r,403,LE_AUTH,"Missing or invalid CSRF token");return 0;}if(!allowed_origin(c,q)){err(r,403,LE_AUTH,"Origin is not allowed");return 0;}return 1;}
 static int body_ok(const struct api_request*q,struct api_response*r){if(!json_valid_object(q->body,q->body_len)){err(r,400,LE_INVALID,"Request body must be a valid JSON object");return 0;}return 1;}
 static const char *update_path(void){const char *p=getenv("LIBREECHO_UPDATE");return p&&*p?p:"/usr/local/sbin/libreecho-update";}
@@ -1180,6 +1180,34 @@ static int usb_subpath(const char*path,char*out_rel,size_t size,char*out_full,si
  else if((size_t)snprintf(out_full,full_size,"%s",LE_USB_MOUNT)>=full_size)return -1;
  return 0;
 }
+static int usb_open_dir(const char*rel)
+{
+ int fd,next;char copy[256],*save,*part;
+ fd=open(LE_USB_MOUNT,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+ if(fd<0)return-1;
+ if(!rel||!rel[0])return fd;
+ if((size_t)snprintf(copy,sizeof(copy),"%s",rel)>=sizeof(copy)){close(fd);return-1;}
+ for(part=strtok_r(copy,"/",&save);part;part=strtok_r(NULL,"/",&save)){
+  if(!strcmp(part,"."))continue;
+  if(!strcmp(part,"..")){close(fd);return-1;}
+  next=openat(fd,part,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+  if(next<0){close(fd);return-1;}
+  close(fd);fd=next;
+ }
+ return fd;
+}
+static int usb_open_file(const char*rel)
+{
+ char copy[256],*slash,*base;int dirfd,fd;struct stat st;
+ if(!rel||!rel[0]||(size_t)snprintf(copy,sizeof(copy),"%s",rel)>=sizeof(copy))return-1;
+ slash=strrchr(copy,'/');
+ if(slash){*slash='\0';base=slash+1;dirfd=usb_open_dir(copy);}else{base=copy;dirfd=usb_open_dir("");}
+ if(dirfd<0||!base[0]){if(dirfd>=0)close(dirfd);return-1;}
+ fd=openat(dirfd,base,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+ close(dirfd);
+ if(fd<0||fstat(fd,&st)<0||!S_ISREG(st.st_mode)){if(fd>=0)close(fd);return-1;}
+ return fd;
+}
 /*
  * Play a file from the mounted drive. radiod decodes MPEG-1/2 Layer III only,
  * so anything else is refused by extension with a reason rather than started
@@ -1187,11 +1215,11 @@ static int usb_subpath(const char*path,char*out_rel,size_t size,char*out_full,si
  */
 static void usb_play_json(struct api_context*c,const struct api_request*q,struct api_response*r)
 {
- char rel[256],full[512],esc[600];const char*dot;struct stat st;int rc;
+ char rel[256],full[512],esc[600];const char*dot;int rc;
  if(json_get_string(q->body,"path",rel,sizeof(rel))<1||!rel[0]){err(r,400,LE_INVALID,"path is required");return;}
  if(strstr(rel,"..")||strchr(rel,'\\')||rel[0]=='/'){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
  if((size_t)snprintf(full,sizeof(full),"%s/%s",LE_USB_MOUNT,rel)>=sizeof(full)){err(r,400,LE_INVALID,"That path is too long");return;}
- if(stat(full,&st)||!S_ISREG(st.st_mode)){err(r,404,LE_INVALID,"No such file on the drive");return;}
+ {int checked=usb_open_file(rel);if(checked<0){err(r,404,LE_INVALID,"No such file on the drive");return;}close(checked);}
  dot=strrchr(rel,'.');
  if(!dot||strcasecmp(dot,".mp3")){
   err(r,415,LE_NOT_SUPPORTED,"Only MP3 files can be played; this image has no AAC decoder");return;}
@@ -1202,14 +1230,14 @@ static void usb_play_json(struct api_context*c,const struct api_request*q,struct
  api_log(c,"info","USB file playback started");
  {char body[768];snprintf(body,sizeof(body),"{\"playing\":true,\"path\":\"%s\"}",esc);ok(r,body);}
 }
-static void usb_storage_json(struct api_context*c,const struct api_request*q,struct api_response*r){char node[64],part[64],esc[192],rel[256],dirpath[512],relesc[512];unsigned long long bytes=0,used=0,avail=0;const char*fs;size_t n=0,listed=0;DIR*d;struct dirent*e;struct statvfs vfs;(void)c;
+static void usb_storage_json(struct api_context*c,const struct api_request*q,struct api_response*r){char node[64],part[64],esc[192],rel[256],dirpath[512],relesc[512];unsigned long long bytes=0,used=0,avail=0;const char*fs;size_t n=0,listed=0;DIR*d;struct dirent*e;struct stat st;struct statvfs vfs;(void)c;
  if(usb_subpath(q?q->path:NULL,rel,sizeof(rel),dirpath,sizeof(dirpath))<0){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
  if(!usb_disk_find(node,sizeof(node),part,sizeof(part),&bytes)){out(r,200,"{\"ok\":true,\"data\":{\"present\":false,\"mounted\":false,\"message\":\"No USB disk is attached. The OTG port must be in host mode.\"},\"error\":null}");return;}
  fs=usb_mount_try(part);
  if(fs&&statvfs(LE_USB_MOUNT,&vfs)==0){unsigned long long fr=(unsigned long long)vfs.f_frsize;avail=fr*(unsigned long long)vfs.f_bavail;used=fr*((unsigned long long)vfs.f_blocks-(unsigned long long)vfs.f_bfree);}
  json_escape(relesc,sizeof(relesc),rel);
  if(bluetooth_append(r->body,sizeof(r->body),&n,"{\"ok\":true,\"data\":{\"present\":true,\"device\":\"%s\",\"partition\":\"%s\",\"size_bytes\":%llu,\"used_bytes\":%llu,\"free_bytes\":%llu,\"filesystem\":\"%s\",\"mounted\":%s,\"path\":\"%s\",\"rel_path\":\"%s\",\"entries\":[",node,part,bytes,used,avail,fs?fs:"",fs?"true":"false",LE_USB_MOUNT,relesc)){err(r,503,LE_IO,"Storage response is too large");return;}
- if(fs&&(d=opendir(dirpath))!=NULL){while((e=readdir(d))!=NULL&&listed<LE_USB_ENTRIES){char full[512];struct stat st;if(e->d_name[0]=='.')continue;snprintf(full,sizeof(full),"%s/%s",dirpath,e->d_name);if(stat(full,&st))continue;json_escape(esc,sizeof(esc),e->d_name);if(bluetooth_append(r->body,sizeof(r->body),&n,"%s{\"name\":\"%s\",\"directory\":%s,\"size_bytes\":%llu}",listed?",":"",esc,S_ISDIR(st.st_mode)?"true":"false",(unsigned long long)st.st_size))break;listed++;}closedir(d);}
+ if(fs&&(d=fdopendir(usb_open_dir(rel)))!=NULL){int dfd=dirfd(d);while((e=readdir(d))!=NULL&&listed<LE_USB_ENTRIES){if(e->d_name[0]=='.')continue;if(fstatat(dfd,e->d_name,&st,AT_SYMLINK_NOFOLLOW)||S_ISLNK(st.st_mode))continue;json_escape(esc,sizeof(esc),e->d_name);if(bluetooth_append(r->body,sizeof(r->body),&n,"%s{\"name\":\"%s\",\"directory\":%s,\"size_bytes\":%llu}",listed?",":"",esc,S_ISDIR(st.st_mode)?"true":"false",(unsigned long long)st.st_size))break;listed++;}closedir(d);}
  if(bluetooth_append(r->body,sizeof(r->body),&n,"],\"entry_count\":%u},\"error\":null}",(unsigned)listed)){err(r,503,LE_IO,"Storage response is too large");return;}
  r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
 /*
@@ -1351,7 +1379,7 @@ clear:
 static void auth_remove_user_json(struct api_context*c,const struct api_request*q,struct api_response*r)
 {
     const char*username=q->path+strlen("/api/v1/auth/users/");
-    if(!*username||strchr(username,'/')||le_auth_remove_user(&c->auth,c->users_path,username)){err(r,409,LE_BUSY,"User could not be removed; at least one user must remain");return;}
+    if(!*username||strchr(username,'/')||le_auth_remove_user(&c->auth,c->users_path,username)||(c->feature_https&&c->sessions_path[0]&&le_auth_save_sessions(&c->auth,c->sessions_path))){err(r,409,LE_BUSY,"User could not be removed; at least one user must remain");return;}
     api_log(c,"warning","Local user removed");
     auth_users_json(c,r);
 }

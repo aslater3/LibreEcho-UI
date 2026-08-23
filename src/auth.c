@@ -426,11 +426,20 @@ void le_auth_load_sessions(struct le_auth_db *db, const char *path)
         char token[LE_AUTH_TOKEN_MAX];
         char username[LE_AUTH_USERNAME_MAX];
         long long expires = 0;
+        size_t user;
+        int known_user = 0;
 
         if (sscanf(line, "%64s %31s %lld", token, username, &expires) != 3)
             continue;
         /* A stored session can never outlive the expiry it was issued with. */
         if ((time_t)expires <= now)
+            continue;
+        for (user = 0; user < db->user_count; ++user)
+            if (!strcmp(db->users[user].username, username)) {
+                known_user = 1;
+                break;
+            }
+        if (!known_user)
             continue;
         snprintf(db->sessions[slot].token,
                  sizeof(db->sessions[slot].token), "%s", token);

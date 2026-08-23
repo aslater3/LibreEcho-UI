@@ -35,13 +35,16 @@ extern int setgroups(int,const gid_t*);
 #define LE_UPDATE_TMP "/data/libreecho/update/incoming/manual.tar.tmp"
 #define LE_UPDATE_LOCK "/data/libreecho/update/incoming/upload.lock"
 #define LE_MAX_ASSISTANT_WORKERS 4
+#define LE_MAX_TLS_RELAYS 4
+#define LE_TLS_IDLE_TIMEOUT_MS 60000
 struct client{int fd;
 size_t used;
 char buf[LE_REQ_MAX+1];
 };
 static volatile sig_atomic_t assistant_workers;
 static volatile sig_atomic_t assistant_pids[LE_MAX_ASSISTANT_WORKERS];
-static void reap_assistant_workers(int signo){int i;int status;(void)signo;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]>0&&waitpid((pid_t)assistant_pids[i],&status,WNOHANG)>0){assistant_pids[i]=0;if(assistant_workers>0)assistant_workers--;}}
+static volatile sig_atomic_t tls_relay_pids[LE_MAX_TLS_RELAYS];
+static void reap_child_workers(int signo){int i;int status;(void)signo;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]>0&&waitpid((pid_t)assistant_pids[i],&status,WNOHANG)>0){assistant_pids[i]=0;if(assistant_workers>0)assistant_workers--;}for(i=0;i<LE_MAX_TLS_RELAYS;i++)if(tls_relay_pids[i]>0&&waitpid((pid_t)tls_relay_pids[i],&status,WNOHANG)>0)tls_relay_pids[i]=0;}
 
 static int close_on_exec(int fd)
 {
@@ -196,15 +199,15 @@ c->used=0;
 static void tls_relay(int cfd,const struct http_options*o){
 struct le_tls*tls;int up=-1;struct sockaddr_in a;struct pollfd p[2];char buf[4096];long n;
 tls=le_tls_server_open(cfd,o->tls_cert,o->tls_key);
-if(!tls)return;
+if(!tls){close(cfd);return;}
 up=socket(AF_INET,SOCK_STREAM,0);
-if(up<0){le_tls_close(tls);return;}
+if(up<0){le_tls_close(tls);close(cfd);return;}
 memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)o->port);
 /* inet_pton, not INADDR_LOOPBACK: the latter is not POSIX and is hidden by
    _POSIX_C_SOURCE on some platforms, so it built on Linux and failed the
    native build the e2e harness uses. */
-if(inet_pton(AF_INET,"127.0.0.1",&a.sin_addr)!=1){close(up);le_tls_close(tls);return;}
-if(connect(up,(struct sockaddr*)&a,sizeof(a))){close(up);le_tls_close(tls);return;}
+if(inet_pton(AF_INET,"127.0.0.1",&a.sin_addr)!=1){close(up);le_tls_close(tls);close(cfd);return;}
+if(connect(up,(struct sockaddr*)&a,sizeof(a))){close(up);le_tls_close(tls);close(cfd);return;}
 /*
  * Pump both directions until either end finishes. Two things this loop has to
  * get right, both learned the hard way:
@@ -223,7 +226,7 @@ for(;;){
 int pending=le_tls_pending(tls)>0;
 p[0].fd=cfd;p[0].events=POLLIN;p[0].revents=0;
 p[1].fd=up;p[1].events=POLLIN;p[1].revents=0;
-if(poll(p,2,pending?0:60000)<0)break;
+if(poll(p,2,pending?0:LE_TLS_IDLE_TIMEOUT_MS)<0)break;
 if(!pending&&!p[0].revents&&!p[1].revents)break;   /* idle timeout */
 
 /* upstream first: never let a ready response go unread */
@@ -250,25 +253,28 @@ n=read(up,buf,sizeof(buf));
 if(n<=0)break;
 if(le_tls_write(tls,buf,(size_t)n)!=n)break;
 }
-close(up);le_tls_close(tls);return;}
+close(up);le_tls_close(tls);close(cfd);return;}
 
-/* Double-fork so the relay is reaped by init and never becomes a zombie the
-   existing SIGCHLD bookkeeping would have to account for. */
-static void spawn_tls_relay(int cfd,const struct http_options*o){
-pid_t pid=fork();
-if(pid<0)return;
-if(pid==0){
-if(fork()==0){tls_relay(cfd,o);_exit(0);}
-_exit(0);
-}
-waitpid(pid,NULL,0);
+/* Keep TLS relays in the same fixed process budget as other forked work. */
+static int spawn_tls_relay(int cfd,const struct http_options*o){
+sigset_t blocked,previous;pid_t pid;int i,slot=-1;
+sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);
+if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;
+for(i=0;i<LE_MAX_TLS_RELAYS;i++)if(tls_relay_pids[i]<=0){slot=i;break;}
+if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
+pid=fork();
+if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
+if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);tls_relay(cfd,o);_exit(0);}
+tls_relay_pids[slot]=pid;
+sigprocmask(SIG_SETMASK,&previous,NULL);
+return 0;
 }
 
 int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,tls_ls=-1,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
 struct sockaddr_in a;
 struct client c[LE_MAX_CLIENTS];
 struct pollfd p[LE_MAX_CLIENTS+2];
-time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_assistant_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
+time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_child_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
 if(max>LE_MAX_CLIENTS)max=LE_MAX_CLIENTS;
 memset(c,0,sizeof(c));
 for(i=0;
@@ -318,7 +324,7 @@ close(fd);
 }else c[i].fd=fd;
 }}if(tls_ls>=0&&(p[max+1].revents&POLLIN)){int tfd=accept(tls_ls,0,0);
 if(tfd>=0&&close_on_exec(tfd)<0){close(tfd);tfd=-1;}
-if(tfd>=0){spawn_tls_relay(tfd,o);close(tfd);}
+if(tfd>=0){(void)spawn_tls_relay(tfd,o);close(tfd);}
 }for(i=0;
 i<max;
 i++)if(c[i].fd>=0&&(p[i+1].revents&(POLLIN|POLLHUP|POLLERR))){ssize_t n=recv(c[i].fd,c[i].buf+c[i].used,LE_REQ_MAX-c[i].used,0);

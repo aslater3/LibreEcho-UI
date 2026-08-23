@@ -10,7 +10,9 @@
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/x509_csr.h>
 
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +33,15 @@ struct le_tls {
 };
 
 static const char *SEED = "libreecho-tls";
+#define LE_TLS_HANDSHAKE_TIMEOUT_MS 10000
+
+static long long monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return (long long)time(NULL) * 1000LL;
+    return (long long)now.tv_sec * 1000LL + now.tv_nsec / 1000000LL;
+}
 
 struct le_tls *le_tls_client_open(int fd, const char *hostname)
 {
@@ -90,7 +101,8 @@ struct le_tls *le_tls_server_open(int fd, const char *cert_path,
                                   const char *key_path)
 {
     struct le_tls *tls = calloc(1, sizeof(*tls));
-    int rc;
+    int rc, original_flags;
+    long long deadline;
 
     if (!tls)
         return NULL;
@@ -124,10 +136,31 @@ struct le_tls *le_tls_server_open(int fd, const char *cert_path,
     mbedtls_ssl_set_bio(&tls->ssl, &tls->net, mbedtls_net_send,
                         mbedtls_net_recv, NULL);
 
+    original_flags = fcntl(fd, F_GETFL);
+    if (original_flags < 0 || fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) < 0)
+        goto fail;
+    deadline = monotonic_ms() + LE_TLS_HANDSHAKE_TIMEOUT_MS;
     while ((rc = mbedtls_ssl_handshake(&tls->ssl)) != 0) {
+        struct pollfd waitfd;
+        long long remaining = deadline - monotonic_ms();
+        int waited;
         if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE)
             goto fail;
+        if (remaining <= 0)
+            goto fail;
+        waitfd.fd = fd;
+        waitfd.events = rc == MBEDTLS_ERR_SSL_WANT_WRITE ? POLLOUT : POLLIN;
+        waitfd.revents = 0;
+        waited = poll(&waitfd, 1, remaining > LE_TLS_HANDSHAKE_TIMEOUT_MS ?
+                      LE_TLS_HANDSHAKE_TIMEOUT_MS : (int)remaining);
+        if (waited < 0 && errno == EINTR)
+            continue;
+        if (waited <= 0 || (waited &&
+                            (waitfd.revents & (POLLERR | POLLHUP | POLLNVAL))))
+            goto fail;
     }
+    if (fcntl(fd, F_SETFL, original_flags) < 0)
+        goto fail;
     return tls;
 
 fail:

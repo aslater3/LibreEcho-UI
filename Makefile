@@ -163,6 +163,10 @@ $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emissio
 		-DLE_ADAPTER_NETWORK_SOCK='"/tmp/libreecho-network-backend-test.sock"' \
 		-Isrc -Isrc/adapter $^ -o $@
 
+$(BUILD)/test-auth-sessions: tests/test_auth_sessions.c src/auth.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
@@ -559,7 +563,7 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -m 0755 $(ADAPTER_TARGETS) $(DESTDIR)$(PREFIX)/sbin/
 	cp -R web/* $(DESTDIR)$(PREFIX)/share/libreecho/web/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
-	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init $(DESTDIR)/etc/init.d/
+	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init $(DESTDIR)/etc/init.d/
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
 
 clean:

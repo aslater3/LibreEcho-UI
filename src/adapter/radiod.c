@@ -501,6 +501,43 @@ static int write_bus(int bus, const short *pcm, int frames, int channels,
 static int play_stream(const char *url, const char *bus_path, long *played,
                        int *complete);
 
+static int open_usb_file(const char *url)
+{
+    static const char root[] = "/run/libreecho/usb";
+    char copy[URL_MAX], *save, *part;
+    int dirfd, next;
+    size_t root_len = sizeof(root) - 1;
+    if (!url || strncmp(url, root, root_len) || url[root_len] != '/' ||
+        strlen(url + root_len + 1) >= sizeof(copy))
+        return -1;
+    snprintf(copy, sizeof(copy), "%s", url + root_len + 1);
+    dirfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dirfd < 0)
+        return -1;
+    part = strtok_r(copy, "/", &save);
+    while (part) {
+        char *next_part = strtok_r(NULL, "/", &save);
+        if (!strcmp(part, ".") || !strcmp(part, "..")) {
+            close(dirfd);
+            return -1;
+        }
+        next = openat(dirfd, part, next_part ?
+                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW :
+                      O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) {
+            close(dirfd);
+            return -1;
+        }
+        close(dirfd);
+        if (!next_part)
+            return next;
+        dirfd = next;
+        part = next_part;
+    }
+    close(dirfd);
+    return -1;
+}
+
 /*
  * A stream ending is not a reason to stop playing. Servers rotate, senders
  * close connections and networks hiccup; play_stream returning simply meant
@@ -579,7 +616,7 @@ static int play_stream(const char *url, const char *bus_path, long *played,
      * the rest.
      */
     if (url && url[0] == '/') {
-        net = open(url, O_RDONLY | O_CLOEXEC);
+        net = open_usb_file(url);
         if (net < 0)
             return -1;
         memset(&stream, 0, sizeof(stream));
