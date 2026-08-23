@@ -1456,8 +1456,20 @@ static int mac_override_valid(const char *in, char *out, size_t out_size)
     }
     out[n] = '\0';
     if (sscanf(out, "%2x", &first) != 1 || (first & 1))
+        return 0;                      /* multicast: no interface may source it */
+    /*
+     * All-zero is syntactically six octets but is not a usable address. It is
+     * applied to wlan0 at boot, and this device's recovery path is the network
+     * it would take down, so refuse it here rather than discover it after a
+     * reboot.
+     */
+    {
+        size_t z;
+        for (z = 0; out[z]; ++z)
+            if (out[z] != '0' && out[z] != ':')
+                return 1;
         return 0;
-    return 1;
+    }
 }
 
 void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;usb_host_restore(c);if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(c->feature_https)(void)le_auth_save_sessions(&c->auth,c->sessions_path);}ok(r,"{\"logged_out\":true}");return;}
