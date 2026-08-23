@@ -263,6 +263,13 @@ struct icy_stream {
     char meta_text[ICY_META_MAX];
     unsigned char raw[NET_CHUNK];
     size_t raw_used, raw_pos;
+    /*
+     * A live stream has no Content-Length; a file served over HTTP does.
+     * Keeping both lets the player tell "the station dropped" from "the file
+     * finished", which decide opposite things about reconnecting.
+     */
+    long content_length;            /* 0 when the server declares none */
+    long body_read;
 };
 
 static struct icy_stream stream;
@@ -367,6 +374,14 @@ static int icy_open(struct icy_stream *st, int fd, const char *host,
         if (end != value && metaint > 0 && metaint <= 1024L * 1024L)
             st->metaint = (int)metaint;
     }
+    if (!header_value(headers, "content-length", value, sizeof(value))) {
+        char *end;
+        long declared = strtol(value, &end, 10);
+
+        if (end != value && declared > 0)
+            st->content_length = declared;
+    }
+    st->body_read = 0;
     st->until_meta = st->metaint;
     if (!header_value(headers, "icy-name", name, sizeof(name)))
         sanitise_text(station, station_size, name, strlen(name));
@@ -461,7 +476,8 @@ static int write_bus(int bus, const short *pcm, int frames, int channels,
                      LE_RADIO_RESAMPLE_CHANNELS * sizeof(int16_t));
 }
 
-static int play_stream(const char *url, const char *bus_path, long *played);
+static int play_stream(const char *url, const char *bus_path, long *played,
+                       int *complete);
 
 /*
  * A stream ending is not a reason to stop playing. Servers rotate, senders
@@ -496,8 +512,13 @@ static int play_with_reconnect(const char *url, const char *bus_path)
 
     for (;;) {
         long played = 0;
-        int rc = play_stream(url, bus_path, &played);
+        int complete = 0;
+        int rc = play_stream(url, bus_path, &played, &complete);
 
+        if (complete) {
+            le_log_info("radiod: %s played to its end", url);
+            return rc;
+        }
         if (played > 0) {                     /* a real drop, not a bad URL */
             barren = 0;
             delay = RECONNECT_DELAY_MS;
@@ -517,7 +538,8 @@ static int play_with_reconnect(const char *url, const char *bus_path)
     }
 }
 
-static int play_stream(const char *url, const char *bus_path, long *played)
+static int play_stream(const char *url, const char *bus_path, long *played,
+                       int *complete)
 {
     char host[HOST_MAX], port[16], path[PATH_MAX_LEN], station[TITLE_MAX];
     unsigned char in[IN_BUFFER];
@@ -550,6 +572,7 @@ static int play_stream(const char *url, const char *bus_path, long *played)
 
             if (got <= 0)
                 break;                        /* stream ended */
+            stream.body_read += got;
             filled += (size_t)got;
         }
         samples = mp3dec_decode_frame(&decoder, in, (int)filled, pcm, &info);
@@ -564,6 +587,16 @@ static int play_stream(const char *url, const char *bus_path, long *played)
                 ++*played;
         }
     }
+    /*
+     * A server that declared a length and delivered it served a file, and a
+     * file that reached its end is finished -- reconnecting would replay it
+     * for ever. Live streams declare no length, so they are unaffected. The
+     * metaint guard keeps this to the plain case: interleaved metadata counts
+     * towards Content-Length but not towards the audio bytes counted here.
+     */
+    if (complete && stream.metaint == 0 && stream.content_length > 0 &&
+        stream.body_read >= stream.content_length)
+        *complete = 1;
     rc = 0;
 done:
     if (bus >= 0)
