@@ -15,6 +15,9 @@ for flags in open_calls:
 assert source.count('fstat(fd, &st)') == 2
 assert 'read(fd, data, sizeof(data) - 1)' in source
 assert 'while (total < 4096' in source
+assert 'warning_window[5]' in source
+assert 'window_len' in source
+assert 'memmove(warning_window, warning_window + 1' in source
 assert 'fixed_file_summary("/run/libreecho/reset-reason"' in source
 assert 'fixed_file_summary("/sys/fs/pstore/console-ramoops-0"' in source
 assert 'if (status_rc)' in source and 'append_unavailable(&w, "system")' in source

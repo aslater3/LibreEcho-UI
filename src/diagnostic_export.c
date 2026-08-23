@@ -228,8 +228,9 @@ static int fixed_file_summary(const char *path, size_t *bytes, int *warning)
     int fd;
     struct stat st;
     char buffer[1024];
+    char warning_window[5];
     ssize_t n;
-    size_t total = 0;
+    size_t total = 0, window_len = 0;
     int found_warning = 0;
     if (bytes)
         *bytes = 0;
@@ -250,11 +251,19 @@ static int fixed_file_summary(const char *path, size_t *bytes, int *warning)
         size_t used = (size_t)n;
         if (used > 4096 - total)
             used = 4096 - total;
-        for (i = 0; i + 5 <= used; ++i)
-            if (!strncasecmp(buffer + i, "error", 5) ||
-                !strncasecmp(buffer + i, "panic", 5) ||
-                !strncasecmp(buffer + i, "reset", 5))
+        for (i = 0; i < used; ++i) {
+            if (window_len == sizeof(warning_window)) {
+                memmove(warning_window, warning_window + 1,
+                        sizeof(warning_window) - 1);
+                --window_len;
+            }
+            warning_window[window_len++] = buffer[i];
+            if (window_len == sizeof(warning_window) &&
+                (!strncasecmp(warning_window, "error", sizeof(warning_window)) ||
+                 !strncasecmp(warning_window, "panic", sizeof(warning_window)) ||
+                 !strncasecmp(warning_window, "reset", sizeof(warning_window))))
                 found_warning = 1;
+        }
         total += used;
     }
     close(fd);
