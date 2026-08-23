@@ -19,3 +19,9 @@ long long buttond_poll_timeout_ms(long long now_ms, long long next_status_ms,
         return 0;
     return remaining > INT_MAX ? INT_MAX : remaining;
 }
+
+int buttond_repeat_due(long long now_ms, long long next_repeat_ms,
+                       int held_key)
+{
+    return held_key && now_ms >= next_repeat_ms;
+}
