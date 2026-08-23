@@ -184,6 +184,17 @@ static int valid_hex(const char *value, size_t length)
     return 1;
 }
 
+void le_auth_fold_username(char *out, size_t size, const char *in)
+{
+    size_t i;
+    if (!out || !size) return;
+    out[0] = '\0';
+    if (!in) return;
+    for (i = 0; i + 1 < size && in[i]; ++i)
+        out[i] = (in[i] >= 'A' && in[i] <= 'Z') ? (char)(in[i] - 'A' + 'a') : in[i];
+    out[i] = '\0';
+}
+
 int le_auth_load(struct le_auth_db *db, const char *path)
 {
     FILE *file;
@@ -230,8 +241,8 @@ int le_auth_load(struct le_auth_db *db, const char *path)
             strlen(salt) > 64 || !valid_hex(salt, strlen(salt)) ||
             strlen(digest) != 64 || !valid_hex(digest, 64))
             continue;
-        strncpy(db->users[db->user_count].username, user,
-                sizeof(db->users[db->user_count].username) - 1);
+        le_auth_fold_username(db->users[db->user_count].username,
+                              sizeof(db->users[db->user_count].username), user);
         strncpy(db->users[db->user_count].salt, salt,
                 sizeof(db->users[db->user_count].salt) - 1);
         strncpy(db->users[db->user_count].digest, digest,
@@ -300,17 +311,19 @@ int le_auth_login(struct le_auth_db *db, const char *username,
                   int *expires_in)
 {
     size_t i;
-    char digest[65];
+    char digest[65], folded[LE_AUTH_USERNAME_MAX];
     if (!db || !db->enabled || !username || !password ||
         strlen(password) > LE_AUTH_PASSWORD_MAX)
         return -1;
+    le_auth_fold_username(folded, sizeof(folded), username);
     for (i = 0; i < db->user_count; ++i) {
-        if (!constant_equal(db->users[i].username, username))
+        if (!constant_equal(db->users[i].username, folded))
             continue;
         hash_password(db->users[i].salt, password, digest);
         if (!constant_equal(db->users[i].digest, digest))
             return -1;
-        return issue_token(db, username, token, token_size, expires_in);
+        /* issue against the folded name so the session reports it that way */
+        return issue_token(db, folded, token, token_size, expires_in);
     }
     return -1;
 }
