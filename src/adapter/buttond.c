@@ -16,6 +16,7 @@
  */
 
 #include "adapter.h"
+#include "buttond_timing.h"
 
 #include "../json.h"
 #include "../log.h"
@@ -63,6 +64,8 @@
 struct device {
     int fd;
     char name[64];
+    int volume_capable;
+    int mute_capable;
 };
 
 struct context {
@@ -118,6 +121,18 @@ static unsigned int environment_unsigned(const char *name, unsigned int fallback
 }
 
 /* ---------------------------- Device discovery -------------------------- */
+
+static void recompute_capabilities(struct context *ctx)
+{
+    size_t i;
+
+    ctx->volume_capable = 0;
+    ctx->mute_capable = 0;
+    for (i = 0; i < ctx->device_count; i++) {
+        ctx->volume_capable |= ctx->devices[i].volume_capable;
+        ctx->mute_capable |= ctx->devices[i].mute_capable;
+    }
+}
 
 static int device_is_interesting(int fd, char *name, size_t name_size,
                                  int *volume_capable, int *mute_capable)
@@ -186,12 +201,13 @@ static void discover(struct context *ctx)
         ctx->devices[ctx->device_count].fd = fd;
         snprintf(ctx->devices[ctx->device_count].name,
                  sizeof(ctx->devices[ctx->device_count].name), "%s", name);
+        ctx->devices[ctx->device_count].volume_capable = volume_capable;
+        ctx->devices[ctx->device_count].mute_capable = mute_capable;
         ctx->device_count++;
-        ctx->volume_capable |= volume_capable;
-        ctx->mute_capable |= mute_capable;
         le_log_info("buttond: watching %s [%s]", path, name);
     }
     closedir(dir);
+    recompute_capabilities(ctx);
     if (ctx->device_count)
         le_log_info("buttond: %zu input device(s) with volume or mute keys",
                     ctx->device_count);
@@ -230,10 +246,7 @@ static void remove_device(struct context *ctx, size_t index)
     for (i = index + 1; i < ctx->device_count; i++)
         ctx->devices[i - 1] = ctx->devices[i];
     --ctx->device_count;
-    if (!ctx->device_count) {
-        ctx->volume_capable = 0;
-        ctx->mute_capable = 0;
-    }
+    recompute_capabilities(ctx);
     ctx->held_key = 0;
     ctx->rescan_requested = 1;
     write_capability_status(ctx);
@@ -434,14 +447,11 @@ int main(int argc, char **argv)
             fds[i].events = POLLIN;
             fds[i].revents = 0;
         }
-        if (ctx.held_key) {
-            long long remaining = ctx.next_repeat_ms - monotonic_ms();
-            timeout = remaining < 0 ? 0 : (int)remaining;
-        }
-        if (!ctx.device_count) {
-            long long remaining = next_rescan_ms - monotonic_ms();
-            timeout = remaining < 0 ? 0 : (int)remaining;
-        }
+        timeout = (int)buttond_poll_timeout_ms(monotonic_ms(), next_status_ms,
+                                               next_rescan_ms,
+                                               ctx.next_repeat_ms,
+                                               (int)ctx.device_count,
+                                               ctx.held_key);
         ready = poll(fds, (nfds_t)ctx.device_count, timeout);
         if (ready < 0) {
             if (errno == EINTR)

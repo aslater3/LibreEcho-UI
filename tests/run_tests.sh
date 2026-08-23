@@ -34,6 +34,8 @@ make build/test-audiod-review build/test-led-night-review
 ./build/test-audiod-review
 ./build/test-led-night-review
 sh tests/test_startup_animation.sh
+make build/test-buttond-timing
+./build/test-buttond-timing
 sh tests/test_buttond_contract.sh
 sh tests/test_input_capability_state_contract.sh
 sh tests/test_bluetooth_startup_readiness_contract.sh
