@@ -140,6 +140,23 @@ code=$(curl -sS -o /tmp/le-local-only-conflict.out -w '%{http_code}' \
     -X PUT "$URL/api/v1/privacy" -H "$CSRF" \
     -H 'Content-Type: application/json' --data '{"local_only":true}')
 [ "$code" = 409 ]
+curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"audio_retention":"local","audio_retention_hours":168,"audio_retention_max_mb":16}' |
+    jq -e '.ok and .data.audio_retention_mode == "local" and .data.audio_retention_hours == 168 and .data.audio_retention_max_mb == 16 and .data.audio_remote_destination.effective_mode == "local"' >/dev/null
+code=$(curl -sS -o /tmp/le-retention-http.out -w '%{http_code}' -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"audio_retention":"remote","audio_remote_url":"http://nas.example/audio"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-retention-no-url.out -w '%{http_code}' -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"audio_retention":"remote"}')
+[ "$code" = 400 ]
+curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"audio_retention":"remote","audio_retention_hours":720,"audio_retention_max_mb":256,"audio_remote_url":"https://nas.example/retained-audio"}' |
+    jq -e '.ok and .data.audio_retention_mode == "remote" and .data.audio_retention_hours == 720 and .data.audio_retention_max_mb == 256 and .data.audio_remote_destination.available == false and .data.audio_remote_destination.state == "unavailable" and .data.audio_remote_destination.effective_mode == "none" and .data.audio_remote_destination.fallback == "disabled" and (.data.audio_remote_destination.last_error | contains("unavailable"))' >/dev/null
+code=$(curl -sS -o /tmp/le-retention-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/privacy" -H 'Content-Type: application/json' --data '{"audio_retention":"none"}')
+[ "$code" = 403 ]
+curl -fsS "$URL/api/v1/config/export" | jq -e '.ok and .data.privacy_audio_mode == "remote" and .data.privacy_audio_remote_url == "https://nas.example/retained-audio"' >/dev/null
+! curl -fsS "$URL/api/v1/config/export" | grep -Eqi 'password|secret|bearer|api[_-]?key'
+exported=$(curl -fsS "$URL/api/v1/config/export" | jq -c '.data')
+curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" -H 'Content-Type: application/json' --data "$exported" | jq -e '.ok and .data.restored == true' >/dev/null
+curl -fsS "$URL/api/v1/privacy" | jq -e '.data.audio_retention_mode == "remote" and .data.audio_remote_destination.effective_mode == "none"' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
     -H 'Content-Type: application/json' --data '{"mode":"local"}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" \

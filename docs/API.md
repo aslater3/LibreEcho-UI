@@ -1008,20 +1008,70 @@ them explicitly rather than pretending to render them.
 
 ### Privacy
 
+#### GET /api/v1/privacy
+
+Returns the privacy settings and the effective audio-retention state. Audio
+retention is explicit: `none`, `local`, or `remote`. `remote` is only a
+configuration contract in this release: the destination uses an HTTPS URL and
+credentials are supplied out of band, but the upload transport is not shipped
+on the host-verifiable image. Therefore a configured remote target reports
+`state: "unavailable"`, `available: false`, `effective_mode: "none"`, and
+`fallback: "disabled"`; the device does not silently fill local storage or
+pretend that audio was delivered.
+
+The duration is bounded to `24`, `168`, or `720` hours and the size cap is
+bounded to `16`, `64`, or `256` MiB. Remote URLs are limited to 255 characters,
+require `https://`, and cannot contain embedded credentials, query strings, or
+fragments. Configuration exports may include the destination URL, but never
+contain remote credentials, API keys, or microphone audio.
+
+**Response (remote configured but unavailable):**
+```json
+{
+  "ok": true,
+  "data": {
+    "audio_retention": "remote",
+    "audio_retention_mode": "remote",
+    "audio_retention_hours": 24,
+    "audio_retention_max_mb": 64,
+    "audio_remote_destination": {
+      "configured": true,
+      "url": "https://nas.example/retained-audio",
+      "transport": "https-post",
+      "authentication": "required-out-of-band",
+      "credential_state": "not-configured",
+      "available": false,
+      "state": "unavailable",
+      "effective_mode": "none",
+      "fallback": "disabled",
+      "last_error": "Remote retention transport is unavailable on this release"
+    }
+  }
+}
+```
+
 #### PUT /api/v1/privacy
 
-Update privacy settings.
+Update privacy settings. The request requires `X-LibreEcho-CSRF` and the normal
+same-origin/authentication checks. `audio_retention: "24h"` remains accepted as
+a compatibility alias for `local`.
 
 **Request:**
 ```json
 {
   "local_only": true,
-  "audio_retention": "24h",
+  "audio_retention": "remote",
+  "audio_retention_hours": 168,
+  "audio_retention_max_mb": 64,
+  "audio_remote_url": "https://nas.example/retained-audio",
   "diagnostic_telemetry": false,
   "crash_reports": false,
   "log_retention_hours": 24
 }
 ```
+
+Remote mode without a valid HTTPS destination is rejected with `400`. All
+mutations persist atomically using the existing `0600` configuration store.
 
 ### Integrations
 

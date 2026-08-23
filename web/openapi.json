@@ -1605,6 +1605,7 @@
      "Privacy"
     ],
     "summary": "Read privacy configuration",
+    "description": "Reports explicit microphone retention mode (`audio_retention_mode`: none, local, or remote), bounded duration and size cap (`audio_retention_hours`, `audio_retention_max_mb`), and the remote destination state. Remote retention reports unavailable and has effective_mode=none until an authenticated HTTPS transport is present; it never falls back to local storage.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1619,6 +1620,7 @@
      "Privacy"
     ],
     "summary": "Update privacy configuration",
+    "description": "State-changing requests require CSRF. audio_retention is none, local, or remote (legacy 24h is accepted as local). Remote mode requires an HTTPS URL without embedded credentials; credentials are supplied out of band and are never exported.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
