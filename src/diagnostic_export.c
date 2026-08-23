@@ -231,7 +231,7 @@ static int fixed_file_summary(const char *path, size_t *bytes, int *warning)
         size_t used = (size_t)n;
         if (used > 4096 - total)
             used = 4096 - total;
-        for (i = 0; i < used; ++i)
+        for (i = 0; i + 5 <= used; ++i)
             if (!strncasecmp(buffer + i, "error", 5) ||
                 !strncasecmp(buffer + i, "panic", 5) ||
                 !strncasecmp(buffer + i, "reset", 5))
@@ -306,11 +306,19 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
     memset(&playback, 0, sizeof(playback));
     status_rc = le_get_system_status(c->backend, &status);
     device_rc = le_get_device_info(c->backend, &device);
-    network_rc = le_get_network_state(c->backend, &network);
-    audio_rc = le_get_audio_state(c->backend, &audio);
-    wake_rc = le_get_wake_word_state(c->backend, &wake);
-    bluetooth_rc = le_get_bluetooth_state(c->backend, &bluetooth);
-    playback_rc = le_get_playback_state(c->backend, &playback);
+    /* The Linux backend's adapter calls use synchronous socket timeouts. Keep
+       the single-threaded HTTP event loop non-blocking during diagnostics;
+       target-side adapters can be reported by a future cached/async path. */
+    if (!strcmp(le_backend_mode(c->backend), "linux")) {
+        network_rc = audio_rc = wake_rc = bluetooth_rc = playback_rc =
+            LE_NOT_SUPPORTED;
+    } else {
+        network_rc = le_get_network_state(c->backend, &network);
+        audio_rc = le_get_audio_state(c->backend, &audio);
+        wake_rc = le_get_wake_word_state(c->backend, &wake);
+        bluetooth_rc = le_get_bluetooth_state(c->backend, &bluetooth);
+        playback_rc = le_get_playback_state(c->backend, &playback);
+    }
 
     if (!read_key("/data/libreecho/update/check-status", "channel", value, sizeof(value)) ||
         (strcmp(value, "stable") && strcmp(value, "dev")))

@@ -177,7 +177,7 @@ code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/confi
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export_linux.sh
-curl -fsS "$URL/api/v1/system" | jq -e \\
+curl -fsS "$URL/api/v1/system" | jq -e \
     '.ok and .data.ntp == true and .data.ntp_state == "synchronized" and
      .data.clock_source == "ntp" and .data.rtc_available == true and
      .data.rtc_persisted == true and .data.last_sync_epoch == 1700000000 and
