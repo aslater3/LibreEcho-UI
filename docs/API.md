@@ -827,19 +827,54 @@ Returns diagnostic information.
 
 #### POST /api/v1/diagnostics/export
 
-Export diagnostic bundle.
+Create and return a bounded structured diagnostic bundle for attachment to a
+private or public report. The action requires the normal authenticated API
+session (when authentication is configured) and `X-LibreEcho-CSRF`; an empty
+JSON object is the request body. The response is ordered consistently and is
+capped at 24 KiB of bundle data, so this endpoint does not create a server-side
+temporary file or archive.
+
+The bundle includes public-safe product/release identity (including source
+commit/digest, running web-service identity, channel, slot/update state and
+kernel/UI/platform fields when available), system resource summaries,
+reset/pstore summaries, network liveness without SSID/addresses, audio and
+voice health, Bluetooth/profile state without remote identifiers, playback
+state without media metadata, privacy/button capability state, and up to eight
+recent web log entries. Unavailable or malformed subsystem data is represented
+as `available: false` or a bounded placeholder and does not abort the export.
 
 **Response:**
 ```json
 {
   "ok": true,
   "data": {
-    "filename": "libreecho-diagnostics.json",
-    "redacted": true
+    "schema_version": 1,
+    "format": "libreecho-diagnostic-bundle",
+    "bounded": true,
+    "max_bytes": 24576,
+    "summary": "backend=mock;network=healthy;audio=available;bluetooth=disabled",
+    "release_identity": {
+      "product_version": "LibreEcho OS 0.13.5",
+      "channel": "stable",
+      "active_slot": "unavailable",
+      "pending_slot": "unavailable",
+      "ota_state": "idle",
+      "source_commit": "public-build-identity",
+      "running_service": { "name": "libreecho-web", "version": "LibreEcho OS 0.13.5" }
+    },
+    "network": { "available": true, "connectivity": "healthy", "gateway_reachable": true },
+    "manifest": {
+      "redactions": ["wifi_credentials", "ssid_bssid", "ip_addresses", "bluetooth_addresses", "owner_identifiers", "tokens_cookies", "private_paths", "media_metadata"]
+    }
   },
   "error": null
 }
 ```
+
+The manifest also lists omitted private keys, OTA signing material, raw pstore
+and requester-supplied paths. The browser's **Download diagnostic bundle**
+action downloads this response as JSON and offers its short `summary` for
+copying into an issue template. No server-side temporary file is created.
 
 ### Wake Word
 
