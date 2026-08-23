@@ -87,7 +87,7 @@ static int read_key(const char *path, const char *key, char *out, size_t out_siz
     if (!path || !key || !out || !out_size)
         return 0;
     out[0] = '\0';
-    fd = open(path, O_RDONLY | O_CLOEXEC
+    fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC
 #ifdef O_NOFOLLOW
               | O_NOFOLLOW
 #endif
@@ -235,7 +235,7 @@ static int fixed_file_summary(const char *path, size_t *bytes, int *warning)
         *bytes = 0;
     if (warning)
         *warning = 0;
-    fd = open(path, O_RDONLY | O_CLOEXEC
+    fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC
 #ifdef O_NOFOLLOW
               | O_NOFOLLOW
 #endif
