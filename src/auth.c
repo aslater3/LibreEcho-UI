@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -348,4 +349,85 @@ void le_auth_logout(struct le_auth_db *db, const char *token)
     }
 }
 
+/* ------------------------- Session persistence -------------------------- */
+
+int le_auth_save_sessions(const struct le_auth_db *db, const char *path)
+{
+    char temp[512];
+    FILE *f;
+    size_t i;
+    int fd;
+
+    if (!db || !path || !path[0])
+        return -1;
+    if ((size_t)snprintf(temp, sizeof(temp), "%s.tmp", path) >= sizeof(temp))
+        return -1;
+    /*
+     * 0600 and written through a temporary with a fixed name: the data
+     * contract that guards /data matches names exactly, so a uniquely
+     * named leftover would be an unknown file and would block every
+     * service at the next boot.
+     */
+    fd = open(temp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        (void)unlink(temp);
+        return -1;
+    }
+    for (i = 0; i < LE_AUTH_MAX_SESSIONS; ++i) {
+        if (!db->sessions[i].token[0])
+            continue;
+        fprintf(f, "%s %s %lld\n", db->sessions[i].token,
+                db->sessions[i].username,
+                (long long)db->sessions[i].expires);
+    }
+    if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
+        fclose(f);
+        (void)unlink(temp);
+        return -1;
+    }
+    fclose(f);
+    if (rename(temp, path) != 0) {
+        (void)unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+void le_auth_load_sessions(struct le_auth_db *db, const char *path)
+{
+    char line[256];
+    FILE *f;
+    time_t now = time(NULL);
+    size_t slot = 0;
+
+    if (!db || !path || !path[0])
+        return;
+    f = fopen(path, "r");
+    if (!f)
+        return;
+    while (slot < LE_AUTH_MAX_SESSIONS && fgets(line, sizeof(line), f)) {
+        char token[LE_AUTH_TOKEN_MAX];
+        char username[LE_AUTH_USERNAME_MAX];
+        long long expires = 0;
+
+        if (sscanf(line, "%64s %31s %lld", token, username, &expires) != 3)
+            continue;
+        /* A stored session can never outlive the expiry it was issued with. */
+        if ((time_t)expires <= now)
+            continue;
+        snprintf(db->sessions[slot].token,
+                 sizeof(db->sessions[slot].token), "%s", token);
+        snprintf(db->sessions[slot].username,
+                 sizeof(db->sessions[slot].username), "%s", username);
+        db->sessions[slot].expires = (time_t)expires;
+        ++slot;
+    }
+    fclose(f);
+}
+
 #include "auth_user_management.inc"
+
