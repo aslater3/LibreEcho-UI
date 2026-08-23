@@ -62,6 +62,10 @@ function bindBluetooth(b) {
   $('#bt-discoverable').onchange=()=>mutate('/bluetooth',{discoverable:$('#bt-discoverable').checked},'Visibility setting updated');
   if ($('#bt-pairing-mode')) $('#bt-pairing-mode').onclick=()=>post('/bluetooth/pairing-mode',{enabled:!b.pairing_mode},b.pairing_mode?'Pairing mode ended':'Pairing mode active — device is visible');
   $('#bt-scan').onclick=()=>post('/bluetooth/scan',{},'Bluetooth discovery started');
+  /* Starting a scan clears the controller's discovery results, so a second
+   * click on a button still labelled "Scanning…" would wipe the list the user
+   * is waiting for. Stop scan is the way out while one is running. */
+  $('#bt-scan').disabled=!!b.scanning;
   if ($('#bt-scan-stop')) $('#bt-scan-stop').onclick=()=>post('/bluetooth/scan/stop',{},'Bluetooth discovery stopped');
   $$('[data-bt-operation]').forEach(button=>button.onclick=()=>{const operation=button.dataset.btOperation,address=button.dataset.btAddress,type=Number(button.dataset.btType||0);if(operation==='unpair'&&!confirm(`Unpair ${address}?`))return;post(`/bluetooth/${operation}`,{address,type},operation==='unpair'?'Device unpaired':operation==='disconnect'?'Device disconnected':'Pairing started')});
   if ($('#bt-confirm')) $('#bt-confirm').onclick=()=>respondBluetoothPairing(b.pending_pairing,'confirm');
@@ -70,8 +74,21 @@ function bindBluetooth(b) {
   if ($('#bt-send-pin')) $('#bt-send-pin').onclick=()=>respondBluetoothPairing(b.pending_pairing,'pin',{pin:$('#bt-pairing-pin').value});
 }
 
+/* The scan runs on the controller, not in the browser, and finishes on its own
+ * when the inquiry period ends. The poll below is what carries the result into
+ * the page; announce the scanning->idle transition so a list that quietly
+ * repopulates is not the only sign the scan is over. */
+function bluetoothScanFinished(b) {
+  const scanning=!!b.scanning,was=state.btScanning;
+  state.btScanning=scanning;
+  if (!was || scanning) return;
+  const found=b.discovered?.length||0;
+  toast(found?`Scan complete — ${found} nearby device${found===1?'':'s'}`:'Scan complete — no nearby devices found');
+}
+
 async function bluetoothPage() {
   const b=await api('/bluetooth');
+  state.btScanning=!!b.scanning;
   content.innerHTML=bluetoothMarkup(b);
   bindBluetooth(b);
   updateBluetoothLiveRegion(b);
@@ -83,7 +100,7 @@ async function refreshBluetooth() {
   if (state.btPairingResponding) return;
   try {
     const b=await api('/bluetooth');
-    if (state.page==='Bluetooth' && !state.btPairingResponding) { content.innerHTML=bluetoothMarkup(b); bindBluetooth(b); updateBluetoothLiveRegion(b); }
+    if (state.page==='Bluetooth' && !state.btPairingResponding) { content.innerHTML=bluetoothMarkup(b); bindBluetooth(b); bluetoothScanFinished(b); updateBluetoothLiveRegion(b); }
   } catch (_) { /* Preserve the last good Bluetooth state during a transient adapter failure. */ }
   finally { if (state.page==='Bluetooth') state.timer=setTimeout(refreshBluetooth,2000); }
 }

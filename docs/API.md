@@ -180,7 +180,7 @@ because not every sender or future integration supplies it.
   "ok": true,
   "data": {
     "state": "playing",
-    "source": "airplay2",
+    "source": "radio",
     "buses": {
       "media": true,
       "system": false,
@@ -189,14 +189,91 @@ because not every sender or future integration supplies it.
     },
     "metadata": {
       "available": true,
-      "title": "Track title",
-      "artist": "Artist",
-      "album": "Album"
+      "title": "Artist - Track title",
+      "artist": null,
+      "album": null,
+      "station": "Groove Salad"
+    },
+    "transport": {
+      "play": false,
+      "pause": false,
+      "stop": true,
+      "reason": "A live radio stream can be stopped but not paused; starting it again rejoins the broadcast where it is now."
     }
   },
   "error": null
 }
 ```
+
+`source` is `radio` while radiod is streaming, and that answer comes from
+radiod rather than from the audio engine's status file: radiod writes straight
+onto the media bus, so it reporting a live player is a fact even when the
+engine that writes the status file is not running.
+
+`metadata.station` is the station's display name — the `name` from the stored
+station list when the playing URL matches one, otherwise the `icy-name` the
+stream sent about itself, and `null` when neither exists.
+
+`metadata.title` for radio is the ICY `StreamTitle` the station interleaves
+into the audio. It is `null` when the station sends no metadata at all, which
+many do not: no title is derived from the URL or the station name to fill the
+gap. `artist` and `album` are always `null` for radio — `StreamTitle` is one
+free-text field, usually but not reliably `Artist - Title`, and splitting it on
+a hyphen would invent structure the station never sent.
+
+`transport` says what this device can actually do to whatever is playing, so a
+client can disable a control with a reason instead of offering one that fails:
+
+| Field | Meaning |
+| --- | --- |
+| `play` | `POST /api/v1/playback/transport` with `play` will start something |
+| `pause` | always `false`; see below |
+| `stop` | there is something playing that this device can stop |
+| `reason` | one sentence explaining the limit, suitable for display |
+
+`pause` is always `false`, and this is a property of the device rather than a
+gap in the implementation. Internet radio is a live stream with no buffered
+position to resume from, so radiod can stop and reconnect but cannot pause.
+AirPlay and Bluetooth are the other way round: the phone is the controller and
+LibreEcho is the speaker. `airplayd` exposes status and an enable switch only,
+and the Bluetooth stack here is an AVRCP *target*, which answers transport
+commands and has no path to send them.
+
+#### POST /api/v1/playback/transport
+
+Starts or stops what is playing. Requires `X-LibreEcho-CSRF`.
+
+**Request:**
+```json
+{ "action": "stop" }
+```
+
+`stop` stops internet radio. `play` starts the last station started in this
+session again; that is a fresh connection which rejoins the broadcast live, not
+a resume. The remembered station is held in memory only and is forgotten on
+restart, because after a reboot nothing was interrupted and offering to resume
+something would be a guess.
+
+`pause` is accepted and answered `501` with the reason, rather than rejected as
+an unknown action: a client that asks deserves to be told why the device cannot
+do it.
+
+| Status | Meaning |
+| --- | --- |
+| `400` | `action` was missing or was not `play`, `pause` or `stop` |
+| `405` | method other than `POST` |
+| `409` | nothing to stop, nothing to start again, or a stream is already playing |
+| `501` | `pause`, or this image has no stream player |
+| `503` | the command reached the player and failed |
+
+The successful response is the same document as `GET /api/v1/playback`, read
+after the action, so a client can re-render from it without a second request.
+
+This is the only transport in the product. `agentd` has no radio path, so
+"stop" spoken over the music does not reach radiod, and the physical buttons
+do not either: `buttond` handles volume up, volume down and microphone mute
+only, so the `Play / pause` short-press action stored by `PUT /api/v1/buttons`
+is a saved preference that nothing acts on yet.
 
 #### GET /api/v1/audio
 
@@ -739,6 +816,29 @@ previous check result; run the update check again before installing.
 Upload a manually selected OTA tar to the inactive slot. The upload is
 signature-verified by default and requires `X-LibreEcho-CSRF`.
 
+`GET /api/v1/system/update` reports two sizes for this endpoint:
+
+| Field | Meaning |
+| --- | --- |
+| `max_upload_ceiling_bytes` | The fixed ceiling, 33554432 (32 MiB). A body larger than this is always refused. |
+| `max_upload_bytes` | What this device will actually accept: the ceiling, capped by the free space on the filesystem the package is staged to, less a margin for the installer. Never greater than the ceiling. |
+
+Read `max_upload_bytes` and show it before a file is chosen. The package is
+streamed to a file under `/data/libreecho/update/incoming/` before the installer
+is handed it, so a device with less free space there than the ceiling cannot
+take a package of that size no matter what the ceiling says. Both limits are
+checked before the body is read: a body over the ceiling answers `413` with
+`reason: update_size` and the generic message, and a body under the ceiling but
+over what the device can stage answers `413` naming the device's own limit.
+Sending it anyway costs the whole upload before it fails.
+
+The two differing means free space is the binding limit rather than the ceiling,
+which is worth telling the user apart — one says the package is too big, the
+other says the device needs clearing out.
+
+The device does not report the size of the image already installed in a slot, so
+a client can only show the size of the file it is about to send.
+
 `GET /api/v1/system/update` reports `allow_unsigned: true` only when the
 installed update helper supports unsigned manual installation. When that flag
 is true, clients may send `X-LibreEcho-Allow-Unsigned: 1` for this upload only.
@@ -773,10 +873,19 @@ Reports the optional feature switches. They are off by default.
 ```json
 {
   "ok": true,
-  "data": { "simulation": false },
+  "data": {
+    "simulation": false,
+    "usb_host": false,
+    "usb_role": "device",
+    "usb_role_supported": true
+  },
   "error": null
 }
 ```
+
+`usb_host` reports whether the OTG port is currently in host mode, `usb_role` is
+the raw role read back from the kernel (`device`, `host` or `none`), and
+`usb_role_supported` is `false` on hardware or images with no switchable role.
 
 `simulation` gates `POST /api/v1/audio/simulate`, which plays rendered speech
 into the microphone path so wake-word detection, speech-to-text and the
@@ -796,6 +905,24 @@ configuration, and the response is the new feature state.
 `simulation` must be a boolean; anything else is rejected with `400`. Hiding the
 menu entry without gating the endpoint would be decoration, so both move
 together: the toggle is the only thing that opens `POST /api/v1/audio/simulate`.
+
+`usb_host` moves the OTG port between host mode, where an attached USB drive is
+enumerated, and device mode, where the port serves ADB:
+
+```json
+{ "usb_host": true }
+```
+
+The port cannot do both at once. Unlike `simulation` this is **not persisted**:
+`libreecho-init` pins the role back to device on every boot, so a stored setting
+can never leave the ADB gadget — this device's only recovery path — switched
+off. It is applied immediately and answers `501` when the running kernel exposes
+no switchable USB role.
+
+The switch is written to the kernel's `usb_role` class, not to the MUSB `mode`
+attribute. Writing `mode` blocks until a USB session that cannot occur while the
+port is powered by a host, and takes the ADB gadget down with it; the role
+switch is register writes only and returns immediately.
 
 ### Configuration
 
@@ -895,6 +1022,60 @@ Returns diagnostic information.
   "error": null
 }
 ```
+
+#### GET /api/v1/storage/usb
+
+Lists a USB drive attached to the OTG port.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "present": true,
+    "device": "sda",
+    "partition": "sda1",
+    "size_bytes": 124006694912,
+    "filesystem": "exfat",
+    "mounted": true,
+    "path": "/run/libreecho/usb",
+    "entries": [{ "name": "Music", "directory": true, "size_bytes": 0 }],
+    "entry_count": 1
+  },
+  "error": null
+}
+```
+
+The port must be in host mode first — `PUT /api/v1/system/features {"usb_host":
+true}`. In device mode the kernel enumerates no disk and this answers
+`present: false`, which is the same answer as no drive being plugged in.
+
+The mount is read-only (`MS_RDONLY|MS_NOSUID|MS_NODEV`) and nothing in this
+endpoint writes to the drive. Bounded like the rest of the API: the first disk,
+its first partition, and at most 64 top-level entries.
+
+#### GET /api/v1/diagnostics/kernel
+
+Returns the tail of the kernel ring buffer, most recent last, bounded to the
+last 80 records and drained non-blocking from `/dev/kmsg`.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "lines": ["usb 1-1: new high-speed USB device number 2 using musb-hdrc"],
+    "count": 1
+  },
+  "error": null
+}
+```
+
+This exists because switching the USB port to host mode removes the ADB gadget,
+which is the only shell this image offers — there is no SSH server. The kernel
+log therefore becomes unreadable over USB at precisely the moment it matters,
+such as when checking whether an attached drive enumerated. Reading it over the
+network closes that gap.
 
 #### POST /api/v1/diagnostics/export
 
@@ -1087,6 +1268,20 @@ leaving it restores the controller settings that were active beforehand.
 Start or stop a combined Classic + LE discovery scan. Results are returned by
 `GET /api/v1/bluetooth`.
 
+Starting a scan clears the previous discovery results, so `discovered` is empty
+in the response to the `POST` itself. The scan then ends by itself when the
+controller's inquiry period expires; there is no completion callback, so a
+client polls `GET /api/v1/bluetooth` and treats `scanning` returning to `false`
+as the end of the scan, with `discovered` then holding what that scan found.
+Starting a second scan while one is running discards the results collected so
+far. Only devices that are bonded or connected survive into the next scan.
+
+The status snapshot travels in one bounded adapter message. When more devices
+are present than fit, `known_devices` is written first and `discovered` is
+clipped to what remains, and the clipping is logged; the snapshot is never
+dropped. `GET /api/v1/bluetooth` therefore always reports the bonds even in a
+crowded radio environment.
+
 Each `discovered` and `known_devices` entry includes `name`, `rssi`, and
 `rssi_valid`. Names are refreshed from the remote device's connected EIR data
 and persisted with the bond. Connected BR/EDR devices are queried with the
@@ -1233,7 +1428,9 @@ Returns the stored internet radio stations. A station is asked for by its
   "ok": true,
   "data": {
     "max_stations": 32,
-    "playback_supported": false,
+    "playback_supported": true,
+    "playing": true,
+    "playing_url": "https://ice1.somafm.com/groovesalad-128-mp3",
     "stations": [
       {
         "word": "groove",
@@ -1247,9 +1444,53 @@ Returns the stored internet radio stations. A station is asked for by its
 }
 ```
 
-`playback_supported` is currently `false`: the list is stored and served, but
-this image carries no stream decoder, so nothing plays these URLs yet. Clients
-should say so rather than implying playback works.
+`playback_supported` is answered by asking radiod rather than by a constant, so
+an image without a stream player reports `false` and a client can say so rather
+than implying playback works.
+
+`playing` is radiod's own state and is the authoritative answer to whether a
+stream is running; `playing_url` is empty when it is not. The track title and
+station name radiod read off the stream are reported by
+`GET /api/v1/playback` rather than here, so a client shows now-playing from one
+document. A client verifying
+that playback stopped should read `playing` rather than a log line. The
+amplifier reported by `GET /api/v1/audio` as `amplifier_on` is a useful second
+witness — it powers up only when PCM is actually flowing — but it is not a
+substitute: it also stays up while the device speaks, so it lags the stream.
+
+#### POST /api/v1/integrations/radio/play
+
+Starts the station whose `word` matches, by its stored URL.
+
+**Request:**
+```json
+{ "word": "groove" }
+```
+
+| Status | Meaning |
+| --- | --- |
+| `400` | `word` was missing or empty |
+| `404` | no station has that word |
+| `409` | the station exists but is switched off |
+| `501` | this image has no stream player |
+| `503` | the station could not be played |
+
+The successful response has the same shape as `GET`, so `playing` and
+`playing_url` come back with it.
+
+The assistant does not reach this endpoint. `agentd` has no radio path at all,
+so a spoken request for a station cannot start one; playback is started over the
+API today.
+
+#### POST /api/v1/integrations/radio/stop
+
+Stops whatever radiod is playing. Stopping a stream that is already stopped is
+not an error, so this is safe to send unconditionally as cleanup. Answers `501`
+when the image has no stream player and `503` when the stop failed. The
+successful response has the same shape as `GET`.
+
+This is the only way to stop the radio today, for the same reason: `agentd` has
+no radio path, so "stop" spoken over the music does not reach radiod.
 
 #### PUT /api/v1/integrations/radio
 

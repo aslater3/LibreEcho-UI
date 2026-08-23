@@ -69,6 +69,15 @@
 #define BT_MAX_DEVICES 24
 #define BT_MAX_KEYS 24
 #define BT_NAME_MAX 64
+/*
+ * The status document travels inside the bounded adapter response envelope
+ * ({"v":1,"id":N,"ok":true,"data":<document>}\n) and still has to close its own
+ * arrays.  Clip the device lists against this reserve so a crowded table costs
+ * a few listed devices instead of the whole snapshot: status_json() returning
+ * -1 leaves the client with no reply at all, which the web UI can only render
+ * as stale state.
+ */
+#define STATUS_ENVELOPE_RESERVE 96
 
 /* L2CAP profile listeners.  PSM values follow the assigned-numbers table:
  * SDP browsing, AVRCP control/browsing, and AVDTP signaling/transport. */
@@ -1506,6 +1515,8 @@ static int status_json(struct bt_context *context, char *data, size_t size)
 {
     size_t used = 0;
     size_t i;
+    size_t list_size = size > STATUS_ENVELOPE_RESERVE ?
+                       size - STATUS_ENVELOPE_RESERVE : 0;
     int available;
     char escaped[BT_NAME_MAX * 2];
     char local_name[BT_NAME_MAX * 2];
@@ -1574,39 +1585,23 @@ static int status_json(struct bt_context *context, char *data, size_t size)
                     "false", "false", "false") != 0)
         return -1;
     if (!context->pairing.active) {
-        if (append_text(data, size, &used, "null,\"discovered\":[") != 0)
+        if (append_text(data, size, &used, "null,\"known_devices\":[") != 0)
             return -1;
     } else {
         char address[18];
         address_text(context->pairing.address, address, sizeof(address));
         if (append_text(data, size, &used,
                         "{\"address\":\"%s\",\"type\":%u,\"method\":\"%s\","
-                        "\"value\":%u},\"discovered\":[",
+                        "\"value\":%u},\"known_devices\":[",
                         address, context->pairing.type, context->pairing.method,
                         context->pairing.value) != 0)
             return -1;
     }
-    for (i = 0; i < context->device_count; ++i) {
-        char address[18], name[BT_NAME_MAX * 2];
-        if (!context->devices[i].discovered)
-            continue;
-        address_text(context->devices[i].address, address, sizeof(address));
-        json_escape(context->devices[i].name, escaped, sizeof(escaped));
-        strncpy(name, escaped, sizeof(name) - 1);
-        name[sizeof(name) - 1] = '\0';
-        if (append_text(data, size, &used,
-                        "%s{\"address\":\"%s\",\"name\":\"%s\","
-                        "\"type\":%u,\"rssi\":%d,\"rssi_valid\":%s,\"paired\":%s,"
-                        "\"connected\":%s}",
-                        used && data[used - 1] != '[' ? "," : "", address, name,
-                        context->devices[i].type, context->devices[i].rssi,
-                        context->devices[i].rssi_valid ? "true" : "false",
-                        context->devices[i].paired ? "true" : "false",
-                        context->devices[i].connected ? "true" : "false") != 0)
-            return -1;
-    }
-    if (append_text(data, size, &used, "],\"known_devices\":[") != 0)
-        return -1;
+    /*
+     * Bonds are written before discovery results.  The bonded set is bounded by
+     * what the user paired and is the list they act on, so the elastic
+     * discovery list is the one that gives way when the message runs out.
+     */
     {
         int first = 1;
         for (i = 0; i < context->device_count; ++i) {
@@ -1615,15 +1610,40 @@ static int status_json(struct bt_context *context, char *data, size_t size)
                 continue;
             address_text(context->devices[i].address, address, sizeof(address));
             json_escape(context->devices[i].name, escaped, sizeof(escaped));
-            if (append_text(data, size, &used,
+            if (append_text(data, list_size, &used,
                             "%s{\"address\":\"%s\",\"name\":\"%s\","
                             "\"type\":%u,\"rssi\":%d,\"rssi_valid\":%s,\"connected\":%s}",
                             first ? "" : ",", address, escaped,
                             context->devices[i].type, context->devices[i].rssi,
                             context->devices[i].rssi_valid ? "true" : "false",
-                            context->devices[i].connected ? "true" : "false") != 0)
-                return -1;
+                            context->devices[i].connected ? "true" : "false") != 0) {
+                le_log_warn("btd: bond list clipped to the bounded status message");
+                break;
+            }
             first = 0;
+        }
+    }
+    if (append_text(data, size, &used, "],\"discovered\":[") != 0)
+        return -1;
+    for (i = 0; i < context->device_count; ++i) {
+        char address[18], name[BT_NAME_MAX * 2];
+        if (!context->devices[i].discovered)
+            continue;
+        address_text(context->devices[i].address, address, sizeof(address));
+        json_escape(context->devices[i].name, escaped, sizeof(escaped));
+        strncpy(name, escaped, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
+        if (append_text(data, list_size, &used,
+                        "%s{\"address\":\"%s\",\"name\":\"%s\","
+                        "\"type\":%u,\"rssi\":%d,\"rssi_valid\":%s,\"paired\":%s,"
+                        "\"connected\":%s}",
+                        used && data[used - 1] != '[' ? "," : "", address, name,
+                        context->devices[i].type, context->devices[i].rssi,
+                        context->devices[i].rssi_valid ? "true" : "false",
+                        context->devices[i].paired ? "true" : "false",
+                        context->devices[i].connected ? "true" : "false") != 0) {
+            le_log_warn("btd: discovery list clipped to the bounded status message");
+            break;
         }
     }
     return append_text(data, size, &used, "]}");
@@ -1656,8 +1676,22 @@ static int set_discovery(struct bt_context *context, int start)
     if (!context->enabled)
         return -1;
     if (start) {
-        for (i = 0; i < context->device_count; ++i)
+        size_t kept = 0;
+        /*
+         * Discovery is a live view, not a history.  LE peers advertise with
+         * rotating resolvable private addresses, so every scan mints new table
+         * entries; keeping them fills the bounded table, after which
+         * get_device() returns NULL and no further device can be reported for
+         * the rest of the boot.  Drop the previous scan's unbonded,
+         * disconnected entries so each scan starts from the bonded set.
+         */
+        for (i = 0; i < context->device_count; ++i) {
+            if (!context->devices[i].paired && !context->devices[i].connected)
+                continue;
             context->devices[i].discovered = 0;
+            context->devices[kept++] = context->devices[i];
+        }
+        context->device_count = kept;
         result = controller_command(context, MGMT_OP_START_DISCOVERY, &type, 1);
         /*
          * This 3.18 port can report LE capability while the MT8163 HCI

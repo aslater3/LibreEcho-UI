@@ -101,6 +101,13 @@ curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: applicatio
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"connectable":false}' | jq -e '.ok and .data.capabilities.connectable == false' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"discoverable":true}' | jq -e '.ok and .data.capabilities.discoverable == true' >/dev/null
 curl -fsS -X POST "$URL/api/v1/bluetooth/scan" -H "$CSRF" -H 'Content-Type: application/json' --data '{}' | jq -e '.ok and .data.scanning == true' >/dev/null
+# Starting a scan clears the previous results; the device is only discovered,
+# and so only pairable, once the scan has ended on its own.
+i=0
+while curl -fsS "$URL/api/v1/bluetooth" | jq -e '.data.scanning == true' >/dev/null; do
+    i=$((i+1)); [ "$i" -lt 30 ] || { echo 'bluetooth scan never finished' >&2; exit 1; }
+    sleep 0.5
+done
 curl -fsS -X POST "$URL/api/v1/bluetooth/pair" -H "$CSRF" -H 'Content-Type: application/json' --data '{"address":"10:20:30:40:50:60","type":0,"io_capability":3}' | jq -e '.ok and (.data.known_devices | length) == 1' >/dev/null
 curl -fsS -X POST "$URL/api/v1/bluetooth/unpair" -H "$CSRF" -H 'Content-Type: application/json' --data '{"address":"10:20:30:40:50:60","type":0}' | jq -e '.ok and (.data.known_devices | length) == 0' >/dev/null
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and (.data.connectivity == "unknown" or .data.connectivity == "healthy") and .data.recovery_stage == "none" and ((.data.gateway_reachable | type) == "boolean" or .data.gateway_reachable == null) and .data.liveness_failures == 0' >/dev/null
@@ -177,7 +184,10 @@ expect "$(curl -fsS "$URL/api/v1/system")" '"rtc_available":false'
 curl -fsS "$URL/api/v1/system/update" | jq -e \
     '.ok and .data.supported == false and
      .data.current_slot == "-" and .data.inactive_slot == "-" and
-     .data.pending_reboot == false and .data.max_upload_bytes == 33554432 and
+     .data.pending_reboot == false and
+     .data.max_upload_ceiling_bytes == 33554432 and
+     .data.max_upload_bytes <= .data.max_upload_ceiling_bytes and
+     .data.max_upload_bytes >= 0 and
      .data.installed_version == "" and .data.latest_version == "" and
      .data.channel == "stable" and .data.source == "github-releases" and
      .data.source_reachable == "unknown" and

@@ -1078,8 +1078,17 @@ static int led(struct le_backend *b, struct le_led_state *o)
     if (json_get_bool(response, "visualizer_active",
                       &o->visualizer_active) < 0)
         o->visualizer_active = 0;
+    /*
+     * The music visualizer is on unless it was deliberately turned off, and
+     * ledd starts it that way too. Every other flag here defaults to 0, which
+     * the memset above already provides, so `< 0` was enough for them -- but
+     * json_get_bool answers 0 for an absent key and only -1 for a malformed
+     * one, so an ledd whose status omits the field left this reading back as
+     * off while the ring was in fact reacting. The UI then showed a toggle
+     * that disagreed with the device. `<= 0` is the difference.
+     */
     if (json_get_bool(response, "visualizer_enabled",
-                      &o->visualizer_enabled) < 0)
+                      &o->visualizer_enabled) <= 0)
         o->visualizer_enabled = 1;
     (void)json_get_string(response, "pattern", o->pattern, sizeof(o->pattern));
     (void)json_get_string(response, "visualizer_owner",
@@ -1375,24 +1384,28 @@ static int radio_stop(struct le_backend *b)
     return adapter_json_command(LE_ADAPTER_RADIO_SOCK, "stop", NULL);
 }
 
-static int radio_playing(struct le_backend *b, int *playing, char *url,
-                         size_t url_size)
+/*
+ * title and station are the ICY fields radiod read off the stream. They are
+ * routinely empty -- plenty of stations send no metadata at all -- and an
+ * empty one means "the stream did not say", not "ask again".
+ */
+static int radio_playing(struct le_backend *b, struct le_radio_status *o)
 {
     char response[LE_ADAPTER_MSG_MAX];
     int rc, v;
 
     (void)b;
-    *playing = 0;
-    if (url && url_size)
-        url[0] = '\0';
+    memset(o, 0, sizeof(*o));
     rc = adapter_command(LE_ADAPTER_RADIO_SOCK, "status", NULL,
                          response, sizeof(response));
     if (rc != LE_OK)
         return rc;
     if (json_get_bool(response, "playing", &v) > 0)
-        *playing = v;
-    if (url && url_size)
-        (void)json_get_string(response, "url", url, url_size);
+        o->playing = v;
+    (void)json_get_string(response, "url", o->url, sizeof(o->url));
+    (void)json_get_string(response, "title", o->title, sizeof(o->title));
+    (void)json_get_string(response, "station", o->station,
+                          sizeof(o->station));
     return LE_OK;
 }
 

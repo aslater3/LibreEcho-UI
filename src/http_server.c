@@ -28,7 +28,8 @@ extern int setgroups(int,const gid_t*);
 #define LE_REQ_MAX 24576
 #define LE_HEADER_MAX 8192
 #define LE_BODY_MAX 16384
-#define LE_UPDATE_MAX 33554432
+/* The ceiling lives in api.h so the size the API advertises and the size
+   enforced here cannot drift apart. */
 #define LE_UPDATE_PATH "/data/libreecho/update/incoming/manual.tar"
 #define LE_UPDATE_TMP "/data/libreecho/update/incoming/manual.tar.tmp"
 #define LE_UPDATE_LOCK "/data/libreecho/update/incoming/upload.lock"
@@ -146,7 +147,10 @@ if(sscanf(c->buf,"%7s %255s",q.method,q.path)!=2){response(c->fd,400,"text/plain
 goto done;
 }cl=header(c->buf,"Content-Length");
 if(cl)content_len=(size_t)strtoul(cl,0,10);
-if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));if(!content_len||content_len>LE_UPDATE_MAX){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}c->fd=-1;c->used=0;return;}
+/* Two size gates: the fixed ceiling, and what the staging filesystem can
+   actually hold. Refusing here costs the client one request; refusing after
+   the stream costs it the whole upload. */
+if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));{size_t limit=le_update_max_upload_bytes();char detail[128];if(!content_len||content_len>LE_UPDATE_MAX_BYTES){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(content_len>limit){snprintf(detail,sizeof(detail),"Update is larger than the %lu bytes this device can stage",(unsigned long)limit);update_error(c->fd,413,"update_size",detail);goto done;}}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}c->fd=-1;c->used=0;return;}
 if(content_len>LE_BODY_MAX){response(c->fd,413,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}",118);
 goto done;
 }if(c->used<headers+content_len)return;
