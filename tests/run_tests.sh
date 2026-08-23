@@ -55,6 +55,7 @@ sh tests/test_microphone_fanout_contract.sh
 sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_wake_word_ui_contract.py
+python3 tests/test_home_location_panel_contract.py
 python3 tools/test_virtual_echo.py
 python3 tests/test_now_playing_ui_contract.py
 python3 tests/test_config_persist_contract.py

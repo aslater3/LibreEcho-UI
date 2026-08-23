@@ -3,13 +3,20 @@ set -eu
 python3 - <<'PY'
 import re
 from pathlib import Path
-p=Path('web/index.html').read_text()
-# Match the whole revision, not a prefix of it. The substring form passed for
-# rev=2 and every rev=2x by accident, then failed the moment the counter
-# reached 3x -- the assertion was tracking a digit, not a version.
-revs=set(re.findall(r'/js/bluetooth\.js\?rev=(\d+)', p))
+
+index = Path('web/index.html').read_text()
+source = Path('web/js/bluetooth.js').read_text()
+
+revs=set(re.findall(r'/js/bluetooth\.js\?rev=(\d+)', index))
 assert len(revs)==1, f'expected exactly one bluetooth.js revision, got {sorted(revs)}'
 rev=int(revs.pop())
-assert rev>=2, f'bluetooth.js cache-bust revision went backwards: {rev}'
-print(f'bluetooth cache-bust contract: ok (rev={rev})')
+assert rev>=29, f'bluetooth.js cache-bust revision went backwards: {rev}'
+
+assert 'disabled=!!b.scanning' in source
+assert 'function bluetoothScanFinished(b)' in source
+assert 'state.btScanning' in source
+assert 'bluetoothScanFinished(b);' in source
+assert 'Scan complete —' in source
+
+print(f'bluetooth scan UI and cache-bust contract: ok (rev={rev})')
 PY
