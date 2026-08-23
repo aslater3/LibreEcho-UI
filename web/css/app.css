@@ -141,3 +141,28 @@ body.light{--bg:#edf3f6;--bg2:#f7fafc;--panel:#fff;--panel2:#f4f8fa;--line:#c8d5
 .pairing-request{padding:12px 0;border-bottom:1px solid #24394a;text-align:left}.pairing-request-heading{display:grid;gap:4px}.pairing-request-heading small{color:var(--muted)}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .pairing-code{display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin:16px 0 4px;text-align:left}.pairing-code>span{color:var(--muted);font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.08em}.pairing-code-value{color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:clamp(32px,6vw,48px);font-weight:800;letter-spacing:.14em;line-height:1.05}
 .light .pairing-code-value{color:#172a38}
+
+/* Radio stations: one station per line.
+   Each control is a .field, which is a block-level grid with generous vertical
+   margins, so four of them stacked made a single station occupy most of the
+   panel. Lay them across instead: the word is short and fixed, the name takes
+   what it needs, and the URL takes the rest. The margins have to be dropped
+   here or the row inherits the stacked spacing and defeats the point.
+   Below 900px there is not enough width to be honest about it, so it stacks
+   again rather than squeezing the URL into something unreadable. */
+.radio-row{display:grid;grid-template-columns:minmax(88px,.6fr) minmax(120px,1fr) minmax(180px,2.2fr) auto auto auto;
+ gap:10px;align-items:end;padding:12px 0;border-bottom:1px solid #24394a}
+.radio-row .field{margin:0;gap:4px}
+.radio-row .field span{font-size:12px;color:#aebbc7}
+.radio-row .field input{padding:9px 10px}
+/* The toggle is a justify-between row by default, which stretches it across a
+   grid cell it does not need; keep it to its own width and on the text baseline. */
+.radio-row .switch-row{border-bottom:0;padding:0 0 6px;gap:8px;justify-content:flex-start;align-items:center}
+.radio-row .switch-row span:first-child{font-size:12px;color:#aebbc7}
+.radio-row .radio-play,.radio-row .radio-remove{padding:9px 14px;margin-bottom:1px;white-space:nowrap}
+/* The error belongs to the whole station, not one field. */
+.radio-row .radio-row-error{grid-column:1/-1;margin:6px 0 0}
+@media (max-width:900px){
+ .radio-row{grid-template-columns:1fr 1fr;align-items:start}
+ .radio-row .field:nth-child(3){grid-column:1/-1}
+}
