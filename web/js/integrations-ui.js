@@ -174,16 +174,50 @@ function bindProviderToggle(id,provider,pipeline) {
  */
 function bindHomeLocation(a) {
   if(a.unsupported||!$('#wx-provider'))return;
-  $('#wx-location').value=a.home_location||'';
-  $('#wx-lat').value=a.latitude||'';
-  $('#wx-lon').value=a.longitude||'';
+  const original={
+    location:String(a.home_location||'').trim(),
+    latitude:String(a.latitude||'').trim(),
+    longitude:String(a.longitude||'').trim()
+  };
+  $('#wx-location').value=original.location;
+  $('#wx-lat').value=original.latitude;
+  $('#wx-lon').value=original.longitude;
   bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
-  $('#save-wx').onclick=()=>mutate('/assistant',{
-    weather_provider:wxId($('#wx-provider').value),
-    home_location:$('#wx-location').value.trim(),
-    latitude:$('#wx-lat').value.trim(),
-    longitude:$('#wx-lon').value.trim()
-  },'Home location saved');
+  $('#save-wx').onclick=()=>{
+    const provider=wxId($('#wx-provider').value);
+    const location=$('#wx-location').value.trim();
+    const latitude=$('#wx-lat').value.trim();
+    const longitude=$('#wx-lon').value.trim();
+    const haveLatitude=latitude.length>0;
+    const haveLongitude=longitude.length>0;
+    const lat=haveLatitude?Number(latitude):null;
+    const lon=haveLongitude?Number(longitude):null;
+    const originalLat=original.latitude?Number(original.latitude):null;
+    const originalLon=original.longitude?Number(original.longitude):null;
+    let problem='';
+
+    if(haveLatitude!==haveLongitude) {
+      problem='Enter both latitude and longitude, or leave both unchanged.';
+    } else if(haveLatitude&&(!Number.isFinite(lat)||!Number.isFinite(lon)||
+              lat<-90||lat>90||lon<-180||lon>180)) {
+      problem='Latitude must be -90 to 90 and longitude must be -180 to 180.';
+    } else if(location&&!haveLatitude&&provider!=='off') {
+      problem='This place needs coordinates before weather can be enabled.';
+    } else if(original.location&&location!==original.location&&haveLatitude&&
+              lat===originalLat&&lon===originalLon) {
+      problem='The place changed but the coordinates did not. Update both coordinates before saving.';
+    } else if(!location&&!haveLatitude&&
+              (original.location||original.latitude||original.longitude)) {
+      problem='This image cannot clear old coordinates safely. Select Off or replace them with the new location.';
+    }
+    if(problem){toast(problem,true);return;}
+    mutate('/assistant',{
+      weather_provider:provider,
+      home_location:location,
+      latitude,
+      longitude
+    },'Home location saved');
+  };
 }
 
 async function integrationsPage() {
