@@ -1182,6 +1182,27 @@ async function copyTextCompat(text){
   if(!document.execCommand('copy'))throw new Error('Clipboard access is unavailable');
   document.body.removeChild(area);
 }
+/*
+ * The upload cap is the daemon's, read from max_upload_bytes rather than
+ * repeated here: a hard-coded "32 MiB" would go quietly wrong the day the
+ * daemon's limit moved. The size shown beside it is the file currently
+ * selected for upload -- the device does not report the size of the image
+ * already installed in a slot, so that is not what this row claims.
+ */
+function updateSizeText(file,ota){
+ const cap=Number(ota&&ota.max_upload_bytes)||0;
+ const ceiling=Number(ota&&ota.max_upload_ceiling_bytes)||0;
+ /* When the two differ it is free space doing the limiting, not the ceiling,
+    and saying which one is the difference between "this build is too big" and
+    "this device needs clearing out first". */
+ const why=cap&&ceiling&&cap<ceiling?' — free space on the device, under the '+mib(ceiling)+' ceiling':'';
+ const limit=cap?' of '+mib(cap)+' limit'+why:'';
+ return (file?mib(file.size):'No file selected')+limit;}
+function updateSizeShow(file,ota){
+ const el=$('#update-size'); if(!el)return;
+ const cap=Number(ota&&ota.max_upload_bytes)||0;
+ el.textContent=updateSizeText(file,ota);
+ el.className=file&&cap&&file.size>cap?'error-text':'';}
 async function systemPage(){
   const [s,d,ota,features]=await Promise.all([api('/system'),api('/device'),api('/system/update'),api('/system/features').catch(e=>({unsupported:e.message}))]);
   updateVersionDisplay(d,ota);

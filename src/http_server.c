@@ -200,7 +200,10 @@ if(!tls)return;
 up=socket(AF_INET,SOCK_STREAM,0);
 if(up<0){le_tls_close(tls);return;}
 memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)o->port);
-a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+/* inet_pton, not INADDR_LOOPBACK: the latter is not POSIX and is hidden by
+   _POSIX_C_SOURCE on some platforms, so it built on Linux and failed the
+   native build the e2e harness uses. */
+if(inet_pton(AF_INET,"127.0.0.1",&a.sin_addr)!=1){close(up);le_tls_close(tls);return;}
 if(connect(up,(struct sockaddr*)&a,sizeof(a))){close(up);le_tls_close(tls);return;}
 /*
  * Pump both directions until either end finishes. Two things this loop has to
