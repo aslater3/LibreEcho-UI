@@ -16,7 +16,10 @@ enum le_result { LE_OK=0, LE_INVALID=-1, LE_NOT_SUPPORTED=-2, LE_IO=-3, LE_BUSY=
 
 struct le_cpu_state { int online, utilization, frequency_khz; };
 struct le_system_status { double uptime; int cpu, memory, storage, temperature; int memory_used_mb, memory_total_mb; int storage_used_mb, storage_total_mb, storage_available; char storage_state[32], device_state[24]; size_t cpu_count; struct le_cpu_state cpus[LE_MAX_CPUS]; };
-struct le_device_info { char name[LE_TEXT], hostname[LE_TEXT], model[LE_TEXT], serial[LE_TEXT], os_version[32], kernel[64], hardware_revision[32], backend[16]; };
+/* factory_mac is the MAC recorded in idme, empty when it could not be read.
+   mac_source names where it came from, so an image whose idme spells the
+   field differently can be identified from the API rather than guessed at. */
+struct le_device_info { char name[LE_TEXT], hostname[LE_TEXT], model[LE_TEXT], serial[LE_TEXT], os_version[32], kernel[64], hardware_revision[32], backend[16], factory_mac[24], mac_source[32]; };
 struct le_audio_state { int volume, microphone_gain, notification_volume, muted, startup_sound, amplifier_on, output_available; char tts_voice[32];
  /* Sleep-noise generator. noise_remaining_seconds is -1 when it is
     running untimed, otherwise the seconds left on the sleep timer. */

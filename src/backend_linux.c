@@ -91,21 +91,98 @@ static int read_line(const char *path, char *out, size_t out_size)
     return 0;
 }
 
+/*
+ * idme lives in one of two places depending on the image: a /proc entry on
+ * some builds, and the device tree on this hardware. api.c already accepts
+ * either when deciding whether this is real hardware, but the serial read
+ * only ever tried /proc -- so on this device it failed and the serial fell
+ * back to a hash of the boot id, reported as "device-<hex>". Try both.
+ */
+static int read_idme_field(const char *field, char *out, size_t out_size)
+{
+    char path[256];
+
+    snprintf(path, sizeof(path), "/proc/idme/%s", field);
+    if (read_line(path, out, out_size) == 0 && out[0])
+        return 0;
+    snprintf(path, sizeof(path),
+             "/sys/firmware/devicetree/base/idme/%s/value", field);
+    if (read_line(path, out, out_size) == 0 && out[0])
+        return 0;
+    out[0] = '\0';
+    return -1;
+}
+
 static int read_device_serial(char *out, size_t out_size)
 {
     const char *idme_path = getenv("LIBREECHO_IDME_SERIAL_PATH");
     size_t i;
 
-    if (!idme_path || !idme_path[0])
-        idme_path = "/proc/idme/serial";
-    if (read_line(idme_path, out, out_size) != 0 || !out[0])
+    if (idme_path && idme_path[0]) {
+        if (read_line(idme_path, out, out_size) != 0 || !out[0])
+            return -1;
+    } else if (read_idme_field("serial", out, out_size) != 0) {
         return -1;
+    }
     for (i = 0; out[i]; ++i)
         if (!isalnum((unsigned char)out[i])) {
             out[0] = '\0';
             return -1;
         }
     return i >= 4 ? 0 : -1;
+}
+
+/*
+ * The factory MAC lives in idme, but the field name varies between images and
+ * this one is not documented anywhere we control, so try the known spellings
+ * rather than hard-coding a guess that would silently read nothing. Anything
+ * that parses as six hex octets wins; the caller reports which name supplied
+ * it so a future image can be matched against the list.
+ *
+ * Nothing applies this yet -- it is reported so the value can be seen before
+ * anything depends on it.
+ */
+static int mac_text_valid(const char *s)
+{
+    int digits = 0, seps = 0;
+    size_t i;
+
+    for (i = 0; s[i]; ++i) {
+        if (isxdigit((unsigned char)s[i])) digits++;
+        else if (s[i] == ':' || s[i] == '-') seps++;
+        else return 0;
+    }
+    return digits == 12 && (seps == 0 || seps == 5);
+}
+
+static int read_device_mac(char *out, size_t out_size, char *source,
+                           size_t source_size)
+{
+    static const char *fields[] = { "mac_addr", "macaddr", "wifi_mac",
+                                    "wifi_mac_addr", "mac", "eth_mac_addr" };
+    char raw[64];
+    size_t f, i, n = 0;
+
+    if (source && source_size) source[0] = '\0';
+    for (f = 0; f < sizeof(fields) / sizeof(fields[0]); ++f) {
+        if (read_idme_field(fields[f], raw, sizeof(raw)) != 0)
+            continue;
+        if (!mac_text_valid(raw))
+            continue;
+        /* normalise to lower-case colon-separated form */
+        for (i = 0; raw[i] && n + 3 < out_size; ++i) {
+            if (!isxdigit((unsigned char)raw[i]))
+                continue;
+            if (n && n % 3 == 2) out[n++] = ':';
+            out[n++] = (char)tolower((unsigned char)raw[i]);
+        }
+        out[n] = '\0';
+        if (source && source_size)
+            snprintf(source, source_size, "idme/%s", fields[f]);
+        return 0;
+    }
+    out[0] = '\0';
+    return -1;
 }
 
 static int read_redacted_boot_id(char *out, size_t out_size)
@@ -742,6 +819,8 @@ static int device(struct le_backend *b, struct le_device_info *o)
     if (read_device_serial(o->serial, sizeof(o->serial)) != 0 &&
         read_redacted_boot_id(o->serial, sizeof(o->serial)) != 0)
         strcpy(o->serial, "unavailable");
+    (void)read_device_mac(o->factory_mac, sizeof(o->factory_mac),
+                          o->mac_source, sizeof(o->mac_source));
     /* os_version is a fixed 32-byte field immediately followed by
        kernel[64]; strcpy of a longer build string silently ran past it
        and corrupted the kernel field. Bound the copy. */
