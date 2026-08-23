@@ -549,16 +549,40 @@ static int play_stream(const char *url, const char *bus_path, long *played,
     size_t filled = 0;
     int net = -1, bus = -1, rc = -1;
 
-    if (split_url(url, host, sizeof(host), port, sizeof(port),
-                  path, sizeof(path)) < 0)
-        return -1;
-    net = connect_stream(host, port);
-    if (net < 0)
-        return -1;
-    if (icy_open(&stream, net, host, path, station, sizeof(station)) < 0)
-        goto done;
-    if (station[0])
-        publish_metadata('N', station);
+    /*
+     * A local file is played by the same decoder as a stream: open it instead
+     * of a socket and hand icy_read a plain fd with no metadata interleaving.
+     * The caller has already checked the path is inside the USB mount, so this
+     * refuses anything that is not an absolute path and lets open() enforce
+     * the rest.
+     */
+    if (url && url[0] == '/') {
+        net = open(url, O_RDONLY | O_CLOEXEC);
+        if (net < 0)
+            return -1;
+        memset(&stream, 0, sizeof(stream));
+        stream.fd = net;
+        stream.meta_need = -1;
+        /* A file has a known length, so it finishes rather than dropping. */
+        stream.content_length = (long)lseek(net, 0, SEEK_END);
+        if (stream.content_length < 0)
+            stream.content_length = 0;
+        if (lseek(net, 0, SEEK_SET) < 0)
+            goto done;
+        stream.body_read = 0;
+        publish_metadata('N', url);
+    } else {
+        if (split_url(url, host, sizeof(host), port, sizeof(port),
+                      path, sizeof(path)) < 0)
+            return -1;
+        net = connect_stream(host, port);
+        if (net < 0)
+            return -1;
+        if (icy_open(&stream, net, host, path, station, sizeof(station)) < 0)
+            goto done;
+        if (station[0])
+            publish_metadata('N', station);
+    }
     bus = open(bus_path, O_WRONLY | O_CLOEXEC);
     if (bus < 0)
         goto done;
@@ -795,7 +819,7 @@ static int handle(char *message, char *response, size_t response_size,
             return le_adapter_respond_err(response, response_size, id,
                 "https streams need a TLS library that is not on this image; "
                 "use an http:// URL for this station");
-        if (strncmp(url, "http://", 7))
+        if (url[0] != '/' && strncmp(url, "http://", 7))
             return le_adapter_respond_err(response, response_size, id,
                                           "url must be http://");
         if (start_player(url, bus_path) < 0)

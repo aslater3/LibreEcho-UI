@@ -14,9 +14,16 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/mount.h>
+#include <sys/klog.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 static void out(struct api_response*r,int status,const char*fmt,...){va_list ap;r->status=status;strcpy(r->type,"application/json; charset=utf-8");va_start(ap,fmt);r->length=(size_t)vsnprintf(r->body,sizeof(r->body),fmt,ap);va_end(ap);if(r->length>=sizeof(r->body))r->length=sizeof(r->body)-1;}
 static void ok(struct api_response*r,const char*data){out(r,200,"{\"ok\":true,\"data\":%s,\"error\":null}",data?data:"{}");}static void err(struct api_response*r,int status,int rc,const char*msg){char e[256];json_escape(e,sizeof(e),msg);out(r,status,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",le_result_code(rc),e);}static void method_not_allowed(struct api_response*r){err(r,405,LE_INVALID,"HTTP method is not allowed for this endpoint");}
@@ -29,6 +36,47 @@ static const char *update_fetch_path(void){const char *p=getenv("LIBREECHO_UPDAT
 static int update_fetch_supported(const struct api_context*c){return !strcmp(le_backend_mode(c->backend),"linux")&&!access(update_path(),X_OK)&&!access(update_fetch_path(),X_OK);}
 
 static int key_from_file(const char*,const char*,char*,size_t);
+/*
+ * How large an uploaded OTA package may be.
+ *
+ * The ceiling is fixed and is the real limit: LE_UPDATE_MAX_BYTES is what
+ * http_server.c refuses above, and a bounded ceiling on a client-fed stream is
+ * the design rather than an accident. What the device adds underneath it is
+ * where the package actually goes -- it is streamed to a file under
+ * LE_UPDATE_STAGE_DIR before the installer is handed it, so a device with less
+ * free space there than the ceiling cannot take a package of that size no
+ * matter what the ceiling says.
+ *
+ * Advertising the ceiling on such a device is how you get a 30 MiB upload that
+ * transfers for a minute and then dies with a write error. Reporting the
+ * smaller of the two lets a client say no before sending anything. A margin is
+ * held back because the installer needs room of its own beside the package.
+ *
+ * statvfs failing is not treated as zero: an image without the staging
+ * directory yet, or a filesystem that cannot answer, falls back to the ceiling
+ * rather than declaring uploads impossible.
+ *
+ * LIBREECHO_UPDATE_STAGE overrides the directory, the same way
+ * LIBREECHO_UPDATE overrides the installer path, so a test can point this at
+ * a filesystem it knows the size of.
+ */
+size_t le_update_max_upload_bytes(void)
+{
+    struct statvfs fs;
+    unsigned long long free_bytes, margin = LE_UPDATE_STAGE_MARGIN_BYTES;
+    const char *dir = getenv("LIBREECHO_UPDATE_STAGE");
+
+    if (!dir || !*dir)
+        dir = LE_UPDATE_STAGE_DIR;
+    if (statvfs(dir, &fs) && statvfs(LE_UPDATE_STAGE_PARENT, &fs))
+        return LE_UPDATE_MAX_BYTES;
+    free_bytes = (unsigned long long)fs.f_bavail * (unsigned long long)fs.f_frsize;
+    if (free_bytes <= margin)
+        return 0;
+    free_bytes -= margin;
+    return free_bytes < LE_UPDATE_MAX_BYTES ? (size_t)free_bytes
+                                            : (size_t)LE_UPDATE_MAX_BYTES;
+}
 int api_update_upload_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){if(strcmp(q->path,"/api/v1/system/update/upload")||strcmp(q->method,"POST")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(strcmp(le_backend_mode(c->backend),"linux")||access("/usr/local/sbin/libreecho-update",X_OK)){err(r,501,LE_NOT_SUPPORTED,"Signed OTA updates are unavailable on this image");return 0;}return 1;}
 int api_update_fetch_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){int apply=!strcmp(q->path,"/api/v1/system/update/apply"),path_ok=!strcmp(q->path,"/api/v1/system/update/check")||apply;char status[64]="";if(!path_ok||strcmp(q->method,"POST")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return 0;}if(apply&&(!key_from_file("/data/libreecho/update/check-status","status",status,sizeof(status))||strcmp(status,"update-available"))){err(r,409,LE_BUSY,"No checked update is currently available");return 0;}return 1;}
 int api_update_channel_authorize(struct api_context*c,const struct api_request*q,struct api_response*r,char*channel,size_t channel_size){if(strcmp(q->method,"PUT")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(!body_ok(q,r))return 0;if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return 0;}if(!channel||json_get_string(q->body,"channel",channel,channel_size)!=1||(strcmp(channel,"stable")&&strcmp(channel,"dev"))||json_duplicate_key(q->body,q->body_len,"channel")){err(r,400,LE_INVALID,"Channel must be stable or dev");return 0;}return 1;}
@@ -141,13 +189,15 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         "\"last_check_epoch\":%ld,\"last_success_epoch\":%ld,"
         "\"automatic_updates\":%s,"
         "\"rollback_available\":%s,\"rollback_version\":\"%s\","
-        "\"allow_unsigned\":%s,\"max_upload_bytes\":33554432},"
+        "\"allow_unsigned\":%s,\"max_upload_bytes\":%zu,"
+        "\"max_upload_ceiling_bytes\":%zu},"
         "\"error\":null}",supported?"true":"false",current,inactive,escaped_state,
         progress,pending?"true":"false",escaped_version,escaped_installed,
         escaped_latest,escaped_channel,escaped_source,escaped_reachable,
         escaped_check_status,escaped_check_error,last_check,last_success,
         automatic?"true":"false",supported?"true":"false",escaped_rollback,
-        allow_unsigned?"true":"false");
+        allow_unsigned?"true":"false",le_update_max_upload_bytes(),
+        (size_t)LE_UPDATE_MAX_BYTES);
 }
 static int agent_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*agent=le_adapter_connect(LE_ADAPTER_AGENT_SOCK,15000);int rc;if(!agent)return LE_NOT_SUPPORTED;if(!strcmp(command,"respond"))le_adapter_set_io_timeout(agent,120000);rc=le_adapter_call(agent,command,args,output,size);le_adapter_close(agent);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
 static void agent_result(struct api_response*r,const char*command,const char*args){char data[LE_ADAPTER_MSG_MAX];int rc=agent_command(command,args,data,sizeof(data));if(rc)err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?503:502,rc,rc==LE_NOT_SUPPORTED?"Voice assistant service is unavailable":rc==LE_INVALID?data:"Voice assistant service request failed");else ok(r,data);}
@@ -820,19 +870,20 @@ static int radio_save(struct api_context *c)
 static void radio_json(struct api_context *c, struct api_response *r)
 {
     char body[16384], word[80], name[160], url[1200];
-    char raw_url[512], playing_url[1200];
+    char playing_url[1200];
+    struct le_radio_status radio;
     size_t i, used = 0;
-    int n, playing = 0, radio_available;
+    int n, playing, radio_available;
 
     /*
      * playback_supported is answered by asking the player, not by a constant.
      * radiod may be absent from an image, and a UI that promises playback the
      * device cannot do is worse than one that says so.
      */
-    radio_available = le_radio_playing(c->backend, &playing,
-                                       raw_url, sizeof(raw_url)) == LE_OK;
+    radio_available = le_radio_playing(c->backend, &radio) == LE_OK;
+    playing = radio_available && radio.playing;
     json_escape(playing_url, sizeof(playing_url),
-                radio_available ? raw_url : "");
+                radio_available ? radio.url : "");
 
     n = snprintf(body, sizeof(body),
                  "{\"ok\":true,\"data\":{\"max_stations\":%d,"
@@ -909,7 +960,39 @@ static int radio_apply(struct api_context *c, const char *j)
    interpolating the daemon's string straight into the response. */
 static const char*noise_colour_name(const struct le_audio_state*a){if(!strcmp(a->noise_colour,"pink"))return "pink";if(!strcmp(a->noise_colour,"brown"))return "brown";return "white";}
 static void audio_json(struct api_context*c,struct api_response*r){struct le_audio_state a;int rc=le_get_audio_state(c->backend,&a);if(rc==LE_NOT_SUPPORTED){out(r,200,"{\"ok\":true,\"data\":{\"available\":false,\"unavailable\":true,\"message\":\"Audio hardware backend is not available\"},\"error\":null}");return;}if(rc){err(r,503,rc,"Audio hardware backend status is unavailable");return;}out(r,200,"{\"ok\":true,\"data\":{\"volume\":%d,\"microphone_gain\":%d,\"notification_volume\":%d,\"microphone_muted\":%s,\"startup_sound\":%s,\"amplifier_on\":%s,\"output_available\":%s,\"noise\":{\"active\":%s,\"colour\":\"%s\",\"level\":%d,\"remaining_seconds\":%ld},\"tts_voice\":\"%s\",\"tts_voices\":[{\"id\":\"southern-female\",\"name\":\"Southern English — female\"},{\"id\":\"northern-male\",\"name\":\"Northern English — male\"}]},\"error\":null}",a.volume,a.microphone_gain,a.notification_volume,a.muted?"true":"false",a.startup_sound?"true":"false",a.amplifier_on?"true":"false",a.output_available?"true":"false",a.noise_active?"true":"false",noise_colour_name(&a),a.noise_level,a.noise_remaining_seconds,a.tts_voice[0]?a.tts_voice:"southern-female");}
-static void playback_json(struct api_context*c,struct api_response*r){struct le_playback_state p;char state[48],source[80],title[LE_MEDIA_TEXT*2+2],artist[LE_MEDIA_TEXT*2+2],album[LE_MEDIA_TEXT*2+2],source_json[96],title_json[LE_MEDIA_TEXT*2+8],artist_json[LE_MEDIA_TEXT*2+8],album_json[LE_MEDIA_TEXT*2+8];int rc=le_get_playback_state(c->backend,&p);if(rc){err(r,503,rc,"Playback status is unavailable");return;}json_escape(state,sizeof(state),p.state);json_escape(source,sizeof(source),p.source);json_escape(title,sizeof(title),p.title);json_escape(artist,sizeof(artist),p.artist);json_escape(album,sizeof(album),p.album);if(source[0])snprintf(source_json,sizeof(source_json),"\"%s\"",source);else strcpy(source_json,"null");if(title[0])snprintf(title_json,sizeof(title_json),"\"%s\"",title);else strcpy(title_json,"null");if(artist[0])snprintf(artist_json,sizeof(artist_json),"\"%s\"",artist);else strcpy(artist_json,"null");if(album[0])snprintf(album_json,sizeof(album_json),"\"%s\"",album);else strcpy(album_json,"null");out(r,200,"{\"ok\":true,\"data\":{\"state\":\"%s\",\"source\":%s,\"buses\":{\"media\":%s,\"system\":%s,\"announcement\":%s,\"alarm\":%s},\"metadata\":{\"available\":%s,\"title\":%s,\"artist\":%s,\"album\":%s}},\"error\":null}",state,source_json,p.media_active?"true":"false",p.system_active?"true":"false",p.announcement_active?"true":"false",p.alarm_active?"true":"false",p.metadata_available?"true":"false",title_json,artist_json,album_json);}
+/*
+ * Internet radio is folded into the playback answer here rather than in the
+ * backend, because the station's display name comes from the configured list
+ * and only this layer has it. radiod's own icy-name is the fallback; when the
+ * stream sent neither a name nor a StreamTitle there is nothing to show and
+ * nothing is invented.
+ */
+static int playback_radio(struct api_context*c,struct le_playback_state*p,char*station,size_t station_size){struct le_radio_status radio;size_t i;station[0]='\0';if(le_radio_playing(c->backend,&radio)!=LE_OK||!radio.playing)return 0;for(i=0;i<c->radio_count;i++)if(!strcmp(c->radio[i].url,radio.url)){snprintf(station,station_size,"%s",c->radio[i].name);snprintf(c->radio_last_word,sizeof(c->radio_last_word),"%s",c->radio[i].word);break;}if(!station[0])snprintf(station,station_size,"%s",radio.station);snprintf(p->source,sizeof(p->source),"radio");snprintf(p->title,sizeof(p->title),"%s",radio.title);p->artist[0]='\0';p->album[0]='\0';p->metadata_available=p->title[0]!='\0'||station[0]!='\0';
+ /* radiod writes straight onto the media bus, so it playing is a fact even
+    when the audio engine's status file is missing or stale. */
+ if(!strcmp(p->state,"idle")){snprintf(p->state,sizeof(p->state),"playing");p->media_active=1;}
+ return 1;}
+/*
+ * What the transport control can actually do, per source, so a client can
+ * disable a button with a reason instead of offering one that fails.
+ *
+ * Radio is the only source this device drives: radiod can be told to stop, and
+ * starting again is a fresh connection that rejoins the broadcast where it is
+ * now -- there is no buffered position to resume from, so no pause is offered.
+ * AirPlay and Bluetooth are the other way round. The phone is the controller
+ * and this device is the speaker: airplayd exposes status and an enable switch
+ * only, and the Bluetooth stack here is an AVRCP *target*, which answers
+ * transport commands and cannot send them. Neither can be paused from here.
+ */
+static int transport_station(struct api_context*c){size_t i;if(!c->radio_last_word[0])return -1;for(i=0;i<c->radio_count;i++)if(!strcmp(c->radio[i].word,c->radio_last_word))return c->radio[i].enabled?(int)i:-1;return -1;}
+static void transport_json(struct api_context*c,const struct le_playback_state*p,int radio_playing,char*out_buf,size_t size){const char*reason;int can_play=0,can_stop=0;if(radio_playing){can_stop=1;reason="A live radio stream can be stopped but not paused; starting it again rejoins the broadcast where it is now.";}else if(!strcmp(p->source,"airplay2")){reason="AirPlay playback is controlled from the device that started it; LibreEcho is the speaker.";}else if(!strcmp(p->source,"bluetooth")){reason="Bluetooth playback is controlled from the connected device; LibreEcho is an AVRCP target and cannot send transport commands.";}else if(transport_station(c)>=0){can_play=1;reason="Internet radio is the only source LibreEcho starts and stops; a live stream cannot be paused.";}else{reason="Nothing here can be started: internet radio is the only source LibreEcho controls, and no station has been started in this session.";}snprintf(out_buf,size,"{\"play\":%s,\"pause\":false,\"stop\":%s,\"reason\":\"%s\"}",can_play?"true":"false",can_stop?"true":"false",reason);}
+static void playback_json(struct api_context*c,struct api_response*r){struct le_playback_state p;char state[48],source[80],title[LE_MEDIA_TEXT*2+2],artist[LE_MEDIA_TEXT*2+2],album[LE_MEDIA_TEXT*2+2],station[LE_MEDIA_TEXT*2+2],source_json[96],title_json[LE_MEDIA_TEXT*2+8],artist_json[LE_MEDIA_TEXT*2+8],album_json[LE_MEDIA_TEXT*2+8],station_json[LE_MEDIA_TEXT*2+8],transport[512];char station_raw[LE_MEDIA_TEXT+1];int rc=le_get_playback_state(c->backend,&p),radio_playing;if(rc){err(r,503,rc,"Playback status is unavailable");return;}radio_playing=playback_radio(c,&p,station_raw,sizeof(station_raw));transport_json(c,&p,radio_playing,transport,sizeof(transport));json_escape(state,sizeof(state),p.state);json_escape(source,sizeof(source),p.source);json_escape(title,sizeof(title),p.title);json_escape(artist,sizeof(artist),p.artist);json_escape(album,sizeof(album),p.album);json_escape(station,sizeof(station),station_raw);if(source[0])snprintf(source_json,sizeof(source_json),"\"%s\"",source);else strcpy(source_json,"null");if(title[0])snprintf(title_json,sizeof(title_json),"\"%s\"",title);else strcpy(title_json,"null");if(artist[0])snprintf(artist_json,sizeof(artist_json),"\"%s\"",artist);else strcpy(artist_json,"null");if(album[0])snprintf(album_json,sizeof(album_json),"\"%s\"",album);else strcpy(album_json,"null");if(station[0])snprintf(station_json,sizeof(station_json),"\"%s\"",station);else strcpy(station_json,"null");out(r,200,"{\"ok\":true,\"data\":{\"state\":\"%s\",\"source\":%s,\"buses\":{\"media\":%s,\"system\":%s,\"announcement\":%s,\"alarm\":%s},\"metadata\":{\"available\":%s,\"title\":%s,\"artist\":%s,\"album\":%s,\"station\":%s},\"transport\":%s},\"error\":null}",state,source_json,p.media_active?"true":"false",p.system_active?"true":"false",p.announcement_active?"true":"false",p.alarm_active?"true":"false",p.metadata_available?"true":"false",title_json,artist_json,album_json,station_json,transport);}
+/*
+ * POST /api/v1/playback/transport. "pause" is accepted and refused with the
+ * reason rather than rejected as a bad action: a client that asks deserves to
+ * be told why the device cannot do it.
+ */
+static void playback_transport(struct api_context*c,const struct api_request*q,struct api_response*r){struct le_playback_state p;struct le_radio_status radio;char action[16];int station,rc;if(json_get_string(q->body,"action",action,sizeof(action))<1){err(r,400,LE_INVALID,"Action must be \"play\", \"pause\" or \"stop\"");return;}if(!strcmp(action,"pause")){err(r,501,LE_NOT_SUPPORTED,"A live radio stream cannot be paused, and AirPlay and Bluetooth playback is controlled from the device that started it");return;}if(strcmp(action,"play")&&strcmp(action,"stop")){err(r,400,LE_INVALID,"Action must be \"play\", \"pause\" or \"stop\"");return;}if(le_radio_playing(c->backend,&radio)!=LE_OK){err(r,501,LE_NOT_SUPPORTED,"Stream playback is not available on this image");return;}if(!strcmp(action,"stop")){if(!radio.playing){if(le_get_playback_state(c->backend,&p)==LE_OK&&(!strcmp(p.source,"airplay2")||!strcmp(p.source,"bluetooth"))){err(r,409,LE_BUSY,"That source is controlled from the device that started it; LibreEcho cannot stop it");return;}err(r,409,LE_BUSY,"Nothing is playing that LibreEcho can stop");return;}rc=le_radio_stop(c->backend);if(rc){err(r,503,rc,"Playback could not be stopped");return;}api_log(c,"info","Playback stopped from the transport control");playback_json(c,r);return;}if(radio.playing){err(r,409,LE_BUSY,"A stream is already playing");return;}station=transport_station(c);if(station<0){err(r,409,LE_BUSY,"No station has been started in this session, so there is nothing to start again");return;}rc=le_radio_play(c->backend,c->radio[station].url);if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_NOT_SUPPORTED?"Stream playback is not available on this image":"The station could not be played");return;}api_log(c,"info","Playback started from the transport control");playback_json(c,r);return;}
 static int miccal_read(int values[7],int present[7]){int i,v,count=0;char path[64];FILE*f;for(i=0;i<7;i++){values[i]=16384;present[i]=0;snprintf(path,sizeof(path),"/proc/idme/miccal.%d",i);f=fopen(path,"r");if(f){if(fscanf(f,"%d",&v)==1&&v>=0&&v<=65535){values[i]=v;present[i]=1;count++;}fclose(f);}}if(!count){f=fopen("/proc/idme/miccal","r");if(f){for(i=0;i<7;i++)if(fscanf(f,"%d",&v)==1&&v>=0&&v<=65535){values[i]=v;present[i]=1;count++;}fclose(f);}}return count;}
 static void baby_monitor_local_json(struct api_context*c,struct api_response*r){FILE*f;char line[512],name[256],sources[30000],calibration[1024];int values[7],present[7],i,calibrated=miccal_read(values,present),available=0,simulated=!strcmp(le_backend_mode(c->backend),"mock");sources[0]='\0';calibration[0]='\0';for(i=0;i<7;i++)snprintf(calibration+strlen(calibration),sizeof(calibration)-strlen(calibration),"%s%d",i?",":"",values[i]);f=fopen("/proc/asound/pcm","r");if(f){while(fgets(line,sizeof(line),f)){unsigned card,device;if(sscanf(line,"%u-%u: %255[^\n]",&card,&device,name)!=3)continue;if(card!=0||device!=24||!strstr(name,"Capture"))continue;{char pcm[64],escaped[512];snprintf(pcm,sizeof(pcm),"/dev/snd/pcmC%uD%uc",card,device);if(!access(pcm,R_OK)){json_escape(escaped,sizeof(escaped),name);snprintf(sources,sizeof(sources),"{\"id\":\"0:24\",\"card\":0,\"device\":24,\"name\":\"%s\",\"rate\":16000,\"channels\":9,\"bits\":24,\"valid_bits\":16,\"encoding\":\"pcm_s24_3le\",\"microphones\":[{\"channel\":0,\"name\":\"Array microphone 1\"},{\"channel\":1,\"name\":\"Array microphone 2\"},{\"channel\":2,\"name\":\"Array microphone 3\"},{\"channel\":3,\"name\":\"Array microphone 4\"},{\"channel\":4,\"name\":\"Array microphone 5\"},{\"channel\":5,\"name\":\"Array microphone 6\"},{\"channel\":6,\"name\":\"Array microphone 7\"}]}",escaped);available=1;}}}fclose(f);}if(!available&&simulated){strcpy(sources,"{\"id\":\"0:0\",\"card\":0,\"device\":0,\"name\":\"Mock microphone\",\"rate\":16000,\"channels\":1,\"bits\":16,\"valid_bits\":16,\"encoding\":\"pcm_s16le\",\"microphones\":[{\"channel\":0,\"name\":\"Microphone 1\"}]}");available=1;}out(r,200,"{\"ok\":true,\"data\":{\"available\":%s,\"simulated\":%s,\"sources\":[%s],\"raw_channels\":9,\"active_microphone_channels\":7,\"inactive_transport_channels\":[7,8],\"logical_channels\":7,\"calibration\":{\"q14\":[%s],\"fallback\":16384,\"source\":\"/proc/idme/miccal\",\"values_found\":%d,\"complete\":%s,\"selected_logical_mics\":[0,3],\"applied_to_raw_stream\":false,\"mapping\":\"identity-provisional; lanes 0 and 3 measured with four-sample compensation\"}},\"error\":null}",available?"true":"false",simulated?"true":"false",sources,calibration,calibrated,calibrated==7?"true":"false");}
 static void baby_monitor_json(struct api_context*c,struct api_response*r){struct le_adapter*a;char data[30000];int rc;if(!strcmp(le_backend_mode(c->backend),"mock")){baby_monitor_local_json(c,r);return;}a=le_adapter_connect(LE_ADAPTER_MIC_SOCK,1000);if(!a){err(r,503,LE_NOT_SUPPORTED,"Microphone service is unavailable");return;}rc=le_adapter_call(a,"status","{}",data,sizeof(data));le_adapter_close(a);if(rc!=LE_ADAPTER_OK){err(r,503,LE_IO,"Microphone service status is unavailable");return;}out(r,200,"{\"ok\":true,\"data\":%s,\"error\":null}",data);}
@@ -992,6 +1075,123 @@ static void system_json(struct api_context*c,struct api_response*r){time_t now=t
 #define LE_AUTH_BLOCK_SECONDS 60
 #define api_handle api_handle_inner
 static int bluetooth_append(char *buffer,size_t size,size_t*used,const char*fmt,...){va_list ap;int n;if(!buffer||!used||*used>=size)return-1;va_start(ap,fmt);n=vsnprintf(buffer+*used,size-*used,fmt,ap);va_end(ap);if(n<0||(size_t)n>=size-*used)return-1;*used+=(size_t)n;return 0;}
+/* The MUSB port is dr_mode="otg", so the role is switchable at runtime through
+ * the usb_role class. mediatek.c's mtk_otg_switch_set() is register writes and
+ * a phy_set_mode() with no waiting, unlike musb_core's "mode" attribute, which
+ * blocks until a session it cannot get and takes the ADB gadget down with it.
+ * Only the role switch is safe to drive from a request. Read /sys directly, as
+ * this file already does for /proc/idme and /sys/class/net. */
+static int usb_role_path(char*out,size_t size){DIR*d=opendir("/sys/class/usb_role");struct dirent*e;int found=0;if(!d)return 0;while((e=readdir(d))!=NULL){if(e->d_name[0]=='.')continue;if(snprintf(out,size,"/sys/class/usb_role/%s/role",e->d_name)<(int)size)found=1;break;}closedir(d);return found;}
+static int usb_role_read(char*out,size_t size){char path[192];FILE*f;size_t n;if(!usb_role_path(path,sizeof(path)))return 0;if(!(f=fopen(path,"r")))return 0;n=fread(out,1,size-1,f);fclose(f);out[n]=0;while(n&&(out[n-1]=='\n'||out[n-1]=='\r'||out[n-1]==' '))out[--n]=0;return n>0;}
+static int usb_role_write(const char*role){char path[192];FILE*f;int ok;if(!usb_role_path(path,sizeof(path)))return LE_NOT_SUPPORTED;if(!(f=fopen(path,"w")))return LE_IO;ok=fprintf(f,"%s",role)>0;if(fclose(f)!=0)ok=0;return ok?LE_OK:LE_IO;}
+/* Host mode removes the ADB gadget, which is this device's only shell, so the
+ * kernel ring buffer becomes unreadable exactly when it matters. /dev/kmsg
+ * returns one record per read() and EAGAIN once the reader has caught up, so a
+ * bounded non-blocking drain retrieves it over the network instead. Records are
+ * "<prio>,<seq>,<ts>,<flag>;<text>"; only the text is kept, and only the most
+ * recent LE_KMSG_LINES survive the ring. */
+#define LE_KMSG_LINES 80
+#define LE_KMSG_TEXT 200
+static void kernel_log_json(struct api_context*c,struct api_response*r){static char buf[32768];static char ring[LE_KMSG_LINES][LE_KMSG_TEXT];long got;size_t count=0,next=0,i,n=0;char*line,*save;(void)c;
+ /* klogctl(SYSLOG_ACTION_READ_ALL) is what dmesg uses and returns the whole
+  * ring in one call (action 3 = SYSLOG_ACTION_READ_ALL). /dev/kmsg was tried first and is not usable here: an open
+  * lands on the newest record and lseek(SEEK_SET) does not rewind it on this
+  * kernel, so a drain yielded exactly one line however it was called. */
+ got=klogctl(3,buf,(int)sizeof(buf)-1);
+ if(got<0){err(r,503,LE_NOT_SUPPORTED,"Kernel log is unavailable");return;}
+ buf[got]='\0';
+ for(line=strtok_r(buf,"\n",&save);line;line=strtok_r(NULL,"\n",&save)){if(!*line)continue;snprintf(ring[next%LE_KMSG_LINES],LE_KMSG_TEXT,"%s",line);next++;if(count<LE_KMSG_LINES)count++;}
+ if(bluetooth_append(r->body,sizeof(r->body),&n,"{\"ok\":true,\"data\":{\"lines\":[")){err(r,503,LE_IO,"Kernel log response is too large");return;}
+ for(i=next-count;i<next;i++){char esc[LE_KMSG_TEXT*2];json_escape(esc,sizeof(esc),ring[i%LE_KMSG_LINES]);if(bluetooth_append(r->body,sizeof(r->body),&n,"%s\"%s\"",i>next-count?",":"",esc))break;}
+ if(bluetooth_append(r->body,sizeof(r->body),&n,"],\"count\":%u},\"error\":null}",(unsigned)count)){err(r,503,LE_IO,"Kernel log response is too large");return;}
+ r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
+/* USB mass storage on the OTG port. Switching that port to host mode removes
+ * the ADB gadget -- the only shell this image has -- so a drive attached to it
+ * can only be inspected over the network. Find the first SCSI disk the kernel
+ * enumerated, mount its first partition read-only, and list what is on it.
+ * Strictly read-only: MS_RDONLY on the mount, and nothing here ever writes to
+ * the drive. Bounded like the rest of this file: one disk, one partition, and
+ * at most LE_USB_ENTRIES names. */
+#define LE_USB_MOUNT "/run/libreecho/usb"
+#define LE_USB_ENTRIES 64
+static int usb_disk_find(char*node,size_t node_size,char*part,size_t part_size,unsigned long long*bytes){DIR*d=opendir("/sys/block");struct dirent*e;int found=0;*bytes=0;if(!d)return 0;while((e=readdir(d))!=NULL){char path[256];FILE*f;unsigned long long sectors=0;DIR*pd;struct dirent*pe;if(strncmp(e->d_name,"sd",2))continue;snprintf(node,node_size,"%s",e->d_name);snprintf(path,sizeof(path),"/sys/block/%s/size",e->d_name);if((f=fopen(path,"r"))!=NULL){if(fscanf(f,"%llu",&sectors)!=1)sectors=0;fclose(f);}*bytes=sectors*512ULL;
+ /* Prefer the first partition; a drive written whole-disk has none. */
+ snprintf(part,part_size,"%s",e->d_name);snprintf(path,sizeof(path),"/sys/block/%s",e->d_name);if((pd=opendir(path))!=NULL){while((pe=readdir(pd))!=NULL){if(strncmp(pe->d_name,e->d_name,strlen(e->d_name)))continue;if(!pe->d_name[strlen(e->d_name)])continue;snprintf(part,part_size,"%s",pe->d_name);break;}closedir(pd);}
+ found=1;break;}closedir(d);return found;}
+/*
+ * This image mounts no devtmpfs -- doing so hides the property area adbd
+ * needs -- and init materialises block nodes only for mmcblk0*.  A
+ * hot-plugged USB disk therefore has no /dev entry at all, so the mount
+ * below never even reached the filesystem layer.  Create the node from the
+ * major:minor sysfs already publishes.
+ */
+static int usb_node_ready(const char*part,const char*dev){struct stat st;char sys[160];unsigned maj=0,min=0;FILE*f;
+ if(!stat(dev,&st))return 1;
+ snprintf(sys,sizeof(sys),"/sys/class/block/%s/dev",part);
+ f=fopen(sys,"r");if(!f)return 0;
+ if(fscanf(f,"%u:%u",&maj,&min)!=2){fclose(f);return 0;}
+ fclose(f);
+ if(mknod(dev,S_IFBLK|0600,makedev(maj,min))&&errno!=EEXIST)return 0;
+ return 1;}
+static const char*usb_mount_try(const char*part){static const char*const kinds[]={"exfat","vfat","ext4"};char dev[64];size_t i;struct stat st;snprintf(dev,sizeof(dev),"/dev/%s",part);if(!usb_node_ready(part,dev))return NULL;if(stat(LE_USB_MOUNT,&st))mkdir(LE_USB_MOUNT,0755);for(i=0;i<sizeof(kinds)/sizeof(kinds[0]);i++)if(mount(dev,LE_USB_MOUNT,kinds[i],MS_RDONLY|MS_NOSUID|MS_NODEV,NULL)==0||errno==EBUSY)return kinds[i];return NULL;}
+static int hexval(char ch){if(ch>='0'&&ch<='9')return ch-'0';if(ch>='a'&&ch<='f')return ch-'a'+10;if(ch>='A'&&ch<='F')return ch-'A'+10;return -1;}
+/*
+ * Browsing sub-directories. The query value is untrusted, so reject anything
+ * that could climb out of the mount: no "..", no absolute paths, no
+ * backslashes. Everything stays under LE_USB_MOUNT by construction.
+ */
+static int usb_subpath(const char*path,char*out_rel,size_t size,char*out_full,size_t full_size)
+{
+ const char*q=path?strchr(path,'?'):NULL;const char*v;size_t i=0;
+ out_rel[0]='\0';
+ if(q&&(v=strstr(q,"path="))){
+  v+=5;
+  while(*v&&*v!='&'&&i+1<size){
+   char ch=*v++;
+   if(ch=='%'&&v[0]&&v[1]){int hi=hexval(v[0]),lo=hexval(v[1]);if(hi>=0&&lo>=0){ch=(char)((hi<<4)|lo);v+=2;}}
+   else if(ch=='+')ch=' ';
+   out_rel[i++]=ch;
+  }
+  out_rel[i]='\0';
+ }
+ if(strstr(out_rel,"..")||strchr(out_rel,'\\')||out_rel[0]=='/'){out_rel[0]='\0';return -1;}
+ if(out_rel[0]){if((size_t)snprintf(out_full,full_size,"%s/%s",LE_USB_MOUNT,out_rel)>=full_size)return -1;}
+ else if((size_t)snprintf(out_full,full_size,"%s",LE_USB_MOUNT)>=full_size)return -1;
+ return 0;
+}
+/*
+ * Play a file from the mounted drive. radiod decodes MPEG-1/2 Layer III only,
+ * so anything else is refused by extension with a reason rather than started
+ * and left silent -- there is no AAC decoder on this image.
+ */
+static void usb_play_json(struct api_context*c,const struct api_request*q,struct api_response*r)
+{
+ char rel[256],full[512],esc[600];const char*dot;struct stat st;int rc;
+ if(json_get_string(q->body,"path",rel,sizeof(rel))<1||!rel[0]){err(r,400,LE_INVALID,"path is required");return;}
+ if(strstr(rel,"..")||strchr(rel,'\\')||rel[0]=='/'){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
+ if((size_t)snprintf(full,sizeof(full),"%s/%s",LE_USB_MOUNT,rel)>=sizeof(full)){err(r,400,LE_INVALID,"That path is too long");return;}
+ if(stat(full,&st)||!S_ISREG(st.st_mode)){err(r,404,LE_INVALID,"No such file on the drive");return;}
+ dot=strrchr(rel,'.');
+ if(!dot||strcasecmp(dot,".mp3")){
+  err(r,415,LE_NOT_SUPPORTED,"Only MP3 files can be played; this image has no AAC decoder");return;}
+ rc=le_radio_play(c->backend,full);
+ if(rc){err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,
+            rc==LE_NOT_SUPPORTED?"Playback is not available on this image":"The file could not be played");return;}
+ json_escape(esc,sizeof(esc),rel);
+ api_log(c,"info","USB file playback started");
+ {char body[768];snprintf(body,sizeof(body),"{\"playing\":true,\"path\":\"%s\"}",esc);ok(r,body);}
+}
+static void usb_storage_json(struct api_context*c,const struct api_request*q,struct api_response*r){char node[64],part[64],esc[192],rel[256],dirpath[512],relesc[512];unsigned long long bytes=0,used=0,avail=0;const char*fs;size_t n=0,listed=0;DIR*d;struct dirent*e;struct statvfs vfs;(void)c;
+ if(usb_subpath(q?q->path:NULL,rel,sizeof(rel),dirpath,sizeof(dirpath))<0){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
+ if(!usb_disk_find(node,sizeof(node),part,sizeof(part),&bytes)){out(r,200,"{\"ok\":true,\"data\":{\"present\":false,\"mounted\":false,\"message\":\"No USB disk is attached. The OTG port must be in host mode.\"},\"error\":null}");return;}
+ fs=usb_mount_try(part);
+ if(fs&&statvfs(LE_USB_MOUNT,&vfs)==0){unsigned long long fr=(unsigned long long)vfs.f_frsize;avail=fr*(unsigned long long)vfs.f_bavail;used=fr*((unsigned long long)vfs.f_blocks-(unsigned long long)vfs.f_bfree);}
+ json_escape(relesc,sizeof(relesc),rel);
+ if(bluetooth_append(r->body,sizeof(r->body),&n,"{\"ok\":true,\"data\":{\"present\":true,\"device\":\"%s\",\"partition\":\"%s\",\"size_bytes\":%llu,\"used_bytes\":%llu,\"free_bytes\":%llu,\"filesystem\":\"%s\",\"mounted\":%s,\"path\":\"%s\",\"rel_path\":\"%s\",\"entries\":[",node,part,bytes,used,avail,fs?fs:"",fs?"true":"false",LE_USB_MOUNT,relesc)){err(r,503,LE_IO,"Storage response is too large");return;}
+ if(fs&&(d=opendir(dirpath))!=NULL){while((e=readdir(d))!=NULL&&listed<LE_USB_ENTRIES){char full[512];struct stat st;if(e->d_name[0]=='.')continue;snprintf(full,sizeof(full),"%s/%s",dirpath,e->d_name);if(stat(full,&st))continue;json_escape(esc,sizeof(esc),e->d_name);if(bluetooth_append(r->body,sizeof(r->body),&n,"%s{\"name\":\"%s\",\"directory\":%s,\"size_bytes\":%llu}",listed?",":"",esc,S_ISDIR(st.st_mode)?"true":"false",(unsigned long long)st.st_size))break;listed++;}closedir(d);}
+ if(bluetooth_append(r->body,sizeof(r->body),&n,"],\"entry_count\":%u},\"error\":null}",(unsigned)listed)){err(r,503,LE_IO,"Storage response is too large");return;}
+ r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
+static void features_json(struct api_context*c,struct api_response*r){char role[32],esc[64];int have=usb_role_read(role,sizeof(role));json_escape(esc,sizeof(esc),have?role:"");out(r,200,"{\"ok\":true,\"data\":{\"simulation\":%s,\"usb_host\":%s,\"usb_role\":\"%s\",\"usb_role_supported\":%s},\"error\":null}",c->feature_simulation?"true":"false",(have&&!strcmp(role,"host"))?"true":"false",esc,have?"true":"false");}
 static void bluetooth_json(struct api_context*c,struct api_response*r){struct le_bluetooth_state b;size_t i,n=0;int rc;char state[64],transport[64],hci[64],local_name[LE_TEXT*2],error[192],disconnect_reason[96],connect_failed_status[96],profile_state[32],profile_error[192],name[LE_TEXT*2];if((rc=le_get_bluetooth_state(c->backend,&b))==LE_NOT_SUPPORTED){out(r,200,"{\"ok\":true,\"data\":{\"available\":false,\"unavailable\":true,\"message\":\"Bluetooth status is unavailable\"},\"error\":null}");return;}else if(rc){err(r,503,rc,"Bluetooth status is unavailable");return;}json_escape(state,sizeof(state),b.state);json_escape(transport,sizeof(transport),b.transport);json_escape(hci,sizeof(hci),b.hci);json_escape(local_name,sizeof(local_name),b.local_name);json_escape(error,sizeof(error),b.last_error);json_escape(disconnect_reason,sizeof(disconnect_reason),b.last_disconnect_reason);json_escape(connect_failed_status,sizeof(connect_failed_status),b.last_connect_failed_status);json_escape(profile_state,sizeof(profile_state),b.profile_state);json_escape(profile_error,sizeof(profile_error),b.profile_error);if(bluetooth_append(r->body,sizeof(r->body),&n,"{\"ok\":true,\"data\":{\"state\":\"%s\",\"available\":%s,\"enabled\":%s,\"activation_attempted\":%s,\"transport\":\"%s\",\"hci\":\"%s\",\"local_name\":\"%s\",\"last_error\":\"%s\",\"last_disconnect_reason\":\"%s\",\"last_connect_failed_status\":\"%s\",\"profile_state\":\"%s\",\"profile_error\":\"%s\",\"profile_services\":{\"sdp\":%s,\"a2dp_sink\":%s,\"avrcp\":%s,\"rfcomm\":%s,\"bnep\":%s,\"hidp\":%s},\"scanning\":%s,\"pairing\":%s,\"pairing_mode\":%s,\"capabilities\":{\"classic\":%s,\"le\":%s,\"ssp\":%s,\"secure_connection\":%s,\"connectable\":%s,\"discoverable\":%s,\"bondable\":%s},\"pending_pairing\":",state,b.available?"true":"false",b.enabled?"true":"false",b.activation_attempted?"true":"false",transport,hci,local_name,error,disconnect_reason,connect_failed_status,profile_state,profile_error,b.profile_sdp?"true":"false",b.profile_a2dp_sink?"true":"false",b.profile_avrcp?"true":"false",b.profile_rfcomm?"true":"false",b.profile_bnep?"true":"false",b.profile_hidp?"true":"false",b.scanning?"true":"false",b.pairing?"true":"false",b.pairing_mode?"true":"false",b.classic?"true":"false",b.le?"true":"false",b.ssp?"true":"false",b.secure_connection?"true":"false",b.connectable?"true":"false",b.discoverable?"true":"false",b.bondable?"true":"false")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}if(b.pairing){json_escape(name,sizeof(name),b.pending_pairing.address);{char method[48];json_escape(method,sizeof(method),b.pending_pairing.method);if(bluetooth_append(r->body,sizeof(r->body),&n,"{\"address\":\"%s\",\"type\":%d,\"method\":\"%s\",\"value\":%u}",name,b.pending_pairing.type,method,b.pending_pairing.value)){err(r,503,LE_IO,"Bluetooth status response is too large");return;}}}else if(bluetooth_append(r->body,sizeof(r->body),&n,"null")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}if(bluetooth_append(r->body,sizeof(r->body),&n,",\"discovered\":[")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}for(i=0;i<b.discovered_count&&i<LE_MAX_BLUETOOTH_DEVICES;i++){char address[32];json_escape(address,sizeof(address),b.discovered[i].address);json_escape(name,sizeof(name),b.discovered[i].name);if(bluetooth_append(r->body,sizeof(r->body),&n,"%s{\"address\":\"%s\",\"name\":\"%s\",\"type\":%d,\"rssi\":%d,\"rssi_valid\":%s,\"paired\":%s,\"connected\":%s}",i?",":"",address,name,b.discovered[i].type,b.discovered[i].rssi,b.discovered[i].rssi_valid?"true":"false",b.discovered[i].paired?"true":"false",b.discovered[i].connected?"true":"false")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}}if(bluetooth_append(r->body,sizeof(r->body),&n,"],\"known_devices\":[")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}for(i=0;i<b.known_count&&i<LE_MAX_BLUETOOTH_DEVICES;i++){char address[32];json_escape(address,sizeof(address),b.known[i].address);json_escape(name,sizeof(name),b.known[i].name);if(bluetooth_append(r->body,sizeof(r->body),&n,"%s{\"address\":\"%s\",\"name\":\"%s\",\"type\":%d,\"rssi\":%d,\"rssi_valid\":%s,\"connected\":%s}",i?",":"",address,name,b.known[i].type,b.known[i].rssi,b.known[i].rssi_valid?"true":"false",b.known[i].connected?"true":"false")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}}if(bluetooth_append(r->body,sizeof(r->body),&n,"]},\"error\":null}")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
 static int auth_rate_limited(struct api_context*c){time_t now=time(0);if(!c->auth.enabled)return 0;if(c->auth_blocked_until>now)return 1;if(c->auth_blocked_until)c->auth_blocked_until=0;if(!c->auth_window_started||now-c->auth_window_started>=LE_AUTH_FAILURE_WINDOW){c->auth_window_started=now;c->auth_failures=0;}return c->auth_failures>=LE_AUTH_FAILURE_LIMIT;}
 static void auth_record_failure(struct api_context*c){time_t now=time(0);if(!c->auth_window_started||now-c->auth_window_started>=LE_AUTH_FAILURE_WINDOW){c->auth_window_started=now;c->auth_failures=0;}if(c->auth_failures<LE_AUTH_FAILURE_LIMIT)c->auth_failures++;if(c->auth_failures>=LE_AUTH_FAILURE_LIMIT)c->auth_blocked_until=now+LE_AUTH_BLOCK_SECONDS;}
@@ -1100,7 +1300,7 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  if(!strcmp(p,"/api/v1/assistant/auth/poll")&&!strcmp(q->method,"POST")){agent_result(r,"auth_poll",NULL);return;}
  if(!strcmp(p,"/api/v1/assistant/logout")&&!strcmp(q->method,"POST")){agent_result(r,"logout",NULL);return;}
  if(!strcmp(p,"/api/v1/assistant/respond")&&!strcmp(q->method,"POST")){agent_result(r,"respond",q->body);return;}
- if((!strcmp(p,"/api/v1")||!strcmp(p,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(p,"/api/v1/status")&&!strcmp(q->method,"GET")){status_json(c,r);return;}if(!strcmp(p,"/api/v1/playback")&&!strcmp(q->method,"GET")){playback_json(c,r);return;}if(!strcmp(p,"/api/v1/device")&&!strcmp(q->method,"GET")){device_json(c,r);return;}if(!strcmp(p,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384},\"error\":null}",c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default");return;}
+ if((!strcmp(p,"/api/v1")||!strcmp(p,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(p,"/api/v1/status")&&!strcmp(q->method,"GET")){status_json(c,r);return;}if(!strcmp(p,"/api/v1/playback")){if(!strcmp(q->method,"GET")){playback_json(c,r);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/playback/transport")){if(!strcmp(q->method,"POST")){playback_transport(c,q,r);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/device")&&!strcmp(q->method,"GET")){device_json(c,r);return;}if(!strcmp(p,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384},\"error\":null}",c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default");return;}
  if(!strcmp(p,"/api/v1/audio")){if(!strcmp(q->method,"GET")){audio_json(c,r);return;}if(!strcmp(q->method,"PUT")){char voice[32];if(json_get_int(q->body,"volume",&v)>0)rc=le_set_volume(c->backend,v);if(!rc&&json_get_int(q->body,"microphone_gain",&v)>0)rc=le_set_microphone_gain(c->backend,v);if(!rc&&json_get_bool(q->body,"microphone_muted",&v)>0)rc=le_set_microphone_muted(c->backend,v);if(!rc&&json_get_string(q->body,"tts_voice",voice,sizeof(voice))>0)rc=le_set_tts_voice(c->backend,voice);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Audio setting could not be applied");return;}api_log(c,"info","Audio settings updated");event_bus_publish(&c->events,"audio","{\"changed\":true}");audio_json(c,r);return;}}
  if(!strcmp(p,"/api/v1/baby-monitor")&&!strcmp(q->method,"GET")){baby_monitor_json(c,r);return;}
  if(!strcmp(p,"/api/v1/bluetooth/pairing-mode")&&!strcmp(q->method,"POST")){int enabled=1;if(json_get_bool(q->body,"enabled",&enabled)<1)enabled=1;rc=le_bluetooth_set_pairing_mode(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth pairing mode could not be changed");return;}api_log(c,"info",enabled?"Bluetooth pairing mode enabled":"Bluetooth pairing mode disabled");bluetooth_json(c,r);return;}
@@ -1121,17 +1321,30 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  * would be decoration, not a control.
  */
  if(!strcmp(p,"/api/v1/system/features")){
-  if(!strcmp(q->method,"GET")){
-   out(r,200,"{\"ok\":true,\"data\":{\"simulation\":%s},\"error\":null}",
-       c->feature_simulation?"true":"false");return;}
-  if(!strcmp(q->method,"PUT")){
+  if(!strcmp(q->method,"GET")){features_json(c,r);return;}
+  if(!strcmp(q->method,"PUT")){int host,want_host=json_get_bool(q->body,"usb_host",&host);
+   /* usb_host moves the OTG port between gadget and host. It is deliberately
+    * not persisted: libreecho-init pins the role back to device on every boot,
+    * so the ADB gadget -- this device's only recovery path -- can never be left
+    * switched off by a stored setting. */
+   /*
+    * Entering host mode drops VBUS and raises it again rather than just
+    * raising it. A USB device pulls up D+ when it sees VBUS *rise*, so a drive
+    * that was already attached and powered produced no attach event and the
+    * port looked empty until it was physically unplugged and replugged. The
+    * dip gives the drive the edge it is waiting for.
+    */
+   if(want_host>0&&host){usb_role_write("device");usleep(400000);}
+   if(want_host>0){int urc=usb_role_write(host?"host":"device");
+    if(urc){err(r,urc==LE_NOT_SUPPORTED?501:503,urc,"USB role could not be changed");return;}
+    api_log(c,"info",host?"USB port switched to host (storage) mode":"USB port switched to device (ADB) mode");
+    features_json(c,r);return;}
    if(json_get_bool(q->body,"simulation",&v)<1){err(r,400,LE_INVALID,"simulation must be boolean");return;}
    c->feature_simulation=v;
    rc=persist_configuration(c);
    if(rc){err(r,503,rc,"Feature settings could not be saved");return;}
    api_log(c,"info",v?"Simulation feature enabled":"Simulation feature disabled");
-   out(r,200,"{\"ok\":true,\"data\":{\"simulation\":%s},\"error\":null}",
-       c->feature_simulation?"true":"false");return;}
+   features_json(c,r);return;}
   method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/integrations/radio/play")&&!strcmp(q->method,"POST")){
   char word[32];size_t i;
@@ -1143,6 +1356,7 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
    if(rc){err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,
               rc==LE_NOT_SUPPORTED?"Stream playback is not available on this image":
               "The station could not be played");return;}
+   snprintf(c->radio_last_word,sizeof(c->radio_last_word),"%s",c->radio[i].word);
    api_log(c,"info","Radio station started");radio_json(c,r);return;}
   err(r,404,LE_INVALID,"No station with that word");return;}
  if(!strcmp(p,"/api/v1/integrations/radio/stop")&&!strcmp(q->method,"POST")){
@@ -1199,7 +1413,7 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  if(!strcmp(p,"/api/v1/system/update/automatic")){int enabled;if(strcmp(q->method,"PUT")){method_not_allowed(r);return;}if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return;}if(json_get_bool(q->body,"enabled",&enabled)<1){err(r,400,LE_INVALID,"Enabled must be a boolean");return;}rc=run_init_command(update_fetch_path(),enabled?"enable-automatic":"disable-automatic");if(rc){err(r,503,rc,"Automatic update preference could not be saved");return;}api_log(c,"info",enabled?"Automatic OTA installation enabled":"Automatic OTA installation disabled");update_status_json(c,r);return;}
  if(!strcmp(p,"/api/v1/system/update/channel")){char channel[16];if(!api_update_channel_authorize(c,q,r,channel,sizeof(channel)))return;if(run_init_command(update_fetch_path(),!strcmp(channel,"dev")?"set-channel-dev":"set-channel-stable")){err(r,503,LE_IO,"Update channel could not be saved");return;}api_log(c,"info","OTA update channel changed");update_status_json(c,r);return;}
  if((!strcmp(p,"/api/v1/system/reboot")||!strcmp(p,"/api/v1/system/shutdown")||!strcmp(p,"/api/v1/system/factory-reset"))&&!strcmp(q->method,"POST")){if(strcmp(q->confirm,"confirm-device-action")){err(r,403,LE_AUTH,"A valid destructive-action confirmation token is required");return;}rc=strstr(p,"factory-reset")?le_factory_reset(c->backend):strstr(p,"shutdown")?le_shutdown(c->backend):le_reboot(c->backend);if(rc){err(r,501,rc,"Device action is not available");return;}api_log(c,"warning",p);ok(r,"{\"accepted\":true}");return;}
- if(!strcmp(p,"/api/v1/logs")&&!strcmp(q->method,"GET")){logs_json(c,r);return;}if(!strcmp(p,"/api/v1/logs/stream")&&!strcmp(q->method,"GET")){logs_stream_json(c,r);return;}if(!strcmp(p,"/api/v1/diagnostics")&&!strcmp(q->method,"GET")){diagnostics_json(c,r);return;}if(!strcmp(p,"/api/v1/diagnostics/export")){if(strcmp(q->method,"POST")){method_not_allowed(r);return;}diagnostics_export_json(c,r);return;}
+ if(!strcmp(p,"/api/v1/logs")&&!strcmp(q->method,"GET")){logs_json(c,r);return;}if(!strcmp(p,"/api/v1/logs/stream")&&!strcmp(q->method,"GET")){logs_stream_json(c,r);return;}if(!strcmp(p,"/api/v1/storage/usb/play")&&!strcmp(q->method,"POST")){usb_play_json(c,q,r);return;}if(!strncmp(p,"/api/v1/storage/usb",19)&&(p[19]==0||p[19]=='?')&&!strcmp(q->method,"GET")){usb_storage_json(c,q,r);return;}if(!strcmp(p,"/api/v1/diagnostics/kernel")&&!strcmp(q->method,"GET")){kernel_log_json(c,r);return;}if(!strcmp(p,"/api/v1/diagnostics")&&!strcmp(q->method,"GET")){diagnostics_json(c,r);return;}if(!strcmp(p,"/api/v1/diagnostics/export")){if(strcmp(q->method,"POST")){method_not_allowed(r);return;}diagnostics_export_json(c,r);return;}
  if(!strcmp(p,"/api/v1/events")&&!strcmp(q->method,"GET")){struct le_event e[8];size_t n,i,used=0;n=event_bus_since(&c->events,0,e,8);r->status=200;strcpy(r->type,"text/event-stream");for(i=0;i<n;i++)used+=(size_t)snprintf(r->body+used,sizeof(r->body)-used,"id: %lu\nevent: %s\ndata: %s\n\n",e[i].id,e[i].type,e[i].data);used+=(size_t)snprintf(r->body+used,sizeof(r->body)-used,"event: status\ndata: {\"refresh\":true}\n\n");r->length=used;return;}
 #ifdef LE_DEV_CONTROLS
  if(!strcmp(p,"/api/v1/dev/mock")&&!strcmp(q->method,"POST")&&c->dev_controls){char a[64],v2[128];if(json_get_string(q->body,"action",a,sizeof(a))<1){err(r,400,LE_INVALID,"Mock action is required");return;}if(json_get_string(q->body,"value",v2,sizeof(v2))<1)v2[0]=0;rc=le_backend_mock_control(c->backend,a,v2);if(rc)err(r,400,rc,"Mock control rejected");else ok(r,"{\"applied\":true}");return;}

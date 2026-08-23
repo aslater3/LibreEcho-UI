@@ -27,6 +27,12 @@ function storageDisplay(value){const text=String(value??''),match=text.match(/^(
  * file that fits look like one that does not.
  */
 function mib(bytes){const n=Number(bytes);return Number.isFinite(n)&&n>=0?(n/1048576).toFixed(1)+' MiB':'—'}
+/* Drive sizes span kilobytes to hundreds of gigabytes, so scale the unit
+   rather than printing six-figure MiB. Binary units throughout, matching mib(). */
+function bytes(v){const n=Number(v);if(!Number.isFinite(n)||n<0)return '—';
+ const u=['B','KiB','MiB','GiB','TiB'];let i=0,x=n;
+ while(x>=1024&&i<u.length-1){x/=1024;i++}
+ return (i===0?x:x.toFixed(x<10?1:0))+' '+u[i]}
 function storageValue(s){const total=Number(s?.storage_total_mb);if(!Number.isFinite(total)||total<=0)return'Unavailable';if(s.storage_available&&Number.isFinite(Number(s.storage_used_mb)))return`${Number(s.storage_used_mb)} / ${total} MB`;return`${total} MB capacity · usage unavailable`}
 function metric(icon,label,value,percent,connected=false,powerLed=false){if(label==='Storage')value=storageDisplay(value);const numericPercent=Number(percent),hasPercent=Number.isFinite(numericPercent);return `<div class="metric ${powerLed?'binary-metric':''}"><svg><use href="#${icon}"></use></svg><span>${label}</span><span class="value ${connected?'connected':''}">${esc(value)}</span>${powerLed?`<span class="power-led ${connected?'on':'off'}" role="img" aria-label="${connected?'Available':'Unavailable'}"></span>`:hasPercent?`<progress class="bar" max="100" value="${Math.max(0,Math.min(100,numericPercent))}" aria-label="${esc(label)}: ${esc(value)}"></progress>`:''}</div>`}
 function cpuDashboard(s){const cores=Array.isArray(s.cpus)?s.cpus:(Array.isArray(s.cpus?.cores)?s.cpus.cores:[]);return `<section class="panel cpu-panel" id="cpu-dashboard"><div class="cpu-heading"><h3>CPU cores</h3><span>${cores.filter(c=>c.online).length}/${cores.length} online</span></div><div class="cpu-core-grid">${cores.map(c=>`<article class="cpu-core ${c.online?'online':'offline'}"><div><strong>CPU${esc(c.id)}</strong><small>${c.online?'Up':'Down'} · ${c.frequency_khz?Math.round(c.frequency_khz/1000)+' MHz':'—'}</small></div><b>${c.online?Number(c.utilization_percent??c.utilization??0)+'%':'—'}</b><progress class="bar" max="100" value="${c.online?Math.max(0,Math.min(100,Number(c.utilization_percent??c.utilization??0))):0}" aria-label="CPU${c.id} utilization"></progress></article>`).join('')}</div></section>`}
@@ -1192,10 +1198,85 @@ async function systemPage(){
   const featuresPanel=panel('Features',features.unsupported?unsupported(features.unsupported):
     toggle('Simulation',!!features.simulation,'feature-simulation')+
     `<p class="muted">Simulation renders a phrase with the device's own text-to-speech and plays it into the <strong>microphone</strong> path, so wake word detection, speech-to-text and the assistant handle it exactly as though it had been spoken in the room. Nothing is recorded and nothing leaves the device.</p><p class="muted">It is off by default and is meant for testing. Switching it on adds the Simulation page to the menu; switching it off hides that page again and the device refuses simulated audio.</p>`+
+    (features.usb_role_supported?toggle('USB storage mode',!!features.usb_host,'feature-usb-host')+
+    `<p class="muted">Host mode reads a drive; device mode serves ADB, the only way in if the network drops. The port cannot do both, so this is never saved and every boot returns to device mode.</p>`+
+    `<p class="muted">Intended behaviour: <strong>off</strong> stays in device mode; <strong>on</strong> uses a drive while one is present and falls back to device mode when none is found. ADB is held for the first minute after boot regardless. Applies immediately &mdash; the Save button below is for Simulation only.</p>`+
+    `<div id="usb-storage" class="usb-storage"></div>`:'')+
     saveButton('save-features'));
   content.innerHTML=`<div class="settings-grid">${panel('Software',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Time zone</dt><dd>${esc(s.timezone)}</dd><dt>NTP</dt><dd class="${s.ntp?'connected':''}">${s.ntp?'Synchronized':esc(s.ntp_state||'Unavailable')}</dd><dt>Last synchronization</dt><dd>${esc(syncTime)}</dd><dt>Clock source</dt><dd>${esc(s.clock_source||'unknown')}</dd><dt>RTC</dt><dd class="${s.rtc_available?'connected':''}">${s.rtc_available?(s.rtc_persisted?'Available · synchronized':'Available'):'Unavailable'}</dd><dt>Time servers</dt><dd>${esc(s.ntp_servers||'Not configured')}</dd></dl>`)}${panel('System update',`<dl class="facts"><dt>Installed version</dt><dd>${esc(installedVersion)}</dd><dt>Latest version</dt><dd>${esc(ota.latest_version||'Unknown')}</dd><dt>Channel</dt><dd>${esc(ota.channel||s.update_channel)}</dd><dt>Source</dt><dd>${esc(sourceName)}</dd><dt>Source status</dt><dd class="${ota.source_reachable==='true'?'connected':''}">${esc(sourceStatus)}</dd><dt>Check result</dt><dd>${esc(checkResult)}</dd><dt>Last checked</dt><dd>${esc(checkTime)}</dd><dt>Last successful check</dt><dd>${esc(successTime)}</dd><dt>Automatic updates</dt><dd>${ota.automatic_updates?'Enabled':'Off'}</dd><dt>Current slot</dt><dd>${esc(ota.current_slot.toUpperCase())}</dd><dt>Inactive slot</dt><dd>${esc(ota.inactive_slot.toUpperCase())}</dd><dt>Install state</dt><dd>${esc(ota.state)}</dd><dt>Update image</dt><dd id="update-size">${updateSizeText(null,ota)}</dd><dt>Rollback</dt><dd>${ota.rollback_available?'Available':'Unavailable'}</dd>${ota.rollback_version?`<dt>Last rollback</dt><dd>${esc(ota.rollback_version)}</dd>`:''}</dl><progress class="progress" max="100" value="${ota.progress}" aria-label="Update progress"></progress>${updateControls}`)}${featuresPanel}${panel('Configuration and diagnostics',`<input id="restore-file" type="file" accept="application/json,.json" hidden><div class="button-row">${action('Download configuration','backup','primary-btn')}${action('Restore configuration','restore')}${action('Download diagnostic bundle','export-diag','primary-btn')}${action('Copy health summary','copy-diag')}</div><p class="muted">Configuration exports are versioned JSON and exclude Wi-Fi passwords, authentication tokens, logs and live telemetry. Diagnostic bundles are bounded JSON with release identity and health evidence; SSIDs, addresses, owner identifiers, tokens, private paths, media metadata and signing material are omitted or redacted.</p>`,'wide')}</div>`;
   if($('#save-update-settings')){bindDirty(['#automatic-updates','#update-channel'],'#save-update-settings');$('#save-update-settings').onclick=async()=>{const channel=$('#update-channel').value,automatic=$('#automatic-updates').checked;if(state.busy)return;setBusy(true);try{if(channel!==(ota.channel||'stable'))await api('/system/update/channel',{method:'PUT',body:JSON.stringify({channel})});if(automatic!==ota.automatic_updates)await api('/system/update/automatic',{method:'PUT',body:JSON.stringify({enabled:automatic})});toast('Update settings saved');await render()}catch(e){toast(e.message,true);await render()}finally{setBusy(false)}}}
   if($('#save-features')){bindDirty(['#feature-simulation'],'#save-features');$('#save-features').onclick=async()=>{if(state.busy)return;setBusy(true);try{const saved=await api('/system/features',{method:'PUT',body:JSON.stringify({simulation:$('#feature-simulation').checked})});applyFeatures(saved);toast(saved.simulation?'Simulation enabled':'Simulation disabled');await render()}catch(e){toast(e.message,true);await render()}finally{setBusy(false)}}}
+  /* Immediate, and deliberately outside the Save flow: the role is a live
+     hardware switch the daemon applies now, not a stored preference. */
+  if($('#feature-usb-host'))$('#feature-usb-host').onchange=()=>mutate('/system/features',{usb_host:$('#feature-usb-host').checked},$('#feature-usb-host').checked?'USB port switched to host mode':'USB port switched to device mode');
+  /*
+   * The drive panel. Rendered only while host mode is on, because in device
+   * mode there is nothing to read and saying "no disk" would suggest a fault
+   * rather than the port simply doing its other job.
+   */
+  async function usbStorageRender(rel){
+   const host=$('#usb-storage');
+   if(!host)return;
+   if(!$('#feature-usb-host')||!$('#feature-usb-host').checked){host.innerHTML='';return}
+   host.innerHTML='<p class="muted">Looking for a drive…</p>';
+   let d;
+   try{ d=await api('/storage/usb'+(rel?'?path='+encodeURIComponent(rel):'')) }
+   catch(e){ host.innerHTML=`<p class="error-text">${esc(e.message)}</p>`; return }
+   if(!host.isConnected)return;
+   if(!d.present){host.innerHTML=`<p class="muted">${esc(d.message||'No drive detected.')}</p>`;return}
+   if(!d.mounted){
+    host.innerHTML=`<div class="status-line"><span class="status-dot warn"></span><span>${esc(d.device||'disk')} found, but no filesystem could be mounted.</span></div>`;
+    return}
+   const total=Number(d.size_bytes)||0,used=Number(d.used_bytes)||0;
+   const pct=total?Math.min(100,Math.round(used/total*100)):0;
+   const crumbs=[];const parts=(d.rel_path||'').split('/').filter(Boolean);
+   crumbs.push(`<button class="link-btn usb-crumb" data-rel="">Drive</button>`);
+   parts.forEach((seg,i)=>crumbs.push(`<span class="usb-sep">/</span><button class="link-btn usb-crumb" data-rel="${esc(parts.slice(0,i+1).join('/'))}">${esc(seg)}</button>`));
+   /* radiod decodes Layer III only, so a Play button appears for .mp3 and
+      anything else audio-looking says why rather than failing silently. */
+   const AUDIO=/\.(mp3|aac|m4a|flac|wav|ogg|opus|wma)$/i;
+   const rows=(d.entries||[]).slice().sort((a,b)=>(b.directory-a.directory)||a.name.localeCompare(b.name)).map(e=>{
+    const sz=e.directory?'':bytes(e.size_bytes);
+    const rel=(d.rel_path?d.rel_path+'/':'')+e.name;
+    const nm=e.directory
+      ? `<button class="link-btn usb-open" data-rel="${esc(rel)}">${esc(e.name)}/</button>`
+      : esc(e.name);
+    let act='';
+    if(!e.directory&&/\.mp3$/i.test(e.name))act=`<button class="secondary-btn usb-play" data-rel="${esc(rel)}">Play</button>`;
+    else if(!e.directory&&AUDIO.test(e.name))act=`<span class="muted" title="This image decodes MP3 only">not playable</span>`;
+    return `<tr><td>${nm}</td><td class="num">${sz}</td><td class="usb-act">${act}</td></tr>`}).join('');
+   /* Keep the open/closed state across re-renders: browsing into a folder
+      re-renders, and a panel that snapped shut each time would be unusable. */
+   const wasOpen=host.dataset.open==='1'||!host.dataset.open;
+   host.innerHTML=
+    `<details class="panel setting-panel usb-drive"${wasOpen?' open':''}>`+
+    `<summary><h3>${esc(d.device||'Drive')} · ${bytes(total)}</h3>`+
+    `<span class="integration-toggle" aria-hidden="true">Show details</span></summary>`+
+    `<div class="integration-section-body">`+
+    `<dl class="facts"><dt>Device</dt><dd>${esc(d.device||'')} · ${esc(d.partition||'')} · ${esc(d.filesystem||'')}</dd>`+
+    `<dt>Capacity</dt><dd>${bytes(total)} total · ${bytes(used)} used · ${bytes(d.free_bytes)} free</dd></dl>`+
+    `<div class="usb-bar"><span style="width:${pct}%"></span></div>`+
+    `<p class="muted">Playable format: <strong>MP3</strong>. Other audio files are listed but cannot be decoded on this image yet.</p>`+
+    `<div class="usb-path">${crumbs.join('')}</div>`+
+    (rows?`<table class="usb-list"><thead><tr><th>Name</th><th class="num">Size</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+         :'<p class="muted">This folder is empty.</p>')+
+    `</div></details>`;
+   const det=$('details',host);
+   if(det)det.ontoggle=()=>{host.dataset.open=det.open?'1':'0'};
+   $$('.usb-open,.usb-crumb',host).forEach(b=>b.onclick=()=>usbStorageRender(b.dataset.rel));
+   $$('.usb-play',host).forEach(b=>b.onclick=async()=>{
+    if(state.busy)return;
+    setBusy(true);
+    try{ await api('/storage/usb/play',{method:'POST',body:JSON.stringify({path:b.dataset.rel})});
+         toast('Playing '+b.dataset.rel.split('/').pop()); }
+    catch(err){ toast(err.message,true) }
+    finally{ setBusy(false) }});
+  }
+  if($('#feature-usb-host')){
+   const prev=$('#feature-usb-host').onchange;
+   $('#feature-usb-host').onchange=e=>{prev(e);setTimeout(()=>usbStorageRender(''),1200)};
+   usbStorageRender('');
+  }
   if($('#check-update'))$('#check-update').onclick=()=>post('/system/update/check',{},'Update check completed');
   if($('#install-update'))$('#install-update').onclick=()=>confirm(`Install signed update ${ota.latest_version} to slot ${ota.inactive_slot.toUpperCase()}?`)&&post('/system/update/apply',{},'Update verified and installed');
   if($('#select-update'))$('#select-update').onclick=()=>$('#update-file').click();
@@ -1227,7 +1308,28 @@ async function systemPage(){
   $('#export-diag').onclick=async()=>{try{const bundle=await api('/diagnostics/export',{method:'POST',body:'{}'});state.data.diagnosticBundle=bundle;const blob=new Blob([JSON.stringify(bundle,null,2)+'\n'],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='libreecho-diagnostic-bundle.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Redacted diagnostic bundle downloaded')}catch(e){toast(e.message,true)}};
   $('#copy-diag').onclick=async()=>{try{const bundle=state.data.diagnosticBundle||await api('/diagnostics/export',{method:'POST',body:'{}'});state.data.diagnosticBundle=bundle;await copyTextCompat(bundle.summary||'LibreEcho diagnostic summary unavailable');toast('Health summary copied')}catch(e){toast(e.message,true)}};
 }
-async function logsPage(){const [l,d]=await Promise.all([api('/logs'),api('/diagnostics')]);const clock=l.entries.some(x=>Number(x.timestamp)<1577836800)?'Device clock unset; relative boot time is shown where available':'Device clock available';content.innerHTML=`${panel('Service logs',`<div class="log-toolbar"><input id="log-filter" placeholder="Filter logs" aria-label="Filter logs">${action('Refresh','log-refresh')}</div><div class="log-viewer" id="log-viewer">${l.entries.length?l.entries.map(x=>`<div data-log="${esc(x.message.toLowerCase())}"><time>${logTime(x.timestamp,x.boot_seconds)}</time><span class="level ${x.level}">${x.level}</span><span>${esc(x.message)}</span></div>`).join(''):'<p class="muted">No logs available.</p>'}</div><p class="muted">Source: ${esc(l.source||'web-memory')}; bounded to ${l.capacity} entries. ${clock}. Relative time is from boot; secrets are redacted before logging.</p>`)}<div class="settings-grid diagnostics">${panel('Diagnostic checks',d.checks.map(x=>`<div class="status-line"><span class="status-dot ${x.status==='ok'?'ok':''}"></span><span>${esc(x.name)}</span><strong>${esc(x.status)}</strong></div>`).join(''))}${panel('Mock fault injection',state.data.status?.simulated?`<p class="muted">Use <code>tools/mockctl.sh</code> with <code>--dev-controls</code> to inject deterministic faults.</p>${action('Fail next Wi-Fi scan','fail-wifi','danger-btn')}`:unsupported('Fault injection is only available in mock development builds.'))}</div>`;$('#log-filter').oninput=e=>$$('[data-log]').forEach(x=>x.hidden=!x.dataset.log.includes(e.target.value.toLowerCase()));$('#log-refresh').onclick=render;if($('#fail-wifi'))$('#fail-wifi').onclick=()=>post('/dev/mock',{action:'fail-next',value:'wifi-scan'},'Next Wi-Fi scan will fail')}
+/*
+ * A check is not simply ok or broken. The daemon reports "degraded" when an
+ * adapter is running but unhealthy, "unavailable" when the hardware is absent
+ * from this image, and "development" on the mock backend where the question
+ * does not apply. Only "ok" ever set a class, so the other three rendered
+ * identically in the default red -- which made a mock backend look like a
+ * failing device. Grade them, and repeat the worst grade on the heading so the
+ * panel reads at a glance instead of row by row.
+ */
+const DIAGNOSTIC_GRADES={ok:'ok',development:'idle',degraded:'warn',unavailable:'warn'};
+function diagnosticGrade(status){const g=DIAGNOSTIC_GRADES[status];return g===undefined?'bad':g}
+function diagnosticsPanel(d){
+ const checks=Array.isArray(d&&d.checks)?d.checks:[];
+ const count=g=>checks.filter(x=>diagnosticGrade(x.status)===g).length;
+ const bad=count('bad'),warn=count('warn');
+ const grade=bad?'bad':warn?'warn':checks.length?'ok':'idle';
+ const summary=bad?`${bad} failing`:warn?`${warn} needs attention`:checks.length?'all healthy':'no checks reported';
+ return panel(`<span class="status-dot ${grade}"></span>Diagnostic checks<small class="diag-summary">${esc(summary)}</small>`,
+  checks.map(x=>`<div class="status-line"><span class="status-dot ${diagnosticGrade(x.status)}"></span><span>${esc(x.name)}</span><strong>${esc(x.status)}</strong></div>`).join('')
+  ||'<p class="muted">The device reported no diagnostic checks.</p>');
+}
+async function logsPage(){const [l,d]=await Promise.all([api('/logs'),api('/diagnostics')]);const clock=l.entries.some(x=>Number(x.timestamp)<1577836800)?'Device clock unset; relative boot time is shown where available':'Device clock available';content.innerHTML=`${panel('Service logs',`<div class="log-toolbar"><input id="log-filter" placeholder="Filter logs" aria-label="Filter logs">${action('Refresh','log-refresh')}</div><div class="log-viewer" id="log-viewer">${l.entries.length?l.entries.map(x=>`<div data-log="${esc(x.message.toLowerCase())}"><time>${logTime(x.timestamp,x.boot_seconds)}</time><span class="level ${x.level}">${x.level}</span><span>${esc(x.message)}</span></div>`).join(''):'<p class="muted">No logs available.</p>'}</div><p class="muted">Source: ${esc(l.source||'web-memory')}; bounded to ${l.capacity} entries. ${clock}. Relative time is from boot; secrets are redacted before logging.</p>`)}<div class="settings-grid diagnostics">${diagnosticsPanel(d)}${panel('Mock fault injection',state.data.status?.simulated?`<p class="muted">Use <code>tools/mockctl.sh</code> with <code>--dev-controls</code> to inject deterministic faults.</p>${action('Fail next Wi-Fi scan','fail-wifi','danger-btn')}`:unsupported('Fault injection is only available in mock development builds.'))}</div>`;$('#log-filter').oninput=e=>$$('[data-log]').forEach(x=>x.hidden=!x.dataset.log.includes(e.target.value.toLowerCase()));$('#log-refresh').onclick=render;if($('#fail-wifi'))$('#fail-wifi').onclick=()=>post('/dev/mock',{action:'fail-next',value:'wifi-scan'},'Next Wi-Fi scan will fail')}
 function aboutPage(){content.innerHTML=`<div class="settings-grid">${panel('LibreEcho',`<img class="about-mark" src="/assets/mark.svg" alt="LibreEcho mark"><p>Open source voice-assistant software built for privacy, repairability and local control.</p><dl class="facts"><dt>Web API</dt><dd>v1</dd><dt>Frontend</dt><dd>Dependency-free HTML, CSS and JavaScript</dd><dt>Daemon</dt><dd>Portable C99</dd><dt>Licence</dt><dd>MIT</dd></dl>`)}${panel('Hardware independence',`<p class="muted">The same frontend API works with both the realistic mock backend and the conservative Linux hardware adapter.</p><div class="privacy-callout">Open. Private. Yours.</div>`)}</div>`}
 async function render(){clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations'){installIntegrationsExtras();await integrationsPage()}else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000)}
 function showPage(name,updateRoute=true){let corrected=false;if(!descriptions[name]||!navItems().some(([n])=>n===name)){name='Overview';corrected=true}if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();state.page=name;const path='/'+pageSlug(name);
