@@ -71,7 +71,7 @@ def read_raw_s16(path):
 
 
 def estimate_impulse_latency(source, captured, rate, source_index=None,
-                             response_window=65):
+                             response_window=65, capture_lead_samples=0):
     """Find the marked impulse in the captured software stream.
 
     The marker makes this a bounded stream-alignment measurement, not an
@@ -104,7 +104,7 @@ def estimate_impulse_latency(source, captured, rate, source_index=None,
     half = response_window // 2
     response = captured[max(0, observed_index - half):
                         min(len(captured), observed_index + half + 1)]
-    latency = observed_index - source_index
+    latency = observed_index - source_index - capture_lead_samples
     return {"latency_samples": latency,
             "latency_ms": latency * 1000.0 / rate,
             "source_impulse_index": source_index,
@@ -165,8 +165,13 @@ def main():
         print("    %7.1f Hz  %+6.1f dB  %s%s" % (f, rel, bar, flag))
         out.append({"hz": f, "rel_db": round(rel, 2)})
 
-    impulse = estimate_impulse_latency(src, cap, rate,
-                                       meta.get("impulse_index"))
+    capture_lead_samples = int(round(
+        float(meta.get("capture_lead_ms", 0)) * rate / 1000.0
+    ))
+    impulse = estimate_impulse_latency(
+        src, cap, rate, meta.get("impulse_index"),
+        capture_lead_samples=capture_lead_samples,
+    )
     print("  software stream impulse: %+d samples (%.3f ms)"
           % (impulse["latency_samples"], impulse["latency_ms"]))
     if args.json:

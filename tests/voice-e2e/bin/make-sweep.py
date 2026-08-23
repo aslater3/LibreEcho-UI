@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=0.35)
     ap.add_argument("--amplitude", type=int, default=6000)
     ap.add_argument("--impulse-amplitude", type=int, default=3000)
+    ap.add_argument("--capture-lead-ms", type=int, default=1500)
     args = ap.parse_args()
 
     freqs = [args.low * (args.high / args.low) ** (i / (args.steps - 1))
@@ -56,6 +57,7 @@ def main():
                    "impulse_index": impulse_index,
                    "seconds_per_tone": args.seconds,
                    "freqs": [round(f, 1) for f in freqs],
+                   "capture_lead_ms": args.capture_lead_ms,
                    "evidence_class": "software_capture_chain",
                    "acoustic_path_measured": False,
                    "hardware_acceptance": "not_measured",
