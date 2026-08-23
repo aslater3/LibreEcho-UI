@@ -79,34 +79,53 @@ static int safe_token(char *out, size_t out_size, const char *value)
 
 static int read_key(const char *path, const char *key, char *out, size_t out_size)
 {
-    FILE *file;
-    char line[256];
-    size_t key_len;
+    int fd;
+    struct stat st;
+    char data[4097];
+    ssize_t count;
+    size_t key_len, offset = 0;
     if (!path || !key || !out || !out_size)
         return 0;
     out[0] = '\0';
-    file = fopen(path, "r");
-    if (!file)
+    fd = open(path, O_RDONLY | O_CLOEXEC
+#ifdef O_NOFOLLOW
+              | O_NOFOLLOW
+#endif
+    );
+    if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode)) {
+        if (fd >= 0)
+            close(fd);
         return 0;
-    key_len = strlen(key);
-    while (fgets(line, sizeof(line), file)) {
-        char *value;
-        size_t n;
-        if (strncmp(line, key, key_len) || line[key_len] != '=')
-            continue;
-        value = line + key_len + 1;
-        value[strcspn(value, "\r\n")] = '\0';
-        n = strnlen(value, out_size);
-        if (n >= out_size || !safe_token(out, out_size, value)) {
-            fclose(file);
-            out[0] = '\0';
-            return 0;
-        }
-        (void)n;
-        fclose(file);
-        return 1;
     }
-    fclose(file);
+    count = read(fd, data, sizeof(data) - 1);
+    close(fd);
+    if (count <= 0 || count >= (ssize_t)sizeof(data) - 1)
+        return 0;
+    data[count] = '\0';
+    key_len = strlen(key);
+    while (offset < (size_t)count) {
+        char *line = data + offset;
+        char *end = strchr(line, '\n');
+        char *value;
+        size_t line_len, n;
+        if (!end)
+            end = data + count;
+        line_len = (size_t)(end - line);
+        if (line_len > 0 && line[line_len - 1] == '\r')
+            --line_len;
+        if (line_len > key_len && !strncmp(line, key, key_len) &&
+            line[key_len] == '=') {
+            value = line + key_len + 1;
+            value[line_len - key_len - 1] = '\0';
+            n = strnlen(value, out_size);
+            if (n >= out_size || !safe_token(out, out_size, value)) {
+                out[0] = '\0';
+                return 0;
+            }
+            return 1;
+        }
+        offset = end < data + count ? (size_t)(end - data) + 1 : (size_t)count;
+    }
     return 0;
 }
 
