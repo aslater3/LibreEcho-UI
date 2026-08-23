@@ -35,7 +35,16 @@ extern int setgroups(int,const gid_t*);
 #define LE_UPDATE_TMP "/data/libreecho/update/incoming/manual.tar.tmp"
 #define LE_UPDATE_LOCK "/data/libreecho/update/incoming/upload.lock"
 #define LE_MAX_ASSISTANT_WORKERS 4
-#define LE_MAX_TLS_RELAYS 4
+/*
+ * One relay per in-flight HTTPS connection, so this is the HTTPS equivalent of
+ * LE_MAX_CLIENTS and has to match it. At 4 a browser silently lost assets: it
+ * opens six or more parallel connections for one page, the ones past the
+ * budget were closed without a response, and the page rendered without its
+ * stylesheet. Plain HTTP allowed 16 all along, so HTTPS was arbitrarily worse.
+ * Relays are short-lived and small -- the parent held under 1 MB RSS across
+ * ~280 connections -- so matching the budget costs little.
+ */
+#define LE_MAX_TLS_RELAYS LE_MAX_CLIENTS
 #define LE_TLS_IDLE_TIMEOUT_MS 60000
 struct client{int fd;
 size_t used;
@@ -261,7 +270,12 @@ sigset_t blocked,previous;pid_t pid;int i,slot=-1;
 sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);
 if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;
 for(i=0;i<LE_MAX_TLS_RELAYS;i++)if(tls_relay_pids[i]<=0){slot=i;break;}
-if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
+if(slot<0){
+/* Dropping a connection with no reply looks like a broken asset rather than a
+   busy server, so say it happened. */
+static int warned;
+if(!warned){warned=1;fprintf(stderr,"HTTPS relay budget (%d) exhausted; a connection was dropped\n",LE_MAX_TLS_RELAYS);}
+sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
 pid=fork();
 if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
 if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);tls_relay(cfd,o);_exit(0);}
