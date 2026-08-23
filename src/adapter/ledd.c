@@ -208,6 +208,9 @@ struct daemon_context {
     double meter_expires;
     char meter_owner[32];
     struct pixel rendered_pixels[RING_PIXELS];
+    double night_next_check;
+    int night_last_active;
+    int night_schedule_initialized;
 };
 
 enum pattern_kind { PATTERN_NONE = 0, PATTERN_PULSE, PATTERN_FLASH };
@@ -466,40 +469,87 @@ static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
 }
 
 static void night_cap_pixels(const struct daemon_context *ctx,
-                             struct pixel pixels[RING_PIXELS],
-                             unsigned int source_brightness)
+                             struct pixel pixels[RING_PIXELS])
 {
+    unsigned int cap;
+    unsigned int maximum;
     size_t i;
 
-    if (night_mode_active(&ctx->state) && source_brightness > 0U) {
-        unsigned int cap = (unsigned int)ctx->state.profiles[PROFILE_NIGHT].brightness;
-
-        if (cap > 100U)
-            cap = 100U;
-        if (source_brightness > cap) {
-            for (i = 0; i < RING_PIXELS; i++) {
-                pixels[i].r = (pixels[i].r * cap + source_brightness / 2U) /
-                             source_brightness;
-                pixels[i].g = (pixels[i].g * cap + source_brightness / 2U) /
-                             source_brightness;
-                pixels[i].b = (pixels[i].b * cap + source_brightness / 2U) /
-                             source_brightness;
-            }
+    if (!night_mode_active(&ctx->state))
+        return;
+    cap = (unsigned int)ctx->state.profiles[PROFILE_NIGHT].brightness;
+    if (cap > 100U)
+        cap = 100U;
+    cap = (cap * 255U + 50U) / 100U;
+    for (i = 0; i < RING_PIXELS; i++) {
+        maximum = pixels[i].r;
+        if (pixels[i].g > maximum)
+            maximum = pixels[i].g;
+        if (pixels[i].b > maximum)
+            maximum = pixels[i].b;
+        if (maximum > cap && maximum > 0U) {
+            pixels[i].r = (pixels[i].r * cap + maximum / 2U) / maximum;
+            pixels[i].g = (pixels[i].g * cap + maximum / 2U) / maximum;
+            pixels[i].b = (pixels[i].b * cap + maximum / 2U) / maximum;
         }
     }
 }
 
 static void hardware_apply_pixels(struct daemon_context *ctx,
-                                  const struct pixel pixels[RING_PIXELS],
-                                  unsigned int source_brightness)
+                                  const struct pixel pixels[RING_PIXELS])
 {
     struct pixel capped[RING_PIXELS];
 
     memcpy(capped, pixels, sizeof(capped));
-    night_cap_pixels(ctx, capped, source_brightness);
+    night_cap_pixels(ctx, capped);
     memcpy(ctx->rendered_pixels, capped, sizeof(ctx->rendered_pixels));
     if (hardware_write_pixels(&ctx->hw, capped) != 0)
         le_log_warn( "LED hardware write failed; retaining state in memory");
+}
+
+static void night_schedule_tick(struct daemon_context *ctx, double now)
+{
+    int active = night_mode_active(&ctx->state);
+
+    if (!ctx->night_schedule_initialized) {
+        ctx->night_schedule_initialized = 1;
+        ctx->night_last_active = active;
+        ctx->night_next_check = ctx->state.night_enabled
+                              ? now + NIGHT_POLL_MS / 1000.0 : 0.0;
+        return;
+    }
+    if (!ctx->state.night_enabled)
+        ctx->night_next_check = 0.0;
+    else if (ctx->night_next_check <= 0.0)
+        ctx->night_next_check = now + NIGHT_POLL_MS / 1000.0;
+    if (active != ctx->night_last_active) {
+        ctx->night_last_active = active;
+        if (!ctx->startup_animation_active && !ctx->test_active &&
+            !ctx->pattern_active && !ctx->visualizer_active &&
+            !ctx->meter_active && !ctx->animation_active)
+            hardware_apply(ctx, &ctx->state.current);
+    }
+    if (ctx->night_next_check > 0.0 && now >= ctx->night_next_check)
+        ctx->night_next_check = now + NIGHT_POLL_MS / 1000.0;
+}
+
+static int night_schedule_timeout(const struct daemon_context *ctx,
+                                  double now)
+{
+    double remaining;
+    int timeout;
+
+    if (!ctx->state.night_enabled)
+        return -1;
+    if (!ctx->night_schedule_initialized || ctx->night_next_check <= now)
+        return 0;
+    remaining = ctx->night_next_check - now;
+    timeout = (int)(remaining * 1000.0);
+    if ((double)timeout < remaining * 1000.0)
+        timeout++;
+    if (timeout < 1)
+        timeout = 1;
+    return timeout > NIGHT_POLL_MS ? NIGHT_POLL_MS : timeout;
 }
 
 static void apply_startup_animation(struct daemon_context *ctx)
@@ -511,7 +561,7 @@ static void apply_startup_animation(struct daemon_context *ctx)
         pixels[i] = (struct pixel){0, 64, 0};
     pixels[ctx->startup_animation_frame % RING_PIXELS] =
         (struct pixel){0, 255, 0};
-    hardware_apply_pixels(ctx, pixels, 100U);
+    hardware_apply_pixels(ctx, pixels);
 }
 
 static void stop_startup_animation(struct daemon_context *ctx)
@@ -1681,7 +1731,7 @@ static void apply_visualizer(struct daemon_context *ctx, double now)
         ctx->visualizer_rhythm_pulse = 0;
     ctx->visualizer_impact = ctx->visualizer_impact > 12U
                            ? ctx->visualizer_impact - 12U : 0U;
-    hardware_apply_pixels(ctx, pixels, ctx->visualizer_brightness);
+    hardware_apply_pixels(ctx, pixels);
 }
 
 static void expire_visualizer(struct daemon_context *ctx, double now)
@@ -1736,7 +1786,7 @@ static void apply_meter(struct daemon_context *ctx)
         pixels[i].g = scale_channel(ctx->meter_colour.g, level);
         pixels[i].b = scale_channel(ctx->meter_colour.b, level);
     }
-    hardware_apply_pixels(ctx, pixels, ctx->meter_colour.brightness);
+    hardware_apply_pixels(ctx, pixels);
 }
 
 static void start_meter(struct daemon_context *ctx, unsigned int value,
@@ -2788,8 +2838,10 @@ int main(int argc, char **argv)
         nfds_t nfds = 1;
         int timeout = -1;
         int poll_result;
+        double now = monotonic_seconds();
         size_t j;
 
+        night_schedule_tick(&ctx, now);
         fds[0].fd = ctx.listen_fd;
         fds[0].events = POLLIN;
         fds[0].revents = 0;
@@ -2800,7 +2852,7 @@ int main(int argc, char **argv)
                  ctx.visualizer_active || ctx.meter_active)
             timeout = FRAME_MS;
         else if (ctx.state.night_enabled)
-            timeout = NIGHT_POLL_MS;
+            timeout = night_schedule_timeout(&ctx, now);
 
         for (j = 0; j < MAX_CLIENTS; j++) {
             if (ctx.clients[j].fd >= 0) {
@@ -2827,12 +2879,12 @@ int main(int argc, char **argv)
                 (fds[j].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)))
                 receive_client(&ctx, &ctx.clients[slot]);
         }
+        now = monotonic_seconds();
         if (ctx.startup_animation_active || ctx.test_active ||
             ctx.animation_active || ctx.pattern_active ||
             ctx.visualizer_active || ctx.meter_active)
-            update_animation(&ctx, monotonic_seconds());
-        else if (poll_result == 0 && ctx.state.night_enabled)
-            hardware_apply(&ctx, &ctx.state.current);
+            update_animation(&ctx, now);
+        night_schedule_tick(&ctx, now);
     }
 
     for (i = 0; i < MAX_CLIENTS; i++)
