@@ -11,8 +11,13 @@ assert "function bindHomeLocation(a)" in source
 assert "bindHomeLocation(a);" in source
 for selector in ("#wx-provider", "#wx-location", "#wx-lat", "#wx-lon", "#save-wx"):
     assert selector in source, f"missing Home location binding: {selector}"
-assert "weather_provider:wxId($('#wx-provider').value)" in source
-assert "home_location:$('#wx-location').value.trim()" in source
+assert "weather_provider:provider" in source
+assert "home_location:location" in source
+assert "haveLatitude!==haveLongitude" in source
+assert "lat<-90||lat>90||lon<-180||lon>180" in source
+assert "lat===originalLat&&lon===originalLon" in source
+assert "The place changed but the coordinates did not" in source
+assert "This image cannot clear old coordinates safely" in source
 assert "/js/integrations-ui.js?rev=29" in index, "browser cache revision was not advanced"
 
-print("home location panel contract: ok")
+print("home location panel and validation contract: ok")
