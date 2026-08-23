@@ -12,7 +12,15 @@ function bluetoothPasskey(value) {
 }
 
 function bluetoothPairingCode(value) {
-  return `<div class="pairing-code" role="status" aria-live="polite"><span>Pairing code</span><strong class="pairing-code-value">${esc(bluetoothPasskey(value))}</strong></div>`;
+  return `<div class="pairing-code" aria-hidden="true"><span>Pairing code</span><strong class="pairing-code-value">${esc(bluetoothPasskey(value))}</strong></div>`;
+}
+
+function updateBluetoothLiveRegion(b) {
+  let live=document.getElementById('bt-pairing-live');
+  if(!live){live=document.createElement('div');live.id='bt-pairing-live';live.setAttribute('role','status');live.setAttribute('aria-live','polite');live.setAttribute('aria-atomic','true');live.className='sr-only';document.body.appendChild(live);}
+  const p=b&&b.pending_pairing;
+  const value=b&&b.pairing&&p&&p.address&&((p.method==='confirm'||p.method==='notify')&&p.value!==undefined&&p.value!==null)?`${p.method==='notify'?'Passkey notification':'Pairing confirmation'}: ${bluetoothPasskey(p.value)}`:'';
+  if(live.dataset.value!==value){live.textContent=value;live.dataset.value=value;}
 }
 
 function bluetoothPending(b) {
@@ -66,6 +74,7 @@ async function bluetoothPage() {
   const b=await api('/bluetooth');
   content.innerHTML=bluetoothMarkup(b);
   bindBluetooth(b);
+  updateBluetoothLiveRegion(b);
   state.timer=setTimeout(refreshBluetooth,2000);
 }
 
@@ -74,7 +83,7 @@ async function refreshBluetooth() {
   if (state.btPairingResponding) return;
   try {
     const b=await api('/bluetooth');
-    if (state.page==='Bluetooth' && !state.btPairingResponding) { content.innerHTML=bluetoothMarkup(b); bindBluetooth(b); }
+    if (state.page==='Bluetooth' && !state.btPairingResponding) { content.innerHTML=bluetoothMarkup(b); bindBluetooth(b); updateBluetoothLiveRegion(b); }
   } catch (_) { /* Preserve the last good Bluetooth state during a transient adapter failure. */ }
   finally { if (state.page==='Bluetooth') state.timer=setTimeout(refreshBluetooth,2000); }
 }

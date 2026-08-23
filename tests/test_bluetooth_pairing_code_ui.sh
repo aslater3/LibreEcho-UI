@@ -14,7 +14,9 @@ css = Path('web/css/app.css').read_text()
 assert 'function bluetoothPairingCode(value)' in ui
 assert 'class="pairing-code"' in ui
 assert 'class="pairing-code-value"' in ui
-assert 'role="status"' in ui
+assert "live.setAttribute('role','status')" in ui
+assert 'aria-hidden="true"' in ui
+assert 'updateBluetoothLiveRegion' in ui
 assert "(p.method==='confirm'||p.method==='notify')" in ui
 assert 'bluetoothPairingCode(p.value)' in ui
 
