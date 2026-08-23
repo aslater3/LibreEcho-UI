@@ -36,7 +36,12 @@ struct le_backend*b=0;
 struct api_context api;
 struct http_options o;
 char listen[96]="127.0.0.1:8080",token[192]={0},csrf[65],*colon;
-char tls_dir[320]="/data/libreecho/config/tls";
+/* Certificates live as plain files directly in the config directory, never in
+   a subdirectory of it. The /data contract tolerates unknown *files* under
+   libreecho/config but an unknown *directory* is fatal, and a failed contract
+   check halts every service -- a cert directory here took wifi and the web UI
+   down on the boot after HTTPS was first enabled. */
+char tls_dir[320]="/data/libreecho/config";
 le_log_init("libreecho-web",argc,argv);
 memset(&o,0,sizeof(o));
 strcpy(o.web_root,"./web");
@@ -84,9 +89,9 @@ if(api.integrations&16u){int airplay_rc=LE_IO,airplay_try;for(airplay_try=0;airp
 if(!o.tls_port&&api.feature_https)o.tls_port=8443;
 if(o.tls_port>0){
 if(o.tls_port<1||o.tls_port>65535||o.tls_port==o.port){fprintf(stderr,"Invalid --tls-port\n");le_backend_destroy(b);return 2;}
-snprintf(o.tls_cert,sizeof(o.tls_cert),"%s/server.crt",tls_dir);
-snprintf(o.tls_key,sizeof(o.tls_key),"%s/server.key",tls_dir);
-mkdir_p_mode(tls_dir,0700);
+snprintf(o.tls_cert,sizeof(o.tls_cert),"%s/https-cert.pem",tls_dir);
+snprintf(o.tls_key,sizeof(o.tls_key),"%s/https-key.pem",tls_dir);
+mkdir_p_mode(tls_dir,0700);   /* the config dir itself, which is expected to exist */
 if(le_tls_ensure_self_signed(o.tls_cert,o.tls_key,"libreecho")!=LE_OK){
 /* Never fatal: HTTP stays up so a certificate problem cannot lock out the UI */
 fprintf(stderr,"HTTPS disabled: could not create a certificate in %s\n",tls_dir);
@@ -98,7 +103,7 @@ strncpy(api.https_cert,o.tls_cert,sizeof(api.https_cert)-1);
 if(o.tls_port>0&&o.run_user[0]){
 /* http_server_run drops privileges before the relay child reads these */
 struct passwd*tp=getpwnam(o.run_user);
-if(tp&&(chown(tls_dir,tp->pw_uid,tp->pw_gid)||chown(o.tls_cert,tp->pw_uid,tp->pw_gid)||chown(o.tls_key,tp->pw_uid,tp->pw_gid)))
+if(tp&&(chown(o.tls_cert,tp->pw_uid,tp->pw_gid)||chown(o.tls_key,tp->pw_uid,tp->pw_gid)))
 fprintf(stderr,"Warning: could not give %s ownership of the TLS key\n",o.run_user);
 }}
 signal(SIGINT,stop);
