@@ -17,6 +17,22 @@ int16_t le_voice_unpack_s24_3le(const uint8_t sample[3])
 
     if (value & 0x00800000)
         value -= 0x01000000;
+    /*
+     * The capture is a 24-bit word carrying 16 valid bits, and the codec
+     * left-justifies them, so the sample is the top 16 bits and not the
+     * low ones.  Taking the 24-bit integer directly made every sample 256
+     * times too large: the clamp below then pinned anything past a 1/256
+     * of full scale to the rails, which is why the stream clipped at every
+     * analogue gain including a PGA of 0, and why the noise floor measured
+     * around 2400 RMS instead of the 12-17 this array actually produces.
+     *
+     * Scaling by 8 bits is right under either reading of the format -- if
+     * the word were genuinely 24-bit audio it would still need this shift
+     * to become a 16-bit sample.  The only case the old code suited is a
+     * right-justified 16-bit value, which would never have exceeded the
+     * clamp at all.
+     */
+    value >>= 8;
     if (value > INT16_MAX)
         return INT16_MAX;
     if (value < INT16_MIN)
@@ -245,7 +261,7 @@ int le_voice_vad_set_floor_rms(
 {
     uint64_t minimum_energy;
 
-    if (!vad || floor_rms < 1U || floor_rms > 1024U)
+    if (!vad || floor_rms < 1U || floor_rms > LE_VOICE_VAD_MAX_FLOOR_RMS)
         return -1;
     minimum_energy = (uint64_t)floor_rms * floor_rms;
     vad->minimum_energy = minimum_energy;

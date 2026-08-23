@@ -41,7 +41,18 @@
 #endif
 
 #define MAX_CLIENTS 4
-#define STATE_PATH "/etc/libreecho/led-state.json"
+/*
+ * The ring colour, brightness and the four state themes are persisted here.
+ *
+ * This used to be /etc/libreecho/led-state.json, which lives in the ramdisk
+ * and is recreated from the boot image on every boot, so every reboot -- and
+ * certainly every OTA -- silently reset the settings to their defaults.  A
+ * brightness saved minutes earlier came back at 100%.  /data is the volume
+ * that survives, and is where the web and assistant configuration already
+ * live.
+ */
+#define STATE_PATH "/data/libreecho/config/led-state.json"
+#define LEGACY_STATE_PATH "/etc/libreecho/led-state.json"
 #define SYSFS_LED_DIR "/sys/class/leds"
 #define SYSFS_I2C_DIR "/sys/bus/i2c/devices"
 #define MAX_PATH 512
@@ -56,6 +67,7 @@
 #define VISUALIZER_TIMEOUT_SECONDS 0.42
 #define STARTUP_READY_PATH "/run/libreecho/startup-ready"
 #define STARTUP_FRAME_MS 88
+#define NIGHT_POLL_MS 60000
 
 struct colour {
     unsigned int r;
@@ -70,22 +82,32 @@ struct pixel {
     unsigned int b;
 };
 
-struct led_state {
-    struct colour current;
-    struct colour boot;
-    struct colour profiles[4];
-};
-
 enum profile_id {
     PROFILE_LISTENING = 0,
     PROFILE_THINKING,
     PROFILE_ERROR,
     PROFILE_DND,
+    /* Night is a theme like the others -- colour and brightness, edited the
+       same way -- rather than separate machinery.  It is not selected as an
+       animation; it caps what every other state may draw while active. */
+    PROFILE_NIGHT,
     PROFILE_COUNT
 };
 
+struct led_state {
+    struct colour current;
+    struct colour boot;
+    struct colour profiles[PROFILE_COUNT];
+    /* Night mode: a window in local time during which the ring is capped to
+       the night theme.  Minutes since midnight so a window can cross it. */
+    int night_enabled;
+    int night_start_minute;
+    int night_end_minute;
+};
+
+
 static const char *const profile_names[PROFILE_COUNT] = {
-    "listening", "thinking", "error", "dnd"
+    "listening", "thinking", "error", "dnd", "night"
 };
 
 enum hardware_kind {
@@ -186,6 +208,9 @@ struct daemon_context {
     double meter_expires;
     char meter_owner[32];
     struct pixel rendered_pixels[RING_PIXELS];
+    double night_next_check;
+    int night_last_active;
+    int night_schedule_initialized;
 };
 
 enum pattern_kind { PATTERN_NONE = 0, PATTERN_PULSE, PATTERN_FLASH };
@@ -381,10 +406,59 @@ static int hardware_write_pixels(const struct hardware *hw,
                               (b + RING_PIXELS / 2) / RING_PIXELS, 100);
 }
 
+/*
+ * Night mode caps what the ring may draw during a window of local time.
+ *
+ * It is a cap rather than a replacement so the device stays informative:
+ * listening, thinking and error still show their own colours, just dimmed
+ * to the night theme's brightness.  Replacing them outright would make a
+ * bedside speaker silent about what it is doing, which is worse than a
+ * faint glow.
+ */
+static int night_mode_active(const struct led_state *state)
+{
+    time_t now;
+    struct tm tm;
+    int minute;
+
+    if (!state->night_enabled)
+        return 0;
+    now = time(NULL);
+    if (!localtime_r(&now, &tm))
+        return 0;
+    minute = tm.tm_hour * 60 + tm.tm_min;
+    if (state->night_start_minute == state->night_end_minute)
+        return 0;
+    if (state->night_start_minute < state->night_end_minute)
+        return minute >= state->night_start_minute &&
+               minute < state->night_end_minute;
+    /* The usual case: the window crosses midnight. */
+    return minute >= state->night_start_minute ||
+           minute < state->night_end_minute;
+}
+
+static struct colour night_capped(const struct daemon_context *ctx,
+                                  struct colour c)
+{
+    unsigned int cap;
+
+    if (!night_mode_active(&ctx->state))
+        return c;
+    cap = (unsigned int)ctx->state.profiles[PROFILE_NIGHT].brightness;
+    if ((unsigned int)c.brightness > cap)
+        c.brightness = (int)cap;
+    return c;
+}
+
 static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
 {
+    /* One choke point: every path that lights the ring ends up here, so the
+       night cap applies to the idle colour, the state themes, patterns and
+       the meter alike without each having to remember it. */
+    struct colour capped = night_capped(ctx, *c);
     size_t i;
 
+    c = &capped;
     for (i = 0; i < RING_PIXELS; i++) {
         ctx->rendered_pixels[i].r = scale_channel(c->r, c->brightness);
         ctx->rendered_pixels[i].g = scale_channel(c->g, c->brightness);
@@ -394,12 +468,88 @@ static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
         le_log_warn( "LED hardware write failed; retaining state in memory");
 }
 
+static void night_cap_pixels(const struct daemon_context *ctx,
+                             struct pixel pixels[RING_PIXELS])
+{
+    unsigned int cap;
+    unsigned int maximum;
+    size_t i;
+
+    if (!night_mode_active(&ctx->state))
+        return;
+    cap = (unsigned int)ctx->state.profiles[PROFILE_NIGHT].brightness;
+    if (cap > 100U)
+        cap = 100U;
+    cap = (cap * 255U + 50U) / 100U;
+    for (i = 0; i < RING_PIXELS; i++) {
+        maximum = pixels[i].r;
+        if (pixels[i].g > maximum)
+            maximum = pixels[i].g;
+        if (pixels[i].b > maximum)
+            maximum = pixels[i].b;
+        if (maximum > cap && maximum > 0U) {
+            pixels[i].r = (pixels[i].r * cap + maximum / 2U) / maximum;
+            pixels[i].g = (pixels[i].g * cap + maximum / 2U) / maximum;
+            pixels[i].b = (pixels[i].b * cap + maximum / 2U) / maximum;
+        }
+    }
+}
+
 static void hardware_apply_pixels(struct daemon_context *ctx,
                                   const struct pixel pixels[RING_PIXELS])
 {
-    memcpy(ctx->rendered_pixels, pixels, sizeof(ctx->rendered_pixels));
-    if (hardware_write_pixels(&ctx->hw, pixels) != 0)
+    struct pixel capped[RING_PIXELS];
+
+    memcpy(capped, pixels, sizeof(capped));
+    night_cap_pixels(ctx, capped);
+    memcpy(ctx->rendered_pixels, capped, sizeof(ctx->rendered_pixels));
+    if (hardware_write_pixels(&ctx->hw, capped) != 0)
         le_log_warn( "LED hardware write failed; retaining state in memory");
+}
+
+static void night_schedule_tick(struct daemon_context *ctx, double now)
+{
+    int active = night_mode_active(&ctx->state);
+
+    if (!ctx->night_schedule_initialized) {
+        ctx->night_schedule_initialized = 1;
+        ctx->night_last_active = active;
+        ctx->night_next_check = ctx->state.night_enabled
+                              ? now + NIGHT_POLL_MS / 1000.0 : 0.0;
+        return;
+    }
+    if (!ctx->state.night_enabled)
+        ctx->night_next_check = 0.0;
+    else if (ctx->night_next_check <= 0.0)
+        ctx->night_next_check = now + NIGHT_POLL_MS / 1000.0;
+    if (active != ctx->night_last_active) {
+        ctx->night_last_active = active;
+        if (!ctx->startup_animation_active && !ctx->test_active &&
+            !ctx->pattern_active && !ctx->visualizer_active &&
+            !ctx->meter_active && !ctx->animation_active)
+            hardware_apply(ctx, &ctx->state.current);
+    }
+    if (ctx->night_next_check > 0.0 && now >= ctx->night_next_check)
+        ctx->night_next_check = now + NIGHT_POLL_MS / 1000.0;
+}
+
+static int night_schedule_timeout(const struct daemon_context *ctx,
+                                  double now)
+{
+    double remaining;
+    int timeout;
+
+    if (!ctx->state.night_enabled)
+        return -1;
+    if (!ctx->night_schedule_initialized || ctx->night_next_check <= now)
+        return 0;
+    remaining = ctx->night_next_check - now;
+    timeout = (int)(remaining * 1000.0);
+    if ((double)timeout < remaining * 1000.0)
+        timeout++;
+    if (timeout < 1)
+        timeout = 1;
+    return timeout > NIGHT_POLL_MS ? NIGHT_POLL_MS : timeout;
 }
 
 static void apply_startup_animation(struct daemon_context *ctx)
@@ -980,6 +1130,12 @@ static void default_state(struct led_state *state)
     state->profiles[PROFILE_THINKING] = (struct colour){168, 115, 239, 100};
     state->profiles[PROFILE_ERROR] = (struct colour){239, 80, 80, 100};
     state->profiles[PROFILE_DND] = (struct colour){190, 35, 35, 100};
+    /* Deep red at low brightness: red preserves dark adaptation, and 12%
+       is legible in a dark room without lighting it. */
+    state->profiles[PROFILE_NIGHT] = (struct colour){255, 40, 0, 12};
+    state->night_enabled = 0;
+    state->night_start_minute = 22 * 60;
+    state->night_end_minute = 7 * 60;
 }
 
 static void read_colour(struct json_span object, struct colour *colour,
@@ -1010,6 +1166,13 @@ static void load_state(struct led_state *state)
     size_t i;
 
     fd = open(STATE_PATH, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        /* Carry a device forward from the old ramdisk location once; it is
+           read-only here and the next save writes to the persistent path. */
+        fd = open(LEGACY_STATE_PATH, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0)
+            le_log_info("ledd: loading LED state from the legacy path");
+    }
     if (fd < 0)
         return;
     n = read(fd, text, sizeof(text) - 1);
@@ -1031,6 +1194,18 @@ static void load_state(struct led_state *state)
         json_span_is_object(object)) {
         read_colour(object, &state->current, 1);
     }
+    if (json_object_find(root, "night", &object) == 1 &&
+        json_span_is_object(object)) {
+        struct request r = { .args = object, .have_args = 1 };
+        unsigned int v;
+
+        if (get_arg_unsigned(&r, "enabled", &v, 1) == 0)
+            state->night_enabled = (int)v;
+        if (get_arg_unsigned(&r, "start_minute", &v, 1439) == 0)
+            state->night_start_minute = (int)v;
+        if (get_arg_unsigned(&r, "end_minute", &v, 1439) == 0)
+            state->night_end_minute = (int)v;
+    }
     if (json_object_find(root, "profiles", &object) == 1 &&
         json_span_is_object(object)) {
         for (i = 0; i < PROFILE_COUNT; i++) {
@@ -1045,6 +1220,11 @@ static void load_state(struct led_state *state)
 
 static int persist_state(const struct led_state *state)
 {
+    /* The persistent config directory exists on a provisioned device, but
+       create it rather than losing the first save if it does not. */
+    (void)mkdir("/data/libreecho", 0755);
+    (void)mkdir("/data/libreecho/config", 0755);
+
     char text[4096];
     char temp_path[MAX_PATH];
     int n, fd;
@@ -1053,10 +1233,12 @@ static int persist_state(const struct led_state *state)
     n = snprintf(text, sizeof(text),
         "{\"current\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
+        "\"night\":{\"enabled\":%d,\"start_minute\":%d,\"end_minute\":%d},"
         "\"profiles\":{",
         state->current.r, state->current.g, state->current.b,
         state->current.brightness, state->boot.r, state->boot.g, state->boot.b,
-        state->boot.brightness);
+        state->boot.brightness, state->night_enabled,
+        state->night_start_minute, state->night_end_minute);
     if (n < 0 || (size_t)n >= sizeof(text))
         return -1;
     for (i = 0; i < PROFILE_COUNT; i++) {
@@ -1075,9 +1257,14 @@ static int persist_state(const struct led_state *state)
     text[n++] = '}';
     text[n] = '\0';
 
-    (void)mkdir("/etc/libreecho", 0755);
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp.%ld", STATE_PATH,
-             (long)getpid());
+    /*
+     * A fixed temporary name, not one suffixed with the pid.  The data
+     * contract that guards /data matches file names exactly, so a uniquely
+     * named leftover from an interrupted save would be an unknown file and
+     * would block every service at the next boot.  There is a single writer
+     * here, so a constant name is safe and always recognisable.
+     */
+    snprintf(temp_path, sizeof(temp_path), "%s.tmp", STATE_PATH);
     fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) {
         le_log_warn( "cannot persist LED state at %s: %s",
@@ -1997,6 +2184,8 @@ static int status_json(const struct daemon_context *ctx, char *out,
         "\"visualizer_owner\":\"%s\","
         "\"visualizer_mood\":\"%s\","
         "\"meter_active\":%s,\"meter_value\":%u,\"meter_owner\":\"%s\","
+        "\"night\":{\"enabled\":%s,\"active\":%s,"
+        "\"start_minute\":%d,\"end_minute\":%d},"
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"profiles\":{",
         ctx->state.current.r, ctx->state.current.g, ctx->state.current.b,
@@ -2015,6 +2204,9 @@ static int status_json(const struct daemon_context *ctx, char *out,
             ? visualizer_mood_names[ctx->visualizer_mood] : "idle",
         ctx->meter_active ? "true" : "false", ctx->meter_value,
         ctx->meter_owner,
+        ctx->state.night_enabled ? "true" : "false",
+        night_mode_active(&ctx->state) ? "true" : "false",
+        ctx->state.night_start_minute, ctx->state.night_end_minute,
         ctx->state.boot.r, ctx->state.boot.g,
         ctx->state.boot.b, ctx->state.boot.brightness);
     if (n < 0 || (size_t)n >= out_size)
@@ -2197,6 +2389,26 @@ static int handle_request(struct daemon_context *ctx, int fd,
             return send_response(fd, request.id, 0, NULL,
                                  "pattern is reserved until per-pixel LED hardware is available");
         return send_response(fd, request.id, 0, NULL, "unknown LED pattern");
+    }
+
+    if (strcmp(request.command, "set_night") == 0) {
+        unsigned int enabled, start, end;
+
+        if (!request.have_args ||
+            get_arg_unsigned(&request, "enabled", &enabled, 1) != 0 ||
+            get_arg_unsigned(&request, "start_minute", &start, 1439) != 0 ||
+            get_arg_unsigned(&request, "end_minute", &end, 1439) != 0)
+            return send_response(
+                fd, request.id, 0, NULL,
+                "set_night requires enabled, start_minute and end_minute");
+        ctx->state.night_enabled = (int)enabled;
+        ctx->state.night_start_minute = (int)start;
+        ctx->state.night_end_minute = (int)end;
+        persist_state(&ctx->state);
+        /* Re-apply immediately so turning night mode on is visible now
+           rather than at the next state change. */
+        apply_base_layer(ctx, now);
+        return send_response(fd, request.id, 1, "{\"night\":true}", NULL);
     }
 
     if (strcmp(request.command, "meter") == 0) {
@@ -2577,7 +2789,20 @@ int main(int argc, char **argv)
 
     default_state(&ctx.state);
     load_state(&ctx.state);
-    ctx.state.current = ctx.state.boot;
+    /*
+     * Do not overwrite the restored ring colour with the boot profile.
+     *
+     * The two mean different things: "boot" is what shows while the device
+     * starts, "current" is the resting state the owner chose.  Assigning
+     * boot over current discarded the setting that had just been loaded, so
+     * a ring deliberately turned down to 0% came back at the boot profile's
+     * brightness after every restart -- the saved value was read from disk
+     * and thrown away on the next line.
+     *
+     * The startup animation below still uses the boot profile for the boot
+     * display; stop_startup_animation() then applies "current", which now
+     * really is the owner's setting.
+     */
     hardware_detect(&ctx.hw, force_stub);
     if (hardware_claim(&ctx.hw) != 0)
         return EXIT_FAILURE;
@@ -2612,8 +2837,11 @@ int main(int argc, char **argv)
         int slots[1 + MAX_CLIENTS];
         nfds_t nfds = 1;
         int timeout = -1;
+        int poll_result;
+        double now = monotonic_seconds();
         size_t j;
 
+        night_schedule_tick(&ctx, now);
         fds[0].fd = ctx.listen_fd;
         fds[0].events = POLLIN;
         fds[0].revents = 0;
@@ -2623,6 +2851,8 @@ int main(int argc, char **argv)
         else if (ctx.test_active || ctx.animation_active || ctx.pattern_active ||
                  ctx.visualizer_active || ctx.meter_active)
             timeout = FRAME_MS;
+        else if (ctx.state.night_enabled)
+            timeout = night_schedule_timeout(&ctx, now);
 
         for (j = 0; j < MAX_CLIENTS; j++) {
             if (ctx.clients[j].fd >= 0) {
@@ -2634,7 +2864,8 @@ int main(int argc, char **argv)
             }
         }
 
-        if (poll(fds, nfds, timeout) < 0) {
+        poll_result = poll(fds, nfds, timeout);
+        if (poll_result < 0) {
             if (errno == EINTR)
                 continue;
             le_log_error( "poll failed: %s", strerror(errno));
@@ -2648,10 +2879,12 @@ int main(int argc, char **argv)
                 (fds[j].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)))
                 receive_client(&ctx, &ctx.clients[slot]);
         }
+        now = monotonic_seconds();
         if (ctx.startup_animation_active || ctx.test_active ||
             ctx.animation_active || ctx.pattern_active ||
             ctx.visualizer_active || ctx.meter_active)
-            update_animation(&ctx, monotonic_seconds());
+            update_animation(&ctx, now);
+        night_schedule_tick(&ctx, now);
     }
 
     for (i = 0; i < MAX_CLIENTS; i++)
