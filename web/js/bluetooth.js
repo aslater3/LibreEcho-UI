@@ -11,13 +11,19 @@ function bluetoothPasskey(value) {
   return Number.isInteger(numeric) && numeric >= 0 && numeric <= 999999 ? String(numeric).padStart(6,'0') : String(value ?? '');
 }
 
+function bluetoothPairingCode(value) {
+  return `<div class="pairing-code" role="status" aria-live="polite"><span>Pairing code</span><strong class="pairing-code-value">${esc(bluetoothPasskey(value))}</strong></div>`;
+}
+
 function bluetoothPending(b) {
   const p=b.pending_pairing;
   if (!b.pairing || !p || !p.address) return '<p class="muted">No pairing request is waiting for a response.</p>';
-  if (p.method==='notify') return `<div class="privacy-callout">Passkey ${esc(bluetoothPasskey(p.value))} displayed by the remote device. Waiting for completion.</div>`;
+  const hasPairingCode=(p.method==='confirm'||p.method==='notify') && p.value !== undefined && p.value !== null;
+  const pairingCode=hasPairingCode ? bluetoothPairingCode(p.value) : '';
+  if (p.method==='notify') return `<div class="pairing-request"><div class="pairing-request-heading"><strong>Passkey notification</strong><small>${esc(p.address)}</small></div>${pairingCode}<p class="muted">Displayed by the remote device. Waiting for completion.</p></div>`;
   const buttons=p.method==='confirm' ? `${action('Confirm pairing','bt-confirm','primary-btn')}${action('Reject','bt-reject','danger-btn')}` : p.method==='passkey' ? `${field('Passkey','', 'bt-pairing-value','number','min="0" max="999999" inputmode="numeric"')}${action('Send passkey','bt-send-passkey','primary-btn')}${action('Reject','bt-reject','danger-btn')}` : p.method==='pin' ? `${field('PIN','', 'bt-pairing-pin','password','maxlength="16" autocomplete="off"')}${action('Send PIN','bt-send-pin','primary-btn')}${action('Reject','bt-reject','danger-btn')}` : `${action('Reject','bt-reject','danger-btn')}`;
-  const comparisonValue=p.method==='confirm' && p.value !== undefined && p.value !== null ? ` · ${bluetoothPasskey(p.value)}` : '';
-  return `<div class="status-line"><span class="status-dot ok"></span><div><strong>${esc(p.method==='confirm'?'Confirm pairing':p.method==='passkey'?'Enter passkey':p.method==='pin'?'Enter PIN':'Pairing request')}</strong><small>${esc(p.address)}${comparisonValue}</small></div></div><div class="button-row">${buttons}</div>`;
+  const title=p.method==='confirm'?'Confirm pairing':p.method==='passkey'?'Enter passkey':p.method==='pin'?'Enter PIN':'Pairing request';
+  return `<div class="pairing-request"><div class="pairing-request-heading"><strong>${esc(title)}</strong><small>${esc(p.address)}</small></div>${pairingCode}</div><div class="button-row">${buttons}</div>`;
 }
 
 function bluetoothMarkup(b) {
