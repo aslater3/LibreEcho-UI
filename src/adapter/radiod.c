@@ -35,6 +35,7 @@
 
 #include "adapter.h"
 #include "../log.h"
+#include "../tls.h"
 #include "radio_resample.h"
 
 #define MINIMP3_ONLY_MP3
@@ -105,14 +106,23 @@ static int write_all(int fd, const void *data, size_t length)
  */
 static int split_url(const char *url, char *host, size_t host_size,
                      char *port, size_t port_size,
-                     char *path, size_t path_size)
+                     char *path, size_t path_size, int *is_https)
 {
     const char *rest, *colon, *slash;
     size_t host_len;
+    int secure = 0;
 
-    if (!url || strncmp(url, "http://", 7))
+    if (!url)
         return -1;
-    rest = url + 7;
+    if (!strncmp(url, "https://", 8)) {
+        rest = url + 8;
+        secure = 1;
+    } else if (!strncmp(url, "http://", 7)) {
+        rest = url + 7;
+        secure = 0;
+    } else {
+        return -1;
+    }
     slash = strchr(rest, '/');
     colon = memchr(rest, ':', slash ? (size_t)(slash - rest) : strlen(rest));
     host_len = colon ? (size_t)(colon - rest)
@@ -128,11 +138,13 @@ static int split_url(const char *url, char *host, size_t host_size,
         memcpy(port, colon + 1, n);
         port[n] = '\0';
     } else {
-        snprintf(port, port_size, "80");
+        snprintf(port, port_size, "%s", secure ? "443" : "80");
     }
     if (snprintf(path, path_size, "%s", slash ? slash : "/")
             >= (int)path_size)
         return -1;
+    if (is_https)
+        *is_https = secure;
     return 0;
 }
 
@@ -270,6 +282,7 @@ struct icy_stream {
      */
     long content_length;            /* 0 when the server declares none */
     long body_read;
+    struct le_tls *tls;             /* NULL for plain http */
 };
 
 static struct icy_stream stream;
@@ -315,7 +328,8 @@ static int header_value(const char *headers, const char *name,
  * passes every byte straight through, exactly as before.
  */
 static int icy_open(struct icy_stream *st, int fd, const char *host,
-                    const char *path, char *station, size_t station_size)
+                    const char *path, char *station, size_t station_size,
+                    int secure)
 {
     char request[HOST_MAX + PATH_MAX_LEN + 128];
     char headers[HEADER_MAX], value[64], name[TITLE_MAX * 2];
@@ -326,6 +340,11 @@ static int icy_open(struct icy_stream *st, int fd, const char *host,
     memset(st, 0, sizeof(*st));
     st->fd = fd;
     st->meta_need = -1;
+    if (secure) {
+        st->tls = le_tls_client_open(fd, host);
+        if (!st->tls)
+            return -1;
+    }
     station[0] = '\0';
     n = snprintf(request, sizeof(request),
                  "GET %s HTTP/1.0\r\nHost: %s\r\n"
@@ -333,7 +352,8 @@ static int icy_open(struct icy_stream *st, int fd, const char *host,
                  "Connection: close\r\n\r\n", path, host);
     if (n < 0 || (size_t)n >= sizeof(request))
         return -1;
-    if (write_all(fd, request, (size_t)n) < 0)
+    if (st->tls ? le_tls_write(st->tls, request, (size_t)n) != n
+                : write_all(fd, request, (size_t)n) < 0)
         return -1;
 
     for (;;) {
@@ -342,7 +362,8 @@ static int icy_open(struct icy_stream *st, int fd, const char *host,
 
         if (used + NET_CHUNK >= sizeof(headers))
             return -1;                       /* headers absurdly large */
-        got = read(fd, headers + used, NET_CHUNK);
+        got = st->tls ? le_tls_read(st->tls, headers + used, NET_CHUNK)
+                      : read(fd, headers + used, NET_CHUNK);
         if (got < 0 && errno == EINTR)
             continue;
         if (got <= 0)
@@ -428,7 +449,8 @@ static int icy_read(struct icy_stream *st, unsigned char *dst, size_t want)
 
             if (produced)
                 break;                       /* never block for a full buffer */
-            got = read(st->fd, st->raw, sizeof(st->raw));
+            got = st->tls ? le_tls_read(st->tls, st->raw, sizeof(st->raw))
+                          : read(st->fd, st->raw, sizeof(st->raw));
             if (got < 0 && errno == EINTR)
                 continue;
             if (got <= 0)
@@ -562,6 +584,7 @@ static int play_stream(const char *url, const char *bus_path, long *played,
             return -1;
         memset(&stream, 0, sizeof(stream));
         stream.fd = net;
+        stream.tls = NULL;
         stream.meta_need = -1;
         /* A file has a known length, so it finishes rather than dropping. */
         stream.content_length = (long)lseek(net, 0, SEEK_END);
@@ -572,14 +595,20 @@ static int play_stream(const char *url, const char *bus_path, long *played,
         stream.body_read = 0;
         publish_metadata('N', url);
     } else {
+        int secure = 0;
+
         if (split_url(url, host, sizeof(host), port, sizeof(port),
-                      path, sizeof(path)) < 0)
+                      path, sizeof(path), &secure) < 0)
             return -1;
         net = connect_stream(host, port);
         if (net < 0)
             return -1;
-        if (icy_open(&stream, net, host, path, station, sizeof(station)) < 0)
+        if (icy_open(&stream, net, host, path, station, sizeof(station),
+                     secure) < 0)
             goto done;
+        if (secure)
+            le_log_info("radiod: %s over TLS (peer not verified: no CA store "
+                        "on this image)", host);
         if (station[0])
             publish_metadata('N', station);
     }
@@ -623,6 +652,10 @@ static int play_stream(const char *url, const char *bus_path, long *played,
         *complete = 1;
     rc = 0;
 done:
+    if (stream.tls) {
+        le_tls_close(stream.tls);
+        stream.tls = NULL;
+    }
     if (bus >= 0)
         close(bus);
     if (net >= 0)
@@ -815,13 +848,10 @@ static int handle(char *message, char *response, size_t response_size,
                               url, sizeof(url)) < 0)
             return le_adapter_respond_err(response, response_size, id,
                                           "url is required");
-        if (!strncmp(url, "https://", 8))
+        if (url[0] != '/' && strncmp(url, "http://", 7) &&
+            strncmp(url, "https://", 8))
             return le_adapter_respond_err(response, response_size, id,
-                "https streams need a TLS library that is not on this image; "
-                "use an http:// URL for this station");
-        if (url[0] != '/' && strncmp(url, "http://", 7))
-            return le_adapter_respond_err(response, response_size, id,
-                                          "url must be http://");
+                                          "url must be http:// or https://");
         if (start_player(url, bus_path) < 0)
             return le_adapter_respond_err(response, response_size, id,
                                           "playback could not start");

@@ -24,7 +24,7 @@ MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/adapter_se
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
 BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
-RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/adapter_server.c src/log.c
+RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/adapter_server.c src/log.c src/tls.c
 BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
@@ -42,7 +42,7 @@ WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
 	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
-SOURCES = src/main.c src/http_server.c src/api.c src/diagnostic_export.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+SOURCES = src/main.c src/http_server.c src/tls.c src/api.c src/diagnostic_export.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -66,8 +66,9 @@ GC_LDFLAGS ?= $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl
 all: CPPFLAGS += -DLE_DEV_CONTROLS=1
 all: $(TARGET) $(LOGD_TARGET) adapters
 
+# WEB_TLS_LIBS, like RADIOD_TLS_LIBS, must follow the objects for a static link.
 $(TARGET): $(OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(OBJECTS) $(LDFLAGS) -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(OBJECTS) $(LDFLAGS) $(WEB_TLS_LIBS) -o $@
 
 $(LOGD_TARGET): $(LOGD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LOGD_OBJECTS) $(LDFLAGS) -o $@
@@ -93,8 +94,10 @@ $(BUILD)/libreecho-buttond: $(BUTTOND_OBJECTS)
 $(BUILD)/libreecho-capture-mux: $(CAPTURE_MUX_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(CAPTURE_MUX_OBJECTS) $(LDFLAGS) -o $@
 
+# RADIOD_TLS_LIBS is empty unless a TLS build supplies it; the libraries must
+# follow the objects so a static link resolves in one pass.
 $(BUILD)/libreecho-radiod: $(RADIOD_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(RADIOD_OBJECTS) $(LDFLAGS) -lm -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(RADIOD_OBJECTS) $(LDFLAGS) -lm $(RADIOD_TLS_LIBS) -o $@
 
 $(BUILD)/libreecho-btd: $(BTD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(BTD_OBJECTS) $(LDFLAGS) -o $@
