@@ -56,6 +56,9 @@ struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabl
 struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, rssi_valid, paired, connected; };
 struct le_bluetooth_pairing { char address[18], method[24]; int type; unsigned int value; };
 struct le_bluetooth_state {
+    /* address is the adapter's current one, factory what idme records for the
+       board; they differ when the controller was never given the board's. */
+    char address[24], address_factory[24];
     char state[32], transport[32], hci[32], local_name[LE_TEXT], last_error[96];
     char last_disconnect_reason[48], last_connect_failed_status[48];
     char profile_state[24], profile_error[96];
