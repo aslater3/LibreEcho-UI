@@ -2229,9 +2229,9 @@
        "properties": {
         "ssid": {
          "type": "string",
-         "maxLength": 255
+         "maxLength": 63
         },
-        "psk": {
+        "password": {
          "type": "string",
          "maxLength": 127,
          "writeOnly": true
