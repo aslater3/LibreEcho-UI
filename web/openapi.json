@@ -2222,30 +2222,58 @@
      "application/json": {
       "schema": {
        "type": "object",
-       "required": [
-        "ssid"
-       ],
-       "additionalProperties": false,
-       "properties": {
-        "ssid": {
-         "type": "string",
-         "maxLength": 63
-        },
-        "password": {
-         "type": "string",
-         "maxLength": 127,
-         "writeOnly": true
-        },
-        "security": {
-         "type": "string",
-         "enum": [
-          "open",
-          "wpa2",
-          "wpa3"
+       "oneOf": [
+        {
+         "required": [
+          "ssid",
+          "security"
          ],
-         "default": "wpa2"
+         "properties": {
+          "ssid": {
+           "type": "string",
+           "maxLength": 63
+          },
+          "password": {
+           "type": "string",
+           "maxLength": 127,
+           "writeOnly": true
+          },
+          "security": {
+           "type": "string",
+           "enum": [
+            "open"
+           ]
+          }
+         },
+         "additionalProperties": false
+        },
+        {
+         "required": [
+          "ssid",
+          "password"
+         ],
+         "properties": {
+          "ssid": {
+           "type": "string",
+           "maxLength": 63
+          },
+          "password": {
+           "type": "string",
+           "maxLength": 127,
+           "writeOnly": true
+          },
+          "security": {
+           "type": "string",
+           "enum": [
+            "wpa2",
+            "wpa3"
+           ],
+           "default": "wpa2"
+          }
+         },
+         "additionalProperties": false
         }
-       }
+       ]
       }
      }
     }
