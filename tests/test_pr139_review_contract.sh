@@ -27,4 +27,9 @@ grep -q 'start_api_worker(c->fd,api,&q)' src/http_server.c
 grep -q 'assistant/history.*GET' src/http_server.c
 grep -q 'first_pcm_ms == 3100' tests/test_api.sh
 grep -q 'mock_agent_history.py' tests/run_tests.sh
+grep -q 'history_generation' src/adapter/agentd.c web/js/app.js docs/API.md web/openapi.json
+grep -q 'LE_AGENT_CLIENT_WORKERS 4' src/adapter/agentd.c
+grep -q 'mkstemp' src/adapter/agentd.c
+grep -q 'fsync' src/adapter/agentd.c
+grep -q 'history_generation == 2' tests/test_api.sh
 printf '%s\n' 'PR 139 review contracts: ok'

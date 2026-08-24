@@ -535,7 +535,7 @@ async function simHistoryLoad(){
   const remotelyCleared=Number.isFinite(generation)&&generation>0&&previousGeneration>0&&generation!==previousGeneration;
   simDeviceTurns=turns.map(simDeviceRow).filter(Boolean);
   if(Number.isFinite(generation)&&generation>0){try{localStorage.setItem(SIM_DEVICE_GENERATION_KEY,String(generation))}catch(_){/* private mode, quota */}}
-  if(remotelyCleared){try{localStorage.removeItem(SIM_DEVICE_KEY)}catch(_){/* private mode, quota */};simDeviceTurns=[]}
+  if(remotelyCleared){try{localStorage.removeItem(SIM_DEVICE_KEY)}catch(_){/* private mode, quota */}}
   else if(simDeviceTurns.length){try{localStorage.setItem(SIM_DEVICE_KEY,JSON.stringify(simDeviceTurns))}catch(_){/* private mode, quota */}}
   else {try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];if(Array.isArray(v))simDeviceTurns=v}catch(_){} }
  }catch(_){

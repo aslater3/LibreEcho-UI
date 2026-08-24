@@ -12,16 +12,20 @@
 #include "../log.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <semaphore.h>
 #include <time.h>
 #include <unistd.h>
 
 /* Twelve records fit the bounded adapter response with worst-case timestamps. */
 #define LE_AGENT_TURN_HISTORY 12
+#define LE_AGENT_CLIENT_WORKERS 4
 
 #define DEFAULT_AGENT_SOCKET LE_ADAPTER_AGENT_SOCK
 #define DEFAULT_AGENT_CONFIG "/data/libreecho/config/agent.json"
@@ -504,24 +508,49 @@ static int command_history(struct agent_state *state, int client_fd,
     return respond(client_fd, id, 1, body);
 }
 
+static int save_history_generation(const struct agent_state *state,
+                                   unsigned long long generation)
+{
+    char temporary[sizeof(state->history_generation_path) + 16];
+    int fd;
+    FILE *file;
+
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX",
+                 state->history_generation_path) >= (int)sizeof(temporary))
+        return -1;
+    fd = mkstemp(temporary);
+    if (fd < 0 || fchmod(fd, 0600) != 0) {
+        if (fd >= 0)
+            close(fd);
+        unlink(temporary);
+        return -1;
+    }
+    file = fdopen(fd, "w");
+    if (!file || fprintf(file, "%llu\n", generation) < 0 ||
+        fflush(file) != 0 || fsync(fileno(file)) != 0) {
+        if (file)
+            fclose(file);
+        else
+            close(fd);
+        unlink(temporary);
+        return -1;
+    }
+    if (fclose(file) != 0 || rename(temporary,
+                                    state->history_generation_path) != 0) {
+        unlink(temporary);
+        return -1;
+    }
+    return 0;
+}
+
 static int command_history_clear(struct agent_state *state, int client_fd,
                                  unsigned long id)
 {
-    FILE *file;
     unsigned long long next = state->history_generation + 1;
 
     if (!next)
         next = 1;
-    file = fopen(state->history_generation_path, "w");
-    if (!file)
-        return respond(client_fd, id, 0,
-                       "history clear could not be persisted");
-    if (fprintf(file, "%llu\n", next) < 0 || fflush(file) != 0) {
-        fclose(file);
-        return respond(client_fd, id, 0,
-                       "history clear could not be persisted");
-    }
-    if (fclose(file) != 0)
+    if (save_history_generation(state, next) != 0)
         return respond(client_fd, id, 0,
                        "history clear could not be persisted");
     state->history_generation = next;
@@ -1430,12 +1459,40 @@ static void handle_client(struct agent_state *state, int client_fd)
     pthread_mutex_unlock(&state->control_mutex);
 }
 
+struct agent_client_job {
+    struct agent_state *state;
+    int client_fd;
+    sem_t *slots;
+    pthread_mutex_t *mutex;
+    int *done;
+    int slot;
+};
+
+static void *agent_client_worker(void *argument)
+{
+    struct agent_client_job *job = argument;
+
+    handle_client(job->state, job->client_fd);
+    close(job->client_fd);
+    pthread_mutex_lock(job->mutex);
+    job->done[job->slot] = 1;
+    pthread_mutex_unlock(job->mutex);
+    sem_post(job->slots);
+    free(job);
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     struct agent_state state;
     const char *poll_minimum;
     int listener;
     int i;
+    pthread_t client_threads[LE_AGENT_CLIENT_WORKERS];
+    int client_in_use[LE_AGENT_CLIENT_WORKERS] = {0};
+    int client_done[LE_AGENT_CLIENT_WORKERS] = {0};
+    pthread_mutex_t client_mutex;
+    sem_t client_slots;
 
     memset(&state, 0, sizeof(state));
     strcpy(state.socket_path, DEFAULT_AGENT_SOCKET);
@@ -1532,6 +1589,17 @@ int main(int argc, char **argv)
         pthread_mutex_destroy(&state.control_mutex);
         return 1;
     }
+    if (pthread_mutex_init(&client_mutex, NULL) != 0) {
+        pthread_mutex_destroy(&state.metrics_mutex);
+        pthread_mutex_destroy(&state.control_mutex);
+        return 1;
+    }
+    if (sem_init(&client_slots, 0, LE_AGENT_CLIENT_WORKERS) != 0) {
+        pthread_mutex_destroy(&client_mutex);
+        pthread_mutex_destroy(&state.metrics_mutex);
+        pthread_mutex_destroy(&state.control_mutex);
+        return 1;
+    }
     if (le_voice_playback_start(
             &state.playback, play_sentence, &state) < 0)
         goto fail_mutex;
@@ -1554,17 +1622,82 @@ int main(int argc, char **argv)
                 state.socket_path, state.provider->id);
     while (running) {
         int client_fd = le_adapter_accept(listener);
+        int slot = -1;
 
         if (client_fd < 0) {
             if (errno == EINTR)
                 continue;
             break;
         }
-        handle_client(&state, client_fd);
-        close(client_fd);
+        {
+            int slot_wait;
+            do
+                slot_wait = sem_wait(&client_slots);
+            while (slot_wait < 0 && errno == EINTR && running);
+            if (slot_wait < 0 || !running) {
+                close(client_fd);
+                break;
+            }
+        }
+        pthread_mutex_lock(&client_mutex);
+        for (i = 0; i < LE_AGENT_CLIENT_WORKERS; ++i) {
+            if (client_in_use[i] && client_done[i]) {
+                pthread_t completed = client_threads[i];
+                client_in_use[i] = 0;
+                client_done[i] = 0;
+                pthread_mutex_unlock(&client_mutex);
+                pthread_join(completed, NULL);
+                pthread_mutex_lock(&client_mutex);
+            }
+        }
+        for (i = 0; i < LE_AGENT_CLIENT_WORKERS; ++i) {
+            if (!client_in_use[i]) {
+                slot = i;
+                client_in_use[i] = 1;
+                client_done[i] = 0;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&client_mutex);
+        if (slot < 0) {
+            close(client_fd);
+            sem_post(&client_slots);
+            continue;
+        }
+        {
+            struct agent_client_job *job = calloc(1, sizeof(*job));
+            if (!job) {
+                pthread_mutex_lock(&client_mutex);
+                client_in_use[slot] = 0;
+                pthread_mutex_unlock(&client_mutex);
+                close(client_fd);
+                sem_post(&client_slots);
+                continue;
+            }
+            job->state = &state;
+            job->client_fd = client_fd;
+            job->slots = &client_slots;
+            job->mutex = &client_mutex;
+            job->done = client_done;
+            job->slot = slot;
+            if (pthread_create(&client_threads[slot], NULL,
+                               agent_client_worker, job) != 0) {
+                free(job);
+                pthread_mutex_lock(&client_mutex);
+                client_in_use[slot] = 0;
+                pthread_mutex_unlock(&client_mutex);
+                close(client_fd);
+                sem_post(&client_slots);
+            }
+        }
     }
     close(listener);
     unlink(state.socket_path);
+    for (i = 0; i < LE_AGENT_CLIENT_WORKERS; ++i)
+        if (client_in_use[i])
+            pthread_join(client_threads[i], NULL);
+    sem_destroy(&client_slots);
+    pthread_mutex_destroy(&client_mutex);
     le_voice_pipeline_stop(state.voice_pipeline);
     le_voice_playback_stop(&state.playback);
     le_llm_credentials_clear(&state.credentials);
@@ -1574,6 +1707,8 @@ int main(int argc, char **argv)
     return running ? 1 : 0;
 
 fail_mutex:
+    sem_destroy(&client_slots);
+    pthread_mutex_destroy(&client_mutex);
     pthread_mutex_destroy(&state.metrics_mutex);
     pthread_mutex_destroy(&state.control_mutex);
     return 1;
