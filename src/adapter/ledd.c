@@ -213,7 +213,11 @@ struct daemon_context {
     int night_schedule_initialized;
 };
 
-enum pattern_kind { PATTERN_NONE = 0, PATTERN_PULSE, PATTERN_FLASH };
+/* PATTERN_SOLID holds a steady colour until its owner stops it. The mute
+   indicator needs a state you can read at a glance, which neither the pulse
+   nor the 1.5s meter can express. */
+enum pattern_kind { PATTERN_NONE = 0, PATTERN_PULSE, PATTERN_FLASH,
+                    PATTERN_SOLID };
 enum visualizer_mood {
     VISUALIZER_MOOD_CALM = 0,
     VISUALIZER_MOOD_BALANCED,
@@ -1820,7 +1824,9 @@ static void apply_current(struct daemon_context *ctx)
 
 static const char *pattern_name(int kind)
 {
-    return kind == PATTERN_PULSE ? "pulse" : kind == PATTERN_FLASH ? "flash" : "none";
+    return kind == PATTERN_PULSE ? "pulse" :
+           kind == PATTERN_FLASH ? "flash" :
+           kind == PATTERN_SOLID ? "solid" : "none";
 }
 
 static void copy_pattern_owner(char *destination, const char *source)
@@ -2367,8 +2373,10 @@ static int handle_request(struct daemon_context *ctx, int fd,
             return send_response(fd, request.id, 1, "{\"pattern\":\"none\"}", NULL);
         }
         if (!strcmp(pattern, "pulse") || !strcmp(pattern, "flash") ||
-            !strcmp(pattern, "full_ring_flash")) {
-            int kind = !strcmp(pattern, "pulse") ? PATTERN_PULSE : PATTERN_FLASH;
+            !strcmp(pattern, "full_ring_flash") ||
+            !strcmp(pattern, "solid")) {
+            int kind = !strcmp(pattern, "pulse") ? PATTERN_PULSE :
+                       !strcmp(pattern, "solid") ? PATTERN_SOLID : PATTERN_FLASH;
             if (get_arg_unsigned(&request, "r", &r, 255) != 0 ||
                 get_arg_unsigned(&request, "g", &g, 255) != 0 ||
                 get_arg_unsigned(&request, "b", &b, 255) != 0 ||
