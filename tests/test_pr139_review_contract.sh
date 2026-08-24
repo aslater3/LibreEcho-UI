@@ -37,4 +37,11 @@ grep -q 'pthread_create(&client_threads' src/adapter/agentd.c
 grep -q 'pthread_mutex_lock(&state->metrics_mutex)' src/adapter/agentd.c
 grep -q 'sync_history_directory' src/adapter/agentd.c
 ! grep -q 'survives a reboot or a change of address' web/js/app.js
-printf '%s\n' 'PR 139 review contracts: ok'
+! grep -q '},125);goto done' src/http_server.c
+grep -q 'sizeof("{\\"ok\\":false' src/http_server.c
+grep -q 'pthread_mutex_lock(&state->metrics_mutex)' src/adapter/agentd.c
+grep -q 'allowUnavailable:true' web/js/bluetooth.js
+# The helper must still reject real HTTP/API failures while allowing only the
+# explicit successful unavailable payload.
+grep -q '!res.ok||!body.ok||(body.data?.unavailable===true&&!allowUnavailable)' web/js/app.js
+printf '%s\n' 'PR 139 post-merge review contracts: ok'

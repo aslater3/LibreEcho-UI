@@ -585,14 +585,17 @@ static int save_history_generation(const struct agent_state *state,
 static int command_history_clear(struct agent_state *state, int client_fd,
                                  unsigned long id)
 {
-    unsigned long long next = state->history_generation + 1;
+    unsigned long long next;
 
+    pthread_mutex_lock(&state->metrics_mutex);
+    next = state->history_generation + 1;
     if (!next)
         next = 1;
-    if (save_history_generation(state, next) != 0)
+    if (save_history_generation(state, next) != 0) {
+        pthread_mutex_unlock(&state->metrics_mutex);
         return respond(client_fd, id, 0,
                        "history clear could not be persisted");
-    pthread_mutex_lock(&state->metrics_mutex);
+    }
     state->history_generation = next;
     state->turn_history_next = 0;
     state->turn_history_count = 0;
