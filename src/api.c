@@ -1515,7 +1515,7 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
     * dip gives the drive the edge it is waiting for.
     */
    if(want_host>0){c->feature_usb_host=host?1:0;c->usb_host_applied=1;api_persist_configuration(c);}
-   if(want_host>0&&host){usb_role_write("device");usleep(400000);}
+   if(want_host>0&&host){struct timespec dip={0,400000000L};usb_role_write("device");nanosleep(&dip,NULL);}
    if(want_host>0){int urc=usb_role_write(host?"host":"device");
     if(urc){err(r,urc==LE_NOT_SUPPORTED?501:503,urc,"USB role could not be changed");return;}
     api_log(c,"info",host?"USB port switched to host (storage) mode":"USB port switched to device (ADB) mode");
