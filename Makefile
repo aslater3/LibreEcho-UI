@@ -399,7 +399,7 @@ $(BUILD)/test-agentd: tests/test_agentd.c src/adapter/adapter_client.c \
 		$(BUILD)/mock-voice-source
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_agentd.c \
-		src/adapter/adapter_client.c src/log.c -o $@
+		src/adapter/adapter_client.c src/log.c -lpthread -o $@
 
 $(BUILD)/test-voice-reply: tests/test_voice_reply.c \
 		src/adapter/voice_reply.c

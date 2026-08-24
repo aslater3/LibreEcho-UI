@@ -34,6 +34,17 @@ static int call(const char *socket_path, const char *command,
     return result;
 }
 
+static int clear_history_after_barrier(const char *socket_path, int barrier_fd)
+{
+    char release;
+    char response[LE_ADAPTER_MSG_MAX];
+
+    if (read(barrier_fd, &release, 1) != 1)
+        return 1;
+    return call(socket_path, "history_clear", NULL,
+                response, sizeof(response)) == 0 ? 0 : 1;
+}
+
 int main(void)
 {
     char directory[] = "/tmp/libreecho-agentd-test-XXXXXX";
@@ -54,6 +65,8 @@ int main(void)
     pid_t audio_child = -1;
     pid_t stt_child = -1;
     pid_t source_child = -1;
+    pid_t clear_children[2] = {-1, -1};
+    int clear_barrier[2] = {-1, -1};
     size_t i;
     int result = 0;
 
@@ -217,9 +230,45 @@ int main(void)
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"authenticated\":false") != NULL);
     CHECK(access(credentials_path, F_OK) != 0);
+    CHECK(pipe(clear_barrier) == 0);
+    for (i = 0; i < 2; ++i) {
+        clear_children[i] = fork();
+        CHECK(clear_children[i] >= 0);
+        if (clear_children[i] == 0) {
+            close(clear_barrier[1]);
+            _exit(clear_history_after_barrier(socket_path, clear_barrier[0]));
+        }
+    }
+    close(clear_barrier[0]);
+    clear_barrier[0] = -1;
+    CHECK(write(clear_barrier[1], "xx", 2) == 2);
+    close(clear_barrier[1]);
+    clear_barrier[1] = -1;
+    for (i = 0; i < 2; ++i) {
+        int clear_status;
+        CHECK(waitpid(clear_children[i], &clear_status, 0) ==
+              clear_children[i]);
+        clear_children[i] = -1;
+        CHECK(WIFEXITED(clear_status) && WEXITSTATUS(clear_status) == 0);
+    }
+    CHECK(call(socket_path, "history", NULL,
+               response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"history_generation\":3") != NULL);
+    CHECK(strstr(response, "\"turns\":[]") != NULL);
+    puts("agentd: concurrent history clears serialize generation and ring reset: ok");
     puts("agentd: device auth, private token store and configuration: ok");
 
 cleanup:
+    if (clear_barrier[0] >= 0)
+        close(clear_barrier[0]);
+    if (clear_barrier[1] >= 0)
+        close(clear_barrier[1]);
+    for (i = 0; i < 2; ++i) {
+        if (clear_children[i] > 0) {
+            kill(clear_children[i], SIGTERM);
+            waitpid(clear_children[i], NULL, 0);
+        }
+    }
     if (child > 0) {
         kill(child, SIGTERM);
         waitpid(child, NULL, 0);
