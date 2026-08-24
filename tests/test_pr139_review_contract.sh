@@ -10,6 +10,8 @@ grep -q 'wall_clock_milliseconds' src/adapter/agentd.c
 grep -q 'CLOCK_REALTIME' src/adapter/agentd.c
 grep -q 'history too large' src/adapter/agentd.c
 grep -q 'body_limit = LE_ADAPTER_MSG_MAX - 256' src/adapter/agentd.c
+grep -q 'request_id\[64\]' src/adapter/agentd.c
+grep -q 'if (generated) {' src/adapter/agentd.c
 ! grep -q 'turn_history_next.*LE_AGENT_TURN_HISTORY - 1' src/adapter/agentd.c
 grep -q 'LE_TLS_AVAILABLE' Makefile src/api.c
 grep -q 'strlen(users_path)+strlen(".sessions")' src/api.c

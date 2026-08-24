@@ -103,6 +103,7 @@ struct agent_state {
         uint64_t at_ms;
         uint64_t stt_audio_ms, stt_processing_ms, stt_total_ms;
         uint64_t first_text_ms, first_announce_ms, first_pcm_ms;
+        char request_id[64];
         int follow_up;
     } turn_history[LE_AGENT_TURN_HISTORY];
     unsigned turn_history_next, turn_history_count;
@@ -412,10 +413,25 @@ static int play_sentence(void *context, const char *text)
                 pthread_mutex_lock(&state->metrics_mutex);
                 if (!state->first_pcm_ms &&
                     marker_ms >= state->turn_started_ms) {
+                    unsigned history_i;
                     state->first_pcm_ms =
                         marker_ms - state->turn_started_ms;
                     if (state->first_pcm_ms > 3000)
                         ++state->latency_violations;
+                    for (history_i = 0;
+                         history_i < state->turn_history_count;
+                         ++history_i) {
+                        unsigned idx = (state->turn_history_next
+                                        + LE_AGENT_TURN_HISTORY - 1
+                                        - history_i)
+                                       % LE_AGENT_TURN_HISTORY;
+                        if (!strcmp(state->turn_history[idx].request_id,
+                                    request_id)) {
+                            state->turn_history[idx].first_pcm_ms =
+                                state->first_pcm_ms;
+                            break;
+                        }
+                    }
                 }
                 pthread_mutex_unlock(&state->metrics_mutex);
             }
@@ -1114,13 +1130,16 @@ static void voice_transcript(
         else
             generated = 1;
         /* Metrics are final here: STT is done and the response has been
-           generated and dispatched. Keep the turn so the UI can show a
-           history that survives a reboot. */
+           generated and dispatched. Keep successful turns so the UI can show
+           a history that survives a reboot. */
+        if (generated) {
         pthread_mutex_lock(&state->metrics_mutex);
         {
             struct turn_record *rec =
                 &state->turn_history[state->turn_history_next];
             rec->at_ms = wall_clock_milliseconds();
+            snprintf(rec->request_id, sizeof(rec->request_id), "%s",
+                     state->turn_request_id);
             rec->stt_audio_ms = turn->stt_audio_ms;
             rec->stt_processing_ms = turn->stt_processing_ms;
             rec->stt_total_ms = turn->stt_total_ms;
@@ -1134,6 +1153,7 @@ static void voice_transcript(
                 ++state->turn_history_count;
         }
         pthread_mutex_unlock(&state->metrics_mutex);
+        }
         if (generated) {
             snprintf(state->previous_voice_user,
                      sizeof(state->previous_voice_user), "%.*s",
