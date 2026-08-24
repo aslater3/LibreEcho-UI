@@ -238,7 +238,7 @@ continue;
 }
 
 if(!client_done&&(pending||(p[0].revents&(POLLIN|POLLHUP|POLLERR)))){
-n=le_tls_read(tls,buf,sizeof(buf));
+n=le_tls_read_deadline(tls,buf,sizeof(buf),LE_TLS_IDLE_TIMEOUT_MS);
 if(n<=0){client_done=1;shutdown(up,SHUT_WR);continue;}
 if(up_writable&&write_all_file(up,buf,(size_t)n)<0){
 /* stop sending, but keep draining whatever the server already replied */

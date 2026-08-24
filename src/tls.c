@@ -192,6 +192,44 @@ long le_tls_read(struct le_tls *tls, void *buf, size_t len)
     return rc < 0 ? -1 : rc;
 }
 
+long le_tls_read_deadline(struct le_tls *tls, void *buf, size_t len,
+                          int timeout_ms)
+{
+    int flags, rc;
+    long long deadline;
+    if (!tls || !buf || timeout_ms < 0)
+        return -1;
+    flags = fcntl(tls->net.fd, F_GETFL);
+    if (flags < 0 || fcntl(tls->net.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        return -1;
+    deadline = monotonic_ms() + timeout_ms;
+    for (;;) {
+        struct pollfd waitfd;
+        long long remaining;
+        rc = mbedtls_ssl_read(&tls->ssl, buf, len);
+        if (rc >= 0 || rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
+            break;
+        if (rc != MBEDTLS_ERR_SSL_WANT_READ &&
+            rc != MBEDTLS_ERR_SSL_WANT_WRITE)
+            break;
+        remaining = deadline - monotonic_ms();
+        if (remaining <= 0) { rc = -1; break; }
+        waitfd.fd = tls->net.fd;
+        waitfd.events = rc == MBEDTLS_ERR_SSL_WANT_WRITE ? POLLOUT : POLLIN;
+        waitfd.revents = 0;
+        rc = poll(&waitfd, 1, remaining > 2147483647LL ?
+                  2147483647 : (int)remaining);
+        if (rc <= 0 || (waitfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            rc = -1;
+            break;
+        }
+    }
+    (void)fcntl(tls->net.fd, F_SETFL, flags);
+    if (rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
+        return 0;
+    return rc < 0 ? -1 : rc;
+}
+
 long le_tls_write(struct le_tls *tls, const void *buf, size_t len)
 {
     int rc;
@@ -338,15 +376,20 @@ int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
 
     if (!access(cert_path, R_OK) && !access(key_path, R_OK)) {
         mbedtls_x509_crt existing;
+        mbedtls_pk_context existing_key;
+        int pair_ok = 0;
         mbedtls_x509_crt_init(&existing);
+        mbedtls_pk_init(&existing_key);
         if (!mbedtls_x509_crt_parse_file(&existing, cert_path) &&
-            !mbedtls_x509_time_is_past(&existing.valid_to)) {
-            mbedtls_x509_crt_free(&existing);
-            return LE_OK;                   /* existing certificate is current */
-        }
+            !mbedtls_pk_parse_keyfile(&existing_key, key_path, NULL, NULL, NULL) &&
+            !mbedtls_pk_check_pair(&existing.pk, &existing_key, NULL, NULL) &&
+            !mbedtls_x509_time_is_past(&existing.valid_to))
+            pair_ok = 1;
+        mbedtls_pk_free(&existing_key);
         mbedtls_x509_crt_free(&existing);
-        /* A certificate made while the clock was near the Unix epoch is
-           expired after NTP corrects the clock; fall through and replace it. */
+        if (pair_ok)
+            return LE_OK;                   /* existing certificate/key pair is current */
+        /* A partial write, mismatched key, or expired certificate is replaced. */
     }
 
     mbedtls_pk_init(&key);
