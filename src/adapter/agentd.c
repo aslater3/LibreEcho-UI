@@ -407,6 +407,21 @@ static int play_sentence(void *context, const char *text)
                         marker_ms - state->turn_started_ms;
                     if (state->first_pcm_ms > 3000)
                         ++state->latency_violations;
+                    /*
+                     * This arrives after the turn record was written -- the
+                     * marker is polled asynchronously -- so amend the newest
+                     * record rather than leaving first_pcm_ms zero, which is
+                     * the one number that says when the user actually heard
+                     * something.
+                     */
+                    if (state->turn_history_count) {
+                        unsigned idx = (state->turn_history_next
+                                        + LE_AGENT_TURN_HISTORY - 1)
+                                       % LE_AGENT_TURN_HISTORY;
+                        if (!state->turn_history[idx].first_pcm_ms)
+                            state->turn_history[idx].first_pcm_ms =
+                                state->first_pcm_ms;
+                    }
                 }
                 pthread_mutex_unlock(&state->metrics_mutex);
             }
