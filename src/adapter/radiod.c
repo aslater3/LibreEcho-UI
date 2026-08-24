@@ -84,6 +84,16 @@ static int meta_out = -1;              /* child: write end of that pipe */
 
 static void stop_signal(int signum) { (void)signum; running = 0; }
 
+static void install_stop_handlers(void)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = stop_signal;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGTERM, &action, NULL);
+    sigaction(SIGINT, &action, NULL);
+}
+
 static int write_all(int fd, const void *data, size_t length)
 {
     const unsigned char *p = data;
@@ -920,8 +930,7 @@ int main(int argc, char **argv)
             bus_path = argv[++i];
     }
 
-    signal(SIGTERM, stop_signal);
-    signal(SIGINT, stop_signal);
+    install_stop_handlers();
     signal(SIGPIPE, SIG_IGN);
 
     listen_fd = le_adapter_listen(socket_path);
@@ -938,6 +947,8 @@ int main(int argc, char **argv)
 
         if (client < 0) {
             reap_player();
+            if (!running)
+                break;
             continue;
         }
         n = read(client, message, sizeof(message) - 1);

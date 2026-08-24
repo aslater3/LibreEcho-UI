@@ -19,12 +19,13 @@ struct api_context{struct le_backend*backend;struct le_event_bus events;struct l
 /* Empty means "use the board's address". Applied at boot, not live: changing a
    MAC on a running interface drops the link and the connection carrying the
    request that changed it. */
-char mac_wifi[24],mac_bt[24];char sessions_path[384];struct le_radio_station{char word[32],name[64],url[512];int enabled;} radio[LE_MAX_RADIO_STATIONS];size_t radio_count;
+char mac_wifi[24],mac_bt[24];char sessions_path[384];int https_active;struct le_radio_station{char word[32],name[64],url[512];int enabled;} radio[LE_MAX_RADIO_STATIONS];size_t radio_count;
 /* The station the transport control would start again. It is deliberately not
    persisted: after a reboot nothing is playing and nothing was interrupted, so
    offering to resume something would be a guess. */
 char radio_last_word[32];char logs[LE_MAX_LOGS][256];size_t log_count,log_next;};
 int api_bootstrap_required(const struct api_context*);
+void api_set_https_active(struct api_context*,int);
 int api_init(struct api_context*,struct le_backend*,int,int,const char*,const char*,const char*,const char*,const char*);int api_apply_persisted_configuration(struct api_context*,char*,size_t);int api_persist_configuration(struct api_context*);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
 int api_baby_monitor_stream_authorize(struct api_context*,const struct api_request*,struct api_response*,int*,int*,int*,int*,int*);
 size_t le_update_max_upload_bytes(void);

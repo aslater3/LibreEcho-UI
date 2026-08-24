@@ -80,7 +80,7 @@ if(strcmp(o.listen_host,"127.0.0.1")&&strcmp(o.listen_host,"::1")&&!token[0]&&!u
 if(users_path&&access(users_path,F_OK)==0&&!valid_users_path(users_path)){fprintf(stderr,"Users file must be a regular private file: %s\n",users_path);return 2;}
 if(le_backend_init(&b,mode,mock,cfg,seed)!=LE_OK){fprintf(stderr,"Unable to initialise %s backend\n",mode);
 return 1;
-}if(random_csrf(csrf,sizeof(csrf))){fprintf(stderr,"Unable to obtain secure CSRF token\n");le_backend_destroy(b);return 2;}if(api_init(&api,b,dev,insecure_lan,token,allowed_origin,csrf,cfg,users_path)){fprintf(stderr,"Unable to initialise authentication\n");le_backend_destroy(b);return 2;}if(cfg&&access(cfg,F_OK)==0)api.setup_completed=1;
+}if(random_csrf(csrf,sizeof(csrf))){fprintf(stderr,"Unable to obtain secure CSRF token\n");le_backend_destroy(b);return 2;}if(api_init(&api,b,dev,insecure_lan,token,allowed_origin,csrf,cfg,users_path)){fprintf(stderr,"Unable to initialise authentication\n");le_backend_destroy(b);return 2;}if(!api.feature_https&&!o.tls_port)api_set_https_active(&api,0);if(cfg&&access(cfg,F_OK)==0)api.setup_completed=1;
 {char unrestored[192];int apply_rc=LE_IO,apply_try;/* The daemons come up alongside this one, so the first pass usually runs before some of their sockets exist. The loop stops as soon as everything applies, so on a healthy boot this costs a pass or two. The 6s ceiling is deliberate: a setting that can never apply would otherwise hold the web UI down on every boot, and the named warning below is what surfaces that case rather than silently spinning. */for(apply_try=0;apply_try<24&&apply_rc;apply_try++){apply_rc=api_apply_persisted_configuration(&api,unrestored,sizeof(unrestored));if(apply_rc)usleep(250000);}if(apply_rc){char message[256];snprintf(message,sizeof(message),"Could not restore saved settings: %s",unrestored[0]?unrestored:"unknown");api_log(&api,"warning",message);}else if(apply_try>1)api_log(&api,"info","Saved settings restored once the hardware daemons were ready");}
 if(api.integrations&8u){int bluetooth_rc=le_set_bluetooth_enabled(b,1);if(bluetooth_rc)api_log(&api,"error","Bluetooth could not be started from saved configuration");}
 if(api.integrations&16u){int airplay_rc=LE_IO,airplay_try;for(airplay_try=0;airplay_try<12&&airplay_rc;airplay_try++){airplay_rc=le_set_airplay_enabled(b,1);if(airplay_rc)usleep(500000);}if(airplay_rc){api_log(&api,"error","AirPlay 2 could not be started from saved configuration");fprintf(stderr,"Unable to start configured AirPlay 2 integration: %d\n",airplay_rc);}}
@@ -95,6 +95,7 @@ mkdir_p_mode(tls_dir,0700);   /* the config dir itself, which is expected to exi
 if(le_tls_ensure_self_signed(o.tls_cert,o.tls_key,"libreecho")!=LE_OK){
 /* Never fatal: HTTP stays up so a certificate problem cannot lock out the UI */
 fprintf(stderr,"HTTPS disabled: could not create a certificate in %s\n",tls_dir);
+api_set_https_active(&api,0);
 o.tls_port=0;
 }else{
 api.https_port=o.tls_port;

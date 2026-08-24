@@ -12,12 +12,14 @@ log_path=./build/test-radio-icy.log
 radiod_bin=${LIBREECHO_TEST_RADIOD:-./build/libreecho-radiod}
 pid=0
 
-# radiod blocks in accept() and installs its handlers with signal(), which
-# carries SA_RESTART, so SIGTERM does not interrupt the wait and the daemon
-# does not exit. That is a real shutdown bug in radiod and is noted here
-# rather than worked around silently; this fixture kills it outright.
 cleanup() {
     if [ "$pid" -gt 1 ]; then
+        kill -TERM "$pid" 2>/dev/null || true
+        i=0
+        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+            sleep 0.1
+            i=$((i + 1))
+        done
         kill -KILL "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     fi
