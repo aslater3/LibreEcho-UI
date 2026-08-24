@@ -466,14 +466,16 @@ static int command_history(struct agent_state *state, int client_fd,
     int wrote;
     const size_t body_limit = LE_ADAPTER_MSG_MAX - 256;
 
+    pthread_mutex_lock(&state->metrics_mutex);
     wrote = snprintf(body, body_limit,
                      "{\"history_generation\":%llu,\"turns\":[",
                      state->history_generation);
-    if (wrote < 0 || (size_t)wrote >= body_limit)
+    if (wrote < 0 || (size_t)wrote >= body_limit) {
+        pthread_mutex_unlock(&state->metrics_mutex);
         return respond(client_fd, id, 0, "history too large");
+    }
     used = (size_t)wrote;
 
-    pthread_mutex_lock(&state->metrics_mutex);
     n = state->turn_history_count;
     for (i = 0; i < n; ++i) {
         /* newest first: walk back from the write cursor */
@@ -508,15 +510,41 @@ static int command_history(struct agent_state *state, int client_fd,
     return respond(client_fd, id, 1, body);
 }
 
+static int sync_history_directory(const char *path)
+{
+    char directory[384];
+    char *slash;
+    int fd, rc;
+
+    snprintf(directory, sizeof(directory), "%s", path);
+    slash = strrchr(directory, '/');
+    if (!slash)
+        return -1;
+    if (slash == directory)
+        slash[1] = '\0';
+    else
+        *slash = '\0';
+    fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    rc = fsync(fd);
+    close(fd);
+    return rc;
+}
+
 static int save_history_generation(const struct agent_state *state,
                                    unsigned long long generation)
 {
     char temporary[sizeof(state->history_generation_path) + 16];
+    char backup[sizeof(state->history_generation_path) + 5];
     int fd;
     FILE *file;
 
     if (snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX",
                  state->history_generation_path) >= (int)sizeof(temporary))
+        return -1;
+    if (snprintf(backup, sizeof(backup), "%s.bak",
+                 state->history_generation_path) >= (int)sizeof(backup))
         return -1;
     fd = mkstemp(temporary);
     if (fd < 0 || fchmod(fd, 0600) != 0) {
@@ -535,11 +563,22 @@ static int save_history_generation(const struct agent_state *state,
         unlink(temporary);
         return -1;
     }
-    if (fclose(file) != 0 || rename(temporary,
-                                    state->history_generation_path) != 0) {
+    if (fclose(file) != 0) {
         unlink(temporary);
         return -1;
     }
+    if (rename(state->history_generation_path, backup) != 0 &&
+        errno != ENOENT) {
+        unlink(temporary);
+        return -1;
+    }
+    if (rename(temporary, state->history_generation_path) != 0) {
+        rename(backup, state->history_generation_path);
+        unlink(temporary);
+        return -1;
+    }
+    if (sync_history_directory(state->history_generation_path) != 0)
+        return -1;
     return 0;
 }
 
@@ -553,8 +592,8 @@ static int command_history_clear(struct agent_state *state, int client_fd,
     if (save_history_generation(state, next) != 0)
         return respond(client_fd, id, 0,
                        "history clear could not be persisted");
-    state->history_generation = next;
     pthread_mutex_lock(&state->metrics_mutex);
+    state->history_generation = next;
     state->turn_history_next = 0;
     state->turn_history_count = 0;
     pthread_mutex_unlock(&state->metrics_mutex);
@@ -1563,12 +1602,27 @@ int main(int argc, char **argv)
         return 1;
     state.history_generation = 1;
     {
-        FILE *file = fopen(state.history_generation_path, "r");
+        char backup[sizeof(state.history_generation_path) + 5];
+        FILE *file;
         unsigned long long saved;
+        int loaded = 0;
+        snprintf(backup, sizeof(backup), "%s.bak",
+                 state.history_generation_path);
+        file = fopen(state.history_generation_path, "r");
         if (file) {
-            if (fscanf(file, "%llu", &saved) == 1 && saved)
+            if (fscanf(file, "%llu", &saved) == 1 && saved) {
                 state.history_generation = saved;
+                loaded = 1;
+            }
             fclose(file);
+        }
+        if (!loaded) {
+            file = fopen(backup, "r");
+            if (file) {
+                if (fscanf(file, "%llu", &saved) == 1 && saved)
+                    state.history_generation = saved;
+                fclose(file);
+            }
         }
     }
     load_config(&state);

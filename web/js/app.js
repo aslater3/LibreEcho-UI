@@ -6,7 +6,7 @@ const descriptions={Overview:'Your LibreEcho at a glance',Device:'Identity, hard
 const nav=$('#nav'),content=$('#content');
 document.body.classList.add('auth-pending');
 function esc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-async function api(path,opt={}){const headers={'Accept':'application/json',...(state.token?{'Authorization':'Bearer '+state.token}:{}),...(opt.body?{'Content-Type':'application/json','X-LibreEcho-CSRF':state.csrf}:{}),...(opt.headers||{})};const res=await fetch('/api/v1'+path,{...opt,headers});let body;try{body=await res.json()}catch(_){throw new Error('The device returned an unreadable response')}if(!res.ok||!body.ok||body.data?.unavailable===true)throw new Error(body.error?.message||body.data?.message||`Request failed (${res.status})`);return body.data}
+async function api(path,opt={}){const {allowUnavailable=false,...fetchOpt}=opt;const headers={'Accept':'application/json',...(state.token?{'Authorization':'Bearer '+state.token}:{}),...(fetchOpt.body?{'Content-Type':'application/json','X-LibreEcho-CSRF':state.csrf}:{}),...(fetchOpt.headers||{})};const res=await fetch('/api/v1'+path,{...fetchOpt,headers});let body;try{body=await res.json()}catch(_){throw new Error('The device returned an unreadable response')}if((!res.ok||!body.ok||body.data?.unavailable===true)&&!allowUnavailable)throw new Error(body.error?.message||body.data?.message||`Request failed (${res.status})`);return body.data}
 function toast(message,error=false){const t=$('#toast');t.textContent=message;t.classList.toggle('error',error);t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
 function panel(title,body,extra=''){return `<section class="panel setting-panel ${extra}"><h3>${title}</h3>${body}</section>`}
 function collapsiblePanel(title,body,extra='',open=false){return `<details class="panel setting-panel integration-section ${extra}"${open?' open':''}><summary><h3>${title}</h3><span class="integration-toggle" aria-hidden="true">Show details</span></summary><div class="integration-section-body">${body}</div></details>`}
@@ -500,7 +500,7 @@ let simDeviceTurns=[];
  * But localStorage is scoped per origin and this device takes a new DHCP lease
  * on most boots -- the Wi-Fi driver generates a fresh MAC each time -- so every
  * reboot moved the UI to a new origin and the panel came up empty. agentd keeps
- * the last 12 turns it measured itself, which survive that.
+ * the last 12 turns it measured itself for the current device generation.
  *
  * The two cannot be joined: a local row's timings are parsed from log lines
  * stamped in whole seconds, the device's are milliseconds off its own clock, so
@@ -635,7 +635,7 @@ function simRender(){
  const el=$('#sim-history'); if(!el)return;
  if(!h.length){el.innerHTML='<p class="muted">No runs yet.</p>';return}
  const note=simShowingDevice()
-  ? '<p class="muted">Showing the last '+h.length+(h.length===1?' turn':' turns')+' the device measured itself, which is what survives a reboot or a change of address. It does not record the phrase or the wake result &mdash; run a simulation to fill those columns.</p>'
+  ? '<p class="muted">Showing the last '+h.length+(h.length===1?' turn':' turns')+' the device measured itself for this device generation. It does not record the phrase or the wake result &mdash; run a simulation to fill those columns.</p>'
   : '';
  el.innerHTML=note+simSummaryHtml(h)+'<div class="table-scroll"><table class="sim-table"><thead><tr>'+
   '<th>time</th><th>wake</th><th>phrase</th><th>wake latency</th>'+
@@ -881,7 +881,7 @@ function simTimingHtml(entry,cap){
   simRadioTimingHtml(entry);
 }
 async function simulationPage(){
- await simHistoryLoad();   /* device-side history, survives reboots and IP changes */
+ await simHistoryLoad();   /* device-side history for the current generation */
  const w=await api('/wake-word').catch(()=>({}));
  const vp=await api('/voice-pipeline').catch(()=>({}));
  const cap=vp?.listening?.max_utterance_ms;

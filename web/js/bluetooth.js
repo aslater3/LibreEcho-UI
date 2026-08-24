@@ -103,7 +103,7 @@ function bluetoothScanFinished(b) {
 }
 
 async function bluetoothPage() {
-  const b=await api('/bluetooth');
+  const b=await api('/bluetooth',{allowUnavailable:true});
   state.btScanning=!!b.scanning;
   content.innerHTML=bluetoothMarkup(b);
   bindBluetooth(b);
@@ -115,7 +115,7 @@ async function refreshBluetooth() {
   if (state.page!=='Bluetooth') return;
   if (state.btPairingResponding) return;
   try {
-    const b=await api('/bluetooth');
+    const b=await api('/bluetooth',{allowUnavailable:true});
     if (state.page==='Bluetooth' && !state.btPairingResponding && !($('#save-bt-mac') && !$('#save-bt-mac').disabled)) { content.innerHTML=bluetoothMarkup(b); bindBluetooth(b); bluetoothScanFinished(b); updateBluetoothLiveRegion(b); }
   } catch (_) { /* Preserve the last good Bluetooth state during a transient adapter failure. */ }
   finally { if (state.page==='Bluetooth') state.timer=setTimeout(refreshBluetooth,2000); }

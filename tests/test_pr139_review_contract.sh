@@ -32,4 +32,9 @@ grep -q 'LE_AGENT_CLIENT_WORKERS 4' src/adapter/agentd.c
 grep -q 'mkstemp' src/adapter/agentd.c
 grep -q 'fsync' src/adapter/agentd.c
 grep -q 'history_generation == 2' tests/test_api.sh
+grep -q 'allowUnavailable:true' web/js/bluetooth.js
+grep -q 'pthread_create(&client_threads' src/adapter/agentd.c
+grep -q 'pthread_mutex_lock(&state->metrics_mutex)' src/adapter/agentd.c
+grep -q 'sync_history_directory' src/adapter/agentd.c
+! grep -q 'survives a reboot or a change of address' web/js/app.js
 printf '%s\n' 'PR 139 review contracts: ok'
