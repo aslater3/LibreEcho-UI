@@ -442,7 +442,7 @@ static int play_sentence(void *context, const char *text)
  * adapter message, while this is read only when the page is open.
  */
 static int command_history(struct agent_state *state, int client_fd,
-                           const char *id)
+                           unsigned long id)
 {
     char body[LE_ADAPTER_MSG_MAX];
     size_t used = 0;
