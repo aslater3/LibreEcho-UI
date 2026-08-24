@@ -488,38 +488,58 @@ const SIM_RESPONSE_GOAL_MS=1000;
 const SIM_RESPONSE_GOAL_TEXT='1 s';
 function simGoalClass(v){const n=Number(v);return Number.isFinite(n)?(n<SIM_RESPONSE_GOAL_MS?'connected':'error-text'):''}
 const SIM_HISTORY_KEY='libreecho-simulation-history';
+const SIM_DEVICE_KEY='libreecho-simulation-device-history';
 const SIM_HISTORY_MAX=100;
-/*
- * Turn history comes from the device, not localStorage.
- *
- * localStorage is scoped per origin, and this device takes a new DHCP lease on
- * most boots -- the Wi-Fi driver generates a fresh MAC each time -- so every
- * reboot moved the UI to a new origin and the history started empty. It also
- * recorded what this browser saw across a network hop rather than what the
- * device measured. agentd already computes these numbers per turn and now
- * keeps the last 24, so read them from there and treat localStorage as a
- * cache of what was fetched, for the moments the device is unreachable.
- */
 let simDeviceTurns=[];
-function simHistory(){
- if(simDeviceTurns.length)return simDeviceTurns;
+/*
+ * Two sources, deliberately not merged.
+ *
+ * Runs this browser performed know the phrase and whether the wake word fired;
+ * nothing on the device records either, so those rows stay in localStorage.
+ * But localStorage is scoped per origin and this device takes a new DHCP lease
+ * on most boots -- the Wi-Fi driver generates a fresh MAC each time -- so every
+ * reboot moved the UI to a new origin and the panel came up empty. agentd keeps
+ * the last 24 turns it measured itself, which survive that.
+ *
+ * The two cannot be joined: a local row's timings are parsed from log lines
+ * stamped in whole seconds, the device's are milliseconds off its own clock, so
+ * the same turn appears with different numbers and there is no key to match on.
+ * Rather than double-count it in the summary, local rows win when this origin
+ * has any and the device's are the fallback that makes a fresh origin useful.
+ */
+function simLocalHistory(){
  try{const raw=localStorage.getItem(SIM_HISTORY_KEY);const v=raw?JSON.parse(raw):[];
      return Array.isArray(v)?v:[]}catch(_){return []}}
+function simLocalSave(list){
+ try{localStorage.setItem(SIM_HISTORY_KEY,JSON.stringify(list.slice(0,SIM_HISTORY_MAX)))}catch(_){/* private mode, quota */}}
+function simHistory(){const local=simLocalHistory();return local.length?local:simDeviceTurns}
+function simShowingDevice(){return !simLocalHistory().length&&simDeviceTurns.length>0}
+/*
+ * A device turn carries timings only. The field names have to be the ones
+ * simParseLogs produces or every column renders blank and simStat finds nothing
+ * to summarise; the columns the device cannot fill are left undefined, which ms
+ * and simRow render as an em dash.
+ */
+function simDeviceRow(t){
+ return {at:t.at_ms,source:'device',follow_up:!!t.follow_up,
+  audio_ms:t.stt_audio_ms,processing_ms:t.stt_processing_ms,
+  queue_to_first_audio_ms:t.first_pcm_ms};}
 async function simHistoryLoad(){
  try{
   const h=await api('/assistant/history');
   const turns=Array.isArray(h&&h.turns)?h.turns:[];
-  simDeviceTurns=turns.map(t=>({
-   at:t.at_ms, sttAudioMs:t.stt_audio_ms, sttMs:t.stt_processing_ms,
-   sttTotalMs:t.stt_total_ms, firstTextMs:t.first_text_ms,
-   announceMs:t.first_announce_ms, firstPcmMs:t.first_pcm_ms,
-   followUp:!!t.follow_up, source:'device'}));
-  /* keep a copy so the panel still shows something if the device drops */
-  simHistorySave(simDeviceTurns);
- }catch(_){/* leave whatever was cached */}
+  simDeviceTurns=turns.map(simDeviceRow);
+  try{localStorage.setItem(SIM_DEVICE_KEY,JSON.stringify(simDeviceTurns))}catch(_){/* private mode, quota */}
+ }catch(_){
+  /* Unreachable, or an image whose agentd predates /assistant/history: show the
+     last copy fetched rather than nothing. */
+  try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];
+      if(Array.isArray(v))simDeviceTurns=v}catch(_){}
+ }
  return simHistory();}
-function simHistorySave(list){
- try{localStorage.setItem(SIM_HISTORY_KEY,JSON.stringify(list.slice(0,SIM_HISTORY_MAX)))}catch(_){/* private mode, quota */}}
+function simHistoryClear(){
+ simDeviceTurns=[];
+ try{localStorage.removeItem(SIM_HISTORY_KEY);localStorage.removeItem(SIM_DEVICE_KEY)}catch(_){}}
 function ms(v){return (v===null||v===undefined)?'—':(v>=1000?(v/1000).toFixed(2)+' s':Math.round(v)+' ms')}
 /*
  * Pull the turn's real timings out of the device log rather than inferring
@@ -568,9 +588,12 @@ function simParseLogs(entries,since){
 }
 function simRow(r){
  const cap=r.audio_ms&&r.max_utterance_ms&&r.audio_ms>=r.max_utterance_ms-100;
+ /* A device row records no phrase and no wake result. Those columns say so
+    rather than reading as an empty phrase that failed to wake the device. */
+ const text=r.text||(r.source==='device'?(r.follow_up?'spoken turn (follow-up)':'spoken turn'):'');
  return `<tr><td>${esc(new Date(r.at).toLocaleTimeString())}</td>`+
-  `<td class="${r.wake?'connected':''}">${r.wake?'yes':'no'}</td>`+
-  `<td>${esc(r.text.length>34?r.text.slice(0,34)+'…':r.text)}`+
+  `<td class="${r.wake===true?'connected':''}">${r.wake===undefined||r.wake===null?'—':(r.wake?'yes':'no')}</td>`+
+  `<td>${esc(text.length>34?text.slice(0,34)+'…':text)}`+
    /* The radio pair is the only row kind with a verdict the columns cannot
       hold, so it is written under the phrase rather than given a column that
       is empty on every other row. */
@@ -602,11 +625,17 @@ function simRender(){
  const h=simHistory();
  const el=$('#sim-history'); if(!el)return;
  if(!h.length){el.innerHTML='<p class="muted">No runs yet.</p>';return}
- el.innerHTML=simSummaryHtml(h)+'<div class="table-scroll"><table class="sim-table"><thead><tr>'+
+ const note=simShowingDevice()
+  ? '<p class="muted">Showing the last '+h.length+' turns the device measured itself, which is what survives a reboot or a change of address. It does not record the phrase or the wake result &mdash; run a simulation to fill those columns.</p>'
+  : '';
+ el.innerHTML=note+simSummaryHtml(h)+'<div class="table-scroll"><table class="sim-table"><thead><tr>'+
   '<th>time</th><th>wake</th><th>phrase</th><th>wake latency</th>'+
   '<th>turn audio</th><th>stt + model</th><th>request → first audio</th></tr></thead><tbody>'+
   h.map(simRow).join('')+'</tbody></table></div>';
- const c=$('#sim-count-runs'); if(c)c.textContent=h.length+' of '+SIM_HISTORY_MAX;
+ /* The device keeps its own, shorter ring, so the ceiling shown has to follow
+    whichever source is on screen. */
+ const c=$('#sim-count-runs');
+ if(c)c.textContent=simShowingDevice()?h.length+' from the device':h.length+' of '+SIM_HISTORY_MAX;
 }
 /*
  * One simulated utterance, start to finish. Shared by the single-phrase button
@@ -637,7 +666,7 @@ async function simRun(phrase,cap,onStatus,onSent){
  const entry={at:new Date().toISOString(),text:phrase,wake,
    wake_latency_ms:wakeLatency?Math.round(wakeLatency):null,
    max_utterance_ms:cap,...simParseLogs(post.entries||[],mark)};
- simHistorySave([entry,...simHistory()]);
+ simLocalSave([entry,...simLocalHistory()]);
  simRender();
  return entry;
 }
@@ -692,9 +721,9 @@ function simRadioDefault(r){
 /* simRun has already stored the row by the time the radio verdict is known, so
    the stored copy is rewritten in place rather than appended a second time. */
 function simHistoryAmend(entry){
- const h=simHistory();
+ const h=simLocalHistory();
  if(h.length&&h[0].at===entry.at)h[0]=entry;
- simHistorySave(h); simRender();}
+ simLocalSave(h); simRender();}
 /*
  * Unconditional, pass or fail: a stop against a stream that already stopped is
  * harmless, and skipping it on the strength of the last poll would leave the
@@ -874,7 +903,7 @@ async function simulationPage(){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
  };
- $('#sim-clear').onclick=()=>{ simHistorySave([]); simRender(); toast('History cleared') };
+ $('#sim-clear').onclick=()=>{ simHistoryClear(); simRender(); toast('History cleared') };
  $('#sim-send').onclick=async()=>{
   const phrase=text.value.trim();
   if(!phrase){toast('Enter a phrase first',true);return}
