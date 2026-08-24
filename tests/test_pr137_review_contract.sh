@@ -30,6 +30,11 @@ grep -q 'usb_mount_record' src/api.c
 grep -q 'usb_unmount_stale' src/api.c
 grep -q 'path_len >= 384' src/api.c
 grep -q 'redirect response rejected' src/adapter/radiod.c
+grep -q 'LE_TLS_AVAILABLE' Makefile src/api.c
+grep -q 'strlen(users_path)+strlen(".sessions")' src/api.c
+grep -q 'bonded_used' src/adapter/btd.c
+grep -q 'bonded-device status exceeds' src/adapter/btd.c
+grep -q 'BT_STATUS_BOND_NAME_MAX' src/adapter/btd.c
 grep -q "u\[i\] == '\"'" src/api.c
 ! grep -q 'c->feature_usb_host=host' src/api.c
 grep -Fq "return !*host||*host==':'" src/api.c
