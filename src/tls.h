@@ -40,6 +40,8 @@ int le_tls_client_verified(const struct le_tls *tls);
 
 /* Same shape as read(2)/write(2): bytes moved, 0 on clean close, -1 on error. */
 long le_tls_read(struct le_tls *tls, void *buf, size_t len);
+long le_tls_read_deadline(struct le_tls *tls, void *buf, size_t len,
+                          int timeout_ms);
 
 /*
  * Bytes already decrypted and buffered inside the TLS layer. poll() only sees
@@ -48,6 +50,8 @@ long le_tls_read(struct le_tls *tls, void *buf, size_t len);
  */
 int le_tls_pending(struct le_tls *tls);
 long le_tls_write(struct le_tls *tls, const void *buf, size_t len);
+long le_tls_write_deadline(struct le_tls *tls, const void *buf, size_t len,
+                           int timeout_ms);
 
 void le_tls_close(struct le_tls *tls);
 

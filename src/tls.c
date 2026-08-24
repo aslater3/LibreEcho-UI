@@ -192,6 +192,44 @@ long le_tls_read(struct le_tls *tls, void *buf, size_t len)
     return rc < 0 ? -1 : rc;
 }
 
+long le_tls_read_deadline(struct le_tls *tls, void *buf, size_t len,
+                          int timeout_ms)
+{
+    int flags, rc;
+    long long deadline;
+    if (!tls || !buf || timeout_ms < 0)
+        return -1;
+    flags = fcntl(tls->net.fd, F_GETFL);
+    if (flags < 0 || fcntl(tls->net.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        return -1;
+    deadline = monotonic_ms() + timeout_ms;
+    for (;;) {
+        struct pollfd waitfd;
+        long long remaining;
+        rc = mbedtls_ssl_read(&tls->ssl, buf, len);
+        if (rc >= 0 || rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
+            break;
+        if (rc != MBEDTLS_ERR_SSL_WANT_READ &&
+            rc != MBEDTLS_ERR_SSL_WANT_WRITE)
+            break;
+        remaining = deadline - monotonic_ms();
+        if (remaining <= 0) { rc = -1; break; }
+        waitfd.fd = tls->net.fd;
+        waitfd.events = rc == MBEDTLS_ERR_SSL_WANT_WRITE ? POLLOUT : POLLIN;
+        waitfd.revents = 0;
+        rc = poll(&waitfd, 1, remaining > 2147483647LL ?
+                  2147483647 : (int)remaining);
+        if (rc <= 0 || (waitfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            rc = -1;
+            break;
+        }
+    }
+    (void)fcntl(tls->net.fd, F_SETFL, flags);
+    if (rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
+        return 0;
+    return rc < 0 ? -1 : rc;
+}
+
 long le_tls_write(struct le_tls *tls, const void *buf, size_t len)
 {
     int rc;
@@ -202,6 +240,45 @@ long le_tls_write(struct le_tls *tls, const void *buf, size_t len)
         rc = mbedtls_ssl_write(&tls->ssl, buf, len);
     } while (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE);
     return rc < 0 ? -1 : rc;
+}
+
+long le_tls_write_deadline(struct le_tls *tls, const void *buf, size_t len,
+                           int timeout_ms)
+{
+    const unsigned char *p = buf;
+    size_t written = 0;
+    int flags, rc;
+    long long deadline;
+
+    if (!tls || !buf || timeout_ms < 0)
+        return -1;
+    flags = fcntl(tls->net.fd, F_GETFL);
+    if (flags < 0 || fcntl(tls->net.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        return -1;
+    deadline = monotonic_ms() + timeout_ms;
+    while (written < len) {
+        struct pollfd waitfd;
+        long long remaining = deadline - monotonic_ms();
+        rc = mbedtls_ssl_write(&tls->ssl, p + written, len - written);
+        if (rc > 0) {
+            written += (size_t)rc;
+            continue;
+        }
+        if (rc != MBEDTLS_ERR_SSL_WANT_READ &&
+            rc != MBEDTLS_ERR_SSL_WANT_WRITE)
+            break;
+        if (remaining <= 0)
+            break;
+        waitfd.fd = tls->net.fd;
+        waitfd.events = rc == MBEDTLS_ERR_SSL_WANT_WRITE ? POLLOUT : POLLIN;
+        waitfd.revents = 0;
+        rc = poll(&waitfd, 1, remaining > 2147483647LL ?
+                  2147483647 : (int)remaining);
+        if (rc <= 0 || (waitfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+            break;
+    }
+    (void)fcntl(tls->net.fd, F_SETFL, flags);
+    return written == len ? (long)written : -1;
 }
 
 void le_tls_close(struct le_tls *tls)
@@ -295,12 +372,25 @@ int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
     unsigned char buf[4096];
     char subject[128];
     char not_before[16], not_after[16];
-    time_t now;
-    struct tm tm_now;
     int rc = LE_IO, len;
 
-    if (!access(cert_path, R_OK) && !access(key_path, R_OK))
-        return LE_OK;                       /* already generated */
+    if (!access(cert_path, R_OK) && !access(key_path, R_OK)) {
+        mbedtls_x509_crt existing;
+        mbedtls_pk_context existing_key;
+        int pair_ok = 0;
+        mbedtls_x509_crt_init(&existing);
+        mbedtls_pk_init(&existing_key);
+        if (!mbedtls_x509_crt_parse_file(&existing, cert_path) &&
+            !mbedtls_pk_parse_keyfile(&existing_key, key_path, NULL, NULL, NULL) &&
+            !mbedtls_pk_check_pair(&existing.pk, &existing_key, NULL, NULL) &&
+            !mbedtls_x509_time_is_past(&existing.valid_to))
+            pair_ok = 1;
+        mbedtls_pk_free(&existing_key);
+        mbedtls_x509_crt_free(&existing);
+        if (pair_ok)
+            return LE_OK;                   /* existing certificate/key pair is current */
+        /* A partial write, mismatched key, or expired certificate is replaced. */
+    }
 
     mbedtls_pk_init(&key);
     mbedtls_x509write_crt_init(&crt);
@@ -322,11 +412,11 @@ int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
     snprintf(subject, sizeof(subject), "CN=%s,O=LibreEcho",
              common_name && *common_name ? common_name : "libreecho.local");
 
-    now = time(NULL);
-    gmtime_r(&now, &tm_now);
-    strftime(not_before, sizeof(not_before), "%Y%m%d%H%M%S", &tm_now);
-    tm_now.tm_year += 10;
-    strftime(not_after, sizeof(not_after), "%Y%m%d%H%M%S", &tm_now);
+    /* Use a fixed broad validity window. A first boot may occur before NTP
+       has set the clock; deriving validity from time(NULL) would create a
+       certificate that is already expired when the clock is corrected. */
+    snprintf(not_before, sizeof(not_before), "%s", "20200101000000");
+    snprintf(not_after, sizeof(not_after), "%s", "20991231235959");
 
     if (mbedtls_mpi_read_string(&serial, 10, "1"))
         goto done;

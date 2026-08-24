@@ -28,10 +28,14 @@
 #include <sys/sysmacros.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
+#ifndef LE_TLS_AVAILABLE
+#define LE_TLS_AVAILABLE 0
+#endif
 static void out(struct api_response*r,int status,const char*fmt,...){va_list ap;r->status=status;strcpy(r->type,"application/json; charset=utf-8");va_start(ap,fmt);r->length=(size_t)vsnprintf(r->body,sizeof(r->body),fmt,ap);va_end(ap);if(r->length>=sizeof(r->body))r->length=sizeof(r->body)-1;}
 static void ok(struct api_response*r,const char*data){out(r,200,"{\"ok\":true,\"data\":%s,\"error\":null}",data?data:"{}");}static void err(struct api_response*r,int status,int rc,const char*msg){char e[256];json_escape(e,sizeof(e),msg);out(r,status,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",le_result_code(rc),e);}static void method_not_allowed(struct api_response*r){err(r,405,LE_INVALID,"HTTP method is not allowed for this endpoint");}
 static int api_bootstrap_required_internal(const struct api_context*c){return c&&c->users_path[0]&&!c->auth.enabled&&!c->auth_token[0];}
 int api_bootstrap_required(const struct api_context*c){return api_bootstrap_required_internal(c);}
+void api_set_https_active(struct api_context*c,int active){if(!c)return;c->https_active=active?1:0;if(c->https_active&&c->sessions_path[0])le_auth_load_sessions(&c->auth,c->sessions_path);else if(!c->https_active&&c->sessions_path[0])unlink(c->sessions_path);}
 static int changing(const char*m){return strcmp(m,"GET")&&strcmp(m,"HEAD");}static int constant_equal(const char*a,const char*b){size_t al=strlen(a),bl=strlen(b),i,n=al>bl?al:bl;unsigned diff=(unsigned)(al^bl);for(i=0;i<n;i++){unsigned ac=i<al?(unsigned char)a[i]:0,bc=i<bl?(unsigned char)b[i]:0;diff|=ac^bc;}return diff==0;}/*
  * The origin must name the same host this request arrived on. Both schemes are
  * accepted: once the daemon can serve HTTPS, the browser sends
@@ -735,12 +739,11 @@ int api_apply_persisted_configuration(struct api_context *c, char *unrestored,
 #define LE_BOOT_ESTIMATE_MIN 10
 #define LE_BOOT_ESTIMATE_MAX 300
 static int measure_boot_seconds(void){FILE*f=fopen("/proc/uptime","r");double up=0.0;int seconds;if(!f)return LE_BOOT_ESTIMATE_DEFAULT;if(fscanf(f,"%lf",&up)!=1){fclose(f);return LE_BOOT_ESTIMATE_DEFAULT;}fclose(f);seconds=(int)(up+0.5);if(seconds<LE_BOOT_ESTIMATE_MIN)seconds=LE_BOOT_ESTIMATE_MIN;if(seconds>LE_BOOT_ESTIMATE_MAX)return LE_BOOT_ESTIMATE_DEFAULT;return seconds;}
-int api_init(struct api_context*c,struct le_backend*b,int dev,int insecure,const char*token,const char*origin,const char*csrf,const char*config_path,const char*users_path){char saved[16384];int v;memset(c,0,sizeof(*c));c->backend=b;c->dev_controls=dev;c->allow_insecure_lan=insecure;c->privacy_local_only=1;c->privacy_audio_retention=0;c->privacy_audio_retention_hours=LE_AUDIO_RETENTION_DEFAULT_HOURS;c->privacy_audio_max_mb=LE_AUDIO_RETENTION_DEFAULT_MAX_MB;strcpy(c->privacy_audio_mode,"none");c->privacy_audio_remote_url[0]=0;c->privacy_log_hours=24;c->integrations=4u;c->stt_max_utterance_ms=LE_STT_MAX_UTTERANCE_DEFAULT;c->stt_end_silence_ms=LE_STT_END_SILENCE_DEFAULT;c->stt_vad_floor_rms=LE_STT_VAD_FLOOR_DEFAULT;strcpy(c->timezone,"UTC");c->boot_estimate_seconds=measure_boot_seconds();strcpy(c->button_short,"Start listening");strcpy(c->button_long,"Open pairing mode");if(token)strncpy(c->auth_token,token,sizeof(c->auth_token)-1);if(origin)strncpy(c->allowed_origin,origin,sizeof(c->allowed_origin)-1);if(!csrf||strlen(csrf)!=64)return -1;strncpy(c->csrf_token,csrf,sizeof(c->csrf_token)-1);if(config_path)strncpy(c->config_path,config_path,sizeof(c->config_path)-1);if(users_path){strncpy(c->users_path,users_path,sizeof(c->users_path)-1);snprintf(c->sessions_path,sizeof(c->sessions_path),"%s.sessions",c->users_path);}if(c->users_path[0]&&!access(c->users_path,F_OK)&&le_auth_load(&c->auth,c->users_path)!=0){fprintf(stderr,"Unable to load LibreEcho users file: %s\n",c->users_path);return -1;}if(c->config_path[0]&&config_read(c->config_path,saved,sizeof(saved))>0){json_get_bool(saved,"privacy_local_only",&c->privacy_local_only);json_get_bool(saved,"privacy_audio_retention",&c->privacy_audio_retention);{char mode[16],url[256];int mode_rc=json_get_string(saved,"privacy_audio_mode",mode,sizeof(mode));if(mode_rc==1&&audio_retention_mode_valid(mode))strcpy(c->privacy_audio_mode,mode);else if(c->privacy_audio_retention)strcpy(c->privacy_audio_mode,"local");if(json_get_int(saved,"privacy_audio_retention_hours",&v)>0&&audio_retention_hours_valid(v))c->privacy_audio_retention_hours=v;if(json_get_int(saved,"privacy_audio_max_mb",&v)>0&&audio_retention_max_mb_valid(v))c->privacy_audio_max_mb=v;if(json_get_string(saved,"privacy_audio_remote_url",url,sizeof(url))==1&&audio_remote_url_valid(url))strcpy(c->privacy_audio_remote_url,url);c->privacy_audio_retention=strcmp(c->privacy_audio_mode,"none")!=0;}json_get_bool(saved,"privacy_telemetry",&c->privacy_telemetry);json_get_bool(saved,"privacy_crash_reports",&c->privacy_crash_reports);if(json_get_int(saved,"privacy_log_hours",&v)>0)c->privacy_log_hours=v;if(json_get_int(saved,"stt_max_utterance_ms",&v)>0&&stt_max_utterance_valid(v))c->stt_max_utterance_ms=v;if(json_get_int(saved,"stt_end_silence_ms",&v)>0&&stt_end_silence_valid(v))c->stt_end_silence_ms=v;if(json_get_int(saved,"stt_vad_floor_rms",&v)>0&&stt_vad_floor_valid(v))c->stt_vad_floor_rms=v;{char tzbuf[64];if(json_get_string(saved,"timezone",tzbuf,sizeof(tzbuf))>0&&timezone_valid(tzbuf))strcpy(c->timezone,tzbuf);}if(json_get_int(saved,"integrations",&v)>0)c->integrations=(unsigned)v;json_get_bool(saved,"feature_simulation",&c->feature_simulation);json_get_bool(saved,"feature_usb_host",&c->feature_usb_host);json_get_bool(saved,"feature_https",&c->feature_https);json_get_string(saved,"mac_wifi",c->mac_wifi,sizeof(c->mac_wifi));json_get_string(saved,"mac_bt",c->mac_bt,sizeof(c->mac_bt));json_get_bool(saved,"ssh",&c->net_ssh);json_get_bool(saved,"api_lan",&c->net_api_lan);json_get_string(saved,"button_short",c->button_short,sizeof(c->button_short));json_get_string(saved,"button_long",c->button_long,sizeof(c->button_long));}/* Sessions are only kept across a restart when HTTPS is on. Persisting a
+int api_init(struct api_context*c,struct le_backend*b,int dev,int insecure,const char*token,const char*origin,const char*csrf,const char*config_path,const char*users_path){char saved[16384];int v;memset(c,0,sizeof(*c));c->backend=b;c->dev_controls=dev;c->allow_insecure_lan=insecure;c->privacy_local_only=1;c->privacy_audio_retention=0;c->privacy_audio_retention_hours=LE_AUDIO_RETENTION_DEFAULT_HOURS;c->privacy_audio_max_mb=LE_AUDIO_RETENTION_DEFAULT_MAX_MB;strcpy(c->privacy_audio_mode,"none");c->privacy_audio_remote_url[0]=0;c->privacy_log_hours=24;c->integrations=4u;c->stt_max_utterance_ms=LE_STT_MAX_UTTERANCE_DEFAULT;c->stt_end_silence_ms=LE_STT_END_SILENCE_DEFAULT;c->stt_vad_floor_rms=LE_STT_VAD_FLOOR_DEFAULT;strcpy(c->timezone,"UTC");c->boot_estimate_seconds=measure_boot_seconds();strcpy(c->button_short,"Start listening");strcpy(c->button_long,"Open pairing mode");if(token)strncpy(c->auth_token,token,sizeof(c->auth_token)-1);if(origin)strncpy(c->allowed_origin,origin,sizeof(c->allowed_origin)-1);if(!csrf||strlen(csrf)!=64)return -1;strncpy(c->csrf_token,csrf,sizeof(c->csrf_token)-1);if(config_path)strncpy(c->config_path,config_path,sizeof(c->config_path)-1);if(users_path){if(strlen(users_path)+strlen(".sessions")>=sizeof(c->sessions_path))return -1;strncpy(c->users_path,users_path,sizeof(c->users_path)-1);snprintf(c->sessions_path,sizeof(c->sessions_path),"%s.sessions",c->users_path);}if(c->users_path[0]&&!access(c->users_path,F_OK)&&le_auth_load(&c->auth,c->users_path)!=0){fprintf(stderr,"Unable to load LibreEcho users file: %s\n",c->users_path);return -1;}if(c->config_path[0]&&config_read(c->config_path,saved,sizeof(saved))>0){json_get_bool(saved,"privacy_local_only",&c->privacy_local_only);json_get_bool(saved,"privacy_audio_retention",&c->privacy_audio_retention);{char mode[16],url[256];int mode_rc=json_get_string(saved,"privacy_audio_mode",mode,sizeof(mode));if(mode_rc==1&&audio_retention_mode_valid(mode))strcpy(c->privacy_audio_mode,mode);else if(c->privacy_audio_retention)strcpy(c->privacy_audio_mode,"local");if(json_get_int(saved,"privacy_audio_retention_hours",&v)>0&&audio_retention_hours_valid(v))c->privacy_audio_retention_hours=v;if(json_get_int(saved,"privacy_audio_max_mb",&v)>0&&audio_retention_max_mb_valid(v))c->privacy_audio_max_mb=v;if(json_get_string(saved,"privacy_audio_remote_url",url,sizeof(url))==1&&audio_remote_url_valid(url))strcpy(c->privacy_audio_remote_url,url);c->privacy_audio_retention=strcmp(c->privacy_audio_mode,"none")!=0;}json_get_bool(saved,"privacy_telemetry",&c->privacy_telemetry);json_get_bool(saved,"privacy_crash_reports",&c->privacy_crash_reports);if(json_get_int(saved,"privacy_log_hours",&v)>0)c->privacy_log_hours=v;if(json_get_int(saved,"stt_max_utterance_ms",&v)>0&&stt_max_utterance_valid(v))c->stt_max_utterance_ms=v;if(json_get_int(saved,"stt_end_silence_ms",&v)>0&&stt_end_silence_valid(v))c->stt_end_silence_ms=v;if(json_get_int(saved,"stt_vad_floor_rms",&v)>0&&stt_vad_floor_valid(v))c->stt_vad_floor_rms=v;{char tzbuf[64];if(json_get_string(saved,"timezone",tzbuf,sizeof(tzbuf))>0&&timezone_valid(tzbuf))strcpy(c->timezone,tzbuf);}if(json_get_int(saved,"integrations",&v)>0)c->integrations=(unsigned)v;json_get_bool(saved,"feature_simulation",&c->feature_simulation);json_get_bool(saved,"feature_https",&c->feature_https);json_get_string(saved,"mac_wifi",c->mac_wifi,sizeof(c->mac_wifi));json_get_string(saved,"mac_bt",c->mac_bt,sizeof(c->mac_bt));json_get_bool(saved,"ssh",&c->net_ssh);json_get_bool(saved,"api_lan",&c->net_api_lan);json_get_string(saved,"button_short",c->button_short,sizeof(c->button_short));json_get_string(saved,"button_long",c->button_long,sizeof(c->button_long));}/* Sessions are only kept across a restart when HTTPS is on. Persisting a
     bearer token extends the life of a credential, which is worth doing only
     when the transport carrying it is encrypted; over plain HTTP the token is
-    readable on the wire and a restart is the one thing that reliably clears
-    it. feature_https is read from the config just above. */
- if(c->feature_https)le_auth_load_sessions(&c->auth,c->sessions_path);
+    * readable on the wire and a restart is the one thing that reliably clears
+    * it. Sessions are loaded only after the HTTPS listener confirms it is active. */
  radio_load(c);event_bus_init(&c->events);api_log(c,"info","LibreEcho web daemon started");return 0;}
 static enum le_log_level api_log_level(const char*level){if(level&&!strcmp(level,"error"))return LE_LOG_ERROR;if(level&&(!strcmp(level,"warning")||!strcmp(level,"warn")))return LE_LOG_WARNING;if(level&&!strcmp(level,"debug"))return LE_LOG_DEBUG;return LE_LOG_INFO;}
 void api_log(struct api_context*c,const char*level,const char*message){char escaped[180],line[256];time_t t=time(0);struct timespec mono;long boot_seconds=0;if(clock_gettime(CLOCK_MONOTONIC,&mono)==0)boot_seconds=(long)mono.tv_sec;json_escape(escaped,sizeof(escaped),message);snprintf(line,sizeof(line),"{\"timestamp\":%ld,\"boot_seconds\":%ld,\"level\":\"%s\",\"message\":\"%s\"}",(long)t,boot_seconds,level,escaped);snprintf(c->logs[c->log_next%LE_MAX_LOGS],sizeof(c->logs[0]),"%s",line);c->log_next++;if(c->log_count<LE_MAX_LOGS)c->log_count++;event_bus_publish(&c->events,"log",line);le_log(api_log_level(level),"%s",message);}
@@ -782,15 +785,32 @@ static int radio_word_valid(const char *w)
 
 static int radio_url_valid(const char *u)
 {
-    size_t i, n = strlen(u);
+    const char *rest, *slash, *colon;
+    size_t n = strlen(u), host_len, port_len, path_len;
 
     if (n < 8 || n >= sizeof(((struct le_radio_station *)0)->url))
         return 0;
-    if (strncmp(u, "http://", 7) && strncmp(u, "https://", 8))
+    if (!strncmp(u, "https://", 8)) {
+        if (!LE_TLS_AVAILABLE)
+            return 0;
+        rest = u + 8;
+    }
+    else if (!strncmp(u, "http://", 7)) rest = u + 7;
+    else return 0;
+    slash = strchr(rest, '/');
+    colon = memchr(rest, ':', slash ? (size_t)(slash - rest) : strlen(rest));
+    host_len = colon ? (size_t)(colon - rest) :
+               (slash ? (size_t)(slash - rest) : strlen(rest));
+    port_len = colon ? (slash ? (size_t)(slash - colon - 1) : strlen(colon + 1)) : 0;
+    path_len = slash ? strlen(slash) : 1;
+    /* Match radiod's HOST_MAX, port buffer, and PATH_MAX_LEN limits. */
+    if (!host_len || host_len >= 256 || (colon && (!port_len || port_len >= 16)) ||
+        path_len >= 384)
         return 0;
-    for (i = 0; i < n; ++i)
-        if ((unsigned char)u[i] < 0x21 || (unsigned char)u[i] > 0x7e)
-            return 0;   /* no control characters, spaces or non-ASCII */
+    for (size_t i = 0; i < n; ++i)
+        if ((unsigned char)u[i] < 0x21 || (unsigned char)u[i] > 0x7e ||
+            u[i] == '"' || u[i] == '\\')
+            return 0;
     return 1;
 }
 
@@ -1154,7 +1174,58 @@ static int usb_node_ready(const char*part,const char*dev){struct stat st;char sy
  fclose(f);
  if(mknod(dev,S_IFBLK|0600,makedev(maj,min))&&errno!=EEXIST)return 0;
  return 1;}
-static const char*usb_mount_try(const char*part){static const char*const kinds[]={"exfat","vfat","ext4"};char dev[64];size_t i;struct stat st;snprintf(dev,sizeof(dev),"/dev/%s",part);if(!usb_node_ready(part,dev))return NULL;if(stat(LE_USB_MOUNT,&st))mkdir(LE_USB_MOUNT,0755);for(i=0;i<sizeof(kinds)/sizeof(kinds[0]);i++)if(mount(dev,LE_USB_MOUNT,kinds[i],MS_RDONLY|MS_NOSUID|MS_NODEV,NULL)==0||errno==EBUSY)return kinds[i];return NULL;}
+static int usb_mount_record(const char*part,char*fstype,size_t fstype_size)
+{
+ FILE*f;char line[1024],dev_field[64],mountpoint[256],mounted_type[64],source[256];struct stat st;unsigned maj,min;char dev[64];int found=0;
+ if(fstype&&fstype_size)fstype[0]='\0';
+ snprintf(dev,sizeof(dev),"/dev/%s",part);
+ if(stat(dev,&st)<0)return 0;
+ maj=major(st.st_rdev);min=minor(st.st_rdev);
+ f=fopen("/proc/self/mountinfo","r");if(!f)return 0;
+ while(fgets(line,sizeof(line),f)){
+  char*sep=strstr(line," - ");
+  if(!sep)continue;
+  if(sscanf(line,"%*u %*u %63s %*s %255s",dev_field,mountpoint)!=2)continue;
+  if(strcmp(mountpoint,LE_USB_MOUNT))continue;
+  if(sscanf(sep+3,"%63s %255s",mounted_type,source)!=2)continue;
+  if(sscanf(dev_field,"%u:%u",&maj,&min)!=2)continue;
+  if(maj==major(st.st_rdev)&&min==minor(st.st_rdev)){
+   if(fstype&&fstype_size)snprintf(fstype,fstype_size,"%s",mounted_type);
+   found=1;
+  }
+  break;
+ }
+ fclose(f);return found;
+}
+static int usb_mount_exists(void)
+{
+ FILE*f;char line[1024];int found=0;
+ f=fopen("/proc/self/mountinfo","r");if(!f)return 0;
+ while(fgets(line,sizeof(line),f)){char dev[64],mountpoint[256];if(sscanf(line,"%*u %*u %63s %*s %255s",dev,mountpoint)==2&&!strcmp(mountpoint,LE_USB_MOUNT)){found=1;break;}}
+ fclose(f);return found;
+}
+static void usb_unmount_stale(void)
+{
+ if(usb_mount_exists())(void)umount(LE_USB_MOUNT);
+}
+static const char*usb_mount_try(const char*part)
+{
+ static const char*const kinds[]={"exfat","vfat","ext4"};
+ char dev[64],existing[64];size_t i,j;struct stat st;
+ snprintf(dev,sizeof(dev),"/dev/%s",part);
+ if(!usb_node_ready(part,dev))return NULL;
+ if(stat(LE_USB_MOUNT,&st))mkdir(LE_USB_MOUNT,0755);
+ if(usb_mount_record(part,existing,sizeof(existing)))
+  for(i=0;i<sizeof(kinds)/sizeof(kinds[0]);i++)if(!strcmp(existing,kinds[i]))return kinds[i];
+ if(usb_mount_exists())usb_unmount_stale();
+ for(i=0;i<sizeof(kinds)/sizeof(kinds[0]);i++){
+  if(mount(dev,LE_USB_MOUNT,kinds[i],MS_RDONLY|MS_NOSUID|MS_NODEV,NULL)==0)return kinds[i];
+  if(errno==EBUSY&&usb_mount_record(part,existing,sizeof(existing)))
+   for(j=0;j<sizeof(kinds)/sizeof(kinds[0]);j++)if(!strcmp(existing,kinds[j]))return kinds[j];
+  if(errno==EBUSY)usb_unmount_stale();
+ }
+ return NULL;
+}
 static int hexval(char ch){if(ch>='0'&&ch<='9')return ch-'0';if(ch>='a'&&ch<='f')return ch-'a'+10;if(ch>='A'&&ch<='F')return ch-'A'+10;return -1;}
 /*
  * Browsing sub-directories. The query value is untrusted, so reject anything
@@ -1230,9 +1301,9 @@ static void usb_play_json(struct api_context*c,const struct api_request*q,struct
  api_log(c,"info","USB file playback started");
  {char body[768];snprintf(body,sizeof(body),"{\"playing\":true,\"path\":\"%s\"}",esc);ok(r,body);}
 }
-static void usb_storage_json(struct api_context*c,const struct api_request*q,struct api_response*r){char node[64],part[64],esc[192],rel[256],dirpath[512],relesc[512];unsigned long long bytes=0,used=0,avail=0;const char*fs;size_t n=0,listed=0;DIR*d;struct dirent*e;struct stat st;struct statvfs vfs;(void)c;
+static void usb_storage_json(struct api_context*c,const struct api_request*q,struct api_response*r){char node[64],part[64],esc[512],rel[256],dirpath[512],relesc[512];unsigned long long bytes=0,used=0,avail=0;const char*fs;size_t n=0,listed=0;DIR*d;struct dirent*e;struct stat st;struct statvfs vfs;(void)c;
  if(usb_subpath(q?q->path:NULL,rel,sizeof(rel),dirpath,sizeof(dirpath))<0){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
- if(!usb_disk_find(node,sizeof(node),part,sizeof(part),&bytes)){out(r,200,"{\"ok\":true,\"data\":{\"present\":false,\"mounted\":false,\"message\":\"No USB disk is attached. The OTG port must be in host mode.\"},\"error\":null}");return;}
+ if(!usb_disk_find(node,sizeof(node),part,sizeof(part),&bytes)){usb_unmount_stale();out(r,200,"{\"ok\":true,\"data\":{\"present\":false,\"mounted\":false,\"message\":\"No USB disk is attached. The OTG port must be in host mode.\"},\"error\":null}");return;}
  fs=usb_mount_try(part);
  if(fs&&statvfs(LE_USB_MOUNT,&vfs)==0){unsigned long long fr=(unsigned long long)vfs.f_frsize;avail=fr*(unsigned long long)vfs.f_bavail;used=fr*((unsigned long long)vfs.f_blocks-(unsigned long long)vfs.f_bfree);}
  json_escape(relesc,sizeof(relesc),rel);
@@ -1327,7 +1398,7 @@ static void features_json(struct api_context*c,struct api_response*r){char role[
 /* https_port is set only when the listener actually bound, so the UI can tell
    "switched on" from "switched on and serving". */
 if(c->https_cert[0])le_tls_cert_info(c->https_cert,na,sizeof(na),fp,sizeof(fp));
-out(r,200,"{\"ok\":true,\"data\":{\"simulation\":%s,\"usb_host\":%s,\"usb_role\":\"%s\",\"usb_role_supported\":%s,\"https\":%s,\"https_active\":%s,\"https_port\":%d,\"https_expires\":\"%s\",\"https_fingerprint\":\"%s\"},\"error\":null}",c->feature_simulation?"true":"false",(have&&!strcmp(role,"host"))?"true":"false",esc,have?"true":"false",c->feature_https?"true":"false",c->https_port>0?"true":"false",c->https_port,na,fp);}
+out(r,200,"{\"ok\":true,\"data\":{\"simulation\":%s,\"usb_host\":%s,\"usb_role\":\"%s\",\"usb_role_supported\":%s,\"https\":%s,\"https_active\":%s,\"https_port\":%d,\"https_expires\":\"%s\",\"https_fingerprint\":\"%s\"},\"error\":null}",c->feature_simulation?"true":"false",(have&&!strcmp(role,"host"))?"true":"false",esc,have?"true":"false",c->feature_https?"true":"false",c->https_active?"true":"false",c->https_port,na,fp);}
 static void bluetooth_json(struct api_context*c,struct api_response*r){struct le_bluetooth_state b;size_t i,n=0;int rc;char btaddr[48],btfac[48],btcfg[48];char state[64],transport[64],hci[64],local_name[LE_TEXT*2],error[192],disconnect_reason[96],connect_failed_status[96],profile_state[32],profile_error[192],name[LE_TEXT*2];if((rc=le_get_bluetooth_state(c->backend,&b))==LE_NOT_SUPPORTED){out(r,200,"{\"ok\":true,\"data\":{\"available\":false,\"unavailable\":true,\"message\":\"Bluetooth status is unavailable\"},\"error\":null}");return;}else if(rc){err(r,503,rc,"Bluetooth status is unavailable");return;}json_escape(state,sizeof(state),b.state);json_escape(transport,sizeof(transport),b.transport);json_escape(hci,sizeof(hci),b.hci);json_escape(btaddr,sizeof(btaddr),b.address);json_escape(btfac,sizeof(btfac),b.address_factory);json_escape(btcfg,sizeof(btcfg),c->mac_bt);json_escape(local_name,sizeof(local_name),b.local_name);json_escape(error,sizeof(error),b.last_error);json_escape(disconnect_reason,sizeof(disconnect_reason),b.last_disconnect_reason);json_escape(connect_failed_status,sizeof(connect_failed_status),b.last_connect_failed_status);json_escape(profile_state,sizeof(profile_state),b.profile_state);json_escape(profile_error,sizeof(profile_error),b.profile_error);if(bluetooth_append(r->body,sizeof(r->body),&n,"{\"ok\":true,\"data\":{\"state\":\"%s\",\"available\":%s,\"enabled\":%s,\"activation_attempted\":%s,\"transport\":\"%s\",\"hci\":\"%s\",\"address\":\"%s\",\"address_factory\":\"%s\",\"address_configured\":\"%s\",\"local_name\":\"%s\",\"last_error\":\"%s\",\"last_disconnect_reason\":\"%s\",\"last_connect_failed_status\":\"%s\",\"profile_state\":\"%s\",\"profile_error\":\"%s\",\"profile_services\":{\"sdp\":%s,\"a2dp_sink\":%s,\"avrcp\":%s,\"rfcomm\":%s,\"bnep\":%s,\"hidp\":%s},\"scanning\":%s,\"pairing\":%s,\"pairing_mode\":%s,\"capabilities\":{\"classic\":%s,\"le\":%s,\"ssp\":%s,\"secure_connection\":%s,\"connectable\":%s,\"discoverable\":%s,\"bondable\":%s},\"pending_pairing\":",state,b.available?"true":"false",b.enabled?"true":"false",b.activation_attempted?"true":"false",transport,hci,btaddr,btfac,btcfg,local_name,error,disconnect_reason,connect_failed_status,profile_state,profile_error,b.profile_sdp?"true":"false",b.profile_a2dp_sink?"true":"false",b.profile_avrcp?"true":"false",b.profile_rfcomm?"true":"false",b.profile_bnep?"true":"false",b.profile_hidp?"true":"false",b.scanning?"true":"false",b.pairing?"true":"false",b.pairing_mode?"true":"false",b.classic?"true":"false",b.le?"true":"false",b.ssp?"true":"false",b.secure_connection?"true":"false",b.connectable?"true":"false",b.discoverable?"true":"false",b.bondable?"true":"false")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}if(b.pairing){json_escape(name,sizeof(name),b.pending_pairing.address);{char method[48];json_escape(method,sizeof(method),b.pending_pairing.method);if(bluetooth_append(r->body,sizeof(r->body),&n,"{\"address\":\"%s\",\"type\":%d,\"method\":\"%s\",\"value\":%u}",name,b.pending_pairing.type,method,b.pending_pairing.value)){err(r,503,LE_IO,"Bluetooth status response is too large");return;}}}else if(bluetooth_append(r->body,sizeof(r->body),&n,"null")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}if(bluetooth_append(r->body,sizeof(r->body),&n,",\"discovered\":[")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}for(i=0;i<b.discovered_count&&i<LE_MAX_BLUETOOTH_DEVICES;i++){char address[32];json_escape(address,sizeof(address),b.discovered[i].address);json_escape(name,sizeof(name),b.discovered[i].name);if(bluetooth_append(r->body,sizeof(r->body),&n,"%s{\"address\":\"%s\",\"name\":\"%s\",\"type\":%d,\"rssi\":%d,\"rssi_valid\":%s,\"paired\":%s,\"connected\":%s}",i?",":"",address,name,b.discovered[i].type,b.discovered[i].rssi,b.discovered[i].rssi_valid?"true":"false",b.discovered[i].paired?"true":"false",b.discovered[i].connected?"true":"false")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}}if(bluetooth_append(r->body,sizeof(r->body),&n,"],\"known_devices\":[")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}for(i=0;i<b.known_count&&i<LE_MAX_BLUETOOTH_DEVICES;i++){char address[32];json_escape(address,sizeof(address),b.known[i].address);json_escape(name,sizeof(name),b.known[i].name);if(bluetooth_append(r->body,sizeof(r->body),&n,"%s{\"address\":\"%s\",\"name\":\"%s\",\"type\":%d,\"rssi\":%d,\"rssi_valid\":%s,\"connected\":%s}",i?",":"",address,name,b.known[i].type,b.known[i].rssi,b.known[i].rssi_valid?"true":"false",b.known[i].connected?"true":"false")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}}if(bluetooth_append(r->body,sizeof(r->body),&n,"]},\"error\":null}")){err(r,503,LE_IO,"Bluetooth status response is too large");return;}r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
 static int auth_rate_limited(struct api_context*c){time_t now=time(0);if(!c->auth.enabled)return 0;if(c->auth_blocked_until>now)return 1;if(c->auth_blocked_until)c->auth_blocked_until=0;if(!c->auth_window_started||now-c->auth_window_started>=LE_AUTH_FAILURE_WINDOW){c->auth_window_started=now;c->auth_failures=0;}return c->auth_failures>=LE_AUTH_FAILURE_LIMIT;}
 static void auth_record_failure(struct api_context*c){time_t now=time(0);if(!c->auth_window_started||now-c->auth_window_started>=LE_AUTH_FAILURE_WINDOW){c->auth_window_started=now;c->auth_failures=0;}if(c->auth_failures<LE_AUTH_FAILURE_LIMIT)c->auth_failures++;if(c->auth_failures>=LE_AUTH_FAILURE_LIMIT)c->auth_blocked_until=now+LE_AUTH_BLOCK_SECONDS;}
@@ -1379,11 +1450,11 @@ clear:
 static void auth_remove_user_json(struct api_context*c,const struct api_request*q,struct api_response*r)
 {
     const char*username=q->path+strlen("/api/v1/auth/users/");
-    if(!*username||strchr(username,'/')||le_auth_remove_user(&c->auth,c->users_path,username)||(c->feature_https&&c->sessions_path[0]&&le_auth_save_sessions(&c->auth,c->sessions_path))){err(r,409,LE_BUSY,"User could not be removed; at least one user must remain");return;}
+    if(!*username||strchr(username,'/')||le_auth_remove_user(&c->auth,c->users_path,username)||(c->https_active&&c->sessions_path[0]&&le_auth_save_sessions(&c->auth,c->sessions_path))){err(r,409,LE_BUSY,"User could not be removed; at least one user must remain");return;}
     api_log(c,"warning","Local user removed");
     auth_users_json(c,r);
 }
-static void auth_login_json(struct api_context*c,const struct api_request*q,struct api_response*r){char username[LE_AUTH_USERNAME_MAX],password[LE_AUTH_PASSWORD_MAX+1],token[LE_AUTH_TOKEN_MAX],escaped[LE_AUTH_USERNAME_MAX*2];int expires;if(json_get_string(q->body,"username",username,sizeof(username))<1||json_get_string(q->body,"password",password,sizeof(password))<1){err(r,400,LE_INVALID,"Username and password are required");return;}if(auth_rate_limited(c)){memset(password,0,sizeof(password));err(r,429,LE_BUSY,"Too many login attempts; try again later");return;}if(le_auth_login(&c->auth,username,password,token,sizeof(token),&expires)!=0){auth_record_failure(c);memset(password,0,sizeof(password));if(auth_rate_limited(c))err(r,429,LE_BUSY,"Too many login attempts; try again later");else err(r,401,LE_AUTH,"Invalid username or password");return;}c->auth_failures=0;c->auth_window_started=0;c->auth_blocked_until=0;memset(password,0,sizeof(password));json_escape(escaped,sizeof(escaped),username);if(c->feature_https)(void)le_auth_save_sessions(&c->auth,c->sessions_path);api_log(c,"info","Authenticated user session created");out(r,200,"{\"ok\":true,\"data\":{\"token\":\"%s\",\"username\":\"%s\",\"expires_in\":%d},\"error\":null}",token,escaped,expires);}
+static void auth_login_json(struct api_context*c,const struct api_request*q,struct api_response*r){char username[LE_AUTH_USERNAME_MAX],password[LE_AUTH_PASSWORD_MAX+1],token[LE_AUTH_TOKEN_MAX],escaped[LE_AUTH_USERNAME_MAX*2];int expires;if(json_get_string(q->body,"username",username,sizeof(username))<1||json_get_string(q->body,"password",password,sizeof(password))<1){err(r,400,LE_INVALID,"Username and password are required");return;}if(auth_rate_limited(c)){memset(password,0,sizeof(password));err(r,429,LE_BUSY,"Too many login attempts; try again later");return;}if(le_auth_login(&c->auth,username,password,token,sizeof(token),&expires)!=0){auth_record_failure(c);memset(password,0,sizeof(password));if(auth_rate_limited(c))err(r,429,LE_BUSY,"Too many login attempts; try again later");else err(r,401,LE_AUTH,"Invalid username or password");return;}c->auth_failures=0;c->auth_window_started=0;c->auth_blocked_until=0;memset(password,0,sizeof(password));json_escape(escaped,sizeof(escaped),username);if(c->https_active)(void)le_auth_save_sessions(&c->auth,c->sessions_path);api_log(c,"info","Authenticated user session created");out(r,200,"{\"ok\":true,\"data\":{\"token\":\"%s\",\"username\":\"%s\",\"expires_in\":%d},\"error\":null}",token,escaped,expires);}
 static void auth_current_json(struct api_context*c,const struct api_request*q,struct api_response*r){char username[LE_AUTH_USERNAME_MAX],escaped[LE_AUTH_USERNAME_MAX*2];if(!strncmp(q->authorization,"Bearer ",7)&&le_auth_session(&c->auth,q->authorization+7,username,sizeof(username))){json_escape(escaped,sizeof(escaped),username);out(r,200,"{\"ok\":true,\"data\":{\"authenticated\":true,\"username\":\"%s\"},\"error\":null}",escaped);}else if(c->auth_token[0])ok(r,"{\"authenticated\":true,\"username\":\"token\"}");else err(r,401,LE_AUTH,"Authentication is required");}
 static int button_status_value(const char *data, const char *key, char *out, size_t size)
 {
@@ -1456,13 +1527,7 @@ static int mac_override_valid(const char *in, char *out, size_t out_size)
     }
     out[n] = '\0';
     if (sscanf(out, "%2x", &first) != 1 || (first & 1))
-        return 0;                      /* multicast: no interface may source it */
-    /*
-     * All-zero is syntactically six octets but is not a usable address. It is
-     * applied to wlan0 at boot, and this device's recovery path is the network
-     * it would take down, so refuse it here rather than discover it after a
-     * reboot.
-     */
+        return 0;
     {
         size_t z;
         for (z = 0; out[z]; ++z)
@@ -1472,7 +1537,7 @@ static int mac_override_valid(const char *in, char *out, size_t out_size)
     }
 }
 
-void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;usb_host_restore(c);if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(c->feature_https)(void)le_auth_save_sessions(&c->auth,c->sessions_path);}ok(r,"{\"logged_out\":true}");return;}
+void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;usb_host_restore(c);if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(c->https_active)(void)le_auth_save_sessions(&c->auth,c->sessions_path);}ok(r,"{\"logged_out\":true}");return;}
  if(!strcmp(p,"/api/v1/config/export")&&!strcmp(q->method,"GET")){char config[4096];rc=configuration_json(c,config,sizeof(config));if(rc)err(r,501,rc,"Configuration export is unavailable for this backend");else ok(r,config);return;}if(!strcmp(p,"/api/v1/config/import")&&!strcmp(q->method,"POST")){rc=import_configuration(c,q->body);if(rc)err(r,rc==LE_INVALID?400:501,rc,rc==LE_INVALID?"Configuration file is invalid or incomplete":"Configuration restore is unavailable for this backend");else{api_log(c,"warning","Configuration restored from uploaded JSON");ok(r,"{\"restored\":true,\"schema_version\":1}");}return;}
  if(!strcmp(p,"/api/v1/assistant")){if(!strcmp(q->method,"GET")){agent_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){agent_result(r,"configure",q->body);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/assistant/history")&&!strcmp(q->method,"GET")){agent_result(r,"history",NULL);return;}
@@ -1514,8 +1579,8 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
     * port looked empty until it was physically unplugged and replugged. The
     * dip gives the drive the edge it is waiting for.
     */
-   if(want_host>0){c->feature_usb_host=host?1:0;c->usb_host_applied=1;api_persist_configuration(c);}
-   if(want_host>0&&host){struct timespec dip={0,400000000L};usb_role_write("device");nanosleep(&dip,NULL);}
+   if(want_host>0){c->usb_host_applied=1;}
+   if(want_host>0&&host){usb_role_write("device");usleep(400000);}
    if(want_host>0){int urc=usb_role_write(host?"host":"device");
     if(urc){err(r,urc==LE_NOT_SUPPORTED?501:503,urc,"USB role could not be changed");return;}
     api_log(c,"info",host?"USB port switched to host (storage) mode":"USB port switched to device (ADB) mode");

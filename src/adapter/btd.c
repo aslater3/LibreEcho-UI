@@ -77,7 +77,8 @@
  * -1 leaves the client with no reply at all, which the web UI can only render
  * as stale state.
  */
-#define STATUS_ENVELOPE_RESERVE 96
+#define STATUS_ENVELOPE_RESERVE 64
+#define BT_STATUS_BOND_NAME_MAX 32
 
 /* L2CAP profile listeners.  PSM values follow the assigned-numbers table:
  * SDP browsing, AVRCP control/browsing, and AVDTP signaling/transport. */
@@ -1515,14 +1516,16 @@ static int status_json(struct bt_context *context, char *data, size_t size)
 {
     size_t used = 0;
     size_t i;
-    size_t list_size = size > STATUS_ENVELOPE_RESERVE ?
-                       size - STATUS_ENVELOPE_RESERVE : 0;
+    size_t bonded_used = 0;
+    size_t list_size;
     int available;
     char escaped[BT_NAME_MAX * 2];
+    char bonded[LE_ADAPTER_MSG_MAX];
     char local_name[BT_NAME_MAX * 2];
     const char *profile_state;
     const char *profile_error;
     int sdp = 0, a2dp = 0, avrcp = 0;
+    bonded[0] = '\0';
 
     if (hci_present() && (time(NULL) - context->last_info > 2))
         (void)refresh_info(context);
@@ -1606,25 +1609,39 @@ static int status_json(struct bt_context *context, char *data, size_t size)
         int first = 1;
         for (i = 0; i < context->device_count; ++i) {
             char address[18];
+            char bond_name[BT_STATUS_BOND_NAME_MAX + 4];
+            size_t bond_name_length;
             if (!context->devices[i].paired)
                 continue;
             address_text(context->devices[i].address, address, sizeof(address));
             json_escape(context->devices[i].name, escaped, sizeof(escaped));
-            if (append_text(data, list_size, &used,
+            bond_name_length = strlen(escaped);
+            if (bond_name_length > BT_STATUS_BOND_NAME_MAX) {
+                size_t cut = BT_STATUS_BOND_NAME_MAX;
+                while (cut && escaped[cut - 1] == '\\')
+                    --cut;
+                memcpy(bond_name, escaped, cut);
+                memcpy(bond_name + cut, "...", 4);
+            } else {
+                memcpy(bond_name, escaped, bond_name_length + 1);
+            }
+            if (append_text(bonded, sizeof(bonded), &bonded_used,
                             "%s{\"address\":\"%s\",\"name\":\"%s\","
                             "\"type\":%u,\"rssi\":%d,\"rssi_valid\":%s,\"connected\":%s}",
-                            first ? "" : ",", address, escaped,
+                            first ? "" : ",", address, bond_name,
                             context->devices[i].type, context->devices[i].rssi,
                             context->devices[i].rssi_valid ? "true" : "false",
                             context->devices[i].connected ? "true" : "false") != 0) {
-                le_log_warn("btd: bond list clipped to the bounded status message");
-                break;
+                le_log_error("btd: bonded-device status exceeds bounded message");
+                return -1;
             }
             first = 0;
         }
     }
-    if (append_text(data, size, &used, "],\"discovered\":[") != 0)
+    if (append_text(data, size, &used, "%s],\"discovered\":[", bonded) != 0)
         return -1;
+    list_size = size > STATUS_ENVELOPE_RESERVE ?
+                size - STATUS_ENVELOPE_RESERVE : used;
     for (i = 0; i < context->device_count; ++i) {
         char address[18], name[BT_NAME_MAX * 2];
         if (!context->devices[i].discovered)

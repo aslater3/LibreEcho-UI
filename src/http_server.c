@@ -206,16 +206,16 @@ c->used=0;
  * misconfiguration can never lock the device's own UI out.
  */
 static void tls_relay(int cfd,const struct http_options*o){
-struct le_tls*tls;int up=-1;struct sockaddr_in a;struct pollfd p[2];char buf[4096];long n;
+struct le_tls*tls;int up=-1;struct sockaddr_in a;struct pollfd p[2];char buf[4096];long n;const char*relay_host;
 tls=le_tls_server_open(cfd,o->tls_cert,o->tls_key);
 if(!tls){close(cfd);return;}
 up=socket(AF_INET,SOCK_STREAM,0);
 if(up<0){le_tls_close(tls);close(cfd);return;}
-memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)o->port);
+memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)o->port);relay_host=!strcmp(o->listen_host,"0.0.0.0")?"127.0.0.1":o->listen_host;
 /* inet_pton, not INADDR_LOOPBACK: the latter is not POSIX and is hidden by
    _POSIX_C_SOURCE on some platforms, so it built on Linux and failed the
    native build the e2e harness uses. */
-if(inet_pton(AF_INET,"127.0.0.1",&a.sin_addr)!=1){close(up);le_tls_close(tls);close(cfd);return;}
+if(inet_pton(AF_INET,relay_host,&a.sin_addr)!=1){close(up);le_tls_close(tls);close(cfd);return;}
 if(connect(up,(struct sockaddr*)&a,sizeof(a))){close(up);le_tls_close(tls);close(cfd);return;}
 /*
  * Pump both directions until either end finishes. Two things this loop has to
@@ -242,12 +242,12 @@ if(!pending&&!p[0].revents&&!p[1].revents)break;   /* idle timeout */
 if(p[1].revents&(POLLIN|POLLHUP|POLLERR)){
 n=read(up,buf,sizeof(buf));
 if(n<=0)break;
-if(le_tls_write(tls,buf,(size_t)n)!=n)break;
+if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
 continue;
 }
 
 if(!client_done&&(pending||(p[0].revents&(POLLIN|POLLHUP|POLLERR)))){
-n=le_tls_read(tls,buf,sizeof(buf));
+n=le_tls_read_deadline(tls,buf,sizeof(buf),LE_TLS_IDLE_TIMEOUT_MS);
 if(n<=0){client_done=1;shutdown(up,SHUT_WR);continue;}
 if(up_writable&&write_all_file(up,buf,(size_t)n)<0){
 /* stop sending, but keep draining whatever the server already replied */
@@ -260,12 +260,12 @@ struct pollfd d={up,POLLIN,0};
 if(poll(&d,1,250)<=0)break;
 n=read(up,buf,sizeof(buf));
 if(n<=0)break;
-if(le_tls_write(tls,buf,(size_t)n)!=n)break;
+if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
 }
 close(up);le_tls_close(tls);close(cfd);return;}
 
 /* Keep TLS relays in the same fixed process budget as other forked work. */
-static int spawn_tls_relay(int cfd,const struct http_options*o){
+static int spawn_tls_relay(int cfd,const struct http_options*o,int http_listener,int https_listener){
 sigset_t blocked,previous;pid_t pid;int i,slot=-1;
 sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);
 if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;
@@ -278,7 +278,7 @@ if(!warned){warned=1;fprintf(stderr,"HTTPS relay budget (%d) exhausted; a connec
 sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
 pid=fork();
 if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
-if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);tls_relay(cfd,o);_exit(0);}
+if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close(http_listener);close(https_listener);tls_relay(cfd,o);_exit(0);}
 tls_relay_pids[slot]=pid;
 sigprocmask(SIG_SETMASK,&previous,NULL);
 return 0;
@@ -317,8 +317,8 @@ memset(&ta,0,sizeof(ta));ta.sin_family=AF_INET;ta.sin_port=htons((uint16_t)o->tl
 if(inet_pton(AF_INET,o->listen_host,&ta.sin_addr)!=1||bind(tls_ls,(struct sockaddr*)&ta,sizeof(ta))||listen(tls_ls,max)){
 /* HTTPS is best-effort: losing it must never take the HTTP UI down with it */
 fprintf(stderr,"HTTPS listener on port %d unavailable: %s\n",o->tls_port,strerror(errno));
-close(tls_ls);tls_ls=-1;
-}else fprintf(stderr,"LibreEcho also listening on https://%s:%d\n",o->listen_host,o->tls_port);
+close(tls_ls);tls_ls=-1;api_set_https_active(api,0);
+}else {api_set_https_active(api,1);fprintf(stderr,"LibreEcho also listening on https://%s:%d\n",o->listen_host,o->tls_port);}
 }}
 while(*running){p[0].fd=ls;
 p[0].events=POLLIN;
@@ -338,7 +338,7 @@ close(fd);
 }else c[i].fd=fd;
 }}if(tls_ls>=0&&(p[max+1].revents&POLLIN)){int tfd=accept(tls_ls,0,0);
 if(tfd>=0&&close_on_exec(tfd)<0){close(tfd);tfd=-1;}
-if(tfd>=0){(void)spawn_tls_relay(tfd,o);close(tfd);}
+if(tfd>=0){if(spawn_tls_relay(tfd,o,ls,tls_ls)<0)close(tfd);else close(tfd);}
 }for(i=0;
 i<max;
 i++)if(c[i].fd>=0&&(p[i+1].revents&(POLLIN|POLLHUP|POLLERR))){ssize_t n=recv(c[i].fd,c[i].buf+c[i].used,LE_REQ_MAX-c[i].used,0);

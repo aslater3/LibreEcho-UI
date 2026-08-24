@@ -623,6 +623,12 @@ succeeded.
     "gateway": "192.0.2.1",
     "dns": "8.8.8.8, 8.8.4.4",
     "hostname": "libreecho",
+    "wifi_mac": "",
+    "wifi_mac_factory": "",
+    "wifi_mac_configured": "",
+    "bt_mac": "",
+    "bt_mac_factory": "",
+    "bt_mac_configured": "",
     "internet": true,
     "dhcp": true,
     "ssh": false,
@@ -677,9 +683,24 @@ false.
 {
   "hostname": "myecho",
   "ssh": false,
-  "api_lan": true
+  "api_lan": true,
+  "wifi_mac": "<six hexadecimal octets>",
+  "bt_mac": "<six hexadecimal octets>"
 }
 ```
+
+`wifi_mac` and `bt_mac` are optional persistent overrides. Each must contain
+six hexadecimal octets separated by colons or hyphens and must be a unicast
+address; send an empty string to clear an override. The values are applied by
+the web daemon during the next Linux boot: Wi-Fi uses the platform `ip` tool,
+and Bluetooth uses the platform `btmgmt` public-address command. If a target
+lacks the required helper or controller operation, startup records a bounded
+warning while leaving the configured value visible for diagnosis.
+
+The response fields `wifi_mac` and `bt_mac` report live interface values;
+`*_factory` reports board identity values when available; and `*_configured`
+reports persisted overrides. Empty strings mean that a value is unavailable or
+unset.
 
 #### GET /api/v1/network/wifi/scan
 

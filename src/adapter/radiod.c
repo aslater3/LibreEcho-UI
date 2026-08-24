@@ -84,6 +84,16 @@ static int meta_out = -1;              /* child: write end of that pipe */
 
 static void stop_signal(int signum) { (void)signum; running = 0; }
 
+static void install_stop_handlers(void)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = stop_signal;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGTERM, &action, NULL);
+    sigaction(SIGINT, &action, NULL);
+}
+
 static int write_all(int fd, const void *data, size_t length)
 {
     const unsigned char *p = data;
@@ -380,6 +390,23 @@ static int icy_open(struct icy_stream *st, int fd, const char *host,
         memcpy(st->raw, headers + offset, leftover);
         st->raw_used = leftover;
         headers[offset - 2] = '\0';          /* keep the header lines only */
+        {
+            int status = 200;
+            char location[URL_MAX];
+            if (!strncmp(headers, "HTTP/", 5) &&
+                sscanf(headers, "%*[^ ] %d", &status) == 1) {
+                if (status >= 300 && status < 400) {
+                    if (!header_value(headers, "location", location,
+                                      sizeof(location)))
+                        le_log_warn("radiod: redirect rejected: %s", location);
+                    else
+                        le_log_warn("radiod: redirect response rejected");
+                    return -1;
+                }
+                if (status < 200 || status >= 300)
+                    return -1;
+            }
+        }
         break;
     }
 
@@ -920,8 +947,7 @@ int main(int argc, char **argv)
             bus_path = argv[++i];
     }
 
-    signal(SIGTERM, stop_signal);
-    signal(SIGINT, stop_signal);
+    install_stop_handlers();
     signal(SIGPIPE, SIG_IGN);
 
     listen_fd = le_adapter_listen(socket_path);
@@ -938,6 +964,8 @@ int main(int argc, char **argv)
 
         if (client < 0) {
             reap_player();
+            if (!running)
+                break;
             continue;
         }
         n = read(client, message, sizeof(message) - 1);

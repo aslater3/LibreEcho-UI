@@ -972,7 +972,7 @@ static int network(struct le_backend *b, struct le_network_state *o)
     copy_string(o->connectivity, sizeof(o->connectivity),
                 !strcmp(o->state, "disconnected") ? "disconnected" : "unknown");
 
-    /* MAC is read here for the hardware adapter boundary; the public API has no MAC field. */
+    /* MAC is read here for the hardware adapter boundary and public status API. */
     snprintf(path, sizeof(path), "/sys/class/net/%s/address", iface);
     (void)read_line(path, mac, sizeof(mac));
     o->signal = read_wireless_signal(iface);
