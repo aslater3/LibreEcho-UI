@@ -6,7 +6,7 @@ const descriptions={Overview:'Your LibreEcho at a glance',Device:'Identity, hard
 const nav=$('#nav'),content=$('#content');
 document.body.classList.add('auth-pending');
 function esc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-async function api(path,opt={}){const headers={'Accept':'application/json',...(state.token?{'Authorization':'Bearer '+state.token}:{}),...(opt.body?{'Content-Type':'application/json','X-LibreEcho-CSRF':state.csrf}:{}),...(opt.headers||{})};const res=await fetch('/api/v1'+path,{...opt,headers});let body;try{body=await res.json()}catch(_){throw new Error('The device returned an unreadable response')}if(!res.ok||!body.ok||body.data?.unavailable===true)throw new Error(body.error?.message||body.data?.message||`Request failed (${res.status})`);return body.data}
+async function api(path,opt={}){const {allowUnavailable=false,...fetchOpt}=opt;const headers={'Accept':'application/json',...(state.token?{'Authorization':'Bearer '+state.token}:{}),...(fetchOpt.body?{'Content-Type':'application/json','X-LibreEcho-CSRF':state.csrf}:{}),...(fetchOpt.headers||{})};const res=await fetch('/api/v1'+path,{...fetchOpt,headers});let body;try{body=await res.json()}catch(_){throw new Error('The device returned an unreadable response')}if((!res.ok||!body.ok||body.data?.unavailable===true)&&!allowUnavailable)throw new Error(body.error?.message||body.data?.message||`Request failed (${res.status})`);return body.data}
 function toast(message,error=false){const t=$('#toast');t.textContent=message;t.classList.toggle('error',error);t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
 function panel(title,body,extra=''){return `<section class="panel setting-panel ${extra}"><h3>${title}</h3>${body}</section>`}
 function collapsiblePanel(title,body,extra='',open=false){return `<details class="panel setting-panel integration-section ${extra}"${open?' open':''}><summary><h3>${title}</h3><span class="integration-toggle" aria-hidden="true">Show details</span></summary><div class="integration-section-body">${body}</div></details>`}
@@ -488,12 +488,67 @@ const SIM_RESPONSE_GOAL_MS=1000;
 const SIM_RESPONSE_GOAL_TEXT='1 s';
 function simGoalClass(v){const n=Number(v);return Number.isFinite(n)?(n<SIM_RESPONSE_GOAL_MS?'connected':'error-text'):''}
 const SIM_HISTORY_KEY='libreecho-simulation-history';
+const SIM_DEVICE_KEY='libreecho-simulation-device-history';
+const SIM_DEVICE_GENERATION_KEY='libreecho-simulation-device-history-generation';
 const SIM_HISTORY_MAX=100;
-function simHistory(){
+let simDeviceTurns=[];
+/*
+ * Two sources, deliberately not merged.
+ *
+ * Runs this browser performed know the phrase and whether the wake word fired;
+ * nothing on the device records either, so those rows stay in localStorage.
+ * But localStorage is scoped per origin and this device takes a new DHCP lease
+ * on most boots -- the Wi-Fi driver generates a fresh MAC each time -- so every
+ * reboot moved the UI to a new origin and the panel came up empty. agentd keeps
+ * the last 12 turns it measured itself for the current device generation.
+ *
+ * The two cannot be joined: a local row's timings are parsed from log lines
+ * stamped in whole seconds, the device's are milliseconds off its own clock, so
+ * the same turn appears with different numbers and there is no key to match on.
+ * Rather than double-count it in the summary, local rows win when this origin
+ * has any and the device's are the fallback that makes a fresh origin useful.
+ */
+function simLocalHistory(){
  try{const raw=localStorage.getItem(SIM_HISTORY_KEY);const v=raw?JSON.parse(raw):[];
      return Array.isArray(v)?v:[]}catch(_){return []}}
-function simHistorySave(list){
+function simLocalSave(list){
  try{localStorage.setItem(SIM_HISTORY_KEY,JSON.stringify(list.slice(0,SIM_HISTORY_MAX)))}catch(_){/* private mode, quota */}}
+function simHistory(){const local=simLocalHistory();return local.length?local:simDeviceTurns}
+function simShowingDevice(){return !simLocalHistory().length&&simDeviceTurns.length>0}
+/*
+ * A device turn carries timings only. The field names have to be the ones
+ * simParseLogs produces or every column renders blank and simStat finds nothing
+ * to summarise; the columns the device cannot fill are left undefined, which ms
+ * and simRow render as an em dash.
+ */
+function simDeviceRow(t){
+ if(!Number.isFinite(Number(t.first_pcm_ms))||Number(t.first_pcm_ms)<=0)return null;
+ return {at:t.at_ms,source:'device',follow_up:!!t.follow_up,
+  audio_ms:t.stt_audio_ms,processing_ms:t.stt_processing_ms,
+  queue_to_first_audio_ms:t.first_pcm_ms};}
+async function simHistoryLoad(){
+ try{
+  const h=await api('/assistant/history');
+  const turns=Array.isArray(h&&h.turns)?h.turns:[];
+  const generation=Number(h&&h.history_generation);
+  const previousGeneration=Number(localStorage.getItem(SIM_DEVICE_GENERATION_KEY)||0);
+  const remotelyCleared=Number.isFinite(generation)&&generation>0&&previousGeneration>0&&generation!==previousGeneration;
+  simDeviceTurns=turns.map(simDeviceRow).filter(Boolean);
+  if(Number.isFinite(generation)&&generation>0){try{localStorage.setItem(SIM_DEVICE_GENERATION_KEY,String(generation))}catch(_){/* private mode, quota */}}
+  if(remotelyCleared){try{localStorage.removeItem(SIM_DEVICE_KEY)}catch(_){/* private mode, quota */}}
+  else if(simDeviceTurns.length){try{localStorage.setItem(SIM_DEVICE_KEY,JSON.stringify(simDeviceTurns))}catch(_){/* private mode, quota */}}
+  else {try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];if(Array.isArray(v))simDeviceTurns=v}catch(_){} }
+ }catch(_){
+  /* Unreachable, or an image whose agentd predates /assistant/history: show the
+     last copy fetched rather than nothing. */
+  try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];
+      if(Array.isArray(v))simDeviceTurns=v}catch(_){}
+ }
+ return simHistory();}
+async function simHistoryClear(){
+ await api('/assistant/history/clear',{method:'POST',body:'{}'});
+ simDeviceTurns=[];
+ try{localStorage.removeItem(SIM_HISTORY_KEY);localStorage.removeItem(SIM_DEVICE_KEY);localStorage.removeItem('libreecho-simulation-device-history-cleared-at')}catch(_){} }
 function ms(v){return (v===null||v===undefined)?'—':(v>=1000?(v/1000).toFixed(2)+' s':Math.round(v)+' ms')}
 /*
  * Pull the turn's real timings out of the device log rather than inferring
@@ -542,9 +597,12 @@ function simParseLogs(entries,since){
 }
 function simRow(r){
  const cap=r.audio_ms&&r.max_utterance_ms&&r.audio_ms>=r.max_utterance_ms-100;
+ /* A device row records no phrase and no wake result. Those columns say so
+    rather than reading as an empty phrase that failed to wake the device. */
+ const text=r.text||(r.source==='device'?(r.follow_up?'spoken turn (follow-up)':'spoken turn'):'');
  return `<tr><td>${esc(new Date(r.at).toLocaleTimeString())}</td>`+
-  `<td class="${r.wake?'connected':''}">${r.wake?'yes':'no'}</td>`+
-  `<td>${esc(r.text.length>34?r.text.slice(0,34)+'…':r.text)}`+
+  `<td class="${r.wake===true?'connected':''}">${r.wake===undefined||r.wake===null?'—':(r.wake?'yes':'no')}</td>`+
+  `<td>${esc(text.length>34?text.slice(0,34)+'…':text)}`+
    /* The radio pair is the only row kind with a verdict the columns cannot
       hold, so it is written under the phrase rather than given a column that
       is empty on every other row. */
@@ -576,11 +634,17 @@ function simRender(){
  const h=simHistory();
  const el=$('#sim-history'); if(!el)return;
  if(!h.length){el.innerHTML='<p class="muted">No runs yet.</p>';return}
- el.innerHTML=simSummaryHtml(h)+'<div class="table-scroll"><table class="sim-table"><thead><tr>'+
+ const note=simShowingDevice()
+  ? '<p class="muted">Showing the last '+h.length+(h.length===1?' turn':' turns')+' the device measured itself for this device generation. It does not record the phrase or the wake result &mdash; run a simulation to fill those columns.</p>'
+  : '';
+ el.innerHTML=note+simSummaryHtml(h)+'<div class="table-scroll"><table class="sim-table"><thead><tr>'+
   '<th>time</th><th>wake</th><th>phrase</th><th>wake latency</th>'+
   '<th>turn audio</th><th>stt + model</th><th>request → first audio</th></tr></thead><tbody>'+
   h.map(simRow).join('')+'</tbody></table></div>';
- const c=$('#sim-count-runs'); if(c)c.textContent=h.length+' of '+SIM_HISTORY_MAX;
+ /* The device keeps its own, shorter ring, so the ceiling shown has to follow
+    whichever source is on screen. */
+ const c=$('#sim-count-runs');
+ if(c)c.textContent=simShowingDevice()?h.length+' from the device':h.length+' of '+SIM_HISTORY_MAX;
 }
 /*
  * One simulated utterance, start to finish. Shared by the single-phrase button
@@ -611,7 +675,7 @@ async function simRun(phrase,cap,onStatus,onSent){
  const entry={at:new Date().toISOString(),text:phrase,wake,
    wake_latency_ms:wakeLatency?Math.round(wakeLatency):null,
    max_utterance_ms:cap,...simParseLogs(post.entries||[],mark)};
- simHistorySave([entry,...simHistory()]);
+ simLocalSave([entry,...simLocalHistory()]);
  simRender();
  return entry;
 }
@@ -666,9 +730,9 @@ function simRadioDefault(r){
 /* simRun has already stored the row by the time the radio verdict is known, so
    the stored copy is rewritten in place rather than appended a second time. */
 function simHistoryAmend(entry){
- const h=simHistory();
+ const h=simLocalHistory();
  if(h.length&&h[0].at===entry.at)h[0]=entry;
- simHistorySave(h); simRender();}
+ simLocalSave(h); simRender();}
 /*
  * Unconditional, pass or fail: a stop against a stream that already stopped is
  * harmless, and skipping it on the strength of the last poll would leave the
@@ -817,6 +881,7 @@ function simTimingHtml(entry,cap){
   simRadioTimingHtml(entry);
 }
 async function simulationPage(){
+ await simHistoryLoad();   /* device-side history for the current generation */
  const w=await api('/wake-word').catch(()=>({}));
  const vp=await api('/voice-pipeline').catch(()=>({}));
  const cap=vp?.listening?.max_utterance_ms;
@@ -847,7 +912,7 @@ async function simulationPage(){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
  };
- $('#sim-clear').onclick=()=>{ simHistorySave([]); simRender(); toast('History cleared') };
+ $('#sim-clear').onclick=async()=>{try{await simHistoryClear();simRender();toast('History cleared')}catch(e){toast(e.message,true)}};
  $('#sim-send').onclick=async()=>{
   const phrase=text.value.trim();
   if(!phrase){toast('Enter a phrase first',true);return}
@@ -927,9 +992,9 @@ function macRow(label,id,live,factory,configured){
  const same=live&&factory&&live.toLowerCase()===factory.toLowerCase();
  return `<dl class="facts"><dt>${esc(label)} in use</dt><dd class="mono${same?' connected':''}">${esc(live||'unknown')}</dd>`
   +`<dt>On the board</dt><dd class="mono">${esc(factory||'not recorded')}</dd></dl>`
-  +field(`${label} address override`,configured||'',`mac-${id}`);
+  +(id==='wifi'?`<p class="muted">This adapter's address cannot be changed: the driver rejects it (<code>SIOCSIFHWADDR: Not supported</code>), and it is not exposed through NVRAM or a module parameter. The address in use is generated by the driver and differs between boots, which is why the device does not keep a stable DHCP lease.</p>${configured?`<button id="clear-wifi-mac" class="secondary-btn">Clear saved Wi-Fi override</button>`:''}`:field(`${label} address override`,configured||'',`mac-${id}`));
 }
-async function networkPage(){const n=await api('/network'),lanEffective=n.api_lan_effective??n.api_lan,lanForced=!!n.api_lan_forced,healthy=n.connectivity==='healthy',healthDetail=n.recovery_stage&&n.recovery_stage!=='none'?`Recovery: ${n.recovery_stage}`:`Gateway: ${n.gateway_reachable===true?'reachable':n.gateway_reachable===false?'unreachable':'not yet verified'}`;content.innerHTML=`<div class="settings-grid">${panel('Wireless network',`<div class="status-line"><span class="status-dot ${healthy?'ok':''}"></span><div><strong>${esc(n.state)} · ${esc(n.connectivity||'unknown')}</strong><small>${esc(n.ssid||'No network')} · ${esc(healthDetail)}</small></div><span>${n.signal||0}%</span></div><div id="wifi-results" class="wifi-results"><p class="muted">Scan to discover nearby networks.</p></div><div class="button-row">${action('Scan Wi-Fi','wifi-scan','primary-btn')}${action('Disconnect','wifi-disconnect')}</div>`)}${panel('Addressing',field('Hostname',n.hostname,'net-hostname')+toggle('Use DHCP',n.dhcp,'dhcp',true)+`<dl class="facts"><dt>IP address</dt><dd>${esc(n.ip||'—')}</dd><dt>Gateway</dt><dd>${esc(n.gateway||'—')}</dd><dt>DNS</dt><dd>${esc(n.dns||'—')}</dd><dt>Internet</dt><dd class="${n.internet?'connected':''}">${n.internet?'Reachable':'Unavailable'}</dd></dl>`+saveButton('save-network'))}${panel('Hardware addresses',macRow('Wi-Fi','wifi',n.wifi_mac,n.wifi_mac_factory,n.wifi_mac_configured)+macRow('Bluetooth','bt',n.bt_mac,n.bt_mac_factory,n.bt_mac_configured)+`<p class="muted">Leave a field empty to use the address built into the board. A change is written now and applied on the next restart &mdash; changing the address of a connected interface would drop the connection making the change.</p>`+saveButton('save-macs'))}${panel('Local access',toggle('LAN API access',lanEffective,'api-lan',lanForced)+toggle('SSH',n.ssh,'ssh')+`<p class="muted">${lanForced?'LAN API access is forced by the development image binding. Authentication is intentionally disabled for this development build.':'Enabling LAN access exposes the API beyond loopback. Configure authentication before using this on an untrusted network.'}</p>`+saveButton('save-access'),'wide')}</div>`;bindDirty(['#net-hostname'],'#save-network');bindDirty(['#mac-wifi','#mac-bt'],'#save-macs');$('#save-macs').onclick=()=>mutate('/network',{wifi_mac:$('#mac-wifi').value.trim(),bt_mac:$('#mac-bt').value.trim()},'Saved — applied at next restart');bindDirty(['#api-lan','#ssh'],'#save-access');$('#save-network').onclick=()=>mutate('/network',{hostname:$('#net-hostname').value},'Network changes saved');$('#save-access').onclick=()=>mutate('/network',{api_lan:$('#api-lan').checked,ssh:$('#ssh').checked},'Local access changes saved');$('#wifi-scan').onclick=async()=>{const box=$('#wifi-results');box.innerHTML='<p class="muted">Scanning…</p>';try{const s=await api('/network/wifi/scan');box.innerHTML=s.networks.length?s.networks.map(x=>`<button class="wifi-network" data-ssid="${esc(x.ssid)}" data-security="${esc(x.security)}"><span><strong>${esc(x.ssid)}</strong><small>${esc(x.security)}</small></span><span>${x.signal}%</span></button>`).join(''):'<p class="muted">No networks found.</p>';$$('.wifi-network').forEach(b=>b.onclick=()=>connectWifi(b.dataset.ssid,b.dataset.security))}catch(e){box.innerHTML=unsupported(e.message)}};$('#wifi-disconnect').onclick=()=>post('/network/wifi/disconnect',{},'Wi-Fi disconnected')}
+async function networkPage(){const n=await api('/network'),lanEffective=n.api_lan_effective??n.api_lan,lanForced=!!n.api_lan_forced,healthy=n.connectivity==='healthy',healthDetail=n.recovery_stage&&n.recovery_stage!=='none'?`Recovery: ${n.recovery_stage}`:`Gateway: ${n.gateway_reachable===true?'reachable':n.gateway_reachable===false?'unreachable':'not yet verified'}`;content.innerHTML=`<div class="settings-grid">${panel('Wireless network',`<div class="status-line"><span class="status-dot ${healthy?'ok':''}"></span><div><strong>${esc(n.state)} · ${esc(n.connectivity||'unknown')}</strong><small>${esc(n.ssid||'No network')} · ${esc(healthDetail)}</small></div><span>${n.signal||0}%</span></div><div id="wifi-results" class="wifi-results"><p class="muted">Scan to discover nearby networks.</p></div><div class="button-row">${action('Scan Wi-Fi','wifi-scan','primary-btn')}${action('Disconnect','wifi-disconnect')}</div>`)}${panel('Addressing',field('Hostname',n.hostname,'net-hostname')+toggle('Use DHCP',n.dhcp,'dhcp',true)+`<dl class="facts"><dt>IP address</dt><dd>${esc(n.ip||'—')}</dd><dt>Gateway</dt><dd>${esc(n.gateway||'—')}</dd><dt>DNS</dt><dd>${esc(n.dns||'—')}</dd><dt>Internet</dt><dd class="${n.internet?'connected':''}">${n.internet?'Reachable':'Unavailable'}</dd></dl>`+saveButton('save-network'))}${panel('Wi-Fi address',macRow('Wi-Fi','wifi',n.wifi_mac,n.wifi_mac_factory,n.wifi_mac_configured)+`<p class="muted">Leave a field empty to use the address built into the board. A change is written now and applied on the next restart &mdash; changing the address of a connected interface would drop the connection making the change.</p>`+'')}${panel('Local access',toggle('LAN API access',lanEffective,'api-lan',lanForced)+toggle('SSH',n.ssh,'ssh')+`<p class="muted">${lanForced?'LAN API access is forced by the development image binding. Authentication is intentionally disabled for this development build.':'Enabling LAN access exposes the API beyond loopback. Configure authentication before using this on an untrusted network.'}</p>`+saveButton('save-access'),'wide')}</div>`;bindDirty(['#net-hostname'],'#save-network');bindDirty(['#api-lan','#ssh'],'#save-access');$('#save-network').onclick=()=>mutate('/network',{hostname:$('#net-hostname').value},'Network changes saved');$('#save-access').onclick=()=>mutate('/network',{api_lan:$('#api-lan').checked,ssh:$('#ssh').checked},'Local access changes saved');$('#wifi-scan').onclick=async()=>{const box=$('#wifi-results');box.innerHTML='<p class="muted">Scanning…</p>';try{const s=await api('/network/wifi/scan');box.innerHTML=s.networks.length?s.networks.map(x=>`<button class="wifi-network" data-ssid="${esc(x.ssid)}" data-security="${esc(x.security)}"><span><strong>${esc(x.ssid)}</strong><small>${esc(x.security)}</small></span><span>${x.signal}%</span></button>`).join(''):'<p class="muted">No networks found.</p>';$$('.wifi-network').forEach(b=>b.onclick=()=>connectWifi(b.dataset.ssid,b.dataset.security))}catch(e){box.innerHTML=unsupported(e.message)}};$('#wifi-disconnect').onclick=()=>post('/network/wifi/disconnect',{},'Wi-Fi disconnected');if($('#clear-wifi-mac'))$('#clear-wifi-mac').onclick=()=>mutate('/network',{wifi_mac:''},'Saved Wi-Fi override cleared')}
 async function connectWifi(ssid,security){let password='';if(security!=='open'){password=prompt(`Password for ${ssid}`)||'';if(!password)return}await post('/network/wifi/connect',{ssid,password,security},`Connecting to ${ssid}`)}
 async function privacyPage(){const p=await api('/privacy');content.innerHTML=`<div class="settings-grid">${panel('Processing',toggle('Local speech recognition only',p.local_only,'local-only')+toggle('Retain microphone audio',p.audio_retention!=='none','audio-retention')+toggle('Diagnostic telemetry',p.diagnostic_telemetry,'telemetry')+toggle('Crash reports',p.crash_reports,'crash-reports')+saveButton('save-privacy'))}${panel('Retention',select('Log retention',String(p.log_retention_hours)+' hours','retention',['24 hours','168 hours','720 hours'])+`<div class="privacy-callout">No cloud dependency is enabled by default.</div><div class="button-row">${saveButton('save-retention')}${action('Reset privacy settings','privacy-reset','danger-btn')}</div>`)}</div>`;bindDirty(['#local-only','#audio-retention','#telemetry','#crash-reports'],'#save-privacy');bindDirty(['#retention'],'#save-retention');$('#save-privacy').onclick=()=>mutate('/privacy',{local_only:$('#local-only').checked,audio_retention:$('#audio-retention').checked?'24h':'none',diagnostic_telemetry:$('#telemetry').checked,crash_reports:$('#crash-reports').checked},'Privacy changes saved');$('#save-retention').onclick=()=>mutate('/privacy',{log_retention_hours:parseInt($('#retention').value,10)},'Retention changes saved');$('#privacy-reset').onclick=()=>confirm('Reset privacy settings?')&&toast('Privacy defaults restored')}
 function assistantCard(a){const local=collapsiblePanel('Local LLM',`<div class="assistant-heading"><div><span class="source-pill">On-device</span><h4>Local LLM</h4><p class="muted">A local language model can run without a subscription or metered API billing. Provider setup will appear here when a reviewed model is installed.</p></div><div class="assistant-state"><span class="status-dot"></span>Not configured</div></div>`,'assistant-provider');if(a.unsupported)return `<section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${local}${collapsiblePanel('ChatGPT',unsupported(a.unsupported),'assistant-provider')}</section>`;const signedIn=a.authenticated,waiting=a.auth_state==='waiting',latency=Number(a.last_speech_end_to_first_pcm_ms||0),chatgpt=collapsiblePanel('ChatGPT',`<div class="assistant-heading"><div><span class="source-pill">Subscription</span><h4>${esc(a.provider_name||'ChatGPT')}</h4><p class="muted">Uses your ChatGPT subscription with device login. LibreEcho never asks for or stores an API key, and does not fall back to metered API billing.</p></div><div class="assistant-state"><span class="status-dot ${signedIn?'ok':''}"></span>${signedIn?'Connected':waiting?'Waiting for sign-in':'Not connected'}</div></div>${waiting?`<div class="device-code"><span>Enter this code</span><strong>${esc(a.user_code)}</strong><a class="primary-btn action-link" href="${esc(a.verification_url)}" target="_blank" rel="noopener">Open ChatGPT sign-in</a></div>`:''}<div class="settings-grid assistant-settings"><div>${toggle('Enable wake-to-reply voice loop',a.enabled,'assistant-enabled',!signedIn)}${field('Provider',a.provider_name||a.provider,'assistant-provider','text','disabled')}${field('Model',a.model,'assistant-model')}<label class="field"><span>Voice response prompt</span><textarea id="assistant-prompt" rows="8">${esc(a.prompt)}</textarea></label>${saveButton('save-assistant')}</div><div><dl class="facts"><dt>Wake audio</dt><dd class="${a.wake_connected?'connected':''}">${a.wake_connected?'Connected':'Unavailable'}</dd><dt>Post-AEC stream</dt><dd class="${a.audio_connected?'connected':''}">${a.audio_connected?'Connected':'Unavailable'}</dd><dt>Local STT</dt><dd>${a.recognizing?'Recognizing':'Ready'}</dd><dt>Completed voice turns</dt><dd>${Number(a.completed_transcripts||0)}</dd><dt>Last STT processing</dt><dd>${Number(a.last_stt_processing_ms||0)||'—'}${a.last_stt_processing_ms?' ms':''}</dd><dt>Speech end → first PCM</dt><dd class="${latency&&latency<=3000?'connected':''}">${latency?latency+' ms':'Not measured'}</dd><dt>Target</dt><dd>≤ ${Number(a.latency_target_ms||3000)} ms</dd><dt>Target violations</dt><dd>${Number(a.latency_violations||0)}</dd></dl><div class="button-row">${!signedIn&&!waiting?action('Connect ChatGPT','assistant-auth-start','primary-btn'):''}${waiting?action('Check sign-in','assistant-auth-poll','primary-btn'):''}${signedIn?action('Disconnect','assistant-logout','danger-btn'):''}</div>${signedIn?`<label class="field"><span>Test prompt</span><input id="assistant-test-text" value="Say hello in one short sentence."></label>${action('Speak test response','assistant-test')}`:''}</div></div>`,'assistant-provider',waiting);return `<section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${local}${chatgpt}</section>`}
@@ -1234,8 +1299,8 @@ async function systemPage(){
       `<dl class="facts"><dt>Status</dt><dd class="connected">Serving on port ${features.https_port}</dd><dt>Certificate expires</dt><dd>${esc(features.https_expires||'unknown')}</dd><dt>SHA-256 fingerprint</dt><dd class="mono wrap">${esc(features.https_fingerprint||'unknown')}</dd></dl>
        <p class="muted">Because the certificate is self-signed, browsers will warn on first visit. Check the fingerprint above matches the one the browser shows before accepting it &mdash; that is what confirms you are talking to this device and not something in between.</p>`:
       `<p class="muted">Switched on, but not yet serving: HTTPS binds its port when the daemon starts, so this takes effect after the next restart.</p>`):'')+
-    (features.usb_role_supported?toggle('USB storage mode',!!features.usb_host,'feature-usb-host')+
-    `<p class="muted">Host mode reads a drive; device mode serves ADB, the only way in if the network drops. The port cannot do both, so this is never saved and every boot returns to device mode.</p>`+
+    (features.usb_role_supported?toggle('USB storage mode (experimental)',!!features.usb_host,'feature-usb-host')+
+    `<p class="muted"><strong>Experimental, but it no longer costs the microphone.</strong> The pin that puts the port in host mode is also the enable line for the microphone array, and an earlier kernel drove it low, which left the codecs disabled. This firmware never drives it low, so a mounted drive and the wake word work at the same time &mdash; measured on hardware, with a full spoken turn while a drive was mounted.</p><p class="muted">Host mode reads a drive; device mode serves ADB, the only way in if the network drops. The port cannot do both.</p>`+
     `<p class="muted">The setting is remembered, but device mode is held for the first minute after every boot so ADB is always reachable; storage mode resumes after that. Applies immediately &mdash; the Save button below is for Simulation only.</p>`+
     `<p class="muted">A drive already plugged in when storage mode turns on cannot be woken: it is already powered and only re-announces itself on a power cycle, which this board cannot perform. Turn storage mode on first, then insert the drive.</p>`+
     `<div id="usb-storage" class="usb-storage"></div>`:'')+
@@ -1250,8 +1315,10 @@ async function systemPage(){
      turned off again. Confirm that, and say how to undo it without the UI. */
   if($('#feature-usb-host'))$('#feature-usb-host').onchange=()=>{
    const el=$('#feature-usb-host');
-   if(el.checked&&!confirm('Switch the USB port to storage mode?\n\n'
-     +'The port cannot be a drive reader and an ADB device at once, so ADB will stop working. '
+   if(el.checked&&!confirm('Switch the USB port to storage mode? (experimental)\n\n'
+     +'The microphone keeps working: this firmware never drives the shared pin low, '
+     +'so a mounted drive and the wake word coexist.\n\n'
+     +'ADB does stop, because the port cannot read a drive and serve ADB at once. '
      +'This setting is remembered, so it applies on every boot after the first minute.\n\n'
      +'To undo it without the UI, hold any button on the device while it boots.')){
     el.checked=false;return}

@@ -153,6 +153,50 @@
     }
    }
   },
+  "/assistant/history": {
+   "get": {
+    "tags": [
+     "Assistant"
+    ],
+    "summary": "Read the bounded device-side voice turn history",
+    "description": "Returns up to 12 newest device-measured turns plus a persisted history_generation. The history ring is held in agentd memory and is empty after an agentd restart; clients should discard cached rows when history_generation changes, but may preserve them when an empty response has the same generation.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/assistant/history/clear": {
+   "post": {
+    "tags": [
+     "Assistant"
+    ],
+    "summary": "Clear device-side voice turn history",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/assistant/auth/poll": {
    "post": {
     "tags": [
@@ -839,7 +883,7 @@
      "Bluetooth"
     ],
     "summary": "Read Bluetooth controller, discovery, pairing, bond and profile-service state",
-    "description": "The response separates controller protocol capabilities from registered userspace profile services. Kernel RFCOMM, BNEP, or HIDP support alone does not make a profile service available. profile_state is pairing-only until SDP/profile services are installed and supervised. When the controller adapter is absent, the 200 response contains data.available=false and data.unavailable=true.",
+    "description": "The response separates controller protocol capabilities from registered userspace profile services. Kernel RFCOMM, BNEP, or HIDP support alone does not make a profile service available. profile_state is pairing-only until SDP/profile services are installed and supervised. When the controller adapter is absent, the 200 response contains data.available=false and data.unavailable=true. The response includes address (live HCI address), address_factory (board-recorded address when available), and address_configured (persisted override; empty means no override).",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"

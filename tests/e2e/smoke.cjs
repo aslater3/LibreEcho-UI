@@ -100,6 +100,47 @@ async function checkAudioMutation(page) {
   assert.equal(await persisted.inputValue(), '63', 'saved volume should survive navigation and re-render');
 }
 
+/*
+ * Simulation is off by default, so the sweep above never reaches it. Turn it on
+ * and render the history table from a device-shaped row: agentd records timings
+ * only -- no phrase, no wake result -- and a renderer that assumes the fields a
+ * locally-run simulation leaves behind throws on the first device row, which
+ * takes the whole page down.
+ */
+async function checkSimulationHistory(context, page) {
+  const config = await context.request.get(`${baseURL}/api/v1/config`);
+  const csrf = (await config.json()).data.csrf_token;
+  const response = await context.request.put(`${baseURL}/api/v1/system/features`, {
+    headers: { 'X-LibreEcho-CSRF': csrf },
+    data: { simulation: true }
+  });
+  assert.ok(response.ok(), `enabling the simulation feature should succeed (${response.status()})`);
+
+  await page.evaluate(() => {
+    localStorage.removeItem('libreecho-simulation-history');
+    localStorage.setItem('libreecho-simulation-device-history', JSON.stringify([
+      { at: Date.now(), source: 'device', follow_up: false,
+        audio_ms: 1870, processing_ms: 2024, queue_to_first_audio_ms: 2313 }
+    ]));
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await waitForPage(page, 'Overview');
+  await selectPage(page, 'Simulation');
+
+  const rows = await page.locator('#sim-history table.sim-table tbody tr').count();
+  assert.equal(rows, 1, 'a cached device turn should render as one history row');
+  const text = await page.locator('#sim-history').innerText();
+  assert.match(text, /spoken turn/, 'a device row should say the phrase was not recorded');
+
+  /* Leave the feature as it was found. It is persisted server-side, and the
+     radio suite asserts the menu hides Simulation when it is off. */
+  await context.request.put(`${baseURL}/api/v1/system/features`, {
+    headers: { 'X-LibreEcho-CSRF': csrf },
+    data: { simulation: false }
+  });
+  await page.evaluate(() => localStorage.removeItem('libreecho-simulation-device-history'));
+}
+
 async function desktopSuite(browser) {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
@@ -118,6 +159,8 @@ async function desktopSuite(browser) {
     'Network', 'Bluetooth', 'Privacy', 'Integrations', 'System', 'Logs', 'About'
   ];
   for (const destination of destinations) await selectPage(page, destination);
+
+  await checkSimulationHistory(context, page);
 
   await checkAudioMutation(page);
   assert.deepEqual(failures, [], `browser failures:\n${failures.join('\n')}`);

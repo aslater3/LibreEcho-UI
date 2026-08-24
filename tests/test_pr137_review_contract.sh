@@ -1,7 +1,10 @@
 #!/bin/sh
 set -eu
 
-grep -q '#define LE_MAX_TLS_RELAYS 4' src/http_server.c
+# The relay budget has to track the client budget, not a literal: a browser
+# opens six or more connections for one page, and a smaller cap closed the
+# extras with no response, which dropped stylesheets over HTTPS.
+grep -q '#define LE_MAX_TLS_RELAYS LE_MAX_CLIENTS' src/http_server.c
 grep -q 'tls_relay_pids' src/http_server.c
 grep -q 'LE_TLS_HANDSHAKE_TIMEOUT_MS' src/tls.c
 grep -q 'poll(&waitfd' src/tls.c

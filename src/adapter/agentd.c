@@ -12,13 +12,20 @@
 #include "../log.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <semaphore.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Twelve records fit the bounded adapter response with worst-case timestamps. */
+#define LE_AGENT_TURN_HISTORY 12
+#define LE_AGENT_CLIENT_WORKERS 4
 
 #define DEFAULT_AGENT_SOCKET LE_ADAPTER_AGENT_SOCK
 #define DEFAULT_AGENT_CONFIG "/data/libreecho/config/agent.json"
@@ -67,6 +74,8 @@ struct agent_state {
     char auth_error[256];
     char socket_path[256];
     char config_path[384];
+    char history_generation_path[384];
+    unsigned long long history_generation;
     char weather_text[160];
     time_t weather_fetched;
     char credentials_path[384];
@@ -86,6 +95,24 @@ struct agent_state {
     uint64_t first_text_ms;
     uint64_t first_announce_ms;
     uint64_t first_pcm_ms;
+    /*
+     * Per-turn timings, kept here rather than in the browser.
+     *
+     * The simulation page used to hold this in localStorage, which is scoped
+     * per origin -- and this device takes a new DHCP lease on most boots
+     * because the Wi-Fi driver generates a fresh MAC, so every reboot moved
+     * the UI to a new origin and the history started empty. It also recorded
+     * what the browser observed across a network hop rather than what the
+     * device measured. These are the numbers agentd already computes.
+     */
+    struct turn_record {
+        uint64_t at_ms;
+        uint64_t stt_audio_ms, stt_processing_ms, stt_total_ms;
+        uint64_t first_text_ms, first_announce_ms, first_pcm_ms;
+        char request_id[64];
+        int follow_up;
+    } turn_history[LE_AGENT_TURN_HISTORY];
+    unsigned turn_history_next, turn_history_count;
     unsigned long latency_violations;
     char turn_request_id[64];
     unsigned long completed_turns;
@@ -108,6 +135,15 @@ static uint64_t monotonic_milliseconds(void)
     struct timespec now;
 
     if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000ULL +
+           (uint64_t)now.tv_nsec / 1000000ULL;
+}
+
+static uint64_t wall_clock_milliseconds(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) < 0)
         return 0;
     return (uint64_t)now.tv_sec * 1000ULL +
            (uint64_t)now.tv_nsec / 1000000ULL;
@@ -383,10 +419,25 @@ static int play_sentence(void *context, const char *text)
                 pthread_mutex_lock(&state->metrics_mutex);
                 if (!state->first_pcm_ms &&
                     marker_ms >= state->turn_started_ms) {
+                    unsigned history_i;
                     state->first_pcm_ms =
                         marker_ms - state->turn_started_ms;
                     if (state->first_pcm_ms > 3000)
                         ++state->latency_violations;
+                    for (history_i = 0;
+                         history_i < state->turn_history_count;
+                         ++history_i) {
+                        unsigned idx = (state->turn_history_next
+                                        + LE_AGENT_TURN_HISTORY - 1
+                                        - history_i)
+                                       % LE_AGENT_TURN_HISTORY;
+                        if (!strcmp(state->turn_history[idx].request_id,
+                                    request_id)) {
+                            state->turn_history[idx].first_pcm_ms =
+                                state->first_pcm_ms;
+                            break;
+                        }
+                    }
                 }
                 pthread_mutex_unlock(&state->metrics_mutex);
             }
@@ -399,6 +450,154 @@ static int play_sentence(void *context, const char *text)
         nanosleep(&delay, NULL);
     }
     return -1;
+}
+
+/*
+ * The per-turn latency history. Its own command rather than extra fields on
+ * status: status is polled often and must stay well inside the 4096-byte
+ * adapter message, while this is read only when the page is open.
+ */
+static int command_history(struct agent_state *state, int client_fd,
+                           unsigned long id)
+{
+    char body[LE_ADAPTER_MSG_MAX];
+    size_t used = 0;
+    unsigned i, n;
+    int wrote;
+    const size_t body_limit = LE_ADAPTER_MSG_MAX - 256;
+
+    pthread_mutex_lock(&state->metrics_mutex);
+    wrote = snprintf(body, body_limit,
+                     "{\"history_generation\":%llu,\"turns\":[",
+                     state->history_generation);
+    if (wrote < 0 || (size_t)wrote >= body_limit) {
+        pthread_mutex_unlock(&state->metrics_mutex);
+        return respond(client_fd, id, 0, "history too large");
+    }
+    used = (size_t)wrote;
+
+    n = state->turn_history_count;
+    for (i = 0; i < n; ++i) {
+        /* newest first: walk back from the write cursor */
+        unsigned idx = (state->turn_history_next + LE_AGENT_TURN_HISTORY
+                        - 1 - i) % LE_AGENT_TURN_HISTORY;
+        const struct turn_record *r = &state->turn_history[idx];
+        wrote = snprintf(body + used, body_limit - used,
+                         "%s{\"at_ms\":%llu,\"stt_audio_ms\":%llu,"
+                         "\"stt_processing_ms\":%llu,\"stt_total_ms\":%llu,"
+                         "\"first_text_ms\":%llu,\"first_announce_ms\":%llu,"
+                         "\"first_pcm_ms\":%llu,\"follow_up\":%s}",
+                         i ? "," : "",
+                         (unsigned long long)r->at_ms,
+                         (unsigned long long)r->stt_audio_ms,
+                         (unsigned long long)r->stt_processing_ms,
+                         (unsigned long long)r->stt_total_ms,
+                         (unsigned long long)r->first_text_ms,
+                         (unsigned long long)r->first_announce_ms,
+                         (unsigned long long)r->first_pcm_ms,
+                         r->follow_up ? "true" : "false");
+        if (wrote < 0 || (size_t)wrote >= body_limit - used) {
+            pthread_mutex_unlock(&state->metrics_mutex);
+            return respond(client_fd, id, 0, "history too large");
+        }
+        used += (size_t)wrote;
+    }
+    pthread_mutex_unlock(&state->metrics_mutex);
+
+    wrote = snprintf(body + used, body_limit - used, "]}");
+    if (wrote < 0 || (size_t)wrote >= body_limit - used)
+        return respond(client_fd, id, 0, "history too large");
+    return respond(client_fd, id, 1, body);
+}
+
+static int sync_history_directory(const char *path)
+{
+    char directory[384];
+    char *slash;
+    int fd, rc;
+
+    snprintf(directory, sizeof(directory), "%s", path);
+    slash = strrchr(directory, '/');
+    if (!slash)
+        return -1;
+    if (slash == directory)
+        slash[1] = '\0';
+    else
+        *slash = '\0';
+    fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    rc = fsync(fd);
+    close(fd);
+    return rc;
+}
+
+static int save_history_generation(const struct agent_state *state,
+                                   unsigned long long generation)
+{
+    char temporary[sizeof(state->history_generation_path) + 16];
+    char backup[sizeof(state->history_generation_path) + 5];
+    int fd;
+    FILE *file;
+
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX",
+                 state->history_generation_path) >= (int)sizeof(temporary))
+        return -1;
+    if (snprintf(backup, sizeof(backup), "%s.bak",
+                 state->history_generation_path) >= (int)sizeof(backup))
+        return -1;
+    fd = mkstemp(temporary);
+    if (fd < 0 || fchmod(fd, 0600) != 0) {
+        if (fd >= 0)
+            close(fd);
+        unlink(temporary);
+        return -1;
+    }
+    file = fdopen(fd, "w");
+    if (!file || fprintf(file, "%llu\n", generation) < 0 ||
+        fflush(file) != 0 || fsync(fileno(file)) != 0) {
+        if (file)
+            fclose(file);
+        else
+            close(fd);
+        unlink(temporary);
+        return -1;
+    }
+    if (fclose(file) != 0) {
+        unlink(temporary);
+        return -1;
+    }
+    if (rename(state->history_generation_path, backup) != 0 &&
+        errno != ENOENT) {
+        unlink(temporary);
+        return -1;
+    }
+    if (rename(temporary, state->history_generation_path) != 0) {
+        rename(backup, state->history_generation_path);
+        unlink(temporary);
+        return -1;
+    }
+    if (sync_history_directory(state->history_generation_path) != 0)
+        return -1;
+    return 0;
+}
+
+static int command_history_clear(struct agent_state *state, int client_fd,
+                                 unsigned long id)
+{
+    unsigned long long next = state->history_generation + 1;
+
+    if (!next)
+        next = 1;
+    if (save_history_generation(state, next) != 0)
+        return respond(client_fd, id, 0,
+                       "history clear could not be persisted");
+    pthread_mutex_lock(&state->metrics_mutex);
+    state->history_generation = next;
+    state->turn_history_next = 0;
+    state->turn_history_count = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
+    return respond(client_fd, id, 1, "{}");
 }
 
 static int command_status(struct agent_state *state, int fd,
@@ -1030,6 +1229,31 @@ static void voice_transcript(
             le_log_warn("agentd: voice response failed: %s", error);
         else
             generated = 1;
+        /* Metrics are final here: STT is done and the response has been
+           generated and dispatched. Keep successful turns so the UI can show
+           a history that survives a reboot. */
+        if (generated) {
+        pthread_mutex_lock(&state->metrics_mutex);
+        {
+            struct turn_record *rec =
+                &state->turn_history[state->turn_history_next];
+            rec->at_ms = wall_clock_milliseconds();
+            snprintf(rec->request_id, sizeof(rec->request_id), "%s",
+                     state->turn_request_id);
+            rec->stt_audio_ms = turn->stt_audio_ms;
+            rec->stt_processing_ms = turn->stt_processing_ms;
+            rec->stt_total_ms = turn->stt_total_ms;
+            rec->first_text_ms = state->first_text_ms;
+            rec->first_announce_ms = state->first_announce_ms;
+            rec->first_pcm_ms = state->first_pcm_ms;
+            rec->follow_up = turn->follow_up ? 1 : 0;
+            state->turn_history_next =
+                (state->turn_history_next + 1) % LE_AGENT_TURN_HISTORY;
+            if (state->turn_history_count < LE_AGENT_TURN_HISTORY)
+                ++state->turn_history_count;
+        }
+        pthread_mutex_unlock(&state->metrics_mutex);
+        }
         if (generated) {
             snprintf(state->previous_voice_user,
                      sizeof(state->previous_voice_user), "%.*s",
@@ -1247,6 +1471,15 @@ static void handle_client(struct agent_state *state, int client_fd)
         (void)respond(client_fd, id, 0, "malformed request");
         return;
     }
+    /* History only takes metrics_mutex. Do not make a read-only history poll
+       wait behind an in-flight provider request holding control_mutex. */
+    if (!strcmp(command, "history") || !strcmp(command, "history_clear")) {
+        if (!strcmp(command, "history_clear"))
+            (void)command_history_clear(state, client_fd, id);
+        else
+            (void)command_history(state, client_fd, id);
+        return;
+    }
     pthread_mutex_lock(&state->control_mutex);
     if (!strcmp(command, "status"))
         (void)command_status(state, client_fd, id);
@@ -1265,12 +1498,40 @@ static void handle_client(struct agent_state *state, int client_fd)
     pthread_mutex_unlock(&state->control_mutex);
 }
 
+struct agent_client_job {
+    struct agent_state *state;
+    int client_fd;
+    sem_t *slots;
+    pthread_mutex_t *mutex;
+    int *done;
+    int slot;
+};
+
+static void *agent_client_worker(void *argument)
+{
+    struct agent_client_job *job = argument;
+
+    handle_client(job->state, job->client_fd);
+    close(job->client_fd);
+    pthread_mutex_lock(job->mutex);
+    job->done[job->slot] = 1;
+    pthread_mutex_unlock(job->mutex);
+    sem_post(job->slots);
+    free(job);
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     struct agent_state state;
     const char *poll_minimum;
     int listener;
     int i;
+    pthread_t client_threads[LE_AGENT_CLIENT_WORKERS];
+    int client_in_use[LE_AGENT_CLIENT_WORKERS] = {0};
+    int client_done[LE_AGENT_CLIENT_WORKERS] = {0};
+    pthread_mutex_t client_mutex;
+    sem_t client_slots;
 
     memset(&state, 0, sizeof(state));
     strcpy(state.socket_path, DEFAULT_AGENT_SOCKET);
@@ -1334,6 +1595,36 @@ int main(int argc, char **argv)
         if (!*end && value <= 30)
             state.poll_minimum = (unsigned int)value;
     }
+    if (snprintf(state.history_generation_path,
+                 sizeof(state.history_generation_path), "%s.history-generation",
+                 state.config_path) >=
+        (int)sizeof(state.history_generation_path))
+        return 1;
+    state.history_generation = 1;
+    {
+        char backup[sizeof(state.history_generation_path) + 5];
+        FILE *file;
+        unsigned long long saved;
+        int loaded = 0;
+        snprintf(backup, sizeof(backup), "%s.bak",
+                 state.history_generation_path);
+        file = fopen(state.history_generation_path, "r");
+        if (file) {
+            if (fscanf(file, "%llu", &saved) == 1 && saved) {
+                state.history_generation = saved;
+                loaded = 1;
+            }
+            fclose(file);
+        }
+        if (!loaded) {
+            file = fopen(backup, "r");
+            if (file) {
+                if (fscanf(file, "%llu", &saved) == 1 && saved)
+                    state.history_generation = saved;
+                fclose(file);
+            }
+        }
+    }
     load_config(&state);
     state.provider = le_llm_provider_by_id(state.config.provider);
     if (!state.provider)
@@ -1349,6 +1640,17 @@ int main(int argc, char **argv)
     if (pthread_mutex_init(&state.control_mutex, NULL) != 0)
         return 1;
     if (pthread_mutex_init(&state.metrics_mutex, NULL) != 0) {
+        pthread_mutex_destroy(&state.control_mutex);
+        return 1;
+    }
+    if (pthread_mutex_init(&client_mutex, NULL) != 0) {
+        pthread_mutex_destroy(&state.metrics_mutex);
+        pthread_mutex_destroy(&state.control_mutex);
+        return 1;
+    }
+    if (sem_init(&client_slots, 0, LE_AGENT_CLIENT_WORKERS) != 0) {
+        pthread_mutex_destroy(&client_mutex);
+        pthread_mutex_destroy(&state.metrics_mutex);
         pthread_mutex_destroy(&state.control_mutex);
         return 1;
     }
@@ -1374,17 +1676,82 @@ int main(int argc, char **argv)
                 state.socket_path, state.provider->id);
     while (running) {
         int client_fd = le_adapter_accept(listener);
+        int slot = -1;
 
         if (client_fd < 0) {
             if (errno == EINTR)
                 continue;
             break;
         }
-        handle_client(&state, client_fd);
-        close(client_fd);
+        {
+            int slot_wait;
+            do
+                slot_wait = sem_wait(&client_slots);
+            while (slot_wait < 0 && errno == EINTR && running);
+            if (slot_wait < 0 || !running) {
+                close(client_fd);
+                break;
+            }
+        }
+        pthread_mutex_lock(&client_mutex);
+        for (i = 0; i < LE_AGENT_CLIENT_WORKERS; ++i) {
+            if (client_in_use[i] && client_done[i]) {
+                pthread_t completed = client_threads[i];
+                client_in_use[i] = 0;
+                client_done[i] = 0;
+                pthread_mutex_unlock(&client_mutex);
+                pthread_join(completed, NULL);
+                pthread_mutex_lock(&client_mutex);
+            }
+        }
+        for (i = 0; i < LE_AGENT_CLIENT_WORKERS; ++i) {
+            if (!client_in_use[i]) {
+                slot = i;
+                client_in_use[i] = 1;
+                client_done[i] = 0;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&client_mutex);
+        if (slot < 0) {
+            close(client_fd);
+            sem_post(&client_slots);
+            continue;
+        }
+        {
+            struct agent_client_job *job = calloc(1, sizeof(*job));
+            if (!job) {
+                pthread_mutex_lock(&client_mutex);
+                client_in_use[slot] = 0;
+                pthread_mutex_unlock(&client_mutex);
+                close(client_fd);
+                sem_post(&client_slots);
+                continue;
+            }
+            job->state = &state;
+            job->client_fd = client_fd;
+            job->slots = &client_slots;
+            job->mutex = &client_mutex;
+            job->done = client_done;
+            job->slot = slot;
+            if (pthread_create(&client_threads[slot], NULL,
+                               agent_client_worker, job) != 0) {
+                free(job);
+                pthread_mutex_lock(&client_mutex);
+                client_in_use[slot] = 0;
+                pthread_mutex_unlock(&client_mutex);
+                close(client_fd);
+                sem_post(&client_slots);
+            }
+        }
     }
     close(listener);
     unlink(state.socket_path);
+    for (i = 0; i < LE_AGENT_CLIENT_WORKERS; ++i)
+        if (client_in_use[i])
+            pthread_join(client_threads[i], NULL);
+    sem_destroy(&client_slots);
+    pthread_mutex_destroy(&client_mutex);
     le_voice_pipeline_stop(state.voice_pipeline);
     le_voice_playback_stop(&state.playback);
     le_llm_credentials_clear(&state.credentials);
@@ -1394,6 +1761,8 @@ int main(int argc, char **argv)
     return running ? 1 : 0;
 
 fail_mutex:
+    sem_destroy(&client_slots);
+    pthread_mutex_destroy(&client_mutex);
     pthread_mutex_destroy(&state.metrics_mutex);
     pthread_mutex_destroy(&state.control_mutex);
     return 1;

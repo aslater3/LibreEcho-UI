@@ -43,13 +43,37 @@ async function navNames(page) {
   return page.$$eval('#nav .nav-item', els => els.map(e => e.textContent.trim()));
 }
 
+/* The radio panel is a <details>; everything the assertions below look at
+   lives inside the disclosure, and a re-render closes it again. */
+async function openRadioPanel(page) {
+  const panel = page.locator('.radio-stations');
+  await panel.waitFor({ timeout: 5000 });
+  if (!(await panel.evaluate(el => el.open))) await panel.locator('summary').click();
+  return panel;
+}
+
 async function main() {
   const browser = await chromium.launch();
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
   const failures = captureBrowserFailures(page);
 
-  // ---- Pass 1: no interception, so both endpoints really 404/405 ----------
+  /*
+   * Pass 1 covers the older-image case: an interface newer than the firmware
+   * it is talking to. It used to rely on the endpoints genuinely not existing,
+   * which stopped being true once the device grew them -- the assertions then
+   * described nothing and the suite failed. Refuse them explicitly instead, so
+   * the case survives the endpoints being implemented.
+   */
+  await page.route('**/api/v1/system/features', route =>
+    route.fulfill({ status: 404, contentType: 'application/json',
+      body: JSON.stringify({ ok: false, data: null,
+        error: { code: 'not_found', message: 'Not supported' } }) }));
+  await page.route('**/api/v1/integrations/radio', route =>
+    route.fulfill({ status: 404, contentType: 'application/json',
+      body: JSON.stringify({ ok: false, data: null,
+        error: { code: 'not_found', message: 'Not supported' } }) }));
+
   await page.goto('/');
   await waitForPage(page, 'Overview');
   assert.ok(!(await navNames(page)).includes('Simulation'),
@@ -66,8 +90,7 @@ async function main() {
 
   await page.locator('#nav').getByText('Integrations', { exact: true }).click();
   await waitForPage(page, 'Integrations');
-  const radio = page.locator('.radio-stations');
-  await radio.waitFor({ timeout: 5000 });
+  const radio = await openRadioPanel(page);
   assert.match(await radio.innerText(), /Not supported/);
   pass('endpoint unavailable: radio panel explains rather than throwing');
 
@@ -75,6 +98,9 @@ async function main() {
   await waitForPage(page, 'Overview');
   assert.equal(new URL(page.url()).pathname, '/overview', 'the unreachable route is replaced');
   pass('direct /simulation route falls back to Overview and rewrites the URL');
+
+  await page.unroute('**/api/v1/system/features');
+  await page.unroute('**/api/v1/integrations/radio');
 
   // ---- Pass 2: supply the two endpoints -----------------------------------
   const backend = { simulation: false, radio: { max_stations: 32, playback_supported: false, stations: [] } };
@@ -123,7 +149,8 @@ async function main() {
 
   await page.locator('#save-features').click();
   await page.waitForFunction(() => [...document.querySelectorAll('#nav .nav-item')].some(e => e.textContent.trim() === 'Simulation'), null, { timeout: 8000 });
-  assert.deepEqual(puts.features, [{ simulation: true }]);
+  /* The panel saves every feature it shows, so HTTPS rides along unchanged. */
+  assert.deepEqual(puts.features, [{ simulation: true, https: false }]);
   pass('features on: PUT sent, Simulation entry appears without a reload');
 
   await page.locator('#nav').getByText('Simulation', { exact: true }).click();
@@ -141,14 +168,13 @@ async function main() {
   await flip(page.locator('#feature-simulation'));
   await page.locator('#save-features').click();
   await page.waitForFunction(() => ![...document.querySelectorAll('#nav .nav-item')].some(e => e.textContent.trim() === 'Simulation'), null, { timeout: 8000 });
-  assert.deepEqual(puts.features[1], { simulation: false });
+  assert.deepEqual(puts.features[1], { simulation: false, https: false });
   pass('features off again: Simulation entry disappears without a reload');
 
   // ---- Radio panel --------------------------------------------------------
   await page.goto('/integrations');
   await waitForPage(page, 'Integrations');
-  await page.locator('.radio-stations').waitFor({ timeout: 5000 });
-  const panelText = await page.locator('.radio-stations').innerText();
+  const panelText = await (await openRadioPanel(page)).innerText();
   assert.match(panelText, /cannot be played yet/);
   assert.match(panelText, /Example station/);
   assert.equal(await page.locator('.radio-row').count(), 1);
@@ -214,6 +240,7 @@ async function main() {
   assert.equal(await page.locator('.radio-row').nth(1).locator('.radio-enabled').isChecked(), false);
   pass('radio: successful save reloads the server list, clean and not dirty');
 
+  await openRadioPanel(page);   /* the reload re-rendered the panel, closing it */
   await page.locator('.radio-row').first().locator('.radio-name').fill('Groove Salad HD');
   assert.equal(await page.locator('#save-radio').isDisabled(), false);
   await page.locator('.radio-row').nth(1).locator('.radio-remove').click();
@@ -305,7 +332,11 @@ async function main() {
   await home.waitFor({ timeout: 5000 });
   assert.equal(await home.count(), 1, 'exactly one home-location card');
   assert.match(await home.locator('summary h3').innerText(), /Home location & weather/);
-  assert.equal(await home.evaluate(el => el.open), true, 'the card is expanded by default');
+  /* Collapsed by default since "stop expanding panels": Home location, Local
+     LLM, the voice assistant and Internet radio all opened themselves on load
+     and the page arrived half-expanded. */
+  assert.equal(await home.evaluate(el => el.open), false, 'the card starts collapsed');
+  await home.locator('summary').click();
   assert.match(await home.innerText(), /Home address or place/);
   assert.match(await home.innerText(), /weather, local time and, in future, directions/);
   assert.equal(await page.locator('#wx-location').inputValue(), 'Austin, Texas');

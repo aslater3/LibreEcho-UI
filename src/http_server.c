@@ -35,7 +35,16 @@ extern int setgroups(int,const gid_t*);
 #define LE_UPDATE_TMP "/data/libreecho/update/incoming/manual.tar.tmp"
 #define LE_UPDATE_LOCK "/data/libreecho/update/incoming/upload.lock"
 #define LE_MAX_ASSISTANT_WORKERS 4
-#define LE_MAX_TLS_RELAYS 4
+/*
+ * One relay per in-flight HTTPS connection, so this is the HTTPS equivalent of
+ * LE_MAX_CLIENTS and has to match it. At 4 a browser silently lost assets: it
+ * opens six or more parallel connections for one page, the ones past the
+ * budget were closed without a response, and the page rendered without its
+ * stylesheet. Plain HTTP allowed 16 all along, so HTTPS was arbitrarily worse.
+ * Relays are short-lived and small -- the parent held under 1 MB RSS across
+ * ~280 connections -- so matching the budget costs little.
+ */
+#define LE_MAX_TLS_RELAYS LE_MAX_CLIENTS
 #define LE_TLS_IDLE_TIMEOUT_MS 60000
 struct client{int fd;
 size_t used;
@@ -168,7 +177,7 @@ copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));
 copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));
 copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));
 copy_header(q.confirm,sizeof(q.confirm),header(c->buf,"X-LibreEcho-Confirm"));
-if(!strcmp(q.path,"/api/v1/assistant/respond")&&!strcmp(q.method,"POST")){if(start_api_worker(c->fd,api,&q)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}",125);goto done;}c->fd=-1;c->used=0;return;}
+if((!strcmp(q.path,"/api/v1/assistant/respond")&&!strcmp(q.method,"POST"))||(!strcmp(q.path,"/api/v1/assistant/history")&&!strcmp(q.method,"GET"))||(!strcmp(q.path,"/api/v1/assistant/history/clear")&&!strcmp(q.method,"POST"))){if(start_api_worker(c->fd,api,&q)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}",125);goto done;}c->fd=-1;c->used=0;return;}
 if(!strcmp(q.path,"/api/v1/system/update/check")||!strcmp(q.path,"/api/v1/system/update/apply")){const char*action=!strcmp(q.path,"/api/v1/system/update/check")?"check":"install";if(!api_update_fetch_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update command could not start");goto done;}c->fd=-1;c->used=0;return;}
 if(!strcmp(q.path,"/api/v1/system/update/channel")){char channel[16],action[32];if(!api_update_channel_authorize(api,&q,&r,channel,sizeof(channel))){response(c->fd,r.status,r.type,r.body,r.length);goto done;}snprintf(action,sizeof(action),"set-channel-%s",channel);if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update channel could not be changed");goto done;}c->fd=-1;c->used=0;return;}
 if(!strncmp(q.path,"/api/v1/baby-monitor/stream",27)){int card,device,channels,bits,selected_channel;if(!api_baby_monitor_stream_authorize(api,&q,&r,&card,&device,&channels,&bits,&selected_channel)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_pcm_stream(c->fd,selected_channel)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Microphone stream could not start\"}}",118);goto done;}c->fd=-1;c->used=0;return;}if(!strncmp(q.path,"/api/",5)){time_t now=time(0);
@@ -261,7 +270,12 @@ sigset_t blocked,previous;pid_t pid;int i,slot=-1;
 sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);
 if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;
 for(i=0;i<LE_MAX_TLS_RELAYS;i++)if(tls_relay_pids[i]<=0){slot=i;break;}
-if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
+if(slot<0){
+/* Dropping a connection with no reply looks like a broken asset rather than a
+   busy server, so say it happened. */
+static int warned;
+if(!warned){warned=1;fprintf(stderr,"HTTPS relay budget (%d) exhausted; a connection was dropped\n",LE_MAX_TLS_RELAYS);}
+sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
 pid=fork();
 if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
 if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close(http_listener);close(https_listener);tls_relay(cfd,o);_exit(0);}

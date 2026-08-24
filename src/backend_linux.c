@@ -1639,6 +1639,9 @@ static void bluetooth_parse_devices(const char *response, const char *key,
 
 static int bluetooth(struct le_backend *b, struct le_bluetooth_state *o)
 {
+    /* Reported here rather than on the network page: the adapter's address
+       belongs with the adapter. */
+
     char response[LE_ADAPTER_MSG_MAX];
     int rc;
 
@@ -1701,6 +1704,9 @@ static int bluetooth(struct le_backend *b, struct le_bluetooth_state *o)
         if (json_get_int(response, "value", &value) > 0 && value >= 0)
             o->pending_pairing.value = (unsigned int)value;
     }
+    read_bt_factory_mac(o->address_factory, sizeof(o->address_factory));
+    read_live_mac("/sys/class/bluetooth/hci0/address", o->address,
+                  sizeof(o->address));
     return LE_OK;
 }
 

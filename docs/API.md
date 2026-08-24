@@ -408,6 +408,43 @@ connectivity, local STT timing, and first-audio latency telemetry. The latency
 measurement is from the estimated end of speech to the first PCM submitted to
 the announcement bus; the current target is 3000 ms.
 
+#### GET /api/v1/assistant/history
+
+Returns the newest bounded turn records measured by `agentd` itself:
+
+```json
+{
+  "history_generation": 7,
+  "turns": [
+    {
+      "at_ms": 1724457600123,
+      "stt_audio_ms": 1200,
+      "stt_processing_ms": 2800,
+      "stt_total_ms": 4000,
+      "first_text_ms": 2500,
+      "first_announce_ms": 3000,
+      "first_pcm_ms": 3100,
+      "follow_up": false
+    }
+  ]
+}
+```
+
+The ring retains up to 12 newest turns in `agentd` memory and is empty after
+that daemon restarts. `history_generation` is persisted on the device and
+increments on every device-wide clear; clients must discard cached rows when
+the generation changes, but may preserve them when an empty response has the
+same generation (for example after an agentd restart). Clients should keep
+their last non-empty cached result when a successful response contains no
+turns. `at_ms` is Unix epoch milliseconds; latency fields are device-local
+durations. Other verbs return 405.
+
+#### POST /api/v1/assistant/history/clear
+
+Clears the device-side history ring. This is a state-changing request and
+requires `X-LibreEcho-CSRF`; the response is an empty success object. The
+browser clears its cache only after this device operation succeeds.
+
 #### PUT /api/v1/assistant
 
 Updates the provider-neutral assistant configuration:
@@ -1260,6 +1297,11 @@ The response also includes `last_disconnect_reason` and
 example `connect-failed (0x04)`), retained for pairing/connection triage. Both
 are empty strings until the first event of each kind has been observed in this
 boot. Connection failures additionally populate `last_error`.
+
+The response also includes `address`, `address_factory`, and
+`address_configured` for the controller. `address` is the live HCI address,
+`address_factory` is the board-recorded address when available, and
+`address_configured` is the persisted override (empty means no override).
 
 #### PUT /api/v1/bluetooth
 
