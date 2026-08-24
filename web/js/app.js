@@ -489,9 +489,35 @@ const SIM_RESPONSE_GOAL_TEXT='1 s';
 function simGoalClass(v){const n=Number(v);return Number.isFinite(n)?(n<SIM_RESPONSE_GOAL_MS?'connected':'error-text'):''}
 const SIM_HISTORY_KEY='libreecho-simulation-history';
 const SIM_HISTORY_MAX=100;
+/*
+ * Turn history comes from the device, not localStorage.
+ *
+ * localStorage is scoped per origin, and this device takes a new DHCP lease on
+ * most boots -- the Wi-Fi driver generates a fresh MAC each time -- so every
+ * reboot moved the UI to a new origin and the history started empty. It also
+ * recorded what this browser saw across a network hop rather than what the
+ * device measured. agentd already computes these numbers per turn and now
+ * keeps the last 24, so read them from there and treat localStorage as a
+ * cache of what was fetched, for the moments the device is unreachable.
+ */
+let simDeviceTurns=[];
 function simHistory(){
+ if(simDeviceTurns.length)return simDeviceTurns;
  try{const raw=localStorage.getItem(SIM_HISTORY_KEY);const v=raw?JSON.parse(raw):[];
      return Array.isArray(v)?v:[]}catch(_){return []}}
+async function simHistoryLoad(){
+ try{
+  const h=await api('/assistant/history');
+  const turns=Array.isArray(h&&h.turns)?h.turns:[];
+  simDeviceTurns=turns.map(t=>({
+   at:t.at_ms, sttAudioMs:t.stt_audio_ms, sttMs:t.stt_processing_ms,
+   sttTotalMs:t.stt_total_ms, firstTextMs:t.first_text_ms,
+   announceMs:t.first_announce_ms, firstPcmMs:t.first_pcm_ms,
+   followUp:!!t.follow_up, source:'device'}));
+  /* keep a copy so the panel still shows something if the device drops */
+  simHistorySave(simDeviceTurns);
+ }catch(_){/* leave whatever was cached */}
+ return simHistory();}
 function simHistorySave(list){
  try{localStorage.setItem(SIM_HISTORY_KEY,JSON.stringify(list.slice(0,SIM_HISTORY_MAX)))}catch(_){/* private mode, quota */}}
 function ms(v){return (v===null||v===undefined)?'—':(v>=1000?(v/1000).toFixed(2)+' s':Math.round(v)+' ms')}
@@ -817,6 +843,7 @@ function simTimingHtml(entry,cap){
   simRadioTimingHtml(entry);
 }
 async function simulationPage(){
+ await simHistoryLoad();   /* device-side history, survives reboots and IP changes */
  const w=await api('/wake-word').catch(()=>({}));
  const vp=await api('/voice-pipeline').catch(()=>({}));
  const cap=vp?.listening?.max_utterance_ms;

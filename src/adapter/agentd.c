@@ -20,6 +20,9 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Turns retained for the latency history the UI reads back. */
+#define LE_AGENT_TURN_HISTORY 24
+
 #define DEFAULT_AGENT_SOCKET LE_ADAPTER_AGENT_SOCK
 #define DEFAULT_AGENT_CONFIG "/data/libreecho/config/agent.json"
 #define DEFAULT_AGENT_CREDENTIALS \
@@ -86,6 +89,23 @@ struct agent_state {
     uint64_t first_text_ms;
     uint64_t first_announce_ms;
     uint64_t first_pcm_ms;
+    /*
+     * Per-turn timings, kept here rather than in the browser.
+     *
+     * The simulation page used to hold this in localStorage, which is scoped
+     * per origin -- and this device takes a new DHCP lease on most boots
+     * because the Wi-Fi driver generates a fresh MAC, so every reboot moved
+     * the UI to a new origin and the history started empty. It also recorded
+     * what the browser observed across a network hop rather than what the
+     * device measured. These are the numbers agentd already computes.
+     */
+    struct turn_record {
+        uint64_t at_ms;
+        uint64_t stt_audio_ms, stt_processing_ms, stt_total_ms;
+        uint64_t first_text_ms, first_announce_ms, first_pcm_ms;
+        int follow_up;
+    } turn_history[LE_AGENT_TURN_HISTORY];
+    unsigned turn_history_next, turn_history_count;
     unsigned long latency_violations;
     char turn_request_id[64];
     unsigned long completed_turns;
@@ -399,6 +419,57 @@ static int play_sentence(void *context, const char *text)
         nanosleep(&delay, NULL);
     }
     return -1;
+}
+
+/*
+ * The per-turn latency history. Its own command rather than extra fields on
+ * status: status is polled often and must stay well inside the 4096-byte
+ * adapter message, while this is read only when the page is open.
+ */
+static int command_history(struct agent_state *state, int client_fd,
+                           const char *id)
+{
+    char body[LE_ADAPTER_MSG_MAX];
+    size_t used = 0;
+    unsigned i, n;
+    int wrote;
+
+    wrote = snprintf(body, sizeof(body), "{\"turns\":[");
+    if (wrote < 0 || (size_t)wrote >= sizeof(body))
+        return respond(client_fd, id, 0, "history too large");
+    used = (size_t)wrote;
+
+    pthread_mutex_lock(&state->metrics_mutex);
+    n = state->turn_history_count;
+    for (i = 0; i < n; ++i) {
+        /* newest first: walk back from the write cursor */
+        unsigned idx = (state->turn_history_next + LE_AGENT_TURN_HISTORY
+                        - 1 - i) % LE_AGENT_TURN_HISTORY;
+        const struct turn_record *r = &state->turn_history[idx];
+        wrote = snprintf(body + used, sizeof(body) - used,
+                         "%s{\"at_ms\":%llu,\"stt_audio_ms\":%llu,"
+                         "\"stt_processing_ms\":%llu,\"stt_total_ms\":%llu,"
+                         "\"first_text_ms\":%llu,\"first_announce_ms\":%llu,"
+                         "\"first_pcm_ms\":%llu,\"follow_up\":%s}",
+                         i ? "," : "",
+                         (unsigned long long)r->at_ms,
+                         (unsigned long long)r->stt_audio_ms,
+                         (unsigned long long)r->stt_processing_ms,
+                         (unsigned long long)r->stt_total_ms,
+                         (unsigned long long)r->first_text_ms,
+                         (unsigned long long)r->first_announce_ms,
+                         (unsigned long long)r->first_pcm_ms,
+                         r->follow_up ? "true" : "false");
+        if (wrote < 0 || (size_t)wrote >= sizeof(body) - used)
+            break;              /* stop cleanly rather than truncate mid-object */
+        used += (size_t)wrote;
+    }
+    pthread_mutex_unlock(&state->metrics_mutex);
+
+    wrote = snprintf(body + used, sizeof(body) - used, "]}");
+    if (wrote < 0 || (size_t)wrote >= sizeof(body) - used)
+        return respond(client_fd, id, 0, "history too large");
+    return respond(client_fd, id, 1, body);
 }
 
 static int command_status(struct agent_state *state, int fd,
@@ -1030,6 +1101,27 @@ static void voice_transcript(
             le_log_warn("agentd: voice response failed: %s", error);
         else
             generated = 1;
+        /* Metrics are final here: STT is done and the response has been
+           generated and dispatched. Keep the turn so the UI can show a
+           history that survives a reboot. */
+        pthread_mutex_lock(&state->metrics_mutex);
+        {
+            struct turn_record *rec =
+                &state->turn_history[state->turn_history_next];
+            rec->at_ms = monotonic_milliseconds();
+            rec->stt_audio_ms = turn->stt_audio_ms;
+            rec->stt_processing_ms = turn->stt_processing_ms;
+            rec->stt_total_ms = turn->stt_total_ms;
+            rec->first_text_ms = state->first_text_ms;
+            rec->first_announce_ms = state->first_announce_ms;
+            rec->first_pcm_ms = state->first_pcm_ms;
+            rec->follow_up = turn->follow_up ? 1 : 0;
+            state->turn_history_next =
+                (state->turn_history_next + 1) % LE_AGENT_TURN_HISTORY;
+            if (state->turn_history_count < LE_AGENT_TURN_HISTORY)
+                ++state->turn_history_count;
+        }
+        pthread_mutex_unlock(&state->metrics_mutex);
         if (generated) {
             snprintf(state->previous_voice_user,
                      sizeof(state->previous_voice_user), "%.*s",
@@ -1250,6 +1342,8 @@ static void handle_client(struct agent_state *state, int client_fd)
     pthread_mutex_lock(&state->control_mutex);
     if (!strcmp(command, "status"))
         (void)command_status(state, client_fd, id);
+    else if (!strcmp(command, "history"))
+        (void)command_history(state, client_fd, id);
     else if (!strcmp(command, "auth_start"))
         (void)command_auth_start(state, client_fd, id);
     else if (!strcmp(command, "auth_poll"))
