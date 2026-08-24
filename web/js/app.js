@@ -626,7 +626,7 @@ function simRender(){
  const el=$('#sim-history'); if(!el)return;
  if(!h.length){el.innerHTML='<p class="muted">No runs yet.</p>';return}
  const note=simShowingDevice()
-  ? '<p class="muted">Showing the last '+h.length+' turns the device measured itself, which is what survives a reboot or a change of address. It does not record the phrase or the wake result &mdash; run a simulation to fill those columns.</p>'
+  ? '<p class="muted">Showing the last '+h.length+(h.length===1?' turn':' turns')+' the device measured itself, which is what survives a reboot or a change of address. It does not record the phrase or the wake result &mdash; run a simulation to fill those columns.</p>'
   : '';
  el.innerHTML=note+simSummaryHtml(h)+'<div class="table-scroll"><table class="sim-table"><thead><tr>'+
   '<th>time</th><th>wake</th><th>phrase</th><th>wake latency</th>'+
