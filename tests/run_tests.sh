@@ -6,6 +6,9 @@ CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
+make build/test-auth-sessions
+./build/test-auth-sessions
+sh tests/test_pr137_review_contract.sh
 make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
 ./build/test-network-health
 ./build/test-gateway-probe
@@ -24,6 +27,15 @@ sh tests/test_bluetooth_profile_service_contract.sh
 sh tests/test_bluetooth_device_metadata_contract.sh
 sh tests/test_bluetooth_cache_bust_contract.sh
 sh tests/test_bluetooth_mgmt_observability_contract.sh
+# Compiles btd.c into the test so the real status writer and discovery
+# bookkeeping run. No -Werror here: the daemon source carries two
+# platform-dependent warnings this test must not silence for the main build.
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic \
+    -Isrc -Isrc/adapter tests/test_bluetooth_status_capacity.c \
+    src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c \
+    src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+    -o build/test-bluetooth-status-capacity
+./build/test-bluetooth-status-capacity
 make build/test-sdp-wire-format
 ./build/test-sdp-wire-format
 make build/test-avdtp-wire-format
@@ -48,6 +60,10 @@ python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_wake_word_ui_contract.py
 python3 tests/test_home_location_panel_contract.py
 python3 tools/test_virtual_echo.py
+python3 tests/test_now_playing_ui_contract.py
+python3 tests/test_config_persist_contract.py
+python3 tests/test_web_ui_behaviour_contract.py
+sh tests/test_update_size_contract.sh
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -64,6 +80,8 @@ sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
+make build/libreecho-radiod
+sh tests/test_radio_icy_metadata.sh
 sh tests/test_airplay_led_bridge.sh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \
@@ -79,6 +97,10 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_voice_dsp.c src/adapter/voice_dsp.c \
     -o build/test-voice-dsp
 ./build/test-voice-dsp
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_radio_resample.c src/adapter/radio_resample.c \
+    -lm -o build/test-radio-resample
+./build/test-radio-resample
 make build/test-voice-aec build/test-voice-reference
 ./build/test-voice-aec
 ./build/test-voice-reference
@@ -115,7 +137,10 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_bluetooth_scan_contract.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_usb_role_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_limits.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_playback_transport_contract.sh
 sh tests/test_memory.sh "$pid"
 kill "$pid"
 wait "$pid" 2>/dev/null || true

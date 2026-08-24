@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression contract for the released Home location settings surface."""
 
+import re
 from pathlib import Path
 
 source = Path("web/js/integrations-ui.js").read_text(encoding="utf-8")
@@ -18,6 +19,7 @@ assert "lat<-90||lat>90||lon<-180||lon>180" in source
 assert "lat===originalLat&&lon===originalLon" in source
 assert "The place changed but the coordinates did not" in source
 assert "This image cannot clear old coordinates safely" in source
-assert "/js/integrations-ui.js?rev=29" in index, "browser cache revision was not advanced"
+match = re.search(r'/js/integrations-ui\.js\?rev=(\d+)', index)
+assert match and int(match.group(1)) >= 29, "browser cache revision was not advanced"
 
 print("home location panel and validation contract: ok")

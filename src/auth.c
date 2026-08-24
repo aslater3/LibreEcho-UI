@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -183,6 +184,17 @@ static int valid_hex(const char *value, size_t length)
     return 1;
 }
 
+void le_auth_fold_username(char *out, size_t size, const char *in)
+{
+    size_t i;
+    if (!out || !size) return;
+    out[0] = '\0';
+    if (!in) return;
+    for (i = 0; i + 1 < size && in[i]; ++i)
+        out[i] = (in[i] >= 'A' && in[i] <= 'Z') ? (char)(in[i] - 'A' + 'a') : in[i];
+    out[i] = '\0';
+}
+
 int le_auth_load(struct le_auth_db *db, const char *path)
 {
     FILE *file;
@@ -199,6 +211,8 @@ int le_auth_load(struct le_auth_db *db, const char *path)
     while (fgets(line, sizeof(line), file) &&
            db->user_count < LE_AUTH_MAX_USERS) {
         char *user, *method, *salt, *digest, *end;
+        char folded[LE_AUTH_USERNAME_MAX];
+        size_t existing;
         size_t length;
         user = line;
         while (*user == ' ' || *user == '\t')
@@ -229,8 +243,15 @@ int le_auth_load(struct le_auth_db *db, const char *path)
             strlen(salt) > 64 || !valid_hex(salt, strlen(salt)) ||
             strlen(digest) != 64 || !valid_hex(digest, 64))
             continue;
-        strncpy(db->users[db->user_count].username, user,
-                sizeof(db->users[db->user_count].username) - 1);
+        le_auth_fold_username(folded, sizeof(folded), user);
+        for (existing = 0; existing < db->user_count; ++existing)
+            if (!strcmp(db->users[existing].username, folded)) {
+                fclose(file);
+                memset(db, 0, sizeof(*db));
+                return -1; /* fail closed rather than hide a case-colliding account */
+            }
+        snprintf(db->users[db->user_count].username,
+                 sizeof(db->users[db->user_count].username), "%s", folded);
         strncpy(db->users[db->user_count].salt, salt,
                 sizeof(db->users[db->user_count].salt) - 1);
         strncpy(db->users[db->user_count].digest, digest,
@@ -299,17 +320,19 @@ int le_auth_login(struct le_auth_db *db, const char *username,
                   int *expires_in)
 {
     size_t i;
-    char digest[65];
+    char digest[65], folded[LE_AUTH_USERNAME_MAX];
     if (!db || !db->enabled || !username || !password ||
         strlen(password) > LE_AUTH_PASSWORD_MAX)
         return -1;
+    le_auth_fold_username(folded, sizeof(folded), username);
     for (i = 0; i < db->user_count; ++i) {
-        if (!constant_equal(db->users[i].username, username))
+        if (!constant_equal(db->users[i].username, folded))
             continue;
         hash_password(db->users[i].salt, password, digest);
         if (!constant_equal(db->users[i].digest, digest))
             return -1;
-        return issue_token(db, username, token, token_size, expires_in);
+        /* issue against the folded name so the session reports it that way */
+        return issue_token(db, folded, token, token_size, expires_in);
     }
     return -1;
 }
@@ -348,4 +371,94 @@ void le_auth_logout(struct le_auth_db *db, const char *token)
     }
 }
 
+/* ------------------------- Session persistence -------------------------- */
+
+int le_auth_save_sessions(const struct le_auth_db *db, const char *path)
+{
+    char temp[512];
+    FILE *f;
+    size_t i;
+    int fd;
+
+    if (!db || !path || !path[0])
+        return -1;
+    if ((size_t)snprintf(temp, sizeof(temp), "%s.tmp", path) >= sizeof(temp))
+        return -1;
+    /*
+     * 0600 and written through a temporary with a fixed name: the data
+     * contract that guards /data matches names exactly, so a uniquely
+     * named leftover would be an unknown file and would block every
+     * service at the next boot.
+     */
+    fd = open(temp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        (void)unlink(temp);
+        return -1;
+    }
+    for (i = 0; i < LE_AUTH_MAX_SESSIONS; ++i) {
+        if (!db->sessions[i].token[0])
+            continue;
+        fprintf(f, "%s %s %lld\n", db->sessions[i].token,
+                db->sessions[i].username,
+                (long long)db->sessions[i].expires);
+    }
+    if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
+        fclose(f);
+        (void)unlink(temp);
+        return -1;
+    }
+    fclose(f);
+    if (rename(temp, path) != 0) {
+        (void)unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+void le_auth_load_sessions(struct le_auth_db *db, const char *path)
+{
+    char line[256];
+    FILE *f;
+    time_t now = time(NULL);
+    size_t slot = 0;
+
+    if (!db || !path || !path[0])
+        return;
+    f = fopen(path, "r");
+    if (!f)
+        return;
+    while (slot < LE_AUTH_MAX_SESSIONS && fgets(line, sizeof(line), f)) {
+        char token[LE_AUTH_TOKEN_MAX];
+        char username[LE_AUTH_USERNAME_MAX];
+        long long expires = 0;
+        size_t user;
+        int known_user = 0;
+
+        if (sscanf(line, "%64s %31s %lld", token, username, &expires) != 3)
+            continue;
+        /* A stored session can never outlive the expiry it was issued with. */
+        if ((time_t)expires <= now)
+            continue;
+        for (user = 0; user < db->user_count; ++user)
+            if (!strcmp(db->users[user].username, username)) {
+                known_user = 1;
+                break;
+            }
+        if (!known_user)
+            continue;
+        snprintf(db->sessions[slot].token,
+                 sizeof(db->sessions[slot].token), "%s", token);
+        snprintf(db->sessions[slot].username,
+                 sizeof(db->sessions[slot].username), "%s", username);
+        db->sessions[slot].expires = (time_t)expires;
+        ++slot;
+    }
+    fclose(f);
+}
+
 #include "auth_user_management.inc"
+

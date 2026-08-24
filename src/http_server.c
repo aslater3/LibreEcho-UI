@@ -1,4 +1,5 @@
 #include "http_server.h"
+#include "tls.h"
 #include "adapter/adapter.h"
 #include "adapter/voice_stream.h"
 #include <arpa/inet.h>
@@ -28,18 +29,22 @@ extern int setgroups(int,const gid_t*);
 #define LE_REQ_MAX 24576
 #define LE_HEADER_MAX 8192
 #define LE_BODY_MAX 16384
-#define LE_UPDATE_MAX 33554432
+/* The ceiling lives in api.h so the size the API advertises and the size
+   enforced here cannot drift apart. */
 #define LE_UPDATE_PATH "/data/libreecho/update/incoming/manual.tar"
 #define LE_UPDATE_TMP "/data/libreecho/update/incoming/manual.tar.tmp"
 #define LE_UPDATE_LOCK "/data/libreecho/update/incoming/upload.lock"
 #define LE_MAX_ASSISTANT_WORKERS 4
+#define LE_MAX_TLS_RELAYS 4
+#define LE_TLS_IDLE_TIMEOUT_MS 60000
 struct client{int fd;
 size_t used;
 char buf[LE_REQ_MAX+1];
 };
 static volatile sig_atomic_t assistant_workers;
 static volatile sig_atomic_t assistant_pids[LE_MAX_ASSISTANT_WORKERS];
-static void reap_assistant_workers(int signo){int i;int status;(void)signo;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]>0&&waitpid((pid_t)assistant_pids[i],&status,WNOHANG)>0){assistant_pids[i]=0;if(assistant_workers>0)assistant_workers--;}}
+static volatile sig_atomic_t tls_relay_pids[LE_MAX_TLS_RELAYS];
+static void reap_child_workers(int signo){int i;int status;(void)signo;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]>0&&waitpid((pid_t)assistant_pids[i],&status,WNOHANG)>0){assistant_pids[i]=0;if(assistant_workers>0)assistant_workers--;}for(i=0;i<LE_MAX_TLS_RELAYS;i++)if(tls_relay_pids[i]>0&&waitpid((pid_t)tls_relay_pids[i],&status,WNOHANG)>0)tls_relay_pids[i]=0;}
 
 static int close_on_exec(int fd)
 {
@@ -146,7 +151,10 @@ if(sscanf(c->buf,"%7s %255s",q.method,q.path)!=2){response(c->fd,400,"text/plain
 goto done;
 }cl=header(c->buf,"Content-Length");
 if(cl)content_len=(size_t)strtoul(cl,0,10);
-if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));if(!content_len||content_len>LE_UPDATE_MAX){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}c->fd=-1;c->used=0;return;}
+/* Two size gates: the fixed ceiling, and what the staging filesystem can
+   actually hold. Refusing here costs the client one request; refusing after
+   the stream costs it the whole upload. */
+if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));{size_t limit=le_update_max_upload_bytes();char detail[128];if(!content_len||content_len>LE_UPDATE_MAX_BYTES){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(content_len>limit){snprintf(detail,sizeof(detail),"Update is larger than the %lu bytes this device can stage",(unsigned long)limit);update_error(c->fd,413,"update_size",detail);goto done;}}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}c->fd=-1;c->used=0;return;}
 if(content_len>LE_BODY_MAX){response(c->fd,413,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}",118);
 goto done;
 }if(c->used<headers+content_len)return;
@@ -178,11 +186,95 @@ done:close(c->fd);
 c->fd=-1;
 c->used=0;
 }
-int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
+/*
+ * HTTPS is served by terminating TLS in a short-lived child that relays
+ * plaintext to the ordinary HTTP loop over loopback, rather than by wrapping
+ * the request path in TLS directly. Two request paths (update upload and the
+ * assistant worker) hand their raw fd to a forked child and keep reading it
+ * there; a child cannot continue a TLS session owned by the parent, so
+ * in-line termination would break exactly those two. Relaying keeps every
+ * downstream byte identical and leaves plain HTTP listening, so a TLS
+ * misconfiguration can never lock the device's own UI out.
+ */
+static void tls_relay(int cfd,const struct http_options*o){
+struct le_tls*tls;int up=-1;struct sockaddr_in a;struct pollfd p[2];char buf[4096];long n;const char*relay_host;
+tls=le_tls_server_open(cfd,o->tls_cert,o->tls_key);
+if(!tls){close(cfd);return;}
+up=socket(AF_INET,SOCK_STREAM,0);
+if(up<0){le_tls_close(tls);close(cfd);return;}
+memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)o->port);relay_host=!strcmp(o->listen_host,"0.0.0.0")?"127.0.0.1":o->listen_host;
+/* inet_pton, not INADDR_LOOPBACK: the latter is not POSIX and is hidden by
+   _POSIX_C_SOURCE on some platforms, so it built on Linux and failed the
+   native build the e2e harness uses. */
+if(inet_pton(AF_INET,relay_host,&a.sin_addr)!=1){close(up);le_tls_close(tls);close(cfd);return;}
+if(connect(up,(struct sockaddr*)&a,sizeof(a))){close(up);le_tls_close(tls);close(cfd);return;}
+/*
+ * Pump both directions until either end finishes. Two things this loop has to
+ * get right, both learned the hard way:
+ *
+ *  - Upstream is checked on every pass, even when TLS still holds buffered
+ *    plaintext. Draining the whole request first looks harmless but means a
+ *    server that answers early (a 401/403, or a 413 on an oversized body) has
+ *    its reply sitting unread while we keep pushing at a socket it already
+ *    closed. The write then fails and the reply is lost.
+ *  - A failed upstream write is not the end of the exchange. The response may
+ *    already be in our receive buffer, so drain and forward it before closing,
+ *    or the client sees a bare TLS shutdown and no status at all.
+ */
+int client_done=0,up_writable=1;
+for(;;){
+int pending=le_tls_pending(tls)>0;
+p[0].fd=cfd;p[0].events=POLLIN;p[0].revents=0;
+p[1].fd=up;p[1].events=POLLIN;p[1].revents=0;
+if(poll(p,2,pending?0:LE_TLS_IDLE_TIMEOUT_MS)<0)break;
+if(!pending&&!p[0].revents&&!p[1].revents)break;   /* idle timeout */
+
+/* upstream first: never let a ready response go unread */
+if(p[1].revents&(POLLIN|POLLHUP|POLLERR)){
+n=read(up,buf,sizeof(buf));
+if(n<=0)break;
+if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
+continue;
+}
+
+if(!client_done&&(pending||(p[0].revents&(POLLIN|POLLHUP|POLLERR)))){
+n=le_tls_read_deadline(tls,buf,sizeof(buf),LE_TLS_IDLE_TIMEOUT_MS);
+if(n<=0){client_done=1;shutdown(up,SHUT_WR);continue;}
+if(up_writable&&write_all_file(up,buf,(size_t)n)<0){
+/* stop sending, but keep draining whatever the server already replied */
+up_writable=0;shutdown(up,SHUT_WR);
+}}}
+
+/* final drain: forward any response still buffered upstream */
+for(;;){
+struct pollfd d={up,POLLIN,0};
+if(poll(&d,1,250)<=0)break;
+n=read(up,buf,sizeof(buf));
+if(n<=0)break;
+if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
+}
+close(up);le_tls_close(tls);close(cfd);return;}
+
+/* Keep TLS relays in the same fixed process budget as other forked work. */
+static int spawn_tls_relay(int cfd,const struct http_options*o,int http_listener,int https_listener){
+sigset_t blocked,previous;pid_t pid;int i,slot=-1;
+sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);
+if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;
+for(i=0;i<LE_MAX_TLS_RELAYS;i++)if(tls_relay_pids[i]<=0){slot=i;break;}
+if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
+pid=fork();
+if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
+if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close(http_listener);close(https_listener);tls_relay(cfd,o);_exit(0);}
+tls_relay_pids[slot]=pid;
+sigprocmask(SIG_SETMASK,&previous,NULL);
+return 0;
+}
+
+int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,tls_ls=-1,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
 struct sockaddr_in a;
 struct client c[LE_MAX_CLIENTS];
-struct pollfd p[LE_MAX_CLIENTS+1];
-time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_assistant_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
+struct pollfd p[LE_MAX_CLIENTS+2];
+time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_child_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
 if(max>LE_MAX_CLIENTS)max=LE_MAX_CLIENTS;
 memset(c,0,sizeof(c));
 for(i=0;
@@ -201,13 +293,28 @@ return-1;
 return-1;
 }if(o->run_user[0]){struct passwd*pw=getpwnam(o->run_user);if(!pw){fprintf(stderr,"Unknown privilege-drop user: %s\n",o->run_user);close(ls);return-1;}if(setgroups(0,0)||setgid(pw->pw_gid)||setuid(pw->pw_uid)){perror("privilege drop");close(ls);return-1;}fprintf(stderr,"Dropped privileges to %s\n",o->run_user);}
 fprintf(stderr,"LibreEcho listening on http://%s:%d (%s backend)\n",o->listen_host,o->port,le_backend_mode(api->backend));
+if(o->tls_port>0){
+struct sockaddr_in ta;int tyes=1;
+tls_ls=socket(AF_INET,SOCK_STREAM,0);
+if(tls_ls>=0&&close_on_exec(tls_ls)<0){close(tls_ls);tls_ls=-1;}
+if(tls_ls>=0){
+setsockopt(tls_ls,SOL_SOCKET,SO_REUSEADDR,&tyes,sizeof(tyes));
+memset(&ta,0,sizeof(ta));ta.sin_family=AF_INET;ta.sin_port=htons((uint16_t)o->tls_port);
+if(inet_pton(AF_INET,o->listen_host,&ta.sin_addr)!=1||bind(tls_ls,(struct sockaddr*)&ta,sizeof(ta))||listen(tls_ls,max)){
+/* HTTPS is best-effort: losing it must never take the HTTP UI down with it */
+fprintf(stderr,"HTTPS listener on port %d unavailable: %s\n",o->tls_port,strerror(errno));
+close(tls_ls);tls_ls=-1;api_set_https_active(api,0);
+}else {api_set_https_active(api,1);fprintf(stderr,"LibreEcho also listening on https://%s:%d\n",o->listen_host,o->tls_port);}
+}}
 while(*running){p[0].fd=ls;
 p[0].events=POLLIN;
+p[max+1].fd=tls_ls;
+p[max+1].events=POLLIN;
 for(i=0;
 i<max;
 i++){p[i+1].fd=c[i].fd;
 p[i+1].events=POLLIN;
-}if(poll(p,(nfds_t)(max+1),500)<0&&errno!=EINTR)break;
+}if(poll(p,(nfds_t)(max+2),500)<0&&errno!=EINTR)break;
 if(p[0].revents&POLLIN){int fd=accept(ls,0,0);
 if(fd>=0&&close_on_exec(fd)<0){close(fd);fd=-1;}
 if(fd>=0){for(i=0;
@@ -215,7 +322,10 @@ i<max&&c[i].fd>=0;
 i++){/* find free bounded slot */}if(i==max){response(fd,503,"text/plain","Server busy",11);
 close(fd);
 }else c[i].fd=fd;
-}}for(i=0;
+}}if(tls_ls>=0&&(p[max+1].revents&POLLIN)){int tfd=accept(tls_ls,0,0);
+if(tfd>=0&&close_on_exec(tfd)<0){close(tfd);tfd=-1;}
+if(tfd>=0){if(spawn_tls_relay(tfd,o,ls,tls_ls)<0)close(tfd);else close(tfd);}
+}for(i=0;
 i<max;
 i++)if(c[i].fd>=0&&(p[i+1].revents&(POLLIN|POLLHUP|POLLERR))){ssize_t n=recv(c[i].fd,c[i].buf+c[i].used,LE_REQ_MAX-c[i].used,0);
 if(n<=0){close(c[i].fd);
@@ -228,6 +338,7 @@ le_backend_tick(api->backend);
 }}for(i=0;
 i<max;
 i++)if(c[i].fd>=0)close(c[i].fd);
+if(tls_ls>=0)close(tls_ls);
 close(ls);
 return 0;
 }

@@ -983,6 +983,7 @@
      "Bluetooth"
     ],
     "summary": "Start a Classic + LE discovery scan",
+    "description": "Starting a scan clears the previous discovery results, so the discovered array in the immediate response is empty. The scan then finishes on its own when the controller's inquiry period ends: poll GET /api/v1/bluetooth until scanning is false, at which point discovered holds the devices this scan found. Returns 409 when the controller is not enabled.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1163,7 +1164,8 @@
     "tags": [
      "Device"
     ],
-    "summary": "Read device identity",
+    "summary": "Read device identity and audio capability",
+    "description": "Identity plus an optional `audio` object describing capture, output and streaming capability. `audio` and every member of it are optional: older daemons omit it and the mock backend does not synthesize one, so clients render what is present. An empty `audio.streaming.decoders` means the device cannot decode compressed streams itself; `audio.streaming.available` lists the transports that deliver already-decoded audio.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1180,6 +1182,77 @@
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     }
+    }
+   }
+  },
+  "/storage/usb": {
+   "get": {
+    "tags": [
+     "System"
+    ],
+    "summary": "List a USB drive attached to the OTG port",
+    "description": "Reports the attached USB disk and lists one directory of it. Optional `path` query selects a directory relative to the mount; it is rejected if it contains `..`, a backslash or a leading slash, so a listing can never escape the drive. Answers `size_bytes`, `used_bytes` and `free_bytes` from statvfs, plus `rel_path` echoing the directory listed. `present` is false when the port is in device mode or no disk is attached; `mounted` is false when a disk is present but no filesystem could be mounted. The drive is mounted read-only, nosuid and nodev.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "parameters": [
+     {
+      "name": "path",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Directory relative to the drive root."
+     }
+    ]
+   }
+  },
+  "/storage/usb/play": {
+   "post": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Play an audio file from the USB drive",
+    "description": "Body is `{\"path\":\"...\"}` relative to the drive root. The path is refused if it contains `..`, a backslash or a leading slash, so playback cannot escape the mount. Only `.mp3` is accepted: radiod decodes MPEG-1/2 Layer III and this image carries no AAC decoder, so other audio formats answer `415` with that reason rather than starting and staying silent. Playback runs through the same radiod path as internet radio, so `/integrations/radio/stop` stops it.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "415": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/diagnostics/kernel": {
+   "get": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Read recent kernel log messages",
+    "description": "Returns the tail of the kernel ring buffer as `lines`, most recent last, with `count`. Bounded to the last 80 records. Drained non-blocking from /dev/kmsg. This exists because switching the USB port to host mode removes the ADB gadget, which is the device's only shell, making the kernel log unreadable over USB at exactly the moment it is needed; this endpoint reads it over the network instead.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }
@@ -1233,6 +1306,197 @@
       "$ref": "#/components/responses/Success"
      },
      "405": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/integrations/radio": {
+   "get": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "List the internet radio stations",
+    "description": "Returns `max_stations`, `playback_supported`, the live `playing` / `playing_url` pair and the `stations` array. `playback_supported` is answered by asking radiod rather than by a constant: an image without a stream player reports false, and a client should say so rather than implying playback works. `playing` is radiod's own state and is the authoritative answer to whether a stream is running; `playing_url` is empty when it is not.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Replace the internet radio station list",
+    "description": "Replaces the whole list. The request body is flat and numbered rather than an array: the daemon reads JSON scalars by key and has no array parser. For every index i below `station_count`, send `station_i_word` and `station_i_url`, optionally `station_i_name` and `station_i_enabled`. The response is the stored list in the same shape as GET. Validation failures answer 400 with a message describing the rule that was broken.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "station_count"
+        ],
+        "properties": {
+         "station_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+         },
+         "station_0_word": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 31,
+          "pattern": "^[a-z0-9 -]+$",
+          "description": "What the station is asked for by. Lowercase letters, digits, spaces and hyphens; no leading or trailing space; unique across the list."
+         },
+         "station_0_name": {
+          "type": "string",
+          "maxLength": 63,
+          "description": "Display name. Defaults to the word when blank or absent."
+         },
+         "station_0_url": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 511,
+          "pattern": "^https?://[!-~]+$",
+          "description": "Stream URL. Printable ASCII with no spaces."
+         },
+         "station_0_enabled": {
+          "type": "boolean",
+          "default": true
+         }
+        },
+        "additionalProperties": true,
+        "example": {
+         "station_count": 2,
+         "station_0_word": "groove",
+         "station_0_name": "Groove Salad",
+         "station_0_url": "https://ice1.somafm.com/groovesalad-128-mp3",
+         "station_0_enabled": true,
+         "station_1_word": "drone zone",
+         "station_1_name": "Drone Zone",
+         "station_1_url": "https://ice1.somafm.com/dronezone-128-mp3",
+         "station_1_enabled": false
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/integrations/radio/play": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Play a stored station",
+    "description": "Starts the station whose `word` matches, by its stored URL. Answers 404 when no station has that word, 409 when the station exists but is switched off, and 501 when the image has no stream player. The response is the station list in the same shape as GET, so `playing` and `playing_url` come back with it.\n\nThe assistant does not reach this: agentd has no radio path, so a spoken request for a station cannot start one. Playback is started over the API today.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "word"
+        ],
+        "properties": {
+         "word": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 31,
+          "pattern": "^[a-z0-9 -]+$",
+          "description": "The stored word of the station to play."
+         }
+        },
+        "example": {
+         "word": "groove"
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/integrations/radio/stop": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Stop stream playback",
+    "description": "Stops whatever radiod is playing. Stopping a stream that is already stopped is not an error, so this is safe to send unconditionally as cleanup. Answers 501 when the image has no stream player. The response is the station list in the same shape as GET.\n\nThis is the only way to stop the radio today: agentd has no radio path, so \"stop\" spoken over the music does not reach radiod.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -1512,14 +1776,14 @@
     "tags": [
      "Network"
     ],
-    "summary": "Update hostname and local access",
+    "summary": "Update hostname, local access, and persistent MAC overrides",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
      }
     ],
     "requestBody": {
-     "$ref": "#/components/requestBodies/JsonObject"
+     "$ref": "#/components/requestBodies/NetworkUpdate"
     },
     "responses": {
      "200": {
@@ -1594,10 +1858,71 @@
     "tags": [
      "Audio"
     ],
-    "summary": "Read unified playback source, priority-bus state and optional media metadata",
+    "summary": "Read unified playback source, priority-bus state, media metadata and what the transport can do",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "description": "metadata.station is the station name when internet radio is playing: the name from the stored station list when the URL matches one, otherwise the stream's own icy-name. metadata.title for radio is the ICY StreamTitle the station interleaved into the stream, and is null when the station sends none -- no title is invented from the URL.\n\ntransport reports what this device can actually do to whatever is playing: {play, pause, stop, reason}. pause is always false. A live radio stream has no buffered position to resume from, so radiod can only stop and reconnect; AirPlay and Bluetooth playback is driven by the phone that started it (airplayd exposes status and an enable switch only, and the Bluetooth stack here is an AVRCP target, which answers transport commands and cannot send them). reason is the sentence to show beside a control that is disabled."
+   }
+  },
+  "/playback/transport": {
+   "post": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Start or stop what is playing",
+    "description": "Body is {\"action\":\"play\"|\"pause\"|\"stop\"}. The successful response is the same document as GET /api/v1/playback, taken after the action.\n\n\"stop\" stops internet radio. \"play\" starts the last station started in this session again -- a fresh connection that rejoins the broadcast live, not a resume. That station is held in memory only and is forgotten on restart, so after a reboot there is nothing to start again.\n\n\"pause\" is accepted and answered 501 with the reason rather than rejected as an unknown action: no source on this device can be paused. Read the transport block from GET /api/v1/playback before offering a control, so a button that cannot work is disabled with its reason instead of failing when pressed.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "action"
+        ],
+        "properties": {
+         "action": {
+          "type": "string",
+          "enum": [
+           "play",
+           "pause",
+           "stop"
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
      },
      "503": {
       "$ref": "#/components/responses/Error"
@@ -1756,6 +2081,66 @@
     }
    }
   },
+  "/system/features": {
+   "get": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Report optional feature switches",
+    "description": "Optional features are off by default. `simulation` enables POST /audio/simulate; while it is off that endpoint answers 403 and the web interface hides its Simulation page. `usb_host` reports whether the OTG port is currently in host mode, `usb_role` is the raw role read back from the kernel, and `usb_role_supported` is false on images or hardware without a switchable role.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Switch an optional feature on or off",
+    "description": "Send `simulation` to change the persisted feature switch. Send `usb_host` to move the OTG port between host mode (reads an attached USB drive) and device mode (serves ADB); the port cannot do both at once. `usb_host` is applied immediately and is deliberately NOT persisted -- every boot pins the port back to device mode so the ADB recovery path can never be left switched off by a stored setting. Returns 501 when the running kernel exposes no switchable USB role. The response is the new feature state.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "simulation"
+        ],
+        "properties": {
+         "simulation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Play rendered speech into the microphone path for testing wake word, speech-to-text and the assistant."
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/system/reboot": {
    "post": {
     "tags": [
@@ -1865,7 +2250,7 @@
      "System"
     ],
     "summary": "Read signed A/B update and source-check state",
-    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, and whether the installed update helper supports unsigned manual uploads.",
+    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, and whether the installed update helper supports unsigned manual uploads. Also reports the two OTA upload sizes: `max_upload_ceiling_bytes` (33554432, i.e. 32 MiB), the fixed limit POST /system/update/upload always refuses above, and `max_upload_bytes`, that ceiling capped by the free space on the filesystem the package is staged to, less a margin for the installer. Clients should read `max_upload_bytes` rather than hard-coding a number; when it is below the ceiling, free space is the binding limit. The size of the image already installed in a slot is not reported.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1989,7 +2374,7 @@
      "System"
     ],
     "summary": "Stream a LibreEcho OTA tar to the inactive slot",
-    "description": "Manual uploads are signature-verified by default. The optional X-LibreEcho-Allow-Unsigned header is honored only when GET /api/v1/system/update reports allow_unsigned=true; it applies only to this manually selected package and bypasses signature verification.",
+    "description": "Manual uploads are signature-verified by default. The optional X-LibreEcho-Allow-Unsigned header is honored only when GET /api/v1/system/update reports allow_unsigned=true; it applies only to this manually selected package and bypasses signature verification. A body over `max_upload_ceiling_bytes`, or over the smaller `max_upload_bytes` this device can stage, is refused with 413 before the body is read; the second case names the device's own limit.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -2223,6 +2608,25 @@
    }
   },
   "requestBodies": {
+   "NetworkUpdate": {
+    "required": true,
+    "description": "Updates hostname, local access, or persistent MAC overrides. MAC values must be six hexadecimal octets separated by colons or hyphens and must be unicast.",
+    "content": {
+     "application/json": {
+      "schema": {
+       "type": "object",
+       "properties": {
+        "hostname": {"type": "string", "maxLength": 63},
+        "ssh": {"type": "boolean"},
+        "api_lan": {"type": "boolean"},
+        "wifi_mac": {"type": "string", "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"},
+        "bt_mac": {"type": "string", "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"}
+       },
+       "additionalProperties": false
+      }
+     }
+    }
+   },
    "WifiConnect": {
     "required": true,
     "description": "Wi-Fi credentials. `security` accepts exactly `open`, `wpa2`, or `wpa3`; when omitted it defaults to `wpa2`.",
@@ -2383,6 +2787,12 @@
      "gateway",
      "dns",
      "hostname",
+     "wifi_mac",
+     "wifi_mac_factory",
+     "wifi_mac_configured",
+     "bt_mac",
+     "bt_mac_factory",
+     "bt_mac_configured",
      "internet",
      "dhcp",
      "ssh",
@@ -2446,6 +2856,36 @@
      },
      "hostname": {
       "type": "string"
+     },
+     "wifi_mac": {
+      "type": "string",
+      "description": "Current Wi-Fi MAC address, or empty when unavailable",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "wifi_mac_factory": {
+      "type": "string",
+      "description": "Factory Wi-Fi MAC from board identity data, or empty when unavailable",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "wifi_mac_configured": {
+      "type": "string",
+      "description": "Persisted Wi-Fi MAC override, or empty when unset",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "bt_mac": {
+      "type": "string",
+      "description": "Current Bluetooth MAC address, or empty when unavailable",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "bt_mac_factory": {
+      "type": "string",
+      "description": "Factory Bluetooth MAC from board identity data, or empty when unavailable",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "bt_mac_configured": {
+      "type": "string",
+      "description": "Persisted Bluetooth MAC override, or empty when unset",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
      },
      "internet": {
       "type": "boolean"

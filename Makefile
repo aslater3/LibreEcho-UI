@@ -8,14 +8,14 @@ OS_VERSION ?= $(shell tr -d '\r\n' < VERSION)
 SOURCE_COMMIT ?= $(shell sh tools/source-provenance.sh --field commit 2>/dev/null || printf unknown)
 SOURCE_DIRTY ?= $(shell sh tools/source-provenance.sh --field dirty 2>/dev/null || printf unknown)
 SOURCE_DIGEST ?= $(shell sh tools/source-provenance.sh --field digest 2>/dev/null || printf unknown)
-CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Isrc/adapter -DLE_OS_VERSION=\"$(OS_VERSION)\" \
+CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Isrc/adapter -DLE_TLS_AVAILABLE=$(TLS_AVAILABLE) -DLE_OS_VERSION=\"$(OS_VERSION)\" \
     -DLE_SOURCE_COMMIT=\"$(SOURCE_COMMIT)\" -DLE_SOURCE_DIRTY=\"$(SOURCE_DIRTY)\" \
     -DLE_SOURCE_DIGEST=\"$(SOURCE_DIGEST)\"
 CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
-ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming
+ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
@@ -24,6 +24,7 @@ MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/adapter_se
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
 BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
+RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/adapter_server.c src/log.c $(TLS_SOURCES)
 BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
@@ -41,7 +42,9 @@ WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
 	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
-SOURCES = src/main.c src/http_server.c src/api.c src/diagnostic_export.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
+TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
+SOURCES = src/main.c src/http_server.c $(TLS_SOURCES) src/api.c src/diagnostic_export.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -50,6 +53,7 @@ MICD_OBJECTS = $(MICD_SOURCES:src/%.c=$(BUILD)/%.o)
 LEDD_OBJECTS = $(LEDD_SOURCES:src/%.c=$(BUILD)/%.o)
 BUTTOND_OBJECTS = $(BUTTOND_SOURCES:src/%.c=$(BUILD)/%.o)
 CAPTURE_MUX_OBJECTS = $(CAPTURE_MUX_SOURCES:src/%.c=$(BUILD)/%.o)
+RADIOD_OBJECTS = $(RADIOD_SOURCES:src/%.c=$(BUILD)/%.o)
 BTD_OBJECTS = $(BTD_SOURCES:src/%.c=$(BUILD)/%.o)
 AIRPLAYD_OBJECTS = $(AIRPLAYD_SOURCES:src/%.c=$(BUILD)/%.o)
 TTSD_OBJECTS = $(TTSD_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -64,8 +68,9 @@ GC_LDFLAGS ?= $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl
 all: CPPFLAGS += -DLE_DEV_CONTROLS=1
 all: $(TARGET) $(LOGD_TARGET) adapters
 
+# WEB_TLS_LIBS, like RADIOD_TLS_LIBS, must follow the objects for a static link.
 $(TARGET): $(OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(OBJECTS) $(LDFLAGS) -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(OBJECTS) $(LDFLAGS) $(WEB_TLS_LIBS) -o $@
 
 $(LOGD_TARGET): $(LOGD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LOGD_OBJECTS) $(LDFLAGS) -o $@
@@ -90,6 +95,11 @@ $(BUILD)/libreecho-buttond: $(BUTTOND_OBJECTS)
 
 $(BUILD)/libreecho-capture-mux: $(CAPTURE_MUX_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(CAPTURE_MUX_OBJECTS) $(LDFLAGS) -o $@
+
+# RADIOD_TLS_LIBS is empty unless a TLS build supplies it; the libraries must
+# follow the objects so a static link resolves in one pass.
+$(BUILD)/libreecho-radiod: $(RADIOD_OBJECTS)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(RADIOD_OBJECTS) $(LDFLAGS) -lm $(RADIOD_TLS_LIBS) -o $@
 
 $(BUILD)/libreecho-btd: $(BTD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(BTD_OBJECTS) $(LDFLAGS) -o $@
@@ -154,6 +164,10 @@ $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emissio
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-DLE_ADAPTER_NETWORK_SOCK='"/tmp/libreecho-network-backend-test.sock"' \
 		-Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-auth-sessions: tests/test_auth_sessions.c src/auth.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
@@ -551,12 +565,12 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -m 0755 $(ADAPTER_TARGETS) $(DESTDIR)$(PREFIX)/sbin/
 	cp -R web/* $(DESTDIR)$(PREFIX)/share/libreecho/web/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
-	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init $(DESTDIR)/etc/init.d/
+	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init $(DESTDIR)/etc/init.d/
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
 
 clean:
 	rm -f $(shell find $(BUILD) -name '*.d' 2>/dev/null)
-	rm -f $(CAPTURE_MUX_OBJECTS) $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
+	rm -f $(CAPTURE_MUX_OBJECTS) $(RADIOD_OBJECTS) $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
 		$(LOGD_OBJECTS) $(BTD_OBJECTS) $(AIRPLAYD_OBJECTS) $(TTSD_OBJECTS) \
 		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(WYOMINGD_OBJECTS) $(ADAPTER_TARGETS) \
 		$(TARGET) $(LOGD_TARGET)

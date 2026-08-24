@@ -203,6 +203,12 @@ For the size-optimised production daemon set:
 make release
 ```
 
+The documented default build remains dependency-free. HTTPS and HTTPS radio
+fetching are enabled when both `WEB_TLS_LIBS` and `RADIOD_TLS_LIBS` are set,
+with matching mbedTLS include/library paths in `CPPFLAGS` and `LDFLAGS`; without
+those variables the build uses a bounded no-TLS fallback and reports HTTPS as
+unavailable rather than failing compilation.
+
 Cross-compilation and staged installation are explicit:
 
 ```sh

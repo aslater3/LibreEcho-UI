@@ -91,21 +91,126 @@ static int read_line(const char *path, char *out, size_t out_size)
     return 0;
 }
 
+/*
+ * idme lives in one of two places depending on the image: a /proc entry on
+ * some builds, and the device tree on this hardware. api.c already accepts
+ * either when deciding whether this is real hardware, but the serial read
+ * only ever tried /proc -- so on this device it failed and the serial fell
+ * back to a hash of the boot id, reported as "device-<hex>". Try both.
+ */
+static int read_idme_field(const char *field, char *out, size_t out_size)
+{
+    char path[256];
+
+    snprintf(path, sizeof(path), "/proc/idme/%s", field);
+    if (read_line(path, out, out_size) == 0 && out[0])
+        return 0;
+    snprintf(path, sizeof(path),
+             "/sys/firmware/devicetree/base/idme/%s/value", field);
+    if (read_line(path, out, out_size) == 0 && out[0])
+        return 0;
+    out[0] = '\0';
+    return -1;
+}
+
 static int read_device_serial(char *out, size_t out_size)
 {
     const char *idme_path = getenv("LIBREECHO_IDME_SERIAL_PATH");
     size_t i;
 
-    if (!idme_path || !idme_path[0])
-        idme_path = "/proc/idme/serial";
-    if (read_line(idme_path, out, out_size) != 0 || !out[0])
+    if (idme_path && idme_path[0]) {
+        if (read_line(idme_path, out, out_size) != 0 || !out[0])
+            return -1;
+    } else if (read_idme_field("serial", out, out_size) != 0) {
         return -1;
+    }
     for (i = 0; out[i]; ++i)
         if (!isalnum((unsigned char)out[i])) {
             out[0] = '\0';
             return -1;
         }
     return i >= 4 ? 0 : -1;
+}
+
+/*
+ * The factory MAC lives in idme, but the field name varies between images and
+ * this one is not documented anywhere we control, so try the known spellings
+ * rather than hard-coding a guess that would silently read nothing. Anything
+ * that parses as six hex octets wins; the caller reports which name supplied
+ * it so a future image can be matched against the list.
+ *
+ * Nothing applies this yet -- it is reported so the value can be seen before
+ * anything depends on it.
+ */
+static int mac_text_valid(const char *s)
+{
+    int digits = 0, seps = 0;
+    size_t i;
+
+    for (i = 0; s[i]; ++i) {
+        if (isxdigit((unsigned char)s[i])) digits++;
+        else if (s[i] == ':' || s[i] == '-') seps++;
+        else return 0;
+    }
+    return digits == 12 && (seps == 0 || seps == 5);
+}
+
+static int read_idme_mac(const char *const *fields, size_t field_count,
+                         char *out, size_t out_size, char *source,
+                         size_t source_size)
+{
+    char raw[64];
+    size_t f, i, n = 0;
+
+    if (source && source_size) source[0] = '\0';
+    for (f = 0; f < field_count; ++f) {
+        if (read_idme_field(fields[f], raw, sizeof(raw)) != 0)
+            continue;
+        if (!mac_text_valid(raw))
+            continue;
+        /* normalise to lower-case colon-separated form */
+        for (i = 0; raw[i] && n + 3 < out_size; ++i) {
+            if (!isxdigit((unsigned char)raw[i]))
+                continue;
+            if (n && n % 3 == 2) out[n++] = ':';
+            out[n++] = (char)tolower((unsigned char)raw[i]);
+        }
+        out[n] = '\0';
+        if (source && source_size)
+            snprintf(source, source_size, "idme/%s", fields[f]);
+        return 0;
+    }
+    out[0] = '\0';
+    return -1;
+}
+
+static int read_device_mac(char *out, size_t out_size, char *source,
+                           size_t source_size)
+{
+    static const char *const fields[] = { "mac_addr", "macaddr", "wifi_mac",
+                                          "wifi_mac_addr", "mac" };
+    return read_idme_mac(fields, sizeof(fields) / sizeof(fields[0]),
+                         out, out_size, source, source_size);
+}
+
+static int read_bt_factory_mac(char *out, size_t out_size)
+{
+    static const char *const fields[] = { "bt_mac_addr", "bt_mac", "btmac" };
+    return read_idme_mac(fields, sizeof(fields) / sizeof(fields[0]),
+                         out, out_size, NULL, 0);
+}
+
+/* The address the interface is actually using, which is what differs from the
+   board's when the driver has generated one. */
+static int read_live_mac(const char *path, char *out, size_t out_size)
+{
+    size_t i;
+
+    if (read_line(path, out, out_size) != 0 || !out[0])
+        return -1;
+    for (i = 0; out[i]; ++i)
+        out[i] = (char)tolower((unsigned char)out[i]);
+    return mac_text_valid(out) ? 0 : -1;
 }
 
 static int read_redacted_boot_id(char *out, size_t out_size)
@@ -658,6 +763,76 @@ static int status(struct le_backend *b, struct le_system_status *o)
 }
 
 /* device() reports the kernel, host, and immutable IDME board identity. */
+/*
+ * Real hardware identity, rather than the placeholders this used to report.
+ *
+ * The device tree carries both the board model and a compatible list whose
+ * last entry is the SoC ("mediatek,mt8163"). compatible is a NUL-separated
+ * list, not a string, so it is read by length and walked entry by entry.
+ */
+static int read_dt_string(const char *name, char *out, size_t size)
+{
+    char path[256];
+    FILE *f;
+    size_t n;
+
+    if (snprintf(path, sizeof(path),
+                 "/sys/firmware/devicetree/base/%s", name) >= (int)sizeof(path))
+        return -1;
+    f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    n = fread(out, 1, size - 1, f);
+    fclose(f);
+    if (!n)
+        return -1;
+    out[n] = '\0';
+    return (int)n;
+}
+
+static void read_hardware_identity(char *model, size_t model_size,
+                                   char *revision, size_t revision_size)
+{
+    char buffer[256], soc[96];
+    int n;
+
+    soc[0] = '\0';
+    n = read_dt_string("compatible", buffer, sizeof(buffer));
+    if (n > 0) {
+        int i = 0;
+        /* Walk the NUL-separated entries; the SoC is the last one. */
+        while (i < n) {
+            size_t len = strlen(buffer + i);
+            if (!len)
+                break;
+            snprintf(soc, sizeof(soc), "%s", buffer + i);
+            i += (int)len + 1;
+        }
+    }
+    if (read_dt_string("model", buffer, sizeof(buffer)) > 0 && buffer[0])
+        snprintf(model, model_size, "%s", buffer);
+    else if (soc[0])
+        snprintf(model, model_size, "%s", soc);
+    else
+        snprintf(model, model_size, "%s", "LibreEcho device");
+
+    if (soc[0]) {
+        /* "mediatek,mt8163" reads better as "MediaTek MT8163". */
+        char *comma = strchr(soc, ',');
+        if (comma) {
+            *comma = '\0';
+            if (!strcmp(soc, "mediatek"))
+                snprintf(revision, revision_size, "MediaTek %s", comma + 1);
+            else
+                snprintf(revision, revision_size, "%s %s", soc, comma + 1);
+        } else {
+            snprintf(revision, revision_size, "%s", soc);
+        }
+    } else {
+        snprintf(revision, revision_size, "%s", "unknown");
+    }
+}
+
 static int device(struct le_backend *b, struct le_device_info *o)
 {
     struct utsname u;
@@ -666,10 +841,14 @@ static int device(struct le_backend *b, struct le_device_info *o)
     memset(o, 0, sizeof(*o));
     read_hostname(o->hostname, sizeof(o->hostname));
     copy_string(o->name, sizeof(o->name), "LibreEcho");
-    strcpy(o->model, "LibreEcho device");
+    read_hardware_identity(o->model, sizeof(o->model),
+                           o->hardware_revision,
+                           sizeof(o->hardware_revision));
     if (read_device_serial(o->serial, sizeof(o->serial)) != 0 &&
         read_redacted_boot_id(o->serial, sizeof(o->serial)) != 0)
         strcpy(o->serial, "unavailable");
+    (void)read_device_mac(o->factory_mac, sizeof(o->factory_mac),
+                          o->mac_source, sizeof(o->mac_source));
     /* os_version is a fixed 32-byte field immediately followed by
        kernel[64]; strcpy of a longer build string silently ran past it
        and corrupted the kernel field. Bound the copy. */
@@ -677,7 +856,6 @@ static int device(struct le_backend *b, struct le_device_info *o)
              LE_OS_VERSION_STRING);
     if (!uname(&u))
         copy_string(o->kernel, sizeof(o->kernel), u.release);
-    strcpy(o->hardware_revision, "adapter pending");
     strcpy(o->backend, "linux");
     return LE_OK;
 }
@@ -731,6 +909,22 @@ static int networkd_status(struct le_backend *b, struct le_network_state *o)
     return found ? LE_OK : LE_IO;
 }
 
+/*
+ * The board's addresses and the ones actually in use. Reported for both radios
+ * so the UI can show them side by side: they differ whenever the driver has
+ * generated an address instead of taking the board's, which is why this device
+ * lands on a new DHCP lease after most reboots.
+ */
+static void fill_mac_fields(struct le_network_state *o)
+{
+    read_device_mac(o->wifi_mac_factory, sizeof(o->wifi_mac_factory), NULL, 0);
+    read_bt_factory_mac(o->bt_mac_factory, sizeof(o->bt_mac_factory));
+    read_live_mac("/sys/class/net/wlan0/address", o->wifi_mac,
+                  sizeof(o->wifi_mac));
+    read_live_mac("/sys/class/bluetooth/hci0/address", o->bt_mac,
+                  sizeof(o->bt_mac));
+}
+
 static int network(struct le_backend *b, struct le_network_state *o)
 {
     char path[PATH_MAX];
@@ -739,10 +933,13 @@ static int network(struct le_backend *b, struct le_network_state *o)
     char iface[IFNAMSIZ];
     int have_iface = 0;
 
-    if (networkd_status(b, o) == LE_OK)
+    if (networkd_status(b, o) == LE_OK) {
+        fill_mac_fields(o);
         return LE_OK;
+    }
 
     memset(o, 0, sizeof(*o));
+    fill_mac_fields(o);
     o->rssi_dbm = -1;
     o->gateway_reachable = -1;
     strcpy(o->recovery_stage, "none");
@@ -775,7 +972,7 @@ static int network(struct le_backend *b, struct le_network_state *o)
     copy_string(o->connectivity, sizeof(o->connectivity),
                 !strcmp(o->state, "disconnected") ? "disconnected" : "unknown");
 
-    /* MAC is read here for the hardware adapter boundary; the public API has no MAC field. */
+    /* MAC is read here for the hardware adapter boundary and public status API. */
     snprintf(path, sizeof(path), "/sys/class/net/%s/address", iface);
     (void)read_line(path, mac, sizeof(mac));
     o->signal = read_wireless_signal(iface);
@@ -1007,8 +1204,17 @@ static int led(struct le_backend *b, struct le_led_state *o)
     if (json_get_bool(response, "visualizer_active",
                       &o->visualizer_active) < 0)
         o->visualizer_active = 0;
+    /*
+     * The music visualizer is on unless it was deliberately turned off, and
+     * ledd starts it that way too. Every other flag here defaults to 0, which
+     * the memset above already provides, so `< 0` was enough for them -- but
+     * json_get_bool answers 0 for an absent key and only -1 for a malformed
+     * one, so an ledd whose status omits the field left this reading back as
+     * off while the ring was in fact reacting. The UI then showed a toggle
+     * that disagreed with the device. `<= 0` is the difference.
+     */
     if (json_get_bool(response, "visualizer_enabled",
-                      &o->visualizer_enabled) < 0)
+                      &o->visualizer_enabled) <= 0)
         o->visualizer_enabled = 1;
     (void)json_get_string(response, "pattern", o->pattern, sizeof(o->pattern));
     (void)json_get_string(response, "visualizer_owner",
@@ -1266,10 +1472,67 @@ static int simulate_audio(struct le_backend *b, const char *text)
     json_escape(escaped, sizeof(escaped), text);
     if (mkdir("/run/libreecho/mic-inject", 0755) < 0 && errno != EEXIST)
         return LE_IO;
+    /*
+     * One slot, so refuse rather than overwrite. pending.raw is audio the mux
+     * has not started yet and active.raw is audio it is playing; rendering
+     * over either one silently discards or delays an utterance, and the
+     * caller -- watching for a wake that never comes for the phrase it
+     * thinks it sent -- reads that as the phrase having failed.
+     */
+    if (!access("/run/libreecho/mic-inject/pending.raw", F_OK) ||
+        !access("/run/libreecho/mic-inject/active.raw", F_OK))
+        return LE_BUSY;
     snprintf(args, sizeof(args),
              "{\"text\":\"%s\",\"path\":\"%s\"}",
              escaped, "/run/libreecho/mic-inject/pending.raw");
     return adapter_json_command(LE_ADAPTER_TTS_SOCK, "render", args);
+}
+
+/*
+ * Internet radio. The player is a separate daemon so a stalled stream cannot
+ * block this one; these are thin pass-throughs to its control socket.
+ */
+static int radio_play(struct le_backend *b, const char *url)
+{
+    char args[1024], escaped[768];
+
+    (void)b;
+    if (!url || !url[0] || strlen(url) >= sizeof(escaped) / 2)
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), url);
+    snprintf(args, sizeof(args), "{\"url\":\"%s\"}", escaped);
+    return adapter_json_command(LE_ADAPTER_RADIO_SOCK, "play", args);
+}
+
+static int radio_stop(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_RADIO_SOCK, "stop", NULL);
+}
+
+/*
+ * title and station are the ICY fields radiod read off the stream. They are
+ * routinely empty -- plenty of stations send no metadata at all -- and an
+ * empty one means "the stream did not say", not "ask again".
+ */
+static int radio_playing(struct le_backend *b, struct le_radio_status *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc, v;
+
+    (void)b;
+    memset(o, 0, sizeof(*o));
+    rc = adapter_command(LE_ADAPTER_RADIO_SOCK, "status", NULL,
+                         response, sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_bool(response, "playing", &v) > 0)
+        o->playing = v;
+    (void)json_get_string(response, "url", o->url, sizeof(o->url));
+    (void)json_get_string(response, "title", o->title, sizeof(o->title));
+    (void)json_get_string(response, "station", o->station,
+                          sizeof(o->station));
+    return LE_OK;
 }
 
 static int noise_start(struct le_backend *b, const char *colour, int level,
@@ -1727,7 +1990,7 @@ static void destroy(struct le_backend *b)
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
-    noise_start, noise_stop, simulate_audio,
+    noise_start, noise_stop, simulate_audio, radio_play, radio_stop, radio_playing,
     led, colour, brightness, visualizer_enabled, boot_led, led_profile, night,
     led_test,
     network, scan, connect_wifi, disconnect_wifi, hostname,

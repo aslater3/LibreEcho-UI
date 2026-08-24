@@ -16,7 +16,10 @@ enum le_result { LE_OK=0, LE_INVALID=-1, LE_NOT_SUPPORTED=-2, LE_IO=-3, LE_BUSY=
 
 struct le_cpu_state { int online, utilization, frequency_khz; };
 struct le_system_status { double uptime; int cpu, memory, storage, temperature; int memory_used_mb, memory_total_mb; int storage_used_mb, storage_total_mb, storage_available; char storage_state[32], device_state[24]; size_t cpu_count; struct le_cpu_state cpus[LE_MAX_CPUS]; };
-struct le_device_info { char name[LE_TEXT], hostname[LE_TEXT], model[LE_TEXT], serial[LE_TEXT], os_version[32], kernel[64], hardware_revision[32], backend[16]; };
+/* factory_mac is the MAC recorded in idme, empty when it could not be read.
+   mac_source names where it came from, so an image whose idme spells the
+   field differently can be identified from the API rather than guessed at. */
+struct le_device_info { char name[LE_TEXT], hostname[LE_TEXT], model[LE_TEXT], serial[LE_TEXT], os_version[32], kernel[64], hardware_revision[32], backend[16], factory_mac[24], mac_source[32]; };
 struct le_audio_state { int volume, microphone_gain, notification_volume, muted, startup_sound, amplifier_on, output_available; char tts_voice[32];
  /* Sleep-noise generator. noise_remaining_seconds is -1 when it is
     running untimed, otherwise the seconds left on the sleep timer. */
@@ -40,6 +43,11 @@ struct le_wifi_scan { struct le_wifi_network networks[LE_MAX_WIFI]; size_t count
 struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };
 struct le_network_state {
     char state[24], connectivity[24], recovery_stage[24];
+    /* factory_* is what idme records for this board; the plain field is what
+       the interface is using now. They differ whenever the driver invents an
+       address instead of taking the board's, which is what makes the device
+       land on a new DHCP lease after most reboots. */
+    char wifi_mac[24], wifi_mac_factory[24], bt_mac[24], bt_mac_factory[24];
     char ssid[LE_TEXT], ip[48], gateway[48], dns[96], hostname[LE_TEXT];
     int signal, rssi_dbm, internet, dhcp, ssh, api_lan;
     int gateway_reachable, liveness_failures;
@@ -65,6 +73,14 @@ struct le_airplay_state {
     char playback_state[24], source[32];
     char title[LE_MEDIA_TEXT+1], artist[LE_MEDIA_TEXT+1], album[LE_MEDIA_TEXT+1];
 };
+/* What radiod is doing. title and station are whatever the stream said about
+   itself over ICY; both are empty when it said nothing, and nothing here
+   invents a substitute. */
+struct le_radio_status {
+    int playing;
+    char url[512];
+    char title[LE_MEDIA_TEXT+1], station[LE_MEDIA_TEXT+1];
+};
 struct le_playback_state {
     char state[24], source[32];
     int media_active, system_active, announcement_active, alarm_active;
@@ -78,7 +94,7 @@ void le_backend_destroy(struct le_backend *b);
 const char *le_backend_mode(struct le_backend *b);
 const char *le_result_code(int rc);
 int le_get_system_status(struct le_backend*,struct le_system_status*); int le_get_device_info(struct le_backend*,struct le_device_info*);
-int le_get_audio_state(struct le_backend*,struct le_audio_state*); int le_set_volume(struct le_backend*,int); int le_set_microphone_gain(struct le_backend*,int); int le_set_microphone_muted(struct le_backend*,int); int le_play_test_tone(struct le_backend*); int le_set_tts_voice(struct le_backend*,const char*); int le_announce(struct le_backend*,const char*); int le_stop_speech(struct le_backend*); int le_start_noise(struct le_backend*,const char*,int,int); int le_stop_noise(struct le_backend*); int le_simulate_audio(struct le_backend*,const char*);
+int le_get_audio_state(struct le_backend*,struct le_audio_state*); int le_set_volume(struct le_backend*,int); int le_set_microphone_gain(struct le_backend*,int); int le_set_microphone_muted(struct le_backend*,int); int le_play_test_tone(struct le_backend*); int le_set_tts_voice(struct le_backend*,const char*); int le_announce(struct le_backend*,const char*); int le_stop_speech(struct le_backend*); int le_start_noise(struct le_backend*,const char*,int,int); int le_stop_noise(struct le_backend*); int le_simulate_audio(struct le_backend*,const char*); int le_radio_play(struct le_backend*,const char*); int le_radio_stop(struct le_backend*); int le_radio_playing(struct le_backend*,struct le_radio_status*);
 int le_get_led_state(struct le_backend*,struct le_led_state*); int le_set_led_colour(struct le_backend*,uint8_t,uint8_t,uint8_t); int le_set_led_brightness(struct le_backend*,int); int le_set_led_visualizer_enabled(struct le_backend*,int); int le_set_boot_led(struct le_backend*,const struct le_led_profile*); int le_set_led_profile(struct le_backend*,const char*,const struct le_led_profile*); int le_set_led_night(struct le_backend*,int,int,int); int le_run_led_test(struct le_backend*);
 int le_get_network_state(struct le_backend*,struct le_network_state*); int le_scan_wifi(struct le_backend*,struct le_wifi_scan*); int le_connect_wifi(struct le_backend*,const struct le_wifi_credentials*); int le_disconnect_wifi(struct le_backend*); int le_set_hostname(struct le_backend*,const char*);
 int le_get_wake_word_state(struct le_backend*,struct le_wake_word_state*); int le_set_wake_word(struct le_backend*,const char*); int le_set_wake_word_sensitivity(struct le_backend*,int); int le_test_wake_word(struct le_backend*);
