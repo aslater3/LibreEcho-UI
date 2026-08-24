@@ -1371,11 +1371,15 @@ static void handle_client(struct agent_state *state, int client_fd)
         (void)respond(client_fd, id, 0, "malformed request");
         return;
     }
+    /* History only takes metrics_mutex. Do not make a read-only history poll
+       wait behind an in-flight provider request holding control_mutex. */
+    if (!strcmp(command, "history")) {
+        (void)command_history(state, client_fd, id);
+        return;
+    }
     pthread_mutex_lock(&state->control_mutex);
     if (!strcmp(command, "status"))
         (void)command_status(state, client_fd, id);
-    else if (!strcmp(command, "history"))
-        (void)command_history(state, client_fd, id);
     else if (!strcmp(command, "auth_start"))
         (void)command_auth_start(state, client_fd, id);
     else if (!strcmp(command, "auth_poll"))
