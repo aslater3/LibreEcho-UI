@@ -1300,7 +1300,7 @@ async function systemPage(){
        <p class="muted">Because the certificate is self-signed, browsers will warn on first visit. Check the fingerprint above matches the one the browser shows before accepting it &mdash; that is what confirms you are talking to this device and not something in between.</p>`:
       `<p class="muted">Switched on, but not yet serving: HTTPS binds its port when the daemon starts, so this takes effect after the next restart.</p>`):'')+
     (features.usb_role_supported?toggle('USB storage mode (experimental)',!!features.usb_host,'feature-usb-host')+
-    `<p class="muted"><strong>Experimental, and it costs the microphone.</strong> The pin the port uses to enter host mode is also the enable line for the microphone array, so a drive and the microphone cannot both work: turning this on leaves the wake word unavailable until the next restart with it off. On current firmware the microphone is kept working, so a drive may not appear at all.</p><p class="muted">Host mode reads a drive; device mode serves ADB, the only way in if the network drops. The port cannot do both.</p>`+
+    `<p class="muted"><strong>Experimental, but it no longer costs the microphone.</strong> The pin that puts the port in host mode is also the enable line for the microphone array, and an earlier kernel drove it low, which left the codecs disabled. This firmware never drives it low, so a mounted drive and the wake word work at the same time &mdash; measured on hardware, with a full spoken turn while a drive was mounted.</p><p class="muted">Host mode reads a drive; device mode serves ADB, the only way in if the network drops. The port cannot do both.</p>`+
     `<p class="muted">The setting is remembered, but device mode is held for the first minute after every boot so ADB is always reachable; storage mode resumes after that. Applies immediately &mdash; the Save button below is for Simulation only.</p>`+
     `<p class="muted">A drive already plugged in when storage mode turns on cannot be woken: it is already powered and only re-announces itself on a power cycle, which this board cannot perform. Turn storage mode on first, then insert the drive.</p>`+
     `<div id="usb-storage" class="usb-storage"></div>`:'')+
@@ -1316,12 +1316,10 @@ async function systemPage(){
   if($('#feature-usb-host'))$('#feature-usb-host').onchange=()=>{
    const el=$('#feature-usb-host');
    if(el.checked&&!confirm('Switch the USB port to storage mode? (experimental)\n\n'
-     +'This disables the microphone. The pin that puts the port in host mode is also the '
-     +'enable line for the microphone array, so the wake word will stop working until you '
-     +'turn this off and restart.\n\n'
-     +'ADB also stops, because the port cannot read a drive and serve ADB at once. '
+     +'The microphone keeps working: this firmware never drives the shared pin low, '
+     +'so a mounted drive and the wake word coexist.\n\n'
+     +'ADB does stop, because the port cannot read a drive and serve ADB at once. '
      +'This setting is remembered, so it applies on every boot after the first minute.\n\n'
-     +'On current firmware the microphone is kept working, so a drive may not appear at all.\n\n'
      +'To undo it without the UI, hold any button on the device while it boots.')){
     el.checked=false;return}
    mutate('/system/features',{usb_host:el.checked},el.checked?'USB port switched to host mode':'USB port switched to device mode');};
