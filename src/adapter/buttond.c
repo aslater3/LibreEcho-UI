@@ -81,6 +81,7 @@ struct context {
     unsigned int brightness;
     int held_key;        /* key code being held, 0 when idle */
     int rescan_requested;
+    size_t logged_device_count;  /* last count announced, so a steady state stays quiet */
     int volume_capable;
     int mute_capable;
     long long next_repeat_ms;
@@ -223,9 +224,18 @@ static void discover(struct context *ctx)
     }
     closedir(dir);
     recompute_capabilities(ctx);
-    if (ctx->device_count)
+    /*
+     * The rescan runs every RESCAN_INTERVAL_MS whether or not anything moved,
+     * so announcing the count each pass put a line in the ring buffer every
+     * five seconds and evicted everything worth reading -- during one
+     * microphone investigation the log held 128 entries and almost all of them
+     * were this. Say it when it changes, which is the only time it is news.
+     */
+    if (ctx->device_count != ctx->logged_device_count) {
         le_log_info("buttond: %zu input device(s) with volume or mute keys",
                     ctx->device_count);
+        ctx->logged_device_count = ctx->device_count;
+    }
     write_capability_status(ctx);
 }
 
