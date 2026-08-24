@@ -521,6 +521,7 @@ function simShowingDevice(){return !simLocalHistory().length&&simDeviceTurns.len
  * and simRow render as an em dash.
  */
 function simDeviceRow(t){
+ if(!Number.isFinite(Number(t.first_pcm_ms))||Number(t.first_pcm_ms)<=0)return null;
  return {at:t.at_ms,source:'device',follow_up:!!t.follow_up,
   audio_ms:t.stt_audio_ms,processing_ms:t.stt_processing_ms,
   queue_to_first_audio_ms:t.first_pcm_ms};}
@@ -528,7 +529,7 @@ async function simHistoryLoad(){
  try{
   const h=await api('/assistant/history');
   const turns=Array.isArray(h&&h.turns)?h.turns:[];
-  simDeviceTurns=turns.map(simDeviceRow);
+  simDeviceTurns=turns.map(simDeviceRow).filter(Boolean);
   if(simDeviceTurns.length){try{localStorage.setItem(SIM_DEVICE_KEY,JSON.stringify(simDeviceTurns))}catch(_){/* private mode, quota */}}
   else {try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];if(Array.isArray(v))simDeviceTurns=v}catch(_){} }
  }catch(_){

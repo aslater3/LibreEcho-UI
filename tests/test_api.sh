@@ -9,12 +9,17 @@ expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
-history=$(curl -sS "$URL/api/v1/assistant/history")
-printf '%s' "$history" | jq -e '.ok == false and .data == null and (.error.code | type) == "string"' >/dev/null
+history=$(curl -fsS "$URL/api/v1/assistant/history")
+printf '%s' "$history" | jq -e '.ok and (.data.turns | length == 1) and .data.turns[0].first_pcm_ms == 3100' >/dev/null
 code=$(curl -sS -o /tmp/le-history-method.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 405 ]
-clear_code=$(curl -sS -o /tmp/le-history-clear.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history/clear" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
-[ "$clear_code" = 501 ] || [ "$clear_code" = 503 ]
+clear_code=$(curl -fsS -o /tmp/le-history-clear.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history/clear" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$clear_code" = 200 ]
+curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and (.data.turns | length == 0)' >/dev/null
+curl -sS -X POST "$URL/api/v1/assistant/respond" -H "$CSRF" -H 'Content-Type: application/json' --data '{"text":"slow test"}' >/tmp/le-assistant-respond.out &
+respond_pid=$!
+timeout 1 curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and (.data.turns | length == 0)' >/dev/null
+wait "$respond_pid"
 expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
 expect "$(curl -fsS "$URL/")" 'First-boot setup'
 code=$(curl -sS -o /tmp/le-bad-setup.out -w '%{http_code}' -X POST "$URL/api/v1/setup" -H "$CSRF" -H 'Content-Type: application/json' --data '{"hostname":"bad host"}')

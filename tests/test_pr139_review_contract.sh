@@ -23,4 +23,8 @@ grep -q 'history_clear' src/adapter/agentd.c src/api.c web/js/app.js
 grep -q 'history/clear' docs/API.md web/openapi.json
 ! grep -q 'SIM_DEVICE_CLEAR_KEY' web/js/app.js
 grep -q 'address_configured' src/api.c
+grep -q 'start_api_worker(c->fd,api,&q)' src/http_server.c
+grep -q 'assistant/history.*GET' src/http_server.c
+grep -q 'first_pcm_ms == 3100' tests/test_api.sh
+grep -q 'mock_agent_history.py' tests/run_tests.sh
 printf '%s\n' 'PR 139 review contracts: ok'
