@@ -133,6 +133,8 @@ AGENT_SOCKET="$PWD/build/test-agent.sock"
 LIBREECHO_AGENT_SOCKET="$AGENT_SOCKET" python3 tests/mock_agent_history.py "$AGENT_SOCKET" >./build/test-agent.log 2>&1 &
 agent_pid=$!
 export LIBREECHO_AGENT_SOCKET
+i=0
+while [ ! -S "$AGENT_SOCKET" ]; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-agent.log; exit 1; }; sleep 0.1; done
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!
 cleanup(){ if [ "${pid:-0}" -gt 1 ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; if [ "${agent_pid:-0}" -gt 1 ]; then kill "$agent_pid" 2>/dev/null || true; wait "$agent_pid" 2>/dev/null || true; fi; }

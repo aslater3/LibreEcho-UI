@@ -20,7 +20,7 @@ class Handler(socketserver.StreamRequestHandler):
             request = json.loads(self.rfile.readline().decode())
             command = request.get("cmd")
             if command == "history":
-                data = {} if self.server.cleared else {"turns": [{
+                data = {"history_generation": self.server.generation, "turns": [{
                     "at_ms": 1724457600123,
                     "stt_audio_ms": 1200,
                     "stt_processing_ms": 2800,
@@ -31,9 +31,10 @@ class Handler(socketserver.StreamRequestHandler):
                     "follow_up": False,
                 }]}
                 if self.server.cleared:
-                    data = {"turns": []}
+                    data = {"history_generation": self.server.generation, "turns": []}
             elif command == "history_clear":
                 self.server.cleared = True
+                self.server.generation += 1
                 data = {}
             elif command == "respond":
                 time.sleep(2.0)
@@ -52,6 +53,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     allow_reuse_address = True
     cleared = False
+    generation = 1
 
 server = Server(SOCKET, Handler)
 server.cleared = False

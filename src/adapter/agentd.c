@@ -70,6 +70,8 @@ struct agent_state {
     char auth_error[256];
     char socket_path[256];
     char config_path[384];
+    char history_generation_path[384];
+    unsigned long long history_generation;
     char weather_text[160];
     time_t weather_fetched;
     char credentials_path[384];
@@ -460,7 +462,9 @@ static int command_history(struct agent_state *state, int client_fd,
     int wrote;
     const size_t body_limit = LE_ADAPTER_MSG_MAX - 256;
 
-    wrote = snprintf(body, body_limit, "{\"turns\":[");
+    wrote = snprintf(body, body_limit,
+                     "{\"history_generation\":%llu,\"turns\":[",
+                     state->history_generation);
     if (wrote < 0 || (size_t)wrote >= body_limit)
         return respond(client_fd, id, 0, "history too large");
     used = (size_t)wrote;
@@ -503,6 +507,24 @@ static int command_history(struct agent_state *state, int client_fd,
 static int command_history_clear(struct agent_state *state, int client_fd,
                                  unsigned long id)
 {
+    FILE *file;
+    unsigned long long next = state->history_generation + 1;
+
+    if (!next)
+        next = 1;
+    file = fopen(state->history_generation_path, "w");
+    if (!file)
+        return respond(client_fd, id, 0,
+                       "history clear could not be persisted");
+    if (fprintf(file, "%llu\n", next) < 0 || fflush(file) != 0) {
+        fclose(file);
+        return respond(client_fd, id, 0,
+                       "history clear could not be persisted");
+    }
+    if (fclose(file) != 0)
+        return respond(client_fd, id, 0,
+                       "history clear could not be persisted");
+    state->history_generation = next;
     pthread_mutex_lock(&state->metrics_mutex);
     state->turn_history_next = 0;
     state->turn_history_count = 0;
@@ -1476,6 +1498,21 @@ int main(int argc, char **argv)
 
         if (!*end && value <= 30)
             state.poll_minimum = (unsigned int)value;
+    }
+    if (snprintf(state.history_generation_path,
+                 sizeof(state.history_generation_path), "%s.history-generation",
+                 state.config_path) >=
+        (int)sizeof(state.history_generation_path))
+        return 1;
+    state.history_generation = 1;
+    {
+        FILE *file = fopen(state.history_generation_path, "r");
+        unsigned long long saved;
+        if (file) {
+            if (fscanf(file, "%llu", &saved) == 1 && saved)
+                state.history_generation = saved;
+            fclose(file);
+        }
     }
     load_config(&state);
     state.provider = le_llm_provider_by_id(state.config.provider);

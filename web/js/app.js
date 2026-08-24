@@ -489,6 +489,7 @@ const SIM_RESPONSE_GOAL_TEXT='1 s';
 function simGoalClass(v){const n=Number(v);return Number.isFinite(n)?(n<SIM_RESPONSE_GOAL_MS?'connected':'error-text'):''}
 const SIM_HISTORY_KEY='libreecho-simulation-history';
 const SIM_DEVICE_KEY='libreecho-simulation-device-history';
+const SIM_DEVICE_GENERATION_KEY='libreecho-simulation-device-history-generation';
 const SIM_HISTORY_MAX=100;
 let simDeviceTurns=[];
 /*
@@ -529,8 +530,13 @@ async function simHistoryLoad(){
  try{
   const h=await api('/assistant/history');
   const turns=Array.isArray(h&&h.turns)?h.turns:[];
+  const generation=Number(h&&h.history_generation);
+  const previousGeneration=Number(localStorage.getItem(SIM_DEVICE_GENERATION_KEY)||0);
+  const remotelyCleared=Number.isFinite(generation)&&generation>0&&previousGeneration>0&&generation!==previousGeneration;
   simDeviceTurns=turns.map(simDeviceRow).filter(Boolean);
-  if(simDeviceTurns.length){try{localStorage.setItem(SIM_DEVICE_KEY,JSON.stringify(simDeviceTurns))}catch(_){/* private mode, quota */}}
+  if(Number.isFinite(generation)&&generation>0){try{localStorage.setItem(SIM_DEVICE_GENERATION_KEY,String(generation))}catch(_){/* private mode, quota */}}
+  if(remotelyCleared){try{localStorage.removeItem(SIM_DEVICE_KEY)}catch(_){/* private mode, quota */};simDeviceTurns=[]}
+  else if(simDeviceTurns.length){try{localStorage.setItem(SIM_DEVICE_KEY,JSON.stringify(simDeviceTurns))}catch(_){/* private mode, quota */}}
   else {try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];if(Array.isArray(v))simDeviceTurns=v}catch(_){} }
  }catch(_){
   /* Unreachable, or an image whose agentd predates /assistant/history: show the
