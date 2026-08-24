@@ -23,6 +23,11 @@ grep -q 'O_NOFOLLOW' src/adapter/radiod.c
 grep -q 'install_stop_handlers' src/adapter/radiod.c
 grep -q 'close(http_listener)' src/http_server.c
 grep -q 'relay_host' src/http_server.c
+grep -q 'le_tls_write_deadline' src/tls.c src/tls.h src/http_server.c
+grep -q 'usb_mount_record' src/api.c
+grep -q 'usb_unmount_stale' src/api.c
+grep -q 'path_len >= 384' src/api.c
+grep -q 'redirect response rejected' src/adapter/radiod.c
 grep -Fq "return !*host||*host==':'" src/api.c
 grep -q 'NetworkUpdate' web/openapi.json
 grep -q 'wifi_mac_configured' web/openapi.json docs/API.md

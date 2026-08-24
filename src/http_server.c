@@ -233,7 +233,7 @@ if(!pending&&!p[0].revents&&!p[1].revents)break;   /* idle timeout */
 if(p[1].revents&(POLLIN|POLLHUP|POLLERR)){
 n=read(up,buf,sizeof(buf));
 if(n<=0)break;
-if(le_tls_write(tls,buf,(size_t)n)!=n)break;
+if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
 continue;
 }
 
@@ -251,7 +251,7 @@ struct pollfd d={up,POLLIN,0};
 if(poll(&d,1,250)<=0)break;
 n=read(up,buf,sizeof(buf));
 if(n<=0)break;
-if(le_tls_write(tls,buf,(size_t)n)!=n)break;
+if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
 }
 close(up);le_tls_close(tls);close(cfd);return;}
 

@@ -782,15 +782,27 @@ static int radio_word_valid(const char *w)
 
 static int radio_url_valid(const char *u)
 {
-    size_t i, n = strlen(u);
+    const char *rest, *slash, *colon;
+    size_t n = strlen(u), host_len, port_len, path_len;
 
     if (n < 8 || n >= sizeof(((struct le_radio_station *)0)->url))
         return 0;
-    if (strncmp(u, "http://", 7) && strncmp(u, "https://", 8))
+    if (!strncmp(u, "https://", 8)) rest = u + 8;
+    else if (!strncmp(u, "http://", 7)) rest = u + 7;
+    else return 0;
+    slash = strchr(rest, '/');
+    colon = memchr(rest, ':', slash ? (size_t)(slash - rest) : strlen(rest));
+    host_len = colon ? (size_t)(colon - rest) :
+               (slash ? (size_t)(slash - rest) : strlen(rest));
+    port_len = colon ? (slash ? (size_t)(slash - colon - 1) : strlen(colon + 1)) : 0;
+    path_len = slash ? strlen(slash) : 1;
+    /* Match radiod's HOST_MAX, port buffer, and PATH_MAX_LEN limits. */
+    if (!host_len || host_len >= 256 || (colon && (!port_len || port_len >= 16)) ||
+        path_len >= 384)
         return 0;
-    for (i = 0; i < n; ++i)
+    for (size_t i = 0; i < n; ++i)
         if ((unsigned char)u[i] < 0x21 || (unsigned char)u[i] > 0x7e)
-            return 0;   /* no control characters, spaces or non-ASCII */
+            return 0;
     return 1;
 }
 
@@ -1154,7 +1166,58 @@ static int usb_node_ready(const char*part,const char*dev){struct stat st;char sy
  fclose(f);
  if(mknod(dev,S_IFBLK|0600,makedev(maj,min))&&errno!=EEXIST)return 0;
  return 1;}
-static const char*usb_mount_try(const char*part){static const char*const kinds[]={"exfat","vfat","ext4"};char dev[64];size_t i;struct stat st;snprintf(dev,sizeof(dev),"/dev/%s",part);if(!usb_node_ready(part,dev))return NULL;if(stat(LE_USB_MOUNT,&st))mkdir(LE_USB_MOUNT,0755);for(i=0;i<sizeof(kinds)/sizeof(kinds[0]);i++)if(mount(dev,LE_USB_MOUNT,kinds[i],MS_RDONLY|MS_NOSUID|MS_NODEV,NULL)==0||errno==EBUSY)return kinds[i];return NULL;}
+static int usb_mount_record(const char*part,char*fstype,size_t fstype_size)
+{
+ FILE*f;char line[1024],dev_field[64],mountpoint[256],mounted_type[64],source[256];struct stat st;unsigned maj,min;char dev[64];int found=0;
+ if(fstype&&fstype_size)fstype[0]='\0';
+ snprintf(dev,sizeof(dev),"/dev/%s",part);
+ if(stat(dev,&st)<0)return 0;
+ maj=major(st.st_rdev);min=minor(st.st_rdev);
+ f=fopen("/proc/self/mountinfo","r");if(!f)return 0;
+ while(fgets(line,sizeof(line),f)){
+  char*sep=strstr(line," - ");
+  if(!sep)continue;
+  if(sscanf(line,"%*u %*u %63s %*s %255s",dev_field,mountpoint)!=2)continue;
+  if(strcmp(mountpoint,LE_USB_MOUNT))continue;
+  if(sscanf(sep+3,"%63s %255s",mounted_type,source)!=2)continue;
+  if(sscanf(dev_field,"%u:%u",&maj,&min)!=2)continue;
+  if(maj==major(st.st_rdev)&&min==minor(st.st_rdev)){
+   if(fstype&&fstype_size)snprintf(fstype,fstype_size,"%s",mounted_type);
+   found=1;
+  }
+  break;
+ }
+ fclose(f);return found;
+}
+static int usb_mount_exists(void)
+{
+ FILE*f;char line[1024];int found=0;
+ f=fopen("/proc/self/mountinfo","r");if(!f)return 0;
+ while(fgets(line,sizeof(line),f)){char dev[64],mountpoint[256];if(sscanf(line,"%*u %*u %63s %*s %255s",dev,mountpoint)==2&&!strcmp(mountpoint,LE_USB_MOUNT)){found=1;break;}}
+ fclose(f);return found;
+}
+static void usb_unmount_stale(void)
+{
+ if(usb_mount_exists())(void)umount(LE_USB_MOUNT);
+}
+static const char*usb_mount_try(const char*part)
+{
+ static const char*const kinds[]={"exfat","vfat","ext4"};
+ char dev[64],existing[64];size_t i,j;struct stat st;
+ snprintf(dev,sizeof(dev),"/dev/%s",part);
+ if(!usb_node_ready(part,dev))return NULL;
+ if(stat(LE_USB_MOUNT,&st))mkdir(LE_USB_MOUNT,0755);
+ if(usb_mount_record(part,existing,sizeof(existing)))
+  for(i=0;i<sizeof(kinds)/sizeof(kinds[0]);i++)if(!strcmp(existing,kinds[i]))return kinds[i];
+ if(usb_mount_exists())usb_unmount_stale();
+ for(i=0;i<sizeof(kinds)/sizeof(kinds[0]);i++){
+  if(mount(dev,LE_USB_MOUNT,kinds[i],MS_RDONLY|MS_NOSUID|MS_NODEV,NULL)==0)return kinds[i];
+  if(errno==EBUSY&&usb_mount_record(part,existing,sizeof(existing)))
+   for(j=0;j<sizeof(kinds)/sizeof(kinds[0]);j++)if(!strcmp(existing,kinds[j]))return kinds[j];
+  if(errno==EBUSY)usb_unmount_stale();
+ }
+ return NULL;
+}
 static int hexval(char ch){if(ch>='0'&&ch<='9')return ch-'0';if(ch>='a'&&ch<='f')return ch-'a'+10;if(ch>='A'&&ch<='F')return ch-'A'+10;return -1;}
 /*
  * Browsing sub-directories. The query value is untrusted, so reject anything
@@ -1232,7 +1295,7 @@ static void usb_play_json(struct api_context*c,const struct api_request*q,struct
 }
 static void usb_storage_json(struct api_context*c,const struct api_request*q,struct api_response*r){char node[64],part[64],esc[512],rel[256],dirpath[512],relesc[512];unsigned long long bytes=0,used=0,avail=0;const char*fs;size_t n=0,listed=0;DIR*d;struct dirent*e;struct stat st;struct statvfs vfs;(void)c;
  if(usb_subpath(q?q->path:NULL,rel,sizeof(rel),dirpath,sizeof(dirpath))<0){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
- if(!usb_disk_find(node,sizeof(node),part,sizeof(part),&bytes)){out(r,200,"{\"ok\":true,\"data\":{\"present\":false,\"mounted\":false,\"message\":\"No USB disk is attached. The OTG port must be in host mode.\"},\"error\":null}");return;}
+ if(!usb_disk_find(node,sizeof(node),part,sizeof(part),&bytes)){usb_unmount_stale();out(r,200,"{\"ok\":true,\"data\":{\"present\":false,\"mounted\":false,\"message\":\"No USB disk is attached. The OTG port must be in host mode.\"},\"error\":null}");return;}
  fs=usb_mount_try(part);
  if(fs&&statvfs(LE_USB_MOUNT,&vfs)==0){unsigned long long fr=(unsigned long long)vfs.f_frsize;avail=fr*(unsigned long long)vfs.f_bavail;used=fr*((unsigned long long)vfs.f_blocks-(unsigned long long)vfs.f_bfree);}
  json_escape(relesc,sizeof(relesc),rel);

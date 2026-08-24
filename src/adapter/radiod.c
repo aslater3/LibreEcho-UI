@@ -390,6 +390,23 @@ static int icy_open(struct icy_stream *st, int fd, const char *host,
         memcpy(st->raw, headers + offset, leftover);
         st->raw_used = leftover;
         headers[offset - 2] = '\0';          /* keep the header lines only */
+        {
+            int status = 200;
+            char location[URL_MAX];
+            if (!strncmp(headers, "HTTP/", 5) &&
+                sscanf(headers, "%*[^ ] %d", &status) == 1) {
+                if (status >= 300 && status < 400) {
+                    if (!header_value(headers, "location", location,
+                                      sizeof(location)))
+                        le_log_warn("radiod: redirect rejected: %s", location);
+                    else
+                        le_log_warn("radiod: redirect response rejected");
+                    return -1;
+                }
+                if (status < 200 || status >= 300)
+                    return -1;
+            }
+        }
         break;
     }
 

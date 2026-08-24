@@ -48,6 +48,8 @@ long le_tls_read(struct le_tls *tls, void *buf, size_t len);
  */
 int le_tls_pending(struct le_tls *tls);
 long le_tls_write(struct le_tls *tls, const void *buf, size_t len);
+long le_tls_write_deadline(struct le_tls *tls, const void *buf, size_t len,
+                           int timeout_ms);
 
 void le_tls_close(struct le_tls *tls);
 
