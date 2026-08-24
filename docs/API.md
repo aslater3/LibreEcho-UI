@@ -408,6 +408,33 @@ connectivity, local STT timing, and first-audio latency telemetry. The latency
 measurement is from the estimated end of speech to the first PCM submitted to
 the announcement bus; the current target is 3000 ms.
 
+#### GET /api/v1/assistant/history
+
+Returns the newest bounded turn records measured by `agentd` itself:
+
+```json
+{
+  "turns": [
+    {
+      "at_ms": 1724457600123,
+      "stt_audio_ms": 1200,
+      "stt_processing_ms": 2800,
+      "stt_total_ms": 4000,
+      "first_text_ms": 2500,
+      "first_announce_ms": 3000,
+      "first_pcm_ms": 3100,
+      "follow_up": false
+    }
+  ]
+}
+```
+
+The ring retains up to 24 newest turns in `agentd` memory and is empty after
+that daemon restarts. Clients should keep their last non-empty cached result
+when a successful response contains no turns. `at_ms` is Unix epoch
+milliseconds; latency fields are device-local durations. Other verbs return
+405.
+
 #### PUT /api/v1/assistant
 
 Updates the provider-neutral assistant configuration:

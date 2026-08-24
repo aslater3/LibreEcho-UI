@@ -133,6 +133,15 @@ static uint64_t monotonic_milliseconds(void)
            (uint64_t)now.tv_nsec / 1000000ULL;
 }
 
+static uint64_t wall_clock_milliseconds(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) < 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000ULL +
+           (uint64_t)now.tv_nsec / 1000000ULL;
+}
+
 static int write_all(int fd, const void *buffer, size_t size)
 {
     const unsigned char *position = buffer;
@@ -407,21 +416,6 @@ static int play_sentence(void *context, const char *text)
                         marker_ms - state->turn_started_ms;
                     if (state->first_pcm_ms > 3000)
                         ++state->latency_violations;
-                    /*
-                     * This arrives after the turn record was written -- the
-                     * marker is polled asynchronously -- so amend the newest
-                     * record rather than leaving first_pcm_ms zero, which is
-                     * the one number that says when the user actually heard
-                     * something.
-                     */
-                    if (state->turn_history_count) {
-                        unsigned idx = (state->turn_history_next
-                                        + LE_AGENT_TURN_HISTORY - 1)
-                                       % LE_AGENT_TURN_HISTORY;
-                        if (!state->turn_history[idx].first_pcm_ms)
-                            state->turn_history[idx].first_pcm_ms =
-                                state->first_pcm_ms;
-                    }
                 }
                 pthread_mutex_unlock(&state->metrics_mutex);
             }
@@ -448,9 +442,10 @@ static int command_history(struct agent_state *state, int client_fd,
     size_t used = 0;
     unsigned i, n;
     int wrote;
+    const size_t body_limit = LE_ADAPTER_MSG_MAX - 256;
 
-    wrote = snprintf(body, sizeof(body), "{\"turns\":[");
-    if (wrote < 0 || (size_t)wrote >= sizeof(body))
+    wrote = snprintf(body, body_limit, "{\"turns\":[");
+    if (wrote < 0 || (size_t)wrote >= body_limit)
         return respond(client_fd, id, 0, "history too large");
     used = (size_t)wrote;
 
@@ -461,7 +456,7 @@ static int command_history(struct agent_state *state, int client_fd,
         unsigned idx = (state->turn_history_next + LE_AGENT_TURN_HISTORY
                         - 1 - i) % LE_AGENT_TURN_HISTORY;
         const struct turn_record *r = &state->turn_history[idx];
-        wrote = snprintf(body + used, sizeof(body) - used,
+        wrote = snprintf(body + used, body_limit - used,
                          "%s{\"at_ms\":%llu,\"stt_audio_ms\":%llu,"
                          "\"stt_processing_ms\":%llu,\"stt_total_ms\":%llu,"
                          "\"first_text_ms\":%llu,\"first_announce_ms\":%llu,"
@@ -475,14 +470,16 @@ static int command_history(struct agent_state *state, int client_fd,
                          (unsigned long long)r->first_announce_ms,
                          (unsigned long long)r->first_pcm_ms,
                          r->follow_up ? "true" : "false");
-        if (wrote < 0 || (size_t)wrote >= sizeof(body) - used)
-            break;              /* stop cleanly rather than truncate mid-object */
+        if (wrote < 0 || (size_t)wrote >= body_limit - used) {
+            pthread_mutex_unlock(&state->metrics_mutex);
+            return respond(client_fd, id, 0, "history too large");
+        }
         used += (size_t)wrote;
     }
     pthread_mutex_unlock(&state->metrics_mutex);
 
-    wrote = snprintf(body + used, sizeof(body) - used, "]}");
-    if (wrote < 0 || (size_t)wrote >= sizeof(body) - used)
+    wrote = snprintf(body + used, body_limit - used, "]}");
+    if (wrote < 0 || (size_t)wrote >= body_limit - used)
         return respond(client_fd, id, 0, "history too large");
     return respond(client_fd, id, 1, body);
 }
@@ -1123,7 +1120,7 @@ static void voice_transcript(
         {
             struct turn_record *rec =
                 &state->turn_history[state->turn_history_next];
-            rec->at_ms = monotonic_milliseconds();
+            rec->at_ms = wall_clock_milliseconds();
             rec->stt_audio_ms = turn->stt_audio_ms;
             rec->stt_processing_ms = turn->stt_processing_ms;
             rec->stt_total_ms = turn->stt_total_ms;

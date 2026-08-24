@@ -9,6 +9,7 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/con
 make build/test-auth-sessions
 ./build/test-auth-sessions
 sh tests/test_pr137_review_contract.sh
+sh tests/test_pr139_review_contract.sh
 make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
 ./build/test-network-health
 ./build/test-gateway-probe
