@@ -102,6 +102,7 @@ jobs:
           CPPFLAGS: -I${{ runner.temp }}/mbedtls/include
           LDFLAGS: -L${{ runner.temp }}/mbedtls/lib
           WEB_TLS_LIBS: -lmbedtls -lmbedx509 -lmbedcrypto
+          RADIOD_TLS_LIBS: -lmbedtls -lmbedx509 -lmbedcrypto
         run: |
           set -euo pipefail
           sh tests/e2e/run.sh

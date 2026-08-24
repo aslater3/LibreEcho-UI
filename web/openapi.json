@@ -1776,14 +1776,14 @@
     "tags": [
      "Network"
     ],
-    "summary": "Update hostname and local access",
+    "summary": "Update hostname, local access, and persistent MAC overrides",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
      }
     ],
     "requestBody": {
-     "$ref": "#/components/requestBodies/JsonObject"
+     "$ref": "#/components/requestBodies/NetworkUpdate"
     },
     "responses": {
      "200": {
@@ -2608,6 +2608,25 @@
    }
   },
   "requestBodies": {
+   "NetworkUpdate": {
+    "required": true,
+    "description": "Updates hostname, local access, or persistent MAC overrides. MAC values must be six hexadecimal octets separated by colons or hyphens and must be unicast.",
+    "content": {
+     "application/json": {
+      "schema": {
+       "type": "object",
+       "properties": {
+        "hostname": {"type": "string", "maxLength": 63},
+        "ssh": {"type": "boolean"},
+        "api_lan": {"type": "boolean"},
+        "wifi_mac": {"type": "string", "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"},
+        "bt_mac": {"type": "string", "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"}
+       },
+       "additionalProperties": false
+      }
+     }
+    }
+   },
    "WifiConnect": {
     "required": true,
     "description": "Wi-Fi credentials. `security` accepts exactly `open`, `wpa2`, or `wpa3`; when omitted it defaults to `wpa2`.",
@@ -2768,6 +2787,12 @@
      "gateway",
      "dns",
      "hostname",
+     "wifi_mac",
+     "wifi_mac_factory",
+     "wifi_mac_configured",
+     "bt_mac",
+     "bt_mac_factory",
+     "bt_mac_configured",
      "internet",
      "dhcp",
      "ssh",
@@ -2831,6 +2856,36 @@
      },
      "hostname": {
       "type": "string"
+     },
+     "wifi_mac": {
+      "type": "string",
+      "description": "Current Wi-Fi MAC address, or empty when unavailable",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "wifi_mac_factory": {
+      "type": "string",
+      "description": "Factory Wi-Fi MAC from board identity data, or empty when unavailable",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "wifi_mac_configured": {
+      "type": "string",
+      "description": "Persisted Wi-Fi MAC override, or empty when unset",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "bt_mac": {
+      "type": "string",
+      "description": "Current Bluetooth MAC address, or empty when unavailable",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "bt_mac_factory": {
+      "type": "string",
+      "description": "Factory Bluetooth MAC from board identity data, or empty when unavailable",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+     },
+     "bt_mac_configured": {
+      "type": "string",
+      "description": "Persisted Bluetooth MAC override, or empty when unset",
+      "pattern": "^$|^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
      },
      "internet": {
       "type": "boolean"

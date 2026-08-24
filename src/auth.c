@@ -211,6 +211,8 @@ int le_auth_load(struct le_auth_db *db, const char *path)
     while (fgets(line, sizeof(line), file) &&
            db->user_count < LE_AUTH_MAX_USERS) {
         char *user, *method, *salt, *digest, *end;
+        char folded[LE_AUTH_USERNAME_MAX];
+        size_t existing;
         size_t length;
         user = line;
         while (*user == ' ' || *user == '\t')
@@ -241,8 +243,15 @@ int le_auth_load(struct le_auth_db *db, const char *path)
             strlen(salt) > 64 || !valid_hex(salt, strlen(salt)) ||
             strlen(digest) != 64 || !valid_hex(digest, 64))
             continue;
-        le_auth_fold_username(db->users[db->user_count].username,
-                              sizeof(db->users[db->user_count].username), user);
+        le_auth_fold_username(folded, sizeof(folded), user);
+        for (existing = 0; existing < db->user_count; ++existing)
+            if (!strcmp(db->users[existing].username, folded)) {
+                fclose(file);
+                memset(db, 0, sizeof(*db));
+                return -1; /* fail closed rather than hide a case-colliding account */
+            }
+        snprintf(db->users[db->user_count].username,
+                 sizeof(db->users[db->user_count].username), "%s", folded);
         strncpy(db->users[db->user_count].salt, salt,
                 sizeof(db->users[db->user_count].salt) - 1);
         strncpy(db->users[db->user_count].digest, digest,

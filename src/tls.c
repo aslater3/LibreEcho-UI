@@ -295,12 +295,20 @@ int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
     unsigned char buf[4096];
     char subject[128];
     char not_before[16], not_after[16];
-    time_t now;
-    struct tm tm_now;
     int rc = LE_IO, len;
 
-    if (!access(cert_path, R_OK) && !access(key_path, R_OK))
-        return LE_OK;                       /* already generated */
+    if (!access(cert_path, R_OK) && !access(key_path, R_OK)) {
+        mbedtls_x509_crt existing;
+        mbedtls_x509_crt_init(&existing);
+        if (!mbedtls_x509_crt_parse_file(&existing, cert_path) &&
+            !mbedtls_x509_time_is_past(&existing.valid_to)) {
+            mbedtls_x509_crt_free(&existing);
+            return LE_OK;                   /* existing certificate is current */
+        }
+        mbedtls_x509_crt_free(&existing);
+        /* A certificate made while the clock was near the Unix epoch is
+           expired after NTP corrects the clock; fall through and replace it. */
+    }
 
     mbedtls_pk_init(&key);
     mbedtls_x509write_crt_init(&crt);
@@ -322,11 +330,11 @@ int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
     snprintf(subject, sizeof(subject), "CN=%s,O=LibreEcho",
              common_name && *common_name ? common_name : "libreecho.local");
 
-    now = time(NULL);
-    gmtime_r(&now, &tm_now);
-    strftime(not_before, sizeof(not_before), "%Y%m%d%H%M%S", &tm_now);
-    tm_now.tm_year += 10;
-    strftime(not_after, sizeof(not_after), "%Y%m%d%H%M%S", &tm_now);
+    /* Use a fixed broad validity window. A first boot may occur before NTP
+       has set the clock; deriving validity from time(NULL) would create a
+       certificate that is already expired when the clock is corrected. */
+    snprintf(not_before, sizeof(not_before), "%s", "20200101000000");
+    snprintf(not_after, sizeof(not_after), "%s", "20991231235959");
 
     if (mbedtls_mpi_read_string(&serial, 10, "1"))
         goto done;

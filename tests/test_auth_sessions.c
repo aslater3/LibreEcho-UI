@@ -8,15 +8,17 @@
 
 int main(void)
 {
-    char users[128], sessions[128], token[LE_AUTH_TOKEN_MAX];
+    char users[128], sessions[128], collision_users[128], token[LE_AUTH_TOKEN_MAX];
     struct le_auth_db db, loaded;
     int expires;
     FILE *file;
 
     snprintf(users, sizeof(users), "/tmp/libreecho-auth-users-%ld", (long)getpid());
     snprintf(sessions, sizeof(sessions), "/tmp/libreecho-auth-sessions-%ld", (long)getpid());
+    snprintf(collision_users, sizeof(collision_users), "/tmp/libreecho-auth-collision-%ld", (long)getpid());
     unlink(users);
     unlink(sessions);
+    unlink(collision_users);
     memset(&db, 0, sizeof(db));
     CHECK(le_auth_add_user(&db, users, "Alice", "alice-password-123") == 0);
     CHECK(le_auth_add_user(&db, users, "Bob", "bob-password-123") == 0);
@@ -42,8 +44,18 @@ int main(void)
     le_auth_load_sessions(&loaded, sessions);
     CHECK(!le_auth_session(&loaded, token, NULL, 0));
 
+    file = fopen(collision_users, "w");
+    CHECK(file != NULL);
+    CHECK(fprintf(file, "Alice:sha256:%s:%s\nAlice:sha256:%s:%s\n",
+                  db.users[0].salt, db.users[0].digest,
+                  db.users[0].salt, db.users[0].digest) > 0);
+    CHECK(fclose(file) == 0);
+    memset(&loaded, 0, sizeof(loaded));
+    CHECK(le_auth_load(&loaded, collision_users) < 0);
+
     unlink(users);
     unlink(sessions);
+    unlink(collision_users);
     puts("auth session deletion persistence: ok");
     return 0;
 }
