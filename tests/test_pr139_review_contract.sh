@@ -22,4 +22,5 @@ grep -q 'LE_AGENT_TURN_HISTORY 12' src/adapter/agentd.c
 grep -q 'history_clear' src/adapter/agentd.c src/api.c web/js/app.js
 grep -q 'history/clear' docs/API.md web/openapi.json
 ! grep -q 'SIM_DEVICE_CLEAR_KEY' web/js/app.js
+grep -q 'address_configured' src/api.c
 printf '%s\n' 'PR 139 review contracts: ok'
