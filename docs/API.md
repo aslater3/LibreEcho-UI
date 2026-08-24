@@ -1288,6 +1288,11 @@ example `connect-failed (0x04)`), retained for pairing/connection triage. Both
 are empty strings until the first event of each kind has been observed in this
 boot. Connection failures additionally populate `last_error`.
 
+The response also includes `address`, `address_factory`, and
+`address_configured` for the controller. `address` is the live HCI address,
+`address_factory` is the board-recorded address when available, and
+`address_configured` is the persisted override (empty means no override).
+
 #### PUT /api/v1/bluetooth
 
 Update one controller setting:

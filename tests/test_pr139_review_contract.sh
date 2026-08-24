@@ -14,4 +14,7 @@ grep -q 'body_limit = LE_ADAPTER_MSG_MAX - 256' src/adapter/agentd.c
 grep -q 'LE_TLS_AVAILABLE' Makefile src/api.c
 grep -q 'strlen(users_path)+strlen(".sessions")' src/api.c
 grep -q 'BT_STATUS_BOND_NAME_MAX' src/adapter/btd.c
+grep -q "activeElement.*mac-bt" web/js/bluetooth.js
+grep -q 'SIM_DEVICE_CLEAR_KEY' web/js/app.js
+grep -q 'address_configured' docs/API.md web/openapi.json
 printf '%s\n' 'PR 139 review contracts: ok'

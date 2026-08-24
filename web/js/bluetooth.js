@@ -116,7 +116,7 @@ async function refreshBluetooth() {
   if (state.btPairingResponding) return;
   try {
     const b=await api('/bluetooth');
-    if (state.page==='Bluetooth' && !state.btPairingResponding) { content.innerHTML=bluetoothMarkup(b); bindBluetooth(b); bluetoothScanFinished(b); updateBluetoothLiveRegion(b); }
+    if (state.page==='Bluetooth' && !state.btPairingResponding && !(document.activeElement && document.activeElement.id==='mac-bt')) { content.innerHTML=bluetoothMarkup(b); bindBluetooth(b); bluetoothScanFinished(b); updateBluetoothLiveRegion(b); }
   } catch (_) { /* Preserve the last good Bluetooth state during a transient adapter failure. */ }
   finally { if (state.page==='Bluetooth') state.timer=setTimeout(refreshBluetooth,2000); }
 }

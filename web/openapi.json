@@ -859,7 +859,7 @@
      "Bluetooth"
     ],
     "summary": "Read Bluetooth controller, discovery, pairing, bond and profile-service state",
-    "description": "The response separates controller protocol capabilities from registered userspace profile services. Kernel RFCOMM, BNEP, or HIDP support alone does not make a profile service available. profile_state is pairing-only until SDP/profile services are installed and supervised. When the controller adapter is absent, the 200 response contains data.available=false and data.unavailable=true.",
+    "description": "The response separates controller protocol capabilities from registered userspace profile services. Kernel RFCOMM, BNEP, or HIDP support alone does not make a profile service available. profile_state is pairing-only until SDP/profile services are installed and supervised. When the controller adapter is absent, the 200 response contains data.available=false and data.unavailable=true. The response includes address (live HCI address), address_factory (board-recorded address when available), and address_configured (persisted override; empty means no override).",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"

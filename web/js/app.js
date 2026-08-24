@@ -489,6 +489,7 @@ const SIM_RESPONSE_GOAL_TEXT='1 s';
 function simGoalClass(v){const n=Number(v);return Number.isFinite(n)?(n<SIM_RESPONSE_GOAL_MS?'connected':'error-text'):''}
 const SIM_HISTORY_KEY='libreecho-simulation-history';
 const SIM_DEVICE_KEY='libreecho-simulation-device-history';
+const SIM_DEVICE_CLEAR_KEY='libreecho-simulation-device-history-cleared-at';
 const SIM_HISTORY_MAX=100;
 let simDeviceTurns=[];
 /*
@@ -525,22 +526,23 @@ function simDeviceRow(t){
   audio_ms:t.stt_audio_ms,processing_ms:t.stt_processing_ms,
   queue_to_first_audio_ms:t.first_pcm_ms};}
 async function simHistoryLoad(){
+ const clearAt=Number(localStorage.getItem(SIM_DEVICE_CLEAR_KEY)||0);
  try{
   const h=await api('/assistant/history');
   const turns=Array.isArray(h&&h.turns)?h.turns:[];
-  simDeviceTurns=turns.map(simDeviceRow);
+  simDeviceTurns=turns.map(simDeviceRow).filter(row=>!clearAt||Number(row.at)>clearAt);
   if(simDeviceTurns.length){try{localStorage.setItem(SIM_DEVICE_KEY,JSON.stringify(simDeviceTurns))}catch(_){/* private mode, quota */}}
-  else {try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];if(Array.isArray(v))simDeviceTurns=v}catch(_){} }
+  else {try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];if(Array.isArray(v))simDeviceTurns=v.filter(row=>!clearAt||Number(row.at)>clearAt)}catch(_){} }
  }catch(_){
   /* Unreachable, or an image whose agentd predates /assistant/history: show the
      last copy fetched rather than nothing. */
   try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];
-      if(Array.isArray(v))simDeviceTurns=v}catch(_){}
+      if(Array.isArray(v))simDeviceTurns=v.filter(row=>!clearAt||Number(row.at)>clearAt)}catch(_){}
  }
  return simHistory();}
 function simHistoryClear(){
  simDeviceTurns=[];
- try{localStorage.removeItem(SIM_HISTORY_KEY);localStorage.removeItem(SIM_DEVICE_KEY)}catch(_){}}
+ try{localStorage.removeItem(SIM_HISTORY_KEY);localStorage.removeItem(SIM_DEVICE_KEY);localStorage.setItem(SIM_DEVICE_CLEAR_KEY,String(Date.now()))}catch(_){} }
 function ms(v){return (v===null||v===undefined)?'—':(v>=1000?(v/1000).toFixed(2)+' s':Math.round(v)+' ms')}
 /*
  * Pull the turn's real timings out of the device log rather than inferring
