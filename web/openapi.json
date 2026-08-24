@@ -159,7 +159,31 @@
      "Assistant"
     ],
     "summary": "Read the bounded device-side voice turn history",
-    "description": "Returns up to 24 newest device-measured turns. The history is held in agentd memory and is empty after an agentd restart; clients should retain their last non-empty cache when this endpoint returns no turns.",
+    "description": "Returns up to 12 newest device-measured turns. The history is held in agentd memory and is empty after an agentd restart; clients should retain their last non-empty cache when this endpoint returns no turns.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/assistant/history/clear": {
+   "post": {
+    "tags": [
+     "Assistant"
+    ],
+    "summary": "Clear device-side voice turn history",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"

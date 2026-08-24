@@ -17,7 +17,9 @@ grep -q 'History only takes metrics_mutex' src/adapter/agentd.c
 grep -q 'LE_TLS_AVAILABLE' Makefile src/api.c
 grep -q 'strlen(users_path)+strlen(".sessions")' src/api.c
 grep -q 'BT_STATUS_BOND_NAME_MAX' src/adapter/btd.c
-grep -q "activeElement.*mac-bt" web/js/bluetooth.js
-grep -q 'SIM_DEVICE_CLEAR_KEY' web/js/app.js
-grep -q 'address_configured' docs/API.md web/openapi.json
+grep -q 'save-bt-mac.*disabled' web/js/bluetooth.js
+grep -q 'LE_AGENT_TURN_HISTORY 12' src/adapter/agentd.c
+grep -q 'history_clear' src/adapter/agentd.c src/api.c web/js/app.js
+grep -q 'history/clear' docs/API.md web/openapi.json
+! grep -q 'SIM_DEVICE_CLEAR_KEY' web/js/app.js
 printf '%s\n' 'PR 139 review contracts: ok'

@@ -20,8 +20,8 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Turns retained for the latency history the UI reads back. */
-#define LE_AGENT_TURN_HISTORY 24
+/* Twelve records fit the bounded adapter response with worst-case timestamps. */
+#define LE_AGENT_TURN_HISTORY 12
 
 #define DEFAULT_AGENT_SOCKET LE_ADAPTER_AGENT_SOCK
 #define DEFAULT_AGENT_CONFIG "/data/libreecho/config/agent.json"
@@ -498,6 +498,16 @@ static int command_history(struct agent_state *state, int client_fd,
     if (wrote < 0 || (size_t)wrote >= body_limit - used)
         return respond(client_fd, id, 0, "history too large");
     return respond(client_fd, id, 1, body);
+}
+
+static int command_history_clear(struct agent_state *state, int client_fd,
+                                 unsigned long id)
+{
+    pthread_mutex_lock(&state->metrics_mutex);
+    state->turn_history_next = 0;
+    state->turn_history_count = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
+    return respond(client_fd, id, 1, "{}");
 }
 
 static int command_status(struct agent_state *state, int fd,
@@ -1373,8 +1383,11 @@ static void handle_client(struct agent_state *state, int client_fd)
     }
     /* History only takes metrics_mutex. Do not make a read-only history poll
        wait behind an in-flight provider request holding control_mutex. */
-    if (!strcmp(command, "history")) {
-        (void)command_history(state, client_fd, id);
+    if (!strcmp(command, "history") || !strcmp(command, "history_clear")) {
+        if (!strcmp(command, "history_clear"))
+            (void)command_history_clear(state, client_fd, id);
+        else
+            (void)command_history(state, client_fd, id);
         return;
     }
     pthread_mutex_lock(&state->control_mutex);

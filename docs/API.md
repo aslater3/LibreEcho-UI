@@ -429,11 +429,17 @@ Returns the newest bounded turn records measured by `agentd` itself:
 }
 ```
 
-The ring retains up to 24 newest turns in `agentd` memory and is empty after
+The ring retains up to 12 newest turns in `agentd` memory and is empty after
 that daemon restarts. Clients should keep their last non-empty cached result
 when a successful response contains no turns. `at_ms` is Unix epoch
 milliseconds; latency fields are device-local durations. Other verbs return
 405.
+
+#### POST /api/v1/assistant/history/clear
+
+Clears the device-side history ring. This is a state-changing request and
+requires `X-LibreEcho-CSRF`; the response is an empty success object. The
+browser clears its cache only after this device operation succeeds.
 
 #### PUT /api/v1/assistant
 

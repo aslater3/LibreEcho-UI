@@ -489,7 +489,6 @@ const SIM_RESPONSE_GOAL_TEXT='1 s';
 function simGoalClass(v){const n=Number(v);return Number.isFinite(n)?(n<SIM_RESPONSE_GOAL_MS?'connected':'error-text'):''}
 const SIM_HISTORY_KEY='libreecho-simulation-history';
 const SIM_DEVICE_KEY='libreecho-simulation-device-history';
-const SIM_DEVICE_CLEAR_KEY='libreecho-simulation-device-history-cleared-at';
 const SIM_HISTORY_MAX=100;
 let simDeviceTurns=[];
 /*
@@ -500,7 +499,7 @@ let simDeviceTurns=[];
  * But localStorage is scoped per origin and this device takes a new DHCP lease
  * on most boots -- the Wi-Fi driver generates a fresh MAC each time -- so every
  * reboot moved the UI to a new origin and the panel came up empty. agentd keeps
- * the last 24 turns it measured itself, which survive that.
+ * the last 12 turns it measured itself, which survive that.
  *
  * The two cannot be joined: a local row's timings are parsed from log lines
  * stamped in whole seconds, the device's are milliseconds off its own clock, so
@@ -526,23 +525,23 @@ function simDeviceRow(t){
   audio_ms:t.stt_audio_ms,processing_ms:t.stt_processing_ms,
   queue_to_first_audio_ms:t.first_pcm_ms};}
 async function simHistoryLoad(){
- const clearAt=Number(localStorage.getItem(SIM_DEVICE_CLEAR_KEY)||0);
  try{
   const h=await api('/assistant/history');
   const turns=Array.isArray(h&&h.turns)?h.turns:[];
-  simDeviceTurns=turns.map(simDeviceRow).filter(row=>!clearAt||Number(row.at)>clearAt);
+  simDeviceTurns=turns.map(simDeviceRow);
   if(simDeviceTurns.length){try{localStorage.setItem(SIM_DEVICE_KEY,JSON.stringify(simDeviceTurns))}catch(_){/* private mode, quota */}}
-  else {try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];if(Array.isArray(v))simDeviceTurns=v.filter(row=>!clearAt||Number(row.at)>clearAt)}catch(_){} }
+  else {try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];if(Array.isArray(v))simDeviceTurns=v}catch(_){} }
  }catch(_){
   /* Unreachable, or an image whose agentd predates /assistant/history: show the
      last copy fetched rather than nothing. */
   try{const raw=localStorage.getItem(SIM_DEVICE_KEY);const v=raw?JSON.parse(raw):[];
-      if(Array.isArray(v))simDeviceTurns=v.filter(row=>!clearAt||Number(row.at)>clearAt)}catch(_){}
+      if(Array.isArray(v))simDeviceTurns=v}catch(_){}
  }
  return simHistory();}
-function simHistoryClear(){
+async function simHistoryClear(){
+ await api('/assistant/history/clear',{method:'POST',body:'{}'});
  simDeviceTurns=[];
- try{localStorage.removeItem(SIM_HISTORY_KEY);localStorage.removeItem(SIM_DEVICE_KEY);localStorage.setItem(SIM_DEVICE_CLEAR_KEY,String(Date.now()))}catch(_){} }
+ try{localStorage.removeItem(SIM_HISTORY_KEY);localStorage.removeItem(SIM_DEVICE_KEY);localStorage.removeItem('libreecho-simulation-device-history-cleared-at')}catch(_){} }
 function ms(v){return (v===null||v===undefined)?'—':(v>=1000?(v/1000).toFixed(2)+' s':Math.round(v)+' ms')}
 /*
  * Pull the turn's real timings out of the device log rather than inferring
@@ -906,7 +905,7 @@ async function simulationPage(){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
  };
- $('#sim-clear').onclick=()=>{ simHistoryClear(); simRender(); toast('History cleared') };
+ $('#sim-clear').onclick=async()=>{try{await simHistoryClear();simRender();toast('History cleared')}catch(e){toast(e.message,true)}};
  $('#sim-send').onclick=async()=>{
   const phrase=text.value.trim();
   if(!phrase){toast('Enter a phrase first',true);return}

@@ -13,6 +13,8 @@ history=$(curl -sS "$URL/api/v1/assistant/history")
 printf '%s' "$history" | jq -e '.ok == false and .data == null and (.error.code | type) == "string"' >/dev/null
 code=$(curl -sS -o /tmp/le-history-method.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 405 ]
+clear_code=$(curl -sS -o /tmp/le-history-clear.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history/clear" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$clear_code" = 501 ] || [ "$clear_code" = 503 ]
 expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
 expect "$(curl -fsS "$URL/")" 'First-boot setup'
 code=$(curl -sS -o /tmp/le-bad-setup.out -w '%{http_code}' -X POST "$URL/api/v1/setup" -H "$CSRF" -H 'Content-Type: application/json' --data '{"hostname":"bad host"}')
