@@ -1172,6 +1172,7 @@
      "Discovery"
     ],
     "summary": "Read API configuration metadata",
+    "description": "Returns the compile-time LibreEcho OS version alongside authentication and request metadata. The os_version value is sourced from the release VERSION file during the daemon build.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"

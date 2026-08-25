@@ -8,6 +8,7 @@ expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exi
 expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
+curl -fsS "$URL/api/v1/config" | jq -e --arg version "LibreEcho OS $OS_VERSION" '.ok and .data.os_version == $version' >/dev/null
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
 history=$(curl -fsS "$URL/api/v1/assistant/history")
 printf '%s' "$history" | jq -e '.ok and .data.history_generation == 1 and (.data.turns | length == 1) and .data.turns[0].first_pcm_ms == 3100' >/dev/null

@@ -994,6 +994,7 @@ Returns API configuration.
   "ok": true,
   "data": {
     "api_version": 1,
+    "os_version": "LibreEcho OS 0.14.0",
     "csrf_token": "<64-character per-boot token>",
     "authentication": "development-disabled",
     "bind_policy": "lan-development",
