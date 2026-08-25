@@ -918,11 +918,19 @@ static void refresh_state(struct audio_hw *audio)
         if (!airplay_media_active() && audio->requested_volume >= 0 &&
             abs(audio->volume - audio->requested_volume) >
                 VOLUME_GUARD_TOLERANCE) {
-            le_log_warn("audiod: volume changed underneath us: requested "
-                        "%d%%, control now reads %d%% (raw %lld of %lld..%lld)"
-                        "; restoring",
-                        audio->requested_volume, audio->volume,
-                        value, min, max);
+            /* One line, not one per playback. The flag was set here but never
+               tested, so an outside writer that fires on every stream -- which
+               is what this device does -- filled the log ring with this message
+               and evicted everything else, including the microphone and
+               wake-word lines needed to diagnose an unrelated fault. The
+               restore below still runs every time; only the warning is
+               one-shot, and setting the volume again re-arms it. */
+            if (!audio->volume_guard_warned)
+                le_log_warn("audiod: volume changed underneath us: requested "
+                            "%d%%, control now reads %d%% (raw %lld of %lld..%lld)"
+                            "; restoring",
+                            audio->requested_volume, audio->volume,
+                            value, min, max);
             audio->volume_guard_warned = 1;
             if (audio_set_volume(audio, audio->requested_volume) == 0)
                 audio->volume = audio->requested_volume;
@@ -996,6 +1004,10 @@ static int audio_set_volume(struct audio_hw *audio, int volume)
     audio->volume = volume;
     audio->notification_volume = volume;
     audio->requested_volume = volume;
+    /* A fresh request re-arms the guard warning: the next time an outside
+       writer overrides this level it is news again, rather than silence
+       because it was reported once hours ago. */
+    audio->volume_guard_warned = 0;
     return 0;
 }
 
