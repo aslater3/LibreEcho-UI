@@ -639,14 +639,41 @@ static void read_dns(char *out, size_t out_size)
     fclose(f);
 }
 
+/*
+ * Rank a thermal zone by how well its type identifies it as the SoC.
+ *
+ * This used to return the first zone whose type contained any of "cpu", "soc",
+ * "mtk" or "thermal", which made the answer depend on probe order rather than
+ * on intent. On radar_puffin the three board thermistors register as
+ * "mtkts_bts0".."mtkts_bts2" and match on "mtk" just as readily as the SoC's
+ * own "cpu-thermal" zone does; the right zone wins today only because the
+ * device-tree zone happens to register first.
+ *
+ * Scoring every zone and taking the best removes the ordering dependency, and
+ * ranking the board thermistors below the SoC means that if the SoC zone ever
+ * disappears we report a real temperature from the wrong place rather than
+ * silently swapping one for the other.
+ */
+static int thermal_zone_rank(const char *type)
+{
+    if (strstr(type, "cpu") || strstr(type, "soc"))
+        return 3;
+    if (strstr(type, "mtkts"))      /* board thermistors: real, but not the SoC */
+        return 1;
+    if (strstr(type, "mtk") || strstr(type, "thermal"))
+        return 2;
+    return 0;
+}
+
 static int read_temperature(void)
 {
     char path[PATH_MAX], type_path[PATH_MAX], raw[32], type[64];
-    int fallback = 0;
+    int fallback = 0, best = 0, best_rank = 0;
     unsigned int zone;
 
     for (zone = 0; zone < 16; ++zone) {
         long value;
+        int rank;
         snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%u/temp", zone);
         if (read_line(path, raw, sizeof(raw)))
             continue;
@@ -657,15 +684,19 @@ static int read_temperature(void)
             continue;
         if (!fallback)
             fallback = (int)value;
+        if (value == 0)
+            continue;
         snprintf(type_path, sizeof(type_path),
                  "/sys/class/thermal/thermal_zone%u/type", zone);
         type[0] = '\0';
         (void)read_line(type_path, type, sizeof(type));
-        if (value != 0 && (strstr(type, "cpu") || strstr(type, "soc") ||
-                           strstr(type, "mtk") || strstr(type, "thermal")))
-            return (int)value;
+        rank = thermal_zone_rank(type);
+        if (rank > best_rank) {
+            best_rank = rank;
+            best = (int)value;
+        }
     }
-    return fallback;
+    return best_rank ? best : fallback;
 }
 
 static int read_block_capacity_mb(int *megabytes)
