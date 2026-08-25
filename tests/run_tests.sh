@@ -99,7 +99,10 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_voice_dsp.c src/adapter/voice_dsp.c \
     -o build/test-voice-dsp
 ./build/test-voice-dsp
-cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+# M_PI is not in C99, and glibc hides it under a strict _POSIX_C_SOURCE, so this
+# built only on toolchains whose headers leak it. It failed to compile on glibc
+# and took every test after it down with it.
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_radio_resample.c src/adapter/radio_resample.c \
     -lm -o build/test-radio-resample
 ./build/test-radio-resample

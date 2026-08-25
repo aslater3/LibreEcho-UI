@@ -19,6 +19,25 @@ SOCKET=${SOCKET:-/run/libreecho/wakeword.sock}
 MIC_SOCKET=${MIC_SOCKET:-/run/libreecho/mic.sock}
 REFERENCE_SOCKET=${REFERENCE_SOCKET:-/run/libreecho-audio/aec-reference.sock}
 VAD_FLOOR_FILE=${VAD_FLOOR_FILE:-/data/libreecho/config/vad-floor-rms}
+# Echo cancellation is on unless this file says 0. It exists because a single
+# playback has been observed to stop the wake word detecting until reboot,
+# and the AEC reference is the prime suspect: before anything is spoken the
+# canceller is inert, afterwards it adapts. Being able to turn it off without
+# reflashing is what makes that testable on hardware.
+AEC_FILE=${AEC_FILE:-/data/libreecho/config/aec-reference}
+# Write a number of seconds here to have waked dump exactly the audio it
+# processes to /data/libreecho/config/wake-dump.raw. It is the only way to see
+# what the detector receives, the microphone and capture-mux having been proven
+# good independently.
+#
+# Two hard-won constraints. waked EXITS when the dump finishes, taking the wake
+# word with it until the next boot, so this is consumed one-shot below: the
+# request is cleared as it is read and a plain reboot always restores a working
+# device. And waked rejects anything from 60 seconds up, so the ceiling here is
+# deliberately far below that -- a dump is a diagnostic, and a long one is only
+# a longer outage.
+DUMP_FILE=${DUMP_FILE:-/data/libreecho/config/wake-dump-seconds}
+DUMP_MAX_SECONDS=${DUMP_MAX_SECONDS:-20}
 VAD_FLOOR_DEFAULT=16
 # Must not exceed what the waked binary accepts, or it exits at startup and
 # the device comes back with no wake word. That binary ships inside the wake
@@ -103,7 +122,30 @@ start_service() {
         echo "libreecho-waked: VAD floor above $VAD_FLOOR_MAX; clamping" >&2
         VAD_FLOOR_RMS=$VAD_FLOOR_MAX
     fi
-    ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET --reference-socket $REFERENCE_SOCKET --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS}
+    # Same fail-safe as the VAD floor: a bad value must not cost the device
+    # its wake word, so anything other than a literal 0 leaves AEC enabled.
+    AEC_REFERENCE_ARG="--reference-socket $REFERENCE_SOCKET"
+    if [ -r "$AEC_FILE" ] && [ "$(sed -n '1p' "$AEC_FILE")" = "0" ]; then
+        AEC_REFERENCE_ARG=""
+        echo "libreecho-waked: echo cancellation disabled by $AEC_FILE" >&2
+    fi
+    # Same fail-safe shape: only a plain positive integer turns dumping on.
+    DUMP_ARG=""
+    if [ -r "$DUMP_FILE" ]; then
+        DUMP_SECONDS=$(sed -n '1p' "$DUMP_FILE")
+        # One-shot: clear the request before acting on it, so a dump can never
+        # cost the wake word on more than the single boot that was asked for.
+        rm -f "$DUMP_FILE"
+        case "$DUMP_SECONDS" in
+            ""|*[!0-9]*) ;;
+            *) if [ "$DUMP_SECONDS" -gt 0 ]; then
+                   [ "$DUMP_SECONDS" -le "$DUMP_MAX_SECONDS" ] || DUMP_SECONDS=$DUMP_MAX_SECONDS
+                   DUMP_ARG="--dump-pcm /data/libreecho/config/wake-dump.raw --dump-seconds $DUMP_SECONDS"
+                   echo "libreecho-waked: dumping ${DUMP_SECONDS}s of processed audio; the wake word stops when it ends, until the next boot" >&2
+               fi ;;
+        esac
+    fi
+    ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET $AEC_REFERENCE_ARG --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS $DUMP_ARG}
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" \
         "$(dirname "$SOCKET")" "$(dirname "$REFERENCE_SOCKET")"
     if command -v start-stop-daemon >/dev/null 2>&1; then

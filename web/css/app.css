@@ -182,3 +182,10 @@ body.light{--bg:#edf3f6;--bg2:#f7fafc;--panel:#fff;--panel2:#f4f8fa;--line:#c8d5
 .sim-table td small:not(.error-text){color:var(--muted)}
 .light .sim-table th{border-color:#c8d5dd}
 .light .sim-table td{border-color:#e0e8ec}
+.sim-spec .spec-table{white-space:normal}
+.sim-spec .spec-table th,.sim-spec .spec-table td{text-align:left}
+.sim-spec .spec-table td:first-child{white-space:nowrap}
+.sim-spec .spec-mono td:first-child{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.sim-spec h4{margin:22px 0 2px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.sim-spec .integration-section-body>h4:first-child{margin-top:6px}
+.sim-spec code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}

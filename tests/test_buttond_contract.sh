@@ -9,6 +9,19 @@ grep -q 'refresh_audio(ctx)' src/adapter/buttond.c
 grep -q 'POLLHUP | POLLERR | POLLNVAL' src/adapter/buttond.c
 grep -q 'rescan_requested' src/adapter/buttond.c
 
+python3 - <<'PY'
+from pathlib import Path
+
+source = Path('src/adapter/buttond.c').read_text()
+assert 'action_capable' in source
+assert 'TEST_BIT(KEY_HELP, key_bits)' in source
+assert 'action=%d' in source
+assert 'json_get_int(buffer, "button_action_brightness", &value) > 0' in source
+assert 'json_get_int(buffer, "button_mute_brightness", &value) > 0' in source
+sample = source[source.index('static void play_sample'):source.index('#define CUE_LOW_HZ')]
+assert 'ctx->tones' not in sample
+PY
+
 test_dir=$(mktemp -d)
 socket_path="$test_dir/led.sock"
 log_path=./build/test-buttond-led.log

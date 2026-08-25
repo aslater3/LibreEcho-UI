@@ -1090,7 +1090,8 @@
     "tags": [
      "LED and buttons"
     ],
-    "summary": "Read button mappings and live physical-input capability state",
+    "summary": "Read button settings and live physical-input capability state",
+    "description": "Returns saved tones/action/brightness settings plus live capability fields from libreecho-buttond. `available` is true only for a fresh connected status record; `stale` is true when the record is missing, disconnected, or older than 15 seconds. The response data includes `short_press`, `long_press`, `tones`, `action`, `action_brightness`, `mute_brightness`, `volume_capable`, `hardware_mute`, and `action_capable`.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1104,18 +1105,60 @@
     "tags": [
      "LED and buttons"
     ],
-    "summary": "Update button mappings",
+    "summary": "Update button mappings, cues, action, and brightness",
+    "description": "All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_brightness` and `mute_brightness` are integers from 0 through 100. Malformed or out-of-range fields return 400.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
      }
     ],
     "requestBody": {
-     "$ref": "#/components/requestBodies/JsonObject"
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "short_press": {
+          "type": "string"
+         },
+         "long_press": {
+          "type": "string"
+         },
+         "tones": {
+          "type": "boolean"
+         },
+         "action": {
+          "type": "string",
+          "enum": [
+           "sound",
+           "listen",
+           "playpause",
+           "disabled"
+          ]
+         },
+         "action_brightness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+         },
+         "mute_brightness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+         }
+        }
+       }
+      }
+     }
     },
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
      },
      "405": {
       "$ref": "#/components/responses/Error"
