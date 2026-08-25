@@ -644,10 +644,25 @@ static void handle_key(struct context *ctx, int code, int value)
      */
     case KEY_HELP:
         if (value == 1) {
+            /*
+             * Three of them, rotating, so repeated presses do not sound like
+             * a stuck machine. Synthesised rather than sampled: an audio file
+             * would have to ship in the image, carry a licence, and survive
+             * the /data contract, for a joke. All three are low and falling,
+             * longer than any acknowledgement, so none can be mistaken for a
+             * volume cue.
+             */
+            static const struct { unsigned int a, b, ms; } raspberry[] = {
+                { 200U,  95U, 380U },   /* short and sharp */
+                { 150U,  70U, 520U },   /* lower, drawn out */
+                { 240U, 110U, 260U },   /* clipped */
+            };
+            static unsigned int next;
+
             le_log_info("buttond: action button");
-            /* Low and falling, longer than an acknowledgement: unmistakably
-               not one of the volume cues. */
-            play_cue(ctx, 190U, 95U, 420U);
+            play_cue(ctx, raspberry[next].a, raspberry[next].b,
+                     raspberry[next].ms);
+            next = (next + 1U) % (sizeof(raspberry) / sizeof(raspberry[0]));
             action_flourish(ctx);
         }
         return;              /* no autorepeat: once per press */
