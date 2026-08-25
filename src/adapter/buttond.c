@@ -635,9 +635,12 @@ static void handle_key(struct context *ctx, int code, int value)
      * GPIO that was never missing.
      */
     /*
-     * The action button, on KPROW1 as KEY_HELP. It reported nothing at all
-     * until the device tree declared that pin: the vendor puts it on the
-     * keypad matrix and mediatek,mt8163-keypad has no driver here.
+     * KEY_HELP is what the vendor calls the action button (0x8a in the
+     * keypad node's kpd-hw-init-map). Nothing emits it on this firmware yet:
+     * the button is behind mediatek,mt8163-keypad, which has no driver here,
+     * and it is not on any of the keypad pins that could be declared as a
+     * gpio-key -- probing those found only floating inputs. Kept so the
+     * behaviour is ready the moment that controller is ported.
      */
     case KEY_HELP:
         if (value == 1) {
