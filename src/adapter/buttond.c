@@ -37,6 +37,7 @@
 
 #define INPUT_DIR "/dev/input"
 #define MAX_DEVICES 8
+#define LE_BUTTOND_CONFIG "/data/libreecho/config/web-config.json"
 #define CONNECT_TIMEOUT_MS 400
 #define METER_OWNER "buttons"
 
@@ -84,6 +85,7 @@ struct context {
     size_t logged_device_count;  /* last count announced, so a steady state stays quiet */
     int indicated_mute;          /* mute state the ring is currently showing; -1 unknown */
     int audio_poll_warned;       /* so an unreachable audiod is reported once, not every tick */
+    int tones;                   /* press cues; read from the web config, on by default */
     int volume_capable;
     int mute_capable;
     long long next_repeat_ms;
@@ -357,9 +359,36 @@ static void privacy_lamp_on(void)
  * must never be the reason an action does not happen, so a failure here is
  * not propagated.
  */
+/*
+ * The cue setting lives in the web config rather than a file of its own: it
+ * is a user preference the UI already owns, and adding a second file would
+ * mean two things to keep in step and another entry in the /data contract.
+ * Re-read on the status tick so a change from the UI takes effect without a
+ * restart. Anything unreadable leaves the current value alone -- a missing
+ * config must not silence a device that was chirping a moment ago.
+ */
+static void refresh_tone_setting(struct context *ctx)
+{
+    char buffer[8192];
+    FILE *file;
+    size_t len;
+    int value;
+
+    file = fopen(LE_BUTTOND_CONFIG, "re");
+    if (!file)
+        return;
+    len = fread(buffer, 1, sizeof(buffer) - 1, file);
+    fclose(file);
+    buffer[len] = '\0';
+    if (json_get_bool(buffer, "button_tones", &value) > 0)
+        ctx->tones = value ? 1 : 0;
+}
+
 static void play_cue(struct context *ctx, unsigned int first_hz,
                      unsigned int second_hz)
 {
+    if (!ctx->tones)
+        return;
     struct le_adapter *adapter;
     char args[64];
 
@@ -580,6 +609,7 @@ int main(int argc, char **argv)
     ctx.muted = -1;
     ctx.indicated_mute = -1;
     ctx.audio_poll_warned = 0;
+    ctx.tones = 1;
     ctx.step = environment_unsigned("LE_BUTTON_VOLUME_STEP", DEFAULT_STEP,
                                     1, 50);
     ctx.hold_ms = environment_unsigned("LE_BUTTON_METER_HOLD_MS",
@@ -628,6 +658,7 @@ int main(int argc, char **argv)
             write_capability_status(&ctx);
             /* The ring must follow the mute state however it changed -- the
                API and the boot-time restore both bypass the key handler. */
+            refresh_tone_setting(&ctx);
             if (refresh_audio(&ctx) != 0) {
                 if (!ctx.audio_poll_warned) {
                     le_log_warn("buttond: audio daemon unreachable; the mute "
