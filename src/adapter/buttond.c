@@ -443,6 +443,25 @@ static void play_cue(struct context *ctx, unsigned int first_hz,
     le_adapter_close(adapter);
 }
 
+/*
+ * Bundled sounds, for the action button. Best effort like the cues: audio
+ * that will not play must never stop the button doing its job.
+ */
+static void play_sample(struct context *ctx, const char *name)
+{
+    struct le_adapter *adapter;
+    char args[96];
+
+    if (!ctx->tones)
+        return;
+    adapter = le_adapter_connect(ctx->audio_sock, CONNECT_TIMEOUT_MS);
+    if (!adapter)
+        return;
+    snprintf(args, sizeof(args), "{\"name\":\"%s\"}", name);
+    (void)le_adapter_call(adapter, "sample", args, NULL, 0);
+    le_adapter_close(adapter);
+}
+
 #define CUE_LOW_HZ   660U
 #define CUE_HIGH_HZ  990U
 #define CUE_MUTE_HZ  440U
@@ -652,17 +671,14 @@ static void handle_key(struct context *ctx, int code, int value)
              * longer than any acknowledgement, so none can be mistaken for a
              * volume cue.
              */
-            static const struct { unsigned int a, b, ms; } raspberry[] = {
-                { 200U,  95U, 380U },   /* short and sharp */
-                { 150U,  70U, 520U },   /* lower, drawn out */
-                { 240U, 110U, 260U },   /* clipped */
+            static const char *const sounds[] = {
+                "action-1", "action-2", "action-3",
             };
             static unsigned int next;
 
             le_log_info("buttond: action button");
-            play_cue(ctx, raspberry[next].a, raspberry[next].b,
-                     raspberry[next].ms);
-            next = (next + 1U) % (sizeof(raspberry) / sizeof(raspberry[0]));
+            play_sample(ctx, sounds[next]);
+            next = (next + 1U) % (sizeof(sounds) / sizeof(sounds[0]));
             action_flourish(ctx);
         }
         return;              /* no autorepeat: once per press */

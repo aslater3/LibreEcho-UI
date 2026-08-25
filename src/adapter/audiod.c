@@ -1473,6 +1473,104 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
     return 0;
 }
 
+#define LE_SOUND_DIR "/usr/local/share/libreecho/sounds"
+
+/*
+ * Play a bundled sound. The files are raw mono S16LE at the bus rate, so this
+ * is a copy with each sample doubled into both channels -- no decoder, no
+ * format negotiation, nothing to go wrong in an image that has to boot.
+ *
+ * The name is restricted to a plain filename under the sound directory: this
+ * is reachable from the adapter socket, and a caller must not be able to walk
+ * out of it and stream an arbitrary file to the speaker.
+ */
+static int sample_name_ok(const char *name)
+{
+    size_t i;
+
+    if (!name || !name[0] || strlen(name) > 48)
+        return 0;
+    for (i = 0; name[i]; i++) {
+        if ((name[i] >= 'a' && name[i] <= 'z') ||
+            (name[i] >= '0' && name[i] <= '9') ||
+            name[i] == '-' || name[i] == '_')
+            continue;
+        return 0;
+    }
+    return 1;
+}
+
+static int write_sample_fd(int fd, const char *name)
+{
+    char path[224];
+    unsigned char out[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS * sizeof(int16_t)];
+    int16_t in[LE_TONE_CHUNK_FRAMES];
+    FILE *file;
+    size_t frames;
+
+    snprintf(path, sizeof(path), "%s/%s.raw", LE_SOUND_DIR, name);
+    file = fopen(path, "rbe");
+    if (!file)
+        return -1;
+    while ((frames = fread(in, sizeof(int16_t), LE_TONE_CHUNK_FRAMES, file)) > 0) {
+        int16_t *samples = (int16_t *)out;
+        size_t bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t);
+        size_t sent = 0;
+        size_t i;
+
+        for (i = 0; i < frames; i++) {
+            samples[i * 2] = in[i];
+            samples[i * 2 + 1] = in[i];
+        }
+        while (sent < bytes) {
+            ssize_t n = write(fd, out + sent, bytes - sent);
+
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pfd = { fd, POLLOUT, 0 };
+                int rc;
+
+                do {
+                    rc = poll(&pfd, 1, 1000);
+                } while (rc < 0 && errno == EINTR);
+                if (rc <= 0)
+                    break;
+                continue;
+            }
+            if (n <= 0)
+                break;
+            sent += (size_t)n;
+        }
+    }
+    fclose(file);
+    return 0;
+}
+
+static int start_sample(const struct audio_hw *audio, const char *name)
+{
+    int fd;
+    pid_t pid;
+
+    if (!audio->output_available || access(LE_SYSTEM_AUDIO_BUS, F_OK) < 0)
+        return -1;
+    fd = open(LE_SYSTEM_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    pid = fork();
+    if (pid < 0) {
+        close(fd);
+        return -1;
+    }
+    if (pid == 0) {
+        int result = write_sample_fd(fd, name);
+        close(fd);
+        _exit(result < 0 ? 1 : 0);
+    }
+    close(fd);
+    return 0;
+}
+
 static int start_cue(const struct audio_hw *audio, double first_hz,
                      double second_hz, unsigned int ms)
 {
@@ -1661,6 +1759,19 @@ static int handle_request(struct audio_hw *audio, char *message,
      * legible to someone who cannot hear the absolute pitch well, and it
      * matches the wake chirp already reading as "I heard you".
      */
+    if (!strcmp(command, "sample")) {
+        char name[64] = "";
+
+        (void)json_string(message, "name", name, sizeof(name));
+        if (!sample_name_ok(name))
+            return response_error(response, response_size, id,
+                                  "sample name must be lowercase letters, digits, - or _");
+        if (start_sample(audio, name) < 0)
+            return response_error(response, response_size, id,
+                                  "sample could not be played");
+        return response_ok(response, response_size, id, "{}");
+    }
+
     if (!strcmp(command, "cue")) {
         long first = 0, second = 0, ms = LE_CHIRP_MS;
 
