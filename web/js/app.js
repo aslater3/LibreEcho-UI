@@ -83,6 +83,36 @@ function nowPlayingTransport(p,l){
  * is tens of thousands, so a linear bar would sit pinned at zero indoors and
  * tell you nothing.
  */
+/*
+ * The ambient light sensor in full. ch0 is the visible channel and ch1 the
+ * infrared one; the driver derives lux from the pair, so showing both makes it
+ * obvious when a reading is dominated by IR -- incandescent light or sunlight
+ * through glass -- rather than by anything the eye would call brightness.
+ *
+ * Gain and integration time are what the reading was taken with. They matter
+ * because this driver ships in manual gain, which saturates outdoors: a lux
+ * figure that stops climbing is a clipped one, and the gain row is where that
+ * shows.
+ */
+function lightPanel(x){
+ if(!x)return '';
+ if(!x.available)return panel('Ambient light sensor',
+   '<p class="muted">No ambient light sensor is present on this board.</p>','light-panel');
+ const rows=[
+   ['Illuminance', x.lux>=0?`${x.lux} lux`:'—'],
+   ['Calibrated', x.calibrated_lux>=0?`${x.calibrated_lux} lux`:'—'],
+   ['Visible channel', x.visible],
+   ['Infrared channel', x.infrared],
+   ['Gain', `${x.gain}\u00d7 ${x.auto_gain?'(auto)':'(manual)'}`],
+   ['Integration time', x.integration_us?`${Math.round(x.integration_us/1000)} ms`:'—'],
+   ['Powered', x.powered?'yes':'no'],
+   ['Device', `${x.driver} on ${x.bus}`]
+ ];
+ return panel('Ambient light sensor',
+  `<dl class="facts">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(String(v))}</dd>`).join('')}</dl>`+
+  (x.auto_gain?'':'<p class="muted">Gain is fixed rather than automatic, so the reading saturates in bright daylight.</p>'),
+  'light-panel');
+}
 function lightMetric(s){
  const lux=s.light_lux;
  if(typeof lux!=='number'||lux<0)return '';
@@ -308,7 +338,7 @@ function hardwareCard(d){
   (groups?`<h4>Audio capability</h4><div class="hardware-groups">${groups}</div>`
          :`<p class="muted">This daemon does not report audio capability.</p>`),
   'wide hardware-card');}
-async function devicePage(){const d=await api('/device');content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${hardwareCard(d)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}</div>`,'wide')}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
+async function devicePage(){const d=await api('/device');const light=await api('/light').catch(()=>null);content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${hardwareCard(d)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}${lightPanel(light)}</div>`,'wide')}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
 const NOISE_COLOURS=[['white','White'],['pink','Pink'],['brown','Brown']];
 const NOISE_TIMERS=[[0,'No timer'],[15,'15 minutes'],[30,'30 minutes'],[45,'45 minutes'],[60,'1 hour'],[90,'1.5 hours'],[120,'2 hours'],[480,'8 hours']];
 function noiseRemainingText(n){

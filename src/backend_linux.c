@@ -709,6 +709,91 @@ static int read_light_level(void)
     return -1;
 }
 
+/*
+ * The sensor's sysfs directory, or NULL when the board has none. The address
+ * is fixed on the Echo Gen 2 but the search keeps a board revision that moves
+ * it from silently reporting "no sensor".
+ */
+static const char *light_sensor_dir(void)
+{
+    static const char *const dirs[] = {
+        "/sys/bus/i2c/devices/0-0039",
+        "/sys/bus/i2c/devices/1-0039",
+    };
+    static const char *found;
+    static int searched;
+    size_t i;
+
+    if (searched)
+        return found;
+    searched = 1;
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
+        char probe[128];
+
+        snprintf(probe, sizeof(probe), "%s/als_lux", dirs[i]);
+        if (access(probe, R_OK) == 0) {
+            found = dirs[i];
+            break;
+        }
+    }
+    return found;
+}
+
+/* Read one integer attribute; leaves *out alone and returns 0 if absent. */
+static int light_attr(const char *dir, const char *name, int *out)
+{
+    char path[160], raw[64], *end;
+    long value;
+
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (read_line(path, raw, sizeof(raw)))
+        return 0;
+    value = strtol(raw, &end, 10);
+    if (end == raw)
+        return 0;
+    *out = (int)value;
+    return 1;
+}
+
+static int light(struct le_backend *b, struct le_light_state *o)
+{
+    const char *dir = light_sensor_dir();
+    char raw[64];
+
+    (void)b;
+    memset(o, 0, sizeof(*o));
+    if (!dir)
+        return LE_OK;            /* available stays 0: no sensor, not an error */
+    o->available = 1;
+    o->lux = -1;
+    o->calibrated_lux = -1;
+    light_attr(dir, "als_lux", &o->lux);
+    light_attr(dir, "als_calibrated_lux", &o->calibrated_lux);
+    light_attr(dir, "als_ch0", &o->ch0);
+    light_attr(dir, "als_ch1", &o->ch1);
+    light_attr(dir, "als_gain", &o->gain);
+    light_attr(dir, "als_power_state", &o->powered);
+    /*
+     * itime and auto_gain are reported as text with the number leading --
+     * "346ms (346368us)" and "manual"/"auto" -- so they are read as strings
+     * rather than through light_attr.
+     */
+    o->integration_us = 0;
+    {
+        char path[160];
+        snprintf(path, sizeof(path), "%s/als_itime", dir);
+        if (!read_line(path, raw, sizeof(raw))) {
+            const char *us = strchr(raw, '(');
+            if (us)
+                o->integration_us = (int)strtol(us + 1, NULL, 10);
+        }
+        snprintf(path, sizeof(path), "%s/als_auto_gain", dir);
+        if (!read_line(path, raw, sizeof(raw)))
+            o->auto_gain = strstr(raw, "auto") != NULL;
+    }
+    return LE_OK;
+}
+
 static int read_temperature(void)
 {
     char path[PATH_MAX], type_path[PATH_MAX], raw[32], type[64];
@@ -2082,7 +2167,8 @@ static const struct le_backend_ops ops = {
     bluetooth_unpair, bluetooth_disconnect, bluetooth_pairing_response,
     bluetooth_discoverable, bluetooth_connectable, bluetooth_pairing_mode,
     airplay, airplay_set, playback,
-    linux_reboot, linux_shutdown, factory_reset, tick, control
+    linux_reboot, linux_shutdown, factory_reset, tick, control,
+    light
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

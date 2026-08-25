@@ -11,6 +11,10 @@ struct le_backend_ops {
  int (*airplay)(struct le_backend*,struct le_airplay_state*); int (*airplay_set)(struct le_backend*,int);
  int (*playback)(struct le_backend*,struct le_playback_state*);
  int (*reboot)(struct le_backend*); int (*shutdown)(struct le_backend*); int (*reset)(struct le_backend*); int (*tick)(struct le_backend*); int (*control)(struct le_backend*,const char*,const char*);
+ /* Ambient light detail. Appended last on purpose: the backends fill this
+    struct positionally, so anything inserted above would silently shift
+    every op after it. A null here reports the feature unsupported. */
+ int (*light)(struct le_backend*,struct le_light_state*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);
