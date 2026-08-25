@@ -11,6 +11,12 @@ struct le_backend_ops {
  int (*airplay)(struct le_backend*,struct le_airplay_state*); int (*airplay_set)(struct le_backend*,int);
  int (*playback)(struct le_backend*,struct le_playback_state*);
  int (*reboot)(struct le_backend*); int (*shutdown)(struct le_backend*); int (*reset)(struct le_backend*); int (*tick)(struct le_backend*); int (*control)(struct le_backend*,const char*,const char*);
+ /* Play one bundled sound by name, for previewing the action-button
+    rotation. Appended last on purpose: the backends initialise this
+    struct positionally, so anything added in the middle would silently
+    shift every op after it. A backend that leaves it null reports the
+    feature unsupported, which is the right answer for the mock. */
+ int (*sound_sample)(struct le_backend*,const char*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);
