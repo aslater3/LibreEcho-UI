@@ -168,9 +168,7 @@ static int device_is_interesting(int fd, char *name, size_t name_size,
         !TEST_BIT(KEY_MUTE, key_bits) &&
         !TEST_BIT(KEY_MICMUTE, key_bits) &&
         !TEST_BIT(KEY_POWER, key_bits) &&
-        !TEST_BIT(KEY_HELP, key_bits) &&
-        !TEST_BIT(KEY_F13, key_bits) &&
-        !TEST_BIT(KEY_F14, key_bits))
+        !TEST_BIT(KEY_HELP, key_bits))
         return 0;
     if (volume_capable)
         *volume_capable = TEST_BIT(KEY_VOLUMEUP, key_bits) ||
@@ -637,18 +635,13 @@ static void handle_key(struct context *ctx, int code, int value)
      * GPIO that was never missing.
      */
     /*
-     * The action button. The vendor puts it on the keypad matrix as KEY_HELP
-     * and that controller has no driver here, so it emitted nothing at all --
-     * the two probe codes are candidate GPIOs being identified by which one
-     * reports. Whichever it turns out to be, the behaviour is the same, and
-     * the log line below names the code so the probe can be narrowed to one
-     * entry afterwards.
+     * The action button, on KPROW1 as KEY_HELP. It reported nothing at all
+     * until the device tree declared that pin: the vendor puts it on the
+     * keypad matrix and mediatek,mt8163-keypad has no driver here.
      */
     case KEY_HELP:
-    case KEY_F13:
-    case KEY_F14:
         if (value == 1) {
-            le_log_info("buttond: action button (code %d)", code);
+            le_log_info("buttond: action button");
             /* Low and falling, longer than an acknowledgement: unmistakably
                not one of the volume cues. */
             play_cue(ctx, 190U, 95U, 420U);
