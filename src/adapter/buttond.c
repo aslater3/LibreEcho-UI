@@ -330,9 +330,13 @@ static void mute_indicator(struct context *ctx, int muted)
         return;
     }
     if (muted)
+        /* repeats is required by the daemon even for a pattern that does not
+           repeat; 0 means "no limit", which is what a state indicator wants.
+           Omitting it had the call rejected outright. */
         snprintf(args, sizeof(args),
                  "{\"name\":\"solid\",\"owner\":\"mute\","
-                 "\"r\":255,\"g\":0,\"b\":0,\"brightness\":60}");
+                 "\"r\":255,\"g\":0,\"b\":0,\"brightness\":60,"
+                 "\"repeats\":0}");
     else
         snprintf(args, sizeof(args),
                  "{\"name\":\"stop\",\"owner\":\"mute\"}");
