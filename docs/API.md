@@ -1240,15 +1240,34 @@ Trigger wake word test.
 
 ### Buttons
 
+#### GET /api/v1/buttons
+
+Returns the saved button settings and the live capability state reported by
+`libreecho-buttond`. `available` is true only for a fresh connected status
+record. `volume_capable`, `hardware_mute`, and `action_capable` reflect the
+keys found on the currently discovered evdev devices; `stale` is true when the
+status record is missing, disconnected, or older than 15 seconds.
+
 #### PUT /api/v1/buttons
 
-Update button mappings.
+Update any supported button setting. The request is persisted after every
+successful update. `tones` controls the short rising/falling press cues;
+`action` controls the separate action-button behavior, and `action_brightness`
+and `mute_brightness` are LED-ring brightness values from 0 to 100. The
+currently wired action is `sound`; `listen`, `playpause`, and `disabled` are
+accepted settings with the corresponding behavior reported by the daemon.
+Malformed fields, unsupported actions, and brightness values outside 0–100
+return the standard 400 error envelope.
 
 **Request:**
 ```json
 {
   "short_press": "Start listening",
-  "long_press": "Open pairing mode"
+  "long_press": "Open pairing mode",
+  "tones": true,
+  "action": "sound",
+  "action_brightness": 70,
+  "mute_brightness": 60
 }
 ```
 
@@ -1264,18 +1283,19 @@ Update button mappings.
     "volume_capable": false,
     "hardware_mute": false,
     "action_capable": false,
-    "stale": true
+    "stale": true,
+    "tones": true,
+    "action": "sound",
+    "action_brightness": 70,
+    "mute_brightness": 60
   },
   "error": null
 }
 ```
 
-`available` and the capability fields are derived from the evdev devices
-currently discovered by `libreecho-buttond`. A missing, disconnected, or older
-than 15-second status record is reported as unavailable/stale; the API never
-claims a physical mute/privacy control from a hard-coded default. Physical
-press behavior, fail-safe capture muting, and reboot persistence remain
-hardware-validation gates.
+Configuration export/import includes all four new settings. Imports from older
+exports may omit them; omitted values retain the current setting, while any
+present value is validated and restored.
 
 ### Bluetooth
 

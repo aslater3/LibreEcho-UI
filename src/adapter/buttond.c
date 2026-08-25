@@ -68,6 +68,7 @@ struct device {
     char path[286];
     int volume_capable;
     int mute_capable;
+    int action_capable;
 };
 
 struct context {
@@ -91,6 +92,7 @@ struct context {
     unsigned int mute_brightness;   /* the ring that accompanies mute; the lamp itself has no PWM */
     int volume_capable;
     int mute_capable;
+    int action_capable;
     long long next_repeat_ms;
 };
 
@@ -137,9 +139,11 @@ static void recompute_capabilities(struct context *ctx)
 
     ctx->volume_capable = 0;
     ctx->mute_capable = 0;
+    ctx->action_capable = 0;
     for (i = 0; i < ctx->device_count; i++) {
         ctx->volume_capable |= ctx->devices[i].volume_capable;
         ctx->mute_capable |= ctx->devices[i].mute_capable;
+        ctx->action_capable |= ctx->devices[i].action_capable;
     }
 }
 
@@ -154,7 +158,8 @@ static int device_path_watched(const struct context *ctx, const char *path)
 }
 
 static int device_is_interesting(int fd, char *name, size_t name_size,
-                                 int *volume_capable, int *mute_capable)
+                                 int *volume_capable, int *mute_capable,
+                                 int *action_capable)
 {
     unsigned long ev_bits[NBITS(EV_MAX)];
     unsigned long key_bits[NBITS(KEY_MAX)];
@@ -180,6 +185,8 @@ static int device_is_interesting(int fd, char *name, size_t name_size,
         *mute_capable = TEST_BIT(KEY_MUTE, key_bits) ||
                         TEST_BIT(KEY_MICMUTE, key_bits) ||
                         TEST_BIT(KEY_POWER, key_bits);
+    if (action_capable)
+        *action_capable = TEST_BIT(KEY_HELP, key_bits);
     if (ioctl(fd, EVIOCGNAME(name_size), name) < 0)
         snprintf(name, name_size, "unknown");
     name[name_size - 1] = '\0';
@@ -203,6 +210,7 @@ static void discover(struct context *ctx)
         int fd;
         int volume_capable = 0;
         int mute_capable = 0;
+        int action_capable = 0;
 
         if (strncmp(entry->d_name, "event", 5) != 0)
             continue;
@@ -218,7 +226,8 @@ static void discover(struct context *ctx)
             continue;
         }
         if (!device_is_interesting(fd, name, sizeof(name),
-                                   &volume_capable, &mute_capable)) {
+                                   &volume_capable, &mute_capable,
+                                   &action_capable)) {
             close(fd);
             continue;
         }
@@ -229,6 +238,7 @@ static void discover(struct context *ctx)
                  sizeof(ctx->devices[ctx->device_count].path), "%s", path);
         ctx->devices[ctx->device_count].volume_capable = volume_capable;
         ctx->devices[ctx->device_count].mute_capable = mute_capable;
+        ctx->devices[ctx->device_count].action_capable = action_capable;
         ctx->device_count++;
         le_log_info("buttond: watching %s [%s]", path, name);
     }
@@ -261,10 +271,11 @@ static void write_capability_status(const struct context *ctx)
     file = fopen(STATUS_TMP_PATH, "w");
     if (!file)
         return;
-    fprintf(file, "schema=1\nstate=%s\nvolume=%d\nmicrophone_mute=%d\naction=0\n",
+    fprintf(file, "schema=1\nstate=%s\nvolume=%d\nmicrophone_mute=%d\naction=%d\n",
             connected ? "connected" : "unavailable",
             connected && ctx->volume_capable,
-            connected && ctx->mute_capable);
+            connected && ctx->mute_capable,
+            connected && ctx->action_capable);
     fflush(file);
     fd = fileno(file);
     if (fd >= 0)
@@ -426,10 +437,10 @@ static void refresh_tone_setting(struct context *ctx)
     buffer[len] = '\0';
     if (json_get_bool(buffer, "button_tones", &value) > 0)
         ctx->tones = value ? 1 : 0;
-    if (json_get_int(buffer, "button_action_brightness", &value) == 0 &&
+    if (json_get_int(buffer, "button_action_brightness", &value) > 0 &&
         value >= 0 && value <= 100)
         ctx->action_brightness = (unsigned int)value;
-    if (json_get_int(buffer, "button_mute_brightness", &value) == 0 &&
+    if (json_get_int(buffer, "button_mute_brightness", &value) > 0 &&
         value >= 0 && value <= 100)
         ctx->mute_brightness = (unsigned int)value;
     (void)json_get_string(buffer, "button_action", ctx->action,
@@ -463,8 +474,6 @@ static void play_sample(struct context *ctx, const char *name)
     struct le_adapter *adapter;
     char args[96];
 
-    if (!ctx->tones)
-        return;
     adapter = le_adapter_connect(ctx->audio_sock, CONNECT_TIMEOUT_MS);
     if (!adapter)
         return;
