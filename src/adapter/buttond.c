@@ -164,14 +164,16 @@ static int device_is_interesting(int fd, char *name, size_t name_size,
     if (!TEST_BIT(KEY_VOLUMEUP, key_bits) &&
         !TEST_BIT(KEY_VOLUMEDOWN, key_bits) &&
         !TEST_BIT(KEY_MUTE, key_bits) &&
-        !TEST_BIT(KEY_MICMUTE, key_bits))
+        !TEST_BIT(KEY_MICMUTE, key_bits) &&
+        !TEST_BIT(KEY_POWER, key_bits))
         return 0;
     if (volume_capable)
         *volume_capable = TEST_BIT(KEY_VOLUMEUP, key_bits) ||
                           TEST_BIT(KEY_VOLUMEDOWN, key_bits);
     if (mute_capable)
         *mute_capable = TEST_BIT(KEY_MUTE, key_bits) ||
-                        TEST_BIT(KEY_MICMUTE, key_bits);
+                        TEST_BIT(KEY_MICMUTE, key_bits) ||
+                        TEST_BIT(KEY_POWER, key_bits);
     if (ioctl(fd, EVIOCGNAME(name_size), name) < 0)
         snprintf(name, name_size, "unknown");
     name[name_size - 1] = '\0';
@@ -448,6 +450,18 @@ static void handle_key(struct context *ctx, int code, int value)
             (void)refresh_audio(ctx);
         adjust_volume(ctx, -1);
         break;
+    /*
+     * KEY_POWER is the microphone-mute button on radar_puffin. Measured, not
+     * assumed: pressing mute ten times produced exactly ten KEY_POWER events
+     * on mtk-pmic-keys and nothing on any other code, while volume up and down
+     * report their own codes normally. The board has no separate power button,
+     * so there is nothing else this key could mean.
+     *
+     * Without this the press was delivered to us and silently discarded, which
+     * looks exactly like dead hardware -- it cost an evening of hunting for a
+     * GPIO that was never missing.
+     */
+    case KEY_POWER:
     case KEY_MUTE:
     case KEY_MICMUTE:
         if (value == 1) {
