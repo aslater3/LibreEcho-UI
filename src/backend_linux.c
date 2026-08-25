@@ -669,6 +669,46 @@ static int thermal_zone_rank(const char *type)
     return 0;
 }
 
+/*
+ * Ambient light in lux from the board's TSL2540.
+ *
+ * This is a vendor driver, not a mainline one: it registers no IIO device, so
+ * there is nothing under /sys/bus/iio/devices to enumerate and the value comes
+ * straight from its i2c sysfs directory. Verified on an Echo Gen 2, where it
+ * sits at 0-0039 and is already powered at boot. The second candidate in the
+ * same device tree, a tsl2584tsv at 0-0029, is not populated and fails to
+ * probe with -ENXIO, so it is not looked for.
+ *
+ * Returns -1 when there is no sensor. That is deliberately not 0: 0 lux is a
+ * real reading from a dark room, and the two must not be confused.
+ */
+static int read_light_level(void)
+{
+    static const char *const paths[] = {
+        "/sys/bus/i2c/devices/0-0039/als_lux",
+        "/sys/bus/i2c/devices/1-0039/als_lux",
+    };
+    char raw[32];
+    size_t i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        long value;
+        char *end;
+
+        if (read_line(paths[i], raw, sizeof(raw)))
+            continue;
+        value = strtol(raw, &end, 10);
+        if (end == raw)
+            continue;
+        /* A negative or absurd figure is the driver reporting a fault through
+           the same file, so report absent rather than passing it on. */
+        if (value < 0 || value > 1000000)
+            return -1;
+        return (int)value;
+    }
+    return -1;
+}
+
 static int read_temperature(void)
 {
     char path[PATH_MAX], type_path[PATH_MAX], raw[32], type[64];
@@ -794,6 +834,7 @@ static int status(struct le_backend *b, struct le_system_status *o)
     }
     (void)f;
     o->temperature = read_temperature();
+    o->light_lux = read_light_level();
     read_cpu_status(b, o);
     return LE_OK;
 }

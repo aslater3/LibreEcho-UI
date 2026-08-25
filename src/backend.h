@@ -15,7 +15,11 @@
 enum le_result { LE_OK=0, LE_INVALID=-1, LE_NOT_SUPPORTED=-2, LE_IO=-3, LE_BUSY=-4, LE_AUTH=-5 };
 
 struct le_cpu_state { int online, utilization, frequency_khz; };
-struct le_system_status { double uptime; int cpu, memory, storage, temperature; int memory_used_mb, memory_total_mb; int storage_used_mb, storage_total_mb, storage_available; char storage_state[32], device_state[24]; size_t cpu_count; struct le_cpu_state cpus[LE_MAX_CPUS]; };
+struct le_system_status { double uptime; int cpu, memory, storage, temperature;
+ /* Ambient light in lux, or -1 when the board has no usable sensor. -1
+    rather than 0 because 0 lux is a real reading: a dark room and a
+    missing sensor must not look the same. */
+ int light_lux; int memory_used_mb, memory_total_mb; int storage_used_mb, storage_total_mb, storage_available; char storage_state[32], device_state[24]; size_t cpu_count; struct le_cpu_state cpus[LE_MAX_CPUS]; };
 /* factory_mac is the MAC recorded in idme, empty when it could not be read.
    mac_source names where it came from, so an image whose idme spells the
    field differently can be identified from the API rather than guessed at. */
