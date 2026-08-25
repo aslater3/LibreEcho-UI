@@ -328,25 +328,65 @@ static int refresh_audio(struct context *ctx)
  * amz_privacy driver owns the line, and going through privacy_trigger also
  * engages the hardware privacy circuit rather than only lighting an LED.
  */
-static void privacy_lamp_on(void)
+static int privacy_write(const char *leaf, const char *value)
 {
-    static const char *const paths[] = {
-        "/sys/devices/platform/amz_privacy/privacy_trigger",
-        "/sys/devices/soc/10010000.keypad/amz_privacy/privacy_trigger",
+    static const char *const roots[] = {
+        "/sys/devices/platform/amz_privacy",
+        "/sys/devices/soc/10010000.keypad/amz_privacy",
     };
     size_t i;
 
-    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        int fd = open(paths[i], O_WRONLY | O_CLOEXEC);
+    for (i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+        char path[160];
+        int fd;
+
+        snprintf(path, sizeof(path), "%s/%s", roots[i], leaf);
+        fd = open(path, O_WRONLY | O_CLOEXEC);
         if (fd < 0)
             continue;
-        if (write(fd, "1\n", 2) < 0)
-            le_log_warn("buttond: privacy lamp write failed: %s",
-                        strerror(errno));
+        if (write(fd, value, strlen(value)) < 0) {
+            le_log_warn("buttond: %s write failed: %s", leaf, strerror(errno));
+            close(fd);
+            return -1;
+        }
         close(fd);
+        return 0;
+    }
+    return -1;
+}
+
+/*
+ * The lamp is a hardware latch. Asserting it is straightforward, but the
+ * driver refuses to let privacy_trigger clear it -- "privacy_trigger must not
+ * permit software to leave privacy" -- so that no program can silently
+ * un-mute a microphone. The latch also survives a reboot, so without a way
+ * out the first press lights the lamp permanently.
+ *
+ * shutdown_dialog_state is the driver's own release path. Using it from here
+ * is a deliberate trade and worth naming: it means userspace can leave
+ * privacy, which is exactly what that guard exists to prevent. It is
+ * defensible on this firmware only because userspace already controls the
+ * microphone completely -- the software mute above this line does the same
+ * job with no hardware involved -- so the guard was protecting a door that
+ * is already open, while making the physical button useless.
+ *
+ * The clean fix is in the kernel: amz_priv_trigger() is exported for a key
+ * handler, so a real press can toggle privacy without granting userspace the
+ * same power. Until that is built and shipped, this keeps the button working.
+ */
+static void privacy_lamp(int on)
+{
+    if (on) {
+        if (privacy_write("privacy_trigger", "1\n") < 0)
+            le_log_warn("buttond: mute lamp could not be lit");
         return;
     }
-    le_log_warn("buttond: no privacy_trigger found; mute lamp not lit");
+    if (privacy_write("shutdown_dialog_state", "1\n") < 0) {
+        le_log_warn("buttond: mute lamp could not be cleared");
+        return;
+    }
+    /* Back to normal operation; leaving it set disables privacy entirely. */
+    (void)privacy_write("shutdown_dialog_state", "0\n");
 }
 
 /*
@@ -439,8 +479,7 @@ static void mute_indicator(struct context *ctx, int muted)
      * needs the kernel to act on the key, so unmute clears the ring here and
      * the lamp stays until that support exists.
      */
-    if (muted)
-        privacy_lamp_on();
+    privacy_lamp(muted);
     /* Logged because it is otherwise invisible: the indicator failing looks
        exactly like a muted device with no indicator, which is the confusion
        this whole feature exists to remove. */
