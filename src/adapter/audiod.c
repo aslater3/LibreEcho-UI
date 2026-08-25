@@ -1211,7 +1211,7 @@ static int write_tone_fd(int fd)
     return 0;
 }
 
-static int write_chirp_fd(int fd)
+static int write_chirp_fd(int fd, double first_hz, double second_hz)
 {
     unsigned char buffer[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS *
                          sizeof(int16_t)];
@@ -1230,8 +1230,7 @@ static int write_chirp_fd(int fd)
             size_t index = done + i;
             /* Second half steps up a fifth, which reads as a question
                being acknowledged rather than an error. */
-            double hz = index * 2U < total ? LE_CHIRP_LOW_HZ
-                                           : LE_CHIRP_HIGH_HZ;
+            double hz = index * 2U < total ? first_hz : second_hz;
             /* Ramp both ends so the bus does not get a click, which is
                louder and more startling than the tone itself. */
             double ramp = 1.0;
@@ -1473,7 +1472,8 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
     return 0;
 }
 
-static int start_wake_chirp(const struct audio_hw *audio)
+static int start_cue(const struct audio_hw *audio, double first_hz,
+                     double second_hz)
 {
     int fd;
     pid_t pid;
@@ -1490,7 +1490,7 @@ static int start_wake_chirp(const struct audio_hw *audio)
         return -1;
     }
     if (pid == 0) {
-        int result = write_chirp_fd(fd);
+        int result = write_chirp_fd(fd, first_hz, second_hz);
         close(fd);
         _exit(result == 0 ? 0 : 1);
     }
@@ -1649,8 +1649,35 @@ static int handle_request(struct audio_hw *audio, char *message,
         le_log_info("audiod: noise stopped");
         return response_ok(response, response_size, id, "{}");
     }
+    /*
+     * Button feedback. The buttons are on top of the device where nobody can
+     * see the ring while pressing them, so a press with no sound is
+     * indistinguishable from a press that did not register -- which is how a
+     * mute button that was reporting the wrong keycode went unnoticed.
+     *
+     * Direction is carried by the interval, not the pitch: rising for up and
+     * for leaving mute, falling for down and for entering it. That stays
+     * legible to someone who cannot hear the absolute pitch well, and it
+     * matches the wake chirp already reading as "I heard you".
+     */
+    if (!strcmp(command, "cue")) {
+        long first = 0, second = 0;
+
+        if (json_long(message, "first_hz", &first) < 0 ||
+            json_long(message, "second_hz", &second) < 0)
+            return response_error(response, response_size, id,
+                                  "cue requires first_hz and second_hz");
+        if (first < 100 || first > 8000 || second < 100 || second > 8000)
+            return response_error(response, response_size, id,
+                                  "cue frequencies must be 100-8000 Hz");
+        if (start_cue(audio, (double)first, (double)second) < 0)
+            return response_error(response, response_size, id,
+                                  "audio output unavailable");
+        return response_ok(response, response_size, id, "{}");
+    }
+
     if (!strcmp(command, "wake_chirp")) {
-        if (start_wake_chirp(audio) < 0)
+        if (start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ) < 0)
             return response_error(response, response_size, id,
                                   "audio output unavailable");
         return response_ok(response, response_size, id, "{}");

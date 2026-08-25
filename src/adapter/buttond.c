@@ -347,6 +347,35 @@ static void privacy_lamp_on(void)
     le_log_warn("buttond: no privacy_trigger found; mute lamp not lit");
 }
 
+/*
+ * Audible feedback for a press. The buttons sit on top of the device, where
+ * whoever is pressing them cannot see the ring, so a silent press is
+ * indistinguishable from one that did not register.
+ *
+ * Direction lives in the interval rather than the pitch: rising to go up or
+ * to leave mute, falling to go down or to enter it. Best effort -- feedback
+ * must never be the reason an action does not happen, so a failure here is
+ * not propagated.
+ */
+static void play_cue(struct context *ctx, unsigned int first_hz,
+                     unsigned int second_hz)
+{
+    struct le_adapter *adapter;
+    char args[64];
+
+    adapter = le_adapter_connect(ctx->audio_sock, CONNECT_TIMEOUT_MS);
+    if (!adapter)
+        return;
+    snprintf(args, sizeof(args), "{\"first_hz\":%u,\"second_hz\":%u}",
+             first_hz, second_hz);
+    (void)le_adapter_call(adapter, "cue", args, NULL, 0);
+    le_adapter_close(adapter);
+}
+
+#define CUE_LOW_HZ   660U
+#define CUE_HIGH_HZ  990U
+#define CUE_MUTE_HZ  440U
+
 static void mute_indicator(struct context *ctx, int muted)
 {
     struct le_adapter *adapter;
@@ -467,6 +496,12 @@ static void toggle_mute(struct context *ctx)
     }
     ctx->muted = target;
     le_log_info("buttond: microphone %s", target ? "muted" : "unmuted");
+    /* Falling into mute, rising out of it -- the same grammar as the volume
+       cues, so the direction is recognisable without hearing the pitch. The
+       cue plays before the indicator so the sound is not delayed behind a
+       daemon that may be slow to answer. */
+    play_cue(ctx, target ? CUE_LOW_HZ : CUE_MUTE_HZ,
+             target ? CUE_MUTE_HZ : CUE_LOW_HZ);
     mute_indicator(ctx, target);
     if (!target && (ctx->volume >= 0 || refresh_audio(ctx) == 0))
         show_meter(ctx, (unsigned int)ctx->volume, 120, 200, 255);
@@ -482,13 +517,19 @@ static void handle_key(struct context *ctx, int code, int value)
     }
     switch (code) {
     case KEY_VOLUMEUP:
-        if (value == 1)
+        if (value == 1) {
             (void)refresh_audio(ctx);
+            /* Only on the press: holding to run the volume up should not
+               machine-gun the cue over the level it is meant to describe. */
+            play_cue(ctx, CUE_LOW_HZ, CUE_HIGH_HZ);
+        }
         adjust_volume(ctx, 1);
         break;
     case KEY_VOLUMEDOWN:
-        if (value == 1)
+        if (value == 1) {
             (void)refresh_audio(ctx);
+            play_cue(ctx, CUE_HIGH_HZ, CUE_LOW_HZ);
+        }
         adjust_volume(ctx, -1);
         break;
     /*
