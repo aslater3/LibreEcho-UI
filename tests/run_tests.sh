@@ -13,8 +13,9 @@ sh tests/test_pr139_review_contract.sh
 make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
 ./build/test-network-health
 ./build/test-gateway-probe
-make build/test-backend-linux-wifi-emission
+make build/test-backend-linux-wifi-emission build/test-thermal-zone-selection
 ./build/test-backend-linux-wifi-emission
+./build/test-thermal-zone-selection
 ./build/test-bt-mgmt-events
 ./build/test-bt-pairing-events
 python3 tests/test_networkd_health_integration.py

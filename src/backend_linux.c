@@ -654,6 +654,10 @@ static void read_dns(char *out, size_t out_size)
  * disappears we report a real temperature from the wrong place rather than
  * silently swapping one for the other.
  */
+#ifndef LE_THERMAL_SYSFS_ROOT
+#define LE_THERMAL_SYSFS_ROOT "/sys/class/thermal"
+#endif
+
 static int thermal_zone_rank(const char *type)
 {
     if (strstr(type, "cpu") || strstr(type, "soc"))
@@ -674,7 +678,8 @@ static int read_temperature(void)
     for (zone = 0; zone < 16; ++zone) {
         long value;
         int rank;
-        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%u/temp", zone);
+        snprintf(path, sizeof(path), "%s/thermal_zone%u/temp",
+                 LE_THERMAL_SYSFS_ROOT, zone);
         if (read_line(path, raw, sizeof(raw)))
             continue;
         value = strtol(raw, NULL, 10);
@@ -687,7 +692,7 @@ static int read_temperature(void)
         if (value == 0)
             continue;
         snprintf(type_path, sizeof(type_path),
-                 "/sys/class/thermal/thermal_zone%u/type", zone);
+                 "%s/thermal_zone%u/type", LE_THERMAL_SYSFS_ROOT, zone);
         type[0] = '\0';
         (void)read_line(type_path, type, sizeof(type));
         rank = thermal_zone_rank(type);
