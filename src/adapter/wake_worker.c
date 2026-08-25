@@ -11,7 +11,27 @@
 
 #define WAKE_BLOCK_SAMPLES 1280U
 #define WAKE_QUEUE_BLOCKS 8U
-#define WAKE_SUPPORT_THRESHOLD 0.35f
+/*
+ * The bar a neighbouring frame must reach to corroborate a peak.
+ *
+ * At 0.35 this sat about two thirds of the way to the accept threshold, which
+ * asks a detector with a one-frame response to hold near its peak for three
+ * frames running. Measured on hardware, a real utterance scored
+ *
+ *     0.019, 0.864, 0.239, 0.249
+ *
+ * across four consecutive frames -- the peak beat the 0.533 accept threshold
+ * by a wide margin and was still discarded, because neither neighbour reached
+ * 0.35. A detection that strong is not a noise spike.
+ *
+ * 0.20 is the highest value that recovers every real detection in the captures
+ * taken from this device, and it adds no false ones: swept from 0.35 down to
+ * 0.10 over roughly two and a half minutes of recorded audio -- including a
+ * noisy room and a run of failed attempts -- 0.20 and below find all three
+ * genuine utterances and nothing else, while 0.25 and above miss one. The
+ * accept threshold is untouched and still does the real gating.
+ */
+#define WAKE_SUPPORT_THRESHOLD 0.20f
 #define WAKE_LOCKOUT_SAMPLES 28000ULL
 
 struct wake_block {
