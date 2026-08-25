@@ -1211,11 +1211,12 @@ static int write_tone_fd(int fd)
     return 0;
 }
 
-static int write_chirp_fd(int fd, double first_hz, double second_hz)
+static int write_chirp_fd(int fd, double first_hz, double second_hz,
+                          unsigned int ms)
 {
     unsigned char buffer[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS *
                          sizeof(int16_t)];
-    size_t total = (size_t)LE_PCM_RATE * LE_CHIRP_MS / 1000U;
+    size_t total = (size_t)LE_PCM_RATE * ms / 1000U;
     size_t done = 0;
 
     while (done < total) {
@@ -1473,7 +1474,7 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
 }
 
 static int start_cue(const struct audio_hw *audio, double first_hz,
-                     double second_hz)
+                     double second_hz, unsigned int ms)
 {
     int fd;
     pid_t pid;
@@ -1490,7 +1491,7 @@ static int start_cue(const struct audio_hw *audio, double first_hz,
         return -1;
     }
     if (pid == 0) {
-        int result = write_chirp_fd(fd, first_hz, second_hz);
+        int result = write_chirp_fd(fd, first_hz, second_hz, ms);
         close(fd);
         _exit(result == 0 ? 0 : 1);
     }
@@ -1661,23 +1662,31 @@ static int handle_request(struct audio_hw *audio, char *message,
      * matches the wake chirp already reading as "I heard you".
      */
     if (!strcmp(command, "cue")) {
-        long first = 0, second = 0;
+        long first = 0, second = 0, ms = LE_CHIRP_MS;
 
         if (json_long(message, "first_hz", &first) < 0 ||
             json_long(message, "second_hz", &second) < 0)
             return response_error(response, response_size, id,
                                   "cue requires first_hz and second_hz");
-        if (first < 100 || first > 8000 || second < 100 || second > 8000)
+        if (first < 60 || first > 8000 || second < 60 || second > 8000)
             return response_error(response, response_size, id,
-                                  "cue frequencies must be 100-8000 Hz");
-        if (start_cue(audio, (double)first, (double)second) < 0)
+                                  "cue frequencies must be 60-8000 Hz");
+        /* Optional so every existing caller keeps the acknowledgement length
+           it was written for. Capped because this plays on the same bus the
+           microphone hears, and a long one would overlap a spoken command. */
+        (void)json_long(message, "ms", &ms);
+        if (ms < 40 || ms > 800)
+            ms = LE_CHIRP_MS;
+        if (start_cue(audio, (double)first, (double)second,
+                      (unsigned int)ms) < 0)
             return response_error(response, response_size, id,
                                   "audio output unavailable");
         return response_ok(response, response_size, id, "{}");
     }
 
     if (!strcmp(command, "wake_chirp")) {
-        if (start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ) < 0)
+        if (start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ,
+                      LE_CHIRP_MS) < 0)
             return response_error(response, response_size, id,
                                   "audio output unavailable");
         return response_ok(response, response_size, id, "{}");

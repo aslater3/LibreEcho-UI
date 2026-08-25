@@ -167,7 +167,10 @@ static int device_is_interesting(int fd, char *name, size_t name_size,
         !TEST_BIT(KEY_VOLUMEDOWN, key_bits) &&
         !TEST_BIT(KEY_MUTE, key_bits) &&
         !TEST_BIT(KEY_MICMUTE, key_bits) &&
-        !TEST_BIT(KEY_POWER, key_bits))
+        !TEST_BIT(KEY_POWER, key_bits) &&
+        !TEST_BIT(KEY_HELP, key_bits) &&
+        !TEST_BIT(KEY_F13, key_bits) &&
+        !TEST_BIT(KEY_F14, key_bits))
         return 0;
     if (volume_capable)
         *volume_capable = TEST_BIT(KEY_VOLUMEUP, key_bits) ||
@@ -425,7 +428,7 @@ static void refresh_tone_setting(struct context *ctx)
 }
 
 static void play_cue(struct context *ctx, unsigned int first_hz,
-                     unsigned int second_hz)
+                     unsigned int second_hz, unsigned int ms)
 {
     if (!ctx->tones)
         return;
@@ -435,8 +438,9 @@ static void play_cue(struct context *ctx, unsigned int first_hz,
     adapter = le_adapter_connect(ctx->audio_sock, CONNECT_TIMEOUT_MS);
     if (!adapter)
         return;
-    snprintf(args, sizeof(args), "{\"first_hz\":%u,\"second_hz\":%u}",
-             first_hz, second_hz);
+    snprintf(args, sizeof(args),
+             "{\"first_hz\":%u,\"second_hz\":%u,\"ms\":%u}",
+             first_hz, second_hz, ms);
     (void)le_adapter_call(adapter, "cue", args, NULL, 0);
     le_adapter_close(adapter);
 }
@@ -444,6 +448,27 @@ static void play_cue(struct context *ctx, unsigned int first_hz,
 #define CUE_LOW_HZ   660U
 #define CUE_HIGH_HZ  990U
 #define CUE_MUTE_HZ  440U
+
+/*
+ * A short flourish on the ring while the action cue plays, so the press is
+ * visible as well as audible. Its own owner, so stopping it cannot clear a
+ * pattern belonging to the wake word or the mute indicator.
+ */
+static void action_flourish(struct context *ctx)
+{
+    struct le_adapter *adapter;
+    char args[128];
+
+    adapter = le_adapter_connect(ctx->led_sock, CONNECT_TIMEOUT_MS);
+    if (!adapter)
+        return;
+    snprintf(args, sizeof(args),
+             "{\"name\":\"flash\",\"owner\":\"action\","
+             "\"r\":255,\"g\":170,\"b\":0,\"brightness\":70,"
+             "\"repeats\":3}");
+    (void)le_adapter_call(adapter, "pattern", args, NULL, 0);
+    le_adapter_close(adapter);
+}
 
 static void mute_indicator(struct context *ctx, int muted)
 {
@@ -569,7 +594,7 @@ static void toggle_mute(struct context *ctx)
        cue plays before the indicator so the sound is not delayed behind a
        daemon that may be slow to answer. */
     play_cue(ctx, target ? CUE_LOW_HZ : CUE_MUTE_HZ,
-             target ? CUE_MUTE_HZ : CUE_LOW_HZ);
+             target ? CUE_MUTE_HZ : CUE_LOW_HZ, 90U);
     mute_indicator(ctx, target);
     if (!target && (ctx->volume >= 0 || refresh_audio(ctx) == 0))
         show_meter(ctx, (unsigned int)ctx->volume, 120, 200, 255);
@@ -589,14 +614,14 @@ static void handle_key(struct context *ctx, int code, int value)
             (void)refresh_audio(ctx);
             /* Only on the press: holding to run the volume up should not
                machine-gun the cue over the level it is meant to describe. */
-            play_cue(ctx, CUE_LOW_HZ, CUE_HIGH_HZ);
+            play_cue(ctx, CUE_LOW_HZ, CUE_HIGH_HZ, 90U);
         }
         adjust_volume(ctx, 1);
         break;
     case KEY_VOLUMEDOWN:
         if (value == 1) {
             (void)refresh_audio(ctx);
-            play_cue(ctx, CUE_HIGH_HZ, CUE_LOW_HZ);
+            play_cue(ctx, CUE_HIGH_HZ, CUE_LOW_HZ, 90U);
         }
         adjust_volume(ctx, -1);
         break;
@@ -611,6 +636,25 @@ static void handle_key(struct context *ctx, int code, int value)
      * looks exactly like dead hardware -- it cost an evening of hunting for a
      * GPIO that was never missing.
      */
+    /*
+     * The action button. The vendor puts it on the keypad matrix as KEY_HELP
+     * and that controller has no driver here, so it emitted nothing at all --
+     * the two probe codes are candidate GPIOs being identified by which one
+     * reports. Whichever it turns out to be, the behaviour is the same, and
+     * the log line below names the code so the probe can be narrowed to one
+     * entry afterwards.
+     */
+    case KEY_HELP:
+    case KEY_F13:
+    case KEY_F14:
+        if (value == 1) {
+            le_log_info("buttond: action button (code %d)", code);
+            /* Low and falling, longer than an acknowledgement: unmistakably
+               not one of the volume cues. */
+            play_cue(ctx, 190U, 95U, 420U);
+            action_flourish(ctx);
+        }
+        return;              /* no autorepeat: once per press */
     case KEY_POWER:
     case KEY_MUTE:
     case KEY_MICMUTE:
