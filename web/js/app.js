@@ -880,6 +880,70 @@ function simTimingHtml(entry,cap){
   '<dt>Request → first audio</dt><dd class="'+simGoalClass(entry.queue_to_first_audio_ms)+'">'+ms(entry.queue_to_first_audio_ms)+'</dd>'+
   simRadioTimingHtml(entry);
 }
+/*
+ * The hardware specification, collapsed. This is the map that the wake and
+ * button work was done against, and every row of it was read off the running
+ * device rather than inferred from the device tree -- where the two disagree,
+ * the device wins. It lives on this page because Simulation is where someone
+ * goes when the pipeline misbehaves, and the first question is always which
+ * pin or codec is involved.
+ *
+ * Deliberately static. Reading it live would mean shipping an endpoint that
+ * dumps gpio, i2c and USB descriptor state, and the USB gadget serial is the
+ * device's real IDME serial -- see the note in the USB table.
+ */
+/* mono=true only where the first column is an identifier (GPIO number, I2C
+   address, PCM node); prose like "Volume Down" reads badly in monospace. */
+function specTable(head,rows,mono){return `<div class="table-scroll"><table class="sim-table spec-table${mono?' spec-mono':''}"><thead><tr>${head.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`}
+const SPEC_GPIO=[
+ ['392','35','KPROW2','aic3101_enable','out hi — mic-array codec enable'],
+ ['393','36','KPCOL0','Action Key','in, IRQ, active-low'],
+ ['394','37','KPCOL1','Volume Down','in, IRQ, active-low'],
+ ['400','43','EINT11','spi0.0','out hi — audio FPGA'],
+ ['407','50','EINT18','Volume Up','in, IRQ, active-low'],
+ ['408','51','EINT19','tlv320aic32x4 rstn','out hi — speaker codec reset'],
+ ['444','87','MSDC2_DAT0','amz_privacy','out, active-low — mute lamp + privacy cut'],
+ ['445','88','MSDC2_DAT1','amz-bright-state','out, active-low — inverse of privacy'],
+ ['390','33','KPROW0','— unclaimed','floats; fires spurious presses'],
+ ['391','34','KPROW1','— unclaimed','floats; fires spurious presses']];
+const SPEC_I2C=[
+ ['0-0018…1b','tlv320aic3101 ×4','bound','mic-array codecs'],
+ ['0-0029','tsl2584tsv','—','ambient light'],
+ ['0-002c','lp855x-led','—','backlight controller'],
+ ['0-0039','tsl2540','bound','ambient light'],
+ ['0-003f','is31fl3236','is31fl32xx','light ring, 12 RGB, all 36 channels used'],
+ ['0-0032','lp55231','absent','probe returns ENXIO — not populated'],
+ ['1-0060','sym827-regulator','—','regulator'],
+ ['2-0018','tlv320aic32x4','bound','speaker codec']];
+const SPEC_BUTTONS=[
+ ['Mute','PMIC, mt6323keys','113 KEY_MUTE','toggles the privacy latch; lamp on GPIO 444'],
+ ['Action','KPCOL0, gpio-keys','138 KEY_HELP','input only — there is no lamp on this button'],
+ ['Volume Up','pin 50, gpio-keys','115 KEY_VOLUMEUP',''],
+ ['Volume Down','pin 37, gpio-keys','114 KEY_VOLUMEDOWN','']];
+const SPEC_USB=[
+ ['Controller','musb-mtk @ 11200000.usb','UDC musb-hdrc.1.auto, high-speed'],
+ ['Role switch','11200000.usb-role-switch','device by default; host needs the vendor session-edge restart'],
+ ['Gadget','configfs usb_gadget/libreecho','function ffs.adb, FunctionFS at /dev/usb-ffs/adb'],
+ ['VID:PID','18d1:d001','Google / Nexus-4 fastboot ID'],
+ ['Strings','LibreEcho / MT8163-ARM32-ADB','the serial string is the real IDME serial — a leak vector if USB descriptors are ever captured'],
+ ['VBUS','none','the port never sources power, so a drive must be self-powered'],
+ ['Exclusivity','one port, one use','a drive takes the gadget at t+60 s; ADB and storage cannot coexist']];
+const SPEC_AUDIO=[
+ ['pcm23p / pcm25p','playback',''],
+ ['pcm24c','capture','9 ch, 24-bit, 16 kHz — ch0–6 live, ch7/8 silent'],
+ ['Bus format','mono S16LE 48 kHz','/run/libreecho-audio/{system,media}.pcm'],
+ ['Other','auxadc, thermal, storage','16 ADC channels, 4 thermal zones, eMMC mmcblk0 ≈3.8 GB'],
+ ['wlan0','MAC','randomised on every boot']];
+function specSection(){return collapsiblePanel('Hardware specification',
+  `<p class="muted">Read off the running device, not taken from the device tree. GPIO numbering starts at 357, so <strong>DTS pin = GPIO &minus; 357</strong>.</p>`+
+  `<h4>GPIO</h4>`+specTable(['GPIO','Pin','SoC name','Claimed by','State'],SPEC_GPIO,1)+
+  `<p class="muted">The buttons are discrete GPIOs, not a scan matrix — the vendor <code>keypad@10010000</code> node is inherited SoC boilerplate with no driver behind it, and its matrix index does not give you the pin. Identify a pin by counting presses over a window, never from one event: KPCOL0 reported 18 times across deliberate presses while KPROW0 and KPROW1 each fired once at boot and never again. Those two float, and trusting a single boot fire wired the wrong pin twice.</p>`+
+  `<h4>Buttons</h4>`+specTable(['Button','Source','Keycode','Notes'],SPEC_BUTTONS)+
+  `<h4>I²C</h4>`+specTable(['Address','Device','Driver','Role'],SPEC_I2C,1)+
+  `<h4>USB and ADB</h4>`+specTable(['Item','Value','Notes'],SPEC_USB)+
+  `<h4>Audio</h4>`+specTable(['Interface','Role','Notes'],SPEC_AUDIO,1),
+  'sim-spec')}
+
 async function simulationPage(){
  await simHistoryLoad();   /* device-side history for the current generation */
  const w=await api('/wake-word').catch(()=>({}));
@@ -897,7 +961,8 @@ async function simulationPage(){
    ${panel('Last run',`<p class="muted sim-goal">Goal: under ${SIM_RESPONSE_GOAL_TEXT} from the end of speech to the first audio out of the speaker.</p><dl class="facts" id="sim-timing"><dt>Status</dt><dd>Nothing sent yet</dd></dl><p class="muted">The device does not report end-of-speech to first audio, so it is not shown. The log-derived rows here are stamped in whole seconds, and <em>request → first audio</em> also covers the phrase playing into the microphone in real time, which a person speaking in the room would not pay — read it as an upper bound. <em>STT + model</em> is measured by agentd in milliseconds and is the closest honest proxy, and the dominant cost.</p>`)}
    </div>
    ${panel('History',`<div class="button-row"><span class="muted" id="sim-count-runs">0 of ${SIM_HISTORY_MAX}</span>`+
-     action('Download JSON','sim-download')+action('Clear','sim-clear')+`</div><div id="sim-history"></div>`,'sim-history-panel')}`;
+     action('Download JSON','sim-download')+action('Clear','sim-clear')+`</div><div id="sim-history"></div>`,'sim-history-panel')}
+   ${specSection()}`;
  const preset=$('#sim-preset'),text=$('#sim-text');
  preset.onchange=()=>{ if(preset.value!=='custom') text.value=SIM_PHRASES[+preset.value][1]; };
  text.oninput=()=>{ preset.value='custom'; };
