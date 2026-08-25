@@ -29,6 +29,13 @@ for control in ('local-base-url', 'local-model', 'local-api-key',
 assert "'openai-compatible'" in ui, 'local provider id never sent'
 assert "'openai-codex'" in ui, 'ChatGPT provider id lost'
 
+# Provider-specific state must not expose ChatGPT actions while a local
+# endpoint is active, and the local test must target only the active provider.
+assert "const chatgptActive=a.provider==='openai-codex',signedIn=chatgptActive&&a.authenticated,waiting=chatgptActive&&a.auth_state==='waiting'" in ui
+assert "${localActive&&localUrl?action('Send test prompt','local-test'):''}" in ui
+assert "toggle('Enable wake-to-reply voice loop',localActive&&a.enabled,'local-enabled')" in ui
+assert "'local-enabled',!localUrl" not in ui
+
 # The local save path sends the endpoint fields.
 assert 'base_url:' in ui, 'base_url never submitted'
 assert 'api_key' in ui, 'api_key never handled'
