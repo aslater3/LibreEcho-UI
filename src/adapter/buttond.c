@@ -321,6 +321,32 @@ static int refresh_audio(struct context *ctx)
  * and stop only that owner on unmute so we cannot clear someone else's
  * pattern.
  */
+/*
+ * The mute button's own lamp. sysfs rather than a GPIO of our own: the
+ * amz_privacy driver owns the line, and going through privacy_trigger also
+ * engages the hardware privacy circuit rather than only lighting an LED.
+ */
+static void privacy_lamp_on(void)
+{
+    static const char *const paths[] = {
+        "/sys/devices/platform/amz_privacy/privacy_trigger",
+        "/sys/devices/soc/10010000.keypad/amz_privacy/privacy_trigger",
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        int fd = open(paths[i], O_WRONLY | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        if (write(fd, "1\n", 2) < 0)
+            le_log_warn("buttond: privacy lamp write failed: %s",
+                        strerror(errno));
+        close(fd);
+        return;
+    }
+    le_log_warn("buttond: no privacy_trigger found; mute lamp not lit");
+}
+
 static void mute_indicator(struct context *ctx, int muted)
 {
     struct le_adapter *adapter;
@@ -342,6 +368,21 @@ static void mute_indicator(struct context *ctx, int muted)
     else
         snprintf(args, sizeof(args),
                  "{\"name\":\"stop\",\"owner\":\"mute\"}");
+    /*
+     * The ring is only half the indicator. The mute button has its own lamp,
+     * driven by the amz_privacy GPIO through the driver's privacy_trigger,
+     * and that is the light people actually look at -- it is beside the
+     * button they just pressed. Assert it alongside the ring.
+     *
+     * Entering privacy is all software is permitted to do: the driver
+     * refuses to let userspace leave it ("privacy_trigger must not permit
+     * software to leave privacy"), which is deliberate -- no program should
+     * be able to silently un-mute a microphone. Leaving privacy therefore
+     * needs the kernel to act on the key, so unmute clears the ring here and
+     * the lamp stays until that support exists.
+     */
+    if (muted)
+        privacy_lamp_on();
     /* Logged because it is otherwise invisible: the indicator failing looks
        exactly like a muted device with no indicator, which is the confusion
        this whole feature exists to remove. */
