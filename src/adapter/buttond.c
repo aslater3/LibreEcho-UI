@@ -83,6 +83,7 @@ struct context {
     int rescan_requested;
     size_t logged_device_count;  /* last count announced, so a steady state stays quiet */
     int indicated_mute;          /* mute state the ring is currently showing; -1 unknown */
+    int audio_poll_warned;       /* so an unreachable audiod is reported once, not every tick */
     int volume_capable;
     int mute_capable;
     long long next_repeat_ms;
@@ -324,8 +325,10 @@ static void mute_indicator(struct context *ctx, int muted)
     char args[96];
 
     adapter = le_adapter_connect(ctx->led_sock, CONNECT_TIMEOUT_MS);
-    if (!adapter)
+    if (!adapter) {
+        le_log_warn("buttond: LED daemon unavailable; mute indicator not shown");
         return;
+    }
     if (muted)
         snprintf(args, sizeof(args),
                  "{\"name\":\"solid\",\"owner\":\"mute\","
@@ -333,7 +336,14 @@ static void mute_indicator(struct context *ctx, int muted)
     else
         snprintf(args, sizeof(args),
                  "{\"name\":\"stop\",\"owner\":\"mute\"}");
-    (void)le_adapter_call(adapter, "pattern", args, NULL, 0);
+    /* Logged because it is otherwise invisible: the indicator failing looks
+       exactly like a muted device with no indicator, which is the confusion
+       this whole feature exists to remove. */
+    if (le_adapter_call(adapter, "pattern", args, NULL, 0) != LE_ADAPTER_OK)
+        le_log_warn("buttond: mute indicator %s rejected by the LED daemon",
+                    muted ? "on" : "off");
+    else
+        le_log_info("buttond: mute indicator %s", muted ? "on" : "off");
     le_adapter_close(adapter);
     ctx->indicated_mute = muted ? 1 : 0;
 }
@@ -469,6 +479,7 @@ int main(int argc, char **argv)
     ctx.volume = -1;
     ctx.muted = -1;
     ctx.indicated_mute = -1;
+    ctx.audio_poll_warned = 0;
     ctx.step = environment_unsigned("LE_BUTTON_VOLUME_STEP", DEFAULT_STEP,
                                     1, 50);
     ctx.hold_ms = environment_unsigned("LE_BUTTON_METER_HOLD_MS",
@@ -517,9 +528,17 @@ int main(int argc, char **argv)
             write_capability_status(&ctx);
             /* The ring must follow the mute state however it changed -- the
                API and the boot-time restore both bypass the key handler. */
-            if (refresh_audio(&ctx) == 0 && ctx.muted >= 0 &&
-                ctx.muted != ctx.indicated_mute)
-                mute_indicator(&ctx, ctx.muted);
+            if (refresh_audio(&ctx) != 0) {
+                if (!ctx.audio_poll_warned) {
+                    le_log_warn("buttond: audio daemon unreachable; the mute "
+                                "indicator cannot follow the API");
+                    ctx.audio_poll_warned = 1;
+                }
+            } else {
+                ctx.audio_poll_warned = 0;
+                if (ctx.muted >= 0 && ctx.muted != ctx.indicated_mute)
+                    mute_indicator(&ctx, ctx.muted);
+            }
             next_status_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
         }
         if (!ready && buttond_repeat_due(monotonic_ms(),
