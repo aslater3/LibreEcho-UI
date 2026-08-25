@@ -86,6 +86,9 @@ struct context {
     int indicated_mute;          /* mute state the ring is currently showing; -1 unknown */
     int audio_poll_warned;       /* so an unreachable audiod is reported once, not every tick */
     int tones;                   /* press cues; read from the web config, on by default */
+    char action[24];             /* what the action button does; only "sound" is wired */
+    unsigned int action_brightness;
+    unsigned int mute_brightness;   /* the ring that accompanies mute; the lamp itself has no PWM */
     int volume_capable;
     int mute_capable;
     long long next_repeat_ms;
@@ -423,6 +426,14 @@ static void refresh_tone_setting(struct context *ctx)
     buffer[len] = '\0';
     if (json_get_bool(buffer, "button_tones", &value) > 0)
         ctx->tones = value ? 1 : 0;
+    if (json_get_int(buffer, "button_action_brightness", &value) == 0 &&
+        value >= 0 && value <= 100)
+        ctx->action_brightness = (unsigned int)value;
+    if (json_get_int(buffer, "button_mute_brightness", &value) == 0 &&
+        value >= 0 && value <= 100)
+        ctx->mute_brightness = (unsigned int)value;
+    (void)json_get_string(buffer, "button_action", ctx->action,
+                          sizeof(ctx->action));
 }
 
 static void play_cue(struct context *ctx, unsigned int first_hz,
@@ -481,8 +492,8 @@ static void action_flourish(struct context *ctx)
         return;
     snprintf(args, sizeof(args),
              "{\"name\":\"flash\",\"owner\":\"action\","
-             "\"r\":255,\"g\":170,\"b\":0,\"brightness\":70,"
-             "\"repeats\":3}");
+             "\"r\":255,\"g\":170,\"b\":0,\"brightness\":%u,"
+             "\"repeats\":3}", ctx->action_brightness);
     (void)le_adapter_call(adapter, "pattern", args, NULL, 0);
     le_adapter_close(adapter);
 }
@@ -503,8 +514,8 @@ static void mute_indicator(struct context *ctx, int muted)
            Omitting it had the call rejected outright. */
         snprintf(args, sizeof(args),
                  "{\"name\":\"solid\",\"owner\":\"mute\","
-                 "\"r\":255,\"g\":0,\"b\":0,\"brightness\":60,"
-                 "\"repeats\":0}");
+                 "\"r\":255,\"g\":0,\"b\":0,\"brightness\":%u,"
+                 "\"repeats\":0}", ctx->mute_brightness);
     else
         snprintf(args, sizeof(args),
                  "{\"name\":\"stop\",\"owner\":\"mute\"}");
@@ -676,7 +687,17 @@ static void handle_key(struct context *ctx, int code, int value)
             };
             static unsigned int next;
 
-            le_log_info("buttond: action button");
+            le_log_info("buttond: action button (%s)", ctx->action);
+            if (!strcmp(ctx->action, "disabled"))
+                return;
+            if (strcmp(ctx->action, "sound")) {
+                /* Chosen in the UI but not built yet. Say so once per press
+                   rather than doing nothing silently, which is the failure
+                   this button has already had once. */
+                le_log_warn("buttond: action \"%s\" is not implemented yet",
+                            ctx->action);
+                return;
+            }
             play_sample(ctx, sounds[next]);
             next = (next + 1U) % (sizeof(sounds) / sizeof(sounds[0]));
             action_flourish(ctx);
@@ -720,6 +741,9 @@ int main(int argc, char **argv)
     ctx.indicated_mute = -1;
     ctx.audio_poll_warned = 0;
     ctx.tones = 1;
+    strcpy(ctx.action, "sound");
+    ctx.action_brightness = 70U;
+    ctx.mute_brightness = 60U;
     ctx.step = environment_unsigned("LE_BUTTON_VOLUME_STEP", DEFAULT_STEP,
                                     1, 50);
     ctx.hold_ms = environment_unsigned("LE_BUTTON_METER_HOLD_MS",
