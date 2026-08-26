@@ -261,7 +261,13 @@ async function integrationsPage() {
       toggleId:'use-local-provider',
       enabled:localEnabled,
       body:localAssistantBody(a,localSelected,pipeline),
-      open:localSelected
+      /*
+       * Collapsed even when this is the selected provider. Opening on
+       * selection meant the page arrived expanded on every load for anyone
+       * actually using it -- the same "stop expanding panels" complaint that
+       * closed Home location, the voice assistant and Internet radio.
+       */
+      open:false
     });
     const devicePanel=assistantProviderPanel({
       title:'On Device Voice Assistant',
@@ -272,7 +278,7 @@ async function integrationsPage() {
       toggleId:'use-device-provider',
       enabled:deviceEnabled,
       body:deviceAssistantBody(a,deviceSelected),
-      open:deviceSelected
+      open:false
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}</section>
