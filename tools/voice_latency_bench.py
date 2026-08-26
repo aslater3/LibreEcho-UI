@@ -96,6 +96,31 @@ def speak(template, text):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def wait_quiet(url, token, csrf, cap=25.0, settle=1.0):
+    """Block until the speaker has stopped, then settle briefly.
+
+    A fixed inter-iteration gap is not enough: a turn takes several seconds and
+    then the device *speaks the answer*, so a timer tuned to the turn fires
+    while it is still talking and that iteration records nothing. amplifier_on
+    tracks playback (it drops roughly 8s after a short announcement begins),
+    but it is still false in the moment right after a trigger, before audio
+    starts -- so require two consecutive false reads rather than trusting the
+    first one.
+    """
+    deadline = time.time() + cap
+    quiet = 0
+    while time.time() < deadline:
+        try:
+            state = api(url, "audio", token, csrf, timeout=8)["data"]
+        except Exception:
+            break
+        quiet = quiet + 1 if not state.get("amplifier_on") else 0
+        if quiet >= 2:
+            break
+        time.sleep(0.5)
+    time.sleep(settle)
+
+
 def newest_turn(url, token, csrf):
     try:
         turns = api(url, "assistant/history", token, csrf)["data"]["turns"]
@@ -157,8 +182,8 @@ def main():
     p.add_argument("--wake-settle", type=float, default=0.4,
                    help="seconds between triggering listening and speaking")
     p.add_argument("--turn-timeout", type=float, default=30.0)
-    p.add_argument("--gap", type=float, default=4.0,
-                   help="seconds between iterations, to let TTS finish")
+    p.add_argument("--gap", type=float, default=1.5,
+                   help="extra settle after the speaker goes quiet (see wait_quiet)")
     p.add_argument("--report", help="write the raw per-turn JSON here")
     args = p.parse_args()
 
@@ -191,7 +216,7 @@ def main():
                   f"  audio={turn['stt_audio_ms']:>5}ms"
                   f"  stt={turn['stt_processing_ms']:>6}ms"
                   f"  first_pcm={turn['first_pcm_ms']:>6}ms  {phrase!r}")
-        time.sleep(args.gap)
+        wait_quiet(args.url, token, csrf, settle=args.gap)
 
     print(f"\n{len(turns)}/{args.iterations} turns completed, {failures} produced nothing")
     if turns:
