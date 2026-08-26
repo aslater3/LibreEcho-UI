@@ -294,29 +294,101 @@ static int valid_pipeline_token(const char *value)
     }
     return 1;
 }
+#define LE_INIT_AGENTD    "/etc/init.d/libreecho-agentd.init"
+#define LE_INIT_STTD      "/etc/init.d/libreecho-sttd.init"
+#define LE_INIT_TTSD      "/etc/init.d/libreecho-ttsd.init"
+#define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
+
+/*
+ * Stop the voice daemons and bring them back for `mode`.
+ *
+ * Every stop is attempted and the starts ALWAYS run, even when a stop
+ * reported failure. That is the whole point: stop_service ends in
+ * unmount_runtime, which returns non-zero whenever the payload mount is
+ * busy, and the previous version treated that as fatal and returned before
+ * starting anything. A single busy unmount therefore left agentd, sttd and
+ * ttsd stopped with nothing to restart them, and the assistant stayed dead
+ * until the device was rebooted. A failure to stop is a reason to report an
+ * error, never a reason to skip the restart.
+ */
+static int voice_pipeline_restart(const char *mode)
+{
+    int failed = 0;
+
+    if (run_init_command(LE_INIT_AGENTD, "stop"))
+        failed = 1;
+    if (run_init_command(LE_INIT_STTD, "stop"))
+        failed = 1;
+    if (run_init_command(LE_INIT_TTSD, "stop"))
+        failed = 1;
+    if (access(LE_INIT_WYOMINGD, X_OK) == 0 &&
+        run_init_command(LE_INIT_WYOMINGD, "stop"))
+        failed = 1;
+
+    if (!strcmp(mode, "home-assistant")) {
+        if (access(LE_INIT_WYOMINGD, X_OK) < 0)
+            return LE_NOT_SUPPORTED;
+        if (run_init_command(LE_INIT_WYOMINGD, "start"))
+            failed = 1;
+        return failed ? LE_IO : LE_OK;
+    }
+    if (run_init_command(LE_INIT_STTD, "start"))
+        failed = 1;
+    if (run_init_command(LE_INIT_TTSD, "start"))
+        failed = 1;
+    if (run_init_command(LE_INIT_AGENTD, "start"))
+        failed = 1;
+    return failed ? LE_IO : LE_OK;
+}
+
+/*
+ * Restart the voice pipeline without holding up the HTTP loop.
+ *
+ * The loop is single threaded, and the stops alone can take ~26s:
+ * agentd's stop_service allows TERM/10/KILL/2 and sttd and ttsd
+ * TERM/5/KILL/2 each. Running that on the request path wedged the whole
+ * daemon -- no page loaded, and the client gave up long before the restart
+ * finished, so the caller could not tell a slow restart from a dead one.
+ * Same shape as the usb_host_restore hang.
+ *
+ * So the sequence runs in a detached grandchild and this returns as soon as
+ * it is launched. The double fork means init reaps the worker and the loop
+ * never blocks on it; the middle child is waited for immediately and exits
+ * at once. The outcome is reported through the central log rather than the
+ * response, because the response is written long before the restart ends.
+ */
 static int apply_voice_pipeline_mode(const char *mode)
 {
-    static const char *const agent = "/etc/init.d/libreecho-agentd.init";
-    static const char *const stt = "/etc/init.d/libreecho-sttd.init";
-    static const char *const tts = "/etc/init.d/libreecho-ttsd.init";
-    static const char *const satellite = "/etc/init.d/libreecho-wyomingd.init";
+    char selected[32];
+    pid_t child;
+    int status;
 
-    if (access(stt, X_OK) < 0 || access(tts, X_OK) < 0 ||
-        access(agent, X_OK) < 0)
+    if (access(LE_INIT_STTD, X_OK) < 0 || access(LE_INIT_TTSD, X_OK) < 0 ||
+        access(LE_INIT_AGENTD, X_OK) < 0)
         return LE_OK;
-    if (run_init_command(agent, "stop") ||
-        run_init_command(stt, "stop") ||
-        run_init_command(tts, "stop"))
+
+    snprintf(selected, sizeof(selected), "%s", mode);
+    child = fork();
+    if (child < 0)
         return LE_IO;
-    if (access(satellite, X_OK) == 0 &&
-        run_init_command(satellite, "stop"))
-        return LE_IO;
-    if (!strcmp(mode, "home-assistant"))
-        return access(satellite, X_OK) == 0
-            ? run_init_command(satellite, "start") : LE_NOT_SUPPORTED;
-    if (run_init_command(stt, "start") ||
-        run_init_command(tts, "start") ||
-        run_init_command(agent, "start"))
+    if (child == 0) {
+        if (setsid() < 0)
+            _exit(127);
+        {
+            pid_t worker = fork();
+            if (worker < 0)
+                _exit(127);
+            if (worker > 0)
+                _exit(0);
+        }
+        if (voice_pipeline_restart(selected))
+            le_log_warn("voice pipeline: restart finished with errors; "
+                        "check the assistant before relying on it");
+        else
+            le_log_info("voice pipeline: daemons restarted");
+        _exit(0);
+    }
+    if (waitpid(child, &status, 0) < 0)
         return LE_IO;
     return LE_OK;
 }
