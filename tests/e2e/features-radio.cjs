@@ -348,7 +348,7 @@ async function main() {
   assert.deepEqual(
     await page.$$eval('.integration-grid > *', els => els.map(e => (e.querySelector('h3') || {}).textContent)),
     ['Voice Assistants', 'Home location & weather', 'Home Assistant', 'MQTT', 'Local REST API',
-     'Bluetooth audio', 'AirPlay 2', 'Internet radio'],
+     'Bluetooth audio', 'AirPlay 2', 'Spotify Connect', 'Internet radio'],
     'the home location card sits directly under Voice Assistants, not buried at the bottom'
   );
   pass('home location: retitled, expanded, labelled as an address, prefilled and dirty-tracked');

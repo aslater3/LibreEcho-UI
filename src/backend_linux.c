@@ -1902,6 +1902,56 @@ static int airplay(struct le_backend *b, struct le_airplay_state *o)
     return LE_OK;
 }
 
+/*
+ * Spotify Connect, served by a librespot-based daemon on the media bus.
+ *
+ * "installed" is answered by whether the daemon binary is in the image, not by
+ * whether it is running: the device can legitimately have the feature switched
+ * off, and a UI that cannot tell those apart offers a toggle that does nothing.
+ * A device without the payload reports installed=0 and the page says so.
+ */
+#define LE_SPOTIFY_DAEMON "/usr/local/sbin/libreecho-spotifyd"
+
+static int spotify(struct le_backend *b, struct le_spotify_state *o)
+{
+    char document[512];
+
+    (void)b;
+    memset(o, 0, sizeof(*o));
+    copy_string(o->status, sizeof(o->status), "unavailable");
+    copy_string(o->device_name, sizeof(o->device_name), "LibreEcho");
+    o->installed = access(LE_SPOTIFY_DAEMON, X_OK) == 0;
+    if (!o->installed)
+        return LE_OK;
+    copy_string(o->status, sizeof(o->status), "stopped");
+    if (adapter_command(LE_ADAPTER_SPOTIFY_SOCK, "status", NULL,
+                        document, sizeof(document)) == LE_OK) {
+        int value = 0;
+        if (json_get_bool(document, "enabled", &value) > 0)
+            o->enabled = value ? 1 : 0;
+        if (json_get_bool(document, "playing", &value) > 0)
+            o->playing = value ? 1 : 0;
+        (void)json_get_string(document, "device_name", o->device_name,
+                              sizeof(o->device_name));
+        copy_string(o->status, sizeof(o->status),
+                    o->playing ? "playing" : (o->enabled ? "ready" : "stopped"));
+    }
+    return LE_OK;
+}
+
+static int spotify_set(struct le_backend *b, int enabled)
+{
+    char args[32];
+
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    if (access(LE_SPOTIFY_DAEMON, X_OK) != 0)
+        return LE_NOT_SUPPORTED;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_SPOTIFY_SOCK, "set_enabled", args);
+}
+
 static int airplay_set(struct le_backend *b, int enabled)
 {
     char args[32];
@@ -2041,7 +2091,8 @@ static const struct le_backend_ops ops = {
     bluetooth_unpair, bluetooth_disconnect, bluetooth_pairing_response,
     bluetooth_discoverable, bluetooth_connectable, bluetooth_pairing_mode,
     airplay, airplay_set, playback,
-    linux_reboot, linux_shutdown, factory_reset, tick, control
+    linux_reboot, linux_shutdown, factory_reset, tick, control,
+    spotify, spotify_set
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)
