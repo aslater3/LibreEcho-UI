@@ -138,6 +138,15 @@ $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 		src/adapter/buttond_timing.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
+# Drives the real worker, queue, thread and decoder against scripted score
+# sequences; the test supplies its own le_wake_engine, so no ONNX runtime or
+# model is needed to exercise the decoding rules.
+$(BUILD)/test-wake-decode: tests/test_wake_decode.c \
+	src/adapter/wake_worker.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
+		$^ -lpthread -lm -o $@
+
 $(BUILD)/test-network-health: tests/test_network_health.c \
 		src/adapter/network_health.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
@@ -589,6 +598,7 @@ clean:
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-thermal-zone-selection \
+		$(BUILD)/test-wake-decode \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
