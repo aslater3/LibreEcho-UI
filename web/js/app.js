@@ -1388,7 +1388,29 @@ function installIntegrationsExtras(){
  const inner=integrationsPage,wrapped=async function(){const out=await inner.apply(this,arguments);await integrationsExtras();return out};
  wrapped.extrasWrapped=true;
  globalThis.integrationsPage=wrapped;}
-async function integrationsPage(){const [d,a]=await Promise.all([api('/integrations'),api('/assistant').catch(e=>({unsupported:e.message}))]);content.innerHTML=`<div class="integration-grid">${assistantCard(a)}${weatherCard(a)}${d.items.map(x=>collapsiblePanel(x.name,`<p class="muted">${x.id==='rest'?'Versioned local device API.':'Optional local integration; no cloud connection required.'}</p>${toggle('Enabled',x.enabled,'int-'+x.id)}<div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${x.enabled?'Enabled':'Not configured'}</span></div>${saveButton('save-int-'+x.id)}`)).join('')}</div>`;d.items.forEach(x=>{bindDirty(['#int-'+x.id],'#save-int-'+x.id);$('#save-int-'+x.id).onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved')});bindWeather(a);
+/*
+ * Per-integration copy. Spotify Connect needs its own line because the thing
+ * that usually goes wrong is not the toggle: it needs a Premium account, and
+ * the device only appears in the Spotify app once the daemon is running and on
+ * the same network.
+ *
+ * Tidal is named here deliberately. It has no open Connect protocol -- it is
+ * licensed to partner hardware and there is no public SDK -- so there is no
+ * honest toggle to offer. Saying that plainly, next to the two transports that
+ * do work for it, is more useful than a switch that could never function.
+ */
+function integrationBlurb(x){
+ if(x.id==='rest')return 'Versioned local device API.';
+ if(x.id==='spotify')return 'Appear as a speaker in the Spotify app. Requires a Spotify Premium account; playback is handled on the device and audio never leaves your network.';
+ if(x.id==='airplay2')return 'Appear as an AirPlay 2 speaker. This is also how Tidal, Apple Music and anything else without an open protocol can play here \u2014 cast from the app.';
+ if(x.id==='bluetooth')return 'Pair a phone or laptop and play to this device directly. A second route for apps with no open casting protocol, including Tidal.';
+ return 'Optional local integration; no cloud connection required.';
+}
+function integrationStatus(x){
+ if(x.installed===false)return 'Not installed in this image';
+ return x.enabled?'Enabled':'Not configured';
+}
+async function integrationsPage(){const [d,a]=await Promise.all([api('/integrations'),api('/assistant').catch(e=>({unsupported:e.message}))]);content.innerHTML=`<div class="integration-grid">${assistantCard(a)}${weatherCard(a)}${d.items.map(x=>collapsiblePanel(x.name,`<p class="muted">${integrationBlurb(x)}</p>${x.installed===false?'':toggle('Enabled',x.enabled,'int-'+x.id)}<div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${integrationStatus(x)}</span></div>${x.installed===false?'':saveButton('save-int-'+x.id)}`)).join('')}</div>`;d.items.forEach(x=>{if(x.installed===false)return;bindDirty(['#int-'+x.id],'#save-int-'+x.id);$('#save-int-'+x.id).onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved')});bindWeather(a);
 if(!a.unsupported){bindDirty(['#assistant-enabled','#assistant-model','#assistant-prompt'],'#save-assistant');$('#save-assistant').onclick=()=>mutate('/assistant',{enabled:$('#assistant-enabled').checked,provider:'openai-codex',model:$('#assistant-model').value.trim(),prompt:$('#assistant-prompt').value.trim()},'Voice assistant settings saved');
 bindDirty(['#local-enabled','#local-base-url','#local-model','#local-api-key'],'#save-local');
 /* Blank key means "keep whatever is stored": api_key is omitted from the body

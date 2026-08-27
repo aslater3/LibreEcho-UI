@@ -669,19 +669,7 @@ static int thermal_zone_rank(const char *type)
     return 0;
 }
 
-/*
- * Ambient light in lux from the board's TSL2540.
- *
- * This is a vendor driver, not a mainline one: it registers no IIO device, so
- * there is nothing under /sys/bus/iio/devices to enumerate and the value comes
- * straight from its i2c sysfs directory. Verified on an Echo Gen 2, where it
- * sits at 0-0039 and is already powered at boot. The second candidate in the
- * same device tree, a tsl2584tsv at 0-0029, is not populated and fails to
- * probe with -ENXIO, so it is not looked for.
- *
- * Returns -1 when there is no sensor. That is deliberately not 0: 0 lux is a
- * real reading from a dark room, and the two must not be confused.
- */
+/* Ambient light from the vendor TSL2540 sysfs driver. */
 #ifndef LE_LIGHT_SYSFS_ROOT
 #define LE_LIGHT_SYSFS_ROOT "/sys/bus/i2c/devices"
 #endif
@@ -704,8 +692,6 @@ static int read_light_level(void)
         value = strtol(raw, &end, 10);
         if (end == raw)
             continue;
-        /* A negative or absurd figure is the driver reporting a fault through
-           the same file, so report absent rather than passing it on. */
         if (value < 0 || value > 1000000)
             return -1;
         return (int)value;
@@ -713,11 +699,6 @@ static int read_light_level(void)
     return -1;
 }
 
-/*
- * The sensor's sysfs directory, or NULL when the board has none. The address
- * is fixed on the Echo Gen 2 but the search keeps a board revision that moves
- * it from silently reporting "no sensor".
- */
 static const char *light_sensor_dir(void)
 {
     static const char *const dirs[] = {
@@ -743,7 +724,6 @@ static const char *light_sensor_dir(void)
     return found;
 }
 
-/* Read one integer attribute; leaves *out alone and returns 0 if absent. */
 static int light_attr(const char *dir, const char *name, int *out)
 {
     char path[160], raw[64], *end;
@@ -767,7 +747,7 @@ static int light(struct le_backend *b, struct le_light_state *o)
     (void)b;
     memset(o, 0, sizeof(*o));
     if (!dir)
-        return LE_OK;            /* available stays 0: no sensor, not an error */
+        return LE_OK;
     o->available = 1;
     snprintf(o->bus, sizeof(o->bus), "i2c %s", strrchr(dir, '/') ? strrchr(dir, '/') + 1 : dir);
     o->lux = -1;
@@ -778,12 +758,6 @@ static int light(struct le_backend *b, struct le_light_state *o)
     light_attr(dir, "als_ch1", &o->ch1);
     light_attr(dir, "als_gain", &o->gain);
     light_attr(dir, "als_power_state", &o->powered);
-    /*
-     * itime and auto_gain are reported as text with the number leading --
-     * "346ms (346368us)" and "manual"/"auto" -- so they are read as strings
-     * rather than through light_attr.
-     */
-    o->integration_us = 0;
     {
         char path[160];
         snprintf(path, sizeof(path), "%s/als_itime", dir);
@@ -2033,6 +2007,56 @@ static int airplay(struct le_backend *b, struct le_airplay_state *o)
     return LE_OK;
 }
 
+/*
+ * Spotify Connect, served by a librespot-based daemon on the media bus.
+ *
+ * "installed" is answered by whether the daemon binary is in the image, not by
+ * whether it is running: the device can legitimately have the feature switched
+ * off, and a UI that cannot tell those apart offers a toggle that does nothing.
+ * A device without the payload reports installed=0 and the page says so.
+ */
+#define LE_SPOTIFY_DAEMON "/usr/local/sbin/libreecho-spotifyd"
+
+static int spotify(struct le_backend *b, struct le_spotify_state *o)
+{
+    char document[512];
+
+    (void)b;
+    memset(o, 0, sizeof(*o));
+    copy_string(o->status, sizeof(o->status), "unavailable");
+    copy_string(o->device_name, sizeof(o->device_name), "LibreEcho");
+    o->installed = access(LE_SPOTIFY_DAEMON, X_OK) == 0;
+    if (!o->installed)
+        return LE_OK;
+    copy_string(o->status, sizeof(o->status), "stopped");
+    if (adapter_command(LE_ADAPTER_SPOTIFY_SOCK, "status", NULL,
+                        document, sizeof(document)) == LE_OK) {
+        int value = 0;
+        if (json_get_bool(document, "enabled", &value) > 0)
+            o->enabled = value ? 1 : 0;
+        if (json_get_bool(document, "playing", &value) > 0)
+            o->playing = value ? 1 : 0;
+        (void)json_get_string(document, "device_name", o->device_name,
+                              sizeof(o->device_name));
+        copy_string(o->status, sizeof(o->status),
+                    o->playing ? "playing" : (o->enabled ? "ready" : "stopped"));
+    }
+    return LE_OK;
+}
+
+static int spotify_set(struct le_backend *b, int enabled)
+{
+    char args[32];
+
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    if (access(LE_SPOTIFY_DAEMON, X_OK) != 0)
+        return LE_NOT_SUPPORTED;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_SPOTIFY_SOCK, "set_enabled", args);
+}
+
 static int airplay_set(struct le_backend *b, int enabled)
 {
     char args[32];
@@ -2173,8 +2197,8 @@ static const struct le_backend_ops ops = {
     bluetooth_discoverable, bluetooth_connectable, bluetooth_pairing_mode,
     airplay, airplay_set, playback,
     linux_reboot, linux_shutdown, factory_reset, tick, control,
-    light
-};
+    spotify, spotify_set,
+    light};
 
 int le_linux_create(struct le_backend *b, const char *cfg)
 {

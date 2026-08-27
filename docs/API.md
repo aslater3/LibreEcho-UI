@@ -1506,6 +1506,32 @@ mutations persist atomically using the existing `0600` configuration store.
 
 ### Integrations
 
+#### GET /api/v1/spotify
+
+Returns the current Spotify Connect status. This endpoint is read-only; `HEAD`
+and other unsupported methods return `405`.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "installed": true,
+    "enabled": false,
+    "playing": false,
+    "device_name": "LibreEcho (mock)",
+    "status": "stopped"
+  },
+  "error": null
+}
+```
+
+`installed` reports whether the Spotify Connect daemon is present in the image;
+it is separate from `enabled`. `status` is `unavailable` when the daemon is not
+installed, `stopped` when installed but disabled, `ready` when enabled, and
+`playing` during playback. `device_name` is the name shown by Spotify and is
+JSON-escaped, including when it contains quotes or backslashes.
+
 #### PUT /api/v1/integrations
 
 Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.

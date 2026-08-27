@@ -11,7 +11,27 @@
 
 #define WAKE_BLOCK_SAMPLES 1280U
 #define WAKE_QUEUE_BLOCKS 8U
-#define WAKE_SUPPORT_THRESHOLD 0.35f
+/*
+ * The bar a neighbouring frame must reach to corroborate a peak.
+ *
+ * At 0.35 this sat about two thirds of the way to the accept threshold, which
+ * asks a detector with a one-frame response to hold near its peak for three
+ * frames running. Measured on hardware, a real utterance scored
+ *
+ *     0.019, 0.864, 0.239, 0.249
+ *
+ * across four consecutive frames -- the peak beat the 0.533 accept threshold
+ * by a wide margin and was still discarded, because neither neighbour reached
+ * 0.35. A detection that strong is not a noise spike.
+ *
+ * 0.20 is the highest value that recovers every real detection in the captures
+ * taken from this device, and it adds no false ones: swept from 0.35 down to
+ * 0.10 over roughly two and a half minutes of recorded audio -- including a
+ * noisy room and a run of failed attempts -- 0.20 and below find all three
+ * genuine utterances and nothing else, while 0.25 and above miss one. The
+ * accept threshold is untouched and still does the real gating.
+ */
+#define WAKE_SUPPORT_THRESHOLD 0.20f
 #define WAKE_LOCKOUT_SAMPLES 28000ULL
 
 struct wake_block {
@@ -21,6 +41,12 @@ struct wake_block {
 
 struct wake_decoder {
     float scores[3];
+    /*
+     * The observation each score was computed from, carried alongside it so a
+     * detection can be attributed to the frame that actually peaked rather
+     * than to whichever frame happened to be newest when it was noticed.
+     */
+    struct le_wake_observation observations[3];
     unsigned int score_count;
     uint64_t lockout_until_sample;
 };
@@ -68,11 +94,15 @@ static void decode_score(struct wake_worker_impl *worker,
     struct wake_decoder *decoder = &worker->decoder;
     float accept_threshold;
     unsigned int support = 0;
+    unsigned int peak;
     unsigned int i;
 
     decoder->scores[0] = decoder->scores[1];
     decoder->scores[1] = decoder->scores[2];
     decoder->scores[2] = score;
+    decoder->observations[0] = decoder->observations[1];
+    decoder->observations[1] = decoder->observations[2];
+    decoder->observations[2] = block->observation;
     if (decoder->score_count < 3)
         ++decoder->score_count;
     ++worker->metrics.scores;
@@ -85,21 +115,49 @@ static void decode_score(struct wake_worker_impl *worker,
     pthread_mutex_lock(&worker->mutex);
     accept_threshold = worker->accept_threshold;
     pthread_mutex_unlock(&worker->mutex);
-    if (block->observation.detection_sample <
+
+    /*
+     * Judge the window by its peak rather than by its newest frame.
+     *
+     * The support rule exists so that a single noisy frame cannot wake the
+     * device, and that is worth keeping. But testing it against the newest
+     * score alone made it unsatisfiable for any detection that rises quickly:
+     * the two frames it looks back at are, by definition, the approach to the
+     * peak and still low. Measured on hardware, an utterance scored
+     * 0.083, 0.102, 0.554 across three consecutive frames -- the 0.554
+     * cleared the 0.533 accept threshold, and was thrown away because the two
+     * frames before it sat under the 0.35 support line. One frame later the
+     * support was there and the score had already fallen to 0.414, under the
+     * threshold. The window it needed never existed.
+     *
+     * Taking the peak of the three lets the corroboration come from either
+     * side of it, which is what "two of the last three" was meant to mean. A
+     * lone spike is still rejected, because a single frame over the support
+     * line is still support of one. The cost is 80 ms of latency on the
+     * detection, one frame, since the peak is confirmed only once the frame
+     * after it has been scored.
+     */
+    peak = 0;
+    for (i = 3 - decoder->score_count; i < 3; ++i) {
+        if (decoder->scores[i] > decoder->scores[peak])
+            peak = i;
+    }
+    if (decoder->observations[peak].detection_sample <
             decoder->lockout_until_sample ||
-        !block->observation.vad_active ||
-        score < accept_threshold || support < 2)
+        !decoder->observations[peak].vad_active ||
+        decoder->scores[peak] < accept_threshold || support < 2)
         return;
 
     ++worker->metrics.events;
     decoder->lockout_until_sample =
-        block->observation.detection_sample + WAKE_LOCKOUT_SAMPLES;
+        decoder->observations[peak].detection_sample +
+        WAKE_LOCKOUT_SAMPLES;
     if (worker->callback) {
         const struct le_wake_event event = {
-            block->observation.detection_sample,
-            score,
-            block->observation.vad_score,
-            block->observation.playback_active,
+            decoder->observations[peak].detection_sample,
+            decoder->scores[peak],
+            decoder->observations[peak].vad_score,
+            decoder->observations[peak].playback_active,
             "alexa_v0.1"
         };
 

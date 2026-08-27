@@ -1382,6 +1382,26 @@
     }
    }
   },
+  "/spotify": {
+   "get": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Read Spotify Connect status",
+    "description": "Returns whether the Spotify Connect daemon is installed in the image, whether it is enabled, whether it is playing, the device name shown in Spotify, and its current status. The device name is escaped as JSON and may contain quotes or backslashes. This endpoint is read-only; unsupported methods, including HEAD, receive 405.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/integrations": {
    "get": {
     "tags": [

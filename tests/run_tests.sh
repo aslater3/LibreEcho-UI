@@ -53,6 +53,8 @@ make build/test-audiod-review build/test-led-night-review
 sh tests/test_startup_animation.sh
 make build/test-buttond-timing
 ./build/test-buttond-timing
+make build/test-wake-decode
+./build/test-wake-decode
 sh tests/test_buttond_contract.sh
 sh tests/test_input_capability_state_contract.sh
 sh tests/test_bluetooth_startup_readiness_contract.sh
@@ -196,6 +198,9 @@ curl -fsS "$URL/api/v1/privacy" | jq -e \
     '.data.local_only == false and .data.log_retention_hours == 168' >/dev/null
 curl -fsS "$URL/api/v1/integrations" | jq -e \
     '.data.items[] | select(.id == "home-assistant") | .enabled == true' \
+    >/dev/null
+curl -fsS "$URL/api/v1/spotify" | jq -e \
+    '.ok and .data.installed == true and .data.enabled == true and .data.status == "ready"' \
     >/dev/null
 curl -fsS "$URL/api/v1/config" | grep -q '"setup_completed":true'
 curl -fsS "$URL/" | grep -q 'LibreEcho Control Centre'
