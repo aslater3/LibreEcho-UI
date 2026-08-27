@@ -138,6 +138,14 @@ $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 		src/adapter/buttond_timing.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
+# Drives the real worker, queue, thread and decoder against scripted score
+# sequences; the test supplies its own le_wake_engine, so no ONNX runtime or
+# model is needed to exercise the decoding rules.
+$(BUILD)/test-wake-decode: tests/test_wake_decode.c \
+		src/adapter/wake_worker.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
+		$^ -lpthread -lm -o $@
+
 $(BUILD)/test-network-health: tests/test_network_health.c \
 		src/adapter/network_health.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
@@ -235,6 +243,7 @@ WAKE_ORT_ARCHIVES = \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
 	$(WAKE_ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
 	$(WAKE_ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
+	$(WAKE_ORT_BUILD)/_deps/google_nsync-build/libnsync_cpp.a \
 	$(RE2_ARCHIVE)
 WAKE_ORT_ABSEIL = $$(find $(WAKE_ORT_BUILD)/_deps/abseil_cpp-build \
 	-name '*.a')
