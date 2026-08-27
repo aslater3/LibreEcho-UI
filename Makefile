@@ -142,7 +142,8 @@ $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 # sequences; the test supplies its own le_wake_engine, so no ONNX runtime or
 # model is needed to exercise the decoding rules.
 $(BUILD)/test-wake-decode: tests/test_wake_decode.c \
-		src/adapter/wake_worker.c
+	src/adapter/wake_worker.c
+	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
 		$^ -lpthread -lm -o $@
 
@@ -243,7 +244,6 @@ WAKE_ORT_ARCHIVES = \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
 	$(WAKE_ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
 	$(WAKE_ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
-	$(WAKE_ORT_BUILD)/_deps/google_nsync-build/libnsync_cpp.a \
 	$(RE2_ARCHIVE)
 WAKE_ORT_ABSEIL = $$(find $(WAKE_ORT_BUILD)/_deps/abseil_cpp-build \
 	-name '*.a')
@@ -598,6 +598,7 @@ clean:
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-thermal-zone-selection \
+		$(BUILD)/test-wake-decode \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \

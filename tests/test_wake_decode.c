@@ -100,7 +100,8 @@ static void on_wake_event(const struct le_wake_event *event, void *opaque)
  * without sleeping. Sequences stay within the 8-block queue so nothing is
  * dropped.
  */
-static void run_sequence(const float *scores, size_t count, int vad_active,
+static void run_sequence(const float *scores, const int *vad_active,
+                         size_t count,
                          struct capture *capture,
                          struct le_wake_worker_metrics *metrics)
 {
@@ -125,7 +126,7 @@ static void run_sequence(const float *scores, size_t count, int vad_active,
         /* Frame n occupies samples [n*1280, (n+1)*1280). */
         observation.detection_sample = (uint64_t)(i + 1) * BLOCK_SAMPLES;
         observation.vad_score = 1.0f;
-        observation.vad_active = vad_active;
+        observation.vad_active = vad_active[i];
         observation.playback_active = 0;
         assert(le_wake_worker_submit(&worker, block, BLOCK_SAMPLES,
                                      &observation) == 0);
@@ -157,8 +158,9 @@ int main(void)
      */
     {
         static const float measured[] = {0.083f, 0.102f, 0.554f, 0.414f};
+        static const int vad_active[] = {1, 1, 1, 1};
 
-        run_sequence(measured, 4, 1, &capture, &metrics);
+        run_sequence(measured, vad_active, 4, &capture, &metrics);
         assert(capture.count == 1);
         /* Attributed to frame 3's peak, not to frame 4's newest score. */
         assert(close_to(capture.events[0].score, 0.554f));
@@ -177,8 +179,9 @@ int main(void)
      */
     {
         static const float spike[] = {0.05f, 0.90f, 0.05f, 0.05f, 0.05f};
+        static const int vad_active[] = {1, 1, 1, 1, 1};
 
-        run_sequence(spike, 5, 1, &capture, &metrics);
+        run_sequence(spike, vad_active, 5, &capture, &metrics);
         assert(capture.count == 0);
         assert(metrics.events == 0);
         assert(metrics.scores == 5);
@@ -188,16 +191,20 @@ int main(void)
     }
 
     /*
-     * The VAD gate still applies, and it is now read from the peak frame's
-     * observation rather than the newest one. With VAD inactive the same
-     * measured sequence must not fire.
+     * VAD gate still applies, and it is now read from the peak frame's
+     * observation rather than the newest one. The peak frame is active while
+     * the newest frame is inactive, so a decoder that reads the newest frame
+     * would incorrectly suppress this event.
      */
     {
         static const float measured[] = {0.083f, 0.102f, 0.554f, 0.414f};
+        static const int vad_active[] = {1, 1, 1, 0};
 
-        run_sequence(measured, 4, 0, &capture, &metrics);
-        assert(capture.count == 0);
-        assert(metrics.events == 0);
+        run_sequence(measured, vad_active, 4, &capture, &metrics);
+        assert(capture.count == 1);
+        assert(close_to(capture.events[0].score, 0.554f));
+        assert(capture.events[0].detection_sample == 3u * BLOCK_SAMPLES);
+        assert(metrics.events == 1);
     }
 
     /*
@@ -210,8 +217,9 @@ int main(void)
         static const float repeated[] = {
             0.083f, 0.102f, 0.554f, 0.414f, 0.10f, 0.60f, 0.60f, 0.10f
         };
+        static const int vad_active[] = {1, 1, 1, 1, 1, 1, 1, 1};
 
-        run_sequence(repeated, 8, 1, &capture, &metrics);
+        run_sequence(repeated, vad_active, 8, &capture, &metrics);
         assert(capture.count == 1);
         assert(capture.events[0].detection_sample == 3u * BLOCK_SAMPLES);
         assert(metrics.events == 1);
