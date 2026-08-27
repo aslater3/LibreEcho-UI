@@ -38,7 +38,7 @@ struct le_audio_state { int volume, microphone_gain, notification_volume, muted,
  * taken with, and auto_gain says whether the driver is choosing the gain
  * itself -- it ships as manual on this board, which saturates in daylight.
  */
-struct le_light_state { int available, lux, calibrated_lux, ch0, ch1, gain, integration_us, auto_gain, powered; };
+struct le_light_state { int available, lux, calibrated_lux, ch0, ch1, gain, integration_us, auto_gain, powered; char bus[32]; };
 struct le_led_profile { uint8_t r,g,b; int brightness, animation_speed; };
 struct le_led_pixel { uint8_t r,g,b; };
 struct le_led_state {

@@ -682,11 +682,15 @@ static int thermal_zone_rank(const char *type)
  * Returns -1 when there is no sensor. That is deliberately not 0: 0 lux is a
  * real reading from a dark room, and the two must not be confused.
  */
+#ifndef LE_LIGHT_SYSFS_ROOT
+#define LE_LIGHT_SYSFS_ROOT "/sys/bus/i2c/devices"
+#endif
+
 static int read_light_level(void)
 {
     static const char *const paths[] = {
-        "/sys/bus/i2c/devices/0-0039/als_lux",
-        "/sys/bus/i2c/devices/1-0039/als_lux",
+        LE_LIGHT_SYSFS_ROOT "/0-0039/als_lux",
+        LE_LIGHT_SYSFS_ROOT "/1-0039/als_lux",
     };
     char raw[32];
     size_t i;
@@ -717,8 +721,8 @@ static int read_light_level(void)
 static const char *light_sensor_dir(void)
 {
     static const char *const dirs[] = {
-        "/sys/bus/i2c/devices/0-0039",
-        "/sys/bus/i2c/devices/1-0039",
+        LE_LIGHT_SYSFS_ROOT "/0-0039",
+        LE_LIGHT_SYSFS_ROOT "/1-0039",
     };
     static const char *found;
     static int searched;
@@ -765,6 +769,7 @@ static int light(struct le_backend *b, struct le_light_state *o)
     if (!dir)
         return LE_OK;            /* available stays 0: no sensor, not an error */
     o->available = 1;
+    snprintf(o->bus, sizeof(o->bus), "i2c %s", strrchr(dir, '/') ? strrchr(dir, '/') + 1 : dir);
     o->lux = -1;
     o->calibrated_lux = -1;
     light_attr(dir, "als_lux", &o->lux);
