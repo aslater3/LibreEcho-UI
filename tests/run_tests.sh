@@ -196,6 +196,9 @@ curl -fsS "$URL/api/v1/privacy" | jq -e \
 curl -fsS "$URL/api/v1/integrations" | jq -e \
     '.data.items[] | select(.id == "home-assistant") | .enabled == true' \
     >/dev/null
+curl -fsS "$URL/api/v1/spotify" | jq -e \
+    '.ok and .data.installed == true and .data.enabled == true and .data.status == "ready"' \
+    >/dev/null
 curl -fsS "$URL/api/v1/config" | grep -q '"setup_completed":true'
 curl -fsS "$URL/" | grep -q 'LibreEcho Control Centre'
 echo 'persistence: ok'

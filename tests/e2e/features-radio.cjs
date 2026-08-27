@@ -336,6 +336,9 @@ async function main() {
      LLM, the voice assistant and Internet radio all opened themselves on load
      and the page arrived half-expanded. */
   assert.equal(await home.evaluate(el => el.open), false, 'the card starts collapsed');
+  const providerPanels = page.locator('.assistant-provider');
+  assert.equal(await providerPanels.count(), 2, 'both voice provider panels render');
+  assert.deepEqual(await providerPanels.evaluateAll(els => els.map(el => el.open)), [false, false], 'voice provider panels start collapsed');
   await home.locator('summary').click();
   assert.match(await home.innerText(), /Home address or place/);
   assert.match(await home.innerText(), /weather, local time and, in future, directions/);
