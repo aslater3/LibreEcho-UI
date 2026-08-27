@@ -100,7 +100,8 @@ static void on_wake_event(const struct le_wake_event *event, void *opaque)
  * without sleeping. Sequences stay within the 8-block queue so nothing is
  * dropped.
  */
-static void run_sequence(const float *scores, size_t count, int vad_active,
+static void run_sequence(const float *scores, const int *vad_active,
+                         size_t count,
                          struct capture *capture,
                          struct le_wake_worker_metrics *metrics)
 {
@@ -125,7 +126,7 @@ static void run_sequence(const float *scores, size_t count, int vad_active,
         /* Frame n occupies samples [n*1280, (n+1)*1280). */
         observation.detection_sample = (uint64_t)(i + 1) * BLOCK_SAMPLES;
         observation.vad_score = 1.0f;
-        observation.vad_active = vad_active;
+        observation.vad_active = vad_active[i];
         observation.playback_active = 0;
         assert(le_wake_worker_submit(&worker, block, BLOCK_SAMPLES,
                                      &observation) == 0);
@@ -157,8 +158,9 @@ int main(void)
      */
     {
         static const float measured[] = {0.083f, 0.102f, 0.554f, 0.414f};
+        static const int vad_active[] = {1, 1, 1, 1};
 
-        run_sequence(measured, 4, 1, &capture, &metrics);
+        run_sequence(measured, vad_active, 4, &capture, &metrics);
         assert(capture.count == 1);
         /* Attributed to frame 3's peak, not to frame 4's newest score. */
         assert(close_to(capture.events[0].score, 0.554f));
@@ -177,8 +179,9 @@ int main(void)
      */
     {
         static const float spike[] = {0.05f, 0.90f, 0.05f, 0.05f, 0.05f};
+        static const int vad_active[] = {1, 1, 1, 1, 1};
 
-        run_sequence(spike, 5, 1, &capture, &metrics);
+        run_sequence(spike, vad_active, 5, &capture, &metrics);
         assert(capture.count == 0);
         assert(metrics.events == 0);
         assert(metrics.scores == 5);
@@ -188,24 +191,15 @@ int main(void)
     }
 
     /*
-     * The energy VAD does not gate acceptance. The same measured sequence
-     * fires with vad_active never set.
-     *
-     * This assertion was inverted deliberately. It previously required the
-     * sequence NOT to fire, which is what the code did and what was silently
-     * discarding real detections: over 22 hours of room audio, 34 of 38
-     * above-threshold blocks were refused for this reason alone, scoring as
-     * high as 0.9534, and one wake event was delivered in the whole period.
-     *
-     * The gate is unreachable for ordinary speech -- it wants
-     * frame_energy > noise_energy * 6 while the measured noise floor sits
-     * above the level speech arrives at -- so requiring it here would pin a
-     * detector that cannot detect.
+     * The peak frame's observation is what a detection is attributed to, not
+     * the newest frame's. Kept from the original coverage: the peak frame is
+     * active while the newest frame is inactive.
      */
     {
         static const float measured[] = {0.083f, 0.102f, 0.554f, 0.414f};
+        static const int vad_active[] = {1, 1, 1, 0};
 
-        run_sequence(measured, 4, 0, &capture, &metrics);
+        run_sequence(measured, vad_active, 4, &capture, &metrics);
         assert(capture.count == 1);
         assert(close_to(capture.events[0].score, 0.554f));
         assert(capture.events[0].detection_sample == 3u * BLOCK_SAMPLES);
@@ -213,14 +207,39 @@ int main(void)
     }
 
     /*
-     * Removing the VAD veto must not weaken anything else. A lone spike with
-     * VAD inactive is still refused, so acceptance now rests on the classifier
-     * and the support rule rather than on frame energy.
+     * The energy VAD does not gate acceptance at all: the same sequence fires
+     * with vad_active never set on any frame.
+     *
+     * This assertion is the inverse of what this file first required, and the
+     * inversion is the point. Gating on the VAD was silently discarding real
+     * detections -- over 22 hours of room audio, 34 of 38 above-threshold
+     * blocks were refused for that reason alone, scoring as high as 0.9534,
+     * and one wake event was delivered in the whole period. The gate wants
+     * frame_energy > noise_energy * 6, which ordinary speech at this array
+     * does not reach, so requiring it here would pin a detector that cannot
+     * detect.
+     */
+    {
+        static const float measured[] = {0.083f, 0.102f, 0.554f, 0.414f};
+        static const int vad_active[] = {0, 0, 0, 0};
+
+        run_sequence(measured, vad_active, 4, &capture, &metrics);
+        assert(capture.count == 1);
+        assert(close_to(capture.events[0].score, 0.554f));
+        assert(capture.events[0].detection_sample == 3u * BLOCK_SAMPLES);
+        assert(metrics.events == 1);
+    }
+
+    /*
+     * Removing the VAD veto must not loosen anything else. A lone spike is
+     * still refused with the VAD inactive, so acceptance rests on the
+     * classifier and the support rule rather than on frame energy.
      */
     {
         static const float spike[] = {0.05f, 0.90f, 0.05f, 0.05f, 0.05f};
+        static const int vad_active[] = {0, 0, 0, 0, 0};
 
-        run_sequence(spike, 5, 0, &capture, &metrics);
+        run_sequence(spike, vad_active, 5, &capture, &metrics);
         assert(capture.count == 0);
         assert(metrics.events == 0);
         assert(close_to(metrics.max_score, 0.90f));
@@ -228,12 +247,13 @@ int main(void)
 
     /*
      * And a sequence that never reaches the accept threshold stays refused
-     * with VAD inactive, so the threshold is still doing the gating.
+     * with the VAD inactive, so the threshold still does the gating.
      */
     {
         static const float quiet[] = {0.21f, 0.33f, 0.42f, 0.38f};
+        static const int vad_active[] = {0, 0, 0, 0};
 
-        run_sequence(quiet, 4, 0, &capture, &metrics);
+        run_sequence(quiet, vad_active, 4, &capture, &metrics);
         assert(capture.count == 0);
         assert(metrics.events == 0);
     }
@@ -248,8 +268,9 @@ int main(void)
         static const float repeated[] = {
             0.083f, 0.102f, 0.554f, 0.414f, 0.10f, 0.60f, 0.60f, 0.10f
         };
+        static const int vad_active[] = {1, 1, 1, 1, 1, 1, 1, 1};
 
-        run_sequence(repeated, 8, 1, &capture, &metrics);
+        run_sequence(repeated, vad_active, 8, &capture, &metrics);
         assert(capture.count == 1);
         assert(capture.events[0].detection_sample == 3u * BLOCK_SAMPLES);
         assert(metrics.events == 1);
