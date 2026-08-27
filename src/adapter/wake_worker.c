@@ -142,9 +142,33 @@ static void decode_score(struct wake_worker_impl *worker,
         if (decoder->scores[i] > decoder->scores[peak])
             peak = i;
     }
+    /*
+     * The energy VAD does not gate acceptance.
+     *
+     * It used to, and it was discarding almost every real detection. Over 22
+     * hours of room audio this device produced 38 blocks at or above the
+     * accept threshold and delivered one wake event: 34 of the other 37 were
+     * refused solely because `vad_active` was 0, including scores of 0.9534,
+     * 0.9434 and 0.8934.
+     *
+     * The gate cannot open for ordinary speech. It requires
+     * frame_energy > noise_energy * 6, about 2.45x the noise floor in RMS,
+     * and this array's calibration (see voice_dsp.c) puts one-metre speech at
+     * 70-105 RMS. The measured noise floor sits at 85-296 RMS rather than the
+     * 12-17 that calibration assumed, so the bar lands at 208-726 RMS -- above
+     * the speech it is supposed to admit. Detection then succeeds only when a
+     * loud, close utterance happens to coincide with a low point in a floor
+     * that wanders by an order of magnitude, which is exactly the intermittent
+     * behaviour this presented as.
+     *
+     * A classifier at 0.89 is stronger evidence of speech than a frame-energy
+     * comparison against a floor that is itself mostly speech, and the support
+     * rule below already refuses a single noisy frame. The VAD remains what it
+     * is good for -- endpointing, and the vad_score reported with the event --
+     * and stops vetoing the detector it sits in front of.
+     */
     if (decoder->observations[peak].detection_sample <
             decoder->lockout_until_sample ||
-        !decoder->observations[peak].vad_active ||
         decoder->scores[peak] < accept_threshold || support < 2)
         return;
 

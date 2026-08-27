@@ -188,14 +188,52 @@ int main(void)
     }
 
     /*
-     * The VAD gate still applies, and it is now read from the peak frame's
-     * observation rather than the newest one. With VAD inactive the same
-     * measured sequence must not fire.
+     * The energy VAD does not gate acceptance. The same measured sequence
+     * fires with vad_active never set.
+     *
+     * This assertion was inverted deliberately. It previously required the
+     * sequence NOT to fire, which is what the code did and what was silently
+     * discarding real detections: over 22 hours of room audio, 34 of 38
+     * above-threshold blocks were refused for this reason alone, scoring as
+     * high as 0.9534, and one wake event was delivered in the whole period.
+     *
+     * The gate is unreachable for ordinary speech -- it wants
+     * frame_energy > noise_energy * 6 while the measured noise floor sits
+     * above the level speech arrives at -- so requiring it here would pin a
+     * detector that cannot detect.
      */
     {
         static const float measured[] = {0.083f, 0.102f, 0.554f, 0.414f};
 
         run_sequence(measured, 4, 0, &capture, &metrics);
+        assert(capture.count == 1);
+        assert(close_to(capture.events[0].score, 0.554f));
+        assert(capture.events[0].detection_sample == 3u * BLOCK_SAMPLES);
+        assert(metrics.events == 1);
+    }
+
+    /*
+     * Removing the VAD veto must not weaken anything else. A lone spike with
+     * VAD inactive is still refused, so acceptance now rests on the classifier
+     * and the support rule rather than on frame energy.
+     */
+    {
+        static const float spike[] = {0.05f, 0.90f, 0.05f, 0.05f, 0.05f};
+
+        run_sequence(spike, 5, 0, &capture, &metrics);
+        assert(capture.count == 0);
+        assert(metrics.events == 0);
+        assert(close_to(metrics.max_score, 0.90f));
+    }
+
+    /*
+     * And a sequence that never reaches the accept threshold stays refused
+     * with VAD inactive, so the threshold is still doing the gating.
+     */
+    {
+        static const float quiet[] = {0.21f, 0.33f, 0.42f, 0.38f};
+
+        run_sequence(quiet, 4, 0, &capture, &metrics);
         assert(capture.count == 0);
         assert(metrics.events == 0);
     }
