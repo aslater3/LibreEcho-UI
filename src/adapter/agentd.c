@@ -633,12 +633,18 @@ static int save_history_state(const struct agent_state *state,
     for (i = 0; i < count; ++i) {
         const struct turn_record *record = &records[(start + i) %
                                                      LE_AGENT_TURN_HISTORY];
+        char request_id[sizeof(record->request_id) * 2U];
+
+        if (escape_json(request_id, sizeof(request_id),
+                        record->request_id) < 0)
+            return -1;
         wrote = snprintf(
             json + used, sizeof(json) - used,
             "%s{\"at_ms\":%llu,\"stt_audio_ms\":%llu,"
             "\"stt_processing_ms\":%llu,\"stt_total_ms\":%llu,"
             "\"first_text_ms\":%llu,\"first_announce_ms\":%llu,"
-            "\"first_pcm_ms\":%llu,\"follow_up\":%s}",
+            "\"first_pcm_ms\":%llu,\"follow_up\":%s,"
+            "\"request_id\":\"%s\"}",
             i ? "," : "", (unsigned long long)record->at_ms,
             (unsigned long long)record->stt_audio_ms,
             (unsigned long long)record->stt_processing_ms,
@@ -646,7 +652,7 @@ static int save_history_state(const struct agent_state *state,
             (unsigned long long)record->first_text_ms,
             (unsigned long long)record->first_announce_ms,
             (unsigned long long)record->first_pcm_ms,
-            record->follow_up ? "true" : "false");
+            record->follow_up ? "true" : "false", request_id);
         if (wrote < 0 || (size_t)wrote >= sizeof(json) - used)
             return -1;
         used += (size_t)wrote;
@@ -721,6 +727,9 @@ static int load_history(struct agent_state *state)
             json_get_bool(object, "follow_up", &follow_up) < 1)
             return -1;
         record.follow_up = follow_up;
+        if (json_get_string(object, "request_id", record.request_id,
+                            sizeof(record.request_id)) < 0)
+            return -1;
         append_history_record(state, &record);
         at = end + 1;
         if (*at == ']')
