@@ -9,6 +9,7 @@ curl -fsS -X PUT "$URL/api/v1/network" -H "$CSRF" -H 'Content-Type: application/
 curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' \
     --data '{"short_press":"Play / pause","long_press":"Reboot device","tones":false,"action":"sound","action_sounds":"action-1,action-2","action_brightness":33,"mute_brightness":44}' \
     | jq -e '.ok and .data.tones == false and .data.action == "sound" and .data.action_sounds == "action-1,action-2" and .data.action_brightness == 33 and .data.mute_brightness == 44' >/dev/null
+jq -e '.button_short == "Play / pause" and .button_long == "Reboot device" and .button_action_sounds == "action-1,action-2" and .button_action_brightness == 33 and .button_mute_brightness == 44' "$CFG" >/dev/null
 curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"local_only":true,"diagnostic_telemetry":false,"crash_reports":false,"audio_retention":"none","log_retention_hours":168}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: application/json' --data '{"mode":"custom","stt_wyoming_uri":"tcp://198.51.100.10:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://198.51.100.10:10200","tts_voice":"en_GB-alan-medium"}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null

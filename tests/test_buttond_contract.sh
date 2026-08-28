@@ -21,6 +21,8 @@ assert 'json_get_int(buffer, "button_mute_brightness", &value) > 0' in source
 assert 'json_get_string(buffer, "button_action_sounds", value_text,\n                        sizeof(value_text)) == 1' in source
 sample = source[source.index('static void play_sample'):source.index('#define CUE_LOW_HZ')]
 assert 'ctx->tones' not in sample
+mute_indicator = source[source.index('static void mute_indicator'):source.index('static void show_meter')]
+assert mute_indicator.index('privacy_lamp(muted)') < mute_indicator.index('adapter = le_adapter_connect')
 PY
 
 test_dir=$(mktemp -d)

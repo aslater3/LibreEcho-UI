@@ -593,6 +593,7 @@ static void mute_indicator(struct context *ctx, int muted)
     struct le_adapter *adapter;
     char args[96];
 
+    privacy_lamp(muted);
     adapter = le_adapter_connect(ctx->led_sock, CONNECT_TIMEOUT_MS);
     if (!adapter) {
         le_log_warn("buttond: LED daemon unavailable; mute indicator not shown");
@@ -622,7 +623,6 @@ static void mute_indicator(struct context *ctx, int muted)
      * needs the kernel to act on the key, so unmute clears the ring here and
      * the lamp stays until that support exists.
      */
-    privacy_lamp(muted);
     /* Logged because it is otherwise invisible: the indicator failing looks
        exactly like a muted device with no indicator, which is the confusion
        this whole feature exists to remove. */
