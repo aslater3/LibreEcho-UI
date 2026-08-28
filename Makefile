@@ -157,7 +157,7 @@ $(BUILD)/test-timer-json: tests/test_timer_json.c \
 $(BUILD)/test-backend-mock-timers: tests/test_backend_mock_timers.c \
 	src/backend_mock.c src/config_store.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
-	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_DEV_CONTROLS $(CSTD) $(WARN) \
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_DEV_CONTROLS -DLE_MOCK_TESTING $(CSTD) $(WARN) \
 		-Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $^ -o $@
 

@@ -250,8 +250,9 @@ when configured, local API authentication.
 Returns the bounded timer schedule. Each entry has an `id`, `kind` (`countdown`
 or `alarm`), `state` (`pending` or `ringing`), `seconds_remaining`, and an
 optional `label`. The response also includes `ringing`, `missed`, and
-`available`. When `timerd` is absent, the endpoint returns the standard 503
-unavailable response.
+`available`. When `timerd` is absent, this GET still returns HTTP 200 with
+`available: false`, an empty `timers` array, and zero `ringing`/`missed`
+counts. Timer writes return the standard 503 unavailable response instead.
 
 #### POST /api/v1/timers
 

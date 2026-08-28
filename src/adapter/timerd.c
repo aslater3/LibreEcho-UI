@@ -36,6 +36,7 @@
 #define STATE_PATH "/data/libreecho/config/timers"
 #define MAX_CLIENTS 4
 #define POLL_CAP_MS 60000
+#define RESTORE_RETRY_MS 1000
 #define AUDIO_TIMEOUT_MS 1000
 
 /* The ring: a two-tone cue every RING_PERIOD_MS. Long enough to be a pattern
@@ -297,6 +298,19 @@ static int state_load_at(struct context *ctx, long long now_ms,
 static void state_load(struct context *ctx)
 {
     (void)state_load_at(ctx, monotonic_ms(), wall_epoch());
+}
+
+static long long timer_poll_timeout(const struct context *ctx,
+                                    long long now_ms, long long now_epoch)
+{
+    long long timeout = le_timer_poll_timeout_ms(&ctx->timers, now_ms,
+                                                 now_epoch, POLL_CAP_MS);
+
+    /* NTP can make the wall clock valid while poll is sleeping. Retry the
+       deferred restore promptly instead of waiting for the full cap. */
+    if (!ctx->state_loaded && timeout > RESTORE_RETRY_MS)
+        timeout = RESTORE_RETRY_MS;
+    return timeout;
 }
 
 /* -------------------------------- ringing ------------------------------- */
@@ -690,8 +704,7 @@ int main(int argc, char **argv)
             ++nfds;
         }
 
-        timeout = le_timer_poll_timeout_ms(&ctx.timers, now_ms, wall_epoch(),
-                                           POLL_CAP_MS);
+        timeout = timer_poll_timeout(&ctx, now_ms, wall_epoch());
         if (le_timer_ringing_count(&ctx.timers) > 0) {
             long long until_ring = ctx.next_ring_ms - now_ms;
 

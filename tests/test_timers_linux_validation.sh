@@ -23,6 +23,13 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
 [ "$code" = 400 ] || { echo "FAIL: Linux overflow returned $code, expected 400"; exit 1; }
 echo "Linux timer overflow validation: ok"
 
+# GET status is deliberately a successful unavailable envelope when timerd is
+# absent, so the UI can render the feature without treating it as a fault.
+curl -fsS "$URL/api/v1/timers" | jq -e \
+    '.ok and .data.available == false and .data.timers == [] and
+     .data.ringing == 0 and .data.missed == 0' >/dev/null
+echo "Linux timer unavailable status: ok"
+
 # The Linux adapter preserves timerd's full-schedule rejection as LE_BUSY, so
 # the API can distinguish capacity from an unavailable daemon.
 grep -q 'no free timer slots' src/backend_linux.c

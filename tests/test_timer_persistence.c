@@ -59,6 +59,13 @@ int main(void)
     read_text(path, text, sizeof(text));
     assert(strstr(text, "alarm 1767225630 wake") != NULL);
 
+    /* Deferred restoration must be retried before the normal 60-second poll
+       cap, otherwise NTP can leave the persisted schedule invisible. */
+    assert(timer_poll_timeout(&context, 1000, BOOT_EPOCH) == RESTORE_RETRY_MS);
+    context.state_loaded = 1;
+    assert(timer_poll_timeout(&context, 1000, BOOT_EPOCH) == POLL_CAP_MS);
+    context.state_loaded = 0;
+
     /* Once NTP makes the clock valid, both records restore deterministically. */
     assert(state_load_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
     assert(le_timer_active_count(&context.timers) == 2);

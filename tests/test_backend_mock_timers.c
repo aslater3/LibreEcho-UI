@@ -1,4 +1,5 @@
 #include "backend_internal.h"
+#include "adapter/timer_schedule.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -36,6 +37,26 @@ int main(void)
     assert(backend.ops->timer_dismiss(&backend, &dismissed) == LE_OK);
     assert(dismissed == 1);
 
+    memset(&backend, 0, sizeof(backend));
+    assert(le_mock_create(&backend, NULL, NULL, 1) == LE_OK);
+    le_mock_test_set_time(1000);
+    assert(backend.ops->timer_add(&backend, 1, "expiry", &id) == LE_OK);
+    assert(backend.ops->timers(&backend, &list) == LE_OK);
+    assert(list.count == 1 && list.items[0].state[0] == 'p');
+    le_mock_test_set_time(1002);
+    assert(backend.ops->timers(&backend, &list) == LE_OK);
+    assert(list.count == 1 && list.ringing == 1);
+    le_mock_test_set_time(1002 + LE_TIMER_RING_SECONDS - 1);
+    assert(backend.ops->timers(&backend, &list) == LE_OK);
+    assert(list.count == 1 && list.ringing == 1);
+    le_mock_test_set_time(1002 + LE_TIMER_RING_SECONDS);
+    assert(backend.ops->timers(&backend, &list) == LE_OK);
+    assert(list.count == 0 && list.ringing == 0);
+    backend.ops->destroy(&backend);
+    le_mock_test_use_real_time();
+
+    memset(&backend, 0, sizeof(backend));
+    assert(le_mock_create(&backend, NULL, NULL, 1) == LE_OK);
     assert(backend.ops->timer_add(&backend, 1, "tick", &id) == LE_OK);
     sleep(2);
     assert(backend.ops->tick(&backend) == LE_OK);
