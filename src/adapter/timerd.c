@@ -56,9 +56,20 @@ struct context {
     long long next_ring_ms;
     int dirty;
     int state_loaded;
+    /* The state path was atomically replaced, but its final durability step
+       failed. A retry must not treat the new file as the old backup source. */
+    int state_commit_pending;
 };
 
 static volatile sig_atomic_t stop_requested;
+
+#ifdef LE_TIMERD_TESTING
+static long long le_timerd_test_monotonic_ms;
+static int le_timerd_test_monotonic_enabled;
+static int le_timerd_test_block_audio_ms;
+static int le_timerd_test_fail_chmod;
+static int le_timerd_test_fail_parent_fsync;
+#endif
 
 static void on_signal(int signo)
 {
@@ -70,6 +81,10 @@ static long long monotonic_ms(void)
 {
     struct timespec ts;
 
+#ifdef LE_TIMERD_TESTING
+    if (le_timerd_test_monotonic_enabled)
+        return le_timerd_test_monotonic_ms;
+#endif
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
         return 0;
     return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
@@ -125,25 +140,62 @@ static int fsync_parent(const char *path)
     return result;
 }
 
-static int state_save_at(struct context *ctx, long long now_ms,
-                         long long now_epoch)
+static int state_load_at(struct context *ctx, long long now_ms,
+                         long long now_epoch);
+
+enum state_save_result {
+    STATE_SAVE_FAILED = 0,
+    STATE_SAVE_OK = 1,
+    STATE_SAVE_COMMITTED_DURABILITY_FAILED = 2
+};
+
+static int state_finalize(const char *path)
+{
+#ifdef LE_TIMERD_TESTING
+    if (le_timerd_test_fail_chmod) {
+        le_timerd_test_fail_chmod = 0;
+        errno = EIO;
+        return -1;
+    }
+#endif
+    if (chmod(path, 0600) != 0)
+        return -1;
+#ifdef LE_TIMERD_TESTING
+    if (le_timerd_test_fail_parent_fsync) {
+        le_timerd_test_fail_parent_fsync = 0;
+        errno = EIO;
+        return -1;
+    }
+#endif
+    return fsync_parent(path);
+}
+
+static enum state_save_result state_save_at(struct context *ctx,
+                                            long long now_ms,
+                                            long long now_epoch)
 {
     char temporary[256], backup[256], backup_temporary[256];
     int fd;
     FILE *file;
     size_t i;
 
+    /* Every save path must complete deferred restoration first. */
+    if (!ctx->state_loaded) {
+        if (!state_load_at(ctx, now_ms, now_epoch))
+            return STATE_SAVE_FAILED;
+        ctx->state_loaded = 1;
+    }
     if (!ctx->state_path || !ctx->state_path[0])
-        return 0;
+        return STATE_SAVE_OK;
     /* Never replace a persisted countdown while the wall clock is invalid:
        its monotonic deadline cannot be converted safely yet. */
     if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
-        return 0;
+        return STATE_SAVE_FAILED;
     if (path_suffix(temporary, sizeof(temporary), ctx->state_path, ".tmp") < 0 ||
         path_suffix(backup, sizeof(backup), ctx->state_path, ".bak") < 0 ||
         path_suffix(backup_temporary, sizeof(backup_temporary), backup,
                     ".tmp") < 0)
-        return 0;
+        return STATE_SAVE_FAILED;
 
     fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0 || fchmod(fd, 0600) < 0) {
@@ -151,13 +203,13 @@ static int state_save_at(struct context *ctx, long long now_ms,
             close(fd);
         le_log_warn("timerd: cannot write %s: %s", temporary,
                     strerror(errno));
-        return 0;
+        return STATE_SAVE_FAILED;
     }
     file = fdopen(fd, "w");
     if (!file) {
         close(fd);
         unlink(temporary);
-        return 0;
+        return STATE_SAVE_FAILED;
     }
     for (i = 0; i < LE_TIMER_MAX; ++i) {
         const struct le_timer *timer = &ctx->timers.timers[i];
@@ -182,7 +234,7 @@ static int state_save_at(struct context *ctx, long long now_ms,
                     due, timer->label) < 0) {
             fclose(file);
             unlink(temporary);
-            return 0;
+            return STATE_SAVE_FAILED;
         }
     }
     if (fflush(file) != 0 || fsync(fileno(file)) != 0 ||
@@ -190,15 +242,15 @@ static int state_save_at(struct context *ctx, long long now_ms,
         le_log_warn("timerd: cannot flush %s", temporary);
         fclose(file);
         unlink(temporary);
-        return 0;
+        return STATE_SAVE_FAILED;
     }
     if (fclose(file) != 0) {
         unlink(temporary);
-        return 0;
+        return STATE_SAVE_FAILED;
     }
     /* Snapshot the old file before replacing it. Keeping the old inode as a
        hard link makes the backup atomic and avoids a window without one. */
-    if (access(ctx->state_path, F_OK) == 0) {
+    if (!ctx->state_commit_pending && access(ctx->state_path, F_OK) == 0) {
         (void)unlink(backup_temporary);
         if (chmod(ctx->state_path, 0600) != 0 ||
             link(ctx->state_path, backup_temporary) != 0 ||
@@ -207,13 +259,13 @@ static int state_save_at(struct context *ctx, long long now_ms,
                         strerror(errno));
             unlink(backup_temporary);
             unlink(temporary);
-            return 0;
+            return STATE_SAVE_FAILED;
         }
         if (fsync_parent(ctx->state_path) != 0) {
             le_log_warn("timerd: cannot sync backup %s: %s", backup,
                         strerror(errno));
             unlink(temporary);
-            return 0;
+            return STATE_SAVE_FAILED;
         }
     }
     /* Rename over the real file so a crash mid-write cannot leave a partial
@@ -222,19 +274,38 @@ static int state_save_at(struct context *ctx, long long now_ms,
         le_log_warn("timerd: cannot replace %s: %s", ctx->state_path,
                     strerror(errno));
         unlink(temporary);
-        return 0;
+        return STATE_SAVE_FAILED;
     }
-    if (chmod(ctx->state_path, 0600) != 0 || fsync_parent(ctx->state_path) != 0) {
-        le_log_warn("timerd: cannot finalize %s: %s", ctx->state_path,
-                    strerror(errno));
-        return 0;
+    /* The rename is the commit point. From here on, failures are durability
+       failures for the new state, not permission to create a new backup from
+       it on retry. */
+    ctx->state_commit_pending = 1;
+    if (state_finalize(ctx->state_path) != 0) {
+        le_log_warn("timerd: cannot finalize %s: %s",
+                    ctx->state_path, strerror(errno));
+        return STATE_SAVE_COMMITTED_DURABILITY_FAILED;
     }
-    return 1;
+    ctx->state_commit_pending = 0;
+    return STATE_SAVE_OK;
 }
 
-static int state_save(struct context *ctx)
+static enum state_save_result state_save(struct context *ctx)
 {
     return state_save_at(ctx, monotonic_ms(), wall_epoch());
+}
+
+static void save_if_dirty(struct context *ctx, long long now_ms,
+                          long long now_epoch)
+{
+    enum state_save_result result;
+
+    if (!ctx->dirty)
+        return;
+    result = state_save_at(ctx, now_ms, now_epoch);
+    if (result == STATE_SAVE_OK)
+        ctx->dirty = 0;
+    else if (result == STATE_SAVE_COMMITTED_DURABILITY_FAILED)
+        ctx->state_commit_pending = 1;
 }
 
 static int state_load_at(struct context *ctx, long long now_ms,
@@ -295,9 +366,13 @@ static int state_load_at(struct context *ctx, long long now_ms,
     return 1;
 }
 
-static void state_load(struct context *ctx)
+static int state_load(struct context *ctx)
 {
-    (void)state_load_at(ctx, monotonic_ms(), wall_epoch());
+    int result = state_load_at(ctx, monotonic_ms(), wall_epoch());
+
+    if (result)
+        ctx->state_loaded = 1;
+    return result;
 }
 
 static long long timer_poll_timeout(const struct context *ctx,
@@ -321,6 +396,13 @@ static void audio_cue(struct context *ctx)
     char args[128];
     int result;
 
+#ifdef LE_TIMERD_TESTING
+    if (le_timerd_test_block_audio_ms > 0) {
+        le_timerd_test_monotonic_ms += le_timerd_test_block_audio_ms;
+        le_timerd_test_block_audio_ms = 0;
+        return;
+    }
+#endif
     adapter = le_adapter_connect(ctx->audio_sock, AUDIO_TIMEOUT_MS);
     if (!adapter) {
         le_log_warn("timerd: audio daemon unavailable; timer is silent");
@@ -344,6 +426,9 @@ static void ring_tick(struct context *ctx, long long now_ms)
     if (now_ms < ctx->next_ring_ms)
         return;
     audio_cue(ctx);
+    /* audio_cue may block on the adapter socket. Refresh the timestamp so the
+       next cue and any save in this cycle use the current monotonic time. */
+    now_ms = monotonic_ms();
     ctx->next_ring_ms = now_ms + RING_PERIOD_MS;
 }
 
@@ -543,9 +628,14 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
        timers alone. */
     if (!strcmp(cmd, "dismiss")) {
         int stopped;
+        unsigned int dismiss_id = 0;
+        int id_result = args ? json_get_uint(args, "id", &dismiss_id) : 0;
 
-        if (args && json_get_int(args, "id", &value) == 1)
-            stopped = le_timer_dismiss(&ctx->timers, (unsigned int)value);
+        if (id_result < 0 || (id_result > 0 && dismiss_id == 0))
+            return le_adapter_respond_err(out, size, id,
+                                          "dismiss id must be a positive integer");
+        if (id_result > 0)
+            stopped = le_timer_dismiss(&ctx->timers, dismiss_id);
         else
             stopped = le_timer_dismiss_all(&ctx->timers);
         if (stopped)
@@ -666,16 +756,15 @@ int main(int argc, char **argv)
         unsigned int fired[LE_TIMER_MAX];
         nfds_t nfds = 1;
         long long now_ms = monotonic_ms();
+        long long now_epoch = wall_epoch();
         long long timeout;
         int count;
         int result;
         nfds_t j;
 
-        if (!ctx.state_loaded && wall_epoch() >= LE_TIMER_CLOCK_VALID_EPOCH) {
-            state_load(&ctx);
-            ctx.state_loaded = 1;
-        }
-        count = le_timer_step(&ctx.timers, now_ms, wall_epoch(), fired,
+        if (!ctx.state_loaded && now_epoch >= LE_TIMER_CLOCK_VALID_EPOCH)
+            (void)state_load(&ctx);
+        count = le_timer_step(&ctx.timers, now_ms, now_epoch, fired,
                               LE_TIMER_MAX);
         if (count > 0) {
             int k;
@@ -687,8 +776,11 @@ int main(int argc, char **argv)
             ctx.dirty = 1;
         }
         ring_tick(&ctx, now_ms);
-        if (ctx.dirty && state_save(&ctx))
-            ctx.dirty = 0;
+        /* ring_tick may wait for audiod. Refresh both snapshots before a save
+           and before deriving the poll deadline from the schedule. */
+        now_ms = monotonic_ms();
+        now_epoch = wall_epoch();
+        save_if_dirty(&ctx, now_ms, now_epoch);
 
         fds[0].fd = ctx.listen_fd;
         fds[0].events = POLLIN;
@@ -704,7 +796,7 @@ int main(int argc, char **argv)
             ++nfds;
         }
 
-        timeout = timer_poll_timeout(&ctx, now_ms, wall_epoch());
+        timeout = timer_poll_timeout(&ctx, now_ms, now_epoch);
         if (le_timer_ringing_count(&ctx.timers) > 0) {
             long long until_ring = ctx.next_ring_ms - now_ms;
 
