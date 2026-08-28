@@ -78,6 +78,12 @@ int main(void)
     assert(kind_of("") == LE_TIMER_INTENT_NONE);
     assert(kind_of("what is the weather in ten minutes") ==
            LE_TIMER_INTENT_NONE);
+    assert(kind_of("don't set a timer for ten minutes") ==
+           LE_TIMER_INTENT_NONE);
+    assert(kind_of("I don't want a ten minute timer") ==
+           LE_TIMER_INTENT_NONE);
+    assert(kind_of("never start an alarm for one hour") ==
+           LE_TIMER_INTENT_NONE);
 
     /* Silencing a ring. Short, and what everyone says. */
     assert(kind_of("stop") == LE_TIMER_INTENT_DISMISS);
