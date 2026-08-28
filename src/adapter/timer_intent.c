@@ -247,6 +247,12 @@ static int mentions_timer(const char *text)
            has_word(text, "alarm") || has_word(text, "alarms");
 }
 
+static int negates_setting(const char *text)
+{
+    return has_word(text, "not") || has_word(text, "never") ||
+           (has_word(text, "don") && has_word(text, "t"));
+}
+
 enum le_timer_intent_kind le_timer_intent_parse(
     const char *transcript, struct le_timer_intent *intent)
 {
@@ -288,6 +294,9 @@ enum le_timer_intent_kind le_timer_intent_parse(
         intent->kind = LE_TIMER_INTENT_QUERY;
         return intent->kind;
     }
+
+    if (negates_setting(text))
+        return LE_TIMER_INTENT_NONE;
 
     seconds = parse_duration(text, &found);
     if (found && seconds > 0) {
