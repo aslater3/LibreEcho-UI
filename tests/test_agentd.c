@@ -353,6 +353,7 @@ int main(void)
     CHECK(access(socket_path, F_OK) == 0);
     CHECK(call(socket_path, "history", NULL,
                response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"history_generation\":1") != NULL);
     CHECK(count_occurrences(response, "\"at_ms\":") == 12);
     CHECK(count_occurrences(response, "\"stt_audio_ms\":") == 12);
     CHECK(strstr(response, "\"at_ms\":1011") != NULL);

@@ -689,6 +689,7 @@ static int load_history_file(struct agent_state *state, const char *path)
     unsigned count = 0;
     unsigned long long loaded_generation = state->history_generation;
 
+    memset(records, 0, sizeof(records));
     if (config_read(path, json, sizeof(json)) < 0 ||
         !json_valid_object(json, strlen(json)))
         return -1;

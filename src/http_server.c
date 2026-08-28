@@ -2,8 +2,8 @@
 #include "tls.h"
 #include "adapter/adapter.h"
 #include "adapter/voice_stream.h"
+#include "inherited_fds.h"
 #include <arpa/inet.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -93,40 +93,8 @@ static int stream_send_all(int fd,const void*body,size_t n){const char*p=body;wh
 static int stream_shared_audio(int fd){struct sockaddr_un address;int wake=-1;char request[128],reply[1024],header[512];size_t used=0;ssize_t n;int frame_result;struct le_voice_stream_frame frame;wake=socket(AF_UNIX,SOCK_STREAM,0);if(wake<0)return-2;memset(&address,0,sizeof(address));address.sun_family=AF_UNIX;strncpy(address.sun_path,LE_ADAPTER_WAKEWORD_SOCK,sizeof(address.sun_path)-1);if(connect(wake,(struct sockaddr*)&address,sizeof(address))<0)goto unavailable;n=snprintf(request,sizeof(request),"{\"v\":1,\"id\":1,\"cmd\":\"stream_audio\",\"args\":{}}\n");if(n<0||stream_send_all(wake,request,(size_t)n)<0)goto unavailable;while(used+1<sizeof(reply)){n=read(wake,reply+used,1);if(n<=0)goto unavailable;if(reply[used++]=='\n')break;}reply[used]='\0';if(!strstr(reply,"\"ok\":true"))goto unavailable;signal(SIGPIPE,SIG_IGN);n=snprintf(header,sizeof(header),"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-LibreEcho-Audio: pcm_s16_le;rate=16000;channels=1;selected-channel=shared-wake;calibration=applied\r\nX-Content-Type-Options: nosniff\r\n\r\n");if(n<0||stream_send_all(fd,header,(size_t)n)<0){close(wake);return-1;}while((frame_result=le_voice_stream_read_frame(wake,&frame))>0){size_t bytes=(size_t)frame.sample_count*sizeof(frame.samples[0]);int z=snprintf(header,sizeof(header),"%zx\r\n",bytes);if(z<0||stream_send_all(fd,header,(size_t)z)<0||stream_send_all(fd,frame.samples,bytes)<0||stream_send_all(fd,"\r\n",2)<0){close(wake);return-1;}}if(frame_result==0)(void)stream_send_all(fd,"0\r\n\r\n",5);close(wake);return frame_result<0?-1:0;unavailable:close(wake);return-2;}
 static int stream_microphone(int fd,int selected_channel){struct sockaddr_un address;int microphone=-1;char request[160],reply[LE_ADAPTER_MSG_MAX],buffer[8192],header[512];size_t used=0;ssize_t n;int shared_result=stream_shared_audio(fd);if(shared_result!=-2){close(fd);return 0;}microphone=socket(AF_UNIX,SOCK_STREAM,0);if(microphone<0)goto unavailable;memset(&address,0,sizeof(address));address.sun_family=AF_UNIX;strncpy(address.sun_path,LE_ADAPTER_MIC_SOCK,sizeof(address.sun_path)-1);if(connect(microphone,(struct sockaddr*)&address,sizeof(address))<0)goto unavailable;n=snprintf(request,sizeof(request),"{\"v\":1,\"id\":1,\"cmd\":\"stream_raw\",\"args\":{\"channel\":%d}}\n",selected_channel);if(n<0||stream_send_all(microphone,request,(size_t)n)<0)goto unavailable;while(used+1<sizeof(reply)){n=read(microphone,reply+used,1);if(n<=0)goto unavailable;if(reply[used++]=='\n')break;}reply[used]='\0';if(!strstr(reply,"\"ok\":true"))goto unavailable;signal(SIGPIPE,SIG_IGN);n=snprintf(header,sizeof(header),"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-LibreEcho-Audio: pcm_s24_3le;rate=16000;channels=9;container-bits=24;valid-bits=16;selected-channel=%d;calibration=none\r\nX-Content-Type-Options: nosniff\r\n\r\n",selected_channel);if(n<0||stream_send_all(fd,header,(size_t)n)<0)goto stop;while((n=read(microphone,buffer,sizeof(buffer)))>0){int z=snprintf(header,sizeof(header),"%zx\r\n",(size_t)n);if(z<0||stream_send_all(fd,header,(size_t)z)<0||stream_send_all(fd,buffer,(size_t)n)<0||stream_send_all(fd,"\r\n",2)<0)goto stop;}if(n==0)(void)stream_send_all(fd,"0\r\n\r\n",5);goto stop;unavailable:{const char*message="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"microphone_unavailable\",\"message\":\"Microphone service could not start the stream\"}}";response(fd,503,"application/json",message,strlen(message));}stop:if(microphone>=0)close(microphone);close(fd);return 0;}
 static int stream_kernel_log(int fd){int probe;FILE*f;char buf[8192],head[512];int z;size_t n;probe=system("dmesg >/dev/null 2>&1");if(probe<0||!WIFEXITED(probe)||WEXITSTATUS(probe)!=0){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log is unavailable\"}}";response(fd,503,"application/json",m,strlen(m));close(fd);return 0;}f=popen("dmesg 2>/dev/null","r");if(!f){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log is unavailable\"}}";response(fd,503,"application/json",m,strlen(m));close(fd);return 0;}signal(SIGPIPE,SIG_IGN);z=snprintf(head,sizeof(head),"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename=\"libreecho-kernel.log\"\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n");if(z<0||stream_send_all(fd,head,(size_t)z)<0){pclose(f);return 0;}while((n=fread(buf,1,sizeof(buf),f))>0){z=snprintf(head,sizeof(head),"%zx\r\n",n);if(z<0||stream_send_all(fd,head,(size_t)z)<0||stream_send_all(fd,buf,n)<0||stream_send_all(fd,"\r\n",2)<0){pclose(f);return 0;}}(void)stream_send_all(fd,"0\r\n\r\n",5);pclose(f);return 0;}
-static void close_kernel_log_inherited(int keep_fd)
-{
-    DIR *directory;
-    struct dirent *entry;
-    int scan_fd;
-
-    /* Do not rely on today's listener/client list: future descriptors must not
-       leak into a worker and keep sockets or files alive after the request. */
-    directory = opendir("/proc/self/fd");
-    if (directory) {
-        scan_fd = dirfd(directory);
-        while ((entry = readdir(directory)) != NULL) {
-            char *end;
-            long inherited = strtol(entry->d_name, &end, 10);
-            if (*entry->d_name && !*end && inherited >= 3 &&
-                inherited != keep_fd && inherited != scan_fd)
-                close((int)inherited);
-        }
-        closedir(directory);
-        return;
-    }
-    /* Linux supplies /proc, but keep a bounded POSIX fallback for test hosts. */
-    {
-        long limit = sysconf(_SC_OPEN_MAX);
-        int fd;
-        if (limit < 3 || limit > 65536)
-            limit = 65536;
-        for (fd = 3; fd < limit; ++fd)
-            if (fd != keep_fd)
-                close(fd);
-    }
-}
-static int start_kernel_log_stream(int fd,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){sigset_t blocked,previous;pid_t pid;int i,slot=-1;(void)http_listener;(void)https_listener;(void)relay_listener;(void)clients;(void)max;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;for(i=0;i<LE_MAX_KERNEL_LOG_WORKERS;i++)if(kernel_log_pids[i]<=0){slot=i;break;}if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close_kernel_log_inherited(fd);(void)stream_kernel_log(fd);_exit(0);}kernel_log_pids[slot]=pid;kernel_log_workers++;sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
-static int start_pcm_stream(int fd,int selected_channel){pid_t pid=fork();if(pid<0)return-1;if(pid==0){close_kernel_log_inherited(fd);(void)stream_microphone(fd,selected_channel);_exit(0);}close(fd);return 0;}
+static int start_kernel_log_stream(int fd,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){sigset_t blocked,previous;pid_t pid;int i,slot=-1;(void)http_listener;(void)https_listener;(void)relay_listener;(void)clients;(void)max;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;for(i=0;i<LE_MAX_KERNEL_LOG_WORKERS;i++)if(kernel_log_pids[i]<=0){slot=i;break;}if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);le_close_inherited_fds(fd);(void)stream_kernel_log(fd);_exit(0);}kernel_log_pids[slot]=pid;kernel_log_workers++;sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
+static int start_pcm_stream(int fd,int selected_channel){pid_t pid=fork();if(pid<0)return-1;if(pid==0){le_close_inherited_fds(fd);(void)stream_microphone(fd,selected_channel);_exit(0);}close(fd);return 0;}
 static int write_all_file(int fd,const void*body,size_t n){const char*p=body;while(n){ssize_t w=write(fd,p,n);if(w<=0)return-1;p+=w;n-=(size_t)w;}return 0;}
 static void update_error(int fd,int status,const char*code,const char*message){char body[512];int n=snprintf(body,sizeof(body),"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",code,message);response(fd,status,"application/json",body,(size_t)n);}
 /* libreecho-update reports why it refused a package by printing ERROR:<token>
@@ -142,7 +110,7 @@ static int start_update_upload(int fd,const char*initial,size_t initial_len,size
 static const char *update_fetch_path(void){const char *p=getenv("LIBREECHO_UPDATE_FETCH");return p&&*p?p:"/usr/local/sbin/libreecho-update-fetch";}
 static int run_update_fetch(int fd,const char*action){char success[160];int status,n,channel_action=!strncmp(action,"set-channel-",12);pid_t child=fork();if(child<0){update_error(fd,503,"io_error","The update command could not start");close(fd);return 0;}if(child==0){const char *helper=update_fetch_path();execl(helper,helper,action,(char*)0);_exit(127);}if(waitpid(child,&status,0)<0||!WIFEXITED(status)||WEXITSTATUS(status)!=0){if(channel_action)update_error(fd,503,"io_error","The update channel could not be saved");else update_error(fd,!strcmp(action,"check")?503:400,!strcmp(action,"check")?"update_check_failed":"update_rejected",!strcmp(action,"check")?"The GitHub release check failed":"The signed update failed verification or installation");close(fd);return 0;}if(channel_action){n=snprintf(success,sizeof(success),"{\"ok\":true,\"data\":{\"channel\":\"%s\"},\"error\":null}",action+12);}else{n=snprintf(success,sizeof(success),"{\"ok\":true,\"data\":{\"checked\":%s,\"installed\":%s,\"state\":\"%s\"},\"error\":null}",!strcmp(action,"check")?"true":"false",!strcmp(action,"install")?"true":"false",!strcmp(action,"check")?"checked":"reboot-pending");}response(fd,200,"application/json",success,(size_t)n);close(fd);return 0;}
 static int start_update_fetch(int fd,const char*action){pid_t pid=fork();if(pid<0)return-1;if(pid==0){(void)run_update_fetch(fd,action);_exit(0);}close(fd);return 0;}
-static int start_api_worker(int fd,struct api_context*api,const struct api_request*q){sigset_t blocked,previous;pid_t pid;int i,slot=-1;struct api_response r;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]<=0){slot=i;break;}if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close_kernel_log_inherited(fd);memset(&r,0,sizeof(r));api_handle(api,q,&r);response(fd,r.status,r.type,r.body,r.length);close(fd);_exit(0);}assistant_pids[slot]=pid;assistant_workers++;sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
+static int start_api_worker(int fd,struct api_context*api,const struct api_request*q){sigset_t blocked,previous;pid_t pid;int i,slot=-1;struct api_response r;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]<=0){slot=i;break;}if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);le_close_inherited_fds(fd);memset(&r,0,sizeof(r));api_handle(api,q,&r);response(fd,r.status,r.type,r.body,r.length);close(fd);_exit(0);}assistant_pids[slot]=pid;assistant_workers++;sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
 static char*header(char*s,const char*name){size_t n=strlen(name);
 char*p=strstr(s,"\r\n");
 while(p&&p[2]&&p[2]!='\r'){p+=2;

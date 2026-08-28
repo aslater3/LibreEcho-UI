@@ -10,16 +10,17 @@ main = Path("src/main.c").read_text(encoding="utf-8")
 openapi = json.loads(Path("web/openapi.json").read_text(encoding="utf-8"))
 docs = Path("docs/API.md").read_text(encoding="utf-8")
 
-assert "close_kernel_log_inherited(fd);" in http
-assert http.count("close_kernel_log_inherited(fd);") >= 3
+assert '#include "inherited_fds.h"' in http
+assert http.count("le_close_inherited_fds(fd);") >= 3
 assert "start_api_worker(c->fd,api,&q)" in http
 assert "start_pcm_stream(c->fd,selected_channel)" in http
-assert "opendir(\"/proc/self/fd\")" in http
-assert "inherited != keep_fd" in http
+assert "opendir(\"/proc/self/fd\")" in Path("src/inherited_fds.c").read_text(encoding="utf-8")
+assert "inherited != keep_fd" in Path("src/inherited_fds.c").read_text(encoding="utf-8")
 assert "relay_ls=socket(AF_INET,SOCK_STREAM,0)" in http
 assert "c[i].secure_transport=1" in http
 assert "q.https=c->secure_transport;" in http
 assert "make build/test-auth-transport" in runner
+assert "make build/test-inherited-fds" in runner
 assert "make build/test-radiod-json" in runner
 assert "connect-src 'self' https://geocoding-api.open-meteo.com" in http
 assert "json_escape" in Path("src/json.c").read_text(encoding="utf-8")
@@ -66,9 +67,10 @@ radio_apply = api[radio_apply_start:radio_apply_end]
 assert radio_apply.index("radio_save(c, staged, staged_count)") < radio_apply.index("memcpy(c->radio")
 assert "return LE_IO;" in radio_apply
 
-assert "close_kernel_log_inherited(fd);" in http
-assert "opendir(\"/proc/self/fd\")" in http
-assert "inherited != keep_fd" in http
+assert '#include "inherited_fds.h"' in http
+assert http.count("le_close_inherited_fds(fd);") >= 3
+assert "opendir(\"/proc/self/fd\")" in Path("src/inherited_fds.c").read_text(encoding="utf-8")
+assert "inherited != keep_fd" in Path("src/inherited_fds.c").read_text(encoding="utf-8")
 assert "target_end-target_start-1" in http
 
 assert "LE_USB_ESCAPED_MAX" in api

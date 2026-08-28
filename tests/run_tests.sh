@@ -12,6 +12,8 @@ make build/test-auth-sessions
 ./build/test-auth-sessions
 make build/test-auth-transport
 ./build/test-auth-transport
+make build/test-inherited-fds
+./build/test-inherited-fds
 python3 tests/test_pr141_review_contract.py
 sh tests/test_pr137_review_contract.sh
 sh tests/test_pr139_review_contract.sh

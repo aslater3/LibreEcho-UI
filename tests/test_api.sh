@@ -24,6 +24,8 @@ code=$(curl -sS -o /tmp/le-history-method.out -w '%{http_code}' -X POST "$URL/ap
 clear_code=$(curl -fsS -o /tmp/le-history-clear.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history/clear" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$clear_code" = 200 ]
 curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and .data.history_generation == 2 and (.data.turns | length == 0)' >/dev/null
+code=$(curl -sS -o /tmp/le-usb-nul.out -w '%{http_code}' "$URL/api/v1/storage/usb?path=Music%00/Other")
+[ "$code" = 400 ]
 curl -sS -X POST "$URL/api/v1/assistant/respond" -H "$CSRF" -H 'Content-Type: application/json' --data '{"text":"slow test"}' >/tmp/le-assistant-respond.out &
 respond_pid=$!
 timeout 1 curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and (.data.turns | length == 0)' >/dev/null
