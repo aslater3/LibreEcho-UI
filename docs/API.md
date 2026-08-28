@@ -501,14 +501,14 @@ Returns the newest bounded turn records measured by `agentd` itself:
 }
 ```
 
-The ring retains up to 12 newest turns in `agentd` memory and is empty after
-that daemon restarts. `history_generation` is persisted on the device and
-increments on every device-wide clear; clients must discard cached rows when
-the generation changes, but may preserve them when an empty response has the
-same generation (for example after an agentd restart). Clients should keep
-their last non-empty cached result when a successful response contains no
-turns. `at_ms` is Unix epoch milliseconds; latency fields are device-local
-durations. Other verbs return 405.
+The ring retains up to 12 newest turns and is persisted by `agentd`, so records
+are restored after that daemon restarts. `history_generation` is persisted on
+the device and increments on every device-wide clear; clients must discard
+cached rows when the generation changes, but may preserve them when an empty
+response has the same generation. Clients should keep their last non-empty
+cached result when a successful response contains no turns. `at_ms` is Unix
+epoch milliseconds; latency fields are device-local durations. Other verbs
+return 405.
 
 #### POST /api/v1/assistant/history/clear
 

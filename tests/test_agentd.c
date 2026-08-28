@@ -50,6 +50,8 @@ int main(void)
     char directory[] = "/tmp/libreecho-agentd-test-XXXXXX";
     char socket_path[256];
     char config_path[256];
+    char history_path[384];
+    char history_backup_path[400];
     char credentials_path[256];
     char capture_path[256];
     char audio_socket[256];
@@ -73,6 +75,10 @@ int main(void)
     CHECK(mkdtemp(directory) != NULL);
     snprintf(socket_path, sizeof(socket_path), "%s/agent.sock", directory);
     snprintf(config_path, sizeof(config_path), "%s/agent.json", directory);
+    snprintf(history_path, sizeof(history_path),
+             "%s.history-generation", config_path);
+    snprintf(history_backup_path, sizeof(history_backup_path),
+             "%s.bak", history_path);
     snprintf(credentials_path, sizeof(credentials_path),
              "%s/oauth.json", directory);
     snprintf(capture_path, sizeof(capture_path), "%s/curl.conf", directory);
@@ -213,6 +219,39 @@ int main(void)
     CHECK(strstr(response, "\"last_stt_total_ms\":") != NULL);
     CHECK(strstr(response, "\"latency_target_met\":true") != NULL);
     CHECK(strstr(response, "\"latency_violations\":0") != NULL);
+    CHECK(call(socket_path, "history", NULL,
+               response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"turns\":[]") == NULL);
+    CHECK(strstr(response, "\"stt_total_ms\":") != NULL);
+    CHECK(stat(history_path, &status) == 0);
+    CHECK((status.st_mode & 0777) == 0600);
+    kill(child, SIGTERM);
+    CHECK(waitpid(child, NULL, 0) == child);
+    child = -1;
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        execl("./build/libreecho-agentd", "./build/libreecho-agentd",
+              "--socket", socket_path,
+              "--config", config_path,
+              "--credentials", credentials_path,
+              "--curl", "./build/mock-llm-curl",
+              "--audio-socket", audio_socket,
+              "--tts-socket", audio_socket,
+              "--tts-first-pcm-file", first_pcm_path,
+              "--wake-socket", wake_socket,
+              "--stt-socket", stt_socket,
+              (char *)NULL);
+        _exit(127);
+    }
+    for (i = 0; i < 300 && access(socket_path, F_OK) != 0; ++i)
+        nanosleep(&delay, NULL);
+    CHECK(access(socket_path, F_OK) == 0);
+    CHECK(call(socket_path, "history", NULL,
+               response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"turns\":[]") == NULL);
+    CHECK(strstr(response, "\"stt_total_ms\":") != NULL);
+    puts("agentd: bounded turn history survives restart: ok");
     CHECK(call(
               socket_path, "configure",
               "{\"provider\":\"openai-compatible\",\"enabled\":true,"
@@ -287,6 +326,8 @@ cleanup:
     }
     unlink(socket_path);
     unlink(config_path);
+    unlink(history_path);
+    unlink(history_backup_path);
     unlink(credentials_path);
     unlink(capture_path);
     unlink(audio_socket);

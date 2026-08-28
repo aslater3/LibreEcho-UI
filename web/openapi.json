@@ -159,7 +159,7 @@
      "Assistant"
     ],
     "summary": "Read the bounded device-side voice turn history",
-    "description": "Returns up to 12 newest device-measured turns plus a persisted history_generation. The history ring is held in agentd memory and is empty after an agentd restart; clients should discard cached rows when history_generation changes, but may preserve them when an empty response has the same generation.",
+    "description": "Returns up to 12 newest device-measured turns plus a persisted history_generation. The history ring is persisted by agentd and restored after restart; clients should discard cached rows when history_generation changes, but may preserve them when an empty response has the same generation.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -2841,8 +2841,8 @@
         "hostname": {"type": "string", "maxLength": 63},
         "ssh": {"type": "boolean"},
         "api_lan": {"type": "boolean"},
-        "wifi_mac": {"type": "string", "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"},
-        "bt_mac": {"type": "string", "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"}
+        "wifi_mac": {"type": "string", "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"},
+        "bt_mac": {"type": "string", "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"}
        },
        "additionalProperties": false
       }

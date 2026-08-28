@@ -58,16 +58,29 @@ static void apply_saved_mac_overrides(struct api_context *api)
     char *set[] = { (char *)"ip", (char *)"link", (char *)"set", (char *)"dev", (char *)"wlan0", (char *)"address", api->mac_wifi, NULL };
     char *up[] = { (char *)"ip", (char *)"link", (char *)"set", (char *)"dev", (char *)"wlan0", (char *)"up", NULL };
     char *bt[] = { (char *)"btmgmt", (char *)"--timeout", (char *)"5", (char *)"--index", (char *)"0", (char *)"public-addr", api->mac_bt, NULL };
-    int rc;
+    int rc, down_rc, address_rc, up_rc;
     if (strcmp(le_backend_mode(api->backend), "linux"))
         return;
     if (api->mac_wifi[0]) {
-        rc = run_first_program(ip_paths, down);
-        if (!rc) rc = run_first_program(ip_paths, set);
-        if (!rc) rc = run_first_program(ip_paths, up);
-        api_log(api, rc ? "warning" : "info", rc ?
-                "Saved Wi-Fi MAC could not be applied at boot" :
-                "Saved Wi-Fi MAC applied at boot");
+        down_rc = run_first_program(ip_paths, down);
+        address_rc = 0;
+        up_rc = 0;
+        if (!down_rc) {
+            address_rc = run_first_program(ip_paths, set);
+            up_rc = run_first_program(ip_paths, up);
+        }
+        if (down_rc)
+            api_log(api, "warning",
+                    "Wi-Fi interface could not be taken down for MAC restore");
+        if (address_rc)
+            api_log(api, "warning",
+                    "Saved Wi-Fi MAC address could not be applied at boot");
+        if (up_rc)
+            api_log(api, "warning",
+                    "Wi-Fi interface could not be brought up after MAC restore");
+        rc = down_rc ? down_rc : address_rc ? address_rc : up_rc;
+        if (!rc)
+            api_log(api, "info", "Saved Wi-Fi MAC applied at boot");
     }
     if (api->mac_bt[0]) {
         rc = run_first_program(bt_paths, bt);
