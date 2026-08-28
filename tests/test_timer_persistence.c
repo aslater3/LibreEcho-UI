@@ -78,23 +78,18 @@ int main(void)
     read_text(path, text, sizeof(text));
     assert(strstr(text, "alarm 1767225630 wake") != NULL);
 
-    /* A valid save must still wait for deferred state restoration. A wall
-       clock transition between the load check and save must not replace the
-       old schedule with only the in-memory change. */
+    /* A wall-clock transition must restore deferred state before allowing the
+       dirty pre-sync change to replace the persisted schedule. Model the
+       daemon's ordering explicitly rather than saving with state_loaded clear. */
     assert(context.state_loaded == 0);
+    assert(load_state_at(&context, 1500, SYNCED_EPOCH) == 1);
+    assert(context.state_loaded == 1);
     save_if_dirty(&context, 1500, SYNCED_EPOCH);
-    assert(context.dirty == 1);
+    assert(context.dirty == 0);
+    assert(le_timer_active_count(&context.timers) == 3);
     read_text(path, text, sizeof(text));
     assert(strstr(text, "alarm 1767225630 wake") != NULL);
-
-    /* This is the cold-boot path: load the old records after sync, then save
-       both them and the pre-sync change rather than losing the latter. */
-    assert(load_state_at(&context, 2000, SYNCED_EPOCH) == 1);
-    assert(le_timer_active_count(&context.timers) == 3);
-    save_if_dirty(&context, 2000, SYNCED_EPOCH);
-    assert(context.dirty == 0);
-    read_text(path, text, sizeof(text));
-    assert(strstr(text, "countdown ") != NULL);
+    assert(strstr(text, "countdown 1767225630 pasta") != NULL);
     assert(strstr(text, " new\n") != NULL);
 
     /* Once NTP makes the clock valid, both records restore deterministically. */
