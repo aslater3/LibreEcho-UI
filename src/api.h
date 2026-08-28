@@ -27,7 +27,7 @@ char radio_last_word[32];char logs[LE_MAX_LOGS][256];size_t log_count,log_next;}
 int api_bootstrap_required(const struct api_context*);
 void api_set_https_active(struct api_context*,int);
 int api_init(struct api_context*,struct le_backend*,int,int,const char*,const char*,const char*,const char*,const char*);int api_apply_persisted_configuration(struct api_context*,char*,size_t);int api_persist_configuration(struct api_context*);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
-int api_baby_monitor_stream_authorize(struct api_context*,const struct api_request*,struct api_response*,int*,int*,int*,int*,int*);
+int api_diagnostics_kernel_authorize(struct api_context*,const struct api_request*,struct api_response*);int api_baby_monitor_stream_authorize(struct api_context*,const struct api_request*,struct api_response*,int*,int*,int*,int*,int*);
 size_t le_update_max_upload_bytes(void);
 int api_update_upload_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_update_fetch_authorize(struct api_context*,const struct api_request*,struct api_response*);

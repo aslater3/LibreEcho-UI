@@ -1207,6 +1207,15 @@ log therefore becomes unreadable over USB at precisely the moment it matters,
 such as when checking whether an attached drive enumerated. Reading it over the
 network closes that gap.
 
+#### GET /api/v1/diagnostics/kernel.log
+
+Streams the complete output of `dmesg` as an attachment. The response is
+`text/plain; charset=utf-8` with `Content-Disposition:
+attachment; filename="libreecho-kernel.log"` and chunked transfer encoding; it is
+not wrapped in the JSON response envelope. If kernel-log access is unavailable,
+it returns HTTP 503 with the standard JSON error envelope before sending any
+success headers. The server allows at most four concurrent kernel-log workers.
+
 #### POST /api/v1/diagnostics/export
 
 Create and return a bounded structured diagnostic bundle for attachment to a
@@ -1259,8 +1268,6 @@ action downloads this response as JSON and offers its short `summary` for
 copying into an issue template. No server-side temporary file is created.
 
 ### Wake Word
-
-#### GET /api/v1/wake-word
 
 Returns wake word state. When the wake-word service is absent, this remains a
 successful `200` response with `data.available: false` and
