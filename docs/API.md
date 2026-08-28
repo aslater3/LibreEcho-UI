@@ -1182,7 +1182,8 @@ true}`. In device mode the kernel enumerates no disk and this answers
 
 The mount is read-only (`MS_RDONLY|MS_NOSUID|MS_NODEV`) and nothing in this
 endpoint writes to the drive. Bounded like the rest of the API: the first disk,
-its first partition, and at most 64 top-level entries.
+its first partition, and at most 64 top-level entries. Invalid paths return
+`400`; methods other than `GET` return `405`.
 
 #### POST /api/v1/storage/usb/play
 
@@ -1199,6 +1200,7 @@ or `..`, contains a backslash, or starts with a slash. Ordinary names such as
 an `.mp3` extension. Other formats return `415` because this image has no AAC
 decoder. The response is an ordinary success envelope; the shared radio stop
 operation (`POST /api/v1/integrations/radio/stop`) also stops USB playback.
+Methods other than `POST` return `405`.
 
 #### GET /api/v1/diagnostics/kernel
 

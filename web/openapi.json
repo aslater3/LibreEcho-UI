@@ -1339,6 +1339,12 @@
      "200": {
       "$ref": "#/components/responses/Success"
      },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
      "503": {
       "$ref": "#/components/responses/Error"
      }
@@ -1383,7 +1389,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "description": "File path relative to the USB drive root; it must name an existing regular `.mp3` file and must not contain `..`, a backslash or a leading slash."
+          "description": "File path relative to the USB drive root; it must name an existing regular `.mp3` file. Path components `.` and `..`, backslashes and leading slashes are rejected; names containing consecutive dots are valid."
          }
         },
         "additionalProperties": false
@@ -1396,6 +1402,9 @@
       "$ref": "#/components/responses/Success"
      },
      "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
       "$ref": "#/components/responses/Error"
      },
      "404": {
