@@ -232,8 +232,13 @@ void json_escape(char *out, size_t z, const char *in)
        characters must be escaped, not dropped: silently deleting newlines
        turned a multi-line log into one unreadable line, and passing a raw
        newline through would have produced invalid JSON. */
-    while (*in && n + 6 < z) {
-        unsigned char c = (unsigned char)*in++;
+    /* Check the width of the current escape rather than reserving six bytes
+       for every input character; quotes and named controls need only two. */
+    while (*in) {
+        unsigned char c = (unsigned char)*in;
+        size_t width = (c == 34 || c == 92 || c == 10 || c == 13 || c == 9) ? 2 : (c < 32 ? 6 : 1);
+        if (n + width + 1 > z) break;
+        in++;
         if (c == '"' || c == '\\') { out[n++] = '\\'; out[n++] = (char)c; }
         else if (c == '\n') { out[n++] = '\\'; out[n++] = 'n'; }
         else if (c == '\r') { out[n++] = '\\'; out[n++] = 'r'; }
