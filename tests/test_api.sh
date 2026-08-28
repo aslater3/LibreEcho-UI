@@ -9,7 +9,18 @@ expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
-expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
+setup_state=$(curl -fsS "$URL/api/v1/setup")
+expect "$setup_state" '"completed":false'
+printf '%s' "$setup_state" | jq -e \
+    '.data.vendor_firmware.state == "not-applicable" and
+     .data.vendor_firmware.verification == "not-applicable" and
+     .data.vendor_firmware.force_next_boot == false and
+     .data.wlan0_registered == true' >/dev/null
+code=$(curl -sS -o /tmp/le-force-vendor-import.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/setup/vendor-import-force-next-boot" \
+    -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"confirm":"force-unverified-owner-local-import"}')
+[ "$code" = 501 ]
 expect "$(curl -fsS "$URL/")" 'First-boot setup'
 code=$(curl -sS -o /tmp/le-bad-setup.out -w '%{http_code}' -X POST "$URL/api/v1/setup" -H "$CSRF" -H 'Content-Type: application/json' --data '{"hostname":"bad host"}')
 [ "$code" = 400 ]

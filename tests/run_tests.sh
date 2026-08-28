@@ -61,6 +61,7 @@ sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
 sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
+sh tests/test_setup_connectivity_contract.sh
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 sh tests/test_airplay_led_bridge.sh
@@ -172,7 +173,21 @@ last_sync_epoch=1700000000
 config_source=image
 servers=time.cloudflare.com,time.nist.gov
 EOF
+cat >./build/test-vendor-import.status <<'EOF'
+state=ready
+verification=hash-pinned
+source_partition=system_a
+source_layout=etc/firmware
+force_requested=0
+error=none
+EOF
+mkdir -p ./build/test-vendor-config
+rm -f ./build/test-vendor-config/vendor-import-force-next-boot
+: >./build/test-wlan0
 LIBREECHO_TIME_STATUS=./build/test-time.status \
+LIBREECHO_VENDOR_STATUS_PATH=./build/test-vendor-import.status \
+LIBREECHO_VENDOR_FORCE_MARKER=./build/test-vendor-config/vendor-import-force-next-boot \
+LIBREECHO_WLAN0_PATH=./build/test-wlan0 \
 ./build/libreecho-web --backend linux --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" >./build/test-linux.log 2>&1 &
 pid=$!
 sleep 1
@@ -183,6 +198,22 @@ code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/confi
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export_linux.sh
+curl -fsS "$URL/api/v1/setup" | jq -e \
+    '.data.vendor_firmware.state == "ready" and
+     .data.vendor_firmware.verification == "hash-pinned" and
+     .data.vendor_firmware.source_layout == "etc/firmware" and
+     .data.vendor_firmware.force_next_boot == false and
+     .data.wlan0_registered == true' >/dev/null
+CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
+curl -fsS -X POST "$URL/api/v1/setup/vendor-import-force-next-boot" \
+    -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"confirm":"force-unverified-owner-local-import"}' | jq -e \
+    '.ok and .data.force_next_boot == true and
+     .data.verification == "forced-unverified" and
+     .data.reboot_required == true' >/dev/null
+[ "$(cat ./build/test-vendor-config/vendor-import-force-next-boot)" = \
+  "force-unverified-owner-local-import-v1" ]
+[ "$(stat -c '%a' ./build/test-vendor-config/vendor-import-force-next-boot)" = 600 ]
 curl -fsS "$URL/api/v1/system" | jq -e \
     '.ok and .data.ntp == true and .data.ntp_state == "synchronized" and
      .data.clock_source == "ntp" and .data.rtc_available == true and

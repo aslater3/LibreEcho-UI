@@ -93,6 +93,10 @@ libreecho-web --backend linux \
 **Key responsibilities:**
 - Serve static files (HTML/CSS/JS) from `--web-root`
 - Route `/api/v1/*` requests to backend
+- Report boot-time owner-local firmware import state and live `wlan0`
+  registration during setup
+- Schedule the explicitly confirmed, one-shot, unverified vendor-import retry
+  marker without rebooting the device
 - Manage central config (`/etc/libreecho/config.json`)
 - Coordinate with companion daemons via adapter protocol
 - Log to central logd
@@ -398,6 +402,7 @@ Browser: displays scan results
 └── led-state.json           # Per-boot LED daemon working state
 
 /run/libreecho/
+├── vendor-import.status       # Platform-owned boot import result (0600)
 ├── network.sock             # networkd adapter socket
 ├── audio.sock               # audiod adapter socket
 ├── wakeword.sock            # wake events and indexed post-AEC PCM
@@ -425,6 +430,13 @@ Browser: displays scan results
 ├── js/app.js
 └── openapi.json
 ```
+
+The setup API reads `/run/libreecho/vendor-import.status` with `O_NOFOLLOW`
+and checks `/sys/class/net/wlan0` independently. A `ready` import is therefore
+not presented as usable Wi-Fi unless the kernel interface is registered. The
+CSRF-protected compatibility action atomically writes the exact one-shot marker
+`/data/libreecho/config/vendor-import-force-next-boot`; Platform consumes it on
+the next boot and labels that import `forced-unverified`.
 
 ## Process Dependencies
 
