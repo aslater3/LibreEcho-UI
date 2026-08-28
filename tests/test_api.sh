@@ -6,6 +6,13 @@ OS_VERSION=$(tr -d '\r\n' < VERSION)
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exit 1; }; }
 expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
+curl -fsS "$URL/api/v1/status" | jq -e '.ok and (.data.light_lux | type == "number")' >/dev/null
+code=$(curl -sS -o /tmp/le-light-post.out -w '%{http_code}' -X POST "$URL/api/v1/light" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-light-head.out -w '%{http_code}' -I "$URL/api/v1/light")
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-light-get.out -w '%{http_code}' "$URL/api/v1/light")
+[ "$code" = 501 ]
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
 curl -fsS "$URL/api/v1/config" | jq -e --arg version "LibreEcho OS $OS_VERSION" '.ok and .data.os_version == $version' >/dev/null
@@ -46,6 +53,17 @@ curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0
 expect "$(curl -fsS "$URL/swagger.html")" 'API reference · LibreEcho'
 expect "$(curl -fsS "$URL/js/swagger.js")" 'executeOperation'
 expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
+spotify=$(curl -fsS "$URL/api/v1/spotify")
+printf '%s' "$spotify" | jq -e '.ok and .data.installed == true and .data.enabled == false and .data.playing == false and .data.device_name == "LibreEcho (mock)" and .data.status == "stopped"' >/dev/null
+code=$(curl -sS -o /tmp/le-spotify-head.out -w '%{http_code}' -I "$URL/api/v1/spotify")
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-spotify-method.out -w '%{http_code}' -X POST "$URL/api/v1/spotify" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+spotify_name='LibreEcho "Test" \\ Speaker'
+spotify_name_payload=$(jq -cn --arg value "$spotify_name" '{action:"set-spotify-device-name",value:$value}')
+curl -fsS -X POST "$URL/api/v1/dev/mock" -H "$CSRF" -H 'Content-Type: application/json' --data "$spotify_name_payload" | jq -e '.ok' >/dev/null
+curl -fsS "$URL/api/v1/spotify" | jq -e --arg name "$spotify_name" '.ok and .data.device_name == $name' >/dev/null
+curl -fsS -X POST "$URL/api/v1/dev/mock" -H "$CSRF" -H 'Content-Type: application/json' --data '{"action":"set-spotify-device-name","value":"LibreEcho (mock)"}' >/dev/null
 curl -fsS "$URL/api/v1/playback" | jq -e \
     '.ok and .data.state == "playing" and
      .data.source == "airplay2" and .data.buses.media == true and

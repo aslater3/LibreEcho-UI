@@ -11,6 +11,14 @@ struct le_backend_ops {
  int (*airplay)(struct le_backend*,struct le_airplay_state*); int (*airplay_set)(struct le_backend*,int);
  int (*playback)(struct le_backend*,struct le_playback_state*);
  int (*reboot)(struct le_backend*); int (*shutdown)(struct le_backend*); int (*reset)(struct le_backend*); int (*tick)(struct le_backend*); int (*control)(struct le_backend*,const char*,const char*);
+ /* Spotify Connect. Appended last: the backends fill this struct
+    positionally, so anything inserted above silently shifts every op
+    after it. Null here reports the feature unsupported. */
+ int (*spotify)(struct le_backend*,struct le_spotify_state*);
+ int (*spotify_set)(struct le_backend*,int);
+ /* Ambient light detail. Appended after existing operations to preserve positional backends. */
+ int (*light)(struct le_backend*,struct le_light_state*);
+
  /* Play one bundled sound by name, for previewing the action-button
     rotation. Appended last on purpose: the backends initialise this
     struct positionally, so anything added in the middle would silently

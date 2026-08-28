@@ -58,11 +58,44 @@ that refused the package; the field is omitted when the helper emits no `ERROR:`
 token. `manifest_update_channel_mismatch` also receives a channel-specific human
 message.
 
+### Device telemetry
+
+#### GET /api/v1/light
+
+Returns ambient-light telemetry from the TSL2540 vendor driver. `available` is
+false when no usable sensor is present; `lux` and `calibrated_lux` may be `0`
+for a dark room. `bus` reports the actual detected I²C device, such as
+`i2c 0-0039` or `i2c 1-0039`. Unsupported methods, including `HEAD`, return
+`405`; a backend without this sensor returns `501`.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "available": true,
+    "lux": 95,
+    "calibrated_lux": 95,
+    "visible": 93,
+    "infrared": 190,
+    "gain": 64,
+    "integration_us": 346368,
+    "auto_gain": false,
+    "powered": true,
+    "driver": "tsl2540",
+    "bus": "i2c 0-0039"
+  },
+  "error": null
+}
+```
+
 ### System Status
 
 #### GET /api/v1/status
 
-Returns system health and telemetry.
+Returns system health and telemetry. `light_lux` is the current ambient-light
+reading in lux, or `-1` when no usable sensor is present; `0` is a valid dark-room
+reading.
 
 **Response:**
 ```json
@@ -88,6 +121,7 @@ Returns system health and telemetry.
     "storage_available": true,
     "storage_state": "filesystem",
     "temperature_c": 42,
+    "light_lux": 95,
     "device_state": "online"
   },
   "error": null
@@ -394,13 +428,17 @@ accepts or falls back to an OpenAI API key.
 #### GET /api/v1/voice-pipeline
 
 Returns speech-pipeline configuration and endpoint health. The response also
-includes the persisted `listening` object:
+includes the persisted `listening` object and the latest bounded restart state:
 
 ```json
 {
   "max_utterance_ms": 6000,
   "end_silence_ms": 1500,
-  "vad_floor_rms": 45
+  "vad_floor_rms": 45,
+  "restart": {
+    "state": "ready",
+    "error": ""
+  }
 }
 ```
 
@@ -425,6 +463,14 @@ are writable here and are validated before any setting is committed:
 
 Malformed or out-of-range listening fields return HTTP 400 and leave the
 previous configuration unchanged. The request requires `X-LibreEcho-CSRF`.
+
+When the image has voice-daemon init scripts, activation runs as one bounded
+restart job without blocking the HTTP loop. The accepted response is `202` and
+contains `restart.state: "pending"`; a second update while it is pending gets
+`409`. Poll this GET endpoint for completion. If the asynchronous restart fails,
+the state becomes `failed` and the next PUT reports `503` so the caller cannot
+mistake a persisted setting for a running pipeline. Home Assistant mode is
+rejected with `501` when its Wyoming service is not installed.
 
 #### GET /api/v1/assistant
 
@@ -1507,6 +1553,32 @@ Remote mode without a valid HTTPS destination is rejected with `400`. All
 mutations persist atomically using the existing `0600` configuration store.
 
 ### Integrations
+
+#### GET /api/v1/spotify
+
+Returns the current Spotify Connect status. This endpoint is read-only; `HEAD`
+and other unsupported methods return `405`.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "installed": true,
+    "enabled": false,
+    "playing": false,
+    "device_name": "LibreEcho (mock)",
+    "status": "stopped"
+  },
+  "error": null
+}
+```
+
+`installed` reports whether the Spotify Connect daemon is present in the image;
+it is separate from `enabled`. `status` is `unavailable` when the daemon is not
+installed, `stopped` when installed but disabled, `ready` when enabled, and
+`playing` during playback. `device_name` is the name shown by Spotify and is
+JSON-escaped, including when it contains quotes or backslashes.
 
 #### PUT /api/v1/integrations
 

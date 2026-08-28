@@ -226,11 +226,17 @@ async function integrationsPage() {
     api('/assistant').catch(error=>({unsupported:error.message})),
     api('/voice-pipeline').catch(()=>({mode:'local',stt:{},tts:{}}))
   ]);
+  /*
+   * integrationBlurb/integrationStatus come from app.js, which loads first.
+   * An integration the image was built without reports installed:false; it is
+   * listed so the absence is visible, but renders no toggle or save button --
+   * enabling it could only ever fail. The handler loop below skips those rows.
+   */
   const integrations=d.items.map(x=>collapsiblePanel(x.name,
-    `<p class="muted">${x.id==='rest'?'Versioned local device API.':'Optional local integration; no cloud connection required.'}</p>
-    ${toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
-    <div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${x.enabled?'Enabled':'Not configured'}</span></div>
-    ${saveButton('save-int-'+x.id)}`
+    `<p class="muted">${integrationBlurb(x)}</p>
+    ${x.installed===false?'':toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
+    <div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${integrationStatus(x)}</span></div>
+    ${x.installed===false?'':saveButton('save-int-'+x.id)}`
   )).join('');
 
   if(a.unsupported) {
@@ -255,7 +261,13 @@ async function integrationsPage() {
       toggleId:'use-local-provider',
       enabled:localEnabled,
       body:localAssistantBody(a,localSelected,pipeline),
-      open:localSelected
+      /*
+       * Collapsed even when this is the selected provider. Opening on
+       * selection meant the page arrived expanded on every load for anyone
+       * actually using it -- the same "stop expanding panels" complaint that
+       * closed Home location, the voice assistant and Internet radio.
+       */
+      open:false
     });
     const devicePanel=assistantProviderPanel({
       title:'On Device Voice Assistant',
@@ -266,7 +278,7 @@ async function integrationsPage() {
       toggleId:'use-device-provider',
       enabled:deviceEnabled,
       body:deviceAssistantBody(a,deviceSelected),
-      open:deviceSelected
+      open:false
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}</section>
@@ -338,7 +350,9 @@ async function integrationsPage() {
   }
 
   d.items.forEach(x=>{
+    const save=$('#save-int-'+x.id);
+    if(!save)return;                       /* not installed: nothing rendered to bind */
     bindDirty(['#int-'+x.id],'#save-int-'+x.id);
-    $('#save-int-'+x.id).onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
+    save.onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
   });
 }

@@ -336,6 +336,9 @@ async function main() {
      LLM, the voice assistant and Internet radio all opened themselves on load
      and the page arrived half-expanded. */
   assert.equal(await home.evaluate(el => el.open), false, 'the card starts collapsed');
+  const providerPanels = page.locator('.assistant-provider');
+  assert.equal(await providerPanels.count(), 2, 'both voice provider panels render');
+  assert.deepEqual(await providerPanels.evaluateAll(els => els.map(el => el.open)), [false, false], 'voice provider panels start collapsed');
   await home.locator('summary').click();
   assert.match(await home.innerText(), /Home address or place/);
   assert.match(await home.innerText(), /weather, local time and, in future, directions/);
@@ -348,10 +351,47 @@ async function main() {
   assert.deepEqual(
     await page.$$eval('.integration-grid > *', els => els.map(e => (e.querySelector('h3') || {}).textContent)),
     ['Voice Assistants', 'Home location & weather', 'Home Assistant', 'MQTT', 'Local REST API',
-     'Bluetooth audio', 'AirPlay 2', 'Internet radio'],
+     'Bluetooth audio', 'AirPlay 2', 'Spotify Connect', 'Internet radio'],
     'the home location card sits directly under Voice Assistants, not buried at the bottom'
   );
   pass('home location: retitled, expanded, labelled as an address, prefilled and dirty-tracked');
+
+  await page.route('**/api/v1/light', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ok: true, data: {
+      available: true, lux: 95, calibrated_lux: 95, visible: 93, infrared: 190,
+      gain: 64, integration_us: 346368, auto_gain: false, powered: true,
+      driver: 'tsl2540', bus: 'i2c 1-0039'
+    }, error: null })
+  }));
+  await page.goto('/device');
+  await waitForPage(page, 'Device');
+  assert.equal(await page.locator('.light-panel').count(), 1, 'ambient light panel renders');
+  assert.equal(await page.locator('.light-panel').evaluate(el => el.parentElement.classList.contains('settings-grid')), true, 'ambient light panel is a settings-grid item');
+  assert.doesNotMatch(await page.locator('.light-panel').evaluate(el => el.parentElement.className), /button-row/);
+  assert.match(await page.locator('.light-panel').innerText(), /i2c 1-0039/);
+  pass('device: ambient light panel is outside the power-button row and reports its bus');
+  await page.unroute('**/api/v1/light');
+
+  const telemetryPage = await context.newPage();
+  captureBrowserFailures(telemetryPage);
+  const lightValues = [95, 20000];
+  let lightStatusCalls = 0;
+  await telemetryPage.route('**/api/v1/status', async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    const call = lightStatusCalls++;
+    body.data.light_lux = lightValues[Math.min(call, lightValues.length - 1)];
+    if (call > 0) await new Promise(resolve => setTimeout(resolve, 5000));
+    await route.fulfill({ response, body: JSON.stringify(body) });
+  });
+  await telemetryPage.goto('/');
+  await waitForPage(telemetryPage, 'Overview');
+  await telemetryPage.waitForFunction(() => document.querySelector('.status-panel')?.innerText.includes('20000 lux · Daylight'), null, { timeout: 8000 });
+  assert.ok(lightStatusCalls >= 2, 'ambient light was fetched more than once');
+  pass('overview: ambient-light metric refreshes with polled status telemetry');
+  await telemetryPage.close();
 
 
   // ---- Simulation page: the response-time goal -----------------------------
