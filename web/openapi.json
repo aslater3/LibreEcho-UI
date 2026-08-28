@@ -1399,6 +1399,37 @@
     }
    }
   },
+  "/diagnostics/kernel.log": {
+   "get": {
+    "tags": [
+     "Diagnostics"
+    ],
+    "summary": "Download the complete kernel log",
+    "description": "Streams the complete dmesg output as a text/plain attachment using chunked transfer encoding. The response is raw log text rather than the JSON envelope. Kernel-log access failures return the standard JSON error envelope with HTTP 503 before any success headers are sent. At most four kernel-log workers run concurrently.",
+    "responses": {
+     "200": {
+      "description": "Raw kernel log attachment",
+      "headers": {
+       "Content-Disposition": {
+        "schema": {
+         "type": "string"
+        },
+        "description": "Attachment filename is libreecho-kernel.log"
+       }
+      },
+      "content": {
+       "text/plain": {}
+      }
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/diagnostics/export": {
    "post": {
     "tags": [
