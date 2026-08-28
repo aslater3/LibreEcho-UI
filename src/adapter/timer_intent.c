@@ -1,6 +1,7 @@
 #include "timer_intent.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -220,6 +221,30 @@ static long long parse_duration(const char *text, int *found)
     return total;
 }
 
+static int copy_label(char *out, size_t size, const char *start, size_t length)
+{
+    int written;
+
+    if (!out || !size || !start || length > (size_t)INT_MAX)
+        return 0;
+    while (length && start[length - 1] == ' ')
+        --length;
+    if (!length || length >= size)
+        return 0;
+    written = snprintf(out, size, "%.*s", (int)length, start);
+    if (written < 0 || (size_t)written >= size) {
+        out[0] = '\0';
+        return 0;
+    }
+    /* A duration is not a name: "ten minute" is when, not a label. */
+    if (strstr(out, "minute") || strstr(out, "hour") ||
+        strstr(out, "second")) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
 /*
  * The trailing "for X" of "set a timer for the pasta". Only taken when it is
  * not the duration, so "for ten minutes" never becomes a label.
@@ -242,20 +267,8 @@ static void extract_label(const char *text, char *out, size_t size)
            names the pasta and not the duration after it. */
         stop = strstr(hit, " for ");
         length = stop ? (size_t)(stop - hit) : strlen(hit);
-        while (length && hit[length - 1] == ' ')
-            --length;
-        if (!length || length >= size)
-            continue;
-        memcpy(out, hit, length);
-        out[length] = '\0';
-        /* A duration is not a name: "for the next ten minutes" is not a
-           label, it is when. */
-        if (strstr(out, "minute") || strstr(out, "hour") ||
-            strstr(out, "second")) {
-            out[0] = '\0';
-            continue;
-        }
-        return;
+        if (copy_label(out, size, hit, length))
+            return;
     }
 }
 
@@ -301,12 +314,7 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
         else
             start = marker + strlen(" for my ");
         length = strlen(start);
-        while (length && start[length - 1] == ' ')
-            --length;
-        if (length && length < size) {
-            memcpy(out, start, length);
-            out[length] = '\0';
-        }
+        (void)copy_label(out, size, start, length);
         return;
     }
 
@@ -329,12 +337,7 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
     else if (!strncmp(start, "an ", 3))
         start += 3;
     length = (size_t)(noun - start);
-    while (length && start[length - 1] == ' ')
-        --length;
-    if (length && length < size) {
-        memcpy(out, start, length);
-        out[length] = '\0';
-    }
+    (void)copy_label(out, size, start, length);
 }
 
 static int has_universal_timer_noun(const char *text)

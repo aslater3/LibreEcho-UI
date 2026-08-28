@@ -117,6 +117,22 @@ case "$out" in
 esac
 echo "  cancelling by voice removes the timer: ok"
 
+# A duration qualifier is not a timer identity. With one unlabeled timer,
+# cancellation must use the single-timer fallback rather than search for
+# a label such as "ten minute".
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the ten minute timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: duration-only cancellation was not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: duration-only cancellation left the timer scheduled: $out"; exit 1 ;;
+esac
+echo "  duration-only cancellation uses the single-timer fallback: ok"
+
 # Singular voice cancellation is label-targeted and must not clear siblings.
 call "$agent_sock" respond '{"text":"set a timer for ten minutes for the pasta"}' >/dev/null
 call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the tea"}' >/dev/null
