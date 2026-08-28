@@ -70,6 +70,7 @@ python3 tools/test_virtual_echo.py
 python3 tests/test_now_playing_ui_contract.py
 python3 tests/test_config_persist_contract.py
 python3 tests/test_web_ui_behaviour_contract.py
+node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
