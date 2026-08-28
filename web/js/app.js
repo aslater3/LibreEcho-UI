@@ -1095,9 +1095,19 @@ function bindActionSounds(){
   });
  };
  boxes().forEach(x=>x.onchange=()=>{positions();countLine();const b=$('#save-buttons');if(b)b.disabled=false});
- $$('#content .sound-try').forEach(x=>x.onclick=async()=>{
-  try{await post('/audio/sample',{name:x.dataset.try},'Playing '+x.dataset.try)}
-  catch(e){toast(e.message,true)}
+ $$('#content .sound-try').forEach(x=>x.onclick=async e=>{
+  /* Preview is deliberately not a generic post(): post() re-renders the
+     current page after success, which would replace the form with the last
+     saved values and discard unsaved sound choices. */
+  e.preventDefault();
+  e.stopPropagation();
+  if(state.busy)return;
+  setBusy(true);
+  try{
+   await api('/audio/sample',{method:'POST',body:JSON.stringify({name:x.dataset.try})});
+   toast('Playing '+x.dataset.try);
+  }catch(err){toast(err.message,true)}
+  finally{setBusy(false)}
  });
  countLine();
 }
