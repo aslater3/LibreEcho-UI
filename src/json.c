@@ -226,11 +226,23 @@ int json_get_string(const char *s, const char *k, char *out, size_t z)
 
 void json_escape(char *out, size_t z, const char *in)
 {
+    static const char hex[] = "0123456789abcdef";
     size_t n = 0;
-    while (*in && n + 2 < z) {
+    /* Reserve room for the longest single escape (\\uXXXX = 6 bytes). Control
+       characters must be escaped, not dropped: silently deleting newlines
+       turned a multi-line log into one unreadable line, and passing a raw
+       newline through would have produced invalid JSON. */
+    while (*in && n + 6 < z) {
         unsigned char c = (unsigned char)*in++;
         if (c == '"' || c == '\\') { out[n++] = '\\'; out[n++] = (char)c; }
+        else if (c == '\n') { out[n++] = '\\'; out[n++] = 'n'; }
+        else if (c == '\r') { out[n++] = '\\'; out[n++] = 'r'; }
+        else if (c == '\t') { out[n++] = '\\'; out[n++] = 't'; }
         else if (c >= 32) out[n++] = (char)c;
+        else {
+            out[n++] = '\\'; out[n++] = 'u'; out[n++] = '0'; out[n++] = '0';
+            out[n++] = hex[c >> 4]; out[n++] = hex[c & 15];
+        }
     }
     out[n] = 0;
 }
