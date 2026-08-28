@@ -7,6 +7,7 @@ rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
 python3 tests/test_github_link_contract.py
+python3 tests/test_about_supported_devices.py
 make build/test-auth-sessions
 ./build/test-auth-sessions
 sh tests/test_pr137_review_contract.sh
@@ -14,9 +15,10 @@ sh tests/test_pr139_review_contract.sh
 make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
 ./build/test-network-health
 ./build/test-gateway-probe
-make build/test-backend-linux-wifi-emission build/test-thermal-zone-selection
+make build/test-backend-linux-wifi-emission build/test-thermal-zone-selection build/test-light-sensor
 ./build/test-backend-linux-wifi-emission
 ./build/test-thermal-zone-selection
+./build/test-light-sensor
 ./build/test-bt-mgmt-events
 ./build/test-bt-pairing-events
 python3 tests/test_networkd_health_integration.py
@@ -46,12 +48,20 @@ make build/test-avdtp-wire-format
 sh tests/test_network_scan_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
-make build/test-audiod-review build/test-led-night-review
+make build/test-audiod-review build/test-led-night-review build/test-wake-led-profile
 ./build/test-audiod-review
 ./build/test-led-night-review
+./build/test-wake-led-profile
+sh tests/test_voice_listening_led_profile.sh
 sh tests/test_startup_animation.sh
-make build/test-buttond-timing
+make build/test-buttond-timing build/test-watchdog-policy
 ./build/test-buttond-timing
+./build/test-watchdog-policy
+make build/libreecho-watchdogd
+sh tests/test_watchdogd_recovery.sh
+python3 tests/test_watchdog_service_table.py
+python3 tests/test_install_completeness.py
+python3 tests/test_watchdog_build_contract.py
 make build/test-wake-decode
 ./build/test-wake-decode
 sh tests/test_buttond_contract.sh
@@ -69,6 +79,8 @@ python3 tools/test_virtual_echo.py
 python3 tests/test_now_playing_ui_contract.py
 python3 tests/test_config_persist_contract.py
 python3 tests/test_web_ui_behaviour_contract.py
+node tests/test_kernel_log_ui.js
+node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
@@ -84,6 +96,10 @@ sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
 sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
+sh tests/test_voice_pipeline_restart_contract.sh
+python3 tests/test_voice_latency_bench.py
+make build/test-voice-pipeline-restart
+./build/test-voice-pipeline-restart
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 make build/libreecho-radiod
@@ -198,6 +214,9 @@ curl -fsS "$URL/api/v1/privacy" | jq -e \
     '.data.local_only == false and .data.log_retention_hours == 168' >/dev/null
 curl -fsS "$URL/api/v1/integrations" | jq -e \
     '.data.items[] | select(.id == "home-assistant") | .enabled == true' \
+    >/dev/null
+curl -fsS "$URL/api/v1/spotify" | jq -e \
+    '.ok and .data.installed == true and .data.enabled == true and .data.status == "ready"' \
     >/dev/null
 curl -fsS "$URL/api/v1/config" | grep -q '"setup_completed":true'
 curl -fsS "$URL/" | grep -q 'LibreEcho Control Centre'

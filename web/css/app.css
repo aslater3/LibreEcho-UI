@@ -189,3 +189,12 @@ body.light{--bg:#edf3f6;--bg2:#f7fafc;--panel:#fff;--panel2:#f4f8fa;--line:#c8d5
 .sim-spec h4{margin:22px 0 2px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .sim-spec .integration-section-body>h4:first-child{margin-top:6px}
 .sim-spec code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.sound-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.sound-row{display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:12px;padding:10px 14px;border:1px solid #294052;border-radius:10px;background:#111f2b;cursor:pointer}
+.sound-row.on{border-color:#3f7fae;background:#132a3a}
+.sound-row input{margin:0}
+.sound-name{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+.sound-pos{color:var(--muted);font-size:12px;min-width:34px;text-align:right}
+.sound-row .sound-try{padding:4px 12px;font-size:12px}
+.light .sound-row{background:#f4f8fa;border-color:#c8d5dd}
+.light .sound-row.on{background:#e6f1f8;border-color:#7fb0d0}

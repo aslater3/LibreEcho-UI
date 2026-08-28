@@ -220,6 +220,63 @@ async function main() {
     check('a failing turn still propagates', threw);
     check('a failing turn still stops the radio', d.playing === false && posted(d, '/integrations/radio/stop'), d.calls);
 
+    /* ---- Action sound preview must preserve unsaved form state ---- */
+    const oldQuerySelector = document.querySelector;
+    const oldQuerySelectorAll = document.querySelectorAll;
+    const oldApi = globalThis.api;
+    const soundBox = {
+        checked: true,
+        dataset: { sound: 'action-1' },
+        addEventListener() {}
+    };
+    const soundTry = { dataset: { try: 'action-2' } };
+    const count = { textContent: '' };
+    const toast = {
+        textContent: '',
+        classList: { toggle() {}, add() {}, remove() {} }
+    };
+    let previewRequest;
+    document.querySelector = selector => {
+        if (selector === '#ab-count') return count;
+        if (selector === '#toast') return toast;
+        return stub();
+    };
+    document.querySelectorAll = selector => {
+        if (selector === '#content input[data-sound]') return [soundBox];
+        if (selector === '#content .sound-try') return [soundTry];
+        return [];
+    };
+    globalThis.api = async (path, options) => {
+        previewRequest = { path, options };
+        return { playing: true };
+    };
+    globalThis.bindActionSounds();
+    check('sound preview handler is bound', typeof soundTry.onclick === 'function',
+          typeof soundTry.onclick);
+    check('sound preview starts idle', state.busy === false, state.busy);
+    let prevented = false;
+    let stopped = false;
+    await soundTry.onclick({
+        preventDefault() { prevented = true; },
+        stopPropagation() { stopped = true; }
+    });
+    check('sound preview invokes the API', !!previewRequest, {
+        request: previewRequest,
+        toast: toast.textContent,
+        busy: state.busy
+    });
+    check('sound preview sends the selected sample',
+          previewRequest && previewRequest.path === '/audio/sample' &&
+          previewRequest.options.method === 'POST' &&
+          JSON.parse(previewRequest.options.body).name === 'action-2', previewRequest);
+    check('sound preview prevents label default handling', prevented && stopped);
+    check('sound preview preserves an unsaved checkbox', soundBox.checked === true,
+          soundBox.checked);
+    check('sound preview leaves the page busy state clear', state.busy === false, state.busy);
+    document.querySelector = oldQuerySelector;
+    document.querySelectorAll = oldQuerySelectorAll;
+    globalThis.api = oldApi;
+
     /* ---- System update: loaded image size against the daemon's cap ---- */
     const cap = { max_upload_bytes: 33554432, max_upload_ceiling_bytes: 33554432 };
     check('the cap is shown before a file is chosen',

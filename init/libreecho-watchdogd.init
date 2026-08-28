@@ -1,0 +1,67 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          libreecho-watchdogd
+# Required-Start:    $remote_fs
+# Required-Stop:     $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+### END INIT INFO
+
+[ -r /etc/default/libreecho-watchdogd ] && . /etc/default/libreecho-watchdogd
+
+DAEMON=${DAEMON:-/usr/local/sbin/libreecho-watchdogd}
+PIDFILE=${PIDFILE:-/var/run/libreecho-watchdogd.pid}
+LOGFILE=${LOGFILE:-/var/log/libreecho-watchdogd.log}
+
+# The supervised services are still starting when this one does, and a service
+# that has not finished starting is not a service that has failed. The delay is
+# handled inside the daemon rather than with a sleep here, so starting the
+# watchdog never holds up the rest of the boot.
+START_DELAY=${START_DELAY:-60}
+INTERVAL=${INTERVAL:-5}
+
+ARGS=${ARGS:---foreground --interval $INTERVAL --start-delay $START_DELAY}
+
+is_running() {
+    [ -s "$PIDFILE" ] || return 1
+    pid=$(sed -n '1p' "$PIDFILE")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+start_service() {
+    if is_running; then echo "libreecho-watchdogd already running"; return 0; fi
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")"
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS \
+            </dev/null >>"$LOGFILE" 2>&1
+    else
+        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+        echo $! >"$PIDFILE"
+    fi
+}
+
+stop_service() {
+    if is_running && command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
+    elif is_running; then
+        pid=$(sed -n '1p' "$PIDFILE")
+        kill "$pid" 2>/dev/null || true
+        count=0
+        while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 5 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+}
+
+case "$1" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart) stop_service; start_service ;;
+    status) is_running && echo "running" || { echo "stopped"; exit 3; } ;;
+    *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+esac
+exit 0
