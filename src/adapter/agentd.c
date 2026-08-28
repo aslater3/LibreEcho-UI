@@ -211,6 +211,10 @@ static const char *auth_state_name(enum auth_state state)
 
 static void build_turn_prompt(struct agent_state *state, char *out,
                               size_t size);
+static int save_history_state(const struct agent_state *state,
+                              unsigned long long generation,
+                              const struct turn_record *records,
+                              unsigned next, unsigned count);
 
 static void config_defaults(struct agent_config *config)
 {
@@ -423,6 +427,7 @@ static int play_sentence(void *context, const char *text)
                 if (!state->first_pcm_ms &&
                     marker_ms >= state->turn_started_ms) {
                     unsigned history_i;
+                    int history_updated = 0;
                     state->first_pcm_ms =
                         marker_ms - state->turn_started_ms;
                     if (state->first_pcm_ms > 3000)
@@ -438,9 +443,16 @@ static int play_sentence(void *context, const char *text)
                                     request_id)) {
                             state->turn_history[idx].first_pcm_ms =
                                 state->first_pcm_ms;
+                            history_updated = 1;
                             break;
                         }
                     }
+                    if (history_updated &&
+                        save_history_state(state, state->history_generation,
+                                           state->turn_history,
+                                           state->turn_history_next,
+                                           state->turn_history_count) != 0)
+                        le_log_warn("agentd: late turn history update could not be persisted");
                 }
                 pthread_mutex_unlock(&state->metrics_mutex);
             }

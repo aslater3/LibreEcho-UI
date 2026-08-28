@@ -64,7 +64,11 @@ for body in \
     '{"tones":"yes"}' \
     '{"action":"bogus"}' \
     '{"action_brightness":101}' \
-    '{"mute_brightness":-1}'; do
+    '{"mute_brightness":-1}' \
+    '{"short_press":true}' \
+    '{"long_press":123}' \
+    '{"short_press":"12345678901234567890123456789012"}' \
+    '{"long_press":"12345678901234567890123456789012"}'; do
     code=$(curl -sS -o /tmp/le-invalid-button-setting.out -w '%{http_code}' \
         -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data "$body")
     [ "$code" = 400 ]

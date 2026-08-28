@@ -286,6 +286,7 @@ int main(void)
         CHECK(length > 0 && length < sizeof(persisted_history) - 1);
         persisted_history[length] = '\0';
         CHECK(strstr(persisted_history, "\"request_id\":\"") != NULL);
+        CHECK(strstr(persisted_history, "\"first_pcm_ms\":0") == NULL);
     }
     CHECK(count_occurrences(response, "\"at_ms\":") == 2);
     CHECK(count_occurrences(response, "\"stt_audio_ms\":") == 2);

@@ -84,6 +84,8 @@ agentd = Path("src/adapter/agentd.c").read_text(encoding="utf-8")
 assert "static int load_history_file" in agentd
 assert "load_history_file(&state, backup)" in agentd
 assert "A JSON backup contains the recoverable turn ring" in agentd
+assert "late turn history update could not be persisted" in agentd
+assert "save_history_state(state, state->history_generation" in agentd
 app = Path("web/js/app.js").read_text(encoding="utf-8")
 assert "const persisted=new Map(stations.map(st=>[st.word,st]))" in app
 assert "const sameStation=(a,b)=>" in app
@@ -107,6 +109,9 @@ buttons_start = api.index('if(!strcmp(p,"/api/v1/buttons")')
 buttons_end = api.index('if(!strcmp(p,"/api/v1/privacy")', buttons_start)
 buttons = api[buttons_start:buttons_end]
 assert buttons.index("rc=persist_configuration(c)") < buttons.index("buttons_json(c,r)")
+assert "short_field=json_get_string" in buttons
+assert "long_field=json_get_string" in buttons
+assert "short_field<0||long_field<0" in buttons
 assert "Button settings could not be saved" in buttons
 assert "button_action_sounds" in Path("tests/test_config.sh").read_text(encoding="utf-8")
 
