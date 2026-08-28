@@ -850,6 +850,8 @@ static int start_player(const char *url, const char *bus_path)
         meta_out = fds[1];
         (void)fcntl(meta_out, F_SETFL, O_NONBLOCK);
         signal(SIGTERM, SIG_DFL);
+        if (!running)
+            _exit(0);
         _exit(play_with_reconnect(url, bus_path) < 0 ? 1 : 0);
     }
     close(fds[1]);
