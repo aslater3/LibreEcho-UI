@@ -50,6 +50,7 @@ make build/test-audiod-review build/test-led-night-review build/test-wake-led-pr
 ./build/test-audiod-review
 ./build/test-led-night-review
 ./build/test-wake-led-profile
+sh tests/test_voice_listening_led_profile.sh
 sh tests/test_startup_animation.sh
 make build/test-buttond-timing
 ./build/test-buttond-timing

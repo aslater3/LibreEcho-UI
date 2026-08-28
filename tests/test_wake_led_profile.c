@@ -39,6 +39,13 @@ static const char WAKE_PULSE[] =
     "\"brightness\":70,\"repeats\":0,"
     "\"profile\":\"listening\",\"owner\":\"wakeword\"}}";
 
+/* Exactly what voice_listening_led.c puts on the wire after wake detection. */
+static const char LISTENING_PULSE[] =
+    "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+    "{\"name\":\"pulse\",\"r\":255,\"g\":0,\"b\":0,"
+    "\"brightness\":70,\"repeats\":0,"
+    "\"profile\":\"listening\",\"owner\":\"voice-listening\"}}";
+
 /* The same pulse from a caller that names no profile. */
 static const char PLAIN_PULSE[] =
     "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
@@ -84,6 +91,16 @@ int main(void)
                       ctx.pattern_colour.b == 0,
                       "wake pulse colour should stay the caller's red");
 
+    /* The wake pulse is immediately replaced by the voice-listening pulse.
+     * That second request must retain the Listening theme brightness. */
+    fire(&ctx, LISTENING_PULSE);
+    require_condition(ctx.pattern_colour.brightness == 50,
+                      "voice-listening pulse ignored the Listening brightness");
+    require_condition(ctx.pattern_colour.r == 255 &&
+                      ctx.pattern_colour.g == 0 &&
+                      ctx.pattern_colour.b == 0,
+                      "voice-listening pulse colour should stay red");
+
     /*
      * The indicator is transient: it must not disturb the saved ring
      * settings, least of all the zero the user chose.
@@ -105,6 +122,9 @@ int main(void)
     fire(&ctx, WAKE_PULSE);
     require_condition(ctx.pattern_colour.brightness == 0,
                       "a zero Listening brightness should be honoured");
+    fire(&ctx, LISTENING_PULSE);
+    require_condition(ctx.pattern_colour.brightness == 0,
+                      "voice-listening pulse replaced a zero brightness");
 
     /*
      * Callers that name no profile are unaffected, so this cannot change the
