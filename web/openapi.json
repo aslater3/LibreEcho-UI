@@ -1363,6 +1363,33 @@
     ],
     "summary": "Play an audio file from the USB drive",
     "description": "Body is `{\"path\":\"...\"}` relative to the drive root. The path is refused if it contains `..`, a backslash or a leading slash, so playback cannot escape the mount. Only `.mp3` is accepted: radiod decodes MPEG-1/2 Layer III and this image carries no AAC decoder, so other audio formats answer `415` with that reason rather than starting and staying silent. Playback runs through the same radiod path as internet radio, so `/integrations/radio/stop` stops it.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "path"
+        ],
+        "properties": {
+         "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "File path relative to the USB drive root; it must name an existing regular `.mp3` file and must not contain `..`, a backslash or a leading slash."
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     }
+    },
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"

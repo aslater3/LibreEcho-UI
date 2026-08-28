@@ -995,7 +995,9 @@ static void radio_load(struct api_context *c)
     }
 }
 
-static int radio_save(struct api_context *c)
+static int radio_save(struct api_context *c,
+                      const struct le_radio_station *stations,
+                      size_t station_count)
 {
     char path[512], body[16384], word[80], name[160], url[1200];
     size_t i, used = 0;
@@ -1006,21 +1008,21 @@ static int radio_save(struct api_context *c)
         return LE_IO;
     n = snprintf(body, sizeof(body),
                  "{\n  \"schema_version\": 1,\n  \"station_count\": %zu",
-                 c->radio_count);
+                 station_count);
     if (n < 0 || (size_t)n >= sizeof(body))
         return LE_IO;
     used = (size_t)n;
-    for (i = 0; i < c->radio_count; ++i) {
-        json_escape(word, sizeof(word), c->radio[i].word);
-        json_escape(name, sizeof(name), c->radio[i].name);
-        json_escape(url, sizeof(url), c->radio[i].url);
+    for (i = 0; i < station_count; ++i) {
+        json_escape(word, sizeof(word), stations[i].word);
+        json_escape(name, sizeof(name), stations[i].name);
+        json_escape(url, sizeof(url), stations[i].url);
         n = snprintf(body + used, sizeof(body) - used,
                      ",\n  \"station_%zu_word\": \"%s\","
                      "\n  \"station_%zu_name\": \"%s\","
                      "\n  \"station_%zu_url\": \"%s\","
                      "\n  \"station_%zu_enabled\": %s",
                      i, word, i, name, i, url, i,
-                     c->radio[i].enabled ? "true" : "false");
+                     stations[i].enabled ? "true" : "false");
         if (n < 0 || (size_t)n >= sizeof(body) - used)
             return LE_IO;
         used += (size_t)n;
@@ -1116,9 +1118,12 @@ static int radio_apply(struct api_context *c, const char *j)
                 return LE_INVALID;
         ++staged_count;
     }
-    memcpy(c->radio, staged, sizeof(staged));
+    if (radio_save(c, staged, staged_count) < 0)
+        return LE_IO;
+    memset(c->radio, 0, sizeof(c->radio));
+    memcpy(c->radio, staged, staged_count * sizeof(staged[0]));
     c->radio_count = staged_count;
-    return radio_save(c);
+    return LE_OK;
 }
 
 /* The colour arrives from audiod. Map it onto the known set rather than
@@ -1394,6 +1399,8 @@ static void kernel_log_json(struct api_context*c,struct api_response*r){static c
  * at most LE_USB_ENTRIES names. */
 #define LE_USB_MOUNT "/run/libreecho/usb"
 #define LE_USB_ENTRIES 64
+#define LE_USB_PATH_MAX 255
+#define LE_USB_ESCAPED_MAX (LE_USB_PATH_MAX * 6 + 1)
 static int usb_disk_find(char*node,size_t node_size,char*part,size_t part_size,unsigned long long*bytes){DIR*d=opendir("/sys/block");struct dirent*e;int found=0;*bytes=0;if(!d)return 0;while((e=readdir(d))!=NULL){char path[256];FILE*f;unsigned long long sectors=0;DIR*pd;struct dirent*pe;if(strncmp(e->d_name,"sd",2))continue;snprintf(node,node_size,"%s",e->d_name);snprintf(path,sizeof(path),"/sys/block/%s/size",e->d_name);if((f=fopen(path,"r"))!=NULL){if(fscanf(f,"%llu",&sectors)!=1)sectors=0;fclose(f);}*bytes=sectors*512ULL;
  /* Prefer the first partition; a drive written whole-disk has none. */
  snprintf(part,part_size,"%s",e->d_name);snprintf(path,sizeof(path),"/sys/block/%s",e->d_name);if((pd=opendir(path))!=NULL){while((pe=readdir(pd))!=NULL){if(strncmp(pe->d_name,e->d_name,strlen(e->d_name)))continue;if(!pe->d_name[strlen(e->d_name)])continue;snprintf(part,part_size,"%s",pe->d_name);break;}closedir(pd);}
@@ -1473,19 +1480,20 @@ static int hexval(char ch){if(ch>='0'&&ch<='9')return ch-'0';if(ch>='a'&&ch<='f'
  */
 static int usb_subpath(const char*path,char*out_rel,size_t size,char*out_full,size_t full_size)
 {
- const char*q=path?strchr(path,'?'):NULL;const char*v;size_t i=0;
+ const char*q=path?strchr(path,'?'):NULL;const char*v;size_t i=0;int overflow=0;
  out_rel[0]='\0';
  if(q&&(v=strstr(q,"path="))){
   v+=5;
-  while(*v&&*v!='&'&&i+1<size){
+  while(*v&&*v!='&'){
    char ch=*v++;
    if(ch=='%'&&v[0]&&v[1]){int hi=hexval(v[0]),lo=hexval(v[1]);if(hi>=0&&lo>=0){ch=(char)((hi<<4)|lo);v+=2;}}
    else if(ch=='+')ch=' ';
+   if(i+1>=size){overflow=1;continue;}
    out_rel[i++]=ch;
   }
   out_rel[i]='\0';
  }
- if(strstr(out_rel,"..")||strchr(out_rel,'\\')||out_rel[0]=='/'){out_rel[0]='\0';return -1;}
+ if(overflow||strstr(out_rel,"..")||strchr(out_rel,'\\')||out_rel[0]=='/'){out_rel[0]='\0';return -1;}
  if(out_rel[0]){if((size_t)snprintf(out_full,full_size,"%s/%s",LE_USB_MOUNT,out_rel)>=full_size)return -1;}
  else if((size_t)snprintf(out_full,full_size,"%s",LE_USB_MOUNT)>=full_size)return -1;
  return 0;
@@ -1525,7 +1533,7 @@ static int usb_open_file(const char*rel)
  */
 static void usb_play_json(struct api_context*c,const struct api_request*q,struct api_response*r)
 {
- char rel[256],full[512],esc[600];const char*dot;int rc;
+ char rel[LE_USB_PATH_MAX+1],full[512],esc[LE_USB_ESCAPED_MAX];const char*dot;int rc;
  if(json_get_string(q->body,"path",rel,sizeof(rel))<1||!rel[0]){err(r,400,LE_INVALID,"path is required");return;}
  if(strstr(rel,"..")||strchr(rel,'\\')||rel[0]=='/'){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
  if((size_t)snprintf(full,sizeof(full),"%s/%s",LE_USB_MOUNT,rel)>=sizeof(full)){err(r,400,LE_INVALID,"That path is too long");return;}
@@ -1538,9 +1546,9 @@ static void usb_play_json(struct api_context*c,const struct api_request*q,struct
             rc==LE_NOT_SUPPORTED?"Playback is not available on this image":"The file could not be played");return;}
  json_escape(esc,sizeof(esc),rel);
  api_log(c,"info","USB file playback started");
- {char body[768];snprintf(body,sizeof(body),"{\"playing\":true,\"path\":\"%s\"}",esc);ok(r,body);}
+ {char body[LE_USB_ESCAPED_MAX + 128];snprintf(body,sizeof(body),"{\"playing\":true,\"path\":\"%s\"}",esc);ok(r,body);}
 }
-static void usb_storage_json(struct api_context*c,const struct api_request*q,struct api_response*r){char node[64],part[64],esc[512],rel[256],dirpath[512],relesc[512];unsigned long long bytes=0,used=0,avail=0;const char*fs;size_t n=0,listed=0;DIR*d;struct dirent*e;struct stat st;struct statvfs vfs;(void)c;
+static void usb_storage_json(struct api_context*c,const struct api_request*q,struct api_response*r){char node[64],part[64],esc[LE_USB_ESCAPED_MAX],rel[LE_USB_PATH_MAX+1],dirpath[512],relesc[LE_USB_ESCAPED_MAX];unsigned long long bytes=0,used=0,avail=0;const char*fs;size_t n=0,listed=0;DIR*d;struct dirent*e;struct stat st;struct statvfs vfs;(void)c;
  if(usb_subpath(q?q->path:NULL,rel,sizeof(rel),dirpath,sizeof(dirpath))<0){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
  if(!usb_disk_find(node,sizeof(node),part,sizeof(part),&bytes)){usb_unmount_stale();out(r,200,"{\"ok\":true,\"data\":{\"present\":false,\"mounted\":false,\"message\":\"No USB disk is attached. The OTG port must be in host mode.\"},\"error\":null}");return;}
  fs=usb_mount_try(part);
@@ -1695,7 +1703,7 @@ static int mac_override_valid(const char *in, char *out, size_t out_size)
     }
 }
 
-void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/spotify")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/light")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/audio/sample")&&strcmp(q->method,"POST"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(q->https&&c->sessions_path[0])(void)le_auth_save_sessions(&c->auth,c->sessions_path);}ok(r,"{\"logged_out\":true}");return;}
+void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/spotify")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/light")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations/radio/play")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio/stop")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/audio/sample")&&strcmp(q->method,"POST"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(q->https&&c->sessions_path[0])(void)le_auth_save_sessions(&c->auth,c->sessions_path);}ok(r,"{\"logged_out\":true}");return;}
  if(!strcmp(p,"/api/v1/config/export")&&!strcmp(q->method,"GET")){char config[4096];rc=configuration_json(c,config,sizeof(config));if(rc)err(r,501,rc,"Configuration export is unavailable for this backend");else ok(r,config);return;}if(!strcmp(p,"/api/v1/config/import")&&!strcmp(q->method,"POST")){rc=import_configuration(c,q->body);if(rc)err(r,rc==LE_INVALID?400:501,rc,rc==LE_INVALID?"Configuration file is invalid or incomplete":"Configuration restore is unavailable for this backend");else{api_log(c,"warning","Configuration restored from uploaded JSON");ok(r,"{\"restored\":true,\"schema_version\":1}");}return;}
  if(!strcmp(p,"/api/v1/assistant")){if(!strcmp(q->method,"GET")){agent_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){agent_result(r,"configure",q->body);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/assistant/history/clear")&&!strcmp(q->method,"POST")){agent_result(r,"history_clear",NULL);return;}

@@ -41,5 +41,28 @@ end = api.index("static void auth_current_json", start)
 login = api[start:end]
 assert "if(q->https&&c->sessions_path[0])" in login
 assert "if(c->https_active)" not in login
+assert "||(!strcmp(p,\"/api/v1/integrations/radio/play\")&&strcmp(q->method,\"POST\"))" in api
+assert "||(!strcmp(p,\"/api/v1/integrations/radio/stop\")&&strcmp(q->method,\"POST\"))" in api
+assert "||(!strcmp(p,\"/api/v1/integrations/radio\")&&strcmp(q->method,\"GET\")&&strcmp(q->method,\"PUT\"))" in api
 
-print("PR 141 transport/auth source contract: ok")
+radio_apply_start = api.index("static int radio_apply")
+radio_apply_end = api.index("/* The colour arrives", radio_apply_start)
+radio_apply = api[radio_apply_start:radio_apply_end]
+assert radio_apply.index("radio_save(c, staged, staged_count)") < radio_apply.index("memcpy(c->radio")
+assert "return LE_IO;" in radio_apply
+
+assert "close_kernel_log_inherited(fd,http_listener,https_listener,relay_listener,clients,max);" in http
+assert "if(clients[i].fd>=0&&clients[i].fd!=keep_fd)close(clients[i].fd);" in http
+assert "target_end-target_start-1" in http
+
+assert "LE_USB_ESCAPED_MAX" in api
+assert "if(overflow||strstr(out_rel" in api
+assert "if(i+1>=size){overflow=1;continue;}" in api
+usb_play = openapi["paths"]["/storage/usb/play"]["post"]
+usb_body = usb_play["requestBody"]["content"]["application/json"]["schema"]
+assert usb_play["requestBody"]["required"] is True
+assert usb_body["required"] == ["path"]
+assert usb_body["properties"]["path"]["maxLength"] == 255
+assert "storage/usb/play" in docs
+
+print("PR 141 transport/auth/USB/radio source contract: ok")

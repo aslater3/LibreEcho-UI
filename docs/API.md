@@ -1184,6 +1184,21 @@ The mount is read-only (`MS_RDONLY|MS_NOSUID|MS_NODEV`) and nothing in this
 endpoint writes to the drive. Bounded like the rest of the API: the first disk,
 its first partition, and at most 64 top-level entries.
 
+#### POST /api/v1/storage/usb/play
+
+Starts an MP3 file from the attached USB drive through `radiod`. The request
+body must contain a path relative to the drive root:
+
+```json
+{ "path": "Music/track.mp3" }
+```
+
+The path is limited to 255 bytes and is rejected if it contains `..`, a
+backslash, or a leading slash. The file must exist, be a regular file, and have
+an `.mp3` extension. Other formats return `415` because this image has no AAC
+decoder. The response is an ordinary success envelope; the shared radio stop
+operation (`POST /api/v1/integrations/radio/stop`) also stops USB playback.
+
 #### GET /api/v1/diagnostics/kernel
 
 Returns the tail of the kernel ring buffer, most recent last, bounded to the
