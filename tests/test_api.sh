@@ -45,6 +45,16 @@ code=$(curl -sS -o /tmp/le-malformed-wifi-security.out -w '%{http_code}' \
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
 features=$(curl -fsS "$URL/api/v1/system/features")
 printf '%s' "$features" | jq -e '.ok and .data.acoustic_events == false and .data.acoustic_events_available == false' >/dev/null
+for flag in simulation https acoustic_events usb_host; do
+    code=$(curl -sS -o "/tmp/le-nested-$flag.out" -w '%{http_code}' \
+        -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+        -H 'Content-Type: application/json' --data "{\"wrapper\":{\"$flag\":true}}")
+    [ "$code" = 400 ]
+done
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"simulation":false,"wrapper":{"https":true,"acoustic_events":true,"usb_host":true}}' |
+    jq -e '.ok and .data.simulation == false and .data.https == false and .data.acoustic_events == false' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
     -H 'Content-Type: application/json' --data '{"acoustic_events":true}' |
     jq -e '.ok and .data.acoustic_events == true and .data.acoustic_events_available == false' >/dev/null

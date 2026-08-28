@@ -1576,7 +1576,7 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  */
  if(!strcmp(p,"/api/v1/system/features")){
   if(!strcmp(q->method,"GET")){features_json(c,r);return;}
-  if(!strcmp(q->method,"PUT")){int host,av,hv,sim,want_host=json_get_bool(q->body,"usb_host",&host),want_https=json_get_bool(q->body,"https",&hv),want_sim=json_get_bool(q->body,"simulation",&sim),want_aed=json_get_top_level_bool(q->body,q->body_len,"acoustic_events",&av);
+  if(!strcmp(q->method,"PUT")){int host,av,hv,sim,want_host=json_get_top_level_bool(q->body,q->body_len,"usb_host",&host),want_https=json_get_top_level_bool(q->body,q->body_len,"https",&hv),want_sim=json_get_top_level_bool(q->body,q->body_len,"simulation",&sim),want_aed=json_get_top_level_bool(q->body,q->body_len,"acoustic_events",&av);
    /* usb_host moves the OTG port between gadget and host. It is deliberately
     * not persisted: libreecho-init pins the role back to device on every boot,
     * so the ADB gadget -- this device's only recovery path -- can never be left

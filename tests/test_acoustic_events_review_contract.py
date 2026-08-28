@@ -14,7 +14,14 @@ features_start = api_c.index('if(!strcmp(p,"/api/v1/system/features"))')
 features_end = api_c.index('if(!strcmp(p,"/api/v1/integrations/radio/play")', features_start)
 features = api_c[features_start:features_end]
 
-parse = features.index('want_aed=json_get_top_level_bool(q->body,q->body_len,"acoustic_events",&av)')
+feature_keys = ("simulation", "https", "acoustic_events", "usb_host")
+for key in feature_keys:
+    marker = f'json_get_top_level_bool(q->body,q->body_len,"{key}"'
+    assert marker in features, f"{key} must be read only from the top level"
+assert 'json_get_bool(q->body' not in features, (
+    "feature updates must not use the nested-key parser"
+)
+parse = features.index('want_host=json_get_top_level_bool(q->body,q->body_len,"usb_host"')
 validate = features.index('want_https<0||want_sim<0||want_aed<0||', parse)
 usb_write = features.index('usb_role_write(')
 usb_success = features.index('api_log(c,"info",host?"USB port switched', usb_write)

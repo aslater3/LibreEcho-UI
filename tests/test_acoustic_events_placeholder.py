@@ -43,9 +43,16 @@ assert '\\"acoustic_events_available\\":true' not in api_c, (
 )
 
 # Settable, so a UI can store the preference ahead of the implementation.
-assert 'json_get_top_level_bool(q->body,q->body_len,"acoustic_events"' in api_c, (
-    "the features endpoint does not accept the flag"
-)
+features_start = api_c.index('if(!strcmp(p,"/api/v1/system/features"))')
+features_end = api_c.index('if(!strcmp(p,"/api/v1/integrations/radio/play")', features_start)
+features = api_c[features_start:features_end]
+for field in ("simulation", "https", "acoustic_events", "usb_host"):
+    assert f'json_get_top_level_bool(q->body,q->body_len,"{field}"' in features, (
+        f"{field} must be read only from a top-level request property"
+    )
+assert 'json_get_bool(q->body,"usb_host"' not in features
+assert 'json_get_bool(q->body,"https"' not in features
+assert 'json_get_bool(q->body,"simulation"' not in features
 assert "not yet implemented" in api_c, (
     "the log line no longer says the preference is not implemented"
 )
