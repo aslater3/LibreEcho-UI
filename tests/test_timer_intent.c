@@ -99,8 +99,8 @@ int main(void)
     assert(kind_of("cancel all timers") == LE_TIMER_INTENT_CANCEL);
     assert(kind_of("delete the timer") == LE_TIMER_INTENT_CANCEL);
 
-    /* Singular cancellation carries an identity; only explicit plural/all
-       language is allowed to select the cancel-all operation. */
+    /* Only genuinely universal wording may select cancel-all. A quantity such
+       as one or two timers is still a bounded, non-universal request. */
     {
         struct le_timer_intent intent;
 
@@ -108,11 +108,31 @@ int main(void)
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(!strcmp(intent.label, "pasta"));
+        assert(le_timer_intent_parse("delete the tea timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "tea"));
+        assert(le_timer_intent_parse("remove the coffee timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "coffee"));
         assert(le_timer_intent_parse("cancel my timer", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(intent.label[0] == '\0');
+        assert(le_timer_intent_parse("cancel one timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(le_timer_intent_parse("cancel two timers", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
         assert(le_timer_intent_parse("cancel all timers", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.cancel_all);
+        assert(le_timer_intent_parse("delete every timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.cancel_all);
+        assert(le_timer_intent_parse("remove each timer", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         assert(intent.cancel_all);
     }

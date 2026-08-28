@@ -55,9 +55,16 @@ struct context {
     long long next_ring_ms;
     int dirty;
     int state_loaded;
+    /* The state path was atomically replaced, but its final durability step
+       failed. A retry must not treat the new file as the old backup source. */
+    int state_commit_pending;
 };
 
 static volatile sig_atomic_t stop_requested;
+
+#ifdef LE_TIMERD_TESTING
+static int le_timerd_test_fail_finalize;
+#endif
 
 static void on_signal(int signo)
 {
@@ -122,6 +129,29 @@ static int fsync_parent(const char *path)
     result = fsync(fd);
     close(fd);
     return result;
+}
+
+static int state_finalize(const char *path)
+{
+#ifdef LE_TIMERD_TESTING
+    if (le_timerd_test_fail_finalize) {
+        le_timerd_test_fail_finalize = 0;
+        errno = EIO;
+        return -1;
+    }
+#endif
+    if (chmod(path, 0600) != 0)
+        return -1;
+#ifdef LE_TIMERD_TESTING
+    if (le_timerd_test_fail_finalize) {
+        le_timerd_test_fail_finalize = 0;
+        errno = EIO;
+        return -1;
+    }
+#endif
+    if (fsync_parent(path) != 0)
+        return -1;
+    return 0;
 }
 
 static int state_save_at(struct context *ctx, long long now_ms,
@@ -197,7 +227,7 @@ static int state_save_at(struct context *ctx, long long now_ms,
     }
     /* Snapshot the old file before replacing it. Keeping the old inode as a
        hard link makes the backup atomic and avoids a window without one. */
-    if (access(ctx->state_path, F_OK) == 0) {
+    if (!ctx->state_commit_pending && access(ctx->state_path, F_OK) == 0) {
         (void)unlink(backup_temporary);
         if (chmod(ctx->state_path, 0600) != 0 ||
             link(ctx->state_path, backup_temporary) != 0 ||
@@ -223,11 +253,16 @@ static int state_save_at(struct context *ctx, long long now_ms,
         unlink(temporary);
         return 0;
     }
-    if (chmod(ctx->state_path, 0600) != 0 || fsync_parent(ctx->state_path) != 0) {
-        le_log_warn("timerd: cannot finalize %s: %s", ctx->state_path,
-                    strerror(errno));
+    /* The rename is the commit point. From here on, failures are durability
+       failures for the new state, not permission to create a new backup from
+       it on retry. */
+    ctx->state_commit_pending = 1;
+    if (state_finalize(ctx->state_path) != 0) {
+        le_log_warn("timerd: cannot finalize %s: %s",
+                    ctx->state_path, strerror(errno));
         return 0;
     }
+    ctx->state_commit_pending = 0;
     return 1;
 }
 

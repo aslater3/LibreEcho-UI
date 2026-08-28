@@ -146,6 +146,42 @@ case "$out" in
     *) echo "FAIL: ambiguous cancellation changed the schedule: $out"; exit 1 ;;
 esac
 
+# All accepted cancellation verbs must target their named timer.
+out=$(call "$agent_sock" respond '{"text":"delete the tea timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: delete label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"tea"'*)
+        echo "FAIL: delete label cancellation left tea: $out"; exit 1 ;;
+    *'"label":"coffee"'*) ;;
+    *) echo "FAIL: delete label cancellation changed the wrong timer: $out"; exit 1 ;;
+esac
+out=$(call "$agent_sock" respond '{"text":"remove the coffee timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: remove label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: remove label cancellation left a timer: $out"; exit 1 ;;
+esac
+
+# A quantity is not universal wording and must not clear the schedule.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the alpha"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the beta"}' >/dev/null
+for phrase in 'cancel one timer' 'cancel two timers'; do
+    call "$agent_sock" respond "{\"text\":\"$phrase\"}" >/dev/null
+    out=$(call "$timer_sock" status '{}')
+    case "$out" in
+        *'"label":"alpha"'*'"label":"beta"'*) ;;
+        *) echo "FAIL: $phrase was treated as cancel-all: $out"; exit 1 ;;
+    esac
+done
+
 out=$(call "$agent_sock" respond '{"text":"cancel all timers"}')
 case "$out" in
     *'cancelled'*) ;;
@@ -156,7 +192,7 @@ case "$out" in
     *'"timers":[]'*) ;;
     *) echo "FAIL: explicit cancel-all left timers: $out"; exit 1 ;;
 esac
-echo "  singular and plural cancellation are scoped correctly: ok"
+echo "  singular, verb, and universal cancellation are scoped correctly: ok"
 
 # --- "stop" with nothing ringing is not a timer request -------------------
 # It means a dozen other things, so it must fall through rather than being

@@ -243,19 +243,32 @@ static void extract_label(const char *text, char *out, size_t size)
 
 static void extract_cancel_label(const char *text, char *out, size_t size)
 {
+    static const char *const VERBS[] = {"cancel", "delete", "remove", "clear"};
+    const char *verb = NULL;
     const char *cancel;
     const char *timer;
     const char *marker;
     const char *start;
+    size_t verb_length = 0;
     size_t length;
+    size_t i;
 
     out[0] = '\0';
-    cancel = strstr(text, " cancel ");
-    if (!cancel)
-        return;
-    cancel += strlen(" cancel ");
+    for (i = 0; i < sizeof(VERBS) / sizeof(VERBS[0]); ++i) {
+        const char *hit = find_word(text, VERBS[i]);
 
-    /* "cancel timer called pasta" and "cancel the timer for the pasta". */
+        if (hit && (!verb || hit < verb)) {
+            verb = hit;
+            verb_length = strlen(VERBS[i]);
+        }
+    }
+    if (!verb)
+        return;
+    cancel = verb + verb_length;
+    while (*cancel == ' ')
+        ++cancel;
+
+    /* "cancel timer called pasta" and "delete the timer for the pasta". */
     marker = strstr(cancel, " called ");
     if (!marker)
         marker = strstr(cancel, " for the ");
@@ -278,7 +291,7 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
         return;
     }
 
-    /* "cancel the pasta timer" / "cancel my timer". */
+    /* "cancel the pasta timer" / "remove my timer". */
     timer = find_word(cancel, "timer");
     if (!timer)
         return;
@@ -344,8 +357,7 @@ enum le_timer_intent_kind le_timer_intent_parse(
         intent->kind = LE_TIMER_INTENT_CANCEL;
         intent->cancel_all = has_word(text, "all") ||
                              has_word(text, "every") ||
-                             has_word(text, "each") ||
-                             has_word(text, "timers");
+                             has_word(text, "each");
         if (!intent->cancel_all)
             extract_cancel_label(text, intent->label, sizeof(intent->label));
         return intent->kind;

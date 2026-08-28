@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#define LE_TIMERD_TESTING
 #define main timerd_program_main
 #include "../src/adapter/timerd.c"
 #undef main
@@ -115,10 +116,36 @@ int main(void)
     assert(access("/tmp/libreecho-timer-persistence-test.tmp", F_OK) < 0);
     assert(access("/tmp/libreecho-timer-persistence-test.bak.tmp", F_OK) < 0);
 
+    /* A failure after rename has already committed the new schedule. Retrying
+       a failed parent-fsync must not rotate that new file over the real
+       previous copy. */
+    le_timer_set_init(&context.timers);
+    write_text(path, "old schedule\n");
+    unlink(backup);
+    assert(le_timer_add_countdown(&context.timers, 600, "committed", 0, NULL) ==
+           LE_TIMER_OK);
+    le_timerd_test_fail_finalize = 1;
+    assert(state_save(&context) == 0);
+    assert(context.state_commit_pending == 1);
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "committed") != NULL);
+    read_text(backup, text, sizeof(text));
+    assert(!strcmp(text, "old schedule\n"));
+    context.dirty = 1;
+    save_dirty_state_at(&context, 1000, SYNCED_EPOCH);
+    assert(context.dirty == 0);
+    assert(context.state_commit_pending == 0);
+    read_text(backup, text, sizeof(text));
+    assert(!strcmp(text, "old schedule\n"));
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "committed") != NULL);
+
     unlink(path);
     unlink(backup);
     unlink(dirty_path);
     unlink(dirty_backup);
+    unlink("/tmp/libreecho-timer-persistence-test.tmp");
+    unlink("/tmp/libreecho-timer-persistence-test.bak.tmp");
     puts("timer persistence: ok");
     return 0;
 }
