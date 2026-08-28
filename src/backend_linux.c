@@ -1584,6 +1584,8 @@ static const char *next_array_object(const char *cursor, char *out,
                                      size_t size)
 {
     int depth = 0;
+    int in_string = 0;
+    int escaped = 0;
     size_t used = 0;
 
     if (!cursor)
@@ -1596,10 +1598,23 @@ static const char *next_array_object(const char *cursor, char *out,
     if (!*cursor)
         return NULL;
     for (; *cursor; ++cursor) {
-        if (*cursor == '{')
-            ++depth;
         if (used + 1 < size)
             out[used++] = *cursor;
+        if (in_string) {
+            if (escaped)
+                escaped = 0;
+            else if (*cursor == '\\')
+                escaped = 1;
+            else if (*cursor == '"')
+                in_string = 0;
+            continue;
+        }
+        if (*cursor == '"') {
+            in_string = 1;
+            continue;
+        }
+        if (*cursor == '{')
+            ++depth;
         if (*cursor == '}') {
             --depth;
             if (!depth) {
@@ -1610,6 +1625,14 @@ static const char *next_array_object(const char *cursor, char *out,
     }
     return NULL;
 }
+
+#ifdef LE_TIMER_JSON_TEST
+const char *le_test_next_array_object(const char *cursor, char *out,
+                                      size_t size)
+{
+    return next_array_object(cursor, out, size);
+}
+#endif
 
 static int timers(struct le_backend *b, struct le_timer_list *o)
 {

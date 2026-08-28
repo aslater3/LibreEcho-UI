@@ -243,6 +243,43 @@ Use `POST /api/v1/audio/announce/stop` with `{}` to interrupt the active
 announcement. State-changing API calls require the normal CSRF header and,
 when configured, local API authentication.
 
+### Timers and alarms
+
+#### GET /api/v1/timers
+
+Returns the bounded timer schedule. Each entry has an `id`, `kind` (`countdown`
+or `alarm`), `state` (`pending` or `ringing`), `seconds_remaining`, and an
+optional `label`. The response also includes `ringing`, `missed`, and
+`available`. When `timerd` is absent, the endpoint returns the standard 503
+unavailable response.
+
+#### POST /api/v1/timers
+
+Creates a countdown and requires `X-LibreEcho-CSRF`.
+
+```json
+{ "seconds": 600, "label": "pasta" }
+```
+
+`seconds` is required and must be 1–604800. `label` is optional, but if
+present must be a valid JSON string no longer than 47 bytes; oversized or
+malformed labels return HTTP 400 rather than being truncated. Success returns
+HTTP 201 with `{ "id": number }`.
+
+#### POST /api/v1/timers/dismiss
+
+Dismisses all currently ringing timers, leaves pending timers untouched, and
+returns `{ "dismissed": number }`. Requires `X-LibreEcho-CSRF`.
+
+#### DELETE /api/v1/timers/{id}
+
+Cancels one pending timer by numeric ID. Requires `X-LibreEcho-CSRF`; a missing
+or already-cancelled ID returns HTTP 404.
+
+The timer page refreshes its status while open so countdowns and ringing state
+remain current. Timer state is persisted atomically with a restrictive
+permissions policy and is restored after the wall clock becomes valid.
+
 ### Voice assistant
 
 The voice assistant uses local wake-word detection, post-AEC microphone audio,

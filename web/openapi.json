@@ -1158,6 +1158,70 @@
     }
    }
   },
+  "/timers": {
+   "get": {
+    "tags": ["Timers"],
+    "summary": "List timers and alarms",
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "post": {
+    "tags": ["Timers"],
+    "summary": "Create a countdown timer",
+    "security": [{"BearerAuth": []}],
+    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": ["seconds"],
+        "properties": {
+         "seconds": {"type": "integer", "minimum": 1, "maximum": 604800},
+         "label": {"type": "string", "maxLength": 47}
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {"$ref": "#/components/responses/Success"},
+     "400": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/timers/dismiss": {
+   "post": {
+    "tags": ["Timers"],
+    "summary": "Dismiss ringing timers",
+    "security": [{"BearerAuth": []}],
+    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/timers/{id}": {
+   "delete": {
+    "tags": ["Timers"],
+    "summary": "Cancel a timer",
+    "security": [{"BearerAuth": []}],
+    "parameters": [
+     {"$ref": "#/components/parameters/Csrf"},
+     {"name": "id", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}}
+    ],
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "404": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
   "/device": {
    "get": {
     "tags": [

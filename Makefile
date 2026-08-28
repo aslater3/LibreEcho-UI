@@ -147,6 +147,13 @@ $(BUILD)/test-timer-schedule: tests/test_timer_schedule.c \
 	@mkdir -p $(BUILD)
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
+$(BUILD)/test-timer-json: tests/test_timer_json.c \
+		src/backend_linux.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_TIMER_JSON_TEST $(CSTD) $(WARN) \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $^ -o $@
+
 $(BUILD)/test-gateway-probe: tests/test_gateway_probe.c \
 		src/adapter/gateway_probe.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@

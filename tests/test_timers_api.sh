@@ -21,6 +21,13 @@ curl -fsS "$URL/api/v1/timers" \
     | jq -e --argjson id "$id" '.data.timers | length == 1 and .[0].id == $id and .[0].label == "pasta"' >/dev/null
 echo "  timer listed with its label: ok"
 
+# Labels are bounded API fields and must be rejected rather than truncated.
+long_label=$(python3 -c 'print("x" * 48)')
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" --data "{\"seconds\":600,\"label\":\"$long_label\"}")
+[ "$code" = 400 ] || { echo "FAIL: oversized label returned $code, expected 400"; exit 1; }
+echo "  oversized labels refused: ok"
+
 # --- a bad length is the caller's mistake, not a service failure ----------
 for body in '{"seconds":0}' '{"seconds":-5}' '{"seconds":999999999}'; do
     code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \

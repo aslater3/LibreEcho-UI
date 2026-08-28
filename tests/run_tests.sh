@@ -47,6 +47,7 @@ sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_wake_word_ui_contract.py
 python3 tools/test_virtual_echo.py
+node tests/test_timers_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -108,6 +109,8 @@ make build/test-timer-intent
 ./build/test-timer-intent
 make build/test-timer-schedule
 ./build/test-timer-schedule
+make build/test-timer-json
+./build/test-timer-json
 make build/libreecho-timerd
 sh tests/test_timerd.sh
 make build/libreecho-agentd
