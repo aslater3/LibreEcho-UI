@@ -52,8 +52,14 @@ make build/test-audiod-review build/test-led-night-review
 ./build/test-audiod-review
 ./build/test-led-night-review
 sh tests/test_startup_animation.sh
-make build/test-buttond-timing
+make build/test-buttond-timing build/test-watchdog-policy
 ./build/test-buttond-timing
+./build/test-watchdog-policy
+make build/libreecho-watchdogd
+sh tests/test_watchdogd_recovery.sh
+python3 tests/test_watchdog_service_table.py
+python3 tests/test_install_completeness.py
+python3 tests/test_watchdog_build_contract.py
 make build/test-wake-decode
 ./build/test-wake-decode
 sh tests/test_buttond_contract.sh
