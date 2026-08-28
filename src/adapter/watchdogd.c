@@ -308,17 +308,16 @@ int main(int argc, char **argv)
             if (healthy != s->last_healthy) {
                 if (healthy && s->seen_healthy)
                     le_log_info("watchdog: %s is answering again", s->desc->name);
+                else if (!healthy && s->seen_healthy && !s->desc->restartable)
+                    le_log_warn("watchdog: %s is not answering "
+                                "(not restartable; a reboot is needed)",
+                                s->desc->name);
                 s->last_healthy = healthy;
             }
             if (!s->seen_healthy)
                 continue;
-            if (!s->desc->restartable) {
-                if (!healthy)
-                    le_log_warn("watchdog: %s is not answering "
-                                "(not restartable; a reboot is needed)",
-                                s->desc->name);
+            if (!s->desc->restartable)
                 continue;
-            }
             action = le_watchdog_step(&s->state, healthy, now);
             if (action == LE_WATCHDOG_RESTART) {
                 restart(s);

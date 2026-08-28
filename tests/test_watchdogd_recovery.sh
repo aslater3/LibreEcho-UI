@@ -120,4 +120,22 @@ if [ "$(wc -l < "$marker" | tr -d ' ')" -gt "2" ]; then
 fi
 echo "  restarted once, not repeatedly: ok"
 
+# --- a non-restartable failure is reported once --------------------------
+# Waked has no control socket in production, but keep the socket probe here so
+# this drives the same health transition as the real service. An empty init
+# field makes the custom service non-restartable; repeated failed passes must
+# not repeat the warning and fill the device's fixed log ring.
+waked_log="$dir/waked.log"
+( sleep 2; kill "$(cat "$dir/pid")" 2>/dev/null || true; rm -f "$sock" ) &
+"$WD" --passes 6 --interval 1 --service "waked:$sock:" >"$waked_log" 2>&1
+wait
+warnings=$(grep -c 'watchdog: waked is not answering (not restartable; a reboot is needed)' \
+    "$waked_log" || true)
+if [ "$warnings" != "1" ]; then
+    echo "FAIL: non-restartable failure was reported $warnings times"
+    cat "$waked_log"
+    exit 1
+fi
+echo "  non-restartable failure reported once: ok"
+
 echo "watchdogd recovery: ok"
