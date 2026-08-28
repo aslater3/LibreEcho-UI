@@ -449,6 +449,13 @@ $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
 		src/json.c src/log.c -lpthread -o $@
 
+$(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
+	src/api.c src/backend.c src/json.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c -o $@
+
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c \
@@ -617,6 +624,7 @@ clean:
 		$(BUILD)/test-agentd \
 		$(BUILD)/test-voice-reply \
 		$(BUILD)/test-voice-playback \
+		$(BUILD)/test-voice-pipeline-restart \
 		$(BUILD)/libreecho-sttd-sherpa-arm32 \
 		$(BUILD)/sttd.arm.o $(BUILD)/stt_engine_sherpa.arm.o \
 		$(BUILD)/test-wake-engine-arm32 $(BUILD)/wake-adapter-client-arm32 \

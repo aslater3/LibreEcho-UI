@@ -294,31 +294,153 @@ static int valid_pipeline_token(const char *value)
     }
     return 1;
 }
+#ifndef LE_INIT_AGENTD
+#define LE_INIT_AGENTD    "/etc/init.d/libreecho-agentd.init"
+#endif
+#ifndef LE_INIT_STTD
+#define LE_INIT_STTD      "/etc/init.d/libreecho-sttd.init"
+#endif
+#ifndef LE_INIT_TTSD
+#define LE_INIT_TTSD      "/etc/init.d/libreecho-ttsd.init"
+#endif
+#ifndef LE_INIT_WYOMINGD
+#define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
+#endif
+
+/* Only one pipeline restart may be outstanding. The child is deliberately
+ * retained as a direct child so the parent can reap it and report failures;
+ * detached workers cannot be bounded or observed by the API process. */
+static pid_t voice_pipeline_restart_pid = -1;
+static int voice_pipeline_restart_result = LE_OK;
+
+static int voice_pipeline_restart_reap(void)
+{
+    int status;
+    pid_t result;
+
+    if (voice_pipeline_restart_pid <= 0)
+        return voice_pipeline_restart_result;
+    result = waitpid(voice_pipeline_restart_pid, &status, WNOHANG);
+    if (result == 0)
+        return LE_BUSY;
+    voice_pipeline_restart_pid = -1;
+    if (result < 0 || !WIFEXITED(status)) {
+        voice_pipeline_restart_result = LE_IO;
+    } else if (WEXITSTATUS(status) == 0) {
+        voice_pipeline_restart_result = LE_OK;
+    } else if (WEXITSTATUS(status) == 2) {
+        voice_pipeline_restart_result = LE_NOT_SUPPORTED;
+    } else {
+        voice_pipeline_restart_result = LE_IO;
+    }
+    return voice_pipeline_restart_result;
+}
+
+static int voice_pipeline_restart_pending(void)
+{
+    (void)voice_pipeline_restart_reap();
+    return voice_pipeline_restart_pid > 0;
+}
+
+static const char *voice_pipeline_restart_state(void)
+{
+    int result = voice_pipeline_restart_reap();
+
+    if (voice_pipeline_restart_pid > 0 || result == LE_BUSY)
+        return "pending";
+    return result == LE_OK ? "ready" : "failed";
+}
+
+static const char *voice_pipeline_restart_error(void)
+{
+    if (voice_pipeline_restart_pid > 0 || voice_pipeline_restart_result == LE_OK)
+        return "";
+    return voice_pipeline_restart_result == LE_NOT_SUPPORTED
+        ? "Home Assistant voice pipeline is not installed"
+        : "Voice pipeline daemon restart failed";
+}
+
+/*
+ * Stop the voice daemons and bring them back for `mode`.
+ *
+ * Every stop is attempted and the starts ALWAYS run, even when a stop
+ * reported failure. That is the whole point: stop_service ends in
+ * unmount_runtime, which returns non-zero whenever the payload mount is
+ * busy, and the previous version treated that as fatal and returned before
+ * starting anything. A single busy unmount therefore left agentd, sttd and
+ * ttsd stopped with nothing to restart them, and the assistant stayed dead
+ * until the device was rebooted. A failure to stop is a reason to report an
+ * error, never a reason to skip the restart.
+ */
+static int voice_pipeline_restart(const char *mode)
+{
+    int failed = 0;
+
+    if (run_init_command(LE_INIT_AGENTD, "stop"))
+        failed = 1;
+    if (run_init_command(LE_INIT_STTD, "stop"))
+        failed = 1;
+    if (run_init_command(LE_INIT_TTSD, "stop"))
+        failed = 1;
+    if (access(LE_INIT_WYOMINGD, X_OK) == 0 &&
+        run_init_command(LE_INIT_WYOMINGD, "stop"))
+        failed = 1;
+
+    if (!strcmp(mode, "home-assistant")) {
+        if (access(LE_INIT_WYOMINGD, X_OK) < 0)
+            return LE_NOT_SUPPORTED;
+        if (run_init_command(LE_INIT_WYOMINGD, "start"))
+            failed = 1;
+        return failed ? LE_IO : LE_OK;
+    }
+    if (run_init_command(LE_INIT_STTD, "start"))
+        failed = 1;
+    if (run_init_command(LE_INIT_TTSD, "start"))
+        failed = 1;
+    if (run_init_command(LE_INIT_AGENTD, "start"))
+        failed = 1;
+    return failed ? LE_IO : LE_OK;
+}
+
+/*
+ * Start one bounded restart job without holding up the HTTP loop.
+ *
+ * The restart can take several seconds because the init scripts wait for
+ * daemons to stop. Keep the child as a direct child so waitpid(WNOHANG) can
+ * collect its result on a later request. A second request is rejected while
+ * the first job is pending, and a completed failure is exposed by GET and by
+ * the next failed request instead of being hidden behind a successful 200.
+ */
 static int apply_voice_pipeline_mode(const char *mode)
 {
-    static const char *const agent = "/etc/init.d/libreecho-agentd.init";
-    static const char *const stt = "/etc/init.d/libreecho-sttd.init";
-    static const char *const tts = "/etc/init.d/libreecho-ttsd.init";
-    static const char *const satellite = "/etc/init.d/libreecho-wyomingd.init";
+    int result;
+    pid_t child;
 
-    if (access(stt, X_OK) < 0 || access(tts, X_OK) < 0 ||
-        access(agent, X_OK) < 0)
+    result = voice_pipeline_restart_reap();
+    if (voice_pipeline_restart_pid > 0)
+        return LE_BUSY;
+    if (result != LE_OK) {
+        voice_pipeline_restart_result = LE_OK;
+        return result;
+    }
+    if (!strcmp(mode, "home-assistant") &&
+        access(LE_INIT_WYOMINGD, X_OK) < 0)
+        return LE_NOT_SUPPORTED;
+    if (access(LE_INIT_STTD, X_OK) < 0 || access(LE_INIT_TTSD, X_OK) < 0 ||
+        access(LE_INIT_AGENTD, X_OK) < 0)
         return LE_OK;
-    if (run_init_command(agent, "stop") ||
-        run_init_command(stt, "stop") ||
-        run_init_command(tts, "stop"))
+
+    child = fork();
+    if (child < 0)
         return LE_IO;
-    if (access(satellite, X_OK) == 0 &&
-        run_init_command(satellite, "stop"))
-        return LE_IO;
-    if (!strcmp(mode, "home-assistant"))
-        return access(satellite, X_OK) == 0
-            ? run_init_command(satellite, "start") : LE_NOT_SUPPORTED;
-    if (run_init_command(stt, "start") ||
-        run_init_command(tts, "start") ||
-        run_init_command(agent, "start"))
-        return LE_IO;
-    return LE_OK;
+    if (child == 0) {
+        result = voice_pipeline_restart(mode);
+        _exit(result == LE_OK ? 0 :
+              result == LE_NOT_SUPPORTED ? 2 : 1);
+    }
+    voice_pipeline_restart_pid = child;
+    voice_pipeline_restart_result = LE_OK;
+    return LE_BUSY;
 }
 static int pipeline_endpoint_reachable(const struct api_context *c,
                                        const char *uri)
@@ -471,6 +593,7 @@ static void voice_pipeline_json(struct api_context *c,
     int custom;
     int stt_reachable;
     int tts_reachable;
+    const char *restart_state;
 
     ensure_voice_pipeline_config(c);
     custom = !strcmp(c->voice_pipeline_mode, "custom");
@@ -478,6 +601,7 @@ static void voice_pipeline_json(struct api_context *c,
         pipeline_endpoint_reachable(c, c->stt_wyoming_uri);
     tts_reachable = custom &&
         pipeline_endpoint_reachable(c, c->tts_wyoming_uri);
+    restart_state = voice_pipeline_restart_state();
 
     json_escape(stt_uri, sizeof(stt_uri), c->stt_wyoming_uri);
     json_escape(stt_model, sizeof(stt_model), c->stt_wyoming_model);
@@ -496,7 +620,8 @@ static void voice_pipeline_json(struct api_context *c,
            tune them for a room with background conversation, where the VAD
            stays active and end-of-speech would otherwise never fire. */
         "\"listening\":{\"max_utterance_ms\":%d,"
-        "\"end_silence_ms\":%d,\"vad_floor_rms\":%d}},\"error\":null}",
+        "\"end_silence_ms\":%d,\"vad_floor_rms\":%d},"
+        "\"restart\":{\"state\":\"%s\",\"error\":\"%s\"}},\"error\":null}",
         c->voice_pipeline_mode, custom ? "wyoming" : "sherpa",
         stt_uri, stt_model, c->stt_wyoming_uri[0] ? "true" : "false",
         stt_reachable ? "true" : "false",
@@ -504,7 +629,7 @@ static void voice_pipeline_json(struct api_context *c,
         c->tts_wyoming_uri[0] ? "true" : "false",
         tts_reachable ? "true" : "false",
         c->stt_max_utterance_ms, c->stt_end_silence_ms,
-        c->stt_vad_floor_rms);
+        c->stt_vad_floor_rms, restart_state, voice_pipeline_restart_error());
 }
 static int voice_pipeline_update(struct api_context *c, const char *json)
 {
@@ -1724,6 +1849,11 @@ static int handle_voice_pipeline(struct api_context *c,
         method_not_allowed(r);
         return 1;
     }
+    if (voice_pipeline_restart_pending()) {
+        err(r, 409, LE_BUSY,
+            "A voice pipeline restart is already in progress");
+        return 1;
+    }
     if (!q->body || !q->body_len) {
         err(r, 400, LE_INVALID,
             "Voice pipeline configuration is required");
@@ -1738,6 +1868,22 @@ static int handle_voice_pipeline(struct api_context *c,
     rc = persist_configuration(c);
     if (!rc)
         rc = apply_voice_pipeline_mode(c->voice_pipeline_mode);
+    if (rc == LE_BUSY) {
+        if (voice_pipeline_restart_pending()) {
+            voice_pipeline_json(c, r);
+            r->status = 202;
+            return 1;
+        }
+        /* A very short restart may have completed between fork() and the
+         * non-blocking reap above. Treat that as an ordinary completed result
+         * rather than turning the launch marker into a false 503. */
+        rc = voice_pipeline_restart_result;
+        if (rc == LE_OK) {
+            api_log(c, "info", "voice pipeline daemons restarted");
+            voice_pipeline_json(c, r);
+            return 1;
+        }
+    }
     if (rc) {
         err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc,
             "Voice pipeline configuration could not be applied");
