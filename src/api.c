@@ -1598,7 +1598,7 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
     * HTTPS only binds its port at startup, so this stores the choice and the
     * next restart acts on it. */
    {int hv,av,want_https=json_get_bool(q->body,"https",&hv),want_sim=json_get_bool(q->body,"simulation",&v),want_aed=json_get_bool(q->body,"acoustic_events",&av);
-    if(want_https<1&&want_sim<1&&want_aed<1){err(r,400,LE_INVALID,"simulation, https or acoustic_events must be boolean");return;}
+    if(want_https<0||want_sim<0||want_aed<0|| (want_https<1&&want_sim<1&&want_aed<1)){err(r,400,LE_INVALID,"simulation, https or acoustic_events must be boolean");return;}
     if(want_https>0){c->feature_https=hv;
      /* Switching HTTPS off withdraws the justification for tokens on disk. */
      if(!hv&&c->sessions_path[0])unlink(c->sessions_path);}

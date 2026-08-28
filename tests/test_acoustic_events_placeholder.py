@@ -13,9 +13,12 @@ starts looking like a real feature.
 """
 
 from pathlib import Path
+import json
 
 api_c = Path("src/api.c").read_text(encoding="utf-8")
 api_h = Path("src/api.h").read_text(encoding="utf-8")
+docs = Path("docs/API.md").read_text(encoding="utf-8")
+openapi = json.loads(Path("web/openapi.json").read_text(encoding="utf-8"))
 
 assert "feature_acoustic_events" in api_h, "the flag is not declared on the api context"
 
@@ -46,5 +49,27 @@ assert 'json_get_bool(q->body,"acoustic_events"' in api_c, (
 assert "not yet implemented" in api_c, (
     "the log line no longer says the preference is not implemented"
 )
+assert "want_https<0||want_sim<0||want_aed<0" in api_c, (
+    "mixed feature updates must reject every malformed supplied boolean"
+)
+
+# The public docs and OpenAPI contract describe both response fields and permit
+# an acoustic-only request without inventing a required simulation field.
+assert '"acoustic_events": false' in docs
+assert '"acoustic_events_available": false' in docs
+feature_path = openapi["paths"]["/system/features"]
+request_schema = feature_path["put"]["requestBody"]["content"]["application/json"]["schema"]
+assert "simulation" not in request_schema.get("required", [])
+assert request_schema["properties"]["acoustic_events"]["type"] == "boolean"
+response_ref = feature_path["get"]["responses"]["200"]["$ref"]
+response_name = response_ref.rsplit("/", 1)[-1]
+response_schema = openapi["components"]["responses"][response_name]["content"]["application/json"]["schema"]
+data_ref = response_schema["properties"]["data"]["$ref"]
+data_name = data_ref.rsplit("/", 1)[-1]
+data_schema = openapi["components"]["schemas"][data_name]
+for field in ("acoustic_events", "acoustic_events_available"):
+    assert field in data_schema["required"]
+    assert data_schema["properties"][field]["type"] == "boolean"
+assert "always false" in data_schema["properties"]["acoustic_events_available"]["description"].lower()
 
 print("acoustic events placeholder contract: ok")

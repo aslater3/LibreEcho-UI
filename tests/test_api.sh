@@ -43,6 +43,20 @@ code=$(curl -sS -o /tmp/le-malformed-wifi-security.out -w '%{http_code}' \
 [ "$code" = 400 ]
 ! grep -q 'top-secret' "$CFG"
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
+features=$(curl -fsS "$URL/api/v1/system/features")
+printf '%s' "$features" | jq -e '.ok and .data.acoustic_events == false and .data.acoustic_events_available == false' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"acoustic_events":true}' |
+    jq -e '.ok and .data.acoustic_events == true and .data.acoustic_events_available == false' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"simulation":false,"acoustic_events":false}' |
+    jq -e '.ok and .data.simulation == false and .data.acoustic_events == false' >/dev/null
+code=$(curl -sS -o /tmp/le-invalid-acoustic-mixed.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"simulation":true,"acoustic_events":"enabled"}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" |
+    jq -e '.ok and .data.simulation == false and .data.acoustic_events == false and .data.acoustic_events_available == false' >/dev/null
 expect "$(curl -fsS "$URL/swagger.html")" 'API reference · LibreEcho'
 expect "$(curl -fsS "$URL/js/swagger.js")" 'executeOperation'
 expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
