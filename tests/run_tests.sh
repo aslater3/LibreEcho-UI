@@ -48,9 +48,11 @@ make build/test-avdtp-wire-format
 sh tests/test_network_scan_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
-make build/test-audiod-review build/test-led-night-review
+make build/test-audiod-review build/test-led-night-review build/test-wake-led-profile
 ./build/test-audiod-review
 ./build/test-led-night-review
+./build/test-wake-led-profile
+sh tests/test_voice_listening_led_profile.sh
 sh tests/test_startup_animation.sh
 make build/test-buttond-timing build/test-watchdog-policy
 ./build/test-buttond-timing

@@ -228,6 +228,13 @@ $(BUILD)/test-led-night-review: tests/test_led_night_review.c \
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
 		src/adapter/adapter_server.c src/log.c -o $@
 
+# Compiles ledd.c into the test so the real request handler runs: the wake
+# indicator's brightness has to be resolved by the daemon, not asserted about.
+$(BUILD)/test-wake-led-profile: tests/test_wake_led_profile.c \
+		src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_server.c src/log.c -o $@
+
 # sherpa-onnx backed ttsd (cross-compiled ARM32, static).  Uses the real
 # ZipVoice neural TTS engine instead of the mock sine chirp.  Requires
 # SHERPA_PREFIX (sherpa-onnx install) and ORT_BUILD (onnxruntime build dir).

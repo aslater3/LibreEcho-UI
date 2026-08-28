@@ -2377,6 +2377,8 @@ static int handle_request(struct daemon_context *ctx, int fd,
             !strcmp(pattern, "solid")) {
             int kind = !strcmp(pattern, "pulse") ? PATTERN_PULSE :
                        !strcmp(pattern, "solid") ? PATTERN_SOLID : PATTERN_FLASH;
+            int pattern_profile;
+
             if (get_arg_unsigned(&request, "r", &r, 255) != 0 ||
                 get_arg_unsigned(&request, "g", &g, 255) != 0 ||
                 get_arg_unsigned(&request, "b", &b, 255) != 0 ||
@@ -2384,6 +2386,28 @@ static int handle_request(struct daemon_context *ctx, int fd,
                 get_arg_unsigned(&request, "repeats", &repeats, 100) != 0)
                 return send_response(fd, request.id, 0, NULL,
                                      "pattern requires r, g, b, brightness and repeats");
+            /*
+             * An optional "profile" takes the brightness from that state
+             * theme instead of the literal above. The wake indicator uses it
+             * so that turning the ring down to zero for idle does not also
+             * silence the one thing that says the device started listening --
+             * the user sets that level by editing the Listening theme, which
+             * the settings page already offers, rather than through a knob
+             * invented for this.
+             *
+             * Only the brightness is taken. The colour stays the caller's, so
+             * the wake pulse remains red rather than becoming the theme's idle
+             * colour. A profile brightness of zero is honoured: someone who
+             * turns the indicator off means it.
+             *
+             * Unlike "animate", nothing here is written to state.current or
+             * persisted -- a transient indicator must leave the saved ring
+             * settings as it found them.
+             */
+            if (get_arg_profile_field(&request, "profile",
+                                      &pattern_profile) == 0)
+                brightness =
+                    (unsigned int)ctx->state.profiles[pattern_profile].brightness;
             colour.r = r;
             colour.g = g;
             colour.b = b;
