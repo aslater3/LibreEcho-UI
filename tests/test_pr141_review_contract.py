@@ -86,4 +86,11 @@ assert "getppid() != parent" in Path("src/adapter/radiod.c").read_text(encoding=
 assert "utf8_prefix" in Path("src/adapter/btd.c").read_text(encoding="utf-8")
 assert "bond_name_json" in Path("src/adapter/btd.c").read_text(encoding="utf-8")
 
+buttons_start = api.index('if(!strcmp(p,"/api/v1/buttons")')
+buttons_end = api.index('if(!strcmp(p,"/api/v1/privacy")', buttons_start)
+buttons = api[buttons_start:buttons_end]
+assert buttons.index("rc=persist_configuration(c)") < buttons.index("buttons_json(c,r)")
+assert "Button settings could not be saved" in buttons
+assert "button_action_sounds" in Path("tests/test_config.sh").read_text(encoding="utf-8")
+
 print("PR 141 transport/auth/USB/radio source contract: ok")
