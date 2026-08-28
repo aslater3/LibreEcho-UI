@@ -34,6 +34,40 @@ static void read_text(const char *path, char *out, size_t size)
     assert(fclose(file) == 0);
 }
 
+static void assert_post_commit_retry(const char *path, const char *backup,
+                                     int *failure_hook)
+{
+    struct context context;
+    char text[256];
+
+    memset(&context, 0, sizeof(context));
+    context.state_path = path;
+    le_timer_set_init(&context.timers);
+    unlink(path);
+    unlink(backup);
+    write_text(path, "old schedule\n");
+    assert(le_timer_add_countdown(&context.timers, 600, "committed", 0,
+                                  NULL) == LE_TIMER_OK);
+    *failure_hook = 1;
+    assert(state_save(&context) == STATE_SAVE_COMMITTED_DURABILITY_FAILED);
+    assert(context.state_commit_pending == 1);
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "committed") != NULL);
+    read_text(backup, text, sizeof(text));
+    assert(!strcmp(text, "old schedule\n"));
+
+    /* The committed state remains dirty until the durability retry succeeds,
+       but that retry must not rotate the new state over the old backup. */
+    context.dirty = 1;
+    save_dirty_state_at(&context, 1000, SYNCED_EPOCH);
+    assert(context.dirty == 0);
+    assert(context.state_commit_pending == 0);
+    read_text(backup, text, sizeof(text));
+    assert(!strcmp(text, "old schedule\n"));
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "committed") != NULL);
+}
+
 int main(void)
 {
     const char *path = "/tmp/libreecho-timer-persistence-test";
@@ -116,29 +150,10 @@ int main(void)
     assert(access("/tmp/libreecho-timer-persistence-test.tmp", F_OK) < 0);
     assert(access("/tmp/libreecho-timer-persistence-test.bak.tmp", F_OK) < 0);
 
-    /* A failure after rename has already committed the new schedule. Retrying
-       a failed parent-fsync must not rotate that new file over the real
-       previous copy. */
-    le_timer_set_init(&context.timers);
-    write_text(path, "old schedule\n");
-    unlink(backup);
-    assert(le_timer_add_countdown(&context.timers, 600, "committed", 0, NULL) ==
-           LE_TIMER_OK);
-    le_timerd_test_fail_finalize = 1;
-    assert(state_save(&context) == 0);
-    assert(context.state_commit_pending == 1);
-    read_text(path, text, sizeof(text));
-    assert(strstr(text, "committed") != NULL);
-    read_text(backup, text, sizeof(text));
-    assert(!strcmp(text, "old schedule\n"));
-    context.dirty = 1;
-    save_dirty_state_at(&context, 1000, SYNCED_EPOCH);
-    assert(context.dirty == 0);
-    assert(context.state_commit_pending == 0);
-    read_text(backup, text, sizeof(text));
-    assert(!strcmp(text, "old schedule\n"));
-    read_text(path, text, sizeof(text));
-    assert(strstr(text, "committed") != NULL);
+    /* A failure after rename has already committed the new schedule. Both
+       finalisation steps must preserve the old backup on the retry. */
+    assert_post_commit_retry(path, backup, &le_timerd_test_fail_chmod);
+    assert_post_commit_retry(path, backup, &le_timerd_test_fail_parent_fsync);
 
     unlink(path);
     unlink(backup);

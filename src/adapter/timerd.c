@@ -63,7 +63,8 @@ struct context {
 static volatile sig_atomic_t stop_requested;
 
 #ifdef LE_TIMERD_TESTING
-static int le_timerd_test_fail_finalize;
+static int le_timerd_test_fail_chmod;
+static int le_timerd_test_fail_parent_fsync;
 #endif
 
 static void on_signal(int signo)
@@ -131,11 +132,18 @@ static int fsync_parent(const char *path)
     return result;
 }
 
+enum state_save_result {
+    STATE_SAVE_FAILED = 0,
+    STATE_SAVE_OK = 1,
+    /* The new file is committed, but its directory durability step failed. */
+    STATE_SAVE_COMMITTED_DURABILITY_FAILED = 2
+};
+
 static int state_finalize(const char *path)
 {
 #ifdef LE_TIMERD_TESTING
-    if (le_timerd_test_fail_finalize) {
-        le_timerd_test_fail_finalize = 0;
+    if (le_timerd_test_fail_chmod) {
+        le_timerd_test_fail_chmod = 0;
         errno = EIO;
         return -1;
     }
@@ -143,8 +151,8 @@ static int state_finalize(const char *path)
     if (chmod(path, 0600) != 0)
         return -1;
 #ifdef LE_TIMERD_TESTING
-    if (le_timerd_test_fail_finalize) {
-        le_timerd_test_fail_finalize = 0;
+    if (le_timerd_test_fail_parent_fsync) {
+        le_timerd_test_fail_parent_fsync = 0;
         errno = EIO;
         return -1;
     }
@@ -154,8 +162,9 @@ static int state_finalize(const char *path)
     return 0;
 }
 
-static int state_save_at(struct context *ctx, long long now_ms,
-                         long long now_epoch)
+static enum state_save_result state_save_at(struct context *ctx,
+                                            long long now_ms,
+                                            long long now_epoch)
 {
     char temporary[256], backup[256], backup_temporary[256];
     int fd;
@@ -163,16 +172,16 @@ static int state_save_at(struct context *ctx, long long now_ms,
     size_t i;
 
     if (!ctx->state_path || !ctx->state_path[0])
-        return 0;
+        return STATE_SAVE_OK;
     /* Never replace a persisted countdown while the wall clock is invalid:
        its monotonic deadline cannot be converted safely yet. */
     if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
-        return 0;
+        return STATE_SAVE_FAILED;
     if (path_suffix(temporary, sizeof(temporary), ctx->state_path, ".tmp") < 0 ||
         path_suffix(backup, sizeof(backup), ctx->state_path, ".bak") < 0 ||
         path_suffix(backup_temporary, sizeof(backup_temporary), backup,
                     ".tmp") < 0)
-        return 0;
+        return STATE_SAVE_FAILED;
 
     fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0 || fchmod(fd, 0600) < 0) {
@@ -180,13 +189,13 @@ static int state_save_at(struct context *ctx, long long now_ms,
             close(fd);
         le_log_warn("timerd: cannot write %s: %s", temporary,
                     strerror(errno));
-        return 0;
+        return STATE_SAVE_FAILED;
     }
     file = fdopen(fd, "w");
     if (!file) {
         close(fd);
         unlink(temporary);
-        return 0;
+        return STATE_SAVE_FAILED;
     }
     for (i = 0; i < LE_TIMER_MAX; ++i) {
         const struct le_timer *timer = &ctx->timers.timers[i];
@@ -211,7 +220,7 @@ static int state_save_at(struct context *ctx, long long now_ms,
                     due, timer->label) < 0) {
             fclose(file);
             unlink(temporary);
-            return 0;
+            return STATE_SAVE_FAILED;
         }
     }
     if (fflush(file) != 0 || fsync(fileno(file)) != 0 ||
@@ -219,11 +228,11 @@ static int state_save_at(struct context *ctx, long long now_ms,
         le_log_warn("timerd: cannot flush %s", temporary);
         fclose(file);
         unlink(temporary);
-        return 0;
+        return STATE_SAVE_FAILED;
     }
     if (fclose(file) != 0) {
         unlink(temporary);
-        return 0;
+        return STATE_SAVE_FAILED;
     }
     /* Snapshot the old file before replacing it. Keeping the old inode as a
        hard link makes the backup atomic and avoids a window without one. */
@@ -236,13 +245,13 @@ static int state_save_at(struct context *ctx, long long now_ms,
                         strerror(errno));
             unlink(backup_temporary);
             unlink(temporary);
-            return 0;
+            return STATE_SAVE_FAILED;
         }
         if (fsync_parent(ctx->state_path) != 0) {
             le_log_warn("timerd: cannot sync backup %s: %s", backup,
                         strerror(errno));
             unlink(temporary);
-            return 0;
+            return STATE_SAVE_FAILED;
         }
     }
     /* Rename over the real file so a crash mid-write cannot leave a partial
@@ -251,7 +260,7 @@ static int state_save_at(struct context *ctx, long long now_ms,
         le_log_warn("timerd: cannot replace %s: %s", ctx->state_path,
                     strerror(errno));
         unlink(temporary);
-        return 0;
+        return STATE_SAVE_FAILED;
     }
     /* The rename is the commit point. From here on, failures are durability
        failures for the new state, not permission to create a new backup from
@@ -260,13 +269,13 @@ static int state_save_at(struct context *ctx, long long now_ms,
     if (state_finalize(ctx->state_path) != 0) {
         le_log_warn("timerd: cannot finalize %s: %s",
                     ctx->state_path, strerror(errno));
-        return 0;
+        return STATE_SAVE_COMMITTED_DURABILITY_FAILED;
     }
     ctx->state_commit_pending = 0;
-    return 1;
+    return STATE_SAVE_OK;
 }
 
-static int state_save(struct context *ctx)
+static enum state_save_result state_save(struct context *ctx)
 {
     return state_save_at(ctx, monotonic_ms(), wall_epoch());
 }
@@ -274,8 +283,15 @@ static int state_save(struct context *ctx)
 static void save_dirty_state_at(struct context *ctx, long long now_ms,
                                 long long now_epoch)
 {
-    if (ctx->dirty && state_save_at(ctx, now_ms, now_epoch))
+    enum state_save_result result;
+
+    if (!ctx->dirty)
+        return;
+    result = state_save_at(ctx, now_ms, now_epoch);
+    if (result == STATE_SAVE_OK)
         ctx->dirty = 0;
+    else if (result == STATE_SAVE_COMMITTED_DURABILITY_FAILED)
+        ctx->state_commit_pending = 1;
 }
 
 static void save_dirty_state(struct context *ctx)
