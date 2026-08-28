@@ -58,11 +58,44 @@ that refused the package; the field is omitted when the helper emits no `ERROR:`
 token. `manifest_update_channel_mismatch` also receives a channel-specific human
 message.
 
+### Device telemetry
+
+#### GET /api/v1/light
+
+Returns ambient-light telemetry from the TSL2540 vendor driver. `available` is
+false when no usable sensor is present; `lux` and `calibrated_lux` may be `0`
+for a dark room. `bus` reports the actual detected I²C device, such as
+`i2c 0-0039` or `i2c 1-0039`. Unsupported methods, including `HEAD`, return
+`405`; a backend without this sensor returns `501`.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "available": true,
+    "lux": 95,
+    "calibrated_lux": 95,
+    "visible": 93,
+    "infrared": 190,
+    "gain": 64,
+    "integration_us": 346368,
+    "auto_gain": false,
+    "powered": true,
+    "driver": "tsl2540",
+    "bus": "i2c 0-0039"
+  },
+  "error": null
+}
+```
+
 ### System Status
 
 #### GET /api/v1/status
 
-Returns system health and telemetry.
+Returns system health and telemetry. `light_lux` is the current ambient-light
+reading in lux, or `-1` when no usable sensor is present; `0` is a valid dark-room
+reading.
 
 **Response:**
 ```json
@@ -88,6 +121,7 @@ Returns system health and telemetry.
     "storage_available": true,
     "storage_state": "filesystem",
     "temperature_c": 42,
+    "light_lux": 95,
     "device_state": "online"
   },
   "error": null
@@ -333,6 +367,31 @@ Play test tone.
 }
 ```
 
+#### POST /api/v1/audio/sample
+
+Play one bundled raw sound by name for previewing the action-button rotation.
+The request is state-changing and requires `X-LibreEcho-CSRF`.
+
+**Request:**
+```json
+{ "name": "action-1" }
+```
+
+Names must be 1–48 characters and contain only lowercase letters, digits,
+hyphens, or underscores. The mock backend returns `501` because it has no
+speaker; a target without `audiod` does the same.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": { "playing": true },
+  "error": null
+}
+```
+
+Other methods return `405`.
+
 #### POST /api/v1/audio/announce
 
 Speak text through the local TTS service and `audiod` announcement bus. This
@@ -369,13 +428,17 @@ accepts or falls back to an OpenAI API key.
 #### GET /api/v1/voice-pipeline
 
 Returns speech-pipeline configuration and endpoint health. The response also
-includes the persisted `listening` object:
+includes the persisted `listening` object and the latest bounded restart state:
 
 ```json
 {
   "max_utterance_ms": 6000,
   "end_silence_ms": 1500,
-  "vad_floor_rms": 45
+  "vad_floor_rms": 45,
+  "restart": {
+    "state": "ready",
+    "error": ""
+  }
 }
 ```
 
@@ -400,6 +463,14 @@ are writable here and are validated before any setting is committed:
 
 Malformed or out-of-range listening fields return HTTP 400 and leave the
 previous configuration unchanged. The request requires `X-LibreEcho-CSRF`.
+
+When the image has voice-daemon init scripts, activation runs as one bounded
+restart job without blocking the HTTP loop. The accepted response is `202` and
+contains `restart.state: "pending"`; a second update while it is pending gets
+`409`. Poll this GET endpoint for completion. If the asynchronous restart fails,
+the state becomes `failed` and the next PUT reports `503` so the caller cannot
+mistake a persisted setting for a running pipeline. Home Assistant mode is
+rejected with `501` when its Wyoming service is not installed.
 
 #### GET /api/v1/assistant
 
@@ -430,14 +501,14 @@ Returns the newest bounded turn records measured by `agentd` itself:
 }
 ```
 
-The ring retains up to 12 newest turns in `agentd` memory and is empty after
-that daemon restarts. `history_generation` is persisted on the device and
-increments on every device-wide clear; clients must discard cached rows when
-the generation changes, but may preserve them when an empty response has the
-same generation (for example after an agentd restart). Clients should keep
-their last non-empty cached result when a successful response contains no
-turns. `at_ms` is Unix epoch milliseconds; latency fields are device-local
-durations. Other verbs return 405.
+The ring retains up to 12 newest turns and is persisted by `agentd`, so records
+are restored after that daemon restarts. `history_generation` is persisted on
+the device and increments on every device-wide clear; clients must discard
+cached rows when the generation changes, but may preserve them when an empty
+response has the same generation. Clients should keep their last non-empty
+cached result when a successful response contains no turns. `at_ms` is Unix
+epoch milliseconds; latency fields are device-local durations. Other verbs
+return 405.
 
 #### POST /api/v1/assistant/history/clear
 
@@ -1146,7 +1217,25 @@ true}`. In device mode the kernel enumerates no disk and this answers
 
 The mount is read-only (`MS_RDONLY|MS_NOSUID|MS_NODEV`) and nothing in this
 endpoint writes to the drive. Bounded like the rest of the API: the first disk,
-its first partition, and at most 64 top-level entries.
+its first partition, and at most 64 top-level entries. Invalid paths return
+`400`; methods other than `GET` return `405`.
+
+#### POST /api/v1/storage/usb/play
+
+Starts an MP3 file from the attached USB drive through `radiod`. The request
+body must contain a path relative to the drive root:
+
+```json
+{ "path": "Music/track.mp3" }
+```
+
+The path is limited to 255 bytes and is rejected if any path component is `.`
+or `..`, contains a backslash, or starts with a slash. Ordinary names such as
+`a..b.mp3` are allowed. The file must exist, be a regular file, and have
+an `.mp3` extension. Other formats return `415` because this image has no AAC
+decoder. The response is an ordinary success envelope; the shared radio stop
+operation (`POST /api/v1/integrations/radio/stop`) also stops USB playback.
+Methods other than `POST` return `405`.
 
 #### GET /api/v1/diagnostics/kernel
 
@@ -1170,6 +1259,15 @@ which is the only shell this image offers — there is no SSH server. The kernel
 log therefore becomes unreadable over USB at precisely the moment it matters,
 such as when checking whether an attached drive enumerated. Reading it over the
 network closes that gap.
+
+#### GET /api/v1/diagnostics/kernel.log
+
+Streams the complete output of `dmesg` as an attachment. The response is
+`text/plain; charset=utf-8` with `Content-Disposition:
+attachment; filename="libreecho-kernel.log"` and chunked transfer encoding; it is
+not wrapped in the JSON response envelope. If kernel-log access is unavailable,
+it returns HTTP 503 with the standard JSON error envelope before sending any
+success headers. The server allows at most four concurrent kernel-log workers.
 
 #### POST /api/v1/diagnostics/export
 
@@ -1223,8 +1321,6 @@ action downloads this response as JSON and offers its short `summary` for
 copying into an issue template. No server-side temporary file is created.
 
 ### Wake Word
-
-#### GET /api/v1/wake-word
 
 Returns wake word state. When the wake-word service is absent, this remains a
 successful `200` response with `data.available: false` and
@@ -1283,6 +1379,11 @@ Returns the saved button settings and the live capability state reported by
 record. `volume_capable`, `hardware_mute`, and `action_capable` reflect the
 keys found on the currently discovered evdev devices; `stale` is true when the
 status record is missing, disconnected, or older than 15 seconds.
+`available_sounds` lists the installed raw sounds that can be previewed, and
+`action_sounds` is the comma-separated rotation list in play order. Sound names
+are lowercase letters, digits, hyphens, or underscores and are at most 48
+characters each; an empty `action_sounds` disables sound playback while keeping
+the action-button ring flash.
 
 #### PUT /api/v1/buttons
 
@@ -1292,6 +1393,9 @@ successful update. `tones` controls the short rising/falling press cues;
 and `mute_brightness` are LED-ring brightness values from 0 to 100. The
 currently wired action is `sound`; `listen`, `playpause`, and `disabled` are
 accepted settings with the corresponding behavior reported by the daemon.
+`action_sounds` is a comma-separated list of installed sound names in rotation
+order. Each name follows the same 1–48-character lowercase-name rule as the
+preview endpoint; an empty string is valid and means no sound is played.
 Malformed fields, unsupported actions, and brightness values outside 0–100
 return the standard 400 error envelope.
 
@@ -1302,6 +1406,7 @@ return the standard 400 error envelope.
   "long_press": "Open pairing mode",
   "tones": true,
   "action": "sound",
+  "action_sounds": "action-1,action-2,action-3",
   "action_brightness": 70,
   "mute_brightness": 60
 }
@@ -1322,6 +1427,8 @@ return the standard 400 error envelope.
     "stale": true,
     "tones": true,
     "action": "sound",
+    "action_sounds": "action-1,action-2,action-3",
+    "available_sounds": ["action-1", "action-2", "action-3"],
     "action_brightness": 70,
     "mute_brightness": 60
   },
@@ -1329,9 +1436,9 @@ return the standard 400 error envelope.
 }
 ```
 
-Configuration export/import includes all four new settings. Imports from older
-exports may omit them; omitted values retain the current setting, while any
-present value is validated and restored.
+Configuration export/import includes `button_action_sounds` alongside the other
+button settings. Imports from older exports may omit it; omitted values retain
+the current setting, while any present value is validated and restored.
 
 ### Bluetooth
 
@@ -1506,6 +1613,32 @@ Remote mode without a valid HTTPS destination is rejected with `400`. All
 mutations persist atomically using the existing `0600` configuration store.
 
 ### Integrations
+
+#### GET /api/v1/spotify
+
+Returns the current Spotify Connect status. This endpoint is read-only; `HEAD`
+and other unsupported methods return `405`.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "installed": true,
+    "enabled": false,
+    "playing": false,
+    "device_name": "LibreEcho (mock)",
+    "status": "stopped"
+  },
+  "error": null
+}
+```
+
+`installed` reports whether the Spotify Connect daemon is present in the image;
+it is separate from `enabled`. `status` is `unavailable` when the daemon is not
+installed, `stopped` when installed but disabled, `ready` when enabled, and
+`playing` during playback. `device_name` is the name shown by Spotify and is
+JSON-escaped, including when it contains quotes or backslashes.
 
 #### PUT /api/v1/integrations
 

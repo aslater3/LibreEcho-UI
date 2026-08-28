@@ -57,10 +57,49 @@ grep -q '/sys/class/usb_role' src/api.c
 curl -fsS "$URL/api/v1/storage/usb" | jq -e '.ok and (.data|has("present"))' >/dev/null
 curl -fsS "$URL/api/v1/storage/usb" | jq -e \
     'if .data.present then (.data|has("device") and has("entries")) else .data.mounted == false end' >/dev/null
+# Unsupported verbs on the USB browse and playback routes must be explicit
+# 405s, rather than falling through to a misleading 404.
+for method in POST PUT DELETE PATCH; do
+    code=$(curl -sS -o /tmp/le-usb-storage-method.out -w '%{http_code}' \
+        -X "$method" "$URL/api/v1/storage/usb" \
+        -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+    [ "$code" = 405 ]
+done
+for method in GET PUT DELETE PATCH; do
+    code=$(curl -sS -o /tmp/le-usb-play-method.out -w '%{http_code}' \
+        -X "$method" "$URL/api/v1/storage/usb/play" \
+        -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+    [ "$code" = 405 ]
+done
+
+# A browse target may not be clipped into the bounded request-path buffer.
+long_path=$(python3 -c 'print("a" * 240)')
+code=$(curl -sS -o /tmp/le-usb-long-browse.out -w '%{http_code}' \
+    "$URL/api/v1/storage/usb?path=$long_path")
+[ "$code" = 400 ]
+# Playback has the same complete-path rule for JSON request bodies.
+name256=$(python3 -c 'print("a" * 256)')
+name256_payload=$(jq -cn --arg path "$name256" '{path:$path}')
+code=$(curl -sS -o /tmp/le-usb-long-play.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/storage/usb/play" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data "$name256_payload")
+[ "$code" = 400 ]
 # Read-only is a property of the code, not a promise in prose.
 grep -q 'MS_RDONLY' src/api.c
 
 grep -q 'feature-usb-host' web/js/app.js
+grep -q 'setting is temporary and resets to device mode on the next boot' web/js/app.js
+! grep -q 'setting is remembered' web/js/app.js
+! grep -q 'hold any button on the device while it boots' web/js/app.js
+python3 - <<'PY'
+import json
+with open('web/openapi.json', encoding='utf-8') as stream:
+    spec = json.load(stream)
+schema = spec['paths']['/system/features']['put']['requestBody']['content']['application/json']['schema']
+assert schema['minProperties'] == 1
+assert schema['properties']['usb_host']['type'] == 'boolean'
+assert 'not persisted' in schema['properties']['usb_host']['description']
+PY
 # Boot always returns the port to device so ADB cannot be left switched off.
 # The init lives in the platform repository, which is not always checked out
 # beside this one (CI builds this repo alone), so assert it only when present.

@@ -266,11 +266,31 @@ int json_get_string(const char *s, const char *k, char *out, size_t z)
 
 void json_escape(char *out, size_t z, const char *in)
 {
+    static const char hex[] = "0123456789abcdef";
     size_t n = 0;
-    while (*in && n + 2 < z) {
-        unsigned char c = (unsigned char)*in++;
-        if (c == '"' || c == '\\') { out[n++] = '\\'; out[n++] = (char)c; }
-        else if (c >= 32) out[n++] = (char)c;
+
+    while (*in) {
+        unsigned char c = (unsigned char)*in;
+        size_t width = (c == 34 || c == 92 || c == 10 || c == 13 || c == 9)
+            ? 2 : (c < 32 ? 6 : 1);
+        if (n + width + 1 > z)
+            break;
+        ++in;
+        if (c == 34 || c == 92) {
+            out[n++] = '\\';
+            out[n++] = (char)c;
+        } else if (c == 10) {
+            out[n++] = '\\'; out[n++] = 'n';
+        } else if (c == 13) {
+            out[n++] = '\\'; out[n++] = 'r';
+        } else if (c == 9) {
+            out[n++] = '\\'; out[n++] = 't';
+        } else if (c >= 32) {
+            out[n++] = (char)c;
+        } else {
+            out[n++] = '\\'; out[n++] = 'u'; out[n++] = '0'; out[n++] = '0';
+            out[n++] = hex[c >> 4]; out[n++] = hex[c & 15];
+        }
     }
     out[n] = 0;
 }

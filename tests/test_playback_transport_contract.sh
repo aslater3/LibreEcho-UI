@@ -52,6 +52,25 @@ curl -fsS -X PUT "$URL/api/v1/integrations/radio" -H "$CSRF" -H "$JSON" \
 curl -fsS -X POST "$URL/api/v1/integrations/radio/play" -H "$CSRF" -H "$JSON" \
     --data '{"word":"groove"}' >/dev/null
 
+# Unsupported verbs on the radio action and configuration routes are explicit
+# 405s, rather than falling through to a misleading 404.
+for method in GET PUT DELETE PATCH; do
+    code=$(curl -sS -o /tmp/le-radio-play-method.out -w '%{http_code}' \
+        -X "$method" "$URL/api/v1/integrations/radio/play" \
+        -H "$CSRF" -H "$JSON" --data '{}')
+    [ "$code" = 405 ]
+    code=$(curl -sS -o /tmp/le-radio-stop-method.out -w '%{http_code}' \
+        -X "$method" "$URL/api/v1/integrations/radio/stop" \
+        -H "$CSRF" -H "$JSON" --data '{}')
+    [ "$code" = 405 ]
+done
+for method in POST DELETE PATCH; do
+    code=$(curl -sS -o /tmp/le-radio-config-method.out -w '%{http_code}' \
+        -X "$method" "$URL/api/v1/integrations/radio" \
+        -H "$CSRF" -H "$JSON" --data '{}')
+    [ "$code" = 405 ]
+done
+
 # The card must be able to say which station and which track, not "media audio".
 # The stored name wins over the stream's own icy-name, because it is the name
 # the user chose.

@@ -159,7 +159,7 @@
      "Assistant"
     ],
     "summary": "Read the bounded device-side voice turn history",
-    "description": "Returns up to 12 newest device-measured turns plus a persisted history_generation. The history ring is held in agentd memory and is empty after an agentd restart; clients should discard cached rows when history_generation changes, but may preserve them when an empty response has the same generation.",
+    "description": "Returns up to 12 newest device-measured turns plus a persisted history_generation. The history ring is persisted by agentd and restored after restart; clients should discard cached rows when history_generation changes, but may preserve them when an empty response has the same generation.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -566,9 +566,58 @@
       "$ref": "#/components/responses/Error"
      }
     }
-   }
-  },
-  "/auth": {
+    }
+    },
+    "/audio/sample": {
+    "post": {
+     "tags": [
+      "Audio"
+     ],
+     "summary": "Preview one bundled action-button sound",
+     "description": "Plays one raw sound from the installed sound directory. Names are lowercase letters, digits, hyphens, or underscores and are limited to 48 characters. Other HTTP methods return 405.",
+     "parameters": [
+      {
+       "$ref": "#/components/parameters/Csrf"
+      }
+     ],
+     "requestBody": {
+      "required": true,
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "name"
+         ],
+         "properties": {
+          "name": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 48,
+           "pattern": "^[a-z0-9_-]+$"
+          }
+         }
+        }
+       }
+      }
+     },
+     "responses": {
+      "200": {
+       "$ref": "#/components/responses/Success"
+      },
+      "400": {
+       "$ref": "#/components/responses/Error"
+      },
+      "405": {
+       "$ref": "#/components/responses/Error"
+      },
+      "501": {
+       "$ref": "#/components/responses/Error"
+      }
+     }
+    }
+    },
+    "/auth": {
    "get": {
     "tags": [
      "Authentication"
@@ -1091,7 +1140,7 @@
      "LED and buttons"
     ],
     "summary": "Read button settings and live physical-input capability state",
-    "description": "Returns saved tones/action/brightness settings plus live capability fields from libreecho-buttond. `available` is true only for a fresh connected status record; `stale` is true when the record is missing, disconnected, or older than 15 seconds. The response data includes `short_press`, `long_press`, `tones`, `action`, `action_brightness`, `mute_brightness`, `volume_capable`, `hardware_mute`, and `action_capable`.",
+    "description": "Returns saved tones/action/brightness settings plus live capability fields from libreecho-buttond. `available` is true only for a fresh connected status record; `stale` is true when the record is missing, disconnected, or older than 15 seconds. The response data includes `short_press`, `long_press`, `tones`, `action`, `action_sounds`, `available_sounds`, `action_brightness`, `mute_brightness`, `volume_capable`, `hardware_mute`, and `action_capable`. Sound names are lowercase letters, digits, hyphens, or underscores and are at most 48 characters each; an empty `action_sounds` is valid and disables sound playback.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1106,7 +1155,7 @@
      "LED and buttons"
     ],
     "summary": "Update button mappings, cues, action, and brightness",
-    "description": "All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_brightness` and `mute_brightness` are integers from 0 through 100. Malformed or out-of-range fields return 400.",
+    "description": "All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Malformed or out-of-range fields return 400.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1137,6 +1186,11 @@
            "playpause",
            "disabled"
           ]
+         },
+         "action_sounds": {
+          "type": "string",
+          "maxLength": 191,
+          "pattern": "^(|[a-z0-9_-]{1,48}(,[a-z0-9_-]{1,48})*)$"
          },
          "action_brightness": {
           "type": "integer",
@@ -1280,10 +1334,16 @@
      "System"
     ],
     "summary": "List a USB drive attached to the OTG port",
-    "description": "Reports the attached USB disk and lists one directory of it. Optional `path` query selects a directory relative to the mount; it is rejected if it contains `..`, a backslash or a leading slash, so a listing can never escape the drive. Answers `size_bytes`, `used_bytes` and `free_bytes` from statvfs, plus `rel_path` echoing the directory listed. `present` is false when the port is in device mode or no disk is attached; `mounted` is false when a disk is present but no filesystem could be mounted. The drive is mounted read-only, nosuid and nodev.",
+    "description": "Reports the attached USB disk and lists one directory of it. Optional `path` query selects a directory relative to the mount; it is limited to 255 bytes and rejected if any component is `.` or `..`, contains a backslash or starts with a slash, so a listing can never escape the drive. Ordinary names containing consecutive dots are allowed. Answers `size_bytes`, `used_bytes` and `free_bytes` from statvfs, plus `rel_path` echoing the directory listed. `present` is false when the port is in device mode or no disk is attached; `mounted` is false when a disk is present but no filesystem could be mounted. The drive is mounted read-only, nosuid and nodev.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
      },
      "503": {
       "$ref": "#/components/responses/Error"
@@ -1295,9 +1355,10 @@
       "in": "query",
       "required": false,
       "schema": {
-       "type": "string"
+       "type": "string",
+       "maxLength": 255
       },
-      "description": "Directory relative to the drive root."
+      "description": "Directory relative to the drive root; path components `.` and `..`, backslashes and leading slashes are rejected. Names containing consecutive dots are valid."
      }
     ]
    }
@@ -1308,7 +1369,34 @@
      "System"
     ],
     "summary": "Play an audio file from the USB drive",
-    "description": "Body is `{\"path\":\"...\"}` relative to the drive root. The path is refused if it contains `..`, a backslash or a leading slash, so playback cannot escape the mount. Only `.mp3` is accepted: radiod decodes MPEG-1/2 Layer III and this image carries no AAC decoder, so other audio formats answer `415` with that reason rather than starting and staying silent. Playback runs through the same radiod path as internet radio, so `/integrations/radio/stop` stops it.",
+    "description": "Body is `{\"path\":\"...\"}` relative to the drive root. The path is refused if any component is `.` or `..`, contains a backslash or a leading slash; ordinary names containing consecutive dots are allowed, so playback cannot escape the mount. Only `.mp3` is accepted: radiod decodes MPEG-1/2 Layer III and this image carries no AAC decoder, so other audio formats answer `415` with that reason rather than starting and staying silent. Playback runs through the same radiod path as internet radio, so `/integrations/radio/stop` stops it.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "path"
+        ],
+        "properties": {
+         "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "File path relative to the USB drive root; it must name an existing regular `.mp3` file. Path components `.` and `..`, backslashes and leading slashes are rejected; names containing consecutive dots are valid."
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     }
+    },
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1316,10 +1404,16 @@
      "400": {
       "$ref": "#/components/responses/Error"
      },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
      "404": {
       "$ref": "#/components/responses/Error"
      },
      "415": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
       "$ref": "#/components/responses/Error"
      },
      "503": {
@@ -1338,6 +1432,37 @@
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/diagnostics/kernel.log": {
+   "get": {
+    "tags": [
+     "Diagnostics"
+    ],
+    "summary": "Download the complete kernel log",
+    "description": "Streams the complete dmesg output as a text/plain attachment using chunked transfer encoding. The response is raw log text rather than the JSON envelope. Kernel-log access failures return the standard JSON error envelope with HTTP 503 before any success headers are sent. At most four kernel-log workers run concurrently.",
+    "responses": {
+     "200": {
+      "description": "Raw kernel log attachment",
+      "headers": {
+       "Content-Disposition": {
+        "schema": {
+         "type": "string"
+        },
+        "description": "Attachment filename is libreecho-kernel.log"
+       }
+      },
+      "content": {
+       "text/plain": {}
+      }
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
      },
      "503": {
       "$ref": "#/components/responses/Error"
@@ -1378,6 +1503,26 @@
     "responses": {
      "200": {
       "description": "text/event-stream"
+     }
+    }
+   }
+  },
+  "/spotify": {
+   "get": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Read Spotify Connect status",
+    "description": "Returns whether the Spotify Connect daemon is installed in the image, whether it is enabled, whether it is playing, the device name shown in Spotify, and its current status. The device name is escaped as JSON and may contain quotes or backslashes. This endpoint is read-only; unsupported methods, including HEAD, receive 405.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }
@@ -2118,12 +2263,33 @@
     }
    }
   },
+  "/light": {
+   "get": {
+    "tags": [
+     "Device"
+    ],
+    "summary": "Read ambient-light sensor status",
+    "description": "Returns TSL2540 ambient-light telemetry. `available` is false when no usable sensor is present; in that case the other readings are not meaningful. `lux` and `calibrated_lux` may be zero for a dark room. `bus` reports the actual detected I²C device, such as `i2c 0-0039` or `i2c 1-0039`.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/status": {
    "get": {
     "tags": [
      "Device"
     ],
     "summary": "Read system telemetry",
+    "description": "Returns CPU, memory, storage, temperature, and ambient-light telemetry. `light_lux` is the current ambient-light reading in lux, or `-1` when no usable sensor is present; `0` is a valid dark-room reading.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -2202,6 +2368,7 @@
       "application/json": {
        "schema": {
         "type": "object",
+        "minProperties": 1,
         "properties": {
          "simulation": {
           "type": "boolean",
@@ -2221,7 +2388,7 @@
          "usb_host": {
           "type": "boolean",
           "default": false,
-          "description": "Move the OTG port to host mode for USB storage, or device mode for ADB; applied immediately and not persisted."
+          "description": "Switch the OTG port immediately between host/storage mode and device/ADB mode. This live setting is not persisted and resets to device mode on reboot."
          }
         },
         "anyOf": [
@@ -2522,7 +2689,7 @@
      "Assistant"
     ],
     "summary": "Read speech pipeline configuration and endpoint health",
-    "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, and persisted listening settings. max_utterance_ms is 2000\u201320000, end_silence_ms is 200\u20133000, and vad_floor_rms is 1\u20131024.",
+    "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, persisted listening settings, and the state of the latest bounded voice-pipeline restart. `restart.state` is `ready`, `pending`, or `failed`; `restart.error` is non-empty when the last restart failed. max_utterance_ms is 2000\u201320000, end_silence_ms is 200\u20133000, and vad_floor_rms is 1\u20131024.",
     "responses": {
      "200": {
       "description": "Speech pipeline and persisted listening settings",
@@ -2541,7 +2708,7 @@
      "Assistant"
     ],
     "summary": "Configure and activate the speech pipeline",
-    "description": "Persists and applies local, custom, or Home Assistant mode. Custom mode uses remote Wyoming Whisper and Piper services while wake-word detection remains on-device.",
+    "description": "Persists and applies local, custom, or Home Assistant mode. Custom mode uses remote Wyoming Whisper and Piper services while wake-word detection remains on-device. When daemon init scripts are present, activation is bounded to one restart job: the successful response is 202 with `restart.state: pending`; concurrent updates return 409 until it completes. Poll GET /api/v1/voice-pipeline for `restart.state` and `restart.error`; asynchronous restart failures are reported as 503 on the next PUT and remain visible in GET state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -2604,6 +2771,12 @@
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     },
+     "202": {
+      "$ref": "#/components/responses/Success"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
      },
      "400": {
       "$ref": "#/components/responses/Error"
@@ -2725,8 +2898,8 @@
         "hostname": {"type": "string", "maxLength": 63},
         "ssh": {"type": "boolean"},
         "api_lan": {"type": "boolean"},
-        "wifi_mac": {"type": "string", "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"},
-        "bt_mac": {"type": "string", "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"}
+        "wifi_mac": {"type": "string", "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"},
+        "bt_mac": {"type": "string", "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"}
        },
        "additionalProperties": false
       }
@@ -3138,8 +3311,28 @@
       "maximum": 1024
      }
     }
-   },
-   "VoicePipelineEnvelope": {
+    },
+    "VoicePipelineRestart": {
+    "type": "object",
+    "required": [
+     "state",
+     "error"
+    ],
+    "properties": {
+     "state": {
+      "type": "string",
+      "enum": [
+       "ready",
+       "pending",
+       "failed"
+      ]
+     },
+     "error": {
+      "type": "string"
+     }
+    }
+    },
+    "VoicePipelineEnvelope": {
     "type": "object",
     "required": [
      "ok",
@@ -3155,6 +3348,9 @@
       "properties": {
        "listening": {
         "$ref": "#/components/schemas/ListeningSettings"
+       },
+       "restart": {
+        "$ref": "#/components/schemas/VoicePipelineRestart"
        }
       }
      },

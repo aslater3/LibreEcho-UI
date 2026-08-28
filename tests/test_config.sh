@@ -7,11 +7,13 @@ curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/js
 curl -fsS -X PUT "$URL/api/v1/led" -H "$CSRF" -H 'Content-Type: application/json' --data '{"r":12,"g":34,"b":56,"brightness":43,"visualizer_enabled":false}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/network" -H "$CSRF" -H 'Content-Type: application/json' --data '{"hostname":"persistent-echo","ssh":true,"api_lan":true}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' \
-    --data '{"short_press":"Play / pause","long_press":"Reboot device","tones":false,"action":"sound","action_brightness":33,"mute_brightness":44}' \
-    | jq -e '.ok and .data.tones == false and .data.action == "sound" and .data.action_brightness == 33 and .data.mute_brightness == 44' >/dev/null
+    --data '{"short_press":"Play / pause","long_press":"Reboot device","tones":false,"action":"sound","action_sounds":"action-1,action-2","action_brightness":33,"mute_brightness":44}' \
+    | jq -e '.ok and .data.tones == false and .data.action == "sound" and .data.action_sounds == "action-1,action-2" and .data.action_brightness == 33 and .data.mute_brightness == 44' >/dev/null
+jq -e '.button_short == "Play / pause" and .button_long == "Reboot device" and .button_action_sounds == "action-1,action-2" and .button_action_brightness == 33 and .button_mute_brightness == 44' "$CFG" >/dev/null
 curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"local_only":true,"diagnostic_telemetry":false,"crash_reports":false,"audio_retention":"none","log_retention_hours":168}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: application/json' --data '{"mode":"custom","stt_wyoming_uri":"tcp://198.51.100.10:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://198.51.100.10:10200","tts_voice":"en_GB-alan-medium"}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/integrations/spotify" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 grep -q '"volume": 37' "$CFG"
 jq -e '
   .hostname_persisted == true and .hostname == "persistent-echo" and
@@ -21,7 +23,7 @@ jq -e '
   .button_short == "Play / pause" and .button_long == "Reboot device" and
   .button_tones == false and .button_action == "sound" and
   .button_action_brightness == 33 and .button_mute_brightness == 44 and
-  .privacy_log_hours == 168 and .integrations == 5 and
+  .privacy_log_hours == 168 and .integrations == 37 and
   .privacy_local_only == false and
   .voice_pipeline_mode == "custom" and
   .stt_wyoming_uri == "tcp://198.51.100.10:10300" and
@@ -41,6 +43,7 @@ printf '%s' "$exported" | jq -e \
      .led_visualizer_enabled == false and .button_tones == false and
      .feature_acoustic_events == true and
      .button_action == "sound" and .button_action_brightness == 33 and
+     .button_action_sounds == "action-1,action-2" and
      .button_mute_brightness == 44' >/dev/null
 ! printf '%s' "$exported" | grep -Eqi 'password|auth_token|telemetry_value|logs'
 curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
@@ -51,11 +54,12 @@ curl -fsS "$URL/api/v1/system/features" |
     jq -e '.ok and .data.acoustic_events == true and .data.acoustic_events_available == false' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume":10}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' \
-    --data '{"tones":true,"action":"disabled","action_brightness":1,"mute_brightness":2}' >/dev/null
+    --data '{"tones":true,"action":"disabled","action_sounds":"action-3","action_brightness":1,"mute_brightness":2}' >/dev/null
 curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" -H 'Content-Type: application/json' --data "$exported" >/dev/null
 curl -fsS "$URL/api/v1/audio" | grep -q '"volume":37'
 curl -fsS "$URL/api/v1/buttons" | jq -e \
     '.data.tones == false and .data.action == "sound" and
+     .data.action_sounds == "action-1,action-2" and
      .data.action_brightness == 33 and .data.mute_brightness == 44' >/dev/null
 legacy_export=$(printf '%s' "$exported" | jq -c 'del(.led_visualizer_enabled)')
 curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" \

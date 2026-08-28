@@ -3,6 +3,7 @@
 #include "adapter/adapter.h"
 #include "adapter/voice_stream.h"
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -45,15 +46,19 @@ extern int setgroups(int,const gid_t*);
  * ~280 connections -- so matching the budget costs little.
  */
 #define LE_MAX_TLS_RELAYS LE_MAX_CLIENTS
+#define LE_MAX_KERNEL_LOG_WORKERS 4
 #define LE_TLS_IDLE_TIMEOUT_MS 60000
 struct client{int fd;
+int secure_transport;
 size_t used;
 char buf[LE_REQ_MAX+1];
 };
 static volatile sig_atomic_t assistant_workers;
 static volatile sig_atomic_t assistant_pids[LE_MAX_ASSISTANT_WORKERS];
 static volatile sig_atomic_t tls_relay_pids[LE_MAX_TLS_RELAYS];
-static void reap_child_workers(int signo){int i;int status;(void)signo;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]>0&&waitpid((pid_t)assistant_pids[i],&status,WNOHANG)>0){assistant_pids[i]=0;if(assistant_workers>0)assistant_workers--;}for(i=0;i<LE_MAX_TLS_RELAYS;i++)if(tls_relay_pids[i]>0&&waitpid((pid_t)tls_relay_pids[i],&status,WNOHANG)>0)tls_relay_pids[i]=0;}
+static volatile sig_atomic_t kernel_log_workers;
+static volatile sig_atomic_t kernel_log_pids[LE_MAX_KERNEL_LOG_WORKERS];
+static void reap_child_workers(int signo){int i;int status;(void)signo;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]>0&&waitpid((pid_t)assistant_pids[i],&status,WNOHANG)>0){assistant_pids[i]=0;if(assistant_workers>0)assistant_workers--;}for(i=0;i<LE_MAX_TLS_RELAYS;i++)if(tls_relay_pids[i]>0&&waitpid((pid_t)tls_relay_pids[i],&status,WNOHANG)>0)tls_relay_pids[i]=0;for(i=0;i<LE_MAX_KERNEL_LOG_WORKERS;i++)if(kernel_log_pids[i]>0&&waitpid((pid_t)kernel_log_pids[i],&status,WNOHANG)>0){kernel_log_pids[i]=0;if(kernel_log_workers>0)kernel_log_workers--;}}
 
 static int close_on_exec(int fd)
 {
@@ -80,13 +85,47 @@ n-=(size_t)w;
 }}
 static void response(int fd,int code,const char*type,const void*body,size_t n){char h[1024];
 const char*reason=code==200?"OK":code==400?"Bad Request":code==403?"Forbidden":code==404?"Not Found":code==405?"Method Not Allowed":code==409?"Conflict":code==413?"Payload Too Large":code==429?"Too Many Requests":code==501?"Not Implemented":code==503?"Service Unavailable":"Error";
-int z=snprintf(h,sizeof(h),"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; script-src 'self'\r\n\r\n",code,reason,type,(unsigned long)n);
+int z=snprintf(h,sizeof(h),"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' https://geocoding-api.open-meteo.com; script-src 'self'\r\n\r\n",code,reason,type,(unsigned long)n);
 send_all(fd,h,(size_t)z);
 if(n)send_all(fd,body,n);
 }
 static int stream_send_all(int fd,const void*body,size_t n){const char*p=body;while(n){ssize_t w=send(fd,p,n,0);if(w<=0)return-1;p+=w;n-=w;}return 0;}
 static int stream_shared_audio(int fd){struct sockaddr_un address;int wake=-1;char request[128],reply[1024],header[512];size_t used=0;ssize_t n;int frame_result;struct le_voice_stream_frame frame;wake=socket(AF_UNIX,SOCK_STREAM,0);if(wake<0)return-2;memset(&address,0,sizeof(address));address.sun_family=AF_UNIX;strncpy(address.sun_path,LE_ADAPTER_WAKEWORD_SOCK,sizeof(address.sun_path)-1);if(connect(wake,(struct sockaddr*)&address,sizeof(address))<0)goto unavailable;n=snprintf(request,sizeof(request),"{\"v\":1,\"id\":1,\"cmd\":\"stream_audio\",\"args\":{}}\n");if(n<0||stream_send_all(wake,request,(size_t)n)<0)goto unavailable;while(used+1<sizeof(reply)){n=read(wake,reply+used,1);if(n<=0)goto unavailable;if(reply[used++]=='\n')break;}reply[used]='\0';if(!strstr(reply,"\"ok\":true"))goto unavailable;signal(SIGPIPE,SIG_IGN);n=snprintf(header,sizeof(header),"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-LibreEcho-Audio: pcm_s16_le;rate=16000;channels=1;selected-channel=shared-wake;calibration=applied\r\nX-Content-Type-Options: nosniff\r\n\r\n");if(n<0||stream_send_all(fd,header,(size_t)n)<0){close(wake);return-1;}while((frame_result=le_voice_stream_read_frame(wake,&frame))>0){size_t bytes=(size_t)frame.sample_count*sizeof(frame.samples[0]);int z=snprintf(header,sizeof(header),"%zx\r\n",bytes);if(z<0||stream_send_all(fd,header,(size_t)z)<0||stream_send_all(fd,frame.samples,bytes)<0||stream_send_all(fd,"\r\n",2)<0){close(wake);return-1;}}if(frame_result==0)(void)stream_send_all(fd,"0\r\n\r\n",5);close(wake);return frame_result<0?-1:0;unavailable:close(wake);return-2;}
 static int stream_microphone(int fd,int selected_channel){struct sockaddr_un address;int microphone=-1;char request[160],reply[LE_ADAPTER_MSG_MAX],buffer[8192],header[512];size_t used=0;ssize_t n;int shared_result=stream_shared_audio(fd);if(shared_result!=-2){close(fd);return 0;}microphone=socket(AF_UNIX,SOCK_STREAM,0);if(microphone<0)goto unavailable;memset(&address,0,sizeof(address));address.sun_family=AF_UNIX;strncpy(address.sun_path,LE_ADAPTER_MIC_SOCK,sizeof(address.sun_path)-1);if(connect(microphone,(struct sockaddr*)&address,sizeof(address))<0)goto unavailable;n=snprintf(request,sizeof(request),"{\"v\":1,\"id\":1,\"cmd\":\"stream_raw\",\"args\":{\"channel\":%d}}\n",selected_channel);if(n<0||stream_send_all(microphone,request,(size_t)n)<0)goto unavailable;while(used+1<sizeof(reply)){n=read(microphone,reply+used,1);if(n<=0)goto unavailable;if(reply[used++]=='\n')break;}reply[used]='\0';if(!strstr(reply,"\"ok\":true"))goto unavailable;signal(SIGPIPE,SIG_IGN);n=snprintf(header,sizeof(header),"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-LibreEcho-Audio: pcm_s24_3le;rate=16000;channels=9;container-bits=24;valid-bits=16;selected-channel=%d;calibration=none\r\nX-Content-Type-Options: nosniff\r\n\r\n",selected_channel);if(n<0||stream_send_all(fd,header,(size_t)n)<0)goto stop;while((n=read(microphone,buffer,sizeof(buffer)))>0){int z=snprintf(header,sizeof(header),"%zx\r\n",(size_t)n);if(z<0||stream_send_all(fd,header,(size_t)z)<0||stream_send_all(fd,buffer,(size_t)n)<0||stream_send_all(fd,"\r\n",2)<0)goto stop;}if(n==0)(void)stream_send_all(fd,"0\r\n\r\n",5);goto stop;unavailable:{const char*message="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"microphone_unavailable\",\"message\":\"Microphone service could not start the stream\"}}";response(fd,503,"application/json",message,strlen(message));}stop:if(microphone>=0)close(microphone);close(fd);return 0;}
+static int stream_kernel_log(int fd){int probe;FILE*f;char buf[8192],head[512];int z;size_t n;probe=system("dmesg >/dev/null 2>&1");if(probe<0||!WIFEXITED(probe)||WEXITSTATUS(probe)!=0){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log is unavailable\"}}";response(fd,503,"application/json",m,strlen(m));close(fd);return 0;}f=popen("dmesg 2>/dev/null","r");if(!f){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log is unavailable\"}}";response(fd,503,"application/json",m,strlen(m));close(fd);return 0;}signal(SIGPIPE,SIG_IGN);z=snprintf(head,sizeof(head),"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename=\"libreecho-kernel.log\"\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n");if(z<0||stream_send_all(fd,head,(size_t)z)<0){pclose(f);return 0;}while((n=fread(buf,1,sizeof(buf),f))>0){z=snprintf(head,sizeof(head),"%zx\r\n",n);if(z<0||stream_send_all(fd,head,(size_t)z)<0||stream_send_all(fd,buf,n)<0||stream_send_all(fd,"\r\n",2)<0){pclose(f);return 0;}}(void)stream_send_all(fd,"0\r\n\r\n",5);pclose(f);return 0;}
+static void close_kernel_log_inherited(int keep_fd)
+{
+    DIR *directory;
+    struct dirent *entry;
+    int scan_fd;
+
+    /* Do not rely on today's listener/client list: future descriptors must not
+       leak into a worker and keep sockets or files alive after the request. */
+    directory = opendir("/proc/self/fd");
+    if (directory) {
+        scan_fd = dirfd(directory);
+        while ((entry = readdir(directory)) != NULL) {
+            char *end;
+            long inherited = strtol(entry->d_name, &end, 10);
+            if (*entry->d_name && !*end && inherited >= 3 &&
+                inherited != keep_fd && inherited != scan_fd)
+                close((int)inherited);
+        }
+        closedir(directory);
+        return;
+    }
+    /* Linux supplies /proc, but keep a bounded POSIX fallback for test hosts. */
+    {
+        long limit = sysconf(_SC_OPEN_MAX);
+        int fd;
+        if (limit < 3 || limit > 65536)
+            limit = 65536;
+        for (fd = 3; fd < limit; ++fd)
+            if (fd != keep_fd)
+                close(fd);
+    }
+}
+static int start_kernel_log_stream(int fd,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){sigset_t blocked,previous;pid_t pid;int i,slot=-1;(void)http_listener;(void)https_listener;(void)relay_listener;(void)clients;(void)max;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;for(i=0;i<LE_MAX_KERNEL_LOG_WORKERS;i++)if(kernel_log_pids[i]<=0){slot=i;break;}if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close_kernel_log_inherited(fd);(void)stream_kernel_log(fd);_exit(0);}kernel_log_pids[slot]=pid;kernel_log_workers++;sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
 static int start_pcm_stream(int fd,int selected_channel){pid_t pid=fork();if(pid<0)return-1;if(pid==0){(void)stream_microphone(fd,selected_channel);_exit(0);}close(fd);return 0;}
 static int write_all_file(int fd,const void*body,size_t n){const char*p=body;while(n){ssize_t w=write(fd,p,n);if(w<=0)return-1;p+=w;n-=(size_t)w;}return 0;}
 static void update_error(int fd,int status,const char*code,const char*message){char body[512];int n=snprintf(body,sizeof(body),"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",code,message);response(fd,status,"application/json",body,(size_t)n);}
@@ -138,14 +177,14 @@ f=open(path,O_RDONLY);
 if(f<0||fstat(f,&st)||!S_ISREG(st.st_mode)){if(f>=0)close(f);
 return-1;
 } {char h[1024];
-int z=snprintf(h,sizeof(h),"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; script-src 'self'\r\n\r\n",mime(path),(unsigned long)st.st_size);
+int z=snprintf(h,sizeof(h),"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' https://geocoding-api.open-meteo.com; script-src 'self'\r\n\r\n",mime(path),(unsigned long)st.st_size);
 send_all(fd,h,(size_t)z);
 }while((n=read(f,b,sizeof(b)))>0)send_all(fd,b,(size_t)n);
 close(f);
 return 0;
 }
 static int destructive_path(const char*path){return !strcmp(path,"/api/v1/system/reboot")||!strcmp(path,"/api/v1/system/shutdown")||!strcmp(path,"/api/v1/system/factory-reset");}
-static void process(struct client*c,const struct http_options*o,struct api_context*api){char*end=strstr(c->buf,"\r\n\r\n"),*body,*cl;
+static void process(struct client*c,const struct http_options*o,struct api_context*api,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){char*end=strstr(c->buf,"\r\n\r\n"),*body,*cl,*target_start,*target_end;
 size_t headers,body_len=0,content_len=0;
 const char *page_path;
 struct api_request q;
@@ -156,6 +195,11 @@ headers=(size_t)(end-c->buf)+4;
 if(headers>LE_HEADER_MAX){response(c->fd,413,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"headers_too_large\",\"message\":\"Request headers exceed 8 KiB\"}}",122);
 goto done;
 }memset(&q,0,sizeof(q));
+target_start=strchr(c->buf,' ');
+target_end=target_start?strchr(target_start+1,' '):NULL;
+if(!target_start||!target_end||target_end==target_start+1||(size_t)(target_end-target_start-1)>=sizeof(q.path)){response(c->fd,400,"text/plain","Request target is too long or malformed",strlen("Request target is too long or malformed"));
+goto done;
+}
 if(sscanf(c->buf,"%7s %255s",q.method,q.path)!=2){response(c->fd,400,"text/plain","Bad request",11);
 goto done;
 }cl=header(c->buf,"Content-Length");
@@ -172,6 +216,7 @@ body_len=content_len;
 q.body=body;
 q.body_len=body_len;
 body[body_len]=0;
+q.https=c->secure_transport;
 copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));
 copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));
 copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));
@@ -180,12 +225,13 @@ copy_header(q.confirm,sizeof(q.confirm),header(c->buf,"X-LibreEcho-Confirm"));
 if((!strcmp(q.path,"/api/v1/assistant/respond")&&!strcmp(q.method,"POST"))||(!strcmp(q.path,"/api/v1/assistant/history")&&!strcmp(q.method,"GET"))||(!strcmp(q.path,"/api/v1/assistant/history/clear")&&!strcmp(q.method,"POST"))){if(start_api_worker(c->fd,api,&q)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}",sizeof("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}")-1);goto done;}c->fd=-1;c->used=0;return;}
 if(!strcmp(q.path,"/api/v1/system/update/check")||!strcmp(q.path,"/api/v1/system/update/apply")){const char*action=!strcmp(q.path,"/api/v1/system/update/check")?"check":"install";if(!api_update_fetch_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update command could not start");goto done;}c->fd=-1;c->used=0;return;}
 if(!strcmp(q.path,"/api/v1/system/update/channel")){char channel[16],action[32];if(!api_update_channel_authorize(api,&q,&r,channel,sizeof(channel))){response(c->fd,r.status,r.type,r.body,r.length);goto done;}snprintf(action,sizeof(action),"set-channel-%s",channel);if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update channel could not be changed");goto done;}c->fd=-1;c->used=0;return;}
-if(!strncmp(q.path,"/api/v1/baby-monitor/stream",27)){int card,device,channels,bits,selected_channel;if(!api_baby_monitor_stream_authorize(api,&q,&r,&card,&device,&channels,&bits,&selected_channel)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_pcm_stream(c->fd,selected_channel)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Microphone stream could not start\"}}",118);goto done;}c->fd=-1;c->used=0;return;}if(!strncmp(q.path,"/api/",5)){time_t now=time(0);
+if(!strncmp(q.path,"/api/v1/baby-monitor/stream",27)){int card,device,channels,bits,selected_channel;if(!api_baby_monitor_stream_authorize(api,&q,&r,&card,&device,&channels,&bits,&selected_channel)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_pcm_stream(c->fd,selected_channel)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Microphone stream could not start\"}}",118);goto done;}c->fd=-1;c->used=0;return;}
+if(!strcmp(q.path,"/api/v1/diagnostics/kernel.log")){if(!api_diagnostics_kernel_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_kernel_log_stream(c->fd, http_listener, https_listener, relay_listener, clients, max)<0){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log stream could not start\"}}";response(c->fd,503,"application/json",m,strlen(m));goto done;}c->fd=-1;c->used=0;return;}if(!strncmp(q.path,"/api/",5)){time_t now=time(0);
 if(destructive_path(q.path)&&last_destructive&&now-last_destructive<3){response(c->fd,429,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"rate_limited\",\"message\":\"Wait before another device action\"}}",115);
 goto done;
 }if(destructive_path(q.path))last_destructive=now;
 api_handle(api,&q,&r);
-if(r.status>=200&&r.status<300&&!strcmp(q.method,"PUT")&&(!strcmp(q.path,"/api/v1/audio")||!strcmp(q.path,"/api/v1/led")||!strcmp(q.path,"/api/v1/network")||!strcmp(q.path,"/api/v1/wake-word")||!strcmp(q.path,"/api/v1/buttons")||!strcmp(q.path,"/api/v1/privacy")||!strncmp(q.path,"/api/v1/integrations/",21))&&api_persist_configuration(api)){r.status=503;strcpy(r.type,"application/json; charset=utf-8");strcpy(r.body,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Configuration change could not be saved\"}}");r.length=strlen(r.body);}
+if(r.status>=200&&r.status<300&&!strcmp(q.method,"PUT")&&(!strcmp(q.path,"/api/v1/audio")||!strcmp(q.path,"/api/v1/led")||!strcmp(q.path,"/api/v1/network")||!strcmp(q.path,"/api/v1/wake-word")||!strcmp(q.path,"/api/v1/privacy")||!strncmp(q.path,"/api/v1/integrations/",21))&&api_persist_configuration(api)){r.status=503;strcpy(r.type,"application/json; charset=utf-8");strcpy(r.body,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Configuration change could not be saved\"}}");r.length=strlen(r.body);}
 response(c->fd,r.status,r.type,r.body,r.length);
 if(body_len)memset(body,0,body_len);
 }else if(strcmp(q.method,"GET")&&strcmp(q.method,"HEAD"))response(c->fd,405,"text/plain","Method not allowed",18);
@@ -205,17 +251,17 @@ c->used=0;
  * downstream byte identical and leaves plain HTTP listening, so a TLS
  * misconfiguration can never lock the device's own UI out.
  */
-static void tls_relay(int cfd,const struct http_options*o){
-struct le_tls*tls;int up=-1;struct sockaddr_in a;struct pollfd p[2];char buf[4096];long n;const char*relay_host;
+static void tls_relay(int cfd,const struct http_options*o,int relay_port){
+struct le_tls*tls;int up=-1;struct sockaddr_in a;struct pollfd p[2];char buf[4096];long n;
 tls=le_tls_server_open(cfd,o->tls_cert,o->tls_key);
 if(!tls){close(cfd);return;}
 up=socket(AF_INET,SOCK_STREAM,0);
 if(up<0){le_tls_close(tls);close(cfd);return;}
-memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)o->port);relay_host=!strcmp(o->listen_host,"0.0.0.0")?"127.0.0.1":o->listen_host;
+memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)relay_port);
 /* inet_pton, not INADDR_LOOPBACK: the latter is not POSIX and is hidden by
    _POSIX_C_SOURCE on some platforms, so it built on Linux and failed the
    native build the e2e harness uses. */
-if(inet_pton(AF_INET,relay_host,&a.sin_addr)!=1){close(up);le_tls_close(tls);close(cfd);return;}
+if(inet_pton(AF_INET,"127.0.0.1",&a.sin_addr)!=1){close(up);le_tls_close(tls);close(cfd);return;}
 if(connect(up,(struct sockaddr*)&a,sizeof(a))){close(up);le_tls_close(tls);close(cfd);return;}
 /*
  * Pump both directions until either end finishes. Two things this loop has to
@@ -265,7 +311,7 @@ if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
 close(up);le_tls_close(tls);close(cfd);return;}
 
 /* Keep TLS relays in the same fixed process budget as other forked work. */
-static int spawn_tls_relay(int cfd,const struct http_options*o,int http_listener,int https_listener){
+static int spawn_tls_relay(int cfd,const struct http_options*o,int relay_port,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){
 sigset_t blocked,previous;pid_t pid;int i,slot=-1;
 sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);
 if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;
@@ -278,16 +324,16 @@ if(!warned){warned=1;fprintf(stderr,"HTTPS relay budget (%d) exhausted; a connec
 sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
 pid=fork();
 if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
-if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close(http_listener);close(https_listener);tls_relay(cfd,o);_exit(0);}
+if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close(http_listener);close(https_listener);close(relay_listener);for(i=0;i<max;i++)if(clients[i].fd>=0)close(clients[i].fd);tls_relay(cfd,o,relay_port);_exit(0);}
 tls_relay_pids[slot]=pid;
 sigprocmask(SIG_SETMASK,&previous,NULL);
 return 0;
 }
 
-int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,tls_ls=-1,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
+int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,tls_ls=-1,relay_ls=-1,relay_port=0,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
 struct sockaddr_in a;
 struct client c[LE_MAX_CLIENTS];
-struct pollfd p[LE_MAX_CLIENTS+2];
+struct pollfd p[LE_MAX_CLIENTS+3];
 time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_child_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
 if(max>LE_MAX_CLIENTS)max=LE_MAX_CLIENTS;
 memset(c,0,sizeof(c));
@@ -318,41 +364,57 @@ if(inet_pton(AF_INET,o->listen_host,&ta.sin_addr)!=1||bind(tls_ls,(struct sockad
 /* HTTPS is best-effort: losing it must never take the HTTP UI down with it */
 fprintf(stderr,"HTTPS listener on port %d unavailable: %s\n",o->tls_port,strerror(errno));
 close(tls_ls);tls_ls=-1;api_set_https_active(api,0);
-}else {api_set_https_active(api,1);fprintf(stderr,"LibreEcho also listening on https://%s:%d\n",o->listen_host,o->tls_port);}
+}else {
+struct sockaddr_in ra;socklen_t ra_len=sizeof(ra);relay_ls=socket(AF_INET,SOCK_STREAM,0);
+if(relay_ls>=0&&close_on_exec(relay_ls)<0){close(relay_ls);relay_ls=-1;}
+memset(&ra,0,sizeof(ra));ra.sin_family=AF_INET;ra.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+if(relay_ls<0||bind(relay_ls,(struct sockaddr*)&ra,sizeof(ra))||listen(relay_ls,max)||getsockname(relay_ls,(struct sockaddr*)&ra,&ra_len)){
+fprintf(stderr,"HTTPS relay listener unavailable: %s\n",strerror(errno));if(relay_ls>=0)close(relay_ls);relay_ls=-1;close(tls_ls);tls_ls=-1;api_set_https_active(api,0);
+}else {relay_port=(int)ntohs(ra.sin_port);api_set_https_active(api,1);fprintf(stderr,"LibreEcho also listening on https://%s:%d\n",o->listen_host,o->tls_port);}
+}
 }}
 while(*running){p[0].fd=ls;
 p[0].events=POLLIN;
 p[max+1].fd=tls_ls;
 p[max+1].events=POLLIN;
+p[max+2].fd=relay_ls;
+p[max+2].events=POLLIN;
 for(i=0;
 i<max;
 i++){p[i+1].fd=c[i].fd;
 p[i+1].events=POLLIN;
-}if(poll(p,(nfds_t)(max+2),500)<0&&errno!=EINTR)break;
+}if(poll(p,(nfds_t)(max+3),500)<0&&errno!=EINTR)break;
 if(p[0].revents&POLLIN){int fd=accept(ls,0,0);
 if(fd>=0&&close_on_exec(fd)<0){close(fd);fd=-1;}
 if(fd>=0){for(i=0;
 i<max&&c[i].fd>=0;
 i++){/* find free bounded slot */}if(i==max){response(fd,503,"text/plain","Server busy",11);
 close(fd);
-}else c[i].fd=fd;
+}else {c[i].fd=fd;c[i].secure_transport=0;}
 }}if(tls_ls>=0&&(p[max+1].revents&POLLIN)){int tfd=accept(tls_ls,0,0);
 if(tfd>=0&&close_on_exec(tfd)<0){close(tfd);tfd=-1;}
-if(tfd>=0){if(spawn_tls_relay(tfd,o,ls,tls_ls)<0)close(tfd);else close(tfd);}
-}for(i=0;
+if(tfd>=0){if(spawn_tls_relay(tfd,o,relay_port,ls,tls_ls,relay_ls,c,max)<0)close(tfd);else close(tfd);}
+}if(relay_ls>=0&&(p[max+2].revents&POLLIN)){int rfd=accept(relay_ls,0,0);
+if(rfd>=0&&close_on_exec(rfd)<0){close(rfd);rfd=-1;}
+if(rfd>=0){for(i=0;i<max&&c[i].fd>=0;i++){}
+if(i==max){response(rfd,503,"text/plain","Server busy",11);close(rfd);}
+else {c[i].fd=rfd;c[i].secure_transport=1;}
+}}for(i=0;
 i<max;
 i++)if(c[i].fd>=0&&(p[i+1].revents&(POLLIN|POLLHUP|POLLERR))){ssize_t n=recv(c[i].fd,c[i].buf+c[i].used,LE_REQ_MAX-c[i].used,0);
 if(n<=0){close(c[i].fd);
 c[i].fd=-1;
+c[i].secure_transport=0;
 }else{c[i].used+=(size_t)n;
 c[i].buf[c[i].used]=0;
-process(&c[i],o,api);
+process(&c[i],o,api,ls,tls_ls,relay_ls,c,max);
 }}if(time(0)!=last_tick){last_tick=time(0);
 le_backend_tick(api->backend);
 }}for(i=0;
 i<max;
 i++)if(c[i].fd>=0)close(c[i].fd);
 if(tls_ls>=0)close(tls_ls);
+if(relay_ls>=0)close(relay_ls);
 close(ls);
 return 0;
 }

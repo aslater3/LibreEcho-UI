@@ -532,19 +532,47 @@ static int sync_history_directory(const char *path)
     return rc;
 }
 
-static int save_history_generation(const struct agent_state *state,
-                                   unsigned long long generation)
+static int json_get_u64(const char *json, const char *key, uint64_t *out)
 {
-    char temporary[sizeof(state->history_generation_path) + 16];
-    char backup[sizeof(state->history_generation_path) + 5];
+    char needle[64];
+    const char *p;
+    char *end;
+    unsigned long long value;
+
+    if (snprintf(needle, sizeof(needle), "\"%s\"", key) >=
+        (int)sizeof(needle))
+        return -1;
+    p = strstr(json, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ||
+           *p == ':')
+        ++p;
+    if (*p < '0' || *p > '9')
+        return -1;
+    errno = 0;
+    value = strtoull(p, &end, 10);
+    if (errno || end == p ||
+        (*end && *end != ',' && *end != '}' && *end != ']' &&
+         *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n'))
+        return -1;
+    *out = (uint64_t)value;
+    return 1;
+}
+
+static int write_history_file(const char *path, const char *json,
+                              size_t length)
+{
+    char temporary[400];
+    char backup[389];
     int fd;
     FILE *file;
 
-    if (snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX",
-                 state->history_generation_path) >= (int)sizeof(temporary))
-        return -1;
-    if (snprintf(backup, sizeof(backup), "%s.bak",
-                 state->history_generation_path) >= (int)sizeof(backup))
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX", path) >=
+        (int)sizeof(temporary) ||
+        snprintf(backup, sizeof(backup), "%s.bak", path) >=
+        (int)sizeof(backup))
         return -1;
     fd = mkstemp(temporary);
     if (fd < 0 || fchmod(fd, 0600) != 0) {
@@ -554,7 +582,7 @@ static int save_history_generation(const struct agent_state *state,
         return -1;
     }
     file = fdopen(fd, "w");
-    if (!file || fprintf(file, "%llu\n", generation) < 0 ||
+    if (!file || fwrite(json, 1, length, file) != length ||
         fflush(file) != 0 || fsync(fileno(file)) != 0) {
         if (file)
             fclose(file);
@@ -567,19 +595,149 @@ static int save_history_generation(const struct agent_state *state,
         unlink(temporary);
         return -1;
     }
-    if (rename(state->history_generation_path, backup) != 0 &&
+    if (rename(path, backup) != 0 &&
         errno != ENOENT) {
         unlink(temporary);
         return -1;
     }
-    if (rename(temporary, state->history_generation_path) != 0) {
-        rename(backup, state->history_generation_path);
+    if (rename(temporary, path) != 0) {
+        rename(backup, path);
         unlink(temporary);
         return -1;
     }
-    if (sync_history_directory(state->history_generation_path) != 0)
+    if (sync_history_directory(path) != 0)
         return -1;
     return 0;
+}
+
+static int save_history_state(const struct agent_state *state,
+                              unsigned long long generation,
+                              const struct turn_record *records,
+                              unsigned next, unsigned count)
+{
+    char json[LE_ADAPTER_MSG_MAX];
+    size_t used = 0;
+    unsigned i, start;
+    int wrote;
+
+    if (count > LE_AGENT_TURN_HISTORY)
+        return -1;
+    wrote = snprintf(json, sizeof(json),
+                     "{\"version\":1,\"history_generation\":%llu,"
+                     "\"turns\":[",
+                     generation);
+    if (wrote < 0 || (size_t)wrote >= sizeof(json))
+        return -1;
+    used = (size_t)wrote;
+    start = (next + LE_AGENT_TURN_HISTORY - count) % LE_AGENT_TURN_HISTORY;
+    for (i = 0; i < count; ++i) {
+        const struct turn_record *record = &records[(start + i) %
+                                                     LE_AGENT_TURN_HISTORY];
+        char request_id[sizeof(record->request_id) * 2U];
+
+        if (escape_json(request_id, sizeof(request_id),
+                        record->request_id) < 0)
+            return -1;
+        wrote = snprintf(
+            json + used, sizeof(json) - used,
+            "%s{\"at_ms\":%llu,\"stt_audio_ms\":%llu,"
+            "\"stt_processing_ms\":%llu,\"stt_total_ms\":%llu,"
+            "\"first_text_ms\":%llu,\"first_announce_ms\":%llu,"
+            "\"first_pcm_ms\":%llu,\"follow_up\":%s,"
+            "\"request_id\":\"%s\"}",
+            i ? "," : "", (unsigned long long)record->at_ms,
+            (unsigned long long)record->stt_audio_ms,
+            (unsigned long long)record->stt_processing_ms,
+            (unsigned long long)record->stt_total_ms,
+            (unsigned long long)record->first_text_ms,
+            (unsigned long long)record->first_announce_ms,
+            (unsigned long long)record->first_pcm_ms,
+            record->follow_up ? "true" : "false", request_id);
+        if (wrote < 0 || (size_t)wrote >= sizeof(json) - used)
+            return -1;
+        used += (size_t)wrote;
+    }
+    wrote = snprintf(json + used, sizeof(json) - used, "]}\n");
+    if (wrote < 0 || (size_t)wrote >= sizeof(json) - used)
+        return -1;
+    return write_history_file(state->history_generation_path, json,
+                              used + (size_t)wrote);
+}
+
+static void append_history_record(struct agent_state *state,
+                                   const struct turn_record *record)
+{
+    state->turn_history[state->turn_history_next] = *record;
+    state->turn_history_next =
+        (state->turn_history_next + 1) % LE_AGENT_TURN_HISTORY;
+    if (state->turn_history_count < LE_AGENT_TURN_HISTORY)
+        ++state->turn_history_count;
+}
+
+static int load_history(struct agent_state *state)
+{
+    char json[LE_ADAPTER_MSG_MAX];
+    char object[1024];
+    const char *array;
+    const char *at;
+    uint64_t generation;
+
+    if (config_read(state->history_generation_path, json, sizeof(json)) < 0 ||
+        !json_valid_object(json, strlen(json)))
+        return -1;
+    if (json_get_u64(json, "history_generation", &generation) > 0 &&
+        generation)
+        state->history_generation = (unsigned long long)generation;
+    array = strstr(json, "\"turns\"");
+    array = array ? strchr(array, '[') : NULL;
+    if (!array)
+        return 0;
+    at = array + 1;
+    for (;;) {
+        const char *end;
+        size_t length;
+        struct turn_record record;
+        int follow_up;
+
+        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n' ||
+               *at == ',')
+            ++at;
+        if (*at == ']')
+            return 0;
+        if (*at != '{')
+            return -1;
+        end = strchr(at, '}');
+        if (!end)
+            return -1;
+        length = (size_t)(end - at + 1);
+        if (length >= sizeof(object))
+            return -1;
+        memcpy(object, at, length);
+        object[length] = '\0';
+        memset(&record, 0, sizeof(record));
+        if (json_get_u64(object, "at_ms", &record.at_ms) < 1 ||
+            json_get_u64(object, "stt_audio_ms", &record.stt_audio_ms) < 1 ||
+            json_get_u64(object, "stt_processing_ms",
+                         &record.stt_processing_ms) < 1 ||
+            json_get_u64(object, "stt_total_ms", &record.stt_total_ms) < 1 ||
+            json_get_u64(object, "first_text_ms", &record.first_text_ms) < 1 ||
+            json_get_u64(object, "first_announce_ms",
+                         &record.first_announce_ms) < 1 ||
+            json_get_u64(object, "first_pcm_ms", &record.first_pcm_ms) < 1 ||
+            json_get_bool(object, "follow_up", &follow_up) < 1)
+            return -1;
+        record.follow_up = follow_up;
+        if (json_get_string(object, "request_id", record.request_id,
+                            sizeof(record.request_id)) < 0)
+            return -1;
+        append_history_record(state, &record);
+        at = end + 1;
+        if (*at == ']')
+            return 0;
+        if (*at != ',')
+            return -1;
+        ++at;
+    }
 }
 
 static int command_history_clear(struct agent_state *state, int client_fd,
@@ -591,7 +749,7 @@ static int command_history_clear(struct agent_state *state, int client_fd,
     next = state->history_generation + 1;
     if (!next)
         next = 1;
-    if (save_history_generation(state, next) != 0) {
+    if (save_history_state(state, next, NULL, 0, 0) != 0) {
         pthread_mutex_unlock(&state->metrics_mutex);
         return respond(client_fd, id, 0,
                        "history clear could not be persisted");
@@ -1238,22 +1396,24 @@ static void voice_transcript(
         if (generated) {
         pthread_mutex_lock(&state->metrics_mutex);
         {
-            struct turn_record *rec =
-                &state->turn_history[state->turn_history_next];
-            rec->at_ms = wall_clock_milliseconds();
-            snprintf(rec->request_id, sizeof(rec->request_id), "%s",
+            struct turn_record record;
+            memset(&record, 0, sizeof(record));
+            record.at_ms = wall_clock_milliseconds();
+            snprintf(record.request_id, sizeof(record.request_id), "%s",
                      state->turn_request_id);
-            rec->stt_audio_ms = turn->stt_audio_ms;
-            rec->stt_processing_ms = turn->stt_processing_ms;
-            rec->stt_total_ms = turn->stt_total_ms;
-            rec->first_text_ms = state->first_text_ms;
-            rec->first_announce_ms = state->first_announce_ms;
-            rec->first_pcm_ms = state->first_pcm_ms;
-            rec->follow_up = turn->follow_up ? 1 : 0;
-            state->turn_history_next =
-                (state->turn_history_next + 1) % LE_AGENT_TURN_HISTORY;
-            if (state->turn_history_count < LE_AGENT_TURN_HISTORY)
-                ++state->turn_history_count;
+            record.stt_audio_ms = turn->stt_audio_ms;
+            record.stt_processing_ms = turn->stt_processing_ms;
+            record.stt_total_ms = turn->stt_total_ms;
+            record.first_text_ms = state->first_text_ms;
+            record.first_announce_ms = state->first_announce_ms;
+            record.first_pcm_ms = state->first_pcm_ms;
+            record.follow_up = turn->follow_up ? 1 : 0;
+            append_history_record(state, &record);
+            if (save_history_state(state, state->history_generation,
+                                   state->turn_history,
+                                   state->turn_history_next,
+                                   state->turn_history_count) != 0)
+                le_log_warn("agentd: turn history could not be persisted");
         }
         pthread_mutex_unlock(&state->metrics_mutex);
         }
@@ -1604,11 +1764,12 @@ int main(int argc, char **argv)
         (int)sizeof(state.history_generation_path))
         return 1;
     state.history_generation = 1;
-    {
+    if (load_history(&state) < 0) {
         char backup[sizeof(state.history_generation_path) + 5];
         FILE *file;
         unsigned long long saved;
         int loaded = 0;
+
         snprintf(backup, sizeof(backup), "%s.bak",
                  state.history_generation_path);
         file = fopen(state.history_generation_path, "r");

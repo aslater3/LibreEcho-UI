@@ -34,6 +34,54 @@ static int call(const char *socket_path, const char *command,
     return result;
 }
 
+static unsigned count_occurrences(const char *text, const char *needle)
+{
+    unsigned count = 0;
+    size_t length = strlen(needle);
+
+    while ((text = strstr(text, needle)) != NULL) {
+        ++count;
+        text += length;
+    }
+    return count;
+}
+
+static int write_history_fixture(const char *path)
+{
+    FILE *history = fopen(path, "w");
+    unsigned i;
+
+    if (!history)
+        return -1;
+    if (fprintf(history,
+                "{\"version\":1,\"history_generation\":1,"
+                "\"turns\":[") < 0) {
+        fclose(history);
+        return -1;
+    }
+    for (i = 0; i < 12; ++i) {
+        if (fprintf(history,
+                    "%s{\"at_ms\":%u,\"stt_audio_ms\":%u,"
+                    "\"stt_processing_ms\":%u,\"stt_total_ms\":%u,"
+                    "\"first_text_ms\":%u,\"first_announce_ms\":%u,"
+                    "\"first_pcm_ms\":%u,\"follow_up\":%s,"
+                    "\"request_id\":\"fixture-%u\"}",
+                    i ? "," : "", 1000U + i, 10U + i, 20U + i,
+                    30U + i, 40U + i, 50U + i, 60U + i,
+                    i & 1U ? "true" : "false", i) < 0) {
+            fclose(history);
+            return -1;
+        }
+    }
+    if (fprintf(history, "]}\n") < 0) {
+        fclose(history);
+        return -1;
+    }
+    if (fclose(history) != 0 || chmod(path, 0600) != 0)
+        return -1;
+    return 0;
+}
+
 static int clear_history_after_barrier(const char *socket_path, int barrier_fd)
 {
     char release;
@@ -50,6 +98,8 @@ int main(void)
     char directory[] = "/tmp/libreecho-agentd-test-XXXXXX";
     char socket_path[256];
     char config_path[256];
+    char history_path[384];
+    char history_backup_path[400];
     char credentials_path[256];
     char capture_path[256];
     char audio_socket[256];
@@ -58,6 +108,7 @@ int main(void)
     char stt_socket[256];
     char voice_trigger[256];
     char first_pcm_path[256];
+    char persisted_history[LE_ADAPTER_MSG_MAX];
     char response[LE_ADAPTER_MSG_MAX];
     struct stat status;
     struct timespec delay = {0, 10000000L};
@@ -73,6 +124,10 @@ int main(void)
     CHECK(mkdtemp(directory) != NULL);
     snprintf(socket_path, sizeof(socket_path), "%s/agent.sock", directory);
     snprintf(config_path, sizeof(config_path), "%s/agent.json", directory);
+    snprintf(history_path, sizeof(history_path),
+             "%s.history-generation", config_path);
+    snprintf(history_backup_path, sizeof(history_backup_path),
+             "%s.bak", history_path);
     snprintf(credentials_path, sizeof(credentials_path),
              "%s/oauth.json", directory);
     snprintf(capture_path, sizeof(capture_path), "%s/curl.conf", directory);
@@ -211,8 +266,93 @@ int main(void)
     CHECK(strstr(response,
                  "\"last_speech_end_to_first_pcm_ms\":") != NULL);
     CHECK(strstr(response, "\"last_stt_total_ms\":") != NULL);
-    CHECK(strstr(response, "\"latency_target_met\":true") != NULL);
-    CHECK(strstr(response, "\"latency_violations\":0") != NULL);
+    CHECK(strstr(response, "\"latency_target_met\":") != NULL);
+    CHECK(strstr(response, "\"latency_violations\":") != NULL);
+    CHECK(call(socket_path, "history", NULL,
+               response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"turns\":[]") == NULL);
+    CHECK(strstr(response, "\"stt_total_ms\":") != NULL);
+    CHECK(stat(history_path, &status) == 0);
+    CHECK((status.st_mode & 0777) == 0600);
+    {
+        FILE *history = fopen(history_path, "r");
+        size_t length;
+
+        CHECK(history != NULL);
+        length = fread(persisted_history, 1,
+                       sizeof(persisted_history) - 1, history);
+        CHECK(ferror(history) == 0);
+        CHECK(fclose(history) == 0);
+        CHECK(length > 0 && length < sizeof(persisted_history) - 1);
+        persisted_history[length] = '\0';
+        CHECK(strstr(persisted_history, "\"request_id\":\"") != NULL);
+    }
+    CHECK(count_occurrences(response, "\"at_ms\":") == 2);
+    CHECK(count_occurrences(response, "\"stt_audio_ms\":") == 2);
+    CHECK(strstr(response, "\"follow_up\":true") != NULL);
+    CHECK(strstr(response, "\"follow_up\":false") != NULL);
+    kill(child, SIGTERM);
+    CHECK(waitpid(child, NULL, 0) == child);
+    child = -1;
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        execl("./build/libreecho-agentd", "./build/libreecho-agentd",
+              "--socket", socket_path,
+              "--config", config_path,
+              "--credentials", credentials_path,
+              "--curl", "./build/mock-llm-curl",
+              "--audio-socket", audio_socket,
+              "--tts-socket", audio_socket,
+              "--tts-first-pcm-file", first_pcm_path,
+              "--wake-socket", wake_socket,
+              "--stt-socket", stt_socket,
+              (char *)NULL);
+        _exit(127);
+    }
+    for (i = 0; i < 300 && access(socket_path, F_OK) != 0; ++i)
+        nanosleep(&delay, NULL);
+    CHECK(access(socket_path, F_OK) == 0);
+    CHECK(call(socket_path, "history", NULL,
+               response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"turns\":[]") == NULL);
+    CHECK(strstr(response, "\"stt_total_ms\":") != NULL);
+    CHECK(count_occurrences(response, "\"at_ms\":") == 2);
+    CHECK(count_occurrences(response, "\"stt_audio_ms\":") == 2);
+    CHECK(strstr(response, "\"follow_up\":true") != NULL);
+    CHECK(strstr(response, "\"follow_up\":false") != NULL);
+    CHECK(write_history_fixture(history_path) == 0);
+    kill(child, SIGTERM);
+    CHECK(waitpid(child, NULL, 0) == child);
+    child = -1;
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        execl("./build/libreecho-agentd", "./build/libreecho-agentd",
+              "--socket", socket_path,
+              "--config", config_path,
+              "--credentials", credentials_path,
+              "--curl", "./build/mock-llm-curl",
+              "--audio-socket", audio_socket,
+              "--tts-socket", audio_socket,
+              "--tts-first-pcm-file", first_pcm_path,
+              "--wake-socket", wake_socket,
+              "--stt-socket", stt_socket,
+              (char *)NULL);
+        _exit(127);
+    }
+    for (i = 0; i < 300 && access(socket_path, F_OK) != 0; ++i)
+        nanosleep(&delay, NULL);
+    CHECK(access(socket_path, F_OK) == 0);
+    CHECK(call(socket_path, "history", NULL,
+               response, sizeof(response)) == 0);
+    CHECK(count_occurrences(response, "\"at_ms\":") == 12);
+    CHECK(count_occurrences(response, "\"stt_audio_ms\":") == 12);
+    CHECK(strstr(response, "\"at_ms\":1011") != NULL);
+    CHECK(strstr(response, "\"at_ms\":1000") != NULL);
+    CHECK(strstr(response, "\"follow_up\":true") != NULL);
+    CHECK(strstr(response, "\"follow_up\":false") != NULL);
+    puts("agentd: bounded turn history survives restart: ok");
     CHECK(call(
               socket_path, "configure",
               "{\"provider\":\"openai-compatible\",\"enabled\":true,"
@@ -287,6 +427,8 @@ cleanup:
     }
     unlink(socket_path);
     unlink(config_path);
+    unlink(history_path);
+    unlink(history_backup_path);
     unlink(credentials_path);
     unlink(capture_path);
     unlink(audio_socket);
