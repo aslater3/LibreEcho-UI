@@ -203,6 +203,7 @@ curl -fsS "$URL/api/v1/setup" | jq -e \
      .data.vendor_firmware.verification == "hash-pinned" and
      .data.vendor_firmware.source_layout == "etc/firmware" and
      .data.vendor_firmware.force_next_boot == false and
+     .data.wake_word == "LibreEcho" and
      .data.wlan0_registered == true' >/dev/null
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 curl -fsS -X POST "$URL/api/v1/setup/vendor-import-force-next-boot" \
