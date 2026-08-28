@@ -52,10 +52,12 @@
  * Most daemons answer on a control socket, which is the better signal: it is
  * what their callers depend on, so it catches a wedged daemon as well as a
  * dead one. Some -- buttond, timed, logd, wyomingd -- serve no socket at all;
- * they read input events, poll the clock or talk outward. For those the
- * pidfile is all there is. It is a weaker check (it cannot tell a wedged
- * process from a working one) but it still catches the common failure, which
- * is the process being gone.
+ * they read input events, poll the clock or talk outward. sttd, ttsd and
+ * agentd do serve sockets, but their status path can be occupied by expected
+ * voice work (recognition, synthesis or a provider response). Those three
+ * deliberately use their pidfiles to avoid interrupting an active turn. It is
+ * a weaker check (it cannot tell a wedged process from a working one) but it
+ * still catches the common failure, which is the process being gone.
  */
 enum probe_kind {
     PROBE_SOCKET,
@@ -233,11 +235,14 @@ int main(int argc, char **argv)
          "/etc/init.d/libreecho-btd.init", 1, NULL},
         {"radiod", PROBE_SOCKET, "/run/libreecho/radio.sock",
          "/etc/init.d/libreecho-radiod.init", 1, NULL},
-        {"agentd", PROBE_SOCKET, "/run/libreecho/agent.sock",
+        /* Status can wait behind an in-flight provider response. */
+        {"agentd", PROBE_PIDFILE, "/var/run/libreecho-agentd.pid",
          "/etc/init.d/libreecho-agentd.init", 1, NULL},
-        {"ttsd", PROBE_SOCKET, "/run/libreecho/tts.sock",
+        /* In-process synthesis can occupy the status path for one utterance. */
+        {"ttsd", PROBE_PIDFILE, "/var/run/libreecho-ttsd.pid",
          "/etc/init.d/libreecho-ttsd.init", 1, NULL},
-        {"sttd", PROBE_SOCKET, "/run/libreecho/stt.sock",
+        /* Streaming recognition owns the request loop until the turn ends. */
+        {"sttd", PROBE_PIDFILE, "/var/run/libreecho-sttd.pid",
          "/etc/init.d/libreecho-sttd.init", 1, NULL},
         {"airplayd", PROBE_SOCKET, "/run/libreecho/airplay.sock",
          "/etc/init.d/libreecho-airplayd.init", 1, NULL},

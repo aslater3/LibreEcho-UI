@@ -26,6 +26,12 @@ INIT = os.path.join(ROOT, "init")
 # rule exists so a later edit cannot quietly separate them.
 NEVER_ALONE = {"waked": "capture", "micd": "capture"}
 
+# These daemons have sockets, but their single-flight voice work can occupy
+# the status path for a normal turn. The watchdog uses their pidfiles instead
+# so a long recognition, synthesis, or provider response is not mistaken for
+# a hung service and restarted mid-turn.
+PIDFILE_WHILE_BUSY = {"agentd", "ttsd", "sttd"}
+
 # Daemons with no init script of their own, or deliberately not supervised.
 NOT_SUPERVISED = {
     # The web UI is started by its own unit and is not an adapter daemon.
@@ -88,11 +94,17 @@ def main():
                 "%s: watchdog probes %s, init script uses %s"
                 % (name, entry["path"], want))
 
-        # A socket-serving daemon must not be probed by pidfile: the pidfile
-        # cannot tell a wedged daemon from a working one.
-        if entry["kind"] == "PROBE_PIDFILE" and socket:
+        # A socket-serving daemon normally must not be probed by pidfile: the
+        # pidfile cannot tell a wedged daemon from a working one. The explicit
+        # busy allowlist is the documented exception for expected voice work.
+        if (entry["kind"] == "PROBE_PIDFILE" and socket and
+                name not in PIDFILE_WHILE_BUSY):
             failures.append(
                 "%s: serves %s but is probed by pidfile" % (name, socket))
+        if name in PIDFILE_WHILE_BUSY and entry["kind"] != "PROBE_PIDFILE":
+            failures.append(
+                "%s: busy voice daemon must use its pidfile probe"
+                % name)
 
         if name in NEVER_ALONE:
             want_group = '"%s"' % NEVER_ALONE[name]
