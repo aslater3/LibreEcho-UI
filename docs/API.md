@@ -58,11 +58,44 @@ that refused the package; the field is omitted when the helper emits no `ERROR:`
 token. `manifest_update_channel_mismatch` also receives a channel-specific human
 message.
 
+### Device telemetry
+
+#### GET /api/v1/light
+
+Returns ambient-light telemetry from the TSL2540 vendor driver. `available` is
+false when no usable sensor is present; `lux` and `calibrated_lux` may be `0`
+for a dark room. `bus` reports the actual detected I²C device, such as
+`i2c 0-0039` or `i2c 1-0039`. Unsupported methods, including `HEAD`, return
+`405`; a backend without this sensor returns `501`.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "available": true,
+    "lux": 95,
+    "calibrated_lux": 95,
+    "visible": 93,
+    "infrared": 190,
+    "gain": 64,
+    "integration_us": 346368,
+    "auto_gain": false,
+    "powered": true,
+    "driver": "tsl2540",
+    "bus": "i2c 0-0039"
+  },
+  "error": null
+}
+```
+
 ### System Status
 
 #### GET /api/v1/status
 
-Returns system health and telemetry.
+Returns system health and telemetry. `light_lux` is the current ambient-light
+reading in lux, or `-1` when no usable sensor is present; `0` is a valid dark-room
+reading.
 
 **Response:**
 ```json
@@ -88,6 +121,7 @@ Returns system health and telemetry.
     "storage_available": true,
     "storage_state": "filesystem",
     "temperature_c": 42,
+    "light_lux": 95,
     "device_state": "online"
   },
   "error": null

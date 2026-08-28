@@ -16,6 +16,8 @@ struct le_backend_ops {
     after it. Null here reports the feature unsupported. */
  int (*spotify)(struct le_backend*,struct le_spotify_state*);
  int (*spotify_set)(struct le_backend*,int);
+ /* Ambient light detail. Appended after existing operations to preserve positional backends. */
+ int (*light)(struct le_backend*,struct le_light_state*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

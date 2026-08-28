@@ -6,6 +6,13 @@ OS_VERSION=$(tr -d '\r\n' < VERSION)
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exit 1; }; }
 expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
+curl -fsS "$URL/api/v1/status" | jq -e '.ok and (.data.light_lux | type == "number")' >/dev/null
+code=$(curl -sS -o /tmp/le-light-post.out -w '%{http_code}' -X POST "$URL/api/v1/light" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-light-head.out -w '%{http_code}' -I "$URL/api/v1/light")
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-light-get.out -w '%{http_code}' "$URL/api/v1/light")
+[ "$code" = 501 ]
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
 curl -fsS "$URL/api/v1/config" | jq -e --arg version "LibreEcho OS $OS_VERSION" '.ok and .data.os_version == $version' >/dev/null

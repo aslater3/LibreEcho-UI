@@ -669,6 +669,110 @@ static int thermal_zone_rank(const char *type)
     return 0;
 }
 
+/* Ambient light from the vendor TSL2540 sysfs driver. */
+#ifndef LE_LIGHT_SYSFS_ROOT
+#define LE_LIGHT_SYSFS_ROOT "/sys/bus/i2c/devices"
+#endif
+
+static int read_light_level(void)
+{
+    static const char *const paths[] = {
+        LE_LIGHT_SYSFS_ROOT "/0-0039/als_lux",
+        LE_LIGHT_SYSFS_ROOT "/1-0039/als_lux",
+    };
+    char raw[32];
+    size_t i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        long value;
+        char *end;
+
+        if (read_line(paths[i], raw, sizeof(raw)))
+            continue;
+        value = strtol(raw, &end, 10);
+        if (end == raw)
+            continue;
+        if (value < 0 || value > 1000000)
+            return -1;
+        return (int)value;
+    }
+    return -1;
+}
+
+static const char *light_sensor_dir(void)
+{
+    static const char *const dirs[] = {
+        LE_LIGHT_SYSFS_ROOT "/0-0039",
+        LE_LIGHT_SYSFS_ROOT "/1-0039",
+    };
+    static const char *found;
+    static int searched;
+    size_t i;
+
+    if (searched)
+        return found;
+    searched = 1;
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
+        char probe[128];
+
+        snprintf(probe, sizeof(probe), "%s/als_lux", dirs[i]);
+        if (access(probe, R_OK) == 0) {
+            found = dirs[i];
+            break;
+        }
+    }
+    return found;
+}
+
+static int light_attr(const char *dir, const char *name, int *out)
+{
+    char path[160], raw[64], *end;
+    long value;
+
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (read_line(path, raw, sizeof(raw)))
+        return 0;
+    value = strtol(raw, &end, 10);
+    if (end == raw)
+        return 0;
+    *out = (int)value;
+    return 1;
+}
+
+static int light(struct le_backend *b, struct le_light_state *o)
+{
+    const char *dir = light_sensor_dir();
+    char raw[64];
+
+    (void)b;
+    memset(o, 0, sizeof(*o));
+    if (!dir)
+        return LE_OK;
+    o->available = 1;
+    snprintf(o->bus, sizeof(o->bus), "i2c %s", strrchr(dir, '/') ? strrchr(dir, '/') + 1 : dir);
+    o->lux = -1;
+    o->calibrated_lux = -1;
+    light_attr(dir, "als_lux", &o->lux);
+    light_attr(dir, "als_calibrated_lux", &o->calibrated_lux);
+    light_attr(dir, "als_ch0", &o->ch0);
+    light_attr(dir, "als_ch1", &o->ch1);
+    light_attr(dir, "als_gain", &o->gain);
+    light_attr(dir, "als_power_state", &o->powered);
+    {
+        char path[160];
+        snprintf(path, sizeof(path), "%s/als_itime", dir);
+        if (!read_line(path, raw, sizeof(raw))) {
+            const char *us = strchr(raw, '(');
+            if (us)
+                o->integration_us = (int)strtol(us + 1, NULL, 10);
+        }
+        snprintf(path, sizeof(path), "%s/als_auto_gain", dir);
+        if (!read_line(path, raw, sizeof(raw)))
+            o->auto_gain = strstr(raw, "auto") != NULL;
+    }
+    return LE_OK;
+}
+
 static int read_temperature(void)
 {
     char path[PATH_MAX], type_path[PATH_MAX], raw[32], type[64];
@@ -794,6 +898,7 @@ static int status(struct le_backend *b, struct le_system_status *o)
     }
     (void)f;
     o->temperature = read_temperature();
+    o->light_lux = read_light_level();
     read_cpu_status(b, o);
     return LE_OK;
 }
@@ -2092,8 +2197,8 @@ static const struct le_backend_ops ops = {
     bluetooth_discoverable, bluetooth_connectable, bluetooth_pairing_mode,
     airplay, airplay_set, playback,
     linux_reboot, linux_shutdown, factory_reset, tick, control,
-    spotify, spotify_set
-};
+    spotify, spotify_set,
+    light};
 
 int le_linux_create(struct le_backend *b, const char *cfg)
 {

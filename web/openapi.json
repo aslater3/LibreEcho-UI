@@ -2138,12 +2138,33 @@
     }
    }
   },
+  "/light": {
+   "get": {
+    "tags": [
+     "Device"
+    ],
+    "summary": "Read ambient-light sensor status",
+    "description": "Returns TSL2540 ambient-light telemetry. `available` is false when no usable sensor is present; in that case the other readings are not meaningful. `lux` and `calibrated_lux` may be zero for a dark room. `bus` reports the actual detected I²C device, such as `i2c 0-0039` or `i2c 1-0039`.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/status": {
    "get": {
     "tags": [
      "Device"
     ],
     "summary": "Read system telemetry",
+    "description": "Returns CPU, memory, storage, temperature, and ambient-light telemetry. `light_lux` is the current ambient-light reading in lux, or `-1` when no usable sensor is present; `0` is a valid dark-room reading.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"

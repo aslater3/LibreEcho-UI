@@ -72,6 +72,58 @@ function nowPlayingTransport(p,l){
  const lights=l&&!l.unsupported&&l.visualizer_enabled!==undefined?
   toggle('Lights with music',l.visualizer_enabled!==false,'now-playing-visualizer'):'';
  return `<div class="now-playing-transport"><button class="secondary-btn" id="playback-transport" type="button" data-action="${act?act.action:'play'}" title="${esc(reason)}"${act?'':' disabled'}>${act?act.label:'Play'}</button>${lights}${act?'':`<small>${esc(reason)}</small>`}</div>`;}
+/*
+ * Ambient light, from the board's TSL2540.
+ *
+ * The backend reports -1 when there is no usable sensor, which is not the same
+ * as a dark room: 0 lux is a real reading. A board without a sensor shows no
+ * row at all rather than a permanent "0 lux".
+ *
+ * The bar is logarithmic because lux is. A lit room is around 100 and daylight
+ * is tens of thousands, so a linear bar would sit pinned at zero indoors and
+ * tell you nothing.
+ */
+/*
+ * The ambient light sensor in full. ch0 is the visible channel and ch1 the
+ * infrared one; the driver derives lux from the pair, so showing both makes it
+ * obvious when a reading is dominated by IR -- incandescent light or sunlight
+ * through glass -- rather than by anything the eye would call brightness.
+ *
+ * Gain and integration time are what the reading was taken with. They matter
+ * because this driver ships in manual gain, which saturates outdoors: a lux
+ * figure that stops climbing is a clipped one, and the gain row is where that
+ * shows.
+ */
+function lightPanel(x){
+ if(!x)return '';
+ if(!x.available)return panel('Ambient light sensor',
+   '<p class="muted">No ambient light sensor is present on this board.</p>','light-panel');
+ const rows=[
+   ['Illuminance', x.lux>=0?`${x.lux} lux`:'—'],
+   ['Calibrated', x.calibrated_lux>=0?`${x.calibrated_lux} lux`:'—'],
+   ['Visible channel', x.visible],
+   ['Infrared channel', x.infrared],
+   ['Gain', `${x.gain}\u00d7 ${x.auto_gain?'(auto)':'(manual)'}`],
+   ['Integration time', x.integration_us?`${Math.round(x.integration_us/1000)} ms`:'—'],
+   ['Powered', x.powered?'yes':'no'],
+   ['Device', `${x.driver} on ${x.bus}`]
+ ];
+ return panel('Ambient light sensor',
+  `<dl class="facts">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(String(v))}</dd>`).join('')}</dl>`+
+  (x.auto_gain?'':'<p class="muted">Gain is fixed rather than automatic, so the reading saturates in bright daylight.</p>'),
+  'light-panel');
+}
+function ambientLightParts(lux){
+ const pct=Math.max(0,Math.min(100,Math.round(Math.log10(Math.max(lux,1)+1)/Math.log10(10001)*100)));
+ const label=lux<10?'Dark':lux<50?'Dim':lux<300?'Indoors':lux<1000?'Bright':'Daylight';
+ return {value:`${lux} lux · ${label}`,percent:pct};
+}
+function lightMetric(s){
+ const lux=s.light_lux;
+ if(typeof lux!=='number'||lux<0)return '';
+ const light=ambientLightParts(lux);
+ return metric('sun','Ambient light',light.value,light.percent);
+}
 function nowPlaying(p={},l={}){const active=p.state&&p.state!=='idle',copy=nowPlayingCopy(p),levels=Array.isArray(l.visualizer_levels)&&l.visualizer_levels.length===12?l.visualizer_levels:Array(12).fill(0);return `<section class="panel now-playing ${active?'active':'idle'}" id="now-playing"><div class="now-playing-mark" aria-hidden="true"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="36"></circle><circle cx="50" cy="50" r="8"></circle></svg></div><div class="now-playing-copy"><span class="source-pill">${esc(copy.source)}</span><h3>${esc(copy.title)}</h3><p>${esc(copy.detail)}</p></div>${nowPlayingTransport(p,l)}<div class="spectrum-mini" aria-label="${l.visualizer_active?'Live 12-band music spectrum':'Audio spectrum inactive'}">${levels.map((v,i)=>`<i data-level="${Math.max(4,Math.min(100,Math.round(Number(v)||0)))}" data-band="${i}"></i>`).join('')}</div><div class="now-playing-state"><span class="status-dot ${active?'ok':''}"></span>${esc(p.state||'idle')}</div></section>`}
 /*
  * The card is replaced wholesale on every poll, so its handlers are bound
@@ -215,9 +267,26 @@ async function power(path,name){
  await Promise.race([fired,new Promise(r=>setTimeout(r,1500))]);
  if(refused){toast(refused.message,true);return}
  await waitForDevice(estimate,'Restarting your LibreEcho');}
-async function overview(){const [s,n,a,l,d,p,ota]=await Promise.all([api('/status'),api('/network'),api('/audio').catch(e=>({unsupported:e.message})),api('/led').catch(e=>({unsupported:e.message})),api('/device'),api('/playback').catch(()=>({state:'idle',source:null,metadata:{available:false}})),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'}))]);state.data.status=s;state.data.playback=p;state.data.led=l;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);updateVersionDisplay(d,ota);content.innerHTML=`<div class="grid-top"><div class="panel hero"><div class="sim-label" id="hero-device-label">${esc(d.hostname||d.name||'LibreEcho')}</div><h2>LibreEcho</h2><p>Open source voice assistant<br>built for privacy and freedom.</p><img class="device-img" src="/assets/device.png" alt="Amazon Echo device"><div class="hero-actions">${action('Device details','device-details','primary-btn')}${linkAction('API','/api/v1')}${linkAction('Swagger','/swagger.html')}</div></div><div class="panel status-panel"><h3>System Status</h3>${metric('device','CPU Load',s.cpu_percent+'%',s.cpu_percent)}${metric('device','Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent)}${metric('device','Storage',storageValue(s),s.storage_available?s.storage_percent:null)}${metric('sun','Temperature',s.temperature_c+' °C',s.temperature_c)}${metric('wifi','Wi-Fi',networkLabel(n),n.signal,n.state==='connected',true)}${metric('info','Internet',n.internet?'Reachable':'Unavailable',0,n.internet,true)+(a.unsupported?'':metric('mic','Microphone',a.microphone_muted?'Muted':'Live',0,!a.microphone_muted,true))}</div></div>${nowPlaying(p,l)}${cpuDashboard(s)}<div class="cards">${items.slice(2,10).map(([name,icon],i)=>`<button class="panel shortcut" data-page="${name}"><svg class="${['green','purple','blue','sky','green','orange','grey','orange'][i]}"><use href="#${icon}"></use></svg><span><strong>${name}</strong><small>${descriptions[name]}</small></span><span class="arrow">›</span></button>`).join('')}</div><div class="panel community"><img src="/assets/mark.svg" alt="" class="community-mark"><div><h3>Open Source. Community Driven.</h3><p>Configuration stays on your device. ${s.simulated?'This development session uses deterministic mock-capable hardware state.':'Values shown come from the Linux backend.'}</p></div></div>`;$$('[data-page]').forEach(b=>b.onclick=()=>showPage(b.dataset.page));$('#device-details').onclick=()=>showPage('Device');bindNowPlaying()}
+async function overview(){const [s,n,a,l,d,p,ota]=await Promise.all([api('/status'),api('/network'),api('/audio').catch(e=>({unsupported:e.message})),api('/led').catch(e=>({unsupported:e.message})),api('/device'),api('/playback').catch(()=>({state:'idle',source:null,metadata:{available:false}})),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'}))]);state.data.status=s;state.data.playback=p;state.data.led=l;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);updateVersionDisplay(d,ota);content.innerHTML=`<div class="grid-top"><div class="panel hero"><div class="sim-label" id="hero-device-label">${esc(d.hostname||d.name||'LibreEcho')}</div><h2>LibreEcho</h2><p>Open source voice assistant<br>built for privacy and freedom.</p><img class="device-img" src="/assets/device.png" alt="Amazon Echo device"><div class="hero-actions">${action('Device details','device-details','primary-btn')}${linkAction('API','/api/v1')}${linkAction('Swagger','/swagger.html')}</div></div><div class="panel status-panel"><h3>System Status</h3>${metric('device','CPU Load',s.cpu_percent+'%',s.cpu_percent)}${metric('device','Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent)}${metric('device','Storage',storageValue(s),s.storage_available?s.storage_percent:null)}${metric('sun','Temperature',s.temperature_c+' °C',s.temperature_c)}${lightMetric(s)}${metric('wifi','Wi-Fi',networkLabel(n),n.signal,n.state==='connected',true)}${metric('info','Internet',n.internet?'Reachable':'Unavailable',0,n.internet,true)+(a.unsupported?'':metric('mic','Microphone',a.microphone_muted?'Muted':'Live',0,!a.microphone_muted,true))}</div></div>${nowPlaying(p,l)}${cpuDashboard(s)}<div class="cards">${items.slice(2,10).map(([name,icon],i)=>`<button class="panel shortcut" data-page="${name}"><svg class="${['green','purple','blue','sky','green','orange','grey','orange'][i]}"><use href="#${icon}"></use></svg><span><strong>${name}</strong><small>${descriptions[name]}</small></span><span class="arrow">›</span></button>`).join('')}</div><div class="panel community"><img src="/assets/mark.svg" alt="" class="community-mark"><div><h3>Open Source. Community Driven.</h3><p>Configuration stays on your device. ${s.simulated?'This development session uses deterministic mock-capable hardware state.':'Values shown come from the Linux backend.'}</p></div></div>`;$$('[data-page]').forEach(b=>b.onclick=()=>showPage(b.dataset.page));$('#device-details').onclick=()=>showPage('Device');bindNowPlaying()}
 function updateOverviewMetric(label,value,percent,connected){const row=$$('.status-panel .metric').find(x=>x.querySelector('span')?.textContent===label);if(!row)return;if(label==='Storage')value=storageDisplay(value);const output=row.querySelector('.value');output.textContent=value;if(connected!==undefined)output.classList.toggle('connected',connected);const bar=row.querySelector('progress');if(bar)bar.value=Math.max(0,Math.min(100,percent));const led=row.querySelector('.power-led');if(led){led.classList.toggle('on',!!connected);led.classList.toggle('off',!connected);led.setAttribute('aria-label',connected?'Available':'Unavailable')}}
-async function refreshOverview(){if(state.page!=='Overview')return;let delay=5000;try{const [s,n,d,p,l]=await Promise.all([api('/status'),api('/network'),api('/device'),api('/playback'),api('/led').catch(()=>({}))]);if(state.page!=='Overview')return;state.data.status=s;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);$('#sidebar-version').textContent=d.os_version;if(Date.now()-(state.data.otaCheckedAt||0)>=60000)updateVersionDisplay(d,await api('/system/update').catch(()=>state.data.ota));const deviceLabel=$('#hero-device-label');if(deviceLabel)deviceLabel.textContent=d.hostname||d.name||'LibreEcho';updateOverviewMetric('CPU Load',s.cpu_percent+'%',s.cpu_percent);updateOverviewMetric('Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent);updateOverviewMetric('Storage',storageValue(s),s.storage_available?s.storage_percent:null);updateOverviewMetric('Temperature',s.temperature_c+' °C',s.temperature_c);updateOverviewMetric('Wi-Fi',networkLabel(n),0,n.state==='connected');updateOverviewMetric('Internet',n.internet?'Reachable':'Unavailable',0,n.internet);state.data.playback=p;state.data.led=l;
+function updateOverviewAmbientLight(s){
+ const panel=$('.status-panel');
+ if(!panel)return;
+ const row=$$('.metric',panel).find(x=>x.querySelector('span')?.textContent==='Ambient light');
+ const lux=s.light_lux;
+ if(typeof lux!=='number'||lux<0){if(row)row.remove();return;}
+ const light=ambientLightParts(lux);
+ if(row){
+  const output=row.querySelector('.value');
+  if(output)output.textContent=light.value;
+  const bar=row.querySelector('progress');
+  if(bar)bar.value=light.percent;
+  return;
+ }
+ const temperature=$$('.metric',panel).find(x=>x.querySelector('span')?.textContent==='Temperature');
+ if(temperature)temperature.insertAdjacentHTML('afterend',lightMetric(s));
+}
+async function refreshOverview(){if(state.page!=='Overview')return;let delay=5000;try{const [s,n,d,p,l]=await Promise.all([api('/status'),api('/network'),api('/device'),api('/playback'),api('/led').catch(()=>({}))]);if(state.page!=='Overview')return;state.data.status=s;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);$('#sidebar-version').textContent=d.os_version;if(Date.now()-(state.data.otaCheckedAt||0)>=60000)updateVersionDisplay(d,await api('/system/update').catch(()=>state.data.ota));const deviceLabel=$('#hero-device-label');if(deviceLabel)deviceLabel.textContent=d.hostname||d.name||'LibreEcho';updateOverviewMetric('CPU Load',s.cpu_percent+'%',s.cpu_percent);updateOverviewMetric('Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent);updateOverviewMetric('Storage',storageValue(s),s.storage_available?s.storage_percent:null);updateOverviewMetric('Temperature',s.temperature_c+' °C',s.temperature_c);updateOverviewAmbientLight(s);updateOverviewMetric('Wi-Fi',networkLabel(n),0,n.state==='connected');updateOverviewMetric('Internet',n.internet?'Reachable':'Unavailable',0,n.internet);state.data.playback=p;state.data.led=l;
  /* A poll landing mid-interaction would throw away the click that is still in
     flight, so the card keeps whatever the user just did until it settles. */
  if(!state.busy)renderNowPlaying();const cpu=$('#cpu-dashboard');if(cpu)cpu.outerHTML=cpuDashboard(s);applyCssVars(content);if(p.state!=='idle'||l.visualizer_active)delay=1000}catch(_){/* Preserve the last good telemetry when a background refresh fails. */}finally{if(state.page==='Overview')state.timer=setTimeout(refreshOverview,delay)}}
@@ -290,7 +359,7 @@ function hardwareCard(d){
   (groups?`<h4>Audio capability</h4><div class="hardware-groups">${groups}</div>`
          :`<p class="muted">This daemon does not report audio capability.</p>`),
   'wide hardware-card');}
-async function devicePage(){const d=await api('/device');content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${hardwareCard(d)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}</div>`,'wide')}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
+async function devicePage(){const d=await api('/device');const light=await api('/light').catch(()=>null);content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${hardwareCard(d)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}</div>`,'wide')}${lightPanel(light)}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
 const NOISE_COLOURS=[['white','White'],['pink','Pink'],['brown','Brown']];
 const NOISE_TIMERS=[[0,'No timer'],[15,'15 minutes'],[30,'30 minutes'],[45,'45 minutes'],[60,'1 hour'],[90,'1.5 hours'],[120,'2 hours'],[480,'8 hours']];
 function noiseRemainingText(n){

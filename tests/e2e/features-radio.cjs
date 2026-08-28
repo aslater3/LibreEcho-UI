@@ -356,6 +356,43 @@ async function main() {
   );
   pass('home location: retitled, expanded, labelled as an address, prefilled and dirty-tracked');
 
+  await page.route('**/api/v1/light', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ok: true, data: {
+      available: true, lux: 95, calibrated_lux: 95, visible: 93, infrared: 190,
+      gain: 64, integration_us: 346368, auto_gain: false, powered: true,
+      driver: 'tsl2540', bus: 'i2c 1-0039'
+    }, error: null })
+  }));
+  await page.goto('/device');
+  await waitForPage(page, 'Device');
+  assert.equal(await page.locator('.light-panel').count(), 1, 'ambient light panel renders');
+  assert.equal(await page.locator('.light-panel').evaluate(el => el.parentElement.classList.contains('settings-grid')), true, 'ambient light panel is a settings-grid item');
+  assert.doesNotMatch(await page.locator('.light-panel').evaluate(el => el.parentElement.className), /button-row/);
+  assert.match(await page.locator('.light-panel').innerText(), /i2c 1-0039/);
+  pass('device: ambient light panel is outside the power-button row and reports its bus');
+  await page.unroute('**/api/v1/light');
+
+  const telemetryPage = await context.newPage();
+  captureBrowserFailures(telemetryPage);
+  const lightValues = [95, 20000];
+  let lightStatusCalls = 0;
+  await telemetryPage.route('**/api/v1/status', async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    const call = lightStatusCalls++;
+    body.data.light_lux = lightValues[Math.min(call, lightValues.length - 1)];
+    if (call > 0) await new Promise(resolve => setTimeout(resolve, 5000));
+    await route.fulfill({ response, body: JSON.stringify(body) });
+  });
+  await telemetryPage.goto('/');
+  await waitForPage(telemetryPage, 'Overview');
+  await telemetryPage.waitForFunction(() => document.querySelector('.status-panel')?.innerText.includes('20000 lux · Daylight'), null, { timeout: 8000 });
+  assert.ok(lightStatusCalls >= 2, 'ambient light was fetched more than once');
+  pass('overview: ambient-light metric refreshes with polled status telemetry');
+  await telemetryPage.close();
+
 
   // ---- Simulation page: the response-time goal -----------------------------
   // Deliberately mixed: one run under the 1 s goal on stt+llm, the rest over,
