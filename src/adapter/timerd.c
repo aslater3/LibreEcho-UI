@@ -63,6 +63,9 @@ struct context {
 static volatile sig_atomic_t stop_requested;
 
 #ifdef LE_TIMERD_TESTING
+static long long le_timerd_test_monotonic_ms;
+static int le_timerd_test_monotonic_enabled;
+static int le_timerd_test_block_audio_ms;
 static int le_timerd_test_fail_chmod;
 static int le_timerd_test_fail_parent_fsync;
 #endif
@@ -77,6 +80,10 @@ static long long monotonic_ms(void)
 {
     struct timespec ts;
 
+#ifdef LE_TIMERD_TESTING
+    if (le_timerd_test_monotonic_enabled)
+        return le_timerd_test_monotonic_ms;
+#endif
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
         return 0;
     return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
@@ -132,6 +139,9 @@ static int fsync_parent(const char *path)
     return result;
 }
 
+static int state_load_at(struct context *ctx, long long now_ms,
+                         long long now_epoch);
+
 enum state_save_result {
     STATE_SAVE_FAILED = 0,
     STATE_SAVE_OK = 1,
@@ -171,6 +181,12 @@ static enum state_save_result state_save_at(struct context *ctx,
     FILE *file;
     size_t i;
 
+    /* Every save path must complete deferred restoration first. */
+    if (!ctx->state_loaded) {
+        if (!state_load_at(ctx, now_ms, now_epoch))
+            return STATE_SAVE_FAILED;
+        ctx->state_loaded = 1;
+    }
     if (!ctx->state_path || !ctx->state_path[0])
         return STATE_SAVE_OK;
     /* Never replace a persisted countdown while the wall clock is invalid:
@@ -280,8 +296,8 @@ static enum state_save_result state_save(struct context *ctx)
     return state_save_at(ctx, monotonic_ms(), wall_epoch());
 }
 
-static void save_dirty_state_at(struct context *ctx, long long now_ms,
-                                long long now_epoch)
+static void save_if_dirty(struct context *ctx, long long now_ms,
+                          long long now_epoch)
 {
     enum state_save_result result;
 
@@ -292,11 +308,6 @@ static void save_dirty_state_at(struct context *ctx, long long now_ms,
         ctx->dirty = 0;
     else if (result == STATE_SAVE_COMMITTED_DURABILITY_FAILED)
         ctx->state_commit_pending = 1;
-}
-
-static void save_dirty_state(struct context *ctx)
-{
-    save_dirty_state_at(ctx, monotonic_ms(), wall_epoch());
 }
 
 static int state_load_at(struct context *ctx, long long now_ms,
@@ -357,9 +368,13 @@ static int state_load_at(struct context *ctx, long long now_ms,
     return 1;
 }
 
-static void state_load(struct context *ctx)
+static int state_load(struct context *ctx)
 {
-    (void)state_load_at(ctx, monotonic_ms(), wall_epoch());
+    int result = state_load_at(ctx, monotonic_ms(), wall_epoch());
+
+    if (result)
+        ctx->state_loaded = 1;
+    return result;
 }
 
 /* -------------------------------- ringing ------------------------------- */
@@ -370,6 +385,13 @@ static void audio_cue(struct context *ctx)
     char args[128];
     int result;
 
+#ifdef LE_TIMERD_TESTING
+    if (le_timerd_test_block_audio_ms > 0) {
+        le_timerd_test_monotonic_ms += le_timerd_test_block_audio_ms;
+        le_timerd_test_block_audio_ms = 0;
+        return;
+    }
+#endif
     adapter = le_adapter_connect(ctx->audio_sock, AUDIO_TIMEOUT_MS);
     if (!adapter) {
         le_log_warn("timerd: audio daemon unavailable; timer is silent");
@@ -393,6 +415,10 @@ static void ring_tick(struct context *ctx, long long now_ms)
     if (now_ms < ctx->next_ring_ms)
         return;
     audio_cue(ctx);
+    /* audio_cue may block on the adapter socket. Do not schedule from the
+       timestamp captured before that wait, or the next cue and any save in
+       this cycle will use a stale monotonic snapshot. */
+    now_ms = monotonic_ms();
     ctx->next_ring_ms = now_ms + RING_PERIOD_MS;
 }
 
@@ -619,9 +645,14 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
        timers alone. */
     if (!strcmp(cmd, "dismiss")) {
         int stopped;
+        unsigned int dismiss_id = 0;
+        int id_result = args ? json_get_uint(args, "id", &dismiss_id) : 0;
 
-        if (args && json_get_int(args, "id", &value) == 1)
-            stopped = le_timer_dismiss(&ctx->timers, (unsigned int)value);
+        if (id_result < 0 || (id_result > 0 && dismiss_id == 0))
+            return le_adapter_respond_err(out, size, id,
+                                          "dismiss id must be a positive integer");
+        if (id_result > 0)
+            stopped = le_timer_dismiss(&ctx->timers, dismiss_id);
         else
             stopped = le_timer_dismiss_all(&ctx->timers);
         if (stopped)
@@ -742,16 +773,15 @@ int main(int argc, char **argv)
         unsigned int fired[LE_TIMER_MAX];
         nfds_t nfds = 1;
         long long now_ms = monotonic_ms();
+        long long now_epoch = wall_epoch();
         long long timeout;
         int count;
         int result;
         nfds_t j;
 
-        if (!ctx.state_loaded && wall_epoch() >= LE_TIMER_CLOCK_VALID_EPOCH) {
-            state_load(&ctx);
-            ctx.state_loaded = 1;
-        }
-        count = le_timer_step(&ctx.timers, now_ms, wall_epoch(), fired,
+        if (!ctx.state_loaded && now_epoch >= LE_TIMER_CLOCK_VALID_EPOCH)
+            (void)state_load(&ctx);
+        count = le_timer_step(&ctx.timers, now_ms, now_epoch, fired,
                               LE_TIMER_MAX);
         if (count > 0) {
             int k;
@@ -763,7 +793,11 @@ int main(int argc, char **argv)
             ctx.dirty = 1;
         }
         ring_tick(&ctx, now_ms);
-        save_dirty_state(&ctx);
+        /* ring_tick may wait for audiod. Refresh both snapshots before a save
+           and before deriving the poll deadline from the schedule. */
+        now_ms = monotonic_ms();
+        now_epoch = wall_epoch();
+        save_if_dirty(&ctx, now_ms, now_epoch);
 
         fds[0].fd = ctx.listen_fd;
         fds[0].events = POLLIN;
@@ -779,7 +813,7 @@ int main(int argc, char **argv)
             ++nfds;
         }
 
-        timeout = le_timer_poll_timeout_ms(&ctx.timers, now_ms, wall_epoch(),
+        timeout = le_timer_poll_timeout_ms(&ctx.timers, now_ms, now_epoch,
                                            POLL_CAP_MS);
         if (le_timer_ringing_count(&ctx.timers) > 0) {
             long long until_ring = ctx.next_ring_ms - now_ms;

@@ -10,8 +10,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define SYNCED_EPOCH 1767225600LL
 #define BOOT_EPOCH 10LL
+#define SYNCED_EPOCH 1767225600LL
 
 static void write_text(const char *path, const char *text)
 {
@@ -34,6 +34,42 @@ static void read_text(const char *path, char *out, size_t size)
     assert(fclose(file) == 0);
 }
 
+static void assert_audio_refresh_and_snapshot(const char *path,
+                                              const char *backup)
+{
+    struct context context;
+    char text[256];
+
+    memset(&context, 0, sizeof(context));
+    context.state_path = path;
+    context.state_loaded = 1;
+    le_timer_set_init(&context.timers);
+    unlink(path);
+    unlink(backup);
+    unlink("/tmp/libreecho-timer-persistence-test.tmp");
+    unlink("/tmp/libreecho-timer-persistence-test.bak.tmp");
+    assert(le_timer_add_countdown(&context.timers, 1, "ring", 0, NULL) ==
+           LE_TIMER_OK);
+    assert(le_timer_add_countdown(&context.timers, 10, "pending", 1000,
+                                  NULL) == LE_TIMER_OK);
+    le_timerd_test_monotonic_enabled = 1;
+    le_timerd_test_monotonic_ms = 1000;
+    assert(le_timer_step(&context.timers, 1000, SYNCED_EPOCH, NULL, 0) == 1);
+    context.next_ring_ms = 0;
+    le_timerd_test_block_audio_ms = 2000;
+    ring_tick(&context, 1000);
+    assert(le_timerd_test_monotonic_ms == 3000);
+    assert(context.next_ring_ms == 5000);
+
+    context.dirty = 1;
+    save_if_dirty(&context, monotonic_ms(), SYNCED_EPOCH);
+    assert(context.dirty == 0);
+    read_text(path, text, sizeof(text));
+    /* A stale pre-cue snapshot would serialize 1767225610 instead. */
+    assert(strstr(text, "countdown 1767225608 pending") != NULL);
+    le_timerd_test_monotonic_enabled = 0;
+}
+
 static void assert_post_commit_retry(const char *path, const char *backup,
                                      int *failure_hook)
 {
@@ -42,6 +78,7 @@ static void assert_post_commit_retry(const char *path, const char *backup,
 
     memset(&context, 0, sizeof(context));
     context.state_path = path;
+    context.state_loaded = 1;
     le_timer_set_init(&context.timers);
     unlink(path);
     unlink(backup);
@@ -56,10 +93,10 @@ static void assert_post_commit_retry(const char *path, const char *backup,
     read_text(backup, text, sizeof(text));
     assert(!strcmp(text, "old schedule\n"));
 
-    /* The committed state remains dirty until the durability retry succeeds,
-       but that retry must not rotate the new state over the old backup. */
+    /* The committed state remains dirty until durability succeeds, but retry
+       must not rotate the new file over the old backup. */
     context.dirty = 1;
-    save_dirty_state_at(&context, 1000, SYNCED_EPOCH);
+    save_if_dirty(&context, 1000, SYNCED_EPOCH);
     assert(context.dirty == 0);
     assert(context.state_commit_pending == 0);
     read_text(backup, text, sizeof(text));
@@ -71,25 +108,17 @@ static void assert_post_commit_retry(const char *path, const char *backup,
 int main(void)
 {
     const char *path = "/tmp/libreecho-timer-persistence-test";
-    const char *dirty_path = "/tmp/libreecho-timer-persistence-dirty-test";
     char backup[128];
-    char dirty_backup[128];
     char text[256];
     struct context context;
-    struct context dirty_context;
     struct stat info;
     unsigned int fired[LE_TIMER_MAX];
 
     snprintf(backup, sizeof(backup), "%s.bak", path);
-    snprintf(dirty_backup, sizeof(dirty_backup), "%s.bak", dirty_path);
     unlink(path);
     unlink(backup);
     unlink("/tmp/libreecho-timer-persistence-test.tmp");
     unlink("/tmp/libreecho-timer-persistence-test.bak.tmp");
-    unlink(dirty_path);
-    unlink(dirty_backup);
-    unlink("/tmp/libreecho-timer-persistence-dirty-test.tmp");
-    unlink("/tmp/libreecho-timer-persistence-dirty-test.bak.tmp");
 
     memset(&context, 0, sizeof(context));
     context.state_path = path;
@@ -97,30 +126,36 @@ int main(void)
     write_text(path, "alarm 1767225630 wake\ncountdown 1767225630 pasta\n");
 
     /* An invalid boot clock must leave the file and records untouched. */
-    assert(state_load_at(&context, 1000, 10) == 0);
+    assert(state_load_at(&context, 1000, BOOT_EPOCH) == 0);
     assert(le_timer_active_count(&context.timers) == 0);
     read_text(path, text, sizeof(text));
     assert(strstr(text, "alarm 1767225630 wake") != NULL);
 
-    /* A countdown created before NTP remains dirty until a valid-clock save
-       succeeds; an invalid-clock save must not make the caller forget it. */
-    memset(&dirty_context, 0, sizeof(dirty_context));
-    dirty_context.state_path = dirty_path;
-    le_timer_set_init(&dirty_context.timers);
-    write_text(dirty_path, "old state\n");
-    assert(le_timer_add_countdown(&dirty_context.timers, 600, "pre-ntp", 0,
-                                  NULL) == LE_TIMER_OK);
-    dirty_context.dirty = 1;
-    save_dirty_state_at(&dirty_context, 1000, BOOT_EPOCH);
-    assert(dirty_context.dirty == 1);
-    read_text(dirty_path, text, sizeof(text));
-    assert(!strcmp(text, "old state\n"));
-    save_dirty_state_at(&dirty_context, 1000, SYNCED_EPOCH);
-    assert(dirty_context.dirty == 0);
-    read_text(dirty_path, text, sizeof(text));
-    assert(strstr(text, "countdown ") == text);
+    /* A change made before NTP must remain dirty until a valid save. */
+    assert(le_timer_add_countdown(&context.timers, 600, "new", 1000, NULL) ==
+           LE_TIMER_OK);
+    context.dirty = 1;
+    save_if_dirty(&context, 1000, BOOT_EPOCH);
+    assert(context.dirty == 1);
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "alarm 1767225630 wake") != NULL);
+
+    /* A wall-clock transition must restore deferred state before allowing the
+       dirty pre-sync change to replace the persisted schedule. The save path
+       owns this ordering so every save caller gets the same protection. */
+    assert(context.state_loaded == 0);
+    save_if_dirty(&context, 1500, SYNCED_EPOCH);
+    assert(context.state_loaded == 1);
+    assert(context.dirty == 0);
+    assert(le_timer_active_count(&context.timers) == 3);
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "alarm 1767225630 wake") != NULL);
+    assert(strstr(text, "countdown 1767225630 pasta") != NULL);
+    assert(strstr(text, " new\n") != NULL);
 
     /* Once NTP makes the clock valid, both records restore deterministically. */
+    le_timer_set_init(&context.timers);
+    write_text(path, "alarm 1767225630 wake\ncountdown 1767225630 pasta\n");
     assert(state_load_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
     assert(le_timer_active_count(&context.timers) == 2);
     assert(le_timer_step(&context.timers, 5000, SYNCED_EPOCH + 60,
@@ -140,7 +175,7 @@ int main(void)
            LE_TIMER_OK);
     write_text(path, "old state\n");
     assert(chmod(path, 0644) == 0);
-    state_save(&context);
+    assert(state_save(&context) == 1);
     assert(stat(path, &info) == 0 && (info.st_mode & 0777) == 0600);
     assert(stat(backup, &info) == 0 && (info.st_mode & 0777) == 0600);
     read_text(backup, text, sizeof(text));
@@ -150,17 +185,42 @@ int main(void)
     assert(access("/tmp/libreecho-timer-persistence-test.tmp", F_OK) < 0);
     assert(access("/tmp/libreecho-timer-persistence-test.bak.tmp", F_OK) < 0);
 
-    /* A failure after rename has already committed the new schedule. Both
-       finalisation steps must preserve the old backup on the retry. */
+    unlink(path);
+    unlink(backup);
+
+    /* A present malformed id is a protocol error, not dismiss-all. */
+    {
+        char response[256];
+        struct context protocol;
+
+        memset(&protocol, 0, sizeof(protocol));
+        le_timer_set_init(&protocol.timers);
+        assert(le_timer_add_countdown(&protocol.timers, 1, "ring", 0, NULL) ==
+               LE_TIMER_OK);
+        assert(le_timer_step(&protocol.timers, 1000, SYNCED_EPOCH, NULL, 0) ==
+               1);
+        assert(dispatch(&protocol, "dismiss", "{\"id\":\"bad\"}", 7,
+                        response, sizeof(response)) > 0);
+        assert(strstr(response, "\"ok\":false") != NULL);
+        assert(le_timer_ringing_count(&protocol.timers) == 1);
+        assert(dispatch(&protocol, "dismiss", "{\"id\":0}", 7, response,
+                        sizeof(response)) > 0);
+        assert(strstr(response, "\"ok\":false") != NULL);
+        assert(le_timer_ringing_count(&protocol.timers) == 1);
+        assert(dispatch(&protocol, "dismiss", "{\"id\":1.5}", 7,
+                        response, sizeof(response)) > 0);
+        assert(strstr(response, "\"ok\":false") != NULL);
+        assert(le_timer_ringing_count(&protocol.timers) == 1);
+        assert(dispatch(&protocol, "dismiss", "{}", 7, response,
+                        sizeof(response)) > 0);
+        assert(strstr(response, "\"ok\":true") != NULL);
+        assert(le_timer_ringing_count(&protocol.timers) == 0);
+    }
+
+    assert_audio_refresh_and_snapshot(path, backup);
     assert_post_commit_retry(path, backup, &le_timerd_test_fail_chmod);
     assert_post_commit_retry(path, backup, &le_timerd_test_fail_parent_fsync);
 
-    unlink(path);
-    unlink(backup);
-    unlink(dirty_path);
-    unlink(dirty_backup);
-    unlink("/tmp/libreecho-timer-persistence-test.tmp");
-    unlink("/tmp/libreecho-timer-persistence-test.bak.tmp");
     puts("timer persistence: ok");
     return 0;
 }

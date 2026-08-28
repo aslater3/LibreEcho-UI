@@ -130,6 +130,11 @@ fi
 echo "  ring repeats: ok"
 
 # --- dismiss silences the ring and leaves the other timer alone -----------
+out=$(call dismiss '{"id":"bad"}')
+case "$out" in *'"ok":false'*) ;; *) echo "FAIL: malformed dismiss id accepted: $out"; exit 1 ;; esac
+out=$(call status '{}')
+case "$out" in *'"state":"ringing"'*) ;; *) echo "FAIL: malformed dismiss id dismissed the ring: $out"; exit 1 ;; esac
+echo "  malformed dismiss id refused without dismissing: ok"
 out=$(call dismiss '{}')
 case "$out" in *'"dismissed":1'*) ;; *) echo "FAIL: dismiss did not stop one ring: $out"; exit 1 ;; esac
 : > "$bus"
