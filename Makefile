@@ -142,6 +142,13 @@ $(BUILD)/test-timer-schedule: tests/test_timer_schedule.c \
 	@mkdir -p $(BUILD)
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
+$(BUILD)/test-timer-persistence: tests/test_timer_persistence.c \
+		src/adapter/timer_schedule.c src/adapter/adapter_client.c \
+		src/adapter/adapter_server.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -ffunction-sections -fdata-sections \
+		-Wl,--gc-sections -Isrc -Isrc/adapter $^ -o $@
+
 $(BUILD)/test-gateway-probe: tests/test_gateway_probe.c \
 		src/adapter/gateway_probe.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@

@@ -106,7 +106,8 @@ sh tests/test_timed.sh
 sh tests/test_timed_timeout.sh
 make build/test-timer-schedule
 ./build/test-timer-schedule
-make build/libreecho-timerd
+make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
+./build/test-timer-persistence
 sh tests/test_timerd.sh
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!

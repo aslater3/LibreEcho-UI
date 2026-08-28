@@ -54,6 +54,7 @@ struct context {
     int clients[MAX_CLIENTS];
     long long next_ring_ms;
     int dirty;
+    int state_loaded;
 };
 
 static volatile sig_atomic_t stop_requested;
@@ -86,12 +87,47 @@ static long long wall_epoch(void)
  * Countdowns are stored as a wall-clock instant even though they run on the
  * monotonic clock, because the monotonic clock restarts at boot and a stored
  * monotonic value would mean nothing afterwards. That conversion needs a
- * credible wall clock, so with an unset clock countdowns are simply not
- * persisted -- better than writing a due time that is decades wrong.
+ * credible wall clock. Until that clock exists, state restoration and saves
+ * are deferred so a boot-time epoch cannot discard or rewrite the schedule.
  */
+static int path_suffix(char *out, size_t size, const char *path,
+                       const char *suffix)
+{
+    int written;
+
+    written = snprintf(out, size, "%s%s", path, suffix);
+    return written < 0 || (size_t)written >= size ? -1 : 0;
+}
+
+static int fsync_parent(const char *path)
+{
+    char parent[256];
+    char *slash;
+    int fd;
+    int result;
+
+    if (strlen(path) >= sizeof(parent))
+        return -1;
+    strcpy(parent, path);
+    slash = strrchr(parent, '/');
+    if (!slash)
+        strcpy(parent, ".");
+    else if (slash == parent)
+        parent[1] = '\0';
+    else
+        *slash = '\0';
+    fd = open(parent, O_RDONLY | O_DIRECTORY);
+    if (fd < 0)
+        return -1;
+    result = fsync(fd);
+    close(fd);
+    return result;
+}
+
 static void state_save(struct context *ctx)
 {
-    char temporary[256];
+    char temporary[256], backup[256], backup_temporary[256];
+    int fd;
     FILE *file;
     long long now_ms = monotonic_ms();
     long long now_epoch = wall_epoch();
@@ -99,14 +135,28 @@ static void state_save(struct context *ctx)
 
     if (!ctx->state_path || !ctx->state_path[0])
         return;
-    if (snprintf(temporary, sizeof(temporary), "%s.tmp", ctx->state_path) >=
-        (int)sizeof(temporary))
+    /* Never replace a persisted countdown while the wall clock is invalid:
+       its monotonic deadline cannot be converted safely yet. */
+    if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
+        return;
+    if (path_suffix(temporary, sizeof(temporary), ctx->state_path, ".tmp") < 0 ||
+        path_suffix(backup, sizeof(backup), ctx->state_path, ".bak") < 0 ||
+        path_suffix(backup_temporary, sizeof(backup_temporary), backup,
+                    ".tmp") < 0)
         return;
 
-    file = fopen(temporary, "w");
-    if (!file) {
+    fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || fchmod(fd, 0600) < 0) {
+        if (fd >= 0)
+            close(fd);
         le_log_warn("timerd: cannot write %s: %s", temporary,
                     strerror(errno));
+        return;
+    }
+    file = fdopen(fd, "w");
+    if (!file) {
+        close(fd);
+        unlink(temporary);
         return;
     }
     for (i = 0; i < LE_TIMER_MAX; ++i) {
@@ -127,38 +177,71 @@ static void state_save(struct context *ctx)
                 continue;
             due = now_epoch + (timer->due_monotonic_ms - now_ms) / 1000LL;
         }
-        fprintf(file, "%s %lld %s\n",
-                timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown",
-                due, timer->label);
+        if (fprintf(file, "%s %lld %s\n",
+                    timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown",
+                    due, timer->label) < 0) {
+            fclose(file);
+            unlink(temporary);
+            return;
+        }
     }
-    if (fflush(file) != 0 || fsync(fileno(file)) != 0) {
+    if (fflush(file) != 0 || fsync(fileno(file)) != 0 ||
+        fchmod(fileno(file), 0600) != 0) {
         le_log_warn("timerd: cannot flush %s", temporary);
         fclose(file);
         unlink(temporary);
         return;
     }
-    fclose(file);
+    if (fclose(file) != 0) {
+        unlink(temporary);
+        return;
+    }
+    /* Snapshot the old file before replacing it. Keeping the old inode as a
+       hard link makes the backup atomic and avoids a window without one. */
+    if (access(ctx->state_path, F_OK) == 0) {
+        (void)unlink(backup_temporary);
+        if (chmod(ctx->state_path, 0600) != 0 ||
+            link(ctx->state_path, backup_temporary) != 0 ||
+            rename(backup_temporary, backup) != 0) {
+            le_log_warn("timerd: cannot preserve %s: %s", backup,
+                        strerror(errno));
+            unlink(backup_temporary);
+            unlink(temporary);
+            return;
+        }
+        if (fsync_parent(ctx->state_path) != 0) {
+            le_log_warn("timerd: cannot sync backup %s: %s", backup,
+                        strerror(errno));
+            unlink(temporary);
+            return;
+        }
+    }
     /* Rename over the real file so a crash mid-write cannot leave a partial
        schedule behind. */
     if (rename(temporary, ctx->state_path) != 0) {
         le_log_warn("timerd: cannot replace %s: %s", ctx->state_path,
                     strerror(errno));
         unlink(temporary);
+        return;
     }
+    if (chmod(ctx->state_path, 0600) != 0 || fsync_parent(ctx->state_path) != 0)
+        le_log_warn("timerd: cannot finalize %s: %s", ctx->state_path,
+                    strerror(errno));
 }
 
-static void state_load(struct context *ctx)
+static int state_load_at(struct context *ctx, long long now_ms,
+                         long long now_epoch)
 {
     char line[256];
     FILE *file;
-    long long now_ms = monotonic_ms();
-    long long now_epoch = wall_epoch();
 
     if (!ctx->state_path || !ctx->state_path[0])
-        return;
+        return 1;
+    if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
+        return 0;
     file = fopen(ctx->state_path, "r");
     if (!file)
-        return;
+        return 1;
 
     while (fgets(line, sizeof(line), file)) {
         char kind[16];
@@ -182,23 +265,15 @@ static void state_load(struct context *ctx)
         }
 
         if (!strcmp(kind, "alarm")) {
-            if (le_timer_add_alarm(&ctx->timers, due, label, now_epoch, &id) !=
-                LE_TIMER_OK)
+            if (le_timer_restore_alarm(&ctx->timers, due, label, now_epoch,
+                                       now_ms, &id) != LE_TIMER_OK)
                 ++ctx->timers.missed;
         } else if (!strcmp(kind, "countdown")) {
-            long long remaining = due - now_epoch;
-
             /* Restored against the wall clock it was saved with, then handed
-               back to the monotonic clock it runs on. A countdown whose time
-               passed while the device was down is dropped by the same rule
-               that drops one missed while it was running. */
-            if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH ||
-                remaining < LE_TIMER_MIN_SECONDS) {
-                ++ctx->timers.missed;
-                continue;
-            }
-            if (le_timer_add_countdown(&ctx->timers, remaining, label, now_ms,
-                                       &id) != LE_TIMER_OK)
+               back to the monotonic clock it runs on. The restore API retains
+               a slightly overdue record so the scheduler can apply its grace. */
+            if (le_timer_restore_countdown(&ctx->timers, due, label, now_epoch,
+                                          now_ms, &id) != LE_TIMER_OK)
                 ++ctx->timers.missed;
         }
     }
@@ -209,6 +284,12 @@ static void state_load(struct context *ctx)
     if (ctx->timers.missed)
         le_log_info("timerd: %u timer(s) came due while the device was down",
                     ctx->timers.missed);
+    return 1;
+}
+
+static void state_load(struct context *ctx)
+{
+    (void)state_load_at(ctx, monotonic_ms(), wall_epoch());
 }
 
 /* -------------------------------- ringing ------------------------------- */
@@ -217,6 +298,7 @@ static void audio_cue(struct context *ctx)
 {
     struct le_adapter *adapter;
     char args[128];
+    int result;
 
     adapter = le_adapter_connect(ctx->audio_sock, AUDIO_TIMEOUT_MS);
     if (!adapter) {
@@ -226,7 +308,9 @@ static void audio_cue(struct context *ctx)
     snprintf(args, sizeof(args),
              "{\"first_hz\":%d,\"second_hz\":%d,\"ms\":%d}",
              RING_LOW_HZ, RING_HIGH_HZ, RING_CUE_MS);
-    (void)le_adapter_call(adapter, "cue", args, NULL, 0);
+    result = le_adapter_call(adapter, "cue", args, NULL, 0);
+    if (result != LE_ADAPTER_OK)
+        le_log_warn("timerd: audio cue failed (%d)", result);
     le_adapter_close(adapter);
 }
 
@@ -316,10 +400,14 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
     char data[LE_ADAPTER_MSG_MAX];
     char label[LE_TIMER_LABEL_MAX];
     int value = 0;
+    int label_result = 0;
 
     label[0] = '\0';
     if (args)
-        (void)json_get_string(args, "label", label, sizeof(label));
+        label_result = json_get_string(args, "label", label, sizeof(label));
+    if (label_result < 0)
+        return le_adapter_respond_err(out, size, id,
+                                      "label is missing, invalid, or too long");
 
     if (!strcmp(cmd, "status") || !strcmp(cmd, "list")) {
         if (timers_json(ctx, data, sizeof(data)) != 0)
@@ -475,7 +563,6 @@ int main(int argc, char **argv)
     }
 
     le_timer_set_init(&ctx.timers);
-    state_load(&ctx);
 
     ctx.listen_fd = le_adapter_listen(ctx.socket_path);
     if (ctx.listen_fd < 0) {
@@ -504,6 +591,10 @@ int main(int argc, char **argv)
         int result;
         nfds_t j;
 
+        if (!ctx.state_loaded && wall_epoch() >= LE_TIMER_CLOCK_VALID_EPOCH) {
+            state_load(&ctx);
+            ctx.state_loaded = 1;
+        }
         count = le_timer_step(&ctx.timers, now_ms, wall_epoch(), fired,
                               LE_TIMER_MAX);
         if (count > 0) {
