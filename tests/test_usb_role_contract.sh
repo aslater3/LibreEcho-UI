@@ -57,6 +57,21 @@ grep -q '/sys/class/usb_role' src/api.c
 curl -fsS "$URL/api/v1/storage/usb" | jq -e '.ok and (.data|has("present"))' >/dev/null
 curl -fsS "$URL/api/v1/storage/usb" | jq -e \
     'if .data.present then (.data|has("device") and has("entries")) else .data.mounted == false end' >/dev/null
+# Unsupported verbs on the USB browse and playback routes must be explicit
+# 405s, rather than falling through to a misleading 404.
+for method in POST PUT DELETE PATCH; do
+    code=$(curl -sS -o /tmp/le-usb-storage-method.out -w '%{http_code}' \
+        -X "$method" "$URL/api/v1/storage/usb" \
+        -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+    [ "$code" = 405 ]
+done
+for method in GET PUT DELETE PATCH; do
+    code=$(curl -sS -o /tmp/le-usb-play-method.out -w '%{http_code}' \
+        -X "$method" "$URL/api/v1/storage/usb/play" \
+        -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+    [ "$code" = 405 ]
+done
+
 # A browse target may not be clipped into the bounded request-path buffer.
 long_path=$(python3 -c 'print("a" * 240)')
 code=$(curl -sS -o /tmp/le-usb-long-browse.out -w '%{http_code}' \

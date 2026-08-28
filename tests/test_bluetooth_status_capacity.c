@@ -157,11 +157,26 @@ static int test_scan_start_frees_the_table(void)
     return 0;
 }
 
+static int test_bond_name_clip_preserves_utf8(void)
+{
+    char name[64];
+    char escaped[BT_STATUS_BOND_NAME_MAX * 2 + 8];
+
+    memset(name, 'a', 29);
+    memcpy(name + 29, "\xe2\x82\xac", 3); /* Euro sign: three UTF-8 bytes. */
+    memcpy(name + 32, "tail", 5);
+    bond_name_json(name, escaped, sizeof(escaped));
+    CHECK(strstr(escaped, "\xe2\x82\xac...") != NULL);
+    CHECK(strstr(escaped, "\xe2\x82\\x...") == NULL);
+    return 0;
+}
+
 int main(void)
 {
     if (test_full_table_still_answers_status() ||
         test_status_lists_every_device_when_it_fits() ||
-        test_scan_start_frees_the_table())
+        test_scan_start_frees_the_table() ||
+        test_bond_name_clip_preserves_utf8())
         return 1;
     printf("bluetooth status capacity: ok\n");
     return 0;

@@ -584,6 +584,53 @@ static void json_escape(const char *input, char *output, size_t size)
     output[used] = '\0';
 }
 
+static size_t utf8_prefix(const char *input, size_t max)
+{
+    size_t used = 0;
+
+    while (input[used] && used < max) {
+        unsigned char first = (unsigned char)input[used];
+        size_t width = 1;
+        size_t i;
+
+        if (first >= 0xc2 && first <= 0xdf)
+            width = 2;
+        else if (first >= 0xe0 && first <= 0xef)
+            width = 3;
+        else if (first >= 0xf0 && first <= 0xf4)
+            width = 4;
+        if (width > 1) {
+            if (used + width > max)
+                break;
+            for (i = 1; i < width; ++i)
+                if (((unsigned char)input[used + i] & 0xc0) != 0x80)
+                    width = 1;
+        }
+        if (used + width > max)
+            break;
+        used += width;
+    }
+    return used;
+}
+
+static void bond_name_json(const char *input, char *output, size_t size)
+{
+    char clipped[BT_STATUS_BOND_NAME_MAX + 4];
+    size_t raw_length = strlen(input);
+    size_t prefix = utf8_prefix(input, BT_STATUS_BOND_NAME_MAX);
+
+    if (raw_length > prefix && prefix + 3 < sizeof(clipped)) {
+        memcpy(clipped, input, prefix);
+        memcpy(clipped + prefix, "...", 4);
+    } else {
+        prefix = raw_length < sizeof(clipped) - 1 ? raw_length :
+                 sizeof(clipped) - 1;
+        memcpy(clipped, input, prefix);
+        clipped[prefix] = '\0';
+    }
+    json_escape(clipped, output, size);
+}
+
 static int append_text(char *buffer, size_t size, size_t *used,
                        const char *format, ...)
 {
@@ -1609,22 +1656,12 @@ static int status_json(struct bt_context *context, char *data, size_t size)
         int first = 1;
         for (i = 0; i < context->device_count; ++i) {
             char address[18];
-            char bond_name[BT_STATUS_BOND_NAME_MAX + 4];
-            size_t bond_name_length;
+            char bond_name[BT_STATUS_BOND_NAME_MAX * 2 + 4];
             if (!context->devices[i].paired)
                 continue;
             address_text(context->devices[i].address, address, sizeof(address));
-            json_escape(context->devices[i].name, escaped, sizeof(escaped));
-            bond_name_length = strlen(escaped);
-            if (bond_name_length > BT_STATUS_BOND_NAME_MAX) {
-                size_t cut = BT_STATUS_BOND_NAME_MAX;
-                while (cut && escaped[cut - 1] == '\\')
-                    --cut;
-                memcpy(bond_name, escaped, cut);
-                memcpy(bond_name + cut, "...", 4);
-            } else {
-                memcpy(bond_name, escaped, bond_name_length + 1);
-            }
+            bond_name_json(context->devices[i].name, bond_name,
+                           sizeof(bond_name));
             if (append_text(bonded, sizeof(bonded), &bonded_used,
                             "%s{\"address\":\"%s\",\"name\":\"%s\","
                             "\"type\":%u,\"rssi\":%d,\"rssi_valid\":%s,\"connected\":%s}",

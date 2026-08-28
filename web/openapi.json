@@ -1334,7 +1334,7 @@
      "System"
     ],
     "summary": "List a USB drive attached to the OTG port",
-    "description": "Reports the attached USB disk and lists one directory of it. Optional `path` query selects a directory relative to the mount; it is rejected if it contains `..`, a backslash or a leading slash, so a listing can never escape the drive. Answers `size_bytes`, `used_bytes` and `free_bytes` from statvfs, plus `rel_path` echoing the directory listed. `present` is false when the port is in device mode or no disk is attached; `mounted` is false when a disk is present but no filesystem could be mounted. The drive is mounted read-only, nosuid and nodev.",
+    "description": "Reports the attached USB disk and lists one directory of it. Optional `path` query selects a directory relative to the mount; it is limited to 255 bytes and rejected if any component is `.` or `..`, contains a backslash or starts with a slash, so a listing can never escape the drive. Ordinary names containing consecutive dots are allowed. Answers `size_bytes`, `used_bytes` and `free_bytes` from statvfs, plus `rel_path` echoing the directory listed. `present` is false when the port is in device mode or no disk is attached; `mounted` is false when a disk is present but no filesystem could be mounted. The drive is mounted read-only, nosuid and nodev.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1349,9 +1349,10 @@
       "in": "query",
       "required": false,
       "schema": {
-       "type": "string"
+       "type": "string",
+       "maxLength": 255
       },
-      "description": "Directory relative to the drive root."
+      "description": "Directory relative to the drive root; path components `.` and `..`, backslashes and leading slashes are rejected. Names containing consecutive dots are valid."
      }
     ]
    }
@@ -1362,7 +1363,7 @@
      "System"
     ],
     "summary": "Play an audio file from the USB drive",
-    "description": "Body is `{\"path\":\"...\"}` relative to the drive root. The path is refused if it contains `..`, a backslash or a leading slash, so playback cannot escape the mount. Only `.mp3` is accepted: radiod decodes MPEG-1/2 Layer III and this image carries no AAC decoder, so other audio formats answer `415` with that reason rather than starting and staying silent. Playback runs through the same radiod path as internet radio, so `/integrations/radio/stop` stops it.",
+    "description": "Body is `{\"path\":\"...\"}` relative to the drive root. The path is refused if any component is `.` or `..`, contains a backslash or a leading slash; ordinary names containing consecutive dots are allowed, so playback cannot escape the mount. Only `.mp3` is accepted: radiod decodes MPEG-1/2 Layer III and this image carries no AAC decoder, so other audio formats answer `415` with that reason rather than starting and staying silent. Playback runs through the same radiod path as internet radio, so `/integrations/radio/stop` stops it.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1401,6 +1402,9 @@
       "$ref": "#/components/responses/Error"
      },
      "415": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
       "$ref": "#/components/responses/Error"
      },
      "503": {

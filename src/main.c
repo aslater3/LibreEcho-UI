@@ -94,6 +94,32 @@ static void mkdir_p_mode(const char*path,mode_t mode){char tmp[320];size_t i,n;
 n=strlen(path);if(n>=sizeof(tmp))return;memcpy(tmp,path,n+1);
 for(i=1;i<n;i++)if(tmp[i]=='/'){tmp[i]=0;mkdir(tmp,mode);tmp[i]='/';}
 mkdir(tmp,mode);}
+static int tls_directory_for_user(const char *path, const struct passwd *user)
+{
+    struct stat st;
+    char parent[320];
+
+    if (!user || stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+        return -1;
+    /* The relay children open the files after the web process drops root. */
+    if (chown(path, user->pw_uid, user->pw_gid) != 0 ||
+        chmod(path, 0700) != 0)
+        return -1;
+    /* A freshly-created /data/libreecho/config must also be traversable by
+       the daemon user.  Execute-only permission exposes no names or contents. */
+    if (snprintf(parent, sizeof(parent), "%s", path) >= (int)sizeof(parent))
+        return -1;
+    for (;;) {
+        char *slash = strrchr(parent, '/');
+        if (!slash || slash == parent)
+            break;
+        *slash = '\0';
+        if (stat(parent, &st) != 0 || !S_ISDIR(st.st_mode) ||
+            chmod(parent, (st.st_mode & 07777) | S_IXOTH) != 0)
+            return -1;
+    }
+    return 0;
+}
 
 int main(int argc,char**argv){const char*mode="mock",*cfg="./config/runtime.json",*mock="./config/mock-state.json",*token_path=0,*users_path=0,*allowed_origin=0;
 unsigned seed=0;
@@ -158,7 +184,8 @@ if(o.tls_port>0){
 if(o.tls_port<1||o.tls_port>65535||o.tls_port==o.port){fprintf(stderr,"Invalid --tls-port\n");le_backend_destroy(b);return 2;}
 snprintf(o.tls_cert,sizeof(o.tls_cert),"%s/https-cert.pem",tls_dir);
 snprintf(o.tls_key,sizeof(o.tls_key),"%s/https-key.pem",tls_dir);
-mkdir_p_mode(tls_dir,0700);   /* the config dir itself, which is expected to exist */
+mkdir_p_mode(tls_dir,0755);   /* parents need traversal after the drop */
+(void)chmod(tls_dir,0700);
 if(le_tls_ensure_self_signed(o.tls_cert,o.tls_key,"libreecho")!=LE_OK){
 /* Never fatal: HTTP stays up so a certificate problem cannot lock out the UI */
 fprintf(stderr,"HTTPS disabled: could not create a certificate in %s\n",tls_dir);
@@ -169,11 +196,15 @@ api.https_port=o.tls_port;
 strncpy(api.https_cert,o.tls_cert,sizeof(api.https_cert)-1);
 }
 if(o.tls_port>0&&o.run_user[0]){
-/* http_server_run drops privileges before the relay child reads these */
+/* http_server_run drops privileges before the relay child reads these. The
+   certificate files live in the config directory, so fixing file ownership
+   alone is insufficient when that directory was created mode 0700 by root. */
 struct passwd*tp=getpwnam(o.run_user);
-if(tp&&(chown(o.tls_cert,tp->pw_uid,tp->pw_gid)||chown(o.tls_key,tp->pw_uid,tp->pw_gid)))
-fprintf(stderr,"Warning: could not give %s ownership of the TLS key\n",o.run_user);
-}}
+if(!tp||tls_directory_for_user(tls_dir,tp)||chmod(o.tls_cert,0600)||chmod(o.tls_key,0600)||chown(o.tls_cert,tp->pw_uid,tp->pw_gid)||chown(o.tls_key,tp->pw_uid,tp->pw_gid)){
+fprintf(stderr,"HTTPS disabled: TLS files are not reachable as %s\n",o.run_user);
+api_set_https_active(&api,0);
+o.tls_port=0;
+}}}
 signal(SIGINT,stop);
 signal(SIGTERM,stop);
 signal(SIGPIPE,SIG_IGN);

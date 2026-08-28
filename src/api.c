@@ -36,6 +36,7 @@ static void ok(struct api_response*r,const char*data){out(r,200,"{\"ok\":true,\"
 static int api_bootstrap_required_internal(const struct api_context*c){return c&&c->users_path[0]&&!c->auth.enabled&&!c->auth_token[0];}
 int api_bootstrap_required(const struct api_context*c){return api_bootstrap_required_internal(c);}
 void api_set_https_active(struct api_context*c,int active){if(!c)return;c->https_active=active?1:0;if(c->https_active&&c->sessions_path[0])le_auth_load_sessions(&c->auth,c->sessions_path);else if(!c->https_active&&c->sessions_path[0])unlink(c->sessions_path);}
+static int persist_auth_sessions(const struct api_context*c){return c&&c->https_active&&c->sessions_path[0];}
 static int changing(const char*m){return strcmp(m,"GET")&&strcmp(m,"HEAD");}static int constant_equal(const char*a,const char*b){size_t al=strlen(a),bl=strlen(b),i,n=al>bl?al:bl;unsigned diff=(unsigned)(al^bl);for(i=0;i<n;i++){unsigned ac=i<al?(unsigned char)a[i]:0,bc=i<bl?(unsigned char)b[i]:0;diff|=ac^bc;}return diff==0;}/*
  * The origin must name the same host this request arrived on. Both schemes are
  * accepted: once the daemon can serve HTTPS, the browser sends
@@ -1478,6 +1479,18 @@ static int hexval(char ch){if(ch>='0'&&ch<='9')return ch-'0';if(ch>='a'&&ch<='f'
  * that could climb out of the mount: no "..", no absolute paths, no
  * backslashes. Everything stays under LE_USB_MOUNT by construction.
  */
+static int usb_relative_path_valid(const char*rel)
+{
+ const char*part=rel;
+ while(part&&*part){
+  const char*slash=strchr(part,'/');
+  size_t length=slash?(size_t)(slash-part):strlen(part);
+  if((length==1&&part[0]=='.')||(length==2&&part[0]=='.'&&part[1]=='.'))return 0;
+  if(!slash)break;
+  part=slash+1;
+ }
+ return 1;
+}
 static int usb_subpath(const char*path,char*out_rel,size_t size,char*out_full,size_t full_size)
 {
  const char*q=path?strchr(path,'?'):NULL;const char*v;size_t i=0;int overflow=0;
@@ -1493,7 +1506,7 @@ static int usb_subpath(const char*path,char*out_rel,size_t size,char*out_full,si
   }
   out_rel[i]='\0';
  }
- if(overflow||strstr(out_rel,"..")||strchr(out_rel,'\\')||out_rel[0]=='/'){out_rel[0]='\0';return -1;}
+ if(overflow||strchr(out_rel,'\\')||out_rel[0]=='/'||!usb_relative_path_valid(out_rel)){out_rel[0]='\0';return -1;}
  if(out_rel[0]){if((size_t)snprintf(out_full,full_size,"%s/%s",LE_USB_MOUNT,out_rel)>=full_size)return -1;}
  else if((size_t)snprintf(out_full,full_size,"%s",LE_USB_MOUNT)>=full_size)return -1;
  return 0;
@@ -1535,7 +1548,7 @@ static void usb_play_json(struct api_context*c,const struct api_request*q,struct
 {
  char rel[LE_USB_PATH_MAX+1],full[512],esc[LE_USB_ESCAPED_MAX];const char*dot;int rc;
  if(json_get_string(q->body,"path",rel,sizeof(rel))<1||!rel[0]){err(r,400,LE_INVALID,"path is required");return;}
- if(strstr(rel,"..")||strchr(rel,'\\')||rel[0]=='/'){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
+ if(!usb_relative_path_valid(rel)||strchr(rel,'\\')||rel[0]=='/'){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
  if((size_t)snprintf(full,sizeof(full),"%s/%s",LE_USB_MOUNT,rel)>=sizeof(full)){err(r,400,LE_INVALID,"That path is too long");return;}
  {int checked=usb_open_file(rel);if(checked<0){err(r,404,LE_INVALID,"No such file on the drive");return;}close(checked);}
  dot=strrchr(rel,'.');
@@ -1592,7 +1605,7 @@ static void auth_bootstrap_json(struct api_context*c,const struct api_request*q,
     int expires;
     if(!api_bootstrap_required_internal(c)){err(r,409,LE_BUSY,"Initial account setup has already been completed");return;}
     if(!auth_credentials(q,username,password,confirm)||strcmp(password,confirm)){err(r,400,LE_INVALID,"Username, password, and matching password confirmation are required");goto clear;}
-    if(le_auth_add_user(&c->auth,c->users_path,username,password)||le_auth_login(&c->auth,username,password,token,sizeof(token),&expires)){err(r,400,LE_INVALID,"Account details are invalid or could not be saved");goto clear;}
+    if(le_auth_add_user(&c->auth,c->users_path,username,password)||le_auth_login(&c->auth,username,password,token,sizeof(token),&expires)){err(r,400,LE_INVALID,"Account details are invalid or could not be saved");goto clear;}if(q->https&&c->sessions_path[0]&&le_auth_save_sessions(&c->auth,c->sessions_path)!=0){err(r,503,LE_IO,"The initial session could not be saved");goto clear;}
     json_escape(escaped,sizeof(escaped),username);
     api_log(c,"info","Initial local account created");
     out(r,200,"{\"ok\":true,\"data\":{\"token\":\"%s\",\"username\":\"%s\",\"expires_in\":%d},\"error\":null}",token,escaped,expires);
@@ -1614,11 +1627,11 @@ clear:
 static void auth_remove_user_json(struct api_context*c,const struct api_request*q,struct api_response*r)
 {
     const char*username=q->path+strlen("/api/v1/auth/users/");
-    if(!*username||strchr(username,'/')||le_auth_remove_user(&c->auth,c->users_path,username)||(q->https&&c->sessions_path[0]&&le_auth_save_sessions(&c->auth,c->sessions_path))){err(r,409,LE_BUSY,"User could not be removed; at least one user must remain");return;}
+    if(!*username||strchr(username,'/')||le_auth_remove_user(&c->auth,c->users_path,username)||(persist_auth_sessions(c)&&le_auth_save_sessions(&c->auth,c->sessions_path))){err(r,409,LE_BUSY,"User could not be removed; at least one user must remain");return;}
     api_log(c,"warning","Local user removed");
     auth_users_json(c,r);
 }
-static void auth_login_json(struct api_context*c,const struct api_request*q,struct api_response*r){char username[LE_AUTH_USERNAME_MAX],password[LE_AUTH_PASSWORD_MAX+1],token[LE_AUTH_TOKEN_MAX],escaped[LE_AUTH_USERNAME_MAX*2];int expires;if(json_get_string(q->body,"username",username,sizeof(username))<1||json_get_string(q->body,"password",password,sizeof(password))<1){err(r,400,LE_INVALID,"Username and password are required");return;}if(auth_rate_limited(c)){memset(password,0,sizeof(password));err(r,429,LE_BUSY,"Too many login attempts; try again later");return;}if(le_auth_login(&c->auth,username,password,token,sizeof(token),&expires)!=0){auth_record_failure(c);memset(password,0,sizeof(password));if(auth_rate_limited(c))err(r,429,LE_BUSY,"Too many login attempts; try again later");else err(r,401,LE_AUTH,"Invalid username or password");return;}c->auth_failures=0;c->auth_window_started=0;c->auth_blocked_until=0;memset(password,0,sizeof(password));json_escape(escaped,sizeof(escaped),username);if(q->https&&c->sessions_path[0])(void)le_auth_save_sessions(&c->auth,c->sessions_path);api_log(c,"info","Authenticated user session created");out(r,200,"{\"ok\":true,\"data\":{\"token\":\"%s\",\"username\":\"%s\",\"expires_in\":%d},\"error\":null}",token,escaped,expires);}
+static void auth_login_json(struct api_context*c,const struct api_request*q,struct api_response*r){char username[LE_AUTH_USERNAME_MAX],password[LE_AUTH_PASSWORD_MAX+1],token[LE_AUTH_TOKEN_MAX],escaped[LE_AUTH_USERNAME_MAX*2];int expires;if(json_get_string(q->body,"username",username,sizeof(username))<1||json_get_string(q->body,"password",password,sizeof(password))<1){err(r,400,LE_INVALID,"Username and password are required");return;}if(auth_rate_limited(c)){memset(password,0,sizeof(password));err(r,429,LE_BUSY,"Too many login attempts; try again later");return;}if(le_auth_login(&c->auth,username,password,token,sizeof(token),&expires)!=0){auth_record_failure(c);memset(password,0,sizeof(password));if(auth_rate_limited(c))err(r,429,LE_BUSY,"Too many login attempts; try again later");else err(r,401,LE_AUTH,"Invalid username or password");return;}c->auth_failures=0;c->auth_window_started=0;c->auth_blocked_until=0;memset(password,0,sizeof(password));json_escape(escaped,sizeof(escaped),username);if(q->https&&c->sessions_path[0]&&le_auth_save_sessions(&c->auth,c->sessions_path)!=0){err(r,503,LE_IO,"The session could not be saved");return;}api_log(c,"info","Authenticated user session created");out(r,200,"{\"ok\":true,\"data\":{\"token\":\"%s\",\"username\":\"%s\",\"expires_in\":%d},\"error\":null}",token,escaped,expires);}
 static void auth_current_json(struct api_context*c,const struct api_request*q,struct api_response*r){char username[LE_AUTH_USERNAME_MAX],escaped[LE_AUTH_USERNAME_MAX*2];if(!strncmp(q->authorization,"Bearer ",7)&&le_auth_session(&c->auth,q->authorization+7,username,sizeof(username))){json_escape(escaped,sizeof(escaped),username);out(r,200,"{\"ok\":true,\"data\":{\"authenticated\":true,\"username\":\"%s\"},\"error\":null}",escaped);}else if(c->auth_token[0])ok(r,"{\"authenticated\":true,\"username\":\"token\"}");else err(r,401,LE_AUTH,"Authentication is required");}
 static int button_status_value(const char *data, const char *key, char *out, size_t size)
 {
@@ -1703,7 +1716,7 @@ static int mac_override_valid(const char *in, char *out, size_t out_size)
     }
 }
 
-void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/spotify")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/light")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations/radio/play")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio/stop")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/audio/sample")&&strcmp(q->method,"POST"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(q->https&&c->sessions_path[0])(void)le_auth_save_sessions(&c->auth,c->sessions_path);}ok(r,"{\"logged_out\":true}");return;}
+void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/spotify")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/light")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations/radio/play")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio/stop")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/storage/usb/play")&&strcmp(q->method,"POST"))||(!strncmp(p,"/api/v1/storage/usb",19)&&(p[19]==0||p[19]=='?')&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/audio/sample")&&strcmp(q->method,"POST"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(persist_auth_sessions(c)&&(le_auth_save_sessions(&c->auth,c->sessions_path)!=0)){err(r,503,LE_IO,"The session could not be saved after logout");return;}}ok(r,"{\"logged_out\":true}");return;}
  if(!strcmp(p,"/api/v1/config/export")&&!strcmp(q->method,"GET")){char config[4096];rc=configuration_json(c,config,sizeof(config));if(rc)err(r,501,rc,"Configuration export is unavailable for this backend");else ok(r,config);return;}if(!strcmp(p,"/api/v1/config/import")&&!strcmp(q->method,"POST")){rc=import_configuration(c,q->body);if(rc)err(r,rc==LE_INVALID?400:501,rc,rc==LE_INVALID?"Configuration file is invalid or incomplete":"Configuration restore is unavailable for this backend");else{api_log(c,"warning","Configuration restored from uploaded JSON");ok(r,"{\"restored\":true,\"schema_version\":1}");}return;}
  if(!strcmp(p,"/api/v1/assistant")){if(!strcmp(q->method,"GET")){agent_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){agent_result(r,"configure",q->body);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/assistant/history/clear")&&!strcmp(q->method,"POST")){agent_result(r,"history_clear",NULL);return;}

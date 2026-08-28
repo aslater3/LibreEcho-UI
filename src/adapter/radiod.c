@@ -32,6 +32,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #include "adapter.h"
 #include "../json.h"
@@ -93,6 +96,17 @@ static void install_stop_handlers(void)
     sigemptyset(&action.sa_mask);
     sigaction(SIGTERM, &action, NULL);
     sigaction(SIGINT, &action, NULL);
+}
+
+static int player_parent_guard(void)
+{
+#ifdef __linux__
+    pid_t parent = getppid();
+
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0 || getppid() != parent)
+        return -1;
+#endif
+    return 0;
 }
 
 static int write_all(int fd, const void *data, size_t length)
@@ -831,6 +845,8 @@ static int start_player(const char *url, const char *bus_path)
     }
     if (child == 0) {
         close(fds[0]);
+        if (player_parent_guard() < 0)
+            _exit(1);
         meta_out = fds[1];
         (void)fcntl(meta_out, F_SETFL, O_NONBLOCK);
         signal(SIGTERM, SIG_DFL);

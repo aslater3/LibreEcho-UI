@@ -1193,8 +1193,9 @@ body must contain a path relative to the drive root:
 { "path": "Music/track.mp3" }
 ```
 
-The path is limited to 255 bytes and is rejected if it contains `..`, a
-backslash, or a leading slash. The file must exist, be a regular file, and have
+The path is limited to 255 bytes and is rejected if any path component is `.`
+or `..`, contains a backslash, or starts with a slash. Ordinary names such as
+`a..b.mp3` are allowed. The file must exist, be a regular file, and have
 an `.mp3` extension. Other formats return `415` because this image has no AAC
 decoder. The response is an ordinary success envelope; the shared radio stop
 operation (`POST /api/v1/integrations/radio/stop`) also stops USB playback.
