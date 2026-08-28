@@ -12,6 +12,12 @@
  * the system. The socket is what other services actually depend on, so that is
  * what is measured.
  *
+ * A service is supervised only after it has been seen answering at least
+ * once. Some daemons are optional or disabled by configuration, and starting
+ * something the owner turned off is not recovery. Latching on the first
+ * healthy probe also means a daemon that takes longer than the settling delay
+ * to come up is picked up when it arrives rather than written off.
+ *
  * Deliberately not supervised: waked. It cannot be restarted at runtime --
  * micd offers its microphone stream once, so a second waked gets "microphone
  * stream: Protocol error", and stopping it unmounts the wakeword payload.
@@ -36,15 +42,37 @@
 
 #define PROBE_TIMEOUT_MS 1500
 #define DEFAULT_INTERVAL_S 5
-#define MAX_SERVICES 16
+#define MAX_SERVICES 24
 
-struct supervised {
+/*
+ * Most daemons answer on a control socket, which is the better signal: it is
+ * what their callers depend on, so it catches a wedged daemon as well as a
+ * dead one. Some -- buttond, timed, logd, wyomingd -- serve no socket at all;
+ * they read input events, poll the clock or talk outward. For those the
+ * pidfile is all there is. It is a weaker check (it cannot tell a wedged
+ * process from a working one) but it still catches the common failure, which
+ * is the process being gone.
+ */
+enum probe_kind {
+    PROBE_SOCKET,
+    PROBE_PIDFILE
+};
+
+/* What is supervised: constant, and the thing the contract test reads. */
+struct service_desc {
     const char *name;
-    const char *socket_path;
+    enum probe_kind kind;
+    const char *probe_path;
     const char *init_script;
     int restartable;
+};
+
+/* How it is going: mutable, one per descriptor. */
+struct supervised {
+    const struct service_desc *desc;
     struct le_watchdog_service state;
     int last_healthy;
+    int seen_healthy;
     int reported_give_up;
     unsigned int total_restarts;
 };
@@ -71,18 +99,45 @@ static long long monotonic_ms(void)
  * outcome -- refused, timed out, malformed -- is a failure; the policy needs
  * two in a row before it acts, so a single blip costs nothing.
  */
-static int probe(const struct supervised *service)
+static int probe_socket(const char *path)
 {
     struct le_adapter *adapter;
     char response[1024];
     int rc;
 
-    adapter = le_adapter_connect(service->socket_path, PROBE_TIMEOUT_MS);
+    adapter = le_adapter_connect(path, PROBE_TIMEOUT_MS);
     if (!adapter)
         return 0;
     rc = le_adapter_call(adapter, "status", "{}", response, sizeof(response));
     le_adapter_close(adapter);
     return rc == LE_ADAPTER_OK;
+}
+
+static int probe_pidfile(const char *path)
+{
+    char line[64];
+    FILE *file = fopen(path, "r");
+    long pid;
+    char *end;
+
+    if (!file)
+        return 0;
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    pid = strtol(line, &end, 10);
+    if (end == line || pid <= 0)
+        return 0;
+    return kill((pid_t)pid, 0) == 0;
+}
+
+static int probe(const struct service_desc *service)
+{
+    if (service->kind == PROBE_PIDFILE)
+        return probe_pidfile(service->probe_path);
+    return probe_socket(service->probe_path);
 }
 
 static int run_init(const char *script, const char *action)
@@ -103,46 +158,58 @@ static int run_init(const char *script, const char *action)
 
 static void restart(struct supervised *service)
 {
-    le_log_warn("watchdog: %s is not answering; restarting", service->name);
+    le_log_warn("watchdog: %s is not answering; restarting",
+                service->desc->name);
     /* Stop first and ignore its result: a wedged service often fails to stop
        cleanly, and refusing to start again because of that would leave it
        down permanently -- the opposite of the point. */
-    (void)run_init(service->init_script, "stop");
-    if (run_init(service->init_script, "start") != 0)
-        le_log_error("watchdog: restarting %s failed", service->name);
+    (void)run_init(service->desc->init_script, "stop");
+    if (run_init(service->desc->init_script, "start") != 0)
+        le_log_error("watchdog: restarting %s failed", service->desc->name);
     ++service->total_restarts;
 }
 
 int main(int argc, char **argv)
 {
-    static struct supervised services[MAX_SERVICES] = {
-        {"networkd", "/run/libreecho/networkd.sock",
-         "/etc/init.d/libreecho-networkd.init", 1, {0}, 1, 0, 0},
-        {"audiod", "/run/libreecho/audio.sock",
-         "/etc/init.d/libreecho-audiod.init", 1, {0}, 1, 0, 0},
-        {"micd", "/run/libreecho/mic.sock",
-         "/etc/init.d/libreecho-micd.init", 1, {0}, 1, 0, 0},
-        {"ledd", "/run/libreecho/led.sock",
-         "/etc/init.d/libreecho-ledd.init", 1, {0}, 1, 0, 0},
-        {"buttond", "/run/libreecho/buttond.sock",
-         "/etc/init.d/libreecho-buttond.init", 1, {0}, 1, 0, 0},
-        {"btd", "/run/libreecho/bluetooth.sock",
-         "/etc/init.d/libreecho-btd.init", 1, {0}, 1, 0, 0},
-        {"radiod", "/run/libreecho/radio.sock",
-         "/etc/init.d/libreecho-radiod.init", 1, {0}, 1, 0, 0},
-        {"agentd", "/run/libreecho/agent.sock",
-         "/etc/init.d/libreecho-agentd.init", 1, {0}, 1, 0, 0},
-        {"ttsd", "/run/libreecho/tts.sock",
-         "/etc/init.d/libreecho-ttsd.init", 1, {0}, 1, 0, 0},
-        {"sttd", "/run/libreecho/stt.sock",
-         "/etc/init.d/libreecho-sttd.init", 1, {0}, 1, 0, 0},
-        {"airplayd", "/run/libreecho/airplay.sock",
-         "/etc/init.d/libreecho-airplayd.init", 1, {0}, 1, 0, 0},
+    static const struct service_desc descriptors[MAX_SERVICES] = {
+        /* Socket paths are the defaults the init scripts pass; a source
+           contract test keeps this table and init/ from drifting apart. */
+        {"networkd", PROBE_SOCKET, "/run/libreecho/network.sock",
+         "/etc/init.d/libreecho-networkd.init", 1},
+        {"audiod", PROBE_SOCKET, "/run/libreecho/audio.sock",
+         "/etc/init.d/libreecho-audiod.init", 1},
+        {"micd", PROBE_SOCKET, "/run/libreecho/mic.sock",
+         "/etc/init.d/libreecho-micd.init", 1},
+        {"ledd", PROBE_SOCKET, "/run/libreecho/led.sock",
+         "/etc/init.d/libreecho-ledd.init", 1},
+        {"btd", PROBE_SOCKET, "/run/libreecho/bluetooth.sock",
+         "/etc/init.d/libreecho-btd.init", 1},
+        {"radiod", PROBE_SOCKET, "/run/libreecho/radio.sock",
+         "/etc/init.d/libreecho-radiod.init", 1},
+        {"agentd", PROBE_SOCKET, "/run/libreecho/agent.sock",
+         "/etc/init.d/libreecho-agentd.init", 1},
+        {"ttsd", PROBE_SOCKET, "/run/libreecho/tts.sock",
+         "/etc/init.d/libreecho-ttsd.init", 1},
+        {"sttd", PROBE_SOCKET, "/run/libreecho/stt.sock",
+         "/etc/init.d/libreecho-sttd.init", 1},
+        {"airplayd", PROBE_SOCKET, "/run/libreecho/airplay.sock",
+         "/etc/init.d/libreecho-airplayd.init", 1},
+        /* No control socket; the pidfile is the only signal. */
+        {"buttond", PROBE_PIDFILE, "/var/run/libreecho-buttond.pid",
+         "/etc/init.d/libreecho-buttond.init", 1},
+        {"timed", PROBE_PIDFILE, "/var/run/libreecho-timed.pid",
+         "/etc/init.d/libreecho-timed.init", 1},
+        {"logd", PROBE_PIDFILE, "/var/run/libreecho-logd.pid",
+         "/etc/init.d/libreecho-logd.init", 1},
+        {"wyomingd", PROBE_PIDFILE, "/var/run/libreecho-wyomingd.pid",
+         "/etc/init.d/libreecho-wyomingd.init", 1},
         /* Probed and reported, never restarted -- see the note at the top. */
-        {"waked", "/run/libreecho/wakeword.sock", NULL, 0, {0}, 1, 0, 0},
+        {"waked", PROBE_SOCKET, "/run/libreecho/wakeword.sock", NULL, 0},
     };
+    static struct supervised services[MAX_SERVICES];
     static char argbuf[MAX_SERVICES][512];
-    size_t count = 12, i;
+    static struct service_desc custom_descs[MAX_SERVICES];
+    size_t count = 15, i;
     int interval = DEFAULT_INTERVAL_S;
     int passes = 0;   /* 0 = run forever */
     int start_delay = 0;
@@ -184,12 +251,11 @@ int main(int argc, char **argv)
             init = strchr(sock, ':');
             if (!init) { fprintf(stderr, "--service wants NAME:SOCKET:INIT\n"); return 2; }
             *init++ = '\0';
-            memset(&services[custom], 0, sizeof(services[custom]));
-            services[custom].name = name;
-            services[custom].socket_path = sock;
-            services[custom].init_script = init;
-            services[custom].restartable = *init ? 1 : 0;
-            services[custom].last_healthy = 1;
+            custom_descs[custom].name = name;
+            custom_descs[custom].kind = PROBE_SOCKET;
+            custom_descs[custom].probe_path = sock;
+            custom_descs[custom].init_script = init;
+            custom_descs[custom].restartable = *init ? 1 : 0;
             ++custom;
         }
         else {
@@ -202,14 +268,18 @@ int main(int argc, char **argv)
         interval = DEFAULT_INTERVAL_S;
     if (custom)
         count = custom;
+    for (i = 0; i < count; ++i)
+        services[i].desc = custom ? &custom_descs[i] : &descriptors[i];
 
     signal(SIGTERM, stop);
     signal(SIGINT, stop);
     signal(SIGPIPE, SIG_IGN);
 
     now = monotonic_ms();
-    for (i = 0; i < count; ++i)
+    for (i = 0; i < count; ++i) {
         le_watchdog_service_init(&services[i].state, now);
+        services[i].last_healthy = 1;
+    }
 
     le_log_info("watchdog started; supervising %u services every %ds "
                 "after a %ds settling delay",
@@ -225,19 +295,28 @@ int main(int argc, char **argv)
         now = monotonic_ms();
         for (i = 0; i < count && running; ++i) {
             struct supervised *s = &services[i];
-            int healthy = probe(s);
+            int healthy = probe(s->desc);
             enum le_watchdog_action action;
 
+            /* Supervision latches on the first healthy probe. A daemon that
+               has never answered is either disabled or not installed, and
+               starting something the owner turned off is not recovery. */
+            if (healthy && !s->seen_healthy) {
+                s->seen_healthy = 1;
+                le_log_info("watchdog: supervising %s", s->desc->name);
+            }
             if (healthy != s->last_healthy) {
-                if (healthy)
-                    le_log_info("watchdog: %s is answering again", s->name);
+                if (healthy && s->seen_healthy)
+                    le_log_info("watchdog: %s is answering again", s->desc->name);
                 s->last_healthy = healthy;
             }
-            if (!s->restartable) {
+            if (!s->seen_healthy)
+                continue;
+            if (!s->desc->restartable) {
                 if (!healthy)
                     le_log_warn("watchdog: %s is not answering "
                                 "(not restartable; a reboot is needed)",
-                                s->name);
+                                s->desc->name);
                 continue;
             }
             action = le_watchdog_step(&s->state, healthy, now);
@@ -248,7 +327,7 @@ int main(int argc, char **argv)
                 /* Say it once, then stay quiet rather than logging forever. */
                 s->reported_give_up = 1;
                 le_log_error("watchdog: giving up on %s after %u restarts; "
-                             "it needs attention", s->name,
+                             "it needs attention", s->desc->name,
                              s->total_restarts);
             }
         }

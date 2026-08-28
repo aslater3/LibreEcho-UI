@@ -68,22 +68,37 @@ if [ "$(wc -l < "$marker" | tr -d ' ')" != "1" ]; then
 fi
 echo "  healthy service left alone: ok"
 
-# --- a dead service is brought back --------------------------------------
-kill "$(cat "$dir/pid")" 2>/dev/null || true
-rm -f "$sock"
-sleep 1
-# the policy needs two consecutive failures before it acts
-"$WD" --passes 1 --interval 1 --service "fake:$sock:$init" >/dev/null 2>&1
-if [ "$(wc -l < "$marker" | tr -d ' ')" != "1" ]; then
-    echo "FAIL: watchdog restarted on a single failed probe"
+# --- a service that was never up is not started --------------------------
+# Supervision latches on the first healthy probe, so a daemon that has never
+# answered is left alone: it is disabled or not installed, and starting
+# something the owner turned off is not recovery.
+absent="$dir/absent"
+: > "$absent.marker"
+cat > "$absent" <<EOF
+#!/bin/sh
+echo start >> "$absent.marker"
+exit 0
+EOF
+chmod +x "$absent"
+"$WD" --passes 4 --interval 1 --service "gone:$dir/nothing.sock:$absent" \
+    >/dev/null 2>&1
+if [ -s "$absent.marker" ]; then
+    echo "FAIL: watchdog started a service that was never running"
     exit 1
 fi
-echo "  single failure did not trigger a restart: ok"
+echo "  service that was never up left alone: ok"
 
-"$WD" --passes 2 --interval 1 --service "fake:$sock:$init" >/dev/null 2>&1
-if [ "$(wc -l < "$marker" | tr -d ' ')" != "2" ]; then
-    echo "FAIL: watchdog did not restart a dead service"
-    cat "$marker"
+# --- a service that dies mid-run is brought back -------------------------
+# Killing it while one watchdog process is running is the real sequence: the
+# watchdog must see it healthy, then see it go, then restart it. Separate
+# invocations cannot test this -- failure counting and the supervision latch
+# are per-process state.
+( sleep 3; kill "$(cat "$dir/pid")" 2>/dev/null; rm -f "$sock" ) &
+"$WD" --passes 12 --interval 1 --service "fake:$sock:$init" >/dev/null 2>&1
+wait
+
+if [ "$(wc -l < "$marker" | tr -d ' ')" -lt "2" ]; then
+    echo "FAIL: watchdog did not restart a service that died"
     exit 1
 fi
 echo "  dead service restarted: ok"
@@ -95,5 +110,14 @@ if [ ! -S "$sock" ]; then
     exit 1
 fi
 echo "  service answering again: ok"
+
+# --- restarted once, not repeatedly --------------------------------------
+# The service came back, so the remaining passes must leave it alone.
+if [ "$(wc -l < "$marker" | tr -d ' ')" -gt "2" ]; then
+    echo "FAIL: watchdog restarted the service more than once"
+    cat "$marker"
+    exit 1
+fi
+echo "  restarted once, not repeatedly: ok"
 
 echo "watchdogd recovery: ok"
