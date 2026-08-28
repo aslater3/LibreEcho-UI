@@ -2504,7 +2504,7 @@
      "Assistant"
     ],
     "summary": "Read speech pipeline configuration and endpoint health",
-    "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, and persisted listening settings. max_utterance_ms is 2000\u201320000, end_silence_ms is 200\u20133000, and vad_floor_rms is 1\u20131024.",
+    "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, persisted listening settings, and the state of the latest bounded voice-pipeline restart. `restart.state` is `ready`, `pending`, or `failed`; `restart.error` is non-empty when the last restart failed. max_utterance_ms is 2000\u201320000, end_silence_ms is 200\u20133000, and vad_floor_rms is 1\u20131024.",
     "responses": {
      "200": {
       "description": "Speech pipeline and persisted listening settings",
@@ -2523,7 +2523,7 @@
      "Assistant"
     ],
     "summary": "Configure and activate the speech pipeline",
-    "description": "Persists and applies local, custom, or Home Assistant mode. Custom mode uses remote Wyoming Whisper and Piper services while wake-word detection remains on-device.",
+    "description": "Persists and applies local, custom, or Home Assistant mode. Custom mode uses remote Wyoming Whisper and Piper services while wake-word detection remains on-device. When daemon init scripts are present, activation is bounded to one restart job: the successful response is 202 with `restart.state: pending`; concurrent updates return 409 until it completes. Poll GET /api/v1/voice-pipeline for `restart.state` and `restart.error`; asynchronous restart failures are reported as 503 on the next PUT and remain visible in GET state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -2586,6 +2586,12 @@
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     },
+     "202": {
+      "$ref": "#/components/responses/Success"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
      },
      "400": {
       "$ref": "#/components/responses/Error"
@@ -3034,8 +3040,28 @@
       "maximum": 1024
      }
     }
-   },
-   "VoicePipelineEnvelope": {
+    },
+    "VoicePipelineRestart": {
+    "type": "object",
+    "required": [
+     "state",
+     "error"
+    ],
+    "properties": {
+     "state": {
+      "type": "string",
+      "enum": [
+       "ready",
+       "pending",
+       "failed"
+      ]
+     },
+     "error": {
+      "type": "string"
+     }
+    }
+    },
+    "VoicePipelineEnvelope": {
     "type": "object",
     "required": [
      "ok",
@@ -3051,6 +3077,9 @@
       "properties": {
        "listening": {
         "$ref": "#/components/schemas/ListeningSettings"
+       },
+       "restart": {
+        "$ref": "#/components/schemas/VoicePipelineRestart"
        }
       }
      },

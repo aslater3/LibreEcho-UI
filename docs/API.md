@@ -369,13 +369,17 @@ accepts or falls back to an OpenAI API key.
 #### GET /api/v1/voice-pipeline
 
 Returns speech-pipeline configuration and endpoint health. The response also
-includes the persisted `listening` object:
+includes the persisted `listening` object and the latest bounded restart state:
 
 ```json
 {
   "max_utterance_ms": 6000,
   "end_silence_ms": 1500,
-  "vad_floor_rms": 45
+  "vad_floor_rms": 45,
+  "restart": {
+    "state": "ready",
+    "error": ""
+  }
 }
 ```
 
@@ -400,6 +404,14 @@ are writable here and are validated before any setting is committed:
 
 Malformed or out-of-range listening fields return HTTP 400 and leave the
 previous configuration unchanged. The request requires `X-LibreEcho-CSRF`.
+
+When the image has voice-daemon init scripts, activation runs as one bounded
+restart job without blocking the HTTP loop. The accepted response is `202` and
+contains `restart.state: "pending"`; a second update while it is pending gets
+`409`. Poll this GET endpoint for completion. If the asynchronous restart fails,
+the state becomes `failed` and the next PUT reports `503` so the caller cannot
+mistake a persisted setting for a running pipeline. Home Assistant mode is
+rejected with `501` when its Wyoming service is not installed.
 
 #### GET /api/v1/assistant
 

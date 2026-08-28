@@ -129,6 +129,14 @@ def newest_turn(url, token, csrf):
     return turns[0] if turns else None
 
 
+def first_pcm_final(turn):
+    """Return true only after agentd has recorded first audio output."""
+    try:
+        return int(turn.get("first_pcm_ms", 0)) > 0
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def run_once(args, token, csrf, phrase, previous):
     """One turn. Returns the recorded turn dict, or None if nothing landed.
 
@@ -154,7 +162,10 @@ def run_once(args, token, csrf, phrase, previous):
     while time.time() - started < args.turn_timeout:
         turn = newest_turn(args.url, token, csrf)
         if turn and turn.get("at_ms") != prev_at:
-            return turn
+            # agentd creates the history record before TTS starts and patches
+            # first_pcm_ms later. Do not treat that interim zero as a sample.
+            if first_pcm_final(turn):
+                return turn
         time.sleep(0.5)
     return None
 
@@ -201,9 +212,13 @@ def main():
     print(f"wake     : {'acoustic' if args.acoustic else 'synthetic trigger (see --acoustic)'}")
     print(f"speaking : {args.speak_cmd}\n")
 
-    turns, failures, previous = [], 0, newest_turn(args.url, token, csrf)
+    turns, failures = [], 0
     for i in range(1, args.iterations + 1):
         phrase = DEFAULT_PHRASES[(i - 1) % len(DEFAULT_PHRASES)]
+        # A timed-out turn may be finalized after this iteration returns. Take
+        # a fresh baseline immediately before the next trigger so that late
+        # history cannot be attributed to the new phrase.
+        previous = newest_turn(args.url, token, csrf)
         turn = run_once(args, token, csrf, phrase, previous)
         if turn is None:
             failures += 1

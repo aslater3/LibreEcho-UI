@@ -82,6 +82,10 @@ sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
 sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
+sh tests/test_voice_pipeline_restart_contract.sh
+python3 tests/test_voice_latency_bench.py
+make build/test-voice-pipeline-restart
+./build/test-voice-pipeline-restart
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 make build/libreecho-radiod
