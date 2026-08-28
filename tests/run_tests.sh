@@ -166,6 +166,15 @@ agent_pid=$!
 export LIBREECHO_AGENT_SOCKET
 i=0
 while [ ! -S "$AGENT_SOCKET" ]; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-agent.log; exit 1; }; sleep 0.1; done
+make build/test-timer-intent
+./build/test-timer-intent
+make build/test-timer-schedule
+./build/test-timer-schedule
+make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
+./build/test-timer-persistence
+sh tests/test_timerd.sh
+make build/libreecho-agentd
+sh tests/test_agentd_timers.sh
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!
 cleanup(){ if [ "${pid:-0}" -gt 1 ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; if [ "${agent_pid:-0}" -gt 1 ]; then kill "$agent_pid" 2>/dev/null || true; wait "$agent_pid" 2>/dev/null || true; fi; }
