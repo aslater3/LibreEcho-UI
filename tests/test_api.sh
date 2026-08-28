@@ -57,6 +57,12 @@ code=$(curl -sS -o /tmp/le-invalid-acoustic-mixed.out -w '%{http_code}' \
 [ "$code" = 400 ]
 curl -fsS "$URL/api/v1/system/features" |
     jq -e '.ok and .data.simulation == false and .data.acoustic_events == false and .data.acoustic_events_available == false' >/dev/null
+code=$(curl -sS -o /tmp/le-invalid-acoustic-usb-mixed.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"usb_host":false,"simulation":true,"acoustic_events":"enabled"}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" |
+    jq -e '.ok and .data.simulation == false and .data.acoustic_events == false' >/dev/null
 expect "$(curl -fsS "$URL/swagger.html")" 'API reference · LibreEcho'
 expect "$(curl -fsS "$URL/js/swagger.js")" 'executeOperation'
 expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
