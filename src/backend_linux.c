@@ -1571,6 +1571,135 @@ static int bluetooth_pairing_mode(struct le_backend *b, int enabled)
     return bluetooth_controller_setting(b, "pairing_mode", enabled);
 }
 
+#define LE_ADAPTER_TIMER_SOCK "/run/libreecho/timer.sock"
+
+/*
+ * Walk the objects of a JSON array. json.c reads scalars from an object but
+ * has no array support, and the timer list is the first place that needs it.
+ * Rather than teach the parser arrays, find each {...} in the value and hand
+ * it to the existing scalar getters -- the entries are flat objects, so brace
+ * counting is enough and there is nothing to nest wrongly.
+ */
+static const char *next_array_object(const char *cursor, char *out,
+                                     size_t size)
+{
+    int depth = 0;
+    size_t used = 0;
+
+    if (!cursor)
+        return NULL;
+    while (*cursor && *cursor != '{') {
+        if (*cursor == ']')
+            return NULL;
+        ++cursor;
+    }
+    if (!*cursor)
+        return NULL;
+    for (; *cursor; ++cursor) {
+        if (*cursor == '{')
+            ++depth;
+        if (used + 1 < size)
+            out[used++] = *cursor;
+        if (*cursor == '}') {
+            --depth;
+            if (!depth) {
+                out[used] = '\0';
+                return cursor + 1;
+            }
+        }
+    }
+    return NULL;
+}
+
+static int timers(struct le_backend *b, struct le_timer_list *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char entry[512];
+    const char *cursor;
+    int rc;
+    (void)b;
+
+    memset(o, 0, sizeof(*o));
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "status", NULL, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        /* No timer daemon is not an error the panel should shout about; it
+           reports the feature as unavailable and shows nothing. */
+        return LE_OK;
+    o->available = 1;
+    (void)json_get_int(response, "ringing", &o->ringing);
+    (void)json_get_int(response, "missed", &o->missed);
+
+    cursor = strstr(response, "\"timers\"");
+    while (cursor && o->count < (int)(sizeof(o->items) / sizeof(o->items[0]))) {
+        struct le_timer_entry *item = &o->items[o->count];
+        int id = 0, remaining = 0;
+
+        cursor = next_array_object(cursor, entry, sizeof(entry));
+        if (!cursor)
+            break;
+        if (json_get_int(entry, "id", &id) < 1)
+            continue;
+        item->id = (unsigned)id;
+        (void)json_get_int(entry, "seconds_remaining", &remaining);
+        item->seconds_remaining = remaining;
+        (void)json_get_string(entry, "kind", item->kind, sizeof(item->kind));
+        (void)json_get_string(entry, "state", item->state,
+                              sizeof(item->state));
+        (void)json_get_string(entry, "label", item->label,
+                              sizeof(item->label));
+        ++o->count;
+    }
+    return LE_OK;
+}
+
+static int timer_add(struct le_backend *b, int seconds, const char *label,
+                     unsigned *id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[256];
+    char escaped[128];
+    int value = 0, rc;
+    (void)b;
+
+    json_escape(escaped, sizeof(escaped), label ? label : "");
+    snprintf(args, sizeof(args), "{\"seconds\":%d,\"label\":\"%s\"}",
+             seconds, escaped);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "add", args, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (id) {
+        (void)json_get_int(response, "id", &value);
+        *id = (unsigned)value;
+    }
+    return LE_OK;
+}
+
+static int timer_cancel(struct le_backend *b, unsigned id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[64];
+    (void)b;
+
+    snprintf(args, sizeof(args), "{\"id\":%u}", id);
+    return adapter_command(LE_ADAPTER_TIMER_SOCK, "cancel", args, response,
+                           sizeof(response));
+}
+
+static int timer_dismiss(struct le_backend *b, int *stopped)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc;
+    (void)b;
+
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "dismiss", "{}", response,
+                         sizeof(response));
+    if (rc == LE_OK && stopped)
+        (void)json_get_int(response, "dismissed", stopped);
+    return rc;
+}
+
 static int airplay(struct le_backend *b, struct le_airplay_state *o)
 {
     char response[LE_ADAPTER_MSG_MAX];
@@ -1736,7 +1865,8 @@ static const struct le_backend_ops ops = {
     bluetooth_unpair, bluetooth_disconnect, bluetooth_pairing_response,
     bluetooth_discoverable, bluetooth_connectable, bluetooth_pairing_mode,
     airplay, airplay_set, playback,
-    linux_reboot, linux_shutdown, factory_reset, tick, control
+    linux_reboot, linux_shutdown, factory_reset, tick, control,
+    timers, timer_add, timer_cancel, timer_dismiss
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)
