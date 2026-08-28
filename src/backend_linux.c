@@ -1483,6 +1483,22 @@ static int led_test(struct le_backend *b)
     return adapter_json_command(LE_ADAPTER_LED_SOCK, "test", NULL);
 }
 
+/*
+ * Preview one bundled sound. The name is validated by the caller and again by
+ * audiod, which refuses anything that is not a plain sample name -- the name
+ * becomes a path under the sounds directory, so neither side trusts it alone.
+ */
+static int sound_sample(struct le_backend *b, const char *name)
+{
+    char args[96];
+
+    (void)b;
+    if (!name || !*name)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"name\":\"%s\"}", name);
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "sample", args);
+}
+
 static int scan(struct le_backend *b, struct le_wifi_scan *o)
 {
     char response[LE_ADAPTER_MSG_MAX], array[LE_ADAPTER_MSG_MAX];
@@ -2198,7 +2214,9 @@ static const struct le_backend_ops ops = {
     airplay, airplay_set, playback,
     linux_reboot, linux_shutdown, factory_reset, tick, control,
     spotify, spotify_set,
-    light};
+    light,
+    sound_sample
+};
 
 int le_linux_create(struct le_backend *b, const char *cfg)
 {

@@ -88,6 +88,15 @@ struct context {
     int audio_poll_warned;       /* so an unreachable audiod is reported once, not every tick */
     int tones;                   /* press cues; read from the web config, on by default */
     char action[24];             /* what the action button does; only "sound" is wired */
+    /*
+     * The sounds the action button rotates through, as a comma-separated list
+     * of names in the order they play. Curated in the UI, so a press walks
+     * only the sounds that are switched on rather than everything shipped.
+     * Empty means the button is silent -- which is a choice, not a fault, and
+     * is logged as such.
+     */
+    char action_sounds[192];
+    unsigned int action_index;   /* where the rotation has got to */
     unsigned int action_brightness;
     unsigned int mute_brightness;   /* the ring that accompanies mute; the lamp itself has no PWM */
     int volume_capable;
@@ -425,6 +434,7 @@ static void privacy_lamp(int on)
 static void refresh_tone_setting(struct context *ctx)
 {
     char buffer[8192];
+    char value_text[192];
     FILE *file;
     size_t len;
     int value;
@@ -445,6 +455,77 @@ static void refresh_tone_setting(struct context *ctx)
         ctx->mute_brightness = (unsigned int)value;
     (void)json_get_string(buffer, "button_action", ctx->action,
                           sizeof(ctx->action));
+    /*
+     * Re-read every tick like the rest, so curating the list in the UI takes
+     * effect on the next press. The rotation index is deliberately not reset
+     * when the list changes: restarting at the first sound every time someone
+     * toggles an entry would make the button feel stuck on one sound.
+     */
+    /*
+     * Absent is not the same as empty. A config written before this setting
+     * existed has no such key, and treating that as "every sound switched
+     * off" would silence a button that used to work -- it would look like a
+     * regression to anyone who upgraded. Only an explicitly present key
+     * changes the list; otherwise the default rotation seeded at startup
+     * stands.
+     */
+    if (json_get_string(buffer, "button_action_sounds", value_text,
+                        sizeof(value_text)) == 1)
+        snprintf(ctx->action_sounds, sizeof(ctx->action_sounds), "%s",
+                 value_text);
+}
+
+/*
+ * Pick the next sound from the curated list and copy it into out.
+ *
+ * Returns 0 when the list is empty, which is a valid configuration: the user
+ * has switched every sound off. The caller distinguishes that from a failure
+ * so the button can stay silent without logging a warning on every press.
+ */
+static int action_next_sound(struct context *ctx, char *out, size_t out_size)
+{
+    const char *p = ctx->action_sounds;
+    unsigned int count = 0;
+    unsigned int wanted;
+    unsigned int seen = 0;
+
+    while (*p) {
+        while (*p == ',' || *p == ' ')
+            ++p;
+        if (!*p)
+            break;
+        ++count;
+        while (*p && *p != ',')
+            ++p;
+    }
+    if (count == 0)
+        return 0;
+
+    wanted = ctx->action_index % count;
+    p = ctx->action_sounds;
+    while (*p) {
+        const char *start;
+        size_t len;
+
+        while (*p == ',' || *p == ' ')
+            ++p;
+        if (!*p)
+            break;
+        start = p;
+        while (*p && *p != ',')
+            ++p;
+        len = (size_t)(p - start);
+        if (seen == wanted) {
+            if (len >= out_size)
+                len = out_size - 1;
+            memcpy(out, start, len);
+            out[len] = '\0';
+            ctx->action_index = (ctx->action_index + 1U) % count;
+            return 1;
+        }
+        ++seen;
+    }
+    return 0;
 }
 
 static void play_cue(struct context *ctx, unsigned int first_hz,
@@ -691,10 +772,7 @@ static void handle_key(struct context *ctx, int code, int value)
              * longer than any acknowledgement, so none can be mistaken for a
              * volume cue.
              */
-            static const char *const sounds[] = {
-                "action-1", "action-2", "action-3",
-            };
-            static unsigned int next;
+            char sound[64];
 
             le_log_info("buttond: action button (%s)", ctx->action);
             if (!strcmp(ctx->action, "disabled"))
@@ -707,8 +785,17 @@ static void handle_key(struct context *ctx, int code, int value)
                             ctx->action);
                 return;
             }
-            play_sample(ctx, sounds[next]);
-            next = (next + 1U) % (sizeof(sounds) / sizeof(sounds[0]));
+            /*
+             * Rotate through the curated list so repeated presses do not
+             * sound like a stuck machine. An empty list is a deliberate
+             * choice -- every sound switched off -- so it still flashes the
+             * ring to acknowledge the press and says nothing about it.
+             */
+            if (!action_next_sound(ctx, sound, sizeof(sound))) {
+                action_flourish(ctx);
+                return;
+            }
+            play_sample(ctx, sound);
             action_flourish(ctx);
         }
         return;              /* no autorepeat: once per press */
@@ -751,6 +838,9 @@ int main(int argc, char **argv)
     ctx.audio_poll_warned = 0;
     ctx.tones = 1;
     strcpy(ctx.action, "sound");
+    /* The rotation the button had before it was configurable. A config that
+       carries the setting replaces this on the first status tick. */
+    strcpy(ctx.action_sounds, "action-1,action-2,action-3");
     ctx.action_brightness = 70U;
     ctx.mute_brightness = 60U;
     ctx.step = environment_unsigned("LE_BUTTON_VOLUME_STEP", DEFAULT_STEP,

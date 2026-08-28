@@ -566,9 +566,58 @@
       "$ref": "#/components/responses/Error"
      }
     }
-   }
-  },
-  "/auth": {
+    }
+    },
+    "/audio/sample": {
+    "post": {
+     "tags": [
+      "Audio"
+     ],
+     "summary": "Preview one bundled action-button sound",
+     "description": "Plays one raw sound from the installed sound directory. Names are lowercase letters, digits, hyphens, or underscores and are limited to 48 characters. Other HTTP methods return 405.",
+     "parameters": [
+      {
+       "$ref": "#/components/parameters/Csrf"
+      }
+     ],
+     "requestBody": {
+      "required": true,
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "name"
+         ],
+         "properties": {
+          "name": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 48,
+           "pattern": "^[a-z0-9_-]+$"
+          }
+         }
+        }
+       }
+      }
+     },
+     "responses": {
+      "200": {
+       "$ref": "#/components/responses/Success"
+      },
+      "400": {
+       "$ref": "#/components/responses/Error"
+      },
+      "405": {
+       "$ref": "#/components/responses/Error"
+      },
+      "501": {
+       "$ref": "#/components/responses/Error"
+      }
+     }
+    }
+    },
+    "/auth": {
    "get": {
     "tags": [
      "Authentication"
@@ -1091,7 +1140,7 @@
      "LED and buttons"
     ],
     "summary": "Read button settings and live physical-input capability state",
-    "description": "Returns saved tones/action/brightness settings plus live capability fields from libreecho-buttond. `available` is true only for a fresh connected status record; `stale` is true when the record is missing, disconnected, or older than 15 seconds. The response data includes `short_press`, `long_press`, `tones`, `action`, `action_brightness`, `mute_brightness`, `volume_capable`, `hardware_mute`, and `action_capable`.",
+    "description": "Returns saved tones/action/brightness settings plus live capability fields from libreecho-buttond. `available` is true only for a fresh connected status record; `stale` is true when the record is missing, disconnected, or older than 15 seconds. The response data includes `short_press`, `long_press`, `tones`, `action`, `action_sounds`, `available_sounds`, `action_brightness`, `mute_brightness`, `volume_capable`, `hardware_mute`, and `action_capable`. Sound names are lowercase letters, digits, hyphens, or underscores and are at most 48 characters each; an empty `action_sounds` is valid and disables sound playback.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1106,7 +1155,7 @@
      "LED and buttons"
     ],
     "summary": "Update button mappings, cues, action, and brightness",
-    "description": "All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_brightness` and `mute_brightness` are integers from 0 through 100. Malformed or out-of-range fields return 400.",
+    "description": "All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Malformed or out-of-range fields return 400.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1137,6 +1186,11 @@
            "playpause",
            "disabled"
           ]
+         },
+         "action_sounds": {
+          "type": "string",
+          "maxLength": 191,
+          "pattern": "^(|[a-z0-9_-]{1,48}(,[a-z0-9_-]{1,48})*)$"
          },
          "action_brightness": {
           "type": "integer",
