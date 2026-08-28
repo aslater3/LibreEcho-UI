@@ -100,6 +100,16 @@ int le_timer_add_alarm(struct le_timer_set *set, long long due_epoch,
                        const char *label, long long now_epoch,
                        unsigned int *id);
 
+/* Restore a persisted wall-clock due time after the clock becomes valid. A
+ * due time may be slightly overdue so le_timer_step() can apply the common
+ * miss grace, but stale records are rejected. */
+int le_timer_restore_countdown(struct le_timer_set *set, long long due_epoch,
+                               const char *label, long long now_epoch,
+                               long long now_monotonic_ms, unsigned int *id);
+int le_timer_restore_alarm(struct le_timer_set *set, long long due_epoch,
+                           const char *label, long long now_epoch,
+                           long long now_monotonic_ms, unsigned int *id);
+
 int le_timer_cancel(struct le_timer_set *set, unsigned int id);
 
 /* Stop a ringing timer and clear it. Returns how many were stopped. */
