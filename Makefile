@@ -31,7 +31,7 @@ TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adap
 TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
 STTD_SOURCES = src/adapter/sttd.c src/adapter/stt_engine_mock.c src/adapter/adapter_server.c src/log.c
 STTD_SHERPA_CXX_SOURCES = src/adapter/stt_engine_sherpa.cpp
-AGENTD_SOURCES = src/adapter/agentd.c src/adapter/llm_provider.c \
+AGENTD_SOURCES = src/adapter/agentd.c src/adapter/timer_intent.c src/adapter/llm_provider.c \
 	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
@@ -135,6 +135,11 @@ $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 
 $(BUILD)/test-network-health: tests/test_network_health.c \
 		src/adapter/network_health.c
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-timer-intent: tests/test_timer_intent.c \
+		src/adapter/timer_intent.c
+	@mkdir -p $(BUILD)
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
 $(BUILD)/test-timer-schedule: tests/test_timer_schedule.c \
