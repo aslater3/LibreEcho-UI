@@ -12,6 +12,9 @@ assert "c[i].secure_transport=1" in http
 assert "q.https=c->secure_transport;" in http
 assert "make build/test-auth-transport" in runner
 assert "make build/test-radiod-json" in runner
+assert "connect-src 'self' https://geocoding-api.open-meteo.com" in http
+assert "json_escape" in Path("src/json.c").read_text(encoding="utf-8")
+assert "test_unit.c" in runner
 
 start = api.index("static void auth_login_json")
 end = api.index("static void auth_current_json", start)
