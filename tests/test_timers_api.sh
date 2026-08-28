@@ -21,6 +21,15 @@ curl -fsS "$URL/api/v1/timers" \
     | jq -e --argjson id "$id" '.data.timers | length == 1 and .[0].id == $id and .[0].label == "pasta"' >/dev/null
 echo "  timer listed with its label: ok"
 
+# The path component must be an entire nonzero uint; a numeric prefix must not
+# alias the live timer and cancel it.
+for malformed in "${id}junk" "18446744073709551616"; do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/timers/$malformed" -H "$CSRF")
+    [ "$code" = 404 ] || { echo "FAIL: malformed timer id $malformed returned $code, expected 404"; exit 1; }
+done
+curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$id" '.data.timers | length == 1 and .[0].id == $id' >/dev/null
+echo "  malformed timer ids refused without cancellation: ok"
+
 # Labels are bounded API fields and must be rejected rather than truncated.
 long_label=$(python3 -c 'print("x" * 48)')
 code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
@@ -53,6 +62,21 @@ echo "  timer cancelled: ok"
 code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/timers/$id" -H "$CSRF")
 [ "$code" = 404 ] || { echo "FAIL: cancelling twice returned $code, expected 404"; exit 1; }
 echo "  cancelling a gone timer is 404: ok"
+
+# The fixed mock schedule has sixteen slots. A valid request beyond that hard
+# limit is busy, not an invalid duration or an unavailable service.
+i=0
+while [ "$i" -lt 16 ]; do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
+        -H "$CSRF" -H "$JSON" --data '{"seconds":600}')
+    [ "$code" = 201 ] || { echo "FAIL: capacity fill returned $code, expected 201"; exit 1; }
+    i=$((i + 1))
+done
+code=$(curl -sS -o /tmp/le-timer-capacity.out -w '%{http_code}' -X POST "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" --data '{"seconds":600}')
+[ "$code" = 409 ] || { echo "FAIL: full timer schedule returned $code, expected 409"; exit 1; }
+jq -e '.error.code == "busy"' /tmp/le-timer-capacity.out >/dev/null
+echo "  timer capacity reports busy: ok"
 
 # Each timer route has an explicit method contract rather than falling through
 # to a misleading 404.

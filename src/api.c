@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -866,6 +867,28 @@ static void buttons_json(struct api_context *c, struct api_response *r)
     out(r, 200, "{\"ok\":true,\"data\":{\"short_press\":\"%s\",\"long_press\":\"%s\",\"available\":%s,\"state\":\"%s\",\"volume_capable\":%s,\"hardware_mute\":%s,\"action_capable\":%s,\"stale\":%s},\"error\":null}", escaped_short, escaped_long, fresh && !strcmp(state, "connected") ? "true" : "false", state, volume ? "true" : "false", mute ? "true" : "false", action ? "true" : "false", !fresh ? "true" : "false");
 }
 
+static int timer_id_from_path(const char *path, unsigned *id)
+{
+    const char *text = path + strlen("/api/v1/timers/");
+    const char *it;
+    char *end;
+    unsigned long value;
+
+    if (!text[0])
+        return 0;
+    for (it = text; *it; ++it)
+        if (!isdigit((unsigned char)*it))
+            return 0;
+    errno = 0;
+    value = strtoul(text, &end, 10);
+    if (errno == ERANGE || end == text || *end || value == 0 ||
+        value > UINT_MAX)
+        return 0;
+    if (id)
+        *id = (unsigned)value;
+    return 1;
+}
+
 static void timers_json(struct api_context*c,struct api_response*r){
  struct le_timer_list list;char body[4096];char escaped[128];size_t used=0;int i,written;
  if(le_get_timers(c->backend,&list)!=LE_OK){err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}
@@ -888,7 +911,7 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  if(!strcmp(p,"/api/v1/assistant/auth/poll")&&!strcmp(q->method,"POST")){agent_result(r,"auth_poll",NULL);return;}
  if(!strcmp(p,"/api/v1/assistant/logout")&&!strcmp(q->method,"POST")){agent_result(r,"logout",NULL);return;}
  if(!strcmp(p,"/api/v1/assistant/respond")&&!strcmp(q->method,"POST")){agent_result(r,"respond",q->body);return;}
- if((!strcmp(p,"/api/v1")||!strcmp(p,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(p,"/api/v1/status")&&!strcmp(q->method,"GET")){status_json(c,r);return;}if(!strcmp(p,"/api/v1/playback")&&!strcmp(q->method,"GET")){playback_json(c,r);return;}if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"GET")){timers_json(c,r);return;}if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"POST")){int seconds_result,label_result;long long seconds=0;char label[48]="";unsigned id=0;if((seconds_result=json_get_int64(q->body,"seconds",&seconds))!=1||seconds<LE_TIMER_MIN_SECONDS||seconds>LE_TIMER_MAX_SECONDS){err(r,400,LE_INVALID,"Seconds is required or out of range");return;}label_result=json_get_string(q->body,"label",label,sizeof(label));if(label_result<0){err(r,400,LE_INVALID,"Timer label is invalid or too long");return;}rc=le_add_timer(c->backend,seconds,label,&id);if(rc==LE_INVALID){err(r,400,LE_INVALID,"Timer length is out of range");return;}if(rc!=LE_OK){err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}out(r,201,"{\"ok\":true,\"data\":{\"id\":%u},\"error\":null}",id);return;}if(!strcmp(p,"/api/v1/timers/dismiss")&&!strcmp(q->method,"POST")){int stopped=0;if(le_dismiss_timers(c->backend,&stopped)!=LE_OK){err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}out(r,200,"{\"ok\":true,\"data\":{\"dismissed\":%d},\"error\":null}",stopped);return;}if(!strncmp(p,"/api/v1/timers/",15)&&!strcmp(q->method,"DELETE")){unsigned long id=strtoul(p+15,0,10);if(!id){err(r,404,LE_INVALID,"Timer was not found");return;}rc=le_cancel_timer(c->backend,(unsigned)id);if(rc==LE_INVALID){err(r,404,LE_INVALID,"Timer was not found");return;}if(rc!=LE_OK){err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}ok(r,"{\"cancelled\":true}");return;}if(!strcmp(p,"/api/v1/device")&&!strcmp(q->method,"GET")){device_json(c,r);return;}if(!strcmp(p,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384},\"error\":null}",c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default");return;}
+ if((!strcmp(p,"/api/v1")||!strcmp(p,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(p,"/api/v1/status")&&!strcmp(q->method,"GET")){status_json(c,r);return;}if(!strcmp(p,"/api/v1/playback")&&!strcmp(q->method,"GET")){playback_json(c,r);return;}if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"GET")){timers_json(c,r);return;}if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"POST")){int seconds_result,label_result;long long seconds=0;char label[48]="";unsigned id=0;if((seconds_result=json_get_int64(q->body,"seconds",&seconds))!=1||seconds<LE_TIMER_MIN_SECONDS||seconds>LE_TIMER_MAX_SECONDS){err(r,400,LE_INVALID,"Seconds is required or out of range");return;}label_result=json_get_string(q->body,"label",label,sizeof(label));if(label_result<0){err(r,400,LE_INVALID,"Timer label is invalid or too long");return;}rc=le_add_timer(c->backend,seconds,label,&id);if(rc==LE_INVALID){err(r,400,LE_INVALID,"Timer length is out of range");return;}if(rc==LE_BUSY){err(r,409,LE_BUSY,"Timer capacity is full");return;}if(rc!=LE_OK){err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}out(r,201,"{\"ok\":true,\"data\":{\"id\":%u},\"error\":null}",id);return;}if(!strcmp(p,"/api/v1/timers/dismiss")&&!strcmp(q->method,"POST")){int stopped=0;if(le_dismiss_timers(c->backend,&stopped)!=LE_OK){err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}out(r,200,"{\"ok\":true,\"data\":{\"dismissed\":%d},\"error\":null}",stopped);return;}if(!strncmp(p,"/api/v1/timers/",15)&&!strcmp(q->method,"DELETE")){unsigned id;if(!timer_id_from_path(p,&id)){err(r,404,LE_INVALID,"Timer was not found");return;}rc=le_cancel_timer(c->backend,id);if(rc==LE_INVALID){err(r,404,LE_INVALID,"Timer was not found");return;}if(rc!=LE_OK){err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}ok(r,"{\"cancelled\":true}");return;}if(!strcmp(p,"/api/v1/device")&&!strcmp(q->method,"GET")){device_json(c,r);return;}if(!strcmp(p,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384},\"error\":null}",c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default");return;}
  if(!strcmp(p,"/api/v1/audio")){if(!strcmp(q->method,"GET")){audio_json(c,r);return;}if(!strcmp(q->method,"PUT")){char voice[32];if(json_get_int(q->body,"volume",&v)>0)rc=le_set_volume(c->backend,v);if(!rc&&json_get_int(q->body,"microphone_gain",&v)>0)rc=le_set_microphone_gain(c->backend,v);if(!rc&&json_get_bool(q->body,"microphone_muted",&v)>0)rc=le_set_microphone_muted(c->backend,v);if(!rc&&json_get_string(q->body,"tts_voice",voice,sizeof(voice))>0)rc=le_set_tts_voice(c->backend,voice);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Audio setting could not be applied");return;}api_log(c,"info","Audio settings updated");event_bus_publish(&c->events,"audio","{\"changed\":true}");audio_json(c,r);return;}}
  if(!strcmp(p,"/api/v1/baby-monitor")&&!strcmp(q->method,"GET")){baby_monitor_json(c,r);return;}
  if(!strcmp(p,"/api/v1/bluetooth/pairing-mode")&&!strcmp(q->method,"POST")){int enabled=1;if(json_get_bool(q->body,"enabled",&enabled)<1)enabled=1;rc=le_bluetooth_set_pairing_mode(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth pairing mode could not be changed");return;}api_log(c,"info",enabled?"Bluetooth pairing mode enabled":"Bluetooth pairing mode disabled");bluetooth_json(c,r);return;}

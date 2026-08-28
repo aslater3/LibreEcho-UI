@@ -45,6 +45,14 @@ int main(void)
     assert(list.items[0].state[0] == 'r');
 
     backend.ops->destroy(&backend);
+
+    memset(&backend, 0, sizeof(backend));
+    assert(le_mock_create(&backend, NULL, NULL, 1) == LE_OK);
+    for (int i = 0; i < 16; ++i)
+        assert(backend.ops->timer_add(&backend, 60, "capacity", &id) == LE_OK);
+    assert(backend.ops->timer_add(&backend, 60, "capacity", &id) == LE_BUSY);
+    backend.ops->destroy(&backend);
+
     puts("mock timer backend: ok");
     return 0;
 }

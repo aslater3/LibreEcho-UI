@@ -384,10 +384,12 @@ static int adapter_command(const char *socket_path, const char *command,
     }
     rc = le_adapter_call(adapter, command, args, response, response_size);
     le_adapter_close(adapter);
-    if (rc == LE_ADAPTER_ERR_REJECTED && command &&
-        !strcmp(command, "cancel") && response &&
-        !strcmp(response, "no such timer"))
+    if (rc == LE_ADAPTER_ERR_REJECTED && command && response &&
+        !strcmp(command, "cancel") && !strcmp(response, "no such timer"))
         return LE_INVALID;
+    if (rc == LE_ADAPTER_ERR_REJECTED && command && response &&
+        !strcmp(command, "add") && !strcmp(response, "no free timer slots"))
+        return LE_BUSY;
     result = adapter_result(rc);
     if (result != LE_OK)
         le_log_debug("backend: adapter %s failed (rc=%d)", command, rc);

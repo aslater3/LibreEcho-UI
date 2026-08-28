@@ -1190,6 +1190,7 @@
     "responses": {
      "201": {"$ref": "#/components/responses/Success"},
      "400": {"$ref": "#/components/responses/Error"},
+     "409": {"$ref": "#/components/responses/Error"},
      "503": {"$ref": "#/components/responses/Error"}
     }
    }

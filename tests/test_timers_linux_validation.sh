@@ -22,3 +22,9 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
     --data '{"seconds":4294967297}')
 [ "$code" = 400 ] || { echo "FAIL: Linux overflow returned $code, expected 400"; exit 1; }
 echo "Linux timer overflow validation: ok"
+
+# The Linux adapter preserves timerd's full-schedule rejection as LE_BUSY, so
+# the API can distinguish capacity from an unavailable daemon.
+grep -q 'no free timer slots' src/backend_linux.c
+grep -q 'Timer capacity is full' src/api.c
+echo "Linux timer capacity mapping: ok"

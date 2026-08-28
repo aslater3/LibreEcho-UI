@@ -264,7 +264,9 @@ Creates a countdown and requires `X-LibreEcho-CSRF`.
 `seconds` is required and must be 1–604800. `label` is optional, but if
 present must be a valid JSON string no longer than 47 bytes; oversized or
 malformed labels return HTTP 400 rather than being truncated. Success returns
-HTTP 201 with `{ "id": number }`.
+HTTP 201 with `{ "id": number }`. The fixed schedule holds at most 16 active
+entries; a valid request when it is full returns HTTP 409 with error code
+`busy`.
 
 #### POST /api/v1/timers/dismiss
 
@@ -273,8 +275,10 @@ returns `{ "dismissed": number }`. Requires `X-LibreEcho-CSRF`.
 
 #### DELETE /api/v1/timers/{id}
 
-Cancels one pending timer by numeric ID. Requires `X-LibreEcho-CSRF`; a missing
-or already-cancelled ID returns HTTP 404.
+Cancels one pending timer by numeric ID. The entire path component must be a
+nonzero decimal integer; malformed or out-of-range IDs return HTTP 404 without
+calling the backend. Requires `X-LibreEcho-CSRF`; a missing or already-cancelled
+ID returns HTTP 404.
 
 The timer page refreshes its status while open so countdowns and ringing state
 remain current. Timer state is persisted atomically with a restrictive
