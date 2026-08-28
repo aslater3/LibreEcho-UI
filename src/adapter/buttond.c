@@ -470,7 +470,7 @@ static void refresh_tone_setting(struct context *ctx)
      * stands.
      */
     if (json_get_string(buffer, "button_action_sounds", value_text,
-                        sizeof(value_text)) >= 0)
+                        sizeof(value_text)) == 1)
         snprintf(ctx->action_sounds, sizeof(ctx->action_sounds), "%s",
                  value_text);
 }

@@ -245,6 +245,39 @@ code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' -X DELETE "$URL/api/v1/b
 [ "$code" = 405 ]
 code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' "$URL/api/v1/integrations/home-assistant")
 [ "$code" = 405 ]
+# Action sounds use audiod's lowercase, 48-character sample-name contract and
+# the preview endpoint is POST-only.
+for method in GET PUT DELETE; do
+    if [ "$method" = GET ]; then
+        code=$(curl -sS -o /tmp/le-sample-method.out -w '%{http_code}' \
+            -X "$method" "$URL/api/v1/audio/sample" -H "$CSRF")
+    else
+        code=$(curl -sS -o /tmp/le-sample-method.out -w '%{http_code}' \
+            -X "$method" "$URL/api/v1/audio/sample" -H "$CSRF" \
+            -H 'Content-Type: application/json' --data '{}')
+    fi
+    [ "$code" = 405 ]
+done
+code=$(curl -sS -o /tmp/le-sample-uppercase.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/audio/sample" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"name":"Action-1"}')
+[ "$code" = 400 ]
+name49=$(python3 -c 'print("a" * 49)')
+code=$(curl -sS -o /tmp/le-sample-too-long.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/audio/sample" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "{\"name\":\"$name49\"}")
+[ "$code" = 400 ]
+name48=$(python3 -c 'print("a" * 48)')
+code=$(curl -sS -o /tmp/le-sample-valid.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/audio/sample" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "{\"name\":\"$name48\"}")
+[ "$code" = 501 ]
+buttons=$(curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"action_sounds":"action-2,action-3"}')
+printf '%s' "$buttons" | jq -e '.ok and .data.action_sounds == "action-2,action-3"' >/dev/null
+curl -fsS "$URL/api/v1/buttons" | jq -e \
+    '.ok and .data.action_sounds == "action-2,action-3" and (.data.available_sounds | type == "array")' >/dev/null
 escaped=$(curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data '{"short_press":"say \"hi\"","long_press":"path\\test"}')
 printf '%s' "$escaped" | jq -e '.ok and .data.short_press == "say \"hi\"" and .data.long_press == "path\\test"' >/dev/null
 curl -fsS "$URL/api/v1/buttons" | jq -e '.ok and .data.short_press == "say \"hi\"" and .data.long_press == "path\\test"' >/dev/null

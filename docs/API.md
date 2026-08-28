@@ -333,6 +333,31 @@ Play test tone.
 }
 ```
 
+#### POST /api/v1/audio/sample
+
+Play one bundled raw sound by name for previewing the action-button rotation.
+The request is state-changing and requires `X-LibreEcho-CSRF`.
+
+**Request:**
+```json
+{ "name": "action-1" }
+```
+
+Names must be 1–48 characters and contain only lowercase letters, digits,
+hyphens, or underscores. The mock backend returns `501` because it has no
+speaker; a target without `audiod` does the same.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": { "playing": true },
+  "error": null
+}
+```
+
+Other methods return `405`.
+
 #### POST /api/v1/audio/announce
 
 Speak text through the local TTS service and `audiod` announcement bus. This
@@ -1248,6 +1273,11 @@ Returns the saved button settings and the live capability state reported by
 record. `volume_capable`, `hardware_mute`, and `action_capable` reflect the
 keys found on the currently discovered evdev devices; `stale` is true when the
 status record is missing, disconnected, or older than 15 seconds.
+`available_sounds` lists the installed raw sounds that can be previewed, and
+`action_sounds` is the comma-separated rotation list in play order. Sound names
+are lowercase letters, digits, hyphens, or underscores and are at most 48
+characters each; an empty `action_sounds` disables sound playback while keeping
+the action-button ring flash.
 
 #### PUT /api/v1/buttons
 
@@ -1257,6 +1287,9 @@ successful update. `tones` controls the short rising/falling press cues;
 and `mute_brightness` are LED-ring brightness values from 0 to 100. The
 currently wired action is `sound`; `listen`, `playpause`, and `disabled` are
 accepted settings with the corresponding behavior reported by the daemon.
+`action_sounds` is a comma-separated list of installed sound names in rotation
+order. Each name follows the same 1–48-character lowercase-name rule as the
+preview endpoint; an empty string is valid and means no sound is played.
 Malformed fields, unsupported actions, and brightness values outside 0–100
 return the standard 400 error envelope.
 
@@ -1267,6 +1300,7 @@ return the standard 400 error envelope.
   "long_press": "Open pairing mode",
   "tones": true,
   "action": "sound",
+  "action_sounds": "action-1,action-2,action-3",
   "action_brightness": 70,
   "mute_brightness": 60
 }
@@ -1287,6 +1321,8 @@ return the standard 400 error envelope.
     "stale": true,
     "tones": true,
     "action": "sound",
+    "action_sounds": "action-1,action-2,action-3",
+    "available_sounds": ["action-1", "action-2", "action-3"],
     "action_brightness": 70,
     "mute_brightness": 60
   },
@@ -1294,9 +1330,9 @@ return the standard 400 error envelope.
 }
 ```
 
-Configuration export/import includes all four new settings. Imports from older
-exports may omit them; omitted values retain the current setting, while any
-present value is validated and restored.
+Configuration export/import includes `button_action_sounds` alongside the other
+button settings. Imports from older exports may omit it; omitted values retain
+the current setting, while any present value is validated and restored.
 
 ### Bluetooth
 
