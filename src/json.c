@@ -1,5 +1,7 @@
 #include "json.h"
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -196,6 +198,21 @@ int json_get_int(const char *s, const char *k, int *out)
     *out = (int)v; return 1;
 }
 
+int json_get_uint(const char *s, const char *k, unsigned int *out)
+{
+    char *e; unsigned long v; const char *p = find_key(s, k);
+
+    if (!p) return 0;
+    if (*p == '+' || *p == '-') return -1;
+    errno = 0;
+    v = strtoul(p, &e, 10);
+    if (e == p || errno == ERANGE || v > UINT_MAX) return -1;
+    while (isspace((unsigned char)*e)) e++;
+    if (*e && *e != ',' && *e != '}') return -1;
+    if (out) *out = (unsigned int)v;
+    return 1;
+}
+
 int json_get_bool(const char *s, const char *k, int *out)
 {
     const char *p = find_key(s, k);
@@ -228,7 +245,6 @@ void json_escape(char *out, size_t z, const char *in)
 {
     static const char hex[] = "0123456789abcdef";
     size_t n = 0;
-
     while (*in) {
         unsigned char c = (unsigned char)*in;
         size_t width = (c == 34 || c == 92 || c == 10 || c == 13 || c == 9)
