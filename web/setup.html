@@ -44,8 +44,15 @@
 
       <section class="setup-page" data-step="1">
         <span class="eyebrow">Network</span>
-        <h1>Connect LibreEcho to Wi-Fi.</h1>
+        <h1>Connect LibreEcho to <span class="no-wrap">Wi-Fi</span>.</h1>
         <p class="lead">Select a network or enter its name manually. The temporary setup access point may disappear while the device joins your LAN.</p>
+        <section class="firmware-state" id="vendor-firmware-state" aria-live="polite">
+          <div class="firmware-state-copy">
+            <strong id="vendor-firmware-title">Checking Wi-Fi hardware…</strong>
+            <small id="vendor-firmware-detail">Reading the boot-time firmware import and driver state.</small>
+          </div>
+          <button class="secondary compact" id="force-vendor-import" type="button" hidden>Force retry next boot</button>
+        </section>
         <div class="section-heading"><h2>Nearby networks</h2><button class="text-button" id="scan-wifi" type="button">Scan again</button></div>
         <div id="wifi-list" class="wifi-list" aria-live="polite"><p class="muted">Scanning for networks…</p></div>
         <div class="form-grid">
