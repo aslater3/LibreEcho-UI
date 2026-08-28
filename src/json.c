@@ -1,5 +1,6 @@
 #include "json.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -194,6 +195,23 @@ int json_get_int(const char *s, const char *k, int *out)
     v = strtol(p, &e, 10);
     if (e == p) return -1;
     *out = (int)v; return 1;
+}
+
+int json_get_int64(const char *s, const char *k, long long *out)
+{
+    char *e;
+    long long value;
+    const char *p = find_key(s, k);
+
+    if (!p)
+        return 0;
+    errno = 0;
+    value = strtoll(p, &e, 10);
+    if (e == p || errno == ERANGE ||
+        (*e && !isspace((unsigned char)*e) && *e != ',' && *e != '}'))
+        return -1;
+    *out = value;
+    return 1;
 }
 
 int json_get_bool(const char *s, const char *k, int *out)

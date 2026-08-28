@@ -39,6 +39,7 @@ globalThis.fetch = () => Promise.reject(new Error('startup fetch intentionally u
 globalThis.URL = { createObjectURL: () => 'blob:unused', revokeObjectURL() {} };
 vm.runInThisContext(fs.readFileSync('web/js/app.js', 'utf8'), { filename: 'app.js' });
 const state = vm.runInThisContext('state');
+const timersPage = vm.runInThisContext('timersPage');
 let scheduled;
 globalThis.setTimeout = (fn) => { scheduled = fn; return 1; };
 globalThis.clearTimeout = () => {};
@@ -52,7 +53,7 @@ globalThis.api = async path => {
 };
 async function main() {
     state.page = 'Timers';
-    await globalThis.timersPage();
+    await timersPage();
     if (!content.innerHTML.includes('10s')) throw new Error('initial timer state was not rendered');
     if (typeof scheduled !== 'function') throw new Error('Timers page did not schedule a refresh');
     await scheduled();

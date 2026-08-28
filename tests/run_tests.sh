@@ -111,6 +111,8 @@ make build/test-timer-schedule
 ./build/test-timer-schedule
 make build/test-timer-json
 ./build/test-timer-json
+make build/test-backend-mock-timers
+./build/test-backend-mock-timers
 make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
 ./build/test-timer-persistence
 sh tests/test_timerd.sh
@@ -132,6 +134,7 @@ sh tests/test_memory.sh "$pid"
 kill "$pid"
 wait "$pid" 2>/dev/null || true
 pid=0
+sh tests/test_timers_linux_validation.sh
 ./tools/create-user.sh test-user test-password-123 >./build/test-users
 chmod 600 ./build/test-users
 ./build/libreecho-web --backend mock --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --users-file ./build/test-users >./build/test-users.log 2>&1 &

@@ -28,8 +28,10 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
 [ "$code" = 400 ] || { echo "FAIL: oversized label returned $code, expected 400"; exit 1; }
 echo "  oversized labels refused: ok"
 
-# --- a bad length is the caller's mistake, not a service failure ----------
-for body in '{"seconds":0}' '{"seconds":-5}' '{"seconds":999999999}'; do
+# The API must reject values outside the bounded countdown range before a
+# backend-specific timer implementation sees them.
+for body in '{"seconds":0}' '{"seconds":-5}' '{"seconds":999999999}' \
+            '{"seconds":4294967297}'; do
     code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
         -H "$CSRF" -H "$JSON" --data "$body")
     [ "$code" = 400 ] || { echo "FAIL: $body returned $code, expected 400"; exit 1; }
@@ -51,6 +53,18 @@ echo "  timer cancelled: ok"
 code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/timers/$id" -H "$CSRF")
 [ "$code" = 404 ] || { echo "FAIL: cancelling twice returned $code, expected 404"; exit 1; }
 echo "  cancelling a gone timer is 404: ok"
+
+# Each timer route has an explicit method contract rather than falling through
+# to a misleading 404.
+code=$(curl --no-fail -sS -o /dev/null -w '%{http_code}' -X PUT "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" --data '{}')
+[ "$code" = 405 ] || { echo "FAIL: PUT /timers returned $code, expected 405"; exit 1; }
+code=$(curl --no-fail -sS -o /dev/null -w '%{http_code}' -X GET "$URL/api/v1/timers/dismiss")
+[ "$code" = 405 ] || { echo "FAIL: GET /timers/dismiss returned $code, expected 405"; exit 1; }
+code=$(curl --no-fail -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers/$id" \
+    -H "$CSRF" -H "$JSON" --data '{}')
+[ "$code" = 405 ] || { echo "FAIL: POST /timers/{id} returned $code, expected 405"; exit 1; }
+echo "  unsupported timer methods refused: ok"
 
 # --- dismiss reports how many rings it stopped ----------------------------
 curl -fsS -X POST "$URL/api/v1/timers/dismiss" -H "$CSRF" -H "$JSON" --data '{}' \

@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#define BOOT_EPOCH 10LL
 #define SYNCED_EPOCH 1767225600LL
 
 static void write_text(const char *path, const char *text)
@@ -78,7 +79,19 @@ int main(void)
            LE_TIMER_OK);
     write_text(path, "old state\n");
     assert(chmod(path, 0644) == 0);
-    state_save(&context);
+
+    /* A save before NTP must not clear the caller's dirty state or replace
+       the persisted schedule. */
+    context.dirty = 1;
+    assert(state_save_at(&context, 1000, BOOT_EPOCH) == 0);
+    assert(context.dirty == 1);
+    read_text(path, text, sizeof(text));
+    assert(!strcmp(text, "old state\n"));
+
+    context.dirty = 1;
+    if (state_save_at(&context, 1000, SYNCED_EPOCH))
+        context.dirty = 0;
+    assert(context.dirty == 0);
     assert(stat(path, &info) == 0 && (info.st_mode & 0777) == 0600);
     assert(stat(backup, &info) == 0 && (info.st_mode & 0777) == 0600);
     read_text(backup, text, sizeof(text));
