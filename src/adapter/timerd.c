@@ -132,6 +132,9 @@ static int state_save_at(struct context *ctx, long long now_ms,
     FILE *file;
     size_t i;
 
+    /* Never replace the persisted schedule before deferred state is loaded. */
+    if (!ctx->state_loaded)
+        return 0;
     if (!ctx->state_path || !ctx->state_path[0])
         return 0;
     /* Never replace a persisted countdown while the wall clock is invalid:

@@ -33,6 +33,16 @@ static void read_text(const char *path, char *out, size_t size)
     assert(fclose(file) == 0);
 }
 
+static int load_state_at(struct context *context, long long now_ms,
+                         long long now_epoch)
+{
+    int result = state_load_at(context, now_ms, now_epoch);
+
+    if (result)
+        context->state_loaded = 1;
+    return result;
+}
+
 int main(void)
 {
     const char *path = "/tmp/libreecho-timer-persistence-test";
@@ -54,7 +64,7 @@ int main(void)
     write_text(path, "alarm 1767225630 wake\ncountdown 1767225630 pasta\n");
 
     /* An invalid boot clock must leave the file and records untouched. */
-    assert(state_load_at(&context, 1000, BOOT_EPOCH) == 0);
+    assert(load_state_at(&context, 1000, BOOT_EPOCH) == 0);
     assert(le_timer_active_count(&context.timers) == 0);
     read_text(path, text, sizeof(text));
     assert(strstr(text, "alarm 1767225630 wake") != NULL);
@@ -68,9 +78,18 @@ int main(void)
     read_text(path, text, sizeof(text));
     assert(strstr(text, "alarm 1767225630 wake") != NULL);
 
+    /* A valid save must still wait for deferred state restoration. A wall
+       clock transition between the load check and save must not replace the
+       old schedule with only the in-memory change. */
+    assert(context.state_loaded == 0);
+    save_if_dirty(&context, 1500, SYNCED_EPOCH);
+    assert(context.dirty == 1);
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "alarm 1767225630 wake") != NULL);
+
     /* This is the cold-boot path: load the old records after sync, then save
        both them and the pre-sync change rather than losing the latter. */
-    assert(state_load_at(&context, 2000, SYNCED_EPOCH) == 1);
+    assert(load_state_at(&context, 2000, SYNCED_EPOCH) == 1);
     assert(le_timer_active_count(&context.timers) == 3);
     save_if_dirty(&context, 2000, SYNCED_EPOCH);
     assert(context.dirty == 0);
@@ -81,7 +100,7 @@ int main(void)
     /* Once NTP makes the clock valid, both records restore deterministically. */
     le_timer_set_init(&context.timers);
     write_text(path, "alarm 1767225630 wake\ncountdown 1767225630 pasta\n");
-    assert(state_load_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
+    assert(load_state_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
     assert(le_timer_active_count(&context.timers) == 2);
     assert(le_timer_step(&context.timers, 5000, SYNCED_EPOCH + 60,
                          fired, LE_TIMER_MAX) == 2);
@@ -90,7 +109,7 @@ int main(void)
     /* Records older than the scheduler grace are reported as missed. */
     le_timer_set_init(&context.timers);
     write_text(path, "alarm 1767225599 stale\n");
-    assert(state_load_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
+    assert(load_state_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
     assert(le_timer_active_count(&context.timers) == 0);
     assert(context.timers.missed == 1);
 
