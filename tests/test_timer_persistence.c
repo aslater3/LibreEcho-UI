@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#define LE_TIMERD_TESTING
 #define main timerd_program_main
 #include "../src/adapter/timerd.c"
 #undef main
@@ -33,14 +34,75 @@ static void read_text(const char *path, char *out, size_t size)
     assert(fclose(file) == 0);
 }
 
-static int load_state_at(struct context *context, long long now_ms,
-                         long long now_epoch)
+static void assert_audio_refresh_and_snapshot(const char *path,
+                                              const char *backup)
 {
-    int result = state_load_at(context, now_ms, now_epoch);
+    struct context context;
+    char text[256];
 
-    if (result)
-        context->state_loaded = 1;
-    return result;
+    memset(&context, 0, sizeof(context));
+    context.state_path = path;
+    context.state_loaded = 1;
+    le_timer_set_init(&context.timers);
+    unlink(path);
+    unlink(backup);
+    unlink("/tmp/libreecho-timer-persistence-test.tmp");
+    unlink("/tmp/libreecho-timer-persistence-test.bak.tmp");
+    assert(le_timer_add_countdown(&context.timers, 1, "ring", 0, NULL) ==
+           LE_TIMER_OK);
+    assert(le_timer_add_countdown(&context.timers, 10, "pending", 1000,
+                                  NULL) == LE_TIMER_OK);
+    le_timerd_test_monotonic_enabled = 1;
+    le_timerd_test_monotonic_ms = 1000;
+    assert(le_timer_step(&context.timers, 1000, SYNCED_EPOCH, NULL, 0) == 1);
+    context.next_ring_ms = 0;
+    le_timerd_test_block_audio_ms = 2000;
+    ring_tick(&context, 1000);
+    assert(le_timerd_test_monotonic_ms == 3000);
+    assert(context.next_ring_ms == 5000);
+
+    context.dirty = 1;
+    save_if_dirty(&context, monotonic_ms(), SYNCED_EPOCH);
+    assert(context.dirty == 0);
+    read_text(path, text, sizeof(text));
+    /* A stale pre-cue snapshot would serialize 1767225610 instead. */
+    assert(strstr(text, "countdown 1767225608 pending") != NULL);
+    le_timerd_test_monotonic_enabled = 0;
+}
+
+static void assert_post_commit_retry(const char *path, const char *backup,
+                                     int *failure_hook)
+{
+    struct context context;
+    char text[256];
+
+    memset(&context, 0, sizeof(context));
+    context.state_path = path;
+    context.state_loaded = 1;
+    le_timer_set_init(&context.timers);
+    unlink(path);
+    unlink(backup);
+    write_text(path, "old schedule\n");
+    assert(le_timer_add_countdown(&context.timers, 600, "committed", 0,
+                                  NULL) == LE_TIMER_OK);
+    *failure_hook = 1;
+    assert(state_save(&context) == STATE_SAVE_COMMITTED_DURABILITY_FAILED);
+    assert(context.state_commit_pending == 1);
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "committed") != NULL);
+    read_text(backup, text, sizeof(text));
+    assert(!strcmp(text, "old schedule\n"));
+
+    /* The committed state remains dirty until durability succeeds, but retry
+       must not rotate the new file over the old backup. */
+    context.dirty = 1;
+    save_if_dirty(&context, 1000, SYNCED_EPOCH);
+    assert(context.dirty == 0);
+    assert(context.state_commit_pending == 0);
+    read_text(backup, text, sizeof(text));
+    assert(!strcmp(text, "old schedule\n"));
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "committed") != NULL);
 }
 
 int main(void)
@@ -64,7 +126,7 @@ int main(void)
     write_text(path, "alarm 1767225630 wake\ncountdown 1767225630 pasta\n");
 
     /* An invalid boot clock must leave the file and records untouched. */
-    assert(load_state_at(&context, 1000, BOOT_EPOCH) == 0);
+    assert(state_load_at(&context, 1000, BOOT_EPOCH) == 0);
     assert(le_timer_active_count(&context.timers) == 0);
     read_text(path, text, sizeof(text));
     assert(strstr(text, "alarm 1767225630 wake") != NULL);
@@ -79,12 +141,11 @@ int main(void)
     assert(strstr(text, "alarm 1767225630 wake") != NULL);
 
     /* A wall-clock transition must restore deferred state before allowing the
-       dirty pre-sync change to replace the persisted schedule. Model the
-       daemon's ordering explicitly rather than saving with state_loaded clear. */
+       dirty pre-sync change to replace the persisted schedule. The save path
+       owns this ordering so every save caller gets the same protection. */
     assert(context.state_loaded == 0);
-    assert(load_state_at(&context, 1500, SYNCED_EPOCH) == 1);
-    assert(context.state_loaded == 1);
     save_if_dirty(&context, 1500, SYNCED_EPOCH);
+    assert(context.state_loaded == 1);
     assert(context.dirty == 0);
     assert(le_timer_active_count(&context.timers) == 3);
     read_text(path, text, sizeof(text));
@@ -95,7 +156,7 @@ int main(void)
     /* Once NTP makes the clock valid, both records restore deterministically. */
     le_timer_set_init(&context.timers);
     write_text(path, "alarm 1767225630 wake\ncountdown 1767225630 pasta\n");
-    assert(load_state_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
+    assert(state_load_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
     assert(le_timer_active_count(&context.timers) == 2);
     assert(le_timer_step(&context.timers, 5000, SYNCED_EPOCH + 60,
                          fired, LE_TIMER_MAX) == 2);
@@ -104,7 +165,7 @@ int main(void)
     /* Records older than the scheduler grace are reported as missed. */
     le_timer_set_init(&context.timers);
     write_text(path, "alarm 1767225599 stale\n");
-    assert(load_state_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
+    assert(state_load_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
     assert(le_timer_active_count(&context.timers) == 0);
     assert(context.timers.missed == 1);
 
@@ -154,6 +215,12 @@ int main(void)
                         sizeof(response)) > 0);
         assert(strstr(response, "\"ok\":true") != NULL);
         assert(le_timer_ringing_count(&protocol.timers) == 0);
+    }
+
+    assert_audio_refresh_and_snapshot(path, backup);
+    {
+        int failure_hook = 0;
+        assert_post_commit_retry(path, backup, &failure_hook);
     }
 
     puts("timer persistence: ok");
