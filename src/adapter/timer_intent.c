@@ -245,6 +245,42 @@ static int copy_label(char *out, size_t size, const char *start, size_t length)
     return 1;
 }
 
+static int is_number_token(const char *start, size_t length)
+{
+    size_t i;
+
+    if (!start || !length)
+        return 0;
+    if (isdigit((unsigned char)start[0])) {
+        for (i = 1; i < length; ++i)
+            if (!isdigit((unsigned char)start[i]))
+                return 0;
+        return 1;
+    }
+    for (i = 0; i < sizeof(WORD_NUMBERS) / sizeof(WORD_NUMBERS[0]); ++i)
+        if (strlen(WORD_NUMBERS[i].word) == length &&
+            !strncmp(start, WORD_NUMBERS[i].word, length))
+            return 1;
+    return 0;
+}
+
+static int starts_with_quantity(const char *start, size_t length)
+{
+    size_t token_length = 0;
+
+    while (token_length < length && start[token_length] != ' ')
+        ++token_length;
+    return is_number_token(start, token_length);
+}
+
+static int copy_cancel_label(char *out, size_t size, const char *start,
+                             size_t length)
+{
+    if (starts_with_quantity(start, length))
+        return 0;
+    return copy_label(out, size, start, length);
+}
+
 /*
  * The trailing "for X" of "set a timer for the pasta". Only taken when it is
  * not the duration, so "for ten minutes" never becomes a label.
@@ -314,7 +350,7 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
         else
             start = marker + strlen(" for my ");
         length = strlen(start);
-        (void)copy_label(out, size, start, length);
+        (void)copy_cancel_label(out, size, start, length);
         return;
     }
 
@@ -337,7 +373,7 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
     else if (!strncmp(start, "an ", 3))
         start += 3;
     length = (size_t)(noun - start);
-    (void)copy_label(out, size, start, length);
+    (void)copy_cancel_label(out, size, start, length);
 }
 
 static int has_universal_timer_noun(const char *text)
@@ -359,6 +395,14 @@ static int has_universal_timer_noun(const char *text)
 
             while (*noun == ' ')
                 ++noun;
+            if ((!strcmp(QUANTIFIERS[i], "every") ||
+                 !strcmp(QUANTIFIERS[i], "each")) &&
+                starts_word(noun, "one")) {
+                const char *after_one = after_word(noun, "one");
+
+                if (starts_word(after_one, "of"))
+                    noun = after_word(after_one, "of");
+            }
             if (starts_word(noun, "of"))
                 noun = after_word(noun, "of");
             for (j = 0; j < sizeof(DETERMINERS) / sizeof(DETERMINERS[0]);

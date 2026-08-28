@@ -133,6 +133,21 @@ case "$out" in
 esac
 echo "  duration-only cancellation uses the single-timer fallback: ok"
 
+# A numeric quantity is not a stored label. With exactly one unlabeled timer,
+# the singular quantity must use the same single-timer fallback.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel one timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: numeric single-timer cancellation was not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: numeric single-timer cancellation left the timer scheduled: $out"; exit 1 ;;
+esac
+echo "  numeric single-timer cancellation uses the fallback: ok"
+
 # Singular voice cancellation is label-targeted and must not clear siblings.
 call "$agent_sock" respond '{"text":"set a timer for ten minutes for the pasta"}' >/dev/null
 call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the tea"}' >/dev/null
@@ -237,6 +252,19 @@ for phrase in 'cancel one timer' 'cancel two timers'; do
     esac
 done
 
+# The "every one of" construction is universal, even though "one" appears
+# between the quantifier and the timer noun.
+out=$(call "$agent_sock" respond '{"text":"cancel every one of my timers"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: every-one-of cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: every-one-of cancel-all left timers: $out"; exit 1 ;;
+esac
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
 out=$(call "$agent_sock" respond '{"text":"cancel all timers"}')
 case "$out" in
     *'cancelled'*) ;;

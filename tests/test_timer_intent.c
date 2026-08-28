@@ -142,9 +142,11 @@ int main(void)
         assert(le_timer_intent_parse("cancel one timer", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
+        assert(intent.label[0] == '\0');
         assert(le_timer_intent_parse("cancel two timers", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
+        assert(intent.label[0] == '\0');
         assert(le_timer_intent_parse("cancel all timers", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         assert(intent.cancel_all);
@@ -152,6 +154,12 @@ int main(void)
                LE_TIMER_INTENT_CANCEL);
         assert(intent.cancel_all);
         assert(le_timer_intent_parse("remove each timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.cancel_all);
+        assert(le_timer_intent_parse("cancel every one of my timers", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.cancel_all);
+        assert(le_timer_intent_parse("delete each one of the alarms", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         assert(intent.cancel_all);
     }
