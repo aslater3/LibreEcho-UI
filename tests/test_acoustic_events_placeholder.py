@@ -43,7 +43,7 @@ assert '\\"acoustic_events_available\\":true' not in api_c, (
 )
 
 # Settable, so a UI can store the preference ahead of the implementation.
-assert 'json_get_bool(q->body,"acoustic_events"' in api_c, (
+assert 'json_get_top_level_bool(q->body,q->body_len,"acoustic_events"' in api_c, (
     "the features endpoint does not accept the flag"
 )
 assert "not yet implemented" in api_c, (

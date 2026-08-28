@@ -14,7 +14,7 @@ features_start = api_c.index('if(!strcmp(p,"/api/v1/system/features"))')
 features_end = api_c.index('if(!strcmp(p,"/api/v1/integrations/radio/play")', features_start)
 features = api_c[features_start:features_end]
 
-parse = features.index('want_aed=json_get_bool(q->body,"acoustic_events",&av)')
+parse = features.index('want_aed=json_get_top_level_bool(q->body,q->body_len,"acoustic_events",&av)')
 validate = features.index('want_https<0||want_sim<0||want_aed<0||', parse)
 usb_write = features.index('usb_role_write(')
 usb_success = features.index('api_log(c,"info",host?"USB port switched', usb_write)
@@ -34,6 +34,7 @@ assert features.count('features_json(c,r);return;') == 2, (
     "the USB branch must not return before applying other feature settings"
 )
 assert 'if(want_host>0){int urc=usb_role_write(host?"host":"device");' in features
+assert 'json_get_top_level_bool(q->body,q->body_len,"acoustic_events",&av)' in features
 
 import_start = api_c.index('static int import_configuration(')
 import_end = api_c.index('static int read_central_logs(', import_start)

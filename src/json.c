@@ -142,6 +142,46 @@ int json_valid_object(const char *s, size_t n)
     return c.i == c.n;
 }
 
+int json_get_top_level_bool(const char *s, size_t n, const char *key, int *out)
+{
+    struct json_cursor c = {s, n, 0, 0};
+    size_t key_len;
+
+    if (!s || !key || !out) return 0;
+    key_len = strlen(key);
+    skip_ws(&c);
+    if (c.i >= c.n || c.s[c.i++] != '{') return 0;
+    skip_ws(&c);
+    if (c.i < c.n && c.s[c.i] == '}') return 0;
+    for (;;) {
+        size_t key_start, key_end;
+        int match;
+
+        if (c.i >= c.n || c.s[c.i] != '"') return -1;
+        key_start = c.i + 1;
+        if (!parse_string(&c)) return -1;
+        key_end = c.i - 1;
+        match = key_end >= key_start && key_end - key_start == key_len &&
+                !memcmp(c.s + key_start, key, key_len);
+        skip_ws(&c);
+        if (c.i >= c.n || c.s[c.i++] != ':') return -1;
+        skip_ws(&c);
+        if (match) {
+            if (literal(&c, "true")) *out = 1;
+            else if (literal(&c, "false")) *out = 0;
+            else return -1;
+            if (c.i < c.n && !ws(c.s[c.i]) && c.s[c.i] != ',' &&
+                c.s[c.i] != '}') return -1;
+            return 1;
+        }
+        if (!parse_value(&c)) return -1;
+        skip_ws(&c);
+        if (c.i < c.n && c.s[c.i] == '}') return 0;
+        if (c.i >= c.n || c.s[c.i++] != ',') return -1;
+        skip_ws(&c);
+    }
+}
+
 int json_duplicate_key(const char *s, size_t n, const char *key)
 {
     size_t i = 0, key_len, count = 0;
