@@ -61,6 +61,9 @@ feature_path = openapi["paths"]["/system/features"]
 request_schema = feature_path["put"]["requestBody"]["content"]["application/json"]["schema"]
 assert "simulation" not in request_schema.get("required", [])
 assert request_schema["properties"]["acoustic_events"]["type"] == "boolean"
+assert {tuple(x["required"]) for x in request_schema["anyOf"]} == {
+    ("simulation",), ("https",), ("acoustic_events",), ("usb_host",)
+}
 response_ref = feature_path["get"]["responses"]["200"]["$ref"]
 response_name = response_ref.rsplit("/", 1)[-1]
 response_schema = openapi["components"]["responses"][response_name]["content"]["application/json"]["schema"]

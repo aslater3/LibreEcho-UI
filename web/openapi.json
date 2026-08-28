@@ -2223,7 +2223,13 @@
           "default": false,
           "description": "Move the OTG port to host mode for USB storage, or device mode for ADB; applied immediately and not persisted."
          }
-        }
+        },
+        "anyOf": [
+         {"required": ["simulation"]},
+         {"required": ["https"]},
+         {"required": ["acoustic_events"]},
+         {"required": ["usb_host"]}
+        ]
        }
       }
      }
