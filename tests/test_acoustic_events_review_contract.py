@@ -18,10 +18,14 @@ feature_keys = ("simulation", "https", "acoustic_events", "usb_host")
 for key in feature_keys:
     marker = f'json_get_top_level_bool(q->body,q->body_len,"{key}"'
     assert marker in features, f"{key} must be read only from the top level"
+    duplicate = f'json_duplicate_key(q->body,q->body_len,"{key}")'
+    assert duplicate in features, f"duplicate {key} properties must be rejected"
 assert 'json_get_bool(q->body' not in features, (
     "feature updates must not use the nested-key parser"
 )
+duplicate_check = features.index('json_duplicate_key(q->body')
 parse = features.index('want_host=json_get_top_level_bool(q->body,q->body_len,"usb_host"')
+assert duplicate_check < parse, "duplicate feature fields must be rejected before parsing"
 validate = features.index('want_https<0||want_sim<0||want_aed<0||', parse)
 usb_write = features.index('usb_role_write(')
 usb_success = features.index('api_log(c,"info",host?"USB port switched', usb_write)
@@ -46,8 +50,11 @@ assert 'json_get_top_level_bool(q->body,q->body_len,"acoustic_events",&av)' in f
 import_start = api_c.index('static int import_configuration(')
 import_end = api_c.index('static int read_central_logs(', import_start)
 importer = api_c[import_start:import_end]
-assert 'json_get_bool(j,"feature_acoustic_events"' in importer, (
-    "config import must read the exported acoustic feature flag"
+assert 'json_get_top_level_bool(j,strlen(j),"feature_acoustic_events"' in importer, (
+    "config import must read the exported acoustic feature flag only at top level"
+)
+assert 'json_get_bool(j,"feature_acoustic_events"' not in importer, (
+    "config import must not use the depth-insensitive feature parser"
 )
 assert 'if(acoustic_events_field>0)c->feature_acoustic_events=acoustic_events;' in importer, (
     "config import must restore the acoustic feature flag"

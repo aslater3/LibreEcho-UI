@@ -48,6 +48,11 @@ printf '%s' "$exported" | jq -e \
 ! printf '%s' "$exported" | grep -Eqi 'password|auth_token|telemetry_value|logs'
 curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
     -H 'Content-Type: application/json' --data '{"acoustic_events":false}' >/dev/null
+nested_export=$(printf '%s' "$exported" | jq -c 'del(.feature_acoustic_events) | .metadata={"feature_acoustic_events":true}')
+curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "$nested_export" >/dev/null
+curl -fsS "$URL/api/v1/system/features" |
+    jq -e '.ok and .data.acoustic_events == false' >/dev/null
 curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" \
     -H 'Content-Type: application/json' --data "$exported" >/dev/null
 curl -fsS "$URL/api/v1/system/features" |

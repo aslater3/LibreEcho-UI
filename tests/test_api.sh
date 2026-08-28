@@ -72,6 +72,16 @@ code=$(curl -sS -o /tmp/le-invalid-acoustic-mixed.out -w '%{http_code}' \
     -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
     -H 'Content-Type: application/json' --data '{"simulation":true,"acoustic_events":"enabled"}')
 [ "$code" = 400 ]
+for payload in \
+    '{"acoustic_events":true,"acoustic_events":"enabled"}' \
+    '{"acoustic_events":true,"acoustic_events":false}'; do
+    code=$(curl -sS -o /tmp/le-duplicate-acoustic.out -w '%{http_code}' \
+        -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+        -H 'Content-Type: application/json' --data "$payload")
+    [ "$code" = "400" ]
+done
+curl -fsS "$URL/api/v1/system/features" |
+    jq -e '.ok and .data.acoustic_events == false' >/dev/null
 code=$(curl -sS -o /tmp/le-nested-acoustic.out -w '%{http_code}' \
     -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
     -H 'Content-Type: application/json' --data '{"wrapper":{"acoustic_events":true}}')
