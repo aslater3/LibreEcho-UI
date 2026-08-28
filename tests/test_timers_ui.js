@@ -6,7 +6,8 @@ function classes() { return { add() {}, remove() {}, toggle() {} }; }
 function element(id) {
     return { id, innerHTML: '', textContent: '', value: '', disabled: false,
         classList: classes(), style: {}, dataset: {}, onclick: null,
-        addEventListener() {}, appendChild() {}, querySelectorAll() { return []; } };
+        addEventListener() {}, appendChild() {}, querySelectorAll() { return []; },
+        focus() { document.activeElement = this; } };
 }
 const elements = new Map();
 const content = element('content');
@@ -25,7 +26,8 @@ globalThis.document = {
     },
     querySelectorAll() { return []; },
     createElement: tag => element(tag),
-    addEventListener() {}, body
+    addEventListener() {}, body,
+    activeElement: null
 };
 globalThis.window = { addEventListener() {} };
 globalThis.location = { pathname: '/', hash: '', host: 'fake-device', replace() {} };
@@ -56,9 +58,18 @@ async function main() {
     await timersPage();
     if (!content.innerHTML.includes('10s')) throw new Error('initial timer state was not rendered');
     if (typeof scheduled !== 'function') throw new Error('Timers page did not schedule a refresh');
+    const minutes = document.querySelector('#timer-minutes');
+    const label = document.querySelector('#timer-label');
+    minutes.value = '37';
+    label.value = 'déjeuner';
+    label.focus();
     await scheduled();
     if (reads !== 2) throw new Error(`expected two timer reads, got ${reads}`);
     if (!content.innerHTML.includes('9s')) throw new Error('refreshed timer state was not rendered');
-    console.log('timers UI refresh: ok');
+    if (minutes.value !== '37' || label.value !== 'déjeuner')
+        throw new Error('timer form values were lost during refresh');
+    if (document.activeElement !== label)
+        throw new Error('timer form focus was lost during refresh');
+    console.log('timers UI refresh preserves form: ok');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

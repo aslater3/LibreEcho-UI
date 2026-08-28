@@ -263,8 +263,9 @@ Creates a countdown and requires `X-LibreEcho-CSRF`.
 ```
 
 `seconds` is required and must be 1–604800. `label` is optional, but if
-present must be a valid JSON string no longer than 47 bytes; oversized or
-malformed labels return HTTP 400 rather than being truncated. Success returns
+present must be a valid JSON string whose UTF-8 encoding is no longer than 47
+bytes; oversized or malformed labels return HTTP 400 rather than being
+truncated. Success returns
 HTTP 201 with `{ "id": number }`. The fixed schedule holds at most 16 active
 entries; a valid request when it is full returns HTTP 409 with error code
 `busy`.
