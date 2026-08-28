@@ -50,6 +50,62 @@ static int parse_string(struct json_cursor *c)
     return 0;
 }
 
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Parse a member name while comparing its decoded characters to key. */
+static int parse_string_key(struct json_cursor *c, const char *key)
+{
+    size_t key_len = strlen(key), decoded_len = 0;
+    int match = 1;
+
+    if (c->i >= c->n || c->s[c->i++] != '"') return -1;
+    while (c->i < c->n) {
+        unsigned char ch = (unsigned char)c->s[c->i++];
+        if (ch == '"') return match && decoded_len == key_len ? 1 : 0;
+        if (ch < 0x20) return -1;
+        if (ch == '\\') {
+            int value, digit, nibble;
+            if (c->i >= c->n) return -1;
+            ch = (unsigned char)c->s[c->i++];
+            switch (ch) {
+            case '"': case '\\': case '/': break;
+            case 'b': ch = '\b'; break;
+            case 'f': ch = '\f'; break;
+            case 'n': ch = '\n'; break;
+            case 'r': ch = '\r'; break;
+            case 't': ch = '\t'; break;
+            case 'u':
+                value = 0;
+                for (digit = 0; digit < 4; digit++) {
+                    if (c->i >= c->n || (nibble = hex_value(c->s[c->i])) < 0)
+                        return -1;
+                    value = (value << 4) | nibble;
+                    c->i++;
+                }
+                /* Supported feature names are ASCII; other code points can
+                 * never match them but must still be valid member names. */
+                if (value > 0x7f) match = 0;
+                ch = (unsigned char)value;
+                break;
+            default: return -1;
+            }
+        }
+        if (decoded_len < key_len) {
+            if (!match || (unsigned char)key[decoded_len] != ch) match = 0;
+            decoded_len++;
+        } else {
+            match = 0;
+        }
+    }
+    return -1;
+}
+
 static int literal(struct json_cursor *c, const char *value)
 {
     size_t n = strlen(value);
@@ -147,24 +203,18 @@ int json_valid_object(const char *s, size_t n)
 int json_get_top_level_bool(const char *s, size_t n, const char *key, int *out)
 {
     struct json_cursor c = {s, n, 0, 0};
-    size_t key_len;
 
     if (!s || !key || !out) return 0;
-    key_len = strlen(key);
     skip_ws(&c);
     if (c.i >= c.n || c.s[c.i++] != '{') return 0;
     skip_ws(&c);
     if (c.i < c.n && c.s[c.i] == '}') return 0;
     for (;;) {
-        size_t key_start, key_end;
         int match;
 
         if (c.i >= c.n || c.s[c.i] != '"') return -1;
-        key_start = c.i + 1;
-        if (!parse_string(&c)) return -1;
-        key_end = c.i - 1;
-        match = key_end >= key_start && key_end - key_start == key_len &&
-                !memcmp(c.s + key_start, key, key_len);
+        match = parse_string_key(&c, key);
+        if (match < 0) return -1;
         skip_ws(&c);
         if (c.i >= c.n || c.s[c.i++] != ':') return -1;
         skip_ws(&c);
