@@ -2297,14 +2297,16 @@
       "application/json": {
        "schema": {
         "type": "object",
-        "required": [
-         "simulation"
-        ],
+        "minProperties": 1,
         "properties": {
          "simulation": {
           "type": "boolean",
           "default": false,
           "description": "Play rendered speech into the microphone path for testing wake word, speech-to-text and the assistant."
+         },
+         "usb_host": {
+          "type": "boolean",
+          "description": "Switch the OTG port immediately between host/storage mode and device/ADB mode. This live setting is not persisted and resets to device mode on reboot."
          }
         }
        }

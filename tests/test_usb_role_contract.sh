@@ -61,6 +61,18 @@ curl -fsS "$URL/api/v1/storage/usb" | jq -e \
 grep -q 'MS_RDONLY' src/api.c
 
 grep -q 'feature-usb-host' web/js/app.js
+grep -q 'setting is temporary and resets to device mode on the next boot' web/js/app.js
+! grep -q 'setting is remembered' web/js/app.js
+! grep -q 'hold any button on the device while it boots' web/js/app.js
+python3 - <<'PY'
+import json
+with open('web/openapi.json', encoding='utf-8') as stream:
+    spec = json.load(stream)
+schema = spec['paths']['/system/features']['put']['requestBody']['content']['application/json']['schema']
+assert schema['minProperties'] == 1
+assert schema['properties']['usb_host']['type'] == 'boolean'
+assert 'not persisted' in schema['properties']['usb_host']['description']
+PY
 # Boot always returns the port to device so ADB cannot be left switched off.
 # The init lives in the platform repository, which is not always checked out
 # beside this one (CI builds this repo alone), so assert it only when present.

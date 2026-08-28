@@ -10,6 +10,9 @@ python3 tests/test_github_link_contract.py
 python3 tests/test_about_supported_devices.py
 make build/test-auth-sessions
 ./build/test-auth-sessions
+make build/test-auth-transport
+./build/test-auth-transport
+python3 tests/test_pr141_review_contract.py
 sh tests/test_pr137_review_contract.sh
 sh tests/test_pr139_review_contract.sh
 make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
@@ -102,6 +105,8 @@ make build/test-voice-pipeline-restart
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 make build/libreecho-radiod
+make build/test-radiod-json
+./build/test-radiod-json
 sh tests/test_radio_icy_metadata.sh
 sh tests/test_airplay_led_bridge.sh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \

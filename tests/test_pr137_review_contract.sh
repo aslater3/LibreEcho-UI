@@ -25,7 +25,7 @@ grep -q 'open_usb_file' src/adapter/radiod.c
 grep -q 'O_NOFOLLOW' src/adapter/radiod.c
 grep -q 'install_stop_handlers' src/adapter/radiod.c
 grep -q 'close(http_listener)' src/http_server.c
-grep -q 'relay_host' src/http_server.c
+grep -q 'relay_ls' src/http_server.c
 grep -q 'le_tls_write_deadline' src/tls.c src/tls.h src/http_server.c
 grep -q 'le_tls_read_deadline' src/tls.c src/tls.h src/http_server.c
 grep -q 'mbedtls_pk_check_pair' src/tls.c

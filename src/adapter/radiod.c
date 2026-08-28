@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include "adapter.h"
+#include "../json.h"
 #include "../log.h"
 #include "../tls.h"
 #include "radio_resample.h"
@@ -846,24 +847,7 @@ static int start_player(const char *url, const char *bus_path)
 static int json_string_field(const char *msg, const char *key,
                              char *out, size_t size)
 {
-    const char *p = strstr(msg, key);
-    const char *q;
-    size_t n;
-
-    if (!p)
-        return -1;
-    p = strchr(p + strlen(key), '"');
-    if (!p)
-        return -1;
-    q = strchr(++p, '"');
-    if (!q)
-        return -1;
-    n = (size_t)(q - p);
-    if (n >= size)
-        return -1;
-    memcpy(out, p, n);
-    out[n] = '\0';
-    return 0;
+    return json_get_string(msg, key, out, size) == 1 ? 0 : -1;
 }
 
 /* Quote what goes into the status document; sanitise_text already removed the
@@ -908,7 +892,7 @@ static int handle(char *message, char *response, size_t response_size,
         return le_adapter_respond_ok(response, response_size, id, data);
     }
     if (!strcmp(command, "play")) {
-        if (json_string_field(args ? args : message, "\"url\"",
+        if (json_string_field(args ? args : message, "url",
                               url, sizeof(url)) < 0)
             return le_adapter_respond_err(response, response_size, id,
                                           "url is required");

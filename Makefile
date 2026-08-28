@@ -25,7 +25,7 @@ LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
 BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
 WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/adapter/adapter_client.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
-RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/adapter_server.c src/log.c $(TLS_SOURCES)
+RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
 BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
@@ -200,6 +200,18 @@ $(BUILD)/test-thermal-zone-selection: tests/test_thermal_zone_selection.c \
 $(BUILD)/test-auth-sessions: tests/test_auth_sessions.c src/auth.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+WEB_TEST_OBJECTS = $(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
+
+$(BUILD)/test-auth-transport: tests/test_auth_transport.c $(WEB_TEST_OBJECTS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -Isrc $< $(WEB_TEST_OBJECTS) -lm -lpthread -o $@
+
+$(BUILD)/test-radiod-json: tests/test_radiod_json.c src/adapter/radiod.c src/json.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $< src/json.c -lm -o $@
 
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
@@ -629,6 +641,7 @@ clean:
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-thermal-zone-selection \
 		$(BUILD)/test-light-sensor \
+		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \
 		$(BUILD)/test-wake-decode \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \

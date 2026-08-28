@@ -47,6 +47,7 @@ extern int setgroups(int,const gid_t*);
 #define LE_MAX_TLS_RELAYS LE_MAX_CLIENTS
 #define LE_TLS_IDLE_TIMEOUT_MS 60000
 struct client{int fd;
+int secure_transport;
 size_t used;
 char buf[LE_REQ_MAX+1];
 };
@@ -172,6 +173,7 @@ body_len=content_len;
 q.body=body;
 q.body_len=body_len;
 body[body_len]=0;
+q.https=c->secure_transport;
 copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));
 copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));
 copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));
@@ -205,17 +207,17 @@ c->used=0;
  * downstream byte identical and leaves plain HTTP listening, so a TLS
  * misconfiguration can never lock the device's own UI out.
  */
-static void tls_relay(int cfd,const struct http_options*o){
-struct le_tls*tls;int up=-1;struct sockaddr_in a;struct pollfd p[2];char buf[4096];long n;const char*relay_host;
+static void tls_relay(int cfd,const struct http_options*o,int relay_port){
+struct le_tls*tls;int up=-1;struct sockaddr_in a;struct pollfd p[2];char buf[4096];long n;
 tls=le_tls_server_open(cfd,o->tls_cert,o->tls_key);
 if(!tls){close(cfd);return;}
 up=socket(AF_INET,SOCK_STREAM,0);
 if(up<0){le_tls_close(tls);close(cfd);return;}
-memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)o->port);relay_host=!strcmp(o->listen_host,"0.0.0.0")?"127.0.0.1":o->listen_host;
+memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)relay_port);
 /* inet_pton, not INADDR_LOOPBACK: the latter is not POSIX and is hidden by
    _POSIX_C_SOURCE on some platforms, so it built on Linux and failed the
    native build the e2e harness uses. */
-if(inet_pton(AF_INET,relay_host,&a.sin_addr)!=1){close(up);le_tls_close(tls);close(cfd);return;}
+if(inet_pton(AF_INET,"127.0.0.1",&a.sin_addr)!=1){close(up);le_tls_close(tls);close(cfd);return;}
 if(connect(up,(struct sockaddr*)&a,sizeof(a))){close(up);le_tls_close(tls);close(cfd);return;}
 /*
  * Pump both directions until either end finishes. Two things this loop has to
@@ -265,7 +267,7 @@ if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
 close(up);le_tls_close(tls);close(cfd);return;}
 
 /* Keep TLS relays in the same fixed process budget as other forked work. */
-static int spawn_tls_relay(int cfd,const struct http_options*o,int http_listener,int https_listener){
+static int spawn_tls_relay(int cfd,const struct http_options*o,int relay_port,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){
 sigset_t blocked,previous;pid_t pid;int i,slot=-1;
 sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);
 if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;
@@ -278,16 +280,16 @@ if(!warned){warned=1;fprintf(stderr,"HTTPS relay budget (%d) exhausted; a connec
 sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
 pid=fork();
 if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}
-if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close(http_listener);close(https_listener);tls_relay(cfd,o);_exit(0);}
+if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close(http_listener);close(https_listener);close(relay_listener);for(i=0;i<max;i++)if(clients[i].fd>=0)close(clients[i].fd);tls_relay(cfd,o,relay_port);_exit(0);}
 tls_relay_pids[slot]=pid;
 sigprocmask(SIG_SETMASK,&previous,NULL);
 return 0;
 }
 
-int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,tls_ls=-1,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
+int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,tls_ls=-1,relay_ls=-1,relay_port=0,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
 struct sockaddr_in a;
 struct client c[LE_MAX_CLIENTS];
-struct pollfd p[LE_MAX_CLIENTS+2];
+struct pollfd p[LE_MAX_CLIENTS+3];
 time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_child_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
 if(max>LE_MAX_CLIENTS)max=LE_MAX_CLIENTS;
 memset(c,0,sizeof(c));
@@ -318,32 +320,47 @@ if(inet_pton(AF_INET,o->listen_host,&ta.sin_addr)!=1||bind(tls_ls,(struct sockad
 /* HTTPS is best-effort: losing it must never take the HTTP UI down with it */
 fprintf(stderr,"HTTPS listener on port %d unavailable: %s\n",o->tls_port,strerror(errno));
 close(tls_ls);tls_ls=-1;api_set_https_active(api,0);
-}else {api_set_https_active(api,1);fprintf(stderr,"LibreEcho also listening on https://%s:%d\n",o->listen_host,o->tls_port);}
+}else {
+struct sockaddr_in ra;socklen_t ra_len=sizeof(ra);relay_ls=socket(AF_INET,SOCK_STREAM,0);
+if(relay_ls>=0&&close_on_exec(relay_ls)<0){close(relay_ls);relay_ls=-1;}
+memset(&ra,0,sizeof(ra));ra.sin_family=AF_INET;ra.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+if(relay_ls<0||bind(relay_ls,(struct sockaddr*)&ra,sizeof(ra))||listen(relay_ls,max)||getsockname(relay_ls,(struct sockaddr*)&ra,&ra_len)){
+fprintf(stderr,"HTTPS relay listener unavailable: %s\n",strerror(errno));if(relay_ls>=0)close(relay_ls);relay_ls=-1;close(tls_ls);tls_ls=-1;api_set_https_active(api,0);
+}else {relay_port=(int)ntohs(ra.sin_port);api_set_https_active(api,1);fprintf(stderr,"LibreEcho also listening on https://%s:%d\n",o->listen_host,o->tls_port);}
+}
 }}
 while(*running){p[0].fd=ls;
 p[0].events=POLLIN;
 p[max+1].fd=tls_ls;
 p[max+1].events=POLLIN;
+p[max+2].fd=relay_ls;
+p[max+2].events=POLLIN;
 for(i=0;
 i<max;
 i++){p[i+1].fd=c[i].fd;
 p[i+1].events=POLLIN;
-}if(poll(p,(nfds_t)(max+2),500)<0&&errno!=EINTR)break;
+}if(poll(p,(nfds_t)(max+3),500)<0&&errno!=EINTR)break;
 if(p[0].revents&POLLIN){int fd=accept(ls,0,0);
 if(fd>=0&&close_on_exec(fd)<0){close(fd);fd=-1;}
 if(fd>=0){for(i=0;
 i<max&&c[i].fd>=0;
 i++){/* find free bounded slot */}if(i==max){response(fd,503,"text/plain","Server busy",11);
 close(fd);
-}else c[i].fd=fd;
+}else {c[i].fd=fd;c[i].secure_transport=0;}
 }}if(tls_ls>=0&&(p[max+1].revents&POLLIN)){int tfd=accept(tls_ls,0,0);
 if(tfd>=0&&close_on_exec(tfd)<0){close(tfd);tfd=-1;}
-if(tfd>=0){if(spawn_tls_relay(tfd,o,ls,tls_ls)<0)close(tfd);else close(tfd);}
-}for(i=0;
+if(tfd>=0){if(spawn_tls_relay(tfd,o,relay_port,ls,tls_ls,relay_ls,c,max)<0)close(tfd);else close(tfd);}
+}if(relay_ls>=0&&(p[max+2].revents&POLLIN)){int rfd=accept(relay_ls,0,0);
+if(rfd>=0&&close_on_exec(rfd)<0){close(rfd);rfd=-1;}
+if(rfd>=0){for(i=0;i<max&&c[i].fd>=0;i++){}
+if(i==max){response(rfd,503,"text/plain","Server busy",11);close(rfd);}
+else {c[i].fd=rfd;c[i].secure_transport=1;}
+}}for(i=0;
 i<max;
 i++)if(c[i].fd>=0&&(p[i+1].revents&(POLLIN|POLLHUP|POLLERR))){ssize_t n=recv(c[i].fd,c[i].buf+c[i].used,LE_REQ_MAX-c[i].used,0);
 if(n<=0){close(c[i].fd);
 c[i].fd=-1;
+c[i].secure_transport=0;
 }else{c[i].used+=(size_t)n;
 c[i].buf[c[i].used]=0;
 process(&c[i],o,api);
@@ -353,6 +370,7 @@ le_backend_tick(api->backend);
 i<max;
 i++)if(c[i].fd>=0)close(c[i].fd);
 if(tls_ls>=0)close(tls_ls);
+if(relay_ls>=0)close(relay_ls);
 close(ls);
 return 0;
 }
