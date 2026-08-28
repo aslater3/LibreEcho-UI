@@ -73,6 +73,24 @@ static const char *find_word(const char *haystack, const char *word)
     return hit ? hit + 1 : NULL;
 }
 
+static int starts_word(const char *text, const char *word)
+{
+    size_t length = strlen(word);
+
+    return !strncmp(text, word, length) &&
+           (text[length] == '\0' || text[length] == ' ');
+}
+
+static const char *after_word(const char *text, const char *word)
+{
+    if (!starts_word(text, word))
+        return text;
+    text += strlen(word);
+    while (*text == ' ')
+        ++text;
+    return text;
+}
+
 /*
  * Read a count immediately before `unit`. Handles digits, single words, and
  * the two-word forms speech produces ("twenty five"). Returns -1 when there
@@ -244,9 +262,10 @@ static void extract_label(const char *text, char *out, size_t size)
 static void extract_cancel_label(const char *text, char *out, size_t size)
 {
     static const char *const VERBS[] = {"cancel", "delete", "remove", "clear"};
+    static const char *const NOUNS[] = {"timer", "timers", "alarm", "alarms"};
     const char *verb = NULL;
     const char *cancel;
-    const char *timer;
+    const char *noun = NULL;
     const char *marker;
     const char *start;
     size_t verb_length = 0;
@@ -291,9 +310,14 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
         return;
     }
 
-    /* "cancel the pasta timer" / "remove my timer". */
-    timer = find_word(cancel, "timer");
-    if (!timer)
+    /* "cancel the pasta timer" / "remove the kitchen alarm". */
+    for (i = 0; i < sizeof(NOUNS) / sizeof(NOUNS[0]); ++i) {
+        const char *hit = find_word(cancel, NOUNS[i]);
+
+        if (hit && (!noun || hit < noun))
+            noun = hit;
+    }
+    if (!noun)
         return;
     start = cancel;
     if (!strncmp(start, "the ", 4))
@@ -304,13 +328,50 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
         start += 2;
     else if (!strncmp(start, "an ", 3))
         start += 3;
-    length = (size_t)(timer - start);
+    length = (size_t)(noun - start);
     while (length && start[length - 1] == ' ')
         --length;
     if (length && length < size) {
         memcpy(out, start, length);
         out[length] = '\0';
     }
+}
+
+static int has_universal_timer_noun(const char *text)
+{
+    static const char *const QUANTIFIERS[] = {"all", "every", "each"};
+    static const char *const NOUNS[] = {"timer", "timers", "alarm", "alarms"};
+    static const char *const DETERMINERS[] = {
+        "the", "my", "these", "those"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(QUANTIFIERS) / sizeof(QUANTIFIERS[0]); ++i) {
+        const char *cursor = text;
+        const char *quantifier;
+
+        while ((quantifier = find_word(cursor, QUANTIFIERS[i]))) {
+            const char *noun = quantifier + strlen(QUANTIFIERS[i]);
+            size_t j;
+
+            while (*noun == ' ')
+                ++noun;
+            if (starts_word(noun, "of"))
+                noun = after_word(noun, "of");
+            for (j = 0; j < sizeof(DETERMINERS) / sizeof(DETERMINERS[0]);
+                 ++j) {
+                if (starts_word(noun, DETERMINERS[j])) {
+                    noun = after_word(noun, DETERMINERS[j]);
+                    break;
+                }
+            }
+            for (j = 0; j < sizeof(NOUNS) / sizeof(NOUNS[0]); ++j)
+                if (starts_word(noun, NOUNS[j]))
+                    return 1;
+            cursor = quantifier + strlen(QUANTIFIERS[i]);
+        }
+    }
+    return 0;
 }
 
 static int mentions_timer(const char *text)
@@ -355,9 +416,7 @@ enum le_timer_intent_kind le_timer_intent_parse(
     if (has_word(text, "cancel") || has_word(text, "delete") ||
         has_word(text, "remove") || has_word(text, "clear")) {
         intent->kind = LE_TIMER_INTENT_CANCEL;
-        intent->cancel_all = has_word(text, "all") ||
-                             has_word(text, "every") ||
-                             has_word(text, "each");
+        intent->cancel_all = has_universal_timer_noun(text);
         if (!intent->cancel_all)
             extract_cancel_label(text, intent->label, sizeof(intent->label));
         return intent->kind;

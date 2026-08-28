@@ -170,9 +170,48 @@ case "$out" in
     *) echo "FAIL: remove label cancellation left a timer: $out"; exit 1 ;;
 esac
 
+# Alarm is an accepted noun as well as timer, and every cancellation verb must
+# carry the label through to the daemon.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the kitchen"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"clear the kitchen alarm"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: alarm label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: alarm label cancellation left a timer: $out"; exit 1 ;;
+esac
+
+# Quantifiers only mean cancel-all when they directly quantify a timer/alarm
+# noun. They must remain label text (or non-universal wording) elsewhere.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the all hands"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the alpha"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for twenty minutes for the beta"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the all hands timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: quantifier-like label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: named quantifier-like label changed the wrong timers: $out"; exit 1 ;;
+esac
+
+out=$(call "$agent_sock" respond '{"text":"cancel every question about timers"}')
+case "$out" in
+    *'could not find that timer'*) ;;
+    *) echo "FAIL: unrelated quantifier became cancel-all: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: unrelated quantifier changed the schedule: $out"; exit 1 ;;
+esac
+
 # A quantity is not universal wording and must not clear the schedule.
-call "$agent_sock" respond '{"text":"set a timer for ten minutes for the alpha"}' >/dev/null
-call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the beta"}' >/dev/null
 for phrase in 'cancel one timer' 'cancel two timers'; do
     call "$agent_sock" respond "{\"text\":\"$phrase\"}" >/dev/null
     out=$(call "$timer_sock" status '{}')

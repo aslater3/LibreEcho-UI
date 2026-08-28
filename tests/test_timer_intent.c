@@ -116,6 +116,17 @@ int main(void)
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(!strcmp(intent.label, "coffee"));
+        assert(le_timer_intent_parse("clear the kitchen alarm", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "kitchen"));
+        assert(le_timer_intent_parse("cancel the all hands timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "all hands"));
+        assert(le_timer_intent_parse("cancel every question about timers",
+                                     &intent) == LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
         assert(le_timer_intent_parse("cancel my timer", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
