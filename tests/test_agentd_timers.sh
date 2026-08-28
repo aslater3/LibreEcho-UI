@@ -117,6 +117,47 @@ case "$out" in
 esac
 echo "  cancelling by voice removes the timer: ok"
 
+# Singular voice cancellation is label-targeted and must not clear siblings.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the pasta"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the tea"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for twenty minutes for the coffee"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the pasta timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"tea"'*'"timers"'*'"label":"pasta"'*)
+        echo "FAIL: label cancellation left pasta or removed tea: $out"; exit 1 ;;
+    *'"label":"tea"'*) ;;
+    *) echo "FAIL: label cancellation did not preserve the sibling: $out"; exit 1 ;;
+esac
+
+# With multiple timers and no identity, do not pick an arbitrary timer.
+out=$(call "$agent_sock" respond '{"text":"cancel my timer"}')
+case "$out" in
+    *'Which timer'*) ;;
+    *) echo "FAIL: ambiguous singular cancellation was not rejected: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"tea"'*) ;;
+    *) echo "FAIL: ambiguous cancellation changed the schedule: $out"; exit 1 ;;
+esac
+
+out=$(call "$agent_sock" respond '{"text":"cancel all timers"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: explicit cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: explicit cancel-all left timers: $out"; exit 1 ;;
+esac
+echo "  singular and plural cancellation are scoped correctly: ok"
+
 # --- "stop" with nothing ringing is not a timer request -------------------
 # It means a dozen other things, so it must fall through rather than being
 # answered as if a timer had been silenced.

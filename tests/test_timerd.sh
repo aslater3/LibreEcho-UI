@@ -188,10 +188,25 @@ case "$out" in
 esac
 echo "  next reports the soonest timer: ok"
 
+# A label-targeted cancellation removes only the requested timer.
+out=$(call cancel '{"label":"two"}')
+case "$out" in
+    *'"ok":true'*) ;;
+    *) echo "FAIL: label cancellation rejected: $out"; exit 1 ;;
+esac
+out=$(call status '{}')
+case "$out" in
+    *'"label":"two"'*)
+        echo "FAIL: label cancellation removed the wrong timer: $out"; exit 1 ;;
+    *'"label":"one"'*) ;;
+    *) echo "FAIL: label cancellation removed the requested timer: $out"; exit 1 ;;
+esac
+echo "  label cancellation targets one timer: ok"
+
 out=$(call cancel_all '{}')
 case "$out" in
-    *'"cancelled":2'*) ;;
-    *) echo "FAIL: cancel_all did not cancel both: $out"; exit 1 ;;
+    *'"cancelled":1'*) ;;
+    *) echo "FAIL: cancel_all did not cancel the remaining timer: $out"; exit 1 ;;
 esac
 out=$(call status '{}')
 case "$out" in

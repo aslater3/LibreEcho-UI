@@ -241,6 +241,65 @@ static void extract_label(const char *text, char *out, size_t size)
     }
 }
 
+static void extract_cancel_label(const char *text, char *out, size_t size)
+{
+    const char *cancel;
+    const char *timer;
+    const char *marker;
+    const char *start;
+    size_t length;
+
+    out[0] = '\0';
+    cancel = strstr(text, " cancel ");
+    if (!cancel)
+        return;
+    cancel += strlen(" cancel ");
+
+    /* "cancel timer called pasta" and "cancel the timer for the pasta". */
+    marker = strstr(cancel, " called ");
+    if (!marker)
+        marker = strstr(cancel, " for the ");
+    if (!marker)
+        marker = strstr(cancel, " for my ");
+    if (marker) {
+        if (!strncmp(marker, " called ", strlen(" called ")))
+            start = marker + strlen(" called ");
+        else if (!strncmp(marker, " for the ", strlen(" for the ")))
+            start = marker + strlen(" for the ");
+        else
+            start = marker + strlen(" for my ");
+        length = strlen(start);
+        while (length && start[length - 1] == ' ')
+            --length;
+        if (length && length < size) {
+            memcpy(out, start, length);
+            out[length] = '\0';
+        }
+        return;
+    }
+
+    /* "cancel the pasta timer" / "cancel my timer". */
+    timer = find_word(cancel, "timer");
+    if (!timer)
+        return;
+    start = cancel;
+    if (!strncmp(start, "the ", 4))
+        start += 4;
+    else if (!strncmp(start, "my ", 3))
+        start += 3;
+    else if (!strncmp(start, "a ", 2))
+        start += 2;
+    else if (!strncmp(start, "an ", 3))
+        start += 3;
+    length = (size_t)(timer - start);
+    while (length && start[length - 1] == ' ')
+        --length;
+    if (length && length < size) {
+        memcpy(out, start, length);
+        out[length] = '\0';
+    }
+}
+
 static int mentions_timer(const char *text)
 {
     return has_word(text, "timer") || has_word(text, "timers") ||
@@ -270,7 +329,6 @@ enum le_timer_intent_kind le_timer_intent_parse(
     /* Silence first: while something is ringing this is the only thing
        anyone is trying to say, and it is the shortest phrasing. */
     if (has_word(text, "stop") || has_word(text, "dismiss") ||
-        has_word(text, "snooze") ||
         (has_word(text, "shut") && has_word(text, "up")) ||
         (has_word(text, "turn") && has_word(text, "off") &&
          mentions_timer(text))) {
@@ -284,6 +342,12 @@ enum le_timer_intent_kind le_timer_intent_parse(
     if (has_word(text, "cancel") || has_word(text, "delete") ||
         has_word(text, "remove") || has_word(text, "clear")) {
         intent->kind = LE_TIMER_INTENT_CANCEL;
+        intent->cancel_all = has_word(text, "all") ||
+                             has_word(text, "every") ||
+                             has_word(text, "each") ||
+                             has_word(text, "timers");
+        if (!intent->cancel_all)
+            extract_cancel_label(text, intent->label, sizeof(intent->label));
         return intent->kind;
     }
 
@@ -329,6 +393,13 @@ int le_timer_intent_say_duration(long long seconds, char *out, size_t size)
         return 0;
     if (seconds <= 0)
         return snprintf(out, size, "no time");
+    if (hours && minutes && rest)
+        return snprintf(out, size, "%lld hour%s, %lld minute%s and %lld "
+                        "second%s", hours, hours == 1 ? "" : "s", minutes,
+                        minutes == 1 ? "" : "s", rest, rest == 1 ? "" : "s");
+    if (hours && rest)
+        return snprintf(out, size, "%lld hour%s and %lld second%s", hours,
+                        hours == 1 ? "" : "s", rest, rest == 1 ? "" : "s");
     if (hours && minutes)
         return snprintf(out, size, "%lld hour%s and %lld minute%s", hours,
                         hours == 1 ? "" : "s", minutes,
@@ -364,7 +435,9 @@ int le_timer_intent_speech(const struct le_timer_intent *intent, int count,
                             duration, intent->label);
         return snprintf(out, size, "%s, starting now.", duration);
     case LE_TIMER_INTENT_CANCEL:
-        if (count <= 0)
+        if (count < 0)
+            return snprintf(out, size, "Which timer should I cancel?");
+        if (count == 0)
             return snprintf(out, size, "There are no timers to cancel.");
         if (count == 1)
             return snprintf(out, size, "Timer cancelled.");

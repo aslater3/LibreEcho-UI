@@ -54,6 +54,7 @@ int main(void)
     expect_seconds("timer for two hours", 7200);
     expect_seconds("start a timer for thirty seconds", 30);
     expect_seconds("set a timer for one hour and ten minutes", 4200);
+    expect_seconds("set a timer for one hour and thirty seconds", 3630);
     expect_seconds("set a timer for twenty five minutes", 1500);
     /* "a minute" is a count of one, not a missing number. */
     expect_seconds("set a timer for a minute", 60);
@@ -90,11 +91,31 @@ int main(void)
     assert(kind_of("Alexa, stop!") == LE_TIMER_INTENT_DISMISS);
     assert(kind_of("dismiss") == LE_TIMER_INTENT_DISMISS);
     assert(kind_of("turn off the timer") == LE_TIMER_INTENT_DISMISS);
+    assert(kind_of("snooze") == LE_TIMER_INTENT_NONE);
+    assert(kind_of("snooze the timer") == LE_TIMER_INTENT_NONE);
 
     /* Cancelling something that has not gone off is a different request. */
     assert(kind_of("cancel my timer") == LE_TIMER_INTENT_CANCEL);
     assert(kind_of("cancel all timers") == LE_TIMER_INTENT_CANCEL);
     assert(kind_of("delete the timer") == LE_TIMER_INTENT_CANCEL);
+
+    /* Singular cancellation carries an identity; only explicit plural/all
+       language is allowed to select the cancel-all operation. */
+    {
+        struct le_timer_intent intent;
+
+        assert(le_timer_intent_parse("cancel the pasta timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "pasta"));
+        assert(le_timer_intent_parse("cancel my timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(intent.label[0] == '\0');
+        assert(le_timer_intent_parse("cancel all timers", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.cancel_all);
+    }
 
     /* Asking about them. */
     assert(kind_of("how long is left on my timer") == LE_TIMER_INTENT_QUERY);
@@ -141,6 +162,8 @@ int main(void)
         assert(!strcmp(out, "1 hour"));
         le_timer_intent_say_duration(4200, out, sizeof(out));
         assert(!strcmp(out, "1 hour and 10 minutes"));
+        le_timer_intent_say_duration(3630, out, sizeof(out));
+        assert(!strcmp(out, "1 hour and 30 seconds"));
         le_timer_intent_say_duration(90, out, sizeof(out));
         assert(!strcmp(out, "1 minute and 30 seconds"));
         le_timer_intent_say_duration(30, out, sizeof(out));
@@ -157,6 +180,11 @@ int main(void)
         le_timer_intent_speech(&intent, 1, 0, speech, sizeof(speech));
         assert(strstr(speech, "10 minutes") != NULL);
 
+        assert(le_timer_intent_parse("set a timer for one hour and thirty "
+                                     "seconds", &intent) == LE_TIMER_INTENT_SET);
+        le_timer_intent_speech(&intent, 1, 0, speech, sizeof(speech));
+        assert(strstr(speech, "1 hour and 30 seconds") != NULL);
+
         assert(le_timer_intent_parse("cancel my timer", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         /* Nothing to cancel must not claim something was cancelled. */
@@ -164,6 +192,11 @@ int main(void)
         assert(strstr(speech, "no timers") != NULL);
         le_timer_intent_speech(&intent, 1, 0, speech, sizeof(speech));
         assert(strstr(speech, "cancelled") != NULL);
+
+        assert(le_timer_intent_parse("cancel my timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        le_timer_intent_speech(&intent, -1, 0, speech, sizeof(speech));
+        assert(strstr(speech, "Which timer") != NULL);
 
         assert(le_timer_intent_parse("how long is left on my timer",
                                      &intent) == LE_TIMER_INTENT_QUERY);
