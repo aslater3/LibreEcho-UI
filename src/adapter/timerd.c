@@ -449,6 +449,64 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         return le_adapter_respond_ok(out, size, id, data);
     }
 
+    /*
+     * Two commands that exist so callers do not have to parse the list and
+     * re-derive what the daemon already knows. Voice control needs "cancel
+     * everything" and "how long is left", and doing that by scraping the
+     * status array in the caller would duplicate the schedule's rules
+     * outside the schedule.
+     */
+    if (!strcmp(cmd, "cancel_all")) {
+        size_t i;
+        int cancelled = 0;
+
+        for (i = 0; i < LE_TIMER_MAX; ++i) {
+            if (ctx->timers.timers[i].state != LE_TIMER_STATE_PENDING)
+                continue;
+            memset(&ctx->timers.timers[i], 0,
+                   sizeof(ctx->timers.timers[i]));
+            ++cancelled;
+        }
+        if (cancelled)
+            ctx->dirty = 1;
+        snprintf(data, sizeof(data), "{\"cancelled\":%d}", cancelled);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+
+    /* The soonest pending timer, and how many there are. */
+    if (!strcmp(cmd, "next")) {
+        long long now_ms = monotonic_ms();
+        long long now_epoch = wall_epoch();
+        long long soonest = -1;
+        char label[LE_TIMER_LABEL_MAX * 2] = "";
+        int count = 0;
+        size_t i;
+
+        for (i = 0; i < LE_TIMER_MAX; ++i) {
+            const struct le_timer *timer = &ctx->timers.timers[i];
+            long long remaining;
+
+            if (timer->state != LE_TIMER_STATE_PENDING)
+                continue;
+            ++count;
+            if (timer->kind == LE_TIMER_ALARM)
+                remaining = timer->due_epoch - now_epoch;
+            else
+                remaining = (timer->due_monotonic_ms - now_ms) / 1000LL;
+            if (remaining < 0)
+                remaining = 0;
+            if (soonest < 0 || remaining < soonest) {
+                soonest = remaining;
+                json_escape(label, sizeof(label), timer->label);
+            }
+        }
+        snprintf(data, sizeof(data),
+                 "{\"count\":%d,\"seconds_remaining\":%lld,"
+                 "\"label\":\"%s\"}",
+                 count, soonest < 0 ? 0 : soonest, label);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+
     if (!strcmp(cmd, "cancel")) {
         if (!args || json_get_int(args, "id", &value) < 1)
             return le_adapter_respond_err(out, size, id,

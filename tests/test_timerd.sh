@@ -169,4 +169,43 @@ case "$out" in
 esac
 echo "  a ring does not survive a restart: ok"
 
+# --- cancel_all and next --------------------------------------------------
+# Voice control needs "cancel everything" and "how long is left". They live in
+# the daemon so a caller does not have to parse the list and re-derive what
+# the schedule already knows.
+out=$(call add '{"seconds":900,"label":"one"}')
+out=$(call add '{"seconds":300,"label":"two"}')
+
+out=$(call next '{}')
+case "$out" in
+    *'"count":2'*) ;;
+    *) echo "FAIL: next did not count both timers: $out"; exit 1 ;;
+esac
+# The soonest one, not the first one added.
+case "$out" in
+    *'"label":"two"'*) ;;
+    *) echo "FAIL: next reported the wrong timer: $out"; exit 1 ;;
+esac
+echo "  next reports the soonest timer: ok"
+
+out=$(call cancel_all '{}')
+case "$out" in
+    *'"cancelled":2'*) ;;
+    *) echo "FAIL: cancel_all did not cancel both: $out"; exit 1 ;;
+esac
+out=$(call status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: timers remain after cancel_all: $out"; exit 1 ;;
+esac
+echo "  cancel_all clears the schedule: ok"
+
+# Nothing left: next must say so rather than reporting a stale timer.
+out=$(call next '{}')
+case "$out" in
+    *'"count":0'*) ;;
+    *) echo "FAIL: next after cancel_all: $out"; exit 1 ;;
+esac
+echo "  next reports an empty schedule: ok"
+
 echo "timerd: ok"
