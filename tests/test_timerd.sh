@@ -7,14 +7,16 @@
 set -eu
 
 WD=./build/libreecho-timerd
+AD=./build/libreecho-audiod
 [ -x "$WD" ] || { echo "timerd not built"; exit 1; }
+[ -x "$AD" ] || { echo "audiod not built"; exit 1; }
 
 dir=$(mktemp -d)
 sock="$dir/timer.sock"
 audio="$dir/audio.sock"
 state="$dir/timers"
-cues="$dir/cues"
-: > "$cues"
+bus="$dir/system.pcm"
+: > "$bus"
 
 cleanup() {
     [ -f "$dir/timerd.pid" ] && kill "$(cat "$dir/timerd.pid")" 2>/dev/null || true
@@ -23,29 +25,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# A stand-in audio daemon that records the cues it is asked to play.
-cat > "$dir/audio.py" <<'PY'
-import os, socket, sys
-path, log, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]
-try: os.unlink(path)
-except FileNotFoundError: pass
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.bind(path); s.listen(8)
-open(pidfile, "w").write(str(os.getpid()))
-while True:
-    c, _ = s.accept()
-    try:
-        data = c.recv(4096).decode("utf-8", "replace")
-        if '"cue"' in data:
-            with open(log, "a") as f:
-                f.write("cue\n")
-        c.sendall(b'{"v":1,"id":1,"ok":true,"data":{},"error":null}\n')
-    except Exception:
-        pass
-    c.close()
-PY
-python3 "$dir/audio.py" "$audio" "$cues" "$dir/audio.pid" &
-sleep 1
+start_audio() {
+    "$AD" --foreground --socket "$audio" --system-bus "$bus" \
+        >>"$dir/audiod.log" 2>&1 &
+    echo $! > "$dir/audio.pid"
+    waited=0
+    while [ ! -S "$audio" ] && [ "$waited" -lt 10 ]; do sleep 1; waited=$((waited+1)); done
+    [ -S "$audio" ] || { echo "FAIL: audiod did not create its socket"; cat "$dir/audiod.log"; exit 1; }
+}
 
 # One request, one response.
 call() {
@@ -75,6 +62,7 @@ stop_daemon() {
     rm -f "$dir/timerd.pid"
 }
 
+start_audio
 start_daemon
 
 # --- a timer can be added and listed --------------------------------------
@@ -95,6 +83,14 @@ out=$(call add '{"seconds":0}')
 case "$out" in *'"ok":false'*) ;; *) echo "FAIL: zero-second timer accepted: $out"; exit 1 ;; esac
 echo "  out-of-range timer refused: ok"
 
+# --- malformed and oversized labels are refused --------------------------
+long_label=$(printf '%048d' 0 | tr '0' x)
+out=$(call add "{\"seconds\":600,\"label\":\"$long_label\"}")
+case "$out" in *'"ok":false'*) ;; *) echo "FAIL: oversized label accepted: $out"; exit 1 ;; esac
+out=$(call add '{"seconds":600,"label":"bad\u0001"}')
+case "$out" in *'"ok":false'*) ;; *) echo "FAIL: malformed label accepted: $out"; exit 1 ;; esac
+echo "  malformed and oversized labels refused: ok"
+
 # --- it survives a restart ------------------------------------------------
 # A timer is a promise about the future; a daemon restart must not lose it.
 stop_daemon
@@ -108,11 +104,11 @@ esac
 echo "  timer survives a restart: ok"
 
 # --- a due timer rings on the audio daemon --------------------------------
-: > "$cues"
+: > "$bus"
 out=$(call add '{"seconds":1,"label":"short"}')
 short_id=$(printf '%s' "$out" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
 sleep 3
-if [ ! -s "$cues" ]; then
+if [ "$(wc -c < "$bus")" -ne 48000 ]; then
     echo "FAIL: a due timer did not ring"
     cat "$dir/timerd.log"
     exit 1
@@ -124,9 +120,9 @@ case "$out" in *'"state":"ringing"'*) ;; *) echo "FAIL: not reported ringing: $o
 echo "  ringing state reported: ok"
 
 # --- it keeps ringing rather than chirping once ---------------------------
-before=$(wc -l < "$cues")
+before=$(stat -c %Y "$bus")
 sleep 3
-after=$(wc -l < "$cues")
+after=$(stat -c %Y "$bus")
 if [ "$after" -le "$before" ]; then
     echo "FAIL: the ring stopped on its own after one cue"
     exit 1
@@ -136,9 +132,10 @@ echo "  ring repeats: ok"
 # --- dismiss silences the ring and leaves the other timer alone -----------
 out=$(call dismiss '{}')
 case "$out" in *'"dismissed":1'*) ;; *) echo "FAIL: dismiss did not stop one ring: $out"; exit 1 ;; esac
-: > "$cues"
+: > "$bus"
+before_dismiss=$(stat -c %Y "$bus")
 sleep 3
-if [ -s "$cues" ]; then
+if [ "$(stat -c %Y "$bus")" -ne "$before_dismiss" ]; then
     echo "FAIL: still ringing after dismiss"
     exit 1
 fi

@@ -108,7 +108,8 @@ make build/test-timer-intent
 ./build/test-timer-intent
 make build/test-timer-schedule
 ./build/test-timer-schedule
-make build/libreecho-timerd
+make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
+./build/test-timer-persistence
 sh tests/test_timerd.sh
 make build/libreecho-agentd
 sh tests/test_agentd_timers.sh

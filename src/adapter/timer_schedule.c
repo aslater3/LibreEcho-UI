@@ -87,6 +87,55 @@ int le_timer_add_alarm(struct le_timer_set *set, long long due_epoch,
     return LE_TIMER_OK;
 }
 
+static int restore_timer(struct le_timer_set *set, enum le_timer_kind kind,
+                         long long due_epoch, const char *label,
+                         long long now_epoch, long long now_monotonic_ms,
+                         unsigned int *id)
+{
+    struct le_timer *timer;
+    long long delta;
+
+    if (!set)
+        return LE_TIMER_ERR_NOT_FOUND;
+    if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
+        return LE_TIMER_ERR_CLOCK;
+    delta = due_epoch - now_epoch;
+    if (delta < -LE_TIMER_MISS_GRACE_SECONDS)
+        return LE_TIMER_ERR_RANGE;
+    if (kind == LE_TIMER_COUNTDOWN && delta > LE_TIMER_MAX_SECONDS)
+        return LE_TIMER_ERR_RANGE;
+    timer = free_slot(set);
+    if (!timer)
+        return LE_TIMER_ERR_FULL;
+
+    memset(timer, 0, sizeof(*timer));
+    timer->id = set->next_id++;
+    timer->kind = kind;
+    timer->state = LE_TIMER_STATE_PENDING;
+    timer->due_epoch = due_epoch;
+    timer->due_monotonic_ms = now_monotonic_ms + delta * 1000LL;
+    set_label(timer, label);
+    if (id)
+        *id = timer->id;
+    return LE_TIMER_OK;
+}
+
+int le_timer_restore_countdown(struct le_timer_set *set, long long due_epoch,
+                               const char *label, long long now_epoch,
+                               long long now_monotonic_ms, unsigned int *id)
+{
+    return restore_timer(set, LE_TIMER_COUNTDOWN, due_epoch, label, now_epoch,
+                         now_monotonic_ms, id);
+}
+
+int le_timer_restore_alarm(struct le_timer_set *set, long long due_epoch,
+                           const char *label, long long now_epoch,
+                           long long now_monotonic_ms, unsigned int *id)
+{
+    return restore_timer(set, LE_TIMER_ALARM, due_epoch, label, now_epoch,
+                         now_monotonic_ms, id);
+}
+
 struct le_timer *le_timer_find(struct le_timer_set *set, unsigned int id)
 {
     size_t i;

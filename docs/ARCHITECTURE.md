@@ -194,6 +194,7 @@ Each daemon owns one hardware domain and exposes it via the adapter protocol.
 | `set_gain` | `{gain: 0-100}` | Set microphone gain |
 | `set_mute` | `{muted: bool}` | Toggle mic mute |
 | `test_tone` | — | Play 440Hz sine wave |
+| `cue` | `{first_hz, second_hz, ms}` | Play a bounded two-tone notification cue |
 
 **ALSA interface:** Direct ioctl on `/dev/snd/controlC0`. Enumerates controls, reads/writes values. Falls back to `amixer` if ioctl fails.
 
