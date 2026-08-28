@@ -18,12 +18,16 @@
  * healthy probe also means a daemon that takes longer than the settling delay
  * to come up is picked up when it arrives rather than written off.
  *
- * Deliberately not supervised: waked. It cannot be restarted at runtime --
- * micd offers its microphone stream once, so a second waked gets "microphone
- * stream: Protocol error", and stopping it unmounts the wakeword payload.
- * Restarting it would take the wake word down until the next boot, which is
- * worse than the fault being repaired. It is probed and reported, never
- * restarted.
+ * micd and waked are restarted together, as a group. waked is micd's only
+ * microphone-stream consumer and it exits when that stream ends, so
+ * restarting micd on its own would take the wake word down until the next
+ * reboot -- the watchdog silently breaking the thing people most want
+ * working. Restarting waked on its own does not work either: micd offers the
+ * stream once, so a second waked gets "microphone stream: Protocol error".
+ * Restarting both, micd first, is the one order that leaves a working wake
+ * word: a fresh micd offers a fresh stream and a fresh waked takes it.
+ *
+ * Every service is handled as a group; most are groups of one.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -65,12 +69,19 @@ struct service_desc {
     const char *probe_path;
     const char *init_script;
     int restartable;
+    /* Services sharing a group name are stopped and started together, in
+       table order. NULL means this service stands alone. */
+    const char *group;
 };
 
 /* How it is going: mutable, one per descriptor. */
 struct supervised {
     const struct service_desc *desc;
     struct le_watchdog_service state;
+    /* Index of the first member of this service's group; its own index when
+       it stands alone. All restart decisions are made on the leader. */
+    size_t leader;
+    int healthy;
     int last_healthy;
     int seen_healthy;
     int reported_give_up;
@@ -156,17 +167,52 @@ static int run_init(const char *script, const char *action)
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
-static void restart(struct supervised *service)
+static int in_group(const struct supervised *services, size_t index,
+                    size_t leader)
 {
-    le_log_warn("watchdog: %s is not answering; restarting",
-                service->desc->name);
-    /* Stop first and ignore its result: a wedged service often fails to stop
-       cleanly, and refusing to start again because of that would leave it
-       down permanently -- the opposite of the point. */
-    (void)run_init(service->desc->init_script, "stop");
-    if (run_init(service->desc->init_script, "start") != 0)
-        le_log_error("watchdog: restarting %s failed", service->desc->name);
-    ++service->total_restarts;
+    return services[index].leader == leader &&
+           services[index].desc->init_script != NULL;
+}
+
+/*
+ * A group is unhealthy when any member that has ever answered stops
+ * answering. A member never seen answering is not counted -- it is disabled
+ * or not installed, and its absence is not a fault.
+ */
+static int group_healthy(const struct supervised *services, size_t count,
+                         size_t leader)
+{
+    size_t i;
+
+    for (i = 0; i < count; ++i)
+        if (services[i].leader == leader && services[i].seen_healthy &&
+            !services[i].healthy)
+            return 0;
+    return 1;
+}
+
+static void restart_group(struct supervised *services, size_t count,
+                          size_t leader)
+{
+    size_t i;
+
+    /* Stop in reverse order, so a consumer is down before its producer, and
+       ignore the result: a wedged service often fails to stop cleanly, and
+       refusing to start again because of that would leave it down
+       permanently -- the opposite of the point. */
+    for (i = count; i-- > 0;)
+        if (in_group(services, i, leader))
+            (void)run_init(services[i].desc->init_script, "stop");
+
+    for (i = 0; i < count; ++i) {
+        if (!in_group(services, i, leader))
+            continue;
+        le_log_warn("watchdog: restarting %s", services[i].desc->name);
+        if (run_init(services[i].desc->init_script, "start") != 0)
+            le_log_error("watchdog: restarting %s failed",
+                         services[i].desc->name);
+        ++services[i].total_restarts;
+    }
 }
 
 int main(int argc, char **argv)
@@ -175,36 +221,37 @@ int main(int argc, char **argv)
         /* Socket paths are the defaults the init scripts pass; a source
            contract test keeps this table and init/ from drifting apart. */
         {"networkd", PROBE_SOCKET, "/run/libreecho/network.sock",
-         "/etc/init.d/libreecho-networkd.init", 1},
+         "/etc/init.d/libreecho-networkd.init", 1, NULL},
         {"audiod", PROBE_SOCKET, "/run/libreecho/audio.sock",
-         "/etc/init.d/libreecho-audiod.init", 1},
+         "/etc/init.d/libreecho-audiod.init", 1, NULL},
+        /* micd and waked are one unit -- see the note at the top. */
         {"micd", PROBE_SOCKET, "/run/libreecho/mic.sock",
-         "/etc/init.d/libreecho-micd.init", 1},
+         "/etc/init.d/libreecho-micd.init", 1, "capture"},
         {"ledd", PROBE_SOCKET, "/run/libreecho/led.sock",
-         "/etc/init.d/libreecho-ledd.init", 1},
+         "/etc/init.d/libreecho-ledd.init", 1, NULL},
         {"btd", PROBE_SOCKET, "/run/libreecho/bluetooth.sock",
-         "/etc/init.d/libreecho-btd.init", 1},
+         "/etc/init.d/libreecho-btd.init", 1, NULL},
         {"radiod", PROBE_SOCKET, "/run/libreecho/radio.sock",
-         "/etc/init.d/libreecho-radiod.init", 1},
+         "/etc/init.d/libreecho-radiod.init", 1, NULL},
         {"agentd", PROBE_SOCKET, "/run/libreecho/agent.sock",
-         "/etc/init.d/libreecho-agentd.init", 1},
+         "/etc/init.d/libreecho-agentd.init", 1, NULL},
         {"ttsd", PROBE_SOCKET, "/run/libreecho/tts.sock",
-         "/etc/init.d/libreecho-ttsd.init", 1},
+         "/etc/init.d/libreecho-ttsd.init", 1, NULL},
         {"sttd", PROBE_SOCKET, "/run/libreecho/stt.sock",
-         "/etc/init.d/libreecho-sttd.init", 1},
+         "/etc/init.d/libreecho-sttd.init", 1, NULL},
         {"airplayd", PROBE_SOCKET, "/run/libreecho/airplay.sock",
-         "/etc/init.d/libreecho-airplayd.init", 1},
+         "/etc/init.d/libreecho-airplayd.init", 1, NULL},
         /* No control socket; the pidfile is the only signal. */
         {"buttond", PROBE_PIDFILE, "/var/run/libreecho-buttond.pid",
-         "/etc/init.d/libreecho-buttond.init", 1},
+         "/etc/init.d/libreecho-buttond.init", 1, NULL},
         {"timed", PROBE_PIDFILE, "/var/run/libreecho-timed.pid",
-         "/etc/init.d/libreecho-timed.init", 1},
+         "/etc/init.d/libreecho-timed.init", 1, NULL},
         {"logd", PROBE_PIDFILE, "/var/run/libreecho-logd.pid",
-         "/etc/init.d/libreecho-logd.init", 1},
+         "/etc/init.d/libreecho-logd.init", 1, NULL},
         {"wyomingd", PROBE_PIDFILE, "/var/run/libreecho-wyomingd.pid",
-         "/etc/init.d/libreecho-wyomingd.init", 1},
-        /* Probed and reported, never restarted -- see the note at the top. */
-        {"waked", PROBE_SOCKET, "/run/libreecho/wakeword.sock", NULL, 0},
+         "/etc/init.d/libreecho-wyomingd.init", 1, NULL},
+        {"waked", PROBE_SOCKET, "/run/libreecho/wakeword.sock",
+         "/etc/init.d/libreecho-waked.init", 1, "capture"},
     };
     static struct supervised services[MAX_SERVICES];
     static char argbuf[MAX_SERVICES][512];
@@ -237,7 +284,7 @@ int main(int argc, char **argv)
            this the service table is compiled in and the daemon cannot be
            exercised against anything but a real device. */
         else if (!strcmp(argv[i], "--service") && i + 1 < (size_t)argc) {
-            char *name, *sock, *init;
+            char *name, *sock, *init, *group;
 
             if (custom >= MAX_SERVICES) {
                 fprintf(stderr, "too many --service entries\n");
@@ -249,13 +296,17 @@ int main(int argc, char **argv)
             if (!sock) { fprintf(stderr, "--service wants NAME:SOCKET:INIT\n"); return 2; }
             *sock++ = '\0';
             init = strchr(sock, ':');
-            if (!init) { fprintf(stderr, "--service wants NAME:SOCKET:INIT\n"); return 2; }
+            if (!init) { fprintf(stderr, "--service wants NAME:SOCKET:INIT[:GROUP]\n"); return 2; }
             *init++ = '\0';
+            group = strchr(init, ':');
+            if (group)
+                *group++ = '\0';
             custom_descs[custom].name = name;
             custom_descs[custom].kind = PROBE_SOCKET;
             custom_descs[custom].probe_path = sock;
             custom_descs[custom].init_script = init;
             custom_descs[custom].restartable = *init ? 1 : 0;
+            custom_descs[custom].group = group;
             ++custom;
         }
         else {
@@ -268,8 +319,21 @@ int main(int argc, char **argv)
         interval = DEFAULT_INTERVAL_S;
     if (custom)
         count = custom;
-    for (i = 0; i < count; ++i)
+    for (i = 0; i < count; ++i) {
+        size_t j;
+
         services[i].desc = custom ? &custom_descs[i] : &descriptors[i];
+        services[i].leader = i;
+        for (j = 0; j < i; ++j) {
+            const char *mine = services[i].desc->group;
+            const char *theirs = services[j].desc->group;
+
+            if (mine && theirs && !strcmp(mine, theirs)) {
+                services[i].leader = services[j].leader;
+                break;
+            }
+        }
+    }
 
     signal(SIGTERM, stop);
     signal(SIGINT, stop);
@@ -293,34 +357,52 @@ int main(int argc, char **argv)
 
     while (running) {
         now = monotonic_ms();
+
+        /* Probe everything first, then decide. A group has to be judged on
+           one sweep, or a member restarted mid-pass looks like a second
+           fault. */
         for (i = 0; i < count && running; ++i) {
             struct supervised *s = &services[i];
-            int healthy = probe(s->desc);
-            enum le_watchdog_action action;
+
+            s->healthy = probe(s->desc);
 
             /* Supervision latches on the first healthy probe. A daemon that
                has never answered is either disabled or not installed, and
                starting something the owner turned off is not recovery. */
-            if (healthy && !s->seen_healthy) {
+            if (s->healthy && !s->seen_healthy) {
                 s->seen_healthy = 1;
                 le_log_info("watchdog: supervising %s", s->desc->name);
             }
-            if (healthy != s->last_healthy) {
-                if (healthy && s->seen_healthy)
-                    le_log_info("watchdog: %s is answering again", s->desc->name);
-                else if (!healthy && s->seen_healthy && !s->desc->restartable)
+            if (s->healthy != s->last_healthy) {
+                if (s->healthy && s->seen_healthy)
+                    le_log_info("watchdog: %s is answering again",
+                                s->desc->name);
+                else if (!s->healthy && s->seen_healthy &&
+                         !s->desc->restartable)
                     le_log_warn("watchdog: %s is not answering "
                                 "(not restartable; a reboot is needed)",
                                 s->desc->name);
-                s->last_healthy = healthy;
+                s->last_healthy = s->healthy;
             }
-            if (!s->seen_healthy)
+        }
+
+        for (i = 0; i < count && running; ++i) {
+            struct supervised *s = &services[i];
+            enum le_watchdog_action action;
+            int healthy;
+
+            /* Members are acted on through their group's leader. */
+            if (s->leader != i || !s->seen_healthy)
                 continue;
+
+            healthy = group_healthy(services, count, i);
+            /* Reported on the health transition above, so a service that
+               cannot be restarted does not refill the log every pass. */
             if (!s->desc->restartable)
                 continue;
             action = le_watchdog_step(&s->state, healthy, now);
             if (action == LE_WATCHDOG_RESTART) {
-                restart(s);
+                restart_group(services, count, i);
                 le_watchdog_restarted(&s->state, now);
             } else if (action == LE_WATCHDOG_GIVE_UP && !s->reported_give_up) {
                 /* Say it once, then stay quiet rather than logging forever. */

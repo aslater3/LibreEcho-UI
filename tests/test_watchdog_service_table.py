@@ -17,12 +17,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TABLE = os.path.join(ROOT, "src", "adapter", "watchdogd.c")
 INIT = os.path.join(ROOT, "init")
 
-# waked cannot be restarted at runtime: micd offers its microphone stream
-# once, so a second waked fails with "microphone stream: Protocol error", and
-# stopping it unmounts the wakeword payload. A restart would take the wake word
-# down until the next boot -- worse than the fault. It is probed and reported
-# only, and this test exists so a later edit cannot quietly make it restartable.
-NEVER_RESTART = {"waked"}
+# Services that must never be restarted on their own, and the group they
+# belong to. waked is micd's only microphone-stream consumer and exits when
+# that stream ends, so restarting micd alone takes the wake word down until
+# the next reboot. Restarting waked alone does not work either -- micd offers
+# the stream once, so the second waked gets "microphone stream: Protocol
+# error". Only restarting both, micd first, leaves a working wake word. This
+# rule exists so a later edit cannot quietly separate them.
+NEVER_ALONE = {"waked": "capture", "micd": "capture"}
 
 # Daemons with no init script of their own, or deliberately not supervised.
 NOT_SUPERVISED = {
@@ -34,7 +36,8 @@ NOT_SUPERVISED = {
 
 ENTRY = re.compile(
     r'\{"(?P<name>\w+)",\s*(?P<kind>PROBE_SOCKET|PROBE_PIDFILE),\s*'
-    r'"(?P<path>[^"]+)",\s*(?:\n\s*)?(?P<init>"[^"]+"|NULL),\s*(?P<restart>[01])',
+    r'"(?P<path>[^"]+)",\s*(?:\n\s*)?(?P<init>"[^"]+"|NULL),\s*'
+    r'(?P<restart>[01]),\s*(?P<group>"[^"]+"|NULL)',
 )
 
 
@@ -91,11 +94,20 @@ def main():
             failures.append(
                 "%s: serves %s but is probed by pidfile" % (name, socket))
 
-        if name in NEVER_RESTART:
-            if entry["restart"] != "0" or entry["init"] != "NULL":
+        if name in NEVER_ALONE:
+            want_group = '"%s"' % NEVER_ALONE[name]
+            if entry["group"] != want_group:
                 failures.append(
-                    "%s must never be restarted (see NEVER_RESTART)" % name)
-            continue
+                    "%s must be in group %s so it is never restarted alone "
+                    "(see NEVER_ALONE)" % (name, want_group))
+            elif len([e for e in entries if e["group"] == want_group]) < 2:
+                failures.append(
+                    "%s is alone in group %s, so a group restart is a solo "
+                    "restart (see NEVER_ALONE)" % (name, want_group))
+            if entry["init"] == "NULL":
+                failures.append(
+                    "%s names no init script, so its group cannot restart it"
+                    % name)
 
         if entry["init"] != "NULL":
             init_path = entry["init"].strip('"')
