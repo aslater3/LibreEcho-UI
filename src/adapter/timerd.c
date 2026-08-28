@@ -124,26 +124,25 @@ static int fsync_parent(const char *path)
     return result;
 }
 
-static void state_save(struct context *ctx)
+static int state_save_at(struct context *ctx, long long now_ms,
+                         long long now_epoch)
 {
     char temporary[256], backup[256], backup_temporary[256];
     int fd;
     FILE *file;
-    long long now_ms = monotonic_ms();
-    long long now_epoch = wall_epoch();
     size_t i;
 
     if (!ctx->state_path || !ctx->state_path[0])
-        return;
+        return 0;
     /* Never replace a persisted countdown while the wall clock is invalid:
        its monotonic deadline cannot be converted safely yet. */
     if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
-        return;
+        return 0;
     if (path_suffix(temporary, sizeof(temporary), ctx->state_path, ".tmp") < 0 ||
         path_suffix(backup, sizeof(backup), ctx->state_path, ".bak") < 0 ||
         path_suffix(backup_temporary, sizeof(backup_temporary), backup,
                     ".tmp") < 0)
-        return;
+        return 0;
 
     fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0 || fchmod(fd, 0600) < 0) {
@@ -151,13 +150,13 @@ static void state_save(struct context *ctx)
             close(fd);
         le_log_warn("timerd: cannot write %s: %s", temporary,
                     strerror(errno));
-        return;
+        return 0;
     }
     file = fdopen(fd, "w");
     if (!file) {
         close(fd);
         unlink(temporary);
-        return;
+        return 0;
     }
     for (i = 0; i < LE_TIMER_MAX; ++i) {
         const struct le_timer *timer = &ctx->timers.timers[i];
@@ -182,7 +181,7 @@ static void state_save(struct context *ctx)
                     due, timer->label) < 0) {
             fclose(file);
             unlink(temporary);
-            return;
+            return 0;
         }
     }
     if (fflush(file) != 0 || fsync(fileno(file)) != 0 ||
@@ -190,11 +189,11 @@ static void state_save(struct context *ctx)
         le_log_warn("timerd: cannot flush %s", temporary);
         fclose(file);
         unlink(temporary);
-        return;
+        return 0;
     }
     if (fclose(file) != 0) {
         unlink(temporary);
-        return;
+        return 0;
     }
     /* Snapshot the old file before replacing it. Keeping the old inode as a
        hard link makes the backup atomic and avoids a window without one. */
@@ -207,13 +206,13 @@ static void state_save(struct context *ctx)
                         strerror(errno));
             unlink(backup_temporary);
             unlink(temporary);
-            return;
+            return 0;
         }
         if (fsync_parent(ctx->state_path) != 0) {
             le_log_warn("timerd: cannot sync backup %s: %s", backup,
                         strerror(errno));
             unlink(temporary);
-            return;
+            return 0;
         }
     }
     /* Rename over the real file so a crash mid-write cannot leave a partial
@@ -222,11 +221,26 @@ static void state_save(struct context *ctx)
         le_log_warn("timerd: cannot replace %s: %s", ctx->state_path,
                     strerror(errno));
         unlink(temporary);
-        return;
+        return 0;
     }
-    if (chmod(ctx->state_path, 0600) != 0 || fsync_parent(ctx->state_path) != 0)
+    if (chmod(ctx->state_path, 0600) != 0 || fsync_parent(ctx->state_path) != 0) {
         le_log_warn("timerd: cannot finalize %s: %s", ctx->state_path,
                     strerror(errno));
+        return 0;
+    }
+    return 1;
+}
+
+static int state_save(struct context *ctx)
+{
+    return state_save_at(ctx, monotonic_ms(), wall_epoch());
+}
+
+static void save_if_dirty(struct context *ctx, long long now_ms,
+                          long long now_epoch)
+{
+    if (ctx->dirty && state_save_at(ctx, now_ms, now_epoch))
+        ctx->dirty = 0;
 }
 
 static int state_load_at(struct context *ctx, long long now_ms,
@@ -521,9 +535,14 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
        timers alone. */
     if (!strcmp(cmd, "dismiss")) {
         int stopped;
+        unsigned int dismiss_id = 0;
+        int id_result = args ? json_get_uint(args, "id", &dismiss_id) : 0;
 
-        if (args && json_get_int(args, "id", &value) == 1)
-            stopped = le_timer_dismiss(&ctx->timers, (unsigned int)value);
+        if (id_result < 0 || (id_result > 0 && dismiss_id == 0))
+            return le_adapter_respond_err(out, size, id,
+                                          "dismiss id must be a positive integer");
+        if (id_result > 0)
+            stopped = le_timer_dismiss(&ctx->timers, dismiss_id);
         else
             stopped = le_timer_dismiss_all(&ctx->timers);
         if (stopped)
@@ -665,10 +684,7 @@ int main(int argc, char **argv)
             ctx.dirty = 1;
         }
         ring_tick(&ctx, now_ms);
-        if (ctx.dirty) {
-            state_save(&ctx);
-            ctx.dirty = 0;
-        }
+        save_if_dirty(&ctx, now_ms, wall_epoch());
 
         fds[0].fd = ctx.listen_fd;
         fds[0].events = POLLIN;
