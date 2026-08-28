@@ -11,6 +11,9 @@ openapi = json.loads(Path("web/openapi.json").read_text(encoding="utf-8"))
 docs = Path("docs/API.md").read_text(encoding="utf-8")
 
 assert "close_kernel_log_inherited(fd);" in http
+assert http.count("close_kernel_log_inherited(fd);") >= 3
+assert "start_api_worker(c->fd,api,&q)" in http
+assert "start_pcm_stream(c->fd,selected_channel)" in http
 assert "opendir(\"/proc/self/fd\")" in http
 assert "inherited != keep_fd" in http
 assert "relay_ls=socket(AF_INET,SOCK_STREAM,0)" in http
@@ -41,7 +44,8 @@ assert "restored after that daemon restarts" in docs
 start = api.index("static void auth_login_json")
 end = api.index("static void auth_current_json", start)
 login = api[start:end]
-assert "q->https&&c->sessions_path[0]&&le_auth_save_sessions" in login
+assert "q->https&&c->sessions_path[0]&&le_auth_save_issued_session" in login
+assert "le_auth_save_issued_session" in api
 assert "if(c->https_active)" not in login
 assert "persist_auth_sessions(c)" in api
 assert "The session could not be saved after logout" in api
@@ -70,7 +74,18 @@ assert "target_end-target_start-1" in http
 assert "LE_USB_ESCAPED_MAX" in api
 assert "static int usb_relative_path_valid" in api
 assert "!usb_relative_path_valid(rel)" in api
+assert "if(!ch)return -1;" in api
+assert "static int usb_disk_find(char*node,size_t node_size,char*part,size_t part_size)" in api
+assert "bytes=fr*(unsigned long long)vfs.f_blocks" in api
 assert "if(i+1>=size){overflow=1;continue;}" in api
+agentd = Path("src/adapter/agentd.c").read_text(encoding="utf-8")
+assert "static int load_history_file" in agentd
+assert "load_history_file(&state, backup)" in agentd
+assert "A JSON backup contains the recoverable turn ring" in agentd
+app = Path("web/js/app.js").read_text(encoding="utf-8")
+assert "const persisted=new Map(stations.map(st=>[st.word,st]))" in app
+assert "const sameStation=(a,b)=>" in app
+assert "stored=persisted.get(v.word)" in app
 usb_play = openapi["paths"]["/storage/usb/play"]["post"]
 usb_body = usb_play["requestBody"]["content"]["application/json"]["schema"]
 assert usb_play["requestBody"]["required"] is True

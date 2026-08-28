@@ -15,7 +15,7 @@ grep -q 'https_active' src/api.h src/api.c
 grep -q 'apply_saved_mac_overrides' src/main.c
 grep -q 'public-addr' src/main.c
 grep -q 'known_user' src/auth.c
-grep -q 'le_auth_save_sessions' src/api.c
+grep -q 'le_auth_save_persisted_sessions' src/api.c
 grep -q 'init/libreecho-radiod.init' Makefile
 grep -q 'usb_open_dir' src/api.c
 grep -q 'openat' src/api.c

@@ -310,6 +310,7 @@ static int issue_token(struct le_auth_db *db, const char *username,
     strncpy(db->sessions[slot].username, username,
             sizeof(db->sessions[slot].username) - 1);
     db->sessions[slot].expires = now + LE_AUTH_SESSION_SECONDS;
+    db->sessions[slot].persisted = 0;
     if (expires_in)
         *expires_in = LE_AUTH_SESSION_SECONDS;
     return 0;
@@ -373,7 +374,8 @@ void le_auth_logout(struct le_auth_db *db, const char *token)
 
 /* ------------------------- Session persistence -------------------------- */
 
-int le_auth_save_sessions(const struct le_auth_db *db, const char *path)
+static int save_sessions(const struct le_auth_db *db, const char *path,
+                         int persisted_only)
 {
     char temp[512];
     FILE *f;
@@ -400,7 +402,7 @@ int le_auth_save_sessions(const struct le_auth_db *db, const char *path)
         return -1;
     }
     for (i = 0; i < LE_AUTH_MAX_SESSIONS; ++i) {
-        if (!db->sessions[i].token[0])
+        if (!db->sessions[i].token[0] || (persisted_only && !db->sessions[i].persisted))
             continue;
         fprintf(f, "%s %s %lld\n", db->sessions[i].token,
                 db->sessions[i].username,
@@ -417,6 +419,39 @@ int le_auth_save_sessions(const struct le_auth_db *db, const char *path)
         return -1;
     }
     return 0;
+}
+
+int le_auth_save_sessions(const struct le_auth_db *db, const char *path)
+{
+    return save_sessions(db, path, 0);
+}
+
+int le_auth_save_persisted_sessions(const struct le_auth_db *db,
+                                    const char *path)
+{
+    return save_sessions(db, path, 1);
+}
+
+int le_auth_save_issued_session(struct le_auth_db *db, const char *path,
+                                const char *token)
+{
+    size_t i;
+    int previous = -1;
+    int result;
+
+    if (!db || !token || !token[0])
+        return -1;
+    for (i = 0; i < LE_AUTH_MAX_SESSIONS; ++i) {
+        if (constant_equal(db->sessions[i].token, token)) {
+            previous = db->sessions[i].persisted;
+            db->sessions[i].persisted = 1;
+            result = le_auth_save_persisted_sessions(db, path);
+            if (result)
+                db->sessions[i].persisted = previous;
+            return result;
+        }
+    }
+    return -1;
 }
 
 void le_auth_load_sessions(struct le_auth_db *db, const char *path)
@@ -455,6 +490,7 @@ void le_auth_load_sessions(struct le_auth_db *db, const char *path)
         snprintf(db->sessions[slot].username,
                  sizeof(db->sessions[slot].username), "%s", username);
         db->sessions[slot].expires = (time_t)expires;
+        db->sessions[slot].persisted = 1;
         ++slot;
     }
     fclose(f);

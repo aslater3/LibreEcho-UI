@@ -322,6 +322,13 @@ int main(void)
     CHECK(strstr(response, "\"follow_up\":true") != NULL);
     CHECK(strstr(response, "\"follow_up\":false") != NULL);
     CHECK(write_history_fixture(history_path) == 0);
+    CHECK(rename(history_path, history_backup_path) == 0);
+    {
+        FILE *history = fopen(history_path, "w");
+        CHECK(history != NULL);
+        CHECK(fputs("{corrupt", history) >= 0);
+        CHECK(fclose(history) == 0);
+    }
     kill(child, SIGTERM);
     CHECK(waitpid(child, NULL, 0) == child);
     child = -1;

@@ -677,70 +677,87 @@ static void append_history_record(struct agent_state *state,
         ++state->turn_history_count;
 }
 
-static int load_history(struct agent_state *state)
+static int load_history_file(struct agent_state *state, const char *path)
 {
     char json[LE_ADAPTER_MSG_MAX];
     char object[1024];
+    struct turn_record records[LE_AGENT_TURN_HISTORY];
     const char *array;
     const char *at;
     uint64_t generation;
+    unsigned next = 0;
+    unsigned count = 0;
+    unsigned long long loaded_generation = state->history_generation;
 
-    if (config_read(state->history_generation_path, json, sizeof(json)) < 0 ||
+    if (config_read(path, json, sizeof(json)) < 0 ||
         !json_valid_object(json, strlen(json)))
         return -1;
     if (json_get_u64(json, "history_generation", &generation) > 0 &&
         generation)
-        state->history_generation = (unsigned long long)generation;
+        loaded_generation = (unsigned long long)generation;
     array = strstr(json, "\"turns\"");
     array = array ? strchr(array, '[') : NULL;
-    if (!array)
-        return 0;
-    at = array + 1;
-    for (;;) {
-        const char *end;
-        size_t length;
-        struct turn_record record;
-        int follow_up;
+    if (array) {
+        at = array + 1;
+        for (;;) {
+            const char *end;
+            size_t length;
+            struct turn_record record;
+            int follow_up;
 
-        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n' ||
-               *at == ',')
+            while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n' ||
+                   *at == ',')
+                ++at;
+            if (*at == ']')
+                break;
+            if (*at != '{')
+                return -1;
+            end = strchr(at, '}');
+            if (!end)
+                return -1;
+            length = (size_t)(end - at + 1);
+            if (length >= sizeof(object))
+                return -1;
+            memcpy(object, at, length);
+            object[length] = '\0';
+            memset(&record, 0, sizeof(record));
+            if (json_get_u64(object, "at_ms", &record.at_ms) < 1 ||
+                json_get_u64(object, "stt_audio_ms", &record.stt_audio_ms) < 1 ||
+                json_get_u64(object, "stt_processing_ms",
+                             &record.stt_processing_ms) < 1 ||
+                json_get_u64(object, "stt_total_ms", &record.stt_total_ms) < 1 ||
+                json_get_u64(object, "first_text_ms", &record.first_text_ms) < 1 ||
+                json_get_u64(object, "first_announce_ms",
+                             &record.first_announce_ms) < 1 ||
+                json_get_u64(object, "first_pcm_ms", &record.first_pcm_ms) < 1 ||
+                json_get_bool(object, "follow_up", &follow_up) < 1)
+                return -1;
+            record.follow_up = follow_up;
+            if (json_get_string(object, "request_id", record.request_id,
+                                sizeof(record.request_id)) < 0)
+                return -1;
+            records[next] = record;
+            next = (next + 1) % LE_AGENT_TURN_HISTORY;
+            if (count < LE_AGENT_TURN_HISTORY)
+                ++count;
+            at = end + 1;
+            if (*at == ']')
+                break;
+            if (*at != ',')
+                return -1;
             ++at;
-        if (*at == ']')
-            return 0;
-        if (*at != '{')
-            return -1;
-        end = strchr(at, '}');
-        if (!end)
-            return -1;
-        length = (size_t)(end - at + 1);
-        if (length >= sizeof(object))
-            return -1;
-        memcpy(object, at, length);
-        object[length] = '\0';
-        memset(&record, 0, sizeof(record));
-        if (json_get_u64(object, "at_ms", &record.at_ms) < 1 ||
-            json_get_u64(object, "stt_audio_ms", &record.stt_audio_ms) < 1 ||
-            json_get_u64(object, "stt_processing_ms",
-                         &record.stt_processing_ms) < 1 ||
-            json_get_u64(object, "stt_total_ms", &record.stt_total_ms) < 1 ||
-            json_get_u64(object, "first_text_ms", &record.first_text_ms) < 1 ||
-            json_get_u64(object, "first_announce_ms",
-                         &record.first_announce_ms) < 1 ||
-            json_get_u64(object, "first_pcm_ms", &record.first_pcm_ms) < 1 ||
-            json_get_bool(object, "follow_up", &follow_up) < 1)
-            return -1;
-        record.follow_up = follow_up;
-        if (json_get_string(object, "request_id", record.request_id,
-                            sizeof(record.request_id)) < 0)
-            return -1;
-        append_history_record(state, &record);
-        at = end + 1;
-        if (*at == ']')
-            return 0;
-        if (*at != ',')
-            return -1;
-        ++at;
+        }
     }
+    state->history_generation = loaded_generation;
+    memcpy(state->turn_history, records, sizeof(records));
+    state->turn_history_next = next;
+    state->turn_history_count = count;
+    return 0;
+}
+
+static int load_history(struct agent_state *state)
+{
+    return load_history_file(state, state->history_generation_path);
 }
 
 static int command_history_clear(struct agent_state *state, int client_fd,
@@ -1898,13 +1915,18 @@ int main(int argc, char **argv)
 
         snprintf(backup, sizeof(backup), "%s.bak",
                  state.history_generation_path);
-        file = fopen(state.history_generation_path, "r");
-        if (file) {
-            if (fscanf(file, "%llu", &saved) == 1 && saved) {
-                state.history_generation = saved;
-                loaded = 1;
+        /* A JSON backup contains the recoverable turn ring, not just a counter. */
+        if (load_history_file(&state, backup) == 0)
+            loaded = 1;
+        if (!loaded) {
+            file = fopen(state.history_generation_path, "r");
+            if (file) {
+                if (fscanf(file, "%llu", &saved) == 1 && saved) {
+                    state.history_generation = saved;
+                    loaded = 1;
+                }
+                fclose(file);
             }
-            fclose(file);
         }
         if (!loaded) {
             file = fopen(backup, "r");

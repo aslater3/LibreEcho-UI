@@ -1376,7 +1376,8 @@ function bindRadio(r){
   * is typed in the row -- so an edited or newly added row cannot be played
   * until it is saved, and saying so beats a 404 the user has to interpret.
   */
- const saved=new Set(stations.filter(st=>st.enabled!==false).map(st=>st.word));
+ const persisted=new Map(stations.map(st=>[st.word,st]));
+ const sameStation=(a,b)=>a&&b&&a.word===b.word&&a.name===b.name&&a.url===b.url&&(a.enabled!==false)===(b.enabled!==false);
  function showNow(data){
   const now=$('#radio-now'),stop=$('#radio-stop');
   if(!now)return;
@@ -1388,8 +1389,8 @@ function bindRadio(r){
  list.addEventListener('click',async e=>{
   const b=e.target.closest('.radio-play');
   if(!b)return;
-  const row=b.closest('[data-radio-row]'),v=read(row);
-  if(!saved.has(v.word)){toast(v.word&&stations.some(st=>st.word===v.word)?'That station is switched off':'Save the station before playing it',true);return}
+  const row=b.closest('[data-radio-row]'),v=read(row),stored=persisted.get(v.word);
+  if(!stored||!sameStation(stored,v)){toast(stored&&sameStation(stored,v)?'That station is switched off':'Save the station before playing it',true);return}
   if(state.busy)return;
   setBusy(true);
   try{showNow(await api('/integrations/radio/play',{method:'POST',body:JSON.stringify({word:v.word})}))}

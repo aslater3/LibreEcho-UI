@@ -14,6 +14,7 @@ int main(void)
 {
     char users[128], sessions[160], bootstrap_users[128];
     char bootstrap_sessions[160], csrf[65], token[LE_AUTH_TOKEN_MAX];
+    char http_token[LE_AUTH_TOKEN_MAX];
     struct le_auth_db seed;
     struct le_backend *backend = NULL;
     struct api_context api;
@@ -53,6 +54,12 @@ int main(void)
     memset(&response, 0, sizeof(response));
     api_handle(&api, &request, &response);
     CHECK(response.status == 200);
+    {
+        const char *start = strstr(response.body, "\"token\":\"");
+        CHECK(start != NULL);
+        start += strlen("\"token\":\"");
+        CHECK(sscanf(start, "%64[0-9a-f]", http_token) == 1);
+    }
     CHECK(access(sessions, F_OK) != 0);
 
     request.https = 1;
@@ -66,6 +73,15 @@ int main(void)
         CHECK(start != NULL);
         start += strlen("\"token\":\"");
         CHECK(sscanf(start, "%64[0-9a-f]", token) == 1);
+    {
+        char persisted[256] = {0};
+        FILE *file = fopen(sessions, "r");
+        CHECK(file != NULL);
+        CHECK(fread(persisted, 1, sizeof(persisted) - 1, file) < sizeof(persisted));
+        CHECK(fclose(file) == 0);
+        CHECK(strstr(persisted, token) != NULL);
+        CHECK(strstr(persisted, http_token) == NULL);
+    }
     }
     snprintf(request.method, sizeof(request.method), "POST");
     snprintf(request.path, sizeof(request.path), "/api/v1/auth/logout");
@@ -84,6 +100,7 @@ int main(void)
         CHECK(fread(persisted, 1, sizeof(persisted) - 1, file) < sizeof(persisted));
         CHECK(fclose(file) == 0);
         CHECK(strstr(persisted, token) == NULL);
+        CHECK(strstr(persisted, http_token) == NULL);
     }
 
     CHECK(api_init(&bootstrap, backend, 0, 0, NULL, NULL, csrf, NULL,

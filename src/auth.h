@@ -20,6 +20,7 @@ struct le_auth_session {
     char token[LE_AUTH_TOKEN_MAX];
     char username[LE_AUTH_USERNAME_MAX];
     time_t expires;
+    int persisted;
 };
 
 struct le_auth_db {
@@ -55,6 +56,10 @@ void le_auth_logout(struct le_auth_db *db, const char *token);
  * yields no sessions rather than failing startup.
  */
 int le_auth_save_sessions(const struct le_auth_db *db, const char *path);
+int le_auth_save_persisted_sessions(const struct le_auth_db *db,
+                                    const char *path);
+int le_auth_save_issued_session(struct le_auth_db *db, const char *path,
+                                const char *token);
 void le_auth_load_sessions(struct le_auth_db *db, const char *path);
 int le_auth_add_user(struct le_auth_db *db, const char *path,
                      const char *username, const char *password);
