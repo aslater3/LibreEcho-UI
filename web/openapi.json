@@ -3011,8 +3011,13 @@
          "$ref": "#/components/schemas/FeatureState"
         },
         "error": {
+         "type": "object",
          "nullable": true,
-         "$ref": "#/components/schemas/ApiError"
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/ApiError"
+          }
+         ]
         }
        }
       }
@@ -3038,8 +3043,13 @@
          "$ref": "#/components/schemas/NetworkState"
         },
         "error": {
+         "type": "object",
          "nullable": true,
-         "$ref": "#/components/schemas/ApiError"
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/ApiError"
+          }
+         ]
         }
        }
       }
@@ -3073,8 +3083,13 @@
       "nullable": true
      },
      "error": {
+      "type": "object",
       "nullable": true,
-      "$ref": "#/components/schemas/ApiError"
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/ApiError"
+       }
+      ]
      }
     }
    },
@@ -3355,8 +3370,13 @@
       }
      },
      "error": {
+      "type": "object",
       "nullable": true,
-      "$ref": "#/components/schemas/ApiError"
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/ApiError"
+       }
+      ]
      }
     }
    }

@@ -8,8 +8,26 @@ return, while a malformed acoustic value must return before either setting is
 changed.
 """
 from pathlib import Path
+import json
 
 api_c = Path("src/api.c").read_text(encoding="utf-8")
+openapi = json.loads(Path("web/openapi.json").read_text(encoding="utf-8"))
+
+
+def assert_no_nullable_ref_siblings(value):
+    if isinstance(value, dict):
+        assert not ("$ref" in value and "nullable" in value), (
+            "OpenAPI 3.0 Reference Objects must not carry nullable siblings"
+        )
+        for child in value.values():
+            assert_no_nullable_ref_siblings(child)
+    elif isinstance(value, list):
+        for child in value:
+            assert_no_nullable_ref_siblings(child)
+
+
+assert_no_nullable_ref_siblings(openapi)
+
 features_start = api_c.index('if(!strcmp(p,"/api/v1/system/features"))')
 features_end = api_c.index('if(!strcmp(p,"/api/v1/integrations/radio/play")', features_start)
 features = api_c[features_start:features_end]
@@ -50,8 +68,14 @@ assert 'json_get_top_level_bool(q->body,q->body_len,"acoustic_events",&av)' in f
 import_start = api_c.index('static int import_configuration(')
 import_end = api_c.index('static int read_central_logs(', import_start)
 importer = api_c[import_start:import_end]
-assert 'json_get_top_level_bool(j,strlen(j),"feature_acoustic_events"' in importer, (
-    "config import must read the exported acoustic feature flag only at top level"
+assert 'json_duplicate_key(j,n,"feature_acoustic_events")' in importer, (
+    "config import must reject duplicate acoustic feature fields"
+)
+assert 'json_get_top_level_bool(j,n,"feature_acoustic_events"' in importer, (
+    "config import must use the bounded request length for the top-level field"
+)
+assert 'json_get_top_level_bool(j,strlen(j),"feature_acoustic_events"' not in importer, (
+    "config import must not scan beyond the bounded request body"
 )
 assert 'json_get_bool(j,"feature_acoustic_events"' not in importer, (
     "config import must not use the depth-insensitive feature parser"
@@ -59,5 +83,13 @@ assert 'json_get_bool(j,"feature_acoustic_events"' not in importer, (
 assert 'if(acoustic_events_field>0)c->feature_acoustic_events=acoustic_events;' in importer, (
     "config import must restore the acoustic feature flag"
 )
+
+feature_path = openapi["paths"]["/system/features"]
+response_ref = feature_path["get"]["responses"]["200"]["$ref"]
+response_name = response_ref.rsplit("/", 1)[-1]
+response_schema = openapi["components"]["responses"][response_name]["content"]["application/json"]["schema"]
+error_schema = response_schema["properties"]["error"]
+assert error_schema["type"] == "object" and error_schema["nullable"] is True
+assert error_schema["allOf"] == [{"$ref": "#/components/schemas/ApiError"}]
 
 print("acoustic events review contracts: ok")
