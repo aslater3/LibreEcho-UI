@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #define LE_AIRPLAY_ACTIVE_PATH "/tmp/libreecho-audiod-review-airplay.active"
+#define LE_SOUND_DIR "/tmp/libreecho-audiod-review-sounds"
 #define main audiod_program_main
 #include "../src/adapter/audiod.c"
 #undef main
@@ -35,6 +36,30 @@ int main(void)
     int i;
     pid_t pid;
     int status;
+    FILE *sample;
+
+    (void)unlink(LE_AIRPLAY_ACTIVE_PATH);
+    (void)unlink(LE_SOUND_DIR "/preview.raw");
+    (void)rmdir(LE_SOUND_DIR "/directory.raw");
+    (void)rmdir(LE_SOUND_DIR);
+    (void)mkdir(LE_SOUND_DIR, 0700);
+    sample = fopen(LE_SOUND_DIR "/preview.raw", "wb");
+    require_condition(sample != NULL, "could not create sample fixture");
+    require_condition(fputc(0, sample) != EOF,
+                      "could not write sample fixture");
+    require_condition(fclose(sample) == 0, "could not close sample fixture");
+    fd = sample_open_fd("preview");
+    require_condition(fd >= 0, "readable sample was not opened before playback");
+    close(fd);
+    require_condition(sample_open_fd("missing") < 0,
+                      "missing sample was accepted before playback");
+    require_condition(mkdir(LE_SOUND_DIR "/directory.raw", 0700) == 0,
+                      "could not create directory sample fixture");
+    require_condition(sample_open_fd("directory") < 0,
+                      "directory sample was accepted before playback");
+    (void)unlink(LE_SOUND_DIR "/preview.raw");
+    (void)rmdir(LE_SOUND_DIR "/directory.raw");
+    (void)rmdir(LE_SOUND_DIR);
 
     (void)unlink(LE_AIRPLAY_ACTIVE_PATH);
     require_condition(!airplay_media_active(),
