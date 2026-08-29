@@ -1089,7 +1089,7 @@ static int radio_apply(struct api_context *c, const char *j)
     struct le_radio_station staged[LE_MAX_RADIO_STATIONS];
     char key[48], text[512];
     size_t i, k, staged_count = 0;
-    int count = 0, value, enabled_result;
+    int count = 0, value, enabled_result, name_result;
 
     if (json_get_int(j, "station_count", &count) < 1 || count < 0 ||
         count > LE_MAX_RADIO_STATIONS)
@@ -1109,7 +1109,10 @@ static int radio_apply(struct api_context *c, const char *j)
             return LE_INVALID;
         snprintf(st->url, sizeof(st->url), "%s", text);
         snprintf(key, sizeof(key), "station_%zu_name", i);
-        if (json_get_string(j, key, text, sizeof(text)) < 1 || !text[0])
+        name_result = json_get_string(j, key, text, sizeof(text));
+        if (name_result < 0)
+            return LE_INVALID;
+        if (name_result == 0 || !text[0])
             snprintf(text, sizeof(text), "%s", st->word);
         if (strlen(text) >= sizeof(st->name))
             return LE_INVALID;

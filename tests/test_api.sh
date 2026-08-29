@@ -73,6 +73,11 @@ code=$(curl -sS -o /tmp/le-malformed-radio-enabled.out -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     --data '{"station_count":1,"station_0_word":"test","station_0_name":"Test","station_0_url":"https://example.com/test","station_0_enabled":"yes"}')
 [ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-radio-name.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/integrations/radio" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"station_count":1,"station_0_word":"test","station_0_name":123,"station_0_url":"http://example.com/test"}')
+[ "$code" = 400 ]
 curl -fsS "$URL/api/v1/integrations/radio" | jq -e '.ok and (.data.stations | length) == 0' >/dev/null
 ! grep -q 'top-secret' "$CFG"
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'

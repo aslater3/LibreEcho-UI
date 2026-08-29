@@ -72,6 +72,9 @@ radio_apply = api[radio_apply_start:radio_apply_end]
 assert radio_apply.index("radio_save(c, staged, staged_count)") < radio_apply.index("memcpy(c->radio")
 assert "enabled_result = json_get_bool(j, key, &value)" in radio_apply
 assert "if (enabled_result < 0)" in radio_apply
+assert "name_result = json_get_string(j, key, text, sizeof(text));" in radio_apply
+assert "if (name_result < 0)" in radio_apply
+assert "if (name_result == 0 || !text[0])" in radio_apply
 assert "return LE_INVALID;" in radio_apply
 assert "enabled_result = json_get_bool(saved, key, &value)" in api
 
