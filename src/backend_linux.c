@@ -1742,12 +1742,14 @@ static int timer_entry_parse(const char *entry, struct le_timer_entry *item)
         json_get_string_top_level(entry, "kind", item->kind,
                                   sizeof(item->kind)) != 1 ||
         json_get_string_top_level(entry, "state", item->state,
-                                  sizeof(item->state)) != 1 ||
-        json_get_string_top_level(entry, "label", item->label,
+                                  sizeof(item->state)) != 1)
+        return 0;
+    if (json_get_string_top_level(entry, "label", item->label,
                                   sizeof(item->label)) != 1)
         return 0;
-    if (!timer_valid_utf8(item->label, strlen(item->label)) ||
-        (strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm")) ||
+    if (!timer_valid_utf8(item->label, strlen(item->label)))
+        return 0;
+    if ((strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm")) ||
         (strcmp(item->state, "pending") && strcmp(item->state, "ringing")))
         return 0;
     item->id = (unsigned)id;
