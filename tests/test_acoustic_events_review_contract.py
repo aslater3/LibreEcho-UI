@@ -96,7 +96,7 @@ response_ref = feature_path["get"]["responses"]["200"]["$ref"]
 response_name = response_ref.rsplit("/", 1)[-1]
 response_schema = openapi["components"]["responses"][response_name]["content"]["application/json"]["schema"]
 error_schema = response_schema["properties"]["error"]
-assert error_schema["type"] == "object" and error_schema["nullable"] is True
-assert error_schema["allOf"] == [{"$ref": "#/components/schemas/ApiError"}]
+assert error_schema == {"$ref": "#/components/schemas/ApiError"}
+assert openapi["components"]["schemas"]["ApiError"]["nullable"] is True
 
 print("acoustic events review contracts: ok")
