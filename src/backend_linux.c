@@ -1821,14 +1821,20 @@ static int timer_cancel(struct le_backend *b, unsigned id)
 static int timer_dismiss(struct le_backend *b, int *stopped)
 {
     char response[LE_ADAPTER_MSG_MAX];
+    long long dismissed = 0;
     int rc;
     (void)b;
 
     rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "dismiss", "{}", response,
                          sizeof(response));
-    if (rc == LE_OK && stopped)
-        (void)json_get_int(response, "dismissed", stopped);
-    return rc;
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "dismissed", &dismissed) != 1 ||
+        dismissed < 0 || dismissed > INT_MAX)
+        return LE_IO;
+    if (stopped)
+        *stopped = (int)dismissed;
+    return LE_OK;
 }
 
 static int airplay(struct le_backend *b, struct le_airplay_state *o)

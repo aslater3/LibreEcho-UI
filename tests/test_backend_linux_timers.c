@@ -64,6 +64,13 @@ int main(void)
     }
     test_response = "{\"id\":\"bad\"}";
     assert(timer_add(NULL, 60, "tea", NULL) == LE_IO);
+    test_response = "{\"dismissed\":3}";
+    {
+        int stopped = 0;
+        assert(timer_dismiss(NULL, &stopped) == LE_OK && stopped == 3);
+    }
+    test_response = "{\"dismissed\":\"bad\"}";
+    assert(timer_dismiss(NULL, NULL) == LE_IO);
 
     puts("Linux timer status transport failures propagate: ok");
     return 0;
