@@ -228,6 +228,11 @@ int main(void)
         assert(state_load_at(&legacy, 0, SYNCED_EPOCH) == 1);
         timer = le_timer_find(&legacy.timers, 1);
         assert(timer != NULL && !strcmp(timer->label, "@hex:tea"));
+        le_timer_set_init(&legacy.timers);
+        write_text(path, "countdown 1767226200   tea\n");
+        assert(state_load_at(&legacy, 0, SYNCED_EPOCH) == 1);
+        timer = le_timer_find(&legacy.timers, 1);
+        assert(timer != NULL && !strcmp(timer->label, "  tea"));
         unlink(path);
         unlink(backup);
     }

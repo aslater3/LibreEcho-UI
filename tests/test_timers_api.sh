@@ -173,4 +173,17 @@ grep -q "\['Timers'," /tmp/le-app.js \
     || { echo "FAIL: timers are missing from the navigation"; exit 1; }
 echo "  timers page is wired into the UI: ok"
 
+# Linux timer writes must retain the backend result so operational failures are
+# reported as `io` rather than being mislabeled as an absent daemon.
+python3 - <<'PY'
+from pathlib import Path
+source = Path("src/api.c").read_text()
+start = source.index('if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"POST"))')
+end = source.index('if(!strcmp(p,"/api/v1/device")', start)
+block = source[start:end]
+assert block.count('err(r,503,rc,"Timer service is unavailable")') == 3
+assert 'err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable")' not in block
+PY
+echo "  timer write error codes preserved: ok"
+
 echo "timers api: ok"

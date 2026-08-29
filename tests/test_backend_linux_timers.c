@@ -35,6 +35,14 @@ int main(void)
 
     test_adapter_rc = LE_IO;
     assert(timers(NULL, &list) == LE_IO);
+    {
+        unsigned id = 0;
+        int stopped = 0;
+
+        assert(timer_add(NULL, 60, "tea", &id) == LE_IO);
+        assert(timer_cancel(NULL, 1) == LE_IO);
+        assert(timer_dismiss(NULL, &stopped) == LE_IO);
+    }
 
     test_adapter_rc = LE_OK;
     assert(timers(NULL, &list) == LE_OK);

@@ -21,6 +21,7 @@
 #include "../json.h"
 #include "../log.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -173,6 +174,61 @@ static int state_decode_label(const char *text, char *out, size_t size)
     }
     out[length / 2] = '\0';
     return 1;
+}
+
+/* Parse the fixed header without letting scanf consume label whitespace. The
+   legacy format has one separator after the due time, so every additional
+   space is part of the label. V2 labels are encoded and may safely skip all
+   formatting whitespace before the @hex: value. */
+static int state_parse_header(const char *line, char *kind, size_t kind_size,
+                              long long *due, size_t *label_offset, int *v2)
+{
+    const char *cursor = line;
+    const char *token;
+    char *number_end;
+    size_t length;
+
+    if (!line || !kind || kind_size == 0 || !due || !label_offset || !v2)
+        return -1;
+    while (*cursor && isspace((unsigned char)*cursor))
+        ++cursor;
+    *v2 = 0;
+    if (!strncmp(cursor, "v2", 2) &&
+        isspace((unsigned char)cursor[2])) {
+        *v2 = 1;
+        cursor += 2;
+        while (*cursor && isspace((unsigned char)*cursor))
+            ++cursor;
+    }
+    token = cursor;
+    while (*cursor && !isspace((unsigned char)*cursor))
+        ++cursor;
+    length = (size_t)(cursor - token);
+    if (!length || length >= kind_size)
+        return -1;
+    memcpy(kind, token, length);
+    kind[length] = '\0';
+    if (!*cursor)
+        return -1;
+    while (*cursor && isspace((unsigned char)*cursor))
+        ++cursor;
+    errno = 0;
+    *due = strtoll(cursor, &number_end, 10);
+    if (errno == ERANGE || number_end == cursor)
+        return -1;
+    if (*number_end && !isspace((unsigned char)*number_end))
+        return -1;
+    if (!*number_end) {
+        *label_offset = (size_t)(number_end - line);
+    } else if (*v2) {
+        while (*number_end && isspace((unsigned char)*number_end))
+            ++number_end;
+        *label_offset = (size_t)(number_end - line);
+    } else {
+        /* Consume exactly the format separator; preserve label whitespace. */
+        *label_offset = (size_t)(number_end + 1 - line);
+    }
+    return 0;
 }
 
 static int fsync_parent(const char *path)
@@ -387,37 +443,31 @@ static int state_load_at(struct context *ctx, long long now_ms,
 
     while (fgets(line, sizeof(line), file)) {
         char kind[16];
-        char record_format[16];
         long long due = 0;
         char label[LE_TIMER_LABEL_MAX];
         unsigned int id = 0;
-        int consumed = 0;
+        size_t label_offset = 0;
         int v2 = 0;
 
         label[0] = '\0';
-        if (sscanf(line, "%15s", record_format) < 1)
+        if (state_parse_header(line, kind, sizeof(kind), &due,
+                               &label_offset, &v2) < 0)
             continue;
-        if (!strcmp(record_format, "v2")) {
-            if (sscanf(line, "v2 %15s %lld %n", kind, &due, &consumed) < 2)
-                continue;
-            v2 = 1;
-        } else if (sscanf(line, "%15s %lld %n", kind, &due, &consumed) < 2) {
-            continue;
-        }
-        if (consumed > 0) {
+        if (label_offset < sizeof(line)) {
             size_t length;
 
-            length = strlen(line + consumed);
-            while (length && (line[consumed + length - 1] == '\n' ||
-                              line[consumed + length - 1] == '\r'))
-                line[consumed + --length] = '\0';
+            length = strlen(line + label_offset);
+            while (length && (line[label_offset + length - 1] == '\n' ||
+                              line[label_offset + length - 1] == '\r'))
+                line[label_offset + --length] = '\0';
             if (v2) {
-                if (state_decode_label(line + consumed, label, sizeof(label)) < 0)
+                if (state_decode_label(line + label_offset, label,
+                                       sizeof(label)) < 0)
                     continue;
             } else {
                 if (length >= sizeof(label))
                     continue;
-                memcpy(label, line + consumed, length + 1);
+                memcpy(label, line + label_offset, length + 1);
             }
         }
 
