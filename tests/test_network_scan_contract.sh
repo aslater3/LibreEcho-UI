@@ -18,8 +18,11 @@ assert 'nl80211_wait_for_scan_event(fd, buffer, NL80211_BUFFER_SIZE,' in source
 assert 'NL80211_SCAN_FRESH_WAIT_MS' not in source
 assert 'TRIGGER_SCAN is only an acknowledgement' not in source
 assert 'struct scan_result' in source
-assert '!strncmp(cell->ssid, "NVRAM WARNING:", 14)' in source
-assert 'wpa_call(ctx, "ADD_NETWORK", reply' in source
+assert 'static int bogus_ssid(const char *ssid)' in source
+assert 'if (bogus_ssid(ssid))' in source
+assert 'static int wait_for_association(' in source
+assert 'Wi-Fi association did not complete' in source
+assert "while (command_length && command[command_length - 1] == '\\n')" in source
 assert 'Wi-Fi password rejected by wpa_supplicant' in source
 assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
 assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));' in source

@@ -373,13 +373,17 @@ static int wpa_ctrl_request(struct wpa_ctrl *ctrl, const char *command,
     struct pollfd pfd;
     long long deadline = monotonic_ms() + timeout_ms;
     ssize_t sent;
+    size_t command_length;
 
     if (ctrl->fd < 0 || !command || !reply || size < 2) {
         errno = EINVAL;
         return -1;
     }
-    sent = send(ctrl->fd, command, strlen(command), MSG_NOSIGNAL);
-    if (sent < 0 || (size_t)sent != strlen(command))
+    command_length = strlen(command);
+    while (command_length && command[command_length - 1] == '\n')
+        --command_length;
+    sent = send(ctrl->fd, command, command_length, MSG_NOSIGNAL);
+    if (sent < 0 || (size_t)sent != command_length)
         return -1;
 
     for (;;) {
@@ -1406,6 +1410,8 @@ static const char *scan_security(const char *flags)
     return "open";
 }
 
+static int bogus_ssid(const char *ssid);
+
 static int parse_scan_results(const char *reply, char *data, size_t size)
 {
     const char *line = reply;
@@ -1440,6 +1446,12 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
             copy_string(signal, sizeof(signal), fields[2]);
             copy_string(flags, sizeof(flags), fields[3]);
             copy_string(ssid, sizeof(ssid), fields[4]);
+            if (bogus_ssid(ssid)) {
+                if (!end)
+                    break;
+                line = end + 1;
+                continue;
+            }
             level = (int)strtol(signal, NULL, 10);
             for (i = 0; i < count; ++i) {
                 if (!strcmp(results[i].ssid, ssid)) {
@@ -1487,6 +1499,26 @@ struct wext_scan_cell {
     int signal;
     int encrypted;
 };
+
+static int bogus_ssid(const char *ssid)
+{
+    size_t i;
+    if (!ssid || !*ssid || !strncmp(ssid, "NVRAM WARNING:", 14))
+        return 1;
+    if (!strncmp(ssid, "\\x00", 4)) {
+        for (i = 0; ssid[i]; ++i)
+            if (ssid[i] != '\\' && ssid[i] != 'x' &&
+                (ssid[i] < '0' || ssid[i] > '9') &&
+                (ssid[i] < 'a' || ssid[i] > 'f') &&
+                (ssid[i] < 'A' || ssid[i] > 'F'))
+                return 0;
+        return 1;
+    }
+    for (i = 0; ssid[i]; ++i)
+        if ((unsigned char)ssid[i] < 32)
+            return 1;
+    return 0;
+}
 
 static int wext_signal_percent(const struct iw_quality *quality)
 {
@@ -1603,9 +1635,7 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
         struct wext_scan_cell *cell = &cells[i];
         size_t j;
         int best = 1;
-        if (!cell->ssid[0])
-            continue;
-        if (!strncmp(cell->ssid, "NVRAM WARNING:", 14))
+        if (bogus_ssid(cell->ssid))
             continue;
         for (j = 0; j < i; ++j)
             if (!strcmp(cells[j].ssid, cell->ssid) &&
@@ -2433,6 +2463,20 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
     return 0;
 }
 
+static int wait_for_association(struct daemon_ctx *ctx)
+{
+    char reply[WPA_REPLY_MAX], state[32];
+    long long deadline = monotonic_ms() + 4500;
+    while (monotonic_ms() < deadline) {
+        if (wpa_call(ctx, "STATUS\n", reply, sizeof(reply)) >= 0 &&
+            wpa_value(reply, "wpa_state", state, sizeof(state)) &&
+            !strcmp(state, "COMPLETED"))
+            return 0;
+        (void)poll(NULL, 0, 100);
+    }
+    return -8;
+}
+
 static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
 {
     char cmd[64], *args = NULL;
@@ -2528,6 +2572,13 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
                               connect_result == -6 ? "Wi-Fi password rejected by wpa_supplicant" :
                               connect_result == -7 ? "Wi-Fi network could not be enabled or selected" :
                               "wpa_supplicant rejected the network");
+            return;
+        }
+        connect_result = wait_for_association(ctx);
+        if (connect_result < 0) {
+            le_log_error("networkd: WPA2 association did not complete for ssid=\"%s\"", ssid);
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "Wi-Fi association did not complete");
             return;
         }
         reset_network_health(ctx, monotonic_ms());
