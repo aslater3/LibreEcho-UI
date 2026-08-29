@@ -1645,6 +1645,72 @@ static const char *next_array_object(const char *cursor, char *out,
     return NULL;
 }
 
+static int timer_entry_parse(const char *entry, struct le_timer_entry *item)
+{
+    long long id = 0;
+    long long remaining = 0;
+
+    if (!entry || !item || !json_valid_object(entry, strlen(entry)))
+        return 0;
+    if (json_get_int64_top_level(entry, "id", &id) != 1 || id <= 0 ||
+        id > UINT_MAX ||
+        json_get_int64_top_level(entry, "seconds_remaining", &remaining) != 1 ||
+        remaining < 0 || remaining > LONG_MAX ||
+        json_get_string_top_level(entry, "kind", item->kind,
+                                  sizeof(item->kind)) != 1 ||
+        json_get_string_top_level(entry, "state", item->state,
+                                  sizeof(item->state)) != 1 ||
+        json_get_string_top_level(entry, "label", item->label,
+                                  sizeof(item->label)) != 1)
+        return 0;
+    if ((strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm")) ||
+        (strcmp(item->state, "pending") && strcmp(item->state, "ringing")))
+        return 0;
+    item->id = (unsigned)id;
+    item->seconds_remaining = (long)remaining;
+    return 1;
+}
+
+static int timer_array_parse(const char *array, size_t array_size,
+                             struct le_timer_list *out)
+{
+    const char *cursor;
+    const char *end;
+    char entry[512];
+
+    if (!array || array_size < 2 || array[0] != '[' ||
+        array[array_size - 1] != ']')
+        return 0;
+    cursor = array + 1;
+    end = array + array_size - 1;
+    while (cursor < end && isspace((unsigned char)*cursor))
+        ++cursor;
+    if (cursor == end)
+        return 1;
+    for (;;) {
+        const char *next;
+
+        if (cursor >= end || *cursor != '{' ||
+            out->count >= (int)(sizeof(out->items) / sizeof(out->items[0])))
+            return 0;
+        next = next_array_object(cursor, entry, sizeof(entry));
+        if (!next || next > end ||
+            !timer_entry_parse(entry, &out->items[out->count]))
+            return 0;
+        ++out->count;
+        cursor = next;
+        while (cursor < end && isspace((unsigned char)*cursor))
+            ++cursor;
+        if (cursor == end)
+            return 1;
+        if (*cursor != ',')
+            return 0;
+        ++cursor;
+        while (cursor < end && isspace((unsigned char)*cursor))
+            ++cursor;
+    }
+}
+
 #ifdef LE_TIMER_JSON_TEST
 const char *le_test_next_array_object(const char *cursor, char *out,
                                       size_t size)
@@ -1656,8 +1722,9 @@ const char *le_test_next_array_object(const char *cursor, char *out,
 static int timers(struct le_backend *b, struct le_timer_list *o)
 {
     char response[LE_ADAPTER_MSG_MAX];
-    char entry[512];
-    const char *cursor;
+    const char *array;
+    size_t array_size;
+    long long count;
     int rc;
     (void)b;
 
@@ -1671,30 +1738,19 @@ static int timers(struct le_backend *b, struct le_timer_list *o)
             return LE_OK;
         return rc;
     }
+    if (!json_valid_object(response, strlen(response)) ||
+        json_get_int64_top_level(response, "ringing", &count) != 1 ||
+        count < 0 || count > INT_MAX)
+        return LE_IO;
+    o->ringing = (int)count;
+    if (json_get_int64_top_level(response, "missed", &count) != 1 ||
+        count < 0 || count > INT_MAX)
+        return LE_IO;
+    o->missed = (int)count;
+    if (json_get_array_top_level(response, "timers", &array, &array_size) != 1 ||
+        !timer_array_parse(array, array_size, o))
+        return LE_IO;
     o->available = 1;
-    (void)json_get_int(response, "ringing", &o->ringing);
-    (void)json_get_int(response, "missed", &o->missed);
-
-    cursor = strstr(response, "\"timers\"");
-    while (cursor && o->count < (int)(sizeof(o->items) / sizeof(o->items[0]))) {
-        struct le_timer_entry *item = &o->items[o->count];
-        int id = 0, remaining = 0;
-
-        cursor = next_array_object(cursor, entry, sizeof(entry));
-        if (!cursor)
-            break;
-        if (json_get_int(entry, "id", &id) < 1)
-            continue;
-        item->id = (unsigned)id;
-        (void)json_get_int(entry, "seconds_remaining", &remaining);
-        item->seconds_remaining = remaining;
-        (void)json_get_string(entry, "kind", item->kind, sizeof(item->kind));
-        (void)json_get_string(entry, "state", item->state,
-                              sizeof(item->state));
-        (void)json_get_string(entry, "label", item->label,
-                              sizeof(item->label));
-        ++o->count;
-    }
     return LE_OK;
 }
 

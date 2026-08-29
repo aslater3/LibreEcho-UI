@@ -278,10 +278,11 @@ returns `{ "dismissed": number }`. Requires `X-LibreEcho-CSRF`.
 
 #### DELETE /api/v1/timers/{id}
 
-Cancels one pending timer by numeric ID. The entire path component must be a
-nonzero decimal integer; malformed or out-of-range IDs return HTTP 404 without
-calling the backend. Requires `X-LibreEcho-CSRF`; a missing or already-cancelled
-ID returns HTTP 404.
+Cancels one pending timer by numeric ID. Ringing timers are not cancelled by
+this route; use `/timers/dismiss` to silence them. The entire path component
+must be a nonzero decimal integer; malformed, ringing, out-of-range, missing,
+or already-cancelled IDs return HTTP 404 without removing another timer.
+Requires `X-LibreEcho-CSRF`.
 
 The timer page refreshes its status while open so countdowns and ringing state
 remain current. Timer state is persisted atomically with a restrictive

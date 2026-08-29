@@ -1210,7 +1210,7 @@
   "/timers/{id}": {
    "delete": {
     "tags": ["Timers"],
-    "summary": "Cancel a timer",
+    "summary": "Cancel a pending timer; use dismiss for ringing timers",
     "security": [{"BearerAuth": []}],
     "parameters": [
      {"$ref": "#/components/parameters/Csrf"},

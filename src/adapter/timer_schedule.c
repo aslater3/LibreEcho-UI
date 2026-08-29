@@ -153,7 +153,7 @@ int le_timer_cancel(struct le_timer_set *set, unsigned int id)
 {
     struct le_timer *timer = le_timer_find(set, id);
 
-    if (!timer)
+    if (!timer || timer->state != LE_TIMER_STATE_PENDING)
         return LE_TIMER_ERR_NOT_FOUND;
     memset(timer, 0, sizeof(*timer));
     return LE_TIMER_OK;

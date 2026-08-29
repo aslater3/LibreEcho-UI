@@ -275,6 +275,31 @@ int json_get_int64_top_level(const char *s, const char *k, long long *out)
     return p ? json_get_int64_at(p, out) : 0;
 }
 
+int json_get_array_top_level(const char *s, const char *k,
+                             const char **out, size_t *size)
+{
+    struct json_cursor c;
+    const char *p = find_top_level_key(s, k);
+    size_t start;
+
+    if (!p)
+        return 0;
+    if (*p != '[')
+        return -1;
+    start = (size_t)(p - s);
+    c.s = s;
+    c.n = strlen(s);
+    c.i = start;
+    c.depth = 0;
+    if (!parse_array(&c))
+        return -1;
+    if (out)
+        *out = p;
+    if (size)
+        *size = c.i - start;
+    return 1;
+}
+
 int json_get_uint(const char *s, const char *k, unsigned int *out)
 {
     char *e; unsigned long v; const char *p = find_key(s, k);

@@ -30,6 +30,18 @@ done
 curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$id" '.data.timers | length == 1 and .[0].id == $id' >/dev/null
 echo "  malformed timer ids refused without cancellation: ok"
 
+# DELETE is for pending timers; a ringing timer must be handled by dismiss.
+ring_id=$(curl -fsS -X POST "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" --data '{"seconds":1,"label":"ring"}' \
+    | jq -r '.data.id')
+sleep 2
+curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$ring_id" \
+    '.data.timers[] | select(.id == $id) | .state == "ringing"' >/dev/null
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/timers/$ring_id" -H "$CSRF")
+[ "$code" = 404 ] || { echo "FAIL: deleting ringing timer returned $code, expected 404"; exit 1; }
+curl -fsS -X POST "$URL/api/v1/timers/dismiss" -H "$CSRF" -H "$JSON" --data '{}' >/dev/null
+echo "  ringing timers require dismiss: ok"
+
 # Labels are bounded API fields and must be rejected rather than truncated.
 long_label=$(python3 -c 'print("x" * 48)')
 code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
