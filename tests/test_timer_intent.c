@@ -155,6 +155,10 @@ int main(void)
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(intent.label[0] == '\0');
+        assert(le_timer_intent_parse("don't cancel my timer", &intent) ==
+               LE_TIMER_INTENT_NONE);
+        assert(le_timer_intent_parse("do not cancel all timers", &intent) ==
+               LE_TIMER_INTENT_NONE);
         /* A numeric first word is not enough to classify a stored name as a
            quantity: "two eggs" is a legitimate timer label. */
         assert(le_timer_intent_parse("cancel the two eggs timer", &intent) ==

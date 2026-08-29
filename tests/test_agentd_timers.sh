@@ -271,6 +271,23 @@ for phrase in 'cancel one timer' 'cancel two timers'; do
     esac
 done
 
+# Explicit negation must not turn into a destructive cancellation. With the
+# alpha and beta timers still pending, both forms must fall through to the
+# unavailable model and leave the schedule unchanged.
+for phrase in "don't cancel all timers" "do not cancel my timer"; do
+    out=$(call "$agent_sock" respond "{\"text\":\"$phrase\"}")
+    case "$out" in
+        *'"ok":false'*) ;;
+        *) echo "FAIL: negated cancellation was handled destructively: $out"; exit 1 ;;
+    esac
+done
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: negated cancellation changed the schedule: $out"; exit 1 ;;
+esac
+echo "  negated cancellation leaves the schedule unchanged: ok"
+
 # The "every one of" construction is universal, even though "one" appears
 # between the quantifier and the timer noun.
 out=$(call "$agent_sock" respond '{"text":"cancel every one of my timers"}')

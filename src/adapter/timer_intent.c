@@ -517,6 +517,11 @@ enum le_timer_intent_kind le_timer_intent_parse(
 
     if (has_word(text, "cancel") || has_word(text, "delete") ||
         has_word(text, "remove") || has_word(text, "clear")) {
+        /* A negated cancellation is not an instruction to mutate the
+           schedule. Check this before extracting labels or universal
+           quantifiers, because both paths can issue destructive commands. */
+        if (negates_setting(text))
+            return LE_TIMER_INTENT_NONE;
         intent->kind = LE_TIMER_INTENT_CANCEL;
         intent->cancel_all = has_universal_timer_noun(text);
         if (!intent->cancel_all)
