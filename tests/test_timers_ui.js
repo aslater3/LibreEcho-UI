@@ -48,12 +48,17 @@ globalThis.clearTimeout = () => {};
 let reads = 0;
 let releaseRefresh;
 let releaseNavigation;
+let rejectNext;
 globalThis.api = async path => {
     if (path !== '/timers') throw new Error(`unexpected API path ${path}`);
     reads++;
+    if (rejectNext) {
+        rejectNext = false;
+        throw new Error('timer service temporarily unavailable');
+    }
     if (reads === 2) await new Promise(resolve => { releaseRefresh = resolve; });
     if (reads === 3) await new Promise(resolve => { releaseNavigation = resolve; });
-    return { available: reads !== 4, ringing: 0, missed: 0,
+    return { available: reads !== 4 && reads !== 5, ringing: 0, missed: 0,
         timers: [{ id: 1, kind: 'countdown', state: 'pending',
             seconds_remaining: reads === 1 ? 10 : 9, label: 'tea' }] };
 };
@@ -88,6 +93,17 @@ async function main() {
     if (content.innerHTML !== 'new timers render sentinel')
         throw new Error('stale timer refresh overwrote the page after navigation');
 
+    // A failed refresh must obey the same navigation guard as a successful one.
+    rejectNext = true;
+    const failedNavigationRefresh = scheduled();
+    state.page = 'Overview';
+    state.renderGeneration++;
+    content.innerHTML = 'new page after failed refresh sentinel';
+    await failedNavigationRefresh;
+    if (content.innerHTML !== 'new page after failed refresh sentinel')
+        throw new Error('failed timer refresh overwrote the page after navigation');
+
+    state.page = 'Timers';
     state.renderGeneration++;
     await timersPage();
     if (!content.innerHTML.includes('not running'))
