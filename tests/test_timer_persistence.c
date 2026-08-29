@@ -66,7 +66,7 @@ static void assert_audio_refresh_and_snapshot(const char *path,
     assert(context.dirty == 0);
     read_text(path, text, sizeof(text));
     /* A stale pre-cue snapshot would serialize 1767225610 instead. */
-    assert(strstr(text, "countdown 1767225608 pending") != NULL);
+    assert(strstr(text, "v2 countdown 1767225608 @hex:70656e64696e67") != NULL);
     le_timerd_test_monotonic_enabled = 0;
 }
 
@@ -88,7 +88,7 @@ static void assert_post_commit_retry(const char *path, const char *backup)
     assert(state_save(&context) == STATE_SAVE_COMMITTED_DURABILITY_FAILED);
     assert(context.state_commit_pending == 1);
     read_text(path, text, sizeof(text));
-    assert(strstr(text, "committed") != NULL);
+    assert(strstr(text, "@hex:636f6d6d6974746564") != NULL);
     read_text(backup, text, sizeof(text));
     assert(!strcmp(text, "old schedule\n"));
 
@@ -101,7 +101,7 @@ static void assert_post_commit_retry(const char *path, const char *backup)
     read_text(backup, text, sizeof(text));
     assert(!strcmp(text, "old schedule\n"));
     read_text(path, text, sizeof(text));
-    assert(strstr(text, "committed") != NULL);
+    assert(strstr(text, "@hex:636f6d6d6974746564") != NULL);
 }
 
 int main(void)
@@ -155,9 +155,9 @@ int main(void)
     assert(context.dirty == 0);
     assert(le_timer_active_count(&context.timers) == 3);
     read_text(path, text, sizeof(text));
-    assert(strstr(text, "alarm 1767225630 wake") != NULL);
-    assert(strstr(text, "countdown 1767225630 pasta") != NULL);
-    assert(strstr(text, " new\n") != NULL);
+    assert(strstr(text, "v2 alarm 1767225630 @hex:77616b65") != NULL);
+    assert(strstr(text, "v2 countdown 1767225630 @hex:7061737461") != NULL);
+    assert(strstr(text, "v2 countdown 1767226199 @hex:6e6577") != NULL);
 
     /* Once NTP makes the clock valid, both records restore deterministically. */
     le_timer_set_init(&context.timers);
@@ -187,9 +187,33 @@ int main(void)
     read_text(backup, text, sizeof(text));
     assert(!strcmp(text, "old state\n"));
     read_text(path, text, sizeof(text));
-    assert(strstr(text, "countdown ") == text);
+    assert(strstr(text, "v2 countdown ") == text);
     assert(access("/tmp/libreecho-timer-persistence-test.tmp", F_OK) < 0);
     assert(access("/tmp/libreecho-timer-persistence-test.bak.tmp", F_OK) < 0);
+
+    /* New records encode labels so leading whitespace survives the restart
+       boundary that the legacy whitespace-delimited format could not preserve. */
+    {
+        struct context whitespace;
+        struct le_timer *timer;
+
+        memset(&whitespace, 0, sizeof(whitespace));
+        whitespace.state_path = path;
+        whitespace.state_loaded = 1;
+        le_timer_set_init(&whitespace.timers);
+        assert(le_timer_add_countdown(&whitespace.timers, 600, "  tea", 0,
+                                      NULL) == LE_TIMER_OK);
+        assert(state_save_at(&whitespace, 0, SYNCED_EPOCH) == STATE_SAVE_OK);
+        read_text(path, text, sizeof(text));
+        assert(strstr(text, "v2 countdown 1767226200 @hex:2020746561") != NULL);
+
+        le_timer_set_init(&whitespace.timers);
+        assert(state_load_at(&whitespace, 0, SYNCED_EPOCH) == 1);
+        timer = le_timer_find(&whitespace.timers, 1);
+        assert(timer != NULL && !strcmp(timer->label, "  tea"));
+        unlink(path);
+        unlink(backup);
+    }
 
     unlink(path);
     unlink(backup);

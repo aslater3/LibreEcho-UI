@@ -52,6 +52,18 @@ unicode_id=$(jq -r '.data.id' < /tmp/le-timer-unicode.out)
 curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$unicode_id" \
     '.data.timers[] | select(.id == $id) | .label == "café"' >/dev/null
 curl -fsS -X DELETE "$URL/api/v1/timers/$unicode_id" -H "$CSRF" >/dev/null
+
+# Leading whitespace is part of the label, not formatting to trim. The timerd
+# persistence test covers the restart boundary; this checks the API preserves it
+# on the immediate round trip too.
+curl -fsS -X POST "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" --data '{"seconds":60,"label":"  tea"}' \
+    -o /tmp/le-timer-whitespace.out
+whitespace_id=$(jq -r '.data.id' < /tmp/le-timer-whitespace.out)
+curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$whitespace_id" \
+    '.data.timers[] | select(.id == $id) | .label == "  tea"' >/dev/null
+curl -fsS -X DELETE "$URL/api/v1/timers/$whitespace_id" -H "$CSRF" >/dev/null
+echo "  leading whitespace labels preserved: ok"
 echo "  top-level fields and Unicode labels: ok"
 
 # Raw UTF-8 labels are accepted when their byte sequence is valid.

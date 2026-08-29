@@ -98,7 +98,10 @@ static long long wall_epoch(void)
 /* ------------------------------ persistence ----------------------------- */
 
 /*
- * One record per line: "kind due_epoch label".
+ * One record per line: "v2 kind due_epoch @hex:label_bytes". Older
+ * whitespace-delimited records without the v2 marker are still accepted when
+ * loading. Encoding new labels removes the whitespace ambiguity in the
+ * original format and preserves every byte of the label across a restart.
  *
  * Countdowns are stored as a wall-clock instant even though they run on the
  * monotonic clock, because the monotonic clock restarts at boot and a stored
@@ -113,6 +116,63 @@ static int path_suffix(char *out, size_t size, const char *path,
 
     written = snprintf(out, size, "%s%s", path, suffix);
     return written < 0 || (size_t)written >= size ? -1 : 0;
+}
+
+static int state_hex_value(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+static int state_encode_label(char *out, size_t size, const char *label)
+{
+    static const char hex[] = "0123456789abcdef";
+    size_t i;
+    size_t length = label ? strlen(label) : 0;
+
+    if (length >= LE_TIMER_LABEL_MAX || size < 6 + length * 2)
+        return -1;
+    memcpy(out, "@hex:", 5);
+    for (i = 0; i < length; ++i) {
+        unsigned char byte = (unsigned char)label[i];
+        out[5 + i * 2] = hex[byte >> 4];
+        out[6 + i * 2] = hex[byte & 15];
+    }
+    out[5 + length * 2] = '\0';
+    return 0;
+}
+
+static int state_decode_label(const char *text, char *out, size_t size)
+{
+    size_t i;
+    size_t length;
+
+    if (!text || !out || size == 0)
+        return -1;
+    if (strncmp(text, "@hex:", 5)) {
+        length = strlen(text);
+        if (length >= size)
+            return -1;
+        memcpy(out, text, length + 1);
+        return 0;
+    }
+    length = strlen(text + 5);
+    if ((length & 1) || length / 2 >= size)
+        return -1;
+    for (i = 0; i < length; i += 2) {
+        int high = state_hex_value(text[5 + i]);
+        int low = state_hex_value(text[5 + i + 1]);
+        if (high < 0 || low < 0)
+            return -1;
+        out[i / 2] = (char)((high << 4) | low);
+    }
+    out[length / 2] = '\0';
+    return 1;
 }
 
 static int fsync_parent(const char *path)
@@ -213,6 +273,7 @@ static enum state_save_result state_save_at(struct context *ctx,
     }
     for (i = 0; i < LE_TIMER_MAX; ++i) {
         const struct le_timer *timer = &ctx->timers.timers[i];
+        char encoded_label[6 + LE_TIMER_LABEL_MAX * 2];
         long long due;
 
         if (timer->state == LE_TIMER_STATE_FREE)
@@ -229,9 +290,11 @@ static enum state_save_result state_save_at(struct context *ctx,
                 continue;
             due = now_epoch + (timer->due_monotonic_ms - now_ms) / 1000LL;
         }
-        if (fprintf(file, "%s %lld %s\n",
+        if (state_encode_label(encoded_label, sizeof(encoded_label),
+                               timer->label) < 0 ||
+            fprintf(file, "v2 %s %lld %s\n",
                     timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown",
-                    due, timer->label) < 0) {
+                    due, encoded_label) < 0) {
             fclose(file);
             unlink(temporary);
             return STATE_SAVE_FAILED;
@@ -324,23 +387,30 @@ static int state_load_at(struct context *ctx, long long now_ms,
 
     while (fgets(line, sizeof(line), file)) {
         char kind[16];
+        char record_format[16];
         long long due = 0;
         char label[LE_TIMER_LABEL_MAX];
         unsigned int id = 0;
         int consumed = 0;
 
         label[0] = '\0';
-        if (sscanf(line, "%15s %lld %n", kind, &due, &consumed) < 2)
+        if (sscanf(line, "%15s", record_format) < 1)
             continue;
+        if (!strcmp(record_format, "v2")) {
+            if (sscanf(line, "v2 %15s %lld %n", kind, &due, &consumed) < 2)
+                continue;
+        } else if (sscanf(line, "%15s %lld %n", kind, &due, &consumed) < 2) {
+            continue;
+        }
         if (consumed > 0) {
             size_t length;
 
-            strncpy(label, line + consumed, sizeof(label) - 1);
-            label[sizeof(label) - 1] = '\0';
-            length = strlen(label);
-            while (length && (label[length - 1] == '\n' ||
-                              label[length - 1] == '\r'))
-                label[--length] = '\0';
+            length = strlen(line + consumed);
+            while (length && (line[consumed + length - 1] == '\n' ||
+                              line[consumed + length - 1] == '\r'))
+                line[consumed + --length] = '\0';
+            if (state_decode_label(line + consumed, label, sizeof(label)) < 0)
+                continue;
         }
 
         if (!strcmp(kind, "alarm")) {
