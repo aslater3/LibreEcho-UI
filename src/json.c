@@ -203,6 +203,7 @@ int json_valid_object(const char *s, size_t n)
 int json_get_top_level_bool(const char *s, size_t n, const char *key, int *out)
 {
     struct json_cursor c = {s, n, 0, 0};
+    int found = 0, value = 0;
 
     if (!s || !key || !out) return 0;
     skip_ws(&c);
@@ -219,16 +220,24 @@ int json_get_top_level_bool(const char *s, size_t n, const char *key, int *out)
         if (c.i >= c.n || c.s[c.i++] != ':') return -1;
         skip_ws(&c);
         if (match) {
-            if (literal(&c, "true")) *out = 1;
-            else if (literal(&c, "false")) *out = 0;
+            /* A caller must not accidentally accept the first value from an
+             * ambiguous object.  parse_string_key() compares decoded names,
+             * so escaped spellings such as acoustic\\u005fevents count too. */
+            if (found) return -1;
+            if (literal(&c, "true")) value = 1;
+            else if (literal(&c, "false")) value = 0;
             else return -1;
             if (c.i < c.n && !ws(c.s[c.i]) && c.s[c.i] != ',' &&
                 c.s[c.i] != '}') return -1;
-            return 1;
+            found = 1;
+        } else if (!parse_value(&c)) {
+            return -1;
         }
-        if (!parse_value(&c)) return -1;
         skip_ws(&c);
-        if (c.i < c.n && c.s[c.i] == '}') return 0;
+        if (c.i < c.n && c.s[c.i] == '}') {
+            if (found) *out = value;
+            return found;
+        }
         if (c.i >= c.n || c.s[c.i++] != ',') return -1;
         skip_ws(&c);
     }
