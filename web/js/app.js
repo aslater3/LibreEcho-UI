@@ -548,6 +548,7 @@ function restoreTimerForm(draft){if(!draft)return;const minutes=$('#timer-minute
 function utf8Bytes(value){return new TextEncoder().encode(value).length}
 async function timersPage(draft=null){
  const t=await api('/timers');
+ if(state.page!=='Timers')return;
  const liveDraft=timerFormDraft()||draft;
  if(!t.available){content.innerHTML=panel('Timers',`<div class="empty-state"><p>The timer service is not running on this device.</p></div>`);return}
  const rows=(t.timers||[]).map(x=>`<tr><td>${esc(x.label||(x.kind==='alarm'?'Alarm':'Timer'))}</td><td>${x.state==='ringing'?'<strong>ringing</strong>':esc(sayLeft(x.seconds_remaining))}</td><td class="right"><button class="link-btn" data-cancel="${x.id}">Cancel</button></td></tr>`).join('');

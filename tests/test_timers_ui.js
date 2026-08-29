@@ -47,10 +47,12 @@ globalThis.setTimeout = (fn) => { scheduled = fn; return 1; };
 globalThis.clearTimeout = () => {};
 let reads = 0;
 let releaseRefresh;
+let releaseNavigation;
 globalThis.api = async path => {
     if (path !== '/timers') throw new Error(`unexpected API path ${path}`);
     reads++;
     if (reads === 2) await new Promise(resolve => { releaseRefresh = resolve; });
+    if (reads === 3) await new Promise(resolve => { releaseNavigation = resolve; });
     return { available: true, ringing: 0, missed: 0,
         timers: [{ id: 1, kind: 'countdown', state: 'pending',
             seconds_remaining: reads === 1 ? 10 : 9, label: 'tea' }] };
@@ -75,6 +77,15 @@ async function main() {
         throw new Error('timer form values were lost during refresh');
     if (document.activeElement !== label)
         throw new Error('timer form focus was lost during refresh');
-    console.log('timers UI refresh preserves form: ok');
+    const navigationRefresh = scheduled();
+    if (typeof releaseNavigation !== 'function')
+        throw new Error('navigation refresh did not reach the slow API');
+    state.page = 'Overview';
+    content.innerHTML = 'overview sentinel';
+    releaseNavigation();
+    await navigationRefresh;
+    if (content.innerHTML !== 'overview sentinel')
+        throw new Error('stale timer refresh overwrote the page after navigation');
+    console.log('timers UI refresh preserves form and navigation: ok');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

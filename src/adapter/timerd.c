@@ -392,6 +392,7 @@ static int state_load_at(struct context *ctx, long long now_ms,
         char label[LE_TIMER_LABEL_MAX];
         unsigned int id = 0;
         int consumed = 0;
+        int v2 = 0;
 
         label[0] = '\0';
         if (sscanf(line, "%15s", record_format) < 1)
@@ -399,6 +400,7 @@ static int state_load_at(struct context *ctx, long long now_ms,
         if (!strcmp(record_format, "v2")) {
             if (sscanf(line, "v2 %15s %lld %n", kind, &due, &consumed) < 2)
                 continue;
+            v2 = 1;
         } else if (sscanf(line, "%15s %lld %n", kind, &due, &consumed) < 2) {
             continue;
         }
@@ -409,8 +411,14 @@ static int state_load_at(struct context *ctx, long long now_ms,
             while (length && (line[consumed + length - 1] == '\n' ||
                               line[consumed + length - 1] == '\r'))
                 line[consumed + --length] = '\0';
-            if (state_decode_label(line + consumed, label, sizeof(label)) < 0)
-                continue;
+            if (v2) {
+                if (state_decode_label(line + consumed, label, sizeof(label)) < 0)
+                    continue;
+            } else {
+                if (length >= sizeof(label))
+                    continue;
+                memcpy(label, line + consumed, length + 1);
+            }
         }
 
         if (!strcmp(kind, "alarm")) {

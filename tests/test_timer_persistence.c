@@ -215,6 +215,23 @@ int main(void)
         unlink(backup);
     }
 
+    /* Legacy records have no format marker, so an @hex: prefix is literal
+       user data rather than the v2 encoding. */
+    {
+        struct context legacy;
+        struct le_timer *timer;
+
+        memset(&legacy, 0, sizeof(legacy));
+        legacy.state_path = path;
+        le_timer_set_init(&legacy.timers);
+        write_text(path, "countdown 1767226200 @hex:tea\n");
+        assert(state_load_at(&legacy, 0, SYNCED_EPOCH) == 1);
+        timer = le_timer_find(&legacy.timers, 1);
+        assert(timer != NULL && !strcmp(timer->label, "@hex:tea"));
+        unlink(path);
+        unlink(backup);
+    }
+
     unlink(path);
     unlink(backup);
 
