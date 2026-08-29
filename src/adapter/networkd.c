@@ -1410,13 +1410,17 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
 {
     const char *line = reply;
     size_t used = 0;
-    int count = 0;
-    if (append_text(data, size, &used, "{\"networks\":[") < 0)
-        return -1;
-    while (*line && count < SCAN_MAX) {
+    int count = 0, i;
+    struct scan_result {
+        char ssid[256];
+        char flags[128];
+        int signal;
+    } results[SCAN_MAX];
+    memset(results, 0, sizeof(results));
+    while (*line) {
         char row[512], *fields[5], *p;
         char ssid[256], flags[128], signal[32];
-        int field = 0;
+        int field = 0, duplicate = -1, level;
         const char *end = strchr(line, '\n');
         size_t len = end ? (size_t)(end - line) : strlen(line);
         if (len >= sizeof(row))
@@ -1436,20 +1440,41 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
             copy_string(signal, sizeof(signal), fields[2]);
             copy_string(flags, sizeof(flags), fields[3]);
             copy_string(ssid, sizeof(ssid), fields[4]);
-            if (count && append_text(data, size, &used, ",") < 0)
-                return -1;
-            if (append_text(data, size, &used, "{\"ssid\":") < 0 ||
-                append_json_string(data, size, &used, ssid) < 0 ||
-                append_text(data, size, &used, ",\"security\":") < 0 ||
-                append_json_string(data, size, &used, scan_security(flags)) < 0 ||
-                append_text(data, size, &used, ",\"signal\":%d}",
-                            rssi_to_percent((int)strtol(signal, NULL, 10))) < 0)
-                return -1;
-            ++count;
+            level = (int)strtol(signal, NULL, 10);
+            for (i = 0; i < count; ++i) {
+                if (!strcmp(results[i].ssid, ssid)) {
+                    duplicate = i;
+                    break;
+                }
+            }
+            if (duplicate >= 0) {
+                if (level > results[duplicate].signal) {
+                    copy_string(results[duplicate].flags,
+                                sizeof(results[duplicate].flags), flags);
+                    results[duplicate].signal = level;
+                }
+            } else if (count < SCAN_MAX) {
+                copy_string(results[count].ssid, sizeof(results[count].ssid), ssid);
+                copy_string(results[count].flags, sizeof(results[count].flags), flags);
+                results[count++].signal = level;
+            }
         }
         if (!end)
             break;
         line = end + 1;
+    }
+    if (append_text(data, size, &used, "{\"networks\":[") < 0)
+        return -1;
+    for (i = 0; i < count; ++i) {
+        if (i && append_text(data, size, &used, ",") < 0)
+            return -1;
+        if (append_text(data, size, &used, "{\"ssid\":") < 0 ||
+            append_json_string(data, size, &used, results[i].ssid) < 0 ||
+            append_text(data, size, &used, ",\"security\":") < 0 ||
+            append_json_string(data, size, &used, scan_security(results[i].flags)) < 0 ||
+            append_text(data, size, &used, ",\"signal\":%d}",
+                        rssi_to_percent(results[i].signal)) < 0)
+                return -1;
     }
     if (append_text(data, size, &used, "]}") < 0)
         return -1;
@@ -1576,7 +1601,19 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
         return -1;
     for (i = 0; i < count; ++i) {
         struct wext_scan_cell *cell = &cells[i];
+        size_t j;
+        int best = 1;
         if (!cell->ssid[0])
+            continue;
+        for (j = 0; j < i; ++j)
+            if (!strcmp(cells[j].ssid, cell->ssid) &&
+                cells[j].signal >= cell->signal)
+                best = 0;
+        for (j = i + 1; j < count; ++j)
+            if (!strcmp(cells[j].ssid, cell->ssid) &&
+                cells[j].signal > cell->signal)
+                best = 0;
+        if (!best)
             continue;
         if (emitted++ && append_text(data, data_size, &used, ",") < 0)
             return -1;
@@ -2358,15 +2395,15 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
     int id;
     const char *key_mgmt;
     if (wpa_call(ctx, "ADD_NETWORK\n", reply, sizeof(reply)) < 0)
-        return -1;
+        return -2;
     id = (int)strtol(reply, NULL, 10);
     if (id < 0 || (reply[0] < '0' || reply[0] > '9'))
-        return -1;
+        return -3;
     if (wpa_quote(quoted, sizeof(quoted), ssid) < 0 ||
         snprintf(command, sizeof(command), "SET_NETWORK %d ssid %s\n", id,
                  quoted) >= (int)sizeof(command) ||
         wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
-        return -1;
+        return -4;
 
     if (!security || !strcmp(security, "open") || !strcmp(security, "none"))
         key_mgmt = "NONE";
@@ -2375,20 +2412,20 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
     if (snprintf(command, sizeof(command), "SET_NETWORK %d key_mgmt %s\n", id,
                  key_mgmt) >= (int)sizeof(command) ||
         wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
-        return -1;
+        return -5;
     if (strcmp(key_mgmt, "NONE")) {
         if (!psk || !*psk || wpa_quote(quoted, sizeof(quoted), psk) < 0 ||
             snprintf(command, sizeof(command), "SET_NETWORK %d psk %s\n", id,
                      quoted) >= (int)sizeof(command) ||
             wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
-            return -1;
+            return -6;
     }
     if (snprintf(command, sizeof(command), "ENABLE_NETWORK %d\n", id) >=
             (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
         snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", id) >=
             (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
         wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0)
-        return -1;
+        return -7;
     ctx->network_id = id;
     return 0;
 }
@@ -2467,6 +2504,7 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         int have_ssid = json_string_arg(args, "ssid", ssid, sizeof(ssid));
         int have_psk = json_string_arg(args, "psk", psk, sizeof(psk));
         int have_security = json_string_arg(args, "security", security, sizeof(security));
+        int connect_result;
         if (have_ssid != 1 || have_psk < 0 || have_security < 0) {
             (void)send_err_fd(ctx->clients[ci].fd, id, "connect requires ssid, psk, security");
             return;
@@ -2476,10 +2514,17 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             return;
         }
         le_log_info("networkd: connect to ssid=\"%s\" security=%s", ssid, have_security == 1 ? security : "wpa2");
-        if (connect_network(ctx, ssid, have_psk == 1 ? psk : "",
-                            have_security == 1 ? security : "wpa2") < 0) {
-            le_log_error("networkd: wpa_supplicant rejected network \"%s\"", ssid);
-            (void)send_err_fd(ctx->clients[ci].fd, id, "wpa_supplicant rejected network");
+        connect_result = connect_network(ctx, ssid, have_psk == 1 ? psk : "",
+                                         have_security == 1 ? security : "wpa2");
+        if (connect_result < 0) {
+            le_log_error("networkd: wpa_supplicant rejected network \\\"%s\\\" at stage %d", ssid, connect_result);
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              connect_result == -2 ? "wpa_supplicant unavailable" :
+                              connect_result == -4 ? "SSID rejected by wpa_supplicant" :
+                              connect_result == -5 ? "WPA2 security rejected by wpa_supplicant" :
+                              connect_result == -6 ? "Wi-Fi password rejected by wpa_supplicant" :
+                              connect_result == -7 ? "Wi-Fi network could not be enabled or selected" :
+                              "wpa_supplicant rejected the network");
             return;
         }
         reset_network_health(ctx, monotonic_ms());
