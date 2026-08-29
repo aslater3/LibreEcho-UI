@@ -70,7 +70,8 @@ static void assert_audio_refresh_and_snapshot(const char *path,
     le_timerd_test_monotonic_enabled = 0;
 }
 
-static void assert_post_commit_retry(const char *path, const char *backup)
+static void assert_post_commit_retry(const char *path, const char *backup,
+                                     int *failure_hook)
 {
     struct context context;
     char text[256];
@@ -84,7 +85,7 @@ static void assert_post_commit_retry(const char *path, const char *backup)
     write_text(path, "old schedule\n");
     assert(le_timer_add_countdown(&context.timers, 600, "committed", 0,
                                   NULL) == LE_TIMER_OK);
-    le_timerd_test_fail_parent_fsync = 1;
+    *failure_hook = 1;
     assert(state_save(&context) == STATE_SAVE_COMMITTED_DURABILITY_FAILED);
     assert(context.state_commit_pending == 1);
     read_text(path, text, sizeof(text));
@@ -217,7 +218,8 @@ int main(void)
     }
 
     assert_audio_refresh_and_snapshot(path, backup);
-    assert_post_commit_retry(path, backup);
+    assert_post_commit_retry(path, backup, &le_timerd_test_fail_chmod);
+    assert_post_commit_retry(path, backup, &le_timerd_test_fail_parent_fsync);
 
     puts("timer persistence: ok");
     return 0;
