@@ -1397,10 +1397,10 @@ static const char *scan_security(const char *flags)
 {
     if (!flags || !*flags)
         return "open";
-    if (strstr(flags, "SAE") || strstr(flags, "WPA3"))
-        return "wpa3";
     if (strstr(flags, "WPA2"))
         return "wpa2";
+    if (strstr(flags, "SAE") || strstr(flags, "WPA3"))
+        return "unsupported";
     if (strstr(flags, "WPA"))
         return "wpa";
     return "open";
@@ -2370,8 +2370,6 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
 
     if (!security || !strcmp(security, "open") || !strcmp(security, "none"))
         key_mgmt = "NONE";
-    else if (strstr(security, "wpa3") || strstr(security, "SAE"))
-        key_mgmt = "SAE";
     else
         key_mgmt = "WPA-PSK";
     if (snprintf(command, sizeof(command), "SET_NETWORK %d key_mgmt %s\n", id,
