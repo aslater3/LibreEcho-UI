@@ -54,6 +54,36 @@ curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$unicode_id" \
 curl -fsS -X DELETE "$URL/api/v1/timers/$unicode_id" -H "$CSRF" >/dev/null
 echo "  top-level fields and Unicode labels: ok"
 
+# Raw UTF-8 labels are accepted when their byte sequence is valid.
+python3 -c 'from pathlib import Path; q=bytes((34,)); Path("/tmp/le-timer-valid-utf8.json").write_bytes(b"{" + q + b"seconds" + q + b":60," + q + b"label" + q + b":" + q + b"caf" + bytes((0xc3, 0xa9)) + q + b"}")'
+curl -fsS -X POST "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" --data-binary @/tmp/le-timer-valid-utf8.json \
+    -o /tmp/le-timer-valid-utf8.out
+valid_utf8_id=$(jq -r '.data.id' < /tmp/le-timer-valid-utf8.out)
+curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$valid_utf8_id" \
+    '.data.timers[] | select(.id == $id) | .label == "café"' >/dev/null
+curl -fsS -X DELETE "$URL/api/v1/timers/$valid_utf8_id" -H "$CSRF" >/dev/null
+
+# Exactly 47 UTF-8 bytes remain valid; the limit is bytes, not code points.
+python3 -c 'from pathlib import Path; q=bytes((34,)); label=bytes((0xf0,0x9f,0x98,0x80))*11+b"abc"; Path("/tmp/le-timer-47-byte.json").write_bytes(b"{" + q + b"seconds" + q + b":60," + q + b"label" + q + b":" + q + label + q + b"}")'
+curl -fsS -X POST "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" --data-binary @/tmp/le-timer-47-byte.json \
+    -o /tmp/le-timer-47-byte.out
+boundary_id=$(jq -r '.data.id' < /tmp/le-timer-47-byte.out)
+[ "$boundary_id" != "null" ] || { echo "FAIL: valid 47-byte label was rejected"; exit 1; }
+curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$boundary_id" \
+    '.data.timers[] | select(.id == $id) | (.label | length) == 14' >/dev/null
+curl -fsS -X DELETE "$URL/api/v1/timers/$boundary_id" -H "$CSRF" >/dev/null
+echo "  valid 47-byte Unicode labels accepted: ok"
+
+after_valid_utf8=$(python3 -c 'from pathlib import Path; q=bytes((34,)); base=b"{" + q + b"seconds" + q + b":60," + q + b"label" + q + b":" + q + b"bad "; cases={"continuation":bytes((0x80,)),"overlong":bytes((0xc0,0xaf)),"truncated":bytes((0xe2,0x82)),"bad-continuation":bytes((0xe2,0x28,0xa1)),"surrogate":bytes((0xed,0xa0,0x80)),"out-of-range":bytes((0xf4,0x90,0x80,0x80))}; [Path("/tmp/le-timer-invalid-"+name+".json").write_bytes(base+value+q+b"}") for name,value in cases.items()]; print(" ".join(cases))')
+for malformed in $after_valid_utf8; do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
+        -H "$CSRF" -H "$JSON" --data-binary "@/tmp/le-timer-invalid-$malformed.json")
+    [ "$code" = 400 ] || { echo "FAIL: malformed UTF-8 label $malformed returned $code, expected 400"; exit 1; }
+done
+echo "  malformed UTF-8 labels refused: ok"
+
 # The API must reject values outside the bounded countdown range before a
 # backend-specific timer implementation sees them.
 for body in '{"seconds":0}' '{"seconds":-5}' '{"seconds":999999999}' \
