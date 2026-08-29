@@ -80,11 +80,12 @@ async function main() {
     const navigationRefresh = scheduled();
     if (typeof releaseNavigation !== 'function')
         throw new Error('navigation refresh did not reach the slow API');
-    state.page = 'Overview';
-    content.innerHTML = 'overview sentinel';
+    state.page = 'Timers';
+    state.renderGeneration++;
+    content.innerHTML = 'new timers render sentinel';
     releaseNavigation();
     await navigationRefresh;
-    if (content.innerHTML !== 'overview sentinel')
+    if (content.innerHTML !== 'new timers render sentinel')
         throw new Error('stale timer refresh overwrote the page after navigation');
     console.log('timers UI refresh preserves form and navigation: ok');
 }
