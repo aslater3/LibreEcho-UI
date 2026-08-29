@@ -9,6 +9,20 @@
 
 static char captured_command[64];
 static char captured_args[1024];
+static int captured_timeout_ms;
+
+int le_backend_linux_test_adapter_json_command(const char *socket_path,
+                                               const char *command,
+                                               const char *args);
+
+int le_backend_linux_test_adapter_json_command_timeout(const char *socket_path,
+                                                       const char *command,
+                                                       const char *args,
+                                                       int timeout_ms)
+{
+    captured_timeout_ms = timeout_ms;
+    return le_backend_linux_test_adapter_json_command(socket_path, command, args);
+}
 
 int le_backend_linux_test_adapter_json_command(const char *socket_path,
                                                const char *command,
@@ -39,6 +53,11 @@ int main(void)
         return 1;
     require_contains(captured_command, "connect");
     require_contains(captured_args, "\"security\":\"open\"");
+    if (captured_timeout_ms != 120000) {
+        fprintf(stderr, "Wi-Fi connect timeout was %d ms, expected 120000 ms\n",
+                captured_timeout_ms);
+        return 1;
+    }
 
     memset(&credentials, 0, sizeof(credentials));
     snprintf(credentials.ssid, sizeof(credentials.ssid), "Unsupported WPA3 WiFi");

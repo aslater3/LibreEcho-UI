@@ -3,13 +3,17 @@ set -eu
 
 HTML=web/setup.html
 JS=web/js/setup.js
+API=src/api.c
+SERVER=src/http_server.c
 
 # The account step must be the first wizard step and the network step must be later.
-python3 - "$HTML" "$JS" <<'PY'
+python3 - "$HTML" "$JS" "$API" "$SERVER" <<'PY'
 from pathlib import Path
 import sys
 html=Path(sys.argv[1]).read_text()
 js=Path(sys.argv[2]).read_text()
+api=Path(sys.argv[3]).read_text()
+server=Path(sys.argv[4]).read_text()
 assert html.index('id="setup-username"') < html.index('id="setup-ssid"')
 assert 'data-step="0"' in html and 'data-step="2"' in html
 assert 'Create your local account.' in html
@@ -23,5 +27,15 @@ assert "if(current.completed){location.replace('/')" in js
 assert "setup.step<=1" in js
 assert "setup/vendor-import-force-next-boot" in js
 assert "Account created. Please reload this page" in js
+assert "if(!setup.hardwareReady)" in js
+assert "The Wi-Fi connection could not be completed; check the access point and try again" in api
+assert "Setup settings could not be saved" in api
+assert '(!strcmp(q.path,"/api/v1/setup")&&!strcmp(q.method,"POST"))' in server
+assert '(!strcmp(q.path,"/api/v1/network/wifi/connect")&&!strcmp(q.method,"POST"))' in server
+assert "refresh_setup_completed(api);" in server
+assert "setup.scanAttempts++<8" in js
+assert "!/[\\u0000-\\u001f]/.test(n.ssid)" in js
+assert "!/^\\\\x(?:00)+$/i.test(n.ssid.trim())" in js
+assert "setup_failure_message(c)" in api
 print('setup account-first browser contract: ok')
 PY

@@ -4,7 +4,7 @@ URL=${LIBREECHO_TEST_URL:-http://127.0.0.1:18083}
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 config=$(curl -fsS "$URL/api/v1/config")
 printf '%s' "$config" | jq -e '.data.authentication == "bootstrap-required" and .data.bootstrap_required == true' >/dev/null
-curl -fsS "$URL/" | grep -q 'Create your first local account'
+curl -fsS "$URL/" | grep -q 'Create your local account'
 # Deep-linking to an SPA route while bootstrap is required must serve the setup
 # page, not the app shell (whose API calls would then 401 with "setup is
 # required"). Regression for the real-URL pathname routing change: the bootstrap

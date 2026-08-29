@@ -189,7 +189,7 @@ curl -fsS "$URL/api/v1/system/update" | jq -e \
     '.ok and .data.supported == false and
      .data.current_slot == "-" and .data.inactive_slot == "-" and
      .data.pending_reboot == false and .data.max_upload_bytes == 33554432 and
-     .data.installed_version == "" and .data.latest_version == "" and
+     .data.installed_version == "LibreEcho OS '"$OS_VERSION"'" and .data.latest_version == "" and
      .data.channel == "stable" and .data.source == "github-releases" and
      .data.source_reachable == "unknown" and
      .data.check_status == "not-checked" and .data.check_error == "" and

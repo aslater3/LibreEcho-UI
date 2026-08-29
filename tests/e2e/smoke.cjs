@@ -100,6 +100,55 @@ async function checkAudioMutation(page) {
   assert.equal(await persisted.inputValue(), '63', 'saved volume should survive navigation and re-render');
 }
 
+async function setupReadinessSuite(browser) {
+  const context = await browser.newContext({ baseURL });
+  await context.addInitScript(() => {
+    sessionStorage.setItem('libreecho-token', 'setup-e2e-token');
+  });
+  const page = await context.newPage();
+  let setupReads = 0;
+  let scans = 0;
+  const envelope = data => ({ ok: true, data, error: null });
+  await page.route('**/api/v1/config', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify(envelope({ csrf_token: 'c'.repeat(64), bootstrap_required: false }))
+  }));
+  await page.route('**/api/v1/setup', route => {
+    setupReads += 1;
+    const ready = setupReads > 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(envelope({
+        completed: false, backend: 'linux', hostname: 'libreecho', volume: 52,
+        wake_word: 'LibreEcho', wake_sensitivity: 68, local_only: true,
+        diagnostic_telemetry: false, network_state: 'unavailable', ssid: '',
+        wlan0_registered: ready,
+        vendor_firmware: { state: 'ready', verification: 'hash-pinned',
+          source_layout: 'etc/firmware', error: 'none', force_next_boot: false }
+      }))
+    });
+  });
+  await page.route('**/api/v1/network/wifi/scan', route => {
+    scans += 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(envelope({ networks: [
+        { ssid: 'ReadinessNet', security: 'wpa2', signal: 81 }
+      ] }))
+    });
+  });
+
+  await page.goto('/setup.html', { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => typeof setup !== 'undefined' && setup.step === 1);
+  await page.evaluate(() => { setup.step = 2; render(); });
+  await page.getByText('ReadinessNet', { exact: true }).waitFor({
+    state: 'visible', timeout: 4000
+  });
+  assert.ok(setupReads >= 2, 'scan retry should refresh setup readiness');
+  assert.equal(scans, 1, 'scan should start once wlan0 becomes ready');
+  await context.close();
+}
+
 async function desktopSuite(browser) {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
@@ -163,6 +212,7 @@ async function mobileSuite(browser) {
 (async () => {
   const browser = await chromium.launch({ headless: true });
   try {
+    await setupReadinessSuite(browser);
     await desktopSuite(browser);
     await mobileSuite(browser);
   } finally {
