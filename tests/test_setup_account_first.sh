@@ -18,6 +18,10 @@ assert "sessionStorage.setItem('libreecho-token'" in js
 assert "if(config.bootstrap_required){render();return}" in js
 assert "const current=await api('/setup')" in js
 assert js.index("api('/auth/bootstrap'") < js.index("api('/setup')")
-assert 'Authorization:`Bearer ${setup.token}`' in js
+assert "button.disabled=false" in js
+assert "if(current.completed){location.replace('/')" in js
+assert "setup.step<=1" in js
+assert "setup/vendor-import-force-next-boot" in js
+assert "Account created. Please reload this page" in js
 print('setup account-first browser contract: ok')
 PY

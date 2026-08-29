@@ -29,6 +29,7 @@ make build/test-sdp-wire-format
 make build/test-avdtp-wire-format
 ./build/test-avdtp-wire-format
 sh tests/test_network_scan_contract.sh
+sh tests/test_setup_account_first.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 make build/test-audiod-review build/test-led-night-review
