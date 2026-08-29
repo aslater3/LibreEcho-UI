@@ -20,6 +20,7 @@ int main(void)
     struct le_auth_db seed;
     struct le_backend *backend = NULL;
     struct api_context api;
+    struct api_context reloaded;
     struct api_context bootstrap;
     struct api_request request;
     struct api_response response;
@@ -157,9 +158,29 @@ int main(void)
         CHECK(strstr(persisted, filled_tokens[LE_AUTH_MAX_SESSIONS - 1]) != NULL);
     }
 
+    /* The evicted HTTP-issued token must stay invalid after a daemon restart,
+       while the newest persisted HTTPS session remains usable. */
+    CHECK(api_init(&reloaded, backend, 0, 0, NULL, NULL, csrf, NULL,
+                   users) == 0);
+    api_set_https_active(&reloaded, 1);
+    snprintf(request.path, sizeof(request.path), "/api/v1/auth");
+    snprintf(request.method, sizeof(request.method), "GET");
+    request.https = 1;
+    snprintf(request.authorization, sizeof(request.authorization),
+             "Bearer %s", evicting_http_token);
+    memset(&response, 0, sizeof(response));
+    api_handle(&reloaded, &request, &response);
+    CHECK(response.status == 401);
+    snprintf(request.authorization, sizeof(request.authorization),
+             "Bearer %s", filled_tokens[LE_AUTH_MAX_SESSIONS - 1]);
+    memset(&response, 0, sizeof(response));
+    api_handle(&reloaded, &request, &response);
+    CHECK(response.status == 200);
+
     CHECK(api_init(&bootstrap, backend, 0, 0, NULL, NULL, csrf, NULL,
                    bootstrap_users) == 0);
     api_set_https_active(&bootstrap, 1);
+    snprintf(request.method, sizeof(request.method), "POST");
     snprintf(request.path, sizeof(request.path), "/api/v1/auth/bootstrap");
     request.authorization[0] = '\0';
     request.body = "{\"username\":\"bootstrap\",\"password\":\"bootstrap-password\",\"password_confirm\":\"bootstrap-password\"}";

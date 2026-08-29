@@ -109,6 +109,18 @@ assert "load_history_file(&state, backup)" in agentd
 assert "A JSON backup contains the recoverable turn ring" in agentd
 assert "late turn history update could not be persisted" in agentd
 assert "save_history_state(state, state->history_generation" in agentd
+late_start = agentd.index("if (!state->first_pcm_ms")
+late_end = agentd.index("pthread_mutex_unlock(&state->metrics_mutex);", late_start)
+late_update = agentd[late_start:late_end]
+assert "history_updated" in late_update
+assert late_update.index("save_history_state(state, state->history_generation") > late_update.index("state->turn_history[idx].first_pcm_ms")
+
+audiod = Path("src/adapter/audiod.c").read_text(encoding="utf-8")
+sample_start = audiod.index("static int start_sample")
+assert "sample_fd = sample_open_fd(name);" in audiod[sample_start:]
+assert audiod.index("sample_fd = sample_open_fd(name);", sample_start) < audiod.index("pid = fork();", sample_start)
+assert "if (sample_fd < 0)" in audiod[sample_start:]
+
 app = Path("web/js/app.js").read_text(encoding="utf-8")
 assert "const persisted=new Map(stations.map(st=>[st.word,st]))" in app
 assert "const sameStation=(a,b)=>" in app
@@ -142,9 +154,5 @@ assert "old_short[sizeof(c->button_short)]" in api
 assert "memcpy(c->button_short,old_short,sizeof(old_short))" in api
 assert "memcpy(c->button_action_sounds,old_sounds,sizeof(old_sounds))" in api
 assert "button_action_sounds" in Path("tests/test_config.sh").read_text(encoding="utf-8")
-late_start = agentd.index("if (!state->first_pcm_ms")
-late_end = agentd.index("pthread_mutex_unlock(&state->metrics_mutex);", late_start)
-late_update = agentd[late_start:late_end]
-assert "save_history_state(state, state->history_generation" in late_update
 
 print("PR 141 transport/auth/USB/radio source contract: ok")
