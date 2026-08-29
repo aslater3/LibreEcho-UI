@@ -675,8 +675,12 @@ static int handle_timer_intent(struct agent_state *state,
             snprintf(args, sizeof(args), "{\"label\":\"%s\"}", label);
             if (adapter_call(state->timer_socket, 1000, "cancel", args,
                              response, sizeof(response)) != LE_ADAPTER_OK) {
-                snprintf(spoken, spoken_size,
-                         "I could not find that timer.");
+                if (!strcmp(response, "timer label is ambiguous"))
+                    snprintf(spoken, spoken_size,
+                             "Which timer should I cancel?");
+                else
+                    snprintf(spoken, spoken_size,
+                             "I could not find that timer.");
                 (void)play_sentence(state, spoken);
                 return 1;
             }

@@ -180,6 +180,12 @@ int main(void)
         assert(le_timer_intent_parse("delete each one of the alarms", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         assert(intent.cancel_all);
+        assert(le_timer_intent_parse("cancel every single timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.cancel_all);
+        assert(le_timer_intent_parse("delete each single one of my alarms",
+                                     &intent) == LE_TIMER_INTENT_CANCEL);
+        assert(intent.cancel_all);
     }
 
     /* Asking about them. */

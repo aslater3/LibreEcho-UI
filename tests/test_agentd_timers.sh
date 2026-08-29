@@ -306,6 +306,38 @@ case "$out" in
     *'"timers":[]'*) ;;
     *) echo "FAIL: explicit cancel-all left timers: $out"; exit 1 ;;
 esac
+
+# "single" is an emphatic universal modifier, not a timer label.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel every single timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: every-single cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: every-single cancel-all left timers: $out"; exit 1 ;;
+esac
+
+# Two equal labels are an ambiguity, not a missing timer. Preserve both until
+# the caller supplies a disambiguating request.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the duplicate"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the duplicate"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the duplicate timer"}')
+case "$out" in
+    *'Which timer should I cancel?'*) ;;
+    *) echo "FAIL: ambiguous label was reported as missing: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.loads(sys.stdin.read())["data"]["timers"]
+assert len(timers) == 2, timers
+assert all(timer["label"] == "duplicate" for timer in timers), timers
+' || { echo "FAIL: ambiguous cancellation changed the schedule: $out"; exit 1; }
+call "$agent_sock" respond '{"text":"cancel all timers"}' >/dev/null
 echo "  singular, verb, and universal cancellation are scoped correctly: ok"
 
 # --- "stop" with nothing ringing is not a timer request -------------------

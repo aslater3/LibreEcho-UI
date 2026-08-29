@@ -446,9 +446,14 @@ static int has_universal_timer_noun(const char *text)
 
             while (*noun == ' ')
                 ++noun;
-            /* "every one of my timers" has an extra word between the
-               quantifier and the optional preposition. Consume it before
-               applying the same `of`/determiner walk as "every timer". */
+            /* "every one of my timers" and "every single timer" have
+               optional words between the quantifier and the noun. Consume
+               them before applying the same `of`/determiner walk as
+               "every timer". */
+            if ((!strcmp(QUANTIFIERS[i], "every") ||
+                 !strcmp(QUANTIFIERS[i], "each")) &&
+                starts_word(noun, "single"))
+                noun = after_word(noun, "single");
             if ((!strcmp(QUANTIFIERS[i], "every") ||
                  !strcmp(QUANTIFIERS[i], "each")) &&
                 starts_word(noun, "one"))
