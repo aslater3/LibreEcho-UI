@@ -713,6 +713,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         long long now_ms = monotonic_ms();
         long long now_epoch = wall_epoch();
         long long soonest = -1;
+        unsigned int soonest_id = 0;
         char label[LE_TIMER_LABEL_MAX * 2] = "";
         int count = 0;
         size_t i;
@@ -732,24 +733,56 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
                 remaining = 0;
             if (soonest < 0 || remaining < soonest) {
                 soonest = remaining;
+                soonest_id = timer->id;
                 json_escape(label, sizeof(label), timer->label);
             }
         }
         snprintf(data, sizeof(data),
-                 "{\"count\":%d,\"seconds_remaining\":%lld,"
+                 "{\"count\":%d,\"id\":%u,\"seconds_remaining\":%lld,"
                  "\"label\":\"%s\"}",
-                 count, soonest < 0 ? 0 : soonest, label);
+                 count, soonest_id, soonest < 0 ? 0 : soonest, label);
         return le_adapter_respond_ok(out, size, id, data);
     }
 
     if (!strcmp(cmd, "cancel")) {
-        if (!args || json_get_int(args, "id", &value) < 1)
-            return le_adapter_respond_err(out, size, id,
-                                          "cancel requires id");
-        if (le_timer_cancel(&ctx->timers, (unsigned int)value) != LE_TIMER_OK)
-            return le_adapter_respond_err(out, size, id, "no such timer");
-        ctx->dirty = 1;
-        return le_adapter_respond_ok(out, size, id, "{}");
+        size_t i;
+        int matches = 0;
+        unsigned int matched = 0;
+        unsigned int timer_id = 0;
+        int id_result = args ? json_get_uint(args, "id", &timer_id) : 0;
+
+        if (id_result < 0 || (id_result > 0 && timer_id == 0))
+            return le_adapter_respond_err(
+                out, size, id, "cancel id must be a positive integer");
+        if (id_result > 0) {
+            if (le_timer_cancel(&ctx->timers, timer_id) !=
+                LE_TIMER_OK)
+                return le_adapter_respond_err(out, size, id,
+                                              "no such timer");
+            ctx->dirty = 1;
+            return le_adapter_respond_ok(out, size, id, "{}");
+        }
+        if (label_result == 1 && label[0]) {
+            for (i = 0; i < LE_TIMER_MAX; ++i) {
+                if (ctx->timers.timers[i].state != LE_TIMER_STATE_PENDING ||
+                    strcmp(ctx->timers.timers[i].label, label))
+                    continue;
+                ++matches;
+                matched = ctx->timers.timers[i].id;
+            }
+            if (matches != 1)
+                return le_adapter_respond_err(
+                    out, size, id,
+                    matches > 1 ? "timer label is ambiguous"
+                                : "no such timer");
+            if (le_timer_cancel(&ctx->timers, matched) != LE_TIMER_OK)
+                return le_adapter_respond_err(out, size, id,
+                                              "no such timer");
+            ctx->dirty = 1;
+            return le_adapter_respond_ok(out, size, id, "{}");
+        }
+        return le_adapter_respond_err(out, size, id,
+                                      "cancel requires id or label");
     }
 
     /* What "Alexa, stop" reaches. Silences every ring and leaves pending

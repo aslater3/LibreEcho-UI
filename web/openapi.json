@@ -1730,7 +1730,7 @@
      "Setup"
     ],
     "summary": "Read first-boot setup state",
-    "description": "Returns safe initial values and whether first-boot setup is complete. Wi-Fi credentials are never returned.",
+    "description": "Returns safe initial values, boot-time owner-local firmware import state, live wlan0 registration, and whether first-boot setup is complete. Wi-Fi credentials are never returned.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1742,7 +1742,7 @@
      "Setup"
     ],
     "summary": "Complete first-boot AP-mode setup",
-    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. This one-time operation is rejected after setup completes.",
+    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. Hostname, audio, Wi-Fi and persistence failures return stage-specific errors. If and only if the optional wake adapter reports not-supported, setup continues and persists wake_word and wake_sensitivity for later restore. This one-time operation is rejected after setup completes.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1759,6 +1759,55 @@
       "$ref": "#/components/responses/Error"
      },
      "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/setup/vendor-import-force-next-boot": {
+   "post": {
+    "tags": [
+     "Setup"
+    ],
+    "summary": "Schedule a one-shot unverified owner-local firmware import",
+    "description": "Creates a mode-0600 one-shot marker consumed on the next boot. Hash matching is bypassed only for that boot; safe paths, the complete four-file inventory, bounded sizes, and MT8163 ROM patch routing metadata remain mandatory. The result is reported as forced-unverified.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "confirm"
+        ],
+        "properties": {
+         "confirm": {
+          "type": "string",
+          "enum": [
+           "force-unverified-owner-local-import"
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
       "$ref": "#/components/responses/Error"
      },
      "501": {
@@ -2290,7 +2339,7 @@
   "requestBodies": {
    "WifiConnect": {
     "required": true,
-    "description": "Wi-Fi credentials. `security` accepts exactly `open`, `wpa2`, or `wpa3`; when omitted it defaults to `wpa2`.",
+    "description": "Wi-Fi credentials. `security` accepts exactly `open` or `wpa2`; when omitted it defaults to `wpa2`. WPA3/SAE is not supported by the shipped MT8163 WEXT path.",
     "content": {
      "application/json": {
       "schema": {
@@ -2338,8 +2387,7 @@
           "security": {
            "type": "string",
            "enum": [
-            "wpa2",
-            "wpa3"
+            "wpa2"
            ],
            "default": "wpa2"
           }

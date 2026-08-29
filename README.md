@@ -52,9 +52,11 @@ The source is intentionally honest when a target adapter is absent: the API retu
 
 State-changing requests require `X-LibreEcho-CSRF`; destructive power actions additionally require `X-LibreEcho-Confirm`. Static paths reject traversal and backslashes. Configuration writes use temporary files, `fsync`, atomic rename, backups, and restrictive permissions.
 
-The API currently exposes 64 documented paths across:
+The API currently exposes 69 documented paths across:
 
-- first-boot setup;
+- first-boot setup, including owner-local firmware import status, live `wlan0`
+  registration, and an explicitly confirmed one-shot compatibility retry for
+  the next boot;
 - authentication and local user management;
 - device/system telemetry and provenance;
 - audio, playback, microphone listing and microphone streaming;

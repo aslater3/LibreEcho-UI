@@ -60,6 +60,69 @@ message.
 
 ### System Status
 
+#### GET /api/v1/setup
+
+Returns first-boot setup defaults and the connectivity prerequisites needed by
+the setup page. The response remains available during a degraded Linux boot
+when audio, network, or wake-word companion services are unavailable.
+
+`vendor_firmware.state`, `verification`, `source_layout`, and `error` mirror
+the bounded boot-time vendor-import status. `force_next_boot` reports whether
+the one-shot compatibility marker is pending, and `wlan0_registered` reports
+whether the kernel currently exposes the Wi-Fi interface. A degraded wake-word
+adapter returns the valid fallback `wake_word: "LibreEcho"`.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "wake_word": "LibreEcho",
+    "vendor_firmware": {
+      "state": "ready",
+      "verification": "hash-pinned",
+      "source_layout": "etc/firmware",
+      "error": "none",
+      "force_next_boot": false
+    },
+    "wlan0_registered": true
+  },
+  "error": null
+}
+```
+
+#### POST /api/v1/setup
+
+Validates and applies the first-boot hostname, initial volume, Wi-Fi profile,
+wake-word preferences, and privacy choices. Hostname, audio, Wi-Fi, and durable
+configuration failures abort the transaction with stage-specific errors.
+
+Wake-word support is optional: if its companion service returns
+`LE_NOT_SUPPORTED`, setup continues, the submitted `wake_word` and
+`wake_sensitivity` are still written to the canonical configuration, and the
+boot-time restore retries them when the service becomes available. Other
+wake-word errors abort setup. Wi-Fi credentials are passed to the network
+adapter for association but are never returned by the API or written to the
+web configuration.
+
+#### POST /api/v1/setup/vendor-import-force-next-boot
+
+Schedules one forced, owner-local firmware import for the next boot. This
+endpoint creates only the mode-`0600` one-shot marker; it does not reboot the
+device. The import remains structurally checked but is reported as
+`forced-unverified`, never hash-pinned.
+
+The request requires normal authentication, `X-LibreEcho-CSRF`, and this exact
+confirmation body:
+
+```json
+{ "confirm": "force-unverified-owner-local-import" }
+```
+
+A successful response reports `force_next_boot: true`,
+`reboot_required: true`, and `verification: "forced-unverified"`. An absent or
+incorrect confirmation returns `400`; non-Linux backends return `501`; and a
+marker write failure returns `503`.
+
 #### GET /api/v1/status
 
 Returns system health and telemetry.
@@ -630,8 +693,10 @@ Scan for WiFi networks.
 
 #### POST /api/v1/network/wifi/connect
 
-Connect to a WiFi network. The `security` field accepts exactly `open`, `wpa2`,
-or `wpa3`; if omitted, it defaults to `wpa2` for backward compatibility.
+Connect to a WiFi network. The `security` field accepts exactly `open` or `wpa2`;
+if omitted, it defaults to `wpa2` for backward compatibility. WPA3/SAE is not
+advertised or accepted because the shipped MT8163 path is WEXT-only and has no
+verified SAE capability.
 Malformed or unsupported security values are rejected with HTTP 400 before any
 adapter request is made.
 
@@ -644,9 +709,8 @@ adapter request is made.
 }
 ```
 
-For an open network, use `"security": "open"` and omit `password`. WPA3 uses
-`"security": "wpa3"`. The endpoint never silently converts an invalid security
-value to an open or WPA2 network.
+For an open network, use `"security": "open"` and omit `password`. The endpoint
+never silently converts an invalid security value to an open or WPA2 network.
 
 **Response:**
 ```json
