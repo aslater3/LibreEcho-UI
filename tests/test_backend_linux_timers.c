@@ -55,6 +55,8 @@ int main(void)
     assert(timers(NULL, &list) == LE_IO);
     test_response = "{\"available\":true,\"ringing\":0,\"missed\":0,\"timers\":[{\"id\":1,\"kind\":\"countdown\",\"state\":\"pending\",\"seconds_remaining\":1,\"label\":\"\xff\"}]}";
     assert(timers(NULL, &list) == LE_IO);
+    test_response = "{\"available\":true,\"ringing\":0,\"missed\":0,\"timers\":[{\"id\":1,\"kind\":\"countdown\",\"state\":\"ringing\",\"seconds_remaining\":0,\"label\":\"tea\"}]}";
+    assert(timers(NULL, &list) == LE_IO);
     test_response = "{\"available\":true,\"ringing\":1,\"missed\":2,\"timers\":[{\"id\":1,\"kind\":\"countdown\",\"state\":\"ringing\",\"seconds_remaining\":0,\"label\":\"tea\"}]}";
     assert(timers(NULL, &list) == LE_OK);
     assert(list.available == 1 && list.count == 1 && list.ringing == 1 &&

@@ -783,8 +783,8 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
             return le_adapter_respond_err(
                 out, size, id, "cancel id must be a positive integer");
         if (id_result > 0) {
-            le_timer_step(&ctx->timers, monotonic_ms(), wall_epoch(), NULL, 0);
-            if (le_timer_cancel(&ctx->timers, timer_id) !=
+            if (le_timer_cancel_at(&ctx->timers, timer_id, monotonic_ms(),
+                                   wall_epoch()) !=
                 LE_TIMER_OK)
                 return le_adapter_respond_err(out, size, id,
                                               "no such timer");
@@ -804,7 +804,8 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
                     out, size, id,
                     matches > 1 ? "timer label is ambiguous"
                                 : "no such timer");
-            if (le_timer_cancel(&ctx->timers, matched) != LE_TIMER_OK)
+            if (le_timer_cancel_at(&ctx->timers, matched, monotonic_ms(),
+                                   wall_epoch()) != LE_TIMER_OK)
                 return le_adapter_respond_err(out, size, id,
                                               "no such timer");
             ctx->dirty = 1;

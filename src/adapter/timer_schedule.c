@@ -192,6 +192,13 @@ int le_timer_cancel(struct le_timer_set *set, unsigned int id)
     return LE_TIMER_OK;
 }
 
+int le_timer_cancel_at(struct le_timer_set *set, unsigned int id,
+                       long long now_monotonic_ms, long long now_epoch)
+{
+    le_timer_step(set, now_monotonic_ms, now_epoch, NULL, 0);
+    return le_timer_cancel(set, id);
+}
+
 int le_timer_dismiss(struct le_timer_set *set, unsigned int id)
 {
     struct le_timer *timer = le_timer_find(set, id);

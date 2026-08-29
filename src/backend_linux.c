@@ -1811,6 +1811,8 @@ static int timers(struct le_backend *b, struct le_timer_list *o)
     const char *array;
     size_t array_size;
     long long count;
+    int actual_ringing;
+    int i;
     int rc;
     (void)b;
 
@@ -1835,6 +1837,11 @@ static int timers(struct le_backend *b, struct le_timer_list *o)
     o->missed = (int)count;
     if (json_get_array_top_level(response, "timers", &array, &array_size) != 1 ||
         !timer_array_parse(array, array_size, o))
+        return LE_IO;
+    actual_ringing = 0;
+    for (i = 0; i < o->count; ++i)
+        actual_ringing += !strcmp(o->items[i].state, "ringing");
+    if (actual_ringing != o->ringing)
         return LE_IO;
     o->available = 1;
     return LE_OK;
