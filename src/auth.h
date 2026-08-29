@@ -28,6 +28,8 @@ struct le_auth_db {
     size_t user_count;
     struct le_auth_user users[LE_AUTH_MAX_USERS];
     struct le_auth_session sessions[LE_AUTH_MAX_SESSIONS];
+    /* Set by login when a persisted row is evicted by a new session. */
+    int persisted_session_evicted;
 };
 
 /*

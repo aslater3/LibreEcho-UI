@@ -50,6 +50,30 @@ code=$(curl -sS -o /tmp/le-malformed-wifi-security.out -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     --data '{"ssid":"LibreNet-IoT","password":"top-secret","security":"open\\nrest"}')
 [ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-features.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"https":"false","simulation":true}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" | jq -e '.ok and .data.simulation == false' >/dev/null
+code=$(curl -sS -o /tmp/le-malformed-mac-type.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/network" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"ssh":true,"wifi_mac":123}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.ssh == false' >/dev/null
+mac64=$(python3 -c 'print("a" * 64)')
+code=$(curl -sS -o /tmp/le-malformed-mac-length.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/network" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data "{\"wifi_mac\":\"$mac64\"}")
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-radio-enabled.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/integrations/radio" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"station_count":1,"station_0_word":"test","station_0_name":"Test","station_0_url":"https://example.com/test","station_0_enabled":"yes"}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/integrations/radio" | jq -e '.ok and (.data.stations | length) == 0' >/dev/null
 ! grep -q 'top-secret' "$CFG"
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
 expect "$(curl -fsS "$URL/swagger.html")" 'API reference · LibreEcho'

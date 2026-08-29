@@ -319,9 +319,7 @@ if(inet_pton(AF_INET,o->listen_host,&a.sin_addr)!=1){close(ls);
 return-1;
 }if(bind(ls,(struct sockaddr*)&a,sizeof(a))||listen(ls,max)){close(ls);
 return-1;
-}if(o->run_user[0]){struct passwd*pw=getpwnam(o->run_user);if(!pw){fprintf(stderr,"Unknown privilege-drop user: %s\n",o->run_user);close(ls);return-1;}if(setgroups(0,0)||setgid(pw->pw_gid)||setuid(pw->pw_uid)){perror("privilege drop");close(ls);return-1;}fprintf(stderr,"Dropped privileges to %s\n",o->run_user);}
-fprintf(stderr,"LibreEcho listening on http://%s:%d (%s backend)\n",o->listen_host,o->port,le_backend_mode(api->backend));
-if(o->tls_port>0){
+}if(o->tls_port>0){
 struct sockaddr_in ta;int tyes=1;
 tls_ls=socket(AF_INET,SOCK_STREAM,0);
 if(tls_ls>=0&&close_on_exec(tls_ls)<0){close(tls_ls);tls_ls=-1;}
@@ -341,6 +339,8 @@ fprintf(stderr,"HTTPS relay listener unavailable: %s\n",strerror(errno));if(rela
 }else {relay_port=(int)ntohs(ra.sin_port);api_set_https_active(api,1);fprintf(stderr,"LibreEcho also listening on https://%s:%d\n",o->listen_host,o->tls_port);}
 }
 }}
+if(o->run_user[0]){struct passwd*pw=getpwnam(o->run_user);if(!pw){fprintf(stderr,"Unknown privilege-drop user: %s\n",o->run_user);if(relay_ls>=0)close(relay_ls);if(tls_ls>=0)close(tls_ls);close(ls);return-1;}if(setgroups(0,0)||setgid(pw->pw_gid)||setuid(pw->pw_uid)){perror("privilege drop");if(relay_ls>=0)close(relay_ls);if(tls_ls>=0)close(tls_ls);close(ls);return-1;}fprintf(stderr,"Dropped privileges to %s\n",o->run_user);}
+fprintf(stderr,"LibreEcho listening on http://%s:%d (%s backend)\n",o->listen_host,o->port,le_backend_mode(api->backend));
 while(*running){p[0].fd=ls;
 p[0].events=POLLIN;
 p[max+1].fd=tls_ls;

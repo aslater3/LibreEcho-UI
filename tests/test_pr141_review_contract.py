@@ -19,6 +19,7 @@ assert "inherited != keep_fd" in Path("src/inherited_fds.c").read_text(encoding=
 assert "relay_ls=socket(AF_INET,SOCK_STREAM,0)" in http
 assert "c[i].secure_transport=1" in http
 assert "q.https=c->secure_transport;" in http
+assert http.index("if(o->tls_port>0)") < http.index("if(o->run_user[0])")
 assert "make build/test-auth-transport" in runner
 assert "make build/test-inherited-fds" in runner
 assert "make build/test-radiod-json" in runner
@@ -65,7 +66,25 @@ radio_apply_start = api.index("static int radio_apply")
 radio_apply_end = api.index("/* The colour arrives", radio_apply_start)
 radio_apply = api[radio_apply_start:radio_apply_end]
 assert radio_apply.index("radio_save(c, staged, staged_count)") < radio_apply.index("memcpy(c->radio")
-assert "return LE_IO;" in radio_apply
+assert "enabled_result = json_get_bool(j, key, &value)" in radio_apply
+assert "if (enabled_result < 0)" in radio_apply
+assert "return LE_INVALID;" in radio_apply
+assert "enabled_result = json_get_bool(saved, key, &value)" in api
+
+features_start = api.index('if(!strcmp(p,"/api/v1/system/features"))')
+features = api[features_start:api.index('if(!strcmp(p,"/api/v1/integrations/radio/play")', features_start)]
+assert "want_https<0||want_sim<0" in features
+assert features.index("persist_configuration(c)") < features.index("unlink(c->sessions_path)")
+
+network_start = api.index('if(!strcmp(p,"/api/v1/network"))')
+network = api[network_start:api.index('if(!strcmp(p,"/api/v1/network/wifi/scan")', network_start)]
+assert "int result=json_get_string(q->body,key,m,sizeof(m))" in network
+assert "result<0" in network
+assert network.index("int result=json_get_string") < network.index('json_get_string(q->body,"hostname"')
+
+assert "persisted_session_evicted" in Path("src/auth.h").read_text(encoding="utf-8")
+assert "!q->https&&persist_auth_sessions(c)&&c->auth.persisted_session_evicted" in api
+assert "evicted session could not be removed" in api
 
 assert '#include "inherited_fds.h"' in http
 assert http.count("le_close_inherited_fds(fd);") >= 3

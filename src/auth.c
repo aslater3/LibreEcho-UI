@@ -289,9 +289,11 @@ static int issue_token(struct le_auth_db *db, const char *username,
     unsigned char random[32];
     size_t i, slot = LE_AUTH_MAX_SESSIONS;
     time_t now = time(NULL);
+    int replacing_persisted = 0;
     if (token_size < LE_AUTH_TOKEN_MAX ||
         random_bytes(random, sizeof(random)) < 0)
         return -1;
+    db->persisted_session_evicted = 0;
     for (i = 0; i < LE_AUTH_MAX_SESSIONS; ++i) {
         if (!db->sessions[i].token[0] || db->sessions[i].expires <= now) {
             slot = i;
@@ -300,6 +302,9 @@ static int issue_token(struct le_auth_db *db, const char *username,
     }
     if (slot == LE_AUTH_MAX_SESSIONS)
         slot = 0;
+    replacing_persisted = db->sessions[slot].token[0] &&
+                          db->sessions[slot].persisted;
+    db->persisted_session_evicted = replacing_persisted;
     for (i = 0; i < sizeof(random); ++i) {
         token[i * 2] = hex[random[i] >> 4];
         token[i * 2 + 1] = hex[random[i] & 15];

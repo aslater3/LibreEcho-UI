@@ -15,6 +15,7 @@ int main(void)
     char users[128], sessions[160], bootstrap_users[128];
     char bootstrap_sessions[160], csrf[65], token[LE_AUTH_TOKEN_MAX];
     char http_token[LE_AUTH_TOKEN_MAX];
+    char filled_tokens[LE_AUTH_MAX_SESSIONS][LE_AUTH_TOKEN_MAX];
     struct le_auth_db seed;
     struct le_backend *backend = NULL;
     struct api_context api;
@@ -101,6 +102,45 @@ int main(void)
         CHECK(fclose(file) == 0);
         CHECK(strstr(persisted, token) == NULL);
         CHECK(strstr(persisted, http_token) == NULL);
+    }
+
+    snprintf(request.path, sizeof(request.path), "/api/v1/auth/logout");
+    snprintf(request.authorization, sizeof(request.authorization),
+             "Bearer %s", http_token);
+    request.https = 0;
+    memset(&response, 0, sizeof(response));
+    api_handle(&api, &request, &response);
+    CHECK(response.status == 200);
+
+    /* An HTTP login may evict a persisted HTTPS session. The persisted-only
+       rewrite must remove the evicted token without storing the HTTP token. */
+    for (i = 0; i < LE_AUTH_MAX_SESSIONS; ++i) {
+        const char *start;
+        request.https = 1;
+        snprintf(request.path, sizeof(request.path), "/api/v1/auth/login");
+        request.authorization[0] = '\0';
+        request.body = body;
+        request.body_len = strlen(body);
+        memset(&response, 0, sizeof(response));
+        api_handle(&api, &request, &response);
+        CHECK(response.status == 200);
+        start = strstr(response.body, "\"token\":\"");
+        CHECK(start != NULL);
+        start += strlen("\"token\":\"");
+        CHECK(sscanf(start, "%64[0-9a-f]", filled_tokens[i]) == 1);
+    }
+    request.https = 0;
+    memset(&response, 0, sizeof(response));
+    api_handle(&api, &request, &response);
+    CHECK(response.status == 200);
+    {
+        char persisted[1024] = {0};
+        FILE *file = fopen(sessions, "r");
+        CHECK(file != NULL);
+        CHECK(fread(persisted, 1, sizeof(persisted) - 1, file) < sizeof(persisted));
+        CHECK(fclose(file) == 0);
+        CHECK(strstr(persisted, filled_tokens[0]) == NULL);
+        CHECK(strstr(persisted, filled_tokens[LE_AUTH_MAX_SESSIONS - 1]) != NULL);
     }
 
     CHECK(api_init(&bootstrap, backend, 0, 0, NULL, NULL, csrf, NULL,
