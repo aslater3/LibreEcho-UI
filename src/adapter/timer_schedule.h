@@ -109,6 +109,17 @@ int le_timer_restore_countdown(struct le_timer_set *set, long long due_epoch,
 int le_timer_restore_alarm(struct le_timer_set *set, long long due_epoch,
                            const char *label, long long now_epoch,
                            long long now_monotonic_ms, unsigned int *id);
+int le_timer_restore_countdown_with_id(struct le_timer_set *set,
+                                       unsigned int restore_id,
+                                       long long due_epoch, const char *label,
+                                       long long now_epoch,
+                                       long long now_monotonic_ms,
+                                       unsigned int *id);
+int le_timer_restore_alarm_with_id(struct le_timer_set *set,
+                                   unsigned int restore_id, long long due_epoch,
+                                   const char *label, long long now_epoch,
+                                   long long now_monotonic_ms,
+                                   unsigned int *id);
 
 int le_timer_cancel(struct le_timer_set *set, unsigned int id);
 

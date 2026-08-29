@@ -24,6 +24,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -99,7 +100,7 @@ static long long wall_epoch(void)
 /* ------------------------------ persistence ----------------------------- */
 
 /*
- * One record per line: "v2 kind due_epoch @hex:label_bytes". Older
+ * One record per line: "v3 kind id due_epoch @hex:label_bytes". Older v2 and
  * whitespace-delimited records without the v2 marker are still accepted when
  * loading. Encoding new labels removes the whitespace ambiguity in the
  * original format and preserves every byte of the label across a restart.
@@ -181,21 +182,24 @@ static int state_decode_label(const char *text, char *out, size_t size)
    space is part of the label. V2 labels are encoded and may safely skip all
    formatting whitespace before the @hex: value. */
 static int state_parse_header(const char *line, char *kind, size_t kind_size,
-                              long long *due, size_t *label_offset, int *v2)
+                              unsigned int *restore_id, long long *due,
+                              size_t *label_offset, int *format)
 {
     const char *cursor = line;
     const char *token;
     char *number_end;
     size_t length;
 
-    if (!line || !kind || kind_size == 0 || !due || !label_offset || !v2)
+    if (!line || !kind || kind_size == 0 || !restore_id || !due ||
+        !label_offset || !format)
         return -1;
     while (*cursor && isspace((unsigned char)*cursor))
         ++cursor;
-    *v2 = 0;
-    if (!strncmp(cursor, "v2", 2) &&
+    *format = 0;
+    *restore_id = 0;
+    if ((!strncmp(cursor, "v2", 2) || !strncmp(cursor, "v3", 2)) &&
         isspace((unsigned char)cursor[2])) {
-        *v2 = 1;
+        *format = cursor[1] - '0';
         cursor += 2;
         while (*cursor && isspace((unsigned char)*cursor))
             ++cursor;
@@ -212,6 +216,19 @@ static int state_parse_header(const char *line, char *kind, size_t kind_size,
         return -1;
     while (*cursor && isspace((unsigned char)*cursor))
         ++cursor;
+    if (*format == 3) {
+        unsigned long value;
+
+        errno = 0;
+        value = strtoul(cursor, &number_end, 10);
+        if (errno == ERANGE || number_end == cursor || value == 0 ||
+            value > UINT_MAX || (*number_end && !isspace((unsigned char)*number_end)))
+            return -1;
+        *restore_id = (unsigned int)value;
+        cursor = number_end;
+        while (*cursor && isspace((unsigned char)*cursor))
+            ++cursor;
+    }
     errno = 0;
     *due = strtoll(cursor, &number_end, 10);
     if (errno == ERANGE || number_end == cursor)
@@ -220,7 +237,7 @@ static int state_parse_header(const char *line, char *kind, size_t kind_size,
         return -1;
     if (!*number_end) {
         *label_offset = (size_t)(number_end - line);
-    } else if (*v2) {
+    } else if (*format >= 2) {
         while (*number_end && isspace((unsigned char)*number_end))
             ++number_end;
         *label_offset = (size_t)(number_end - line);
@@ -348,9 +365,9 @@ static enum state_save_result state_save_at(struct context *ctx,
         }
         if (state_encode_label(encoded_label, sizeof(encoded_label),
                                timer->label) < 0 ||
-            fprintf(file, "v2 %s %lld %s\n",
+            fprintf(file, "v3 %s %u %lld %s\n",
                     timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown",
-                    due, encoded_label) < 0) {
+                    timer->id, due, encoded_label) < 0) {
             fclose(file);
             unlink(temporary);
             return STATE_SAVE_FAILED;
@@ -446,12 +463,13 @@ static int state_load_at(struct context *ctx, long long now_ms,
         long long due = 0;
         char label[LE_TIMER_LABEL_MAX];
         unsigned int id = 0;
+        unsigned int restore_id = 0;
         size_t label_offset = 0;
-        int v2 = 0;
+        int format = 0;
 
         label[0] = '\0';
-        if (state_parse_header(line, kind, sizeof(kind), &due,
-                               &label_offset, &v2) < 0)
+        if (state_parse_header(line, kind, sizeof(kind), &restore_id, &due,
+                               &label_offset, &format) < 0)
             continue;
         if (label_offset < sizeof(line)) {
             size_t length;
@@ -460,7 +478,7 @@ static int state_load_at(struct context *ctx, long long now_ms,
             while (length && (line[label_offset + length - 1] == '\n' ||
                               line[label_offset + length - 1] == '\r'))
                 line[label_offset + --length] = '\0';
-            if (v2) {
+            if (format >= 2) {
                 if (state_decode_label(line + label_offset, label,
                                        sizeof(label)) < 0)
                     continue;
@@ -472,15 +490,25 @@ static int state_load_at(struct context *ctx, long long now_ms,
         }
 
         if (!strcmp(kind, "alarm")) {
-            if (le_timer_restore_alarm(&ctx->timers, due, label, now_epoch,
-                                       now_ms, &id) != LE_TIMER_OK)
+            if ((format >= 3
+                     ? le_timer_restore_alarm_with_id(&ctx->timers, restore_id,
+                                                      due, label, now_epoch,
+                                                      now_ms, &id)
+                     : le_timer_restore_alarm(&ctx->timers, due, label,
+                                              now_epoch, now_ms, &id)) !=
+                LE_TIMER_OK)
                 ++ctx->timers.missed;
         } else if (!strcmp(kind, "countdown")) {
             /* Restored against the wall clock it was saved with, then handed
                back to the monotonic clock it runs on. The restore API retains
                a slightly overdue record so the scheduler can apply its grace. */
-            if (le_timer_restore_countdown(&ctx->timers, due, label, now_epoch,
-                                          now_ms, &id) != LE_TIMER_OK)
+            if ((format >= 3
+                     ? le_timer_restore_countdown_with_id(
+                           &ctx->timers, restore_id, due, label, now_epoch,
+                           now_ms, &id)
+                     : le_timer_restore_countdown(&ctx->timers, due, label,
+                                                  now_epoch, now_ms, &id)) !=
+                LE_TIMER_OK)
                 ++ctx->timers.missed;
         }
     }
@@ -755,6 +783,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
             return le_adapter_respond_err(
                 out, size, id, "cancel id must be a positive integer");
         if (id_result > 0) {
+            le_timer_step(&ctx->timers, monotonic_ms(), wall_epoch(), NULL, 0);
             if (le_timer_cancel(&ctx->timers, timer_id) !=
                 LE_TIMER_OK)
                 return le_adapter_respond_err(out, size, id,
