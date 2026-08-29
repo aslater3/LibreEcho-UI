@@ -201,6 +201,25 @@ case "$out" in
     *) echo "FAIL: remove label cancellation left a timer: $out"; exit 1 ;;
 esac
 
+# A numeric first word may be part of a stored name. It must remain a label
+# when another name word follows, rather than being treated as a count.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the two eggs"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the alpha"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the two eggs timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: numeric-leading label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"two eggs"'*)
+        echo "FAIL: numeric-leading label was not cancelled: $out"; exit 1 ;;
+    *'"label":"alpha"'*) ;;
+    *) echo "FAIL: numeric-leading label cancellation changed the wrong timer: $out"; exit 1 ;;
+esac
+echo "  numeric-leading timer labels remain targetable: ok"
+call "$agent_sock" respond '{"text":"cancel the alpha timer"}' >/dev/null
+
 # Alarm is an accepted noun as well as timer, and every cancellation verb must
 # carry the label through to the daemon.
 call "$agent_sock" respond '{"text":"set a timer for ten minutes for the kitchen"}' >/dev/null
@@ -263,6 +282,18 @@ out=$(call "$timer_sock" status '{}')
 case "$out" in
     *'"timers":[]'*) ;;
     *) echo "FAIL: every-one-of cancel-all left timers: $out"; exit 1 ;;
+esac
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"delete each one of the alarms"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: each-one-of cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: each-one-of cancel-all left timers: $out"; exit 1 ;;
 esac
 call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
 out=$(call "$agent_sock" respond '{"text":"cancel all timers"}')

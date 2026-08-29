@@ -265,13 +265,28 @@ static int is_number_token(const char *start, size_t length)
     return 0;
 }
 
-static int starts_with_quantity(const char *start, size_t length)
+static int span_is_number_sequence(const char *start, size_t length)
 {
-    size_t token_length = 0;
+    size_t offset = 0;
+    int found = 0;
 
-    while (token_length < length && start[token_length] != ' ')
-        ++token_length;
-    return is_number_token(start, token_length);
+    while (offset < length) {
+        size_t token_length;
+
+        while (offset < length && start[offset] == ' ')
+            ++offset;
+        if (offset >= length)
+            break;
+        token_length = offset;
+        while (token_length < length && start[token_length] != ' ')
+            ++token_length;
+        if (token_length == offset ||
+            !is_number_token(start + offset, token_length - offset))
+            return 0;
+        found = 1;
+        offset = token_length;
+    }
+    return found;
 }
 
 static int span_has_word(const char *start, size_t length, const char *word)
@@ -302,7 +317,7 @@ static int copy_cancel_label(char *out, size_t size, const char *start,
         return 0;
     /* Quantities and duration units select a timer; they are never stored
        names. Reject them before copying transcript bytes into the label. */
-    if (starts_with_quantity(start, length) ||
+    if (span_is_number_sequence(start, length) ||
         span_has_word(start, length, "minute") ||
         span_has_word(start, length, "minutes") ||
         span_has_word(start, length, "hour") ||

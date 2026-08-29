@@ -155,6 +155,16 @@ int main(void)
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(intent.label[0] == '\0');
+        /* A numeric first word is not enough to classify a stored name as a
+           quantity: "two eggs" is a legitimate timer label. */
+        assert(le_timer_intent_parse("cancel the two eggs timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "two eggs"));
+        assert(le_timer_intent_parse("cancel the 2 fast eggs alarm", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "2 fast eggs"));
         assert(le_timer_intent_parse("cancel all timers", &intent) ==
                LE_TIMER_INTENT_CANCEL);
         assert(intent.cancel_all);
