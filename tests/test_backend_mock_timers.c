@@ -57,6 +57,12 @@ int main(void)
     le_mock_test_set_time(2000 + 1 + LE_TIMER_MISS_GRACE_SECONDS + 1);
     assert(backend.ops->timers(&backend, &list) == LE_OK);
     assert(list.count == 0 && list.ringing == 0 && list.missed == 1);
+    le_mock_test_set_time(3000);
+    assert(backend.ops->timer_add(&backend, 1, "direct", &id) == LE_OK);
+    le_mock_test_set_time(3001);
+    assert(backend.ops->timer_cancel(&backend, id) == LE_INVALID);
+    assert(backend.ops->timers(&backend, &list) == LE_OK);
+    assert(list.count == 1 && list.ringing == 1);
     backend.ops->destroy(&backend);
     le_mock_test_use_real_time();
 
