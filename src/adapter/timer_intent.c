@@ -125,8 +125,9 @@ static int number_before(const char *text, const char *unit)
         length = (size_t)(end - cursor);
         if (length >= sizeof(words[0]))
             break;
-        memcpy(words[count], cursor, length);
-        words[count][length] = '\0';
+        if (snprintf(words[count], sizeof(words[count]), "%.*s",
+                     (int)length, cursor) < 0)
+            break;
         ++count;
         if (cursor > text)
             --cursor;
@@ -273,11 +274,44 @@ static int starts_with_quantity(const char *start, size_t length)
     return is_number_token(start, token_length);
 }
 
+static int span_has_word(const char *start, size_t length, const char *word)
+{
+    size_t word_length = strlen(word);
+    size_t offset = 0;
+
+    while (offset < length) {
+        size_t token_length;
+
+        while (offset < length && start[offset] == ' ')
+            ++offset;
+        token_length = offset;
+        while (token_length < length && start[token_length] != ' ')
+            ++token_length;
+        if (token_length - offset == word_length &&
+            !strncmp(start + offset, word, word_length))
+            return 1;
+        offset = token_length;
+    }
+    return 0;
+}
+
 static int copy_cancel_label(char *out, size_t size, const char *start,
                              size_t length)
 {
-    if (starts_with_quantity(start, length))
+    if (!out || !size || !start || !length)
         return 0;
+    /* Quantities and duration units select a timer; they are never stored
+       names. Reject them before copying transcript bytes into the label. */
+    if (starts_with_quantity(start, length) ||
+        span_has_word(start, length, "minute") ||
+        span_has_word(start, length, "minutes") ||
+        span_has_word(start, length, "hour") ||
+        span_has_word(start, length, "hours") ||
+        span_has_word(start, length, "second") ||
+        span_has_word(start, length, "seconds")) {
+        out[0] = '\0';
+        return 0;
+    }
     return copy_label(out, size, start, length);
 }
 
@@ -317,6 +351,7 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
     const char *noun = NULL;
     const char *marker;
     const char *start;
+    const char *stop;
     size_t verb_length = 0;
     size_t length;
     size_t i;
@@ -349,7 +384,8 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
             start = marker + strlen(" for the ");
         else
             start = marker + strlen(" for my ");
-        length = strlen(start);
+        stop = strstr(start, " for ");
+        length = stop ? (size_t)(stop - start) : strlen(start);
         (void)copy_cancel_label(out, size, start, length);
         return;
     }
@@ -395,14 +431,13 @@ static int has_universal_timer_noun(const char *text)
 
             while (*noun == ' ')
                 ++noun;
+            /* "every one of my timers" has an extra word between the
+               quantifier and the optional preposition. Consume it before
+               applying the same `of`/determiner walk as "every timer". */
             if ((!strcmp(QUANTIFIERS[i], "every") ||
                  !strcmp(QUANTIFIERS[i], "each")) &&
-                starts_word(noun, "one")) {
-                const char *after_one = after_word(noun, "one");
-
-                if (starts_word(after_one, "of"))
-                    noun = after_word(after_one, "of");
-            }
+                starts_word(noun, "one"))
+                noun = after_word(noun, "one");
             if (starts_word(noun, "of"))
                 noun = after_word(noun, "of");
             for (j = 0; j < sizeof(DETERMINERS) / sizeof(DETERMINERS[0]);

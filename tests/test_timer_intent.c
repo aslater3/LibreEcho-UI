@@ -128,8 +128,16 @@ int main(void)
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(intent.label[0] == '\0');
+        assert(le_timer_intent_parse("clear the 10 minute alarm", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(intent.label[0] == '\0');
         assert(le_timer_intent_parse("cancel timer called fifteen minutes",
                                      &intent) == LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(intent.label[0] == '\0');
+        assert(le_timer_intent_parse("remove 2 timers", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(intent.label[0] == '\0');
         assert(le_timer_intent_parse("cancel every question about timers",
