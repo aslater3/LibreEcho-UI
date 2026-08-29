@@ -2274,7 +2274,7 @@
   "requestBodies": {
    "WifiConnect": {
     "required": true,
-    "description": "Wi-Fi credentials. `security` accepts exactly `open`, `wpa2`, or `wpa3`; when omitted it defaults to `wpa2`.",
+    "description": "Wi-Fi credentials. `security` accepts exactly `open` or `wpa2`; when omitted it defaults to `wpa2`. WPA3/SAE is not supported by the shipped MT8163 WEXT path.",
     "content": {
      "application/json": {
       "schema": {
@@ -2322,8 +2322,7 @@
           "security": {
            "type": "string",
            "enum": [
-            "wpa2",
-            "wpa3"
+            "wpa2"
            ],
            "default": "wpa2"
           }

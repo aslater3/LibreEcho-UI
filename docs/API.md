@@ -634,8 +634,10 @@ Scan for WiFi networks.
 
 #### POST /api/v1/network/wifi/connect
 
-Connect to a WiFi network. The `security` field accepts exactly `open`, `wpa2`,
-or `wpa3`; if omitted, it defaults to `wpa2` for backward compatibility.
+Connect to a WiFi network. The `security` field accepts exactly `open` or `wpa2`;
+if omitted, it defaults to `wpa2` for backward compatibility. WPA3/SAE is not
+advertised or accepted because the shipped MT8163 path is WEXT-only and has no
+verified SAE capability.
 Malformed or unsupported security values are rejected with HTTP 400 before any
 adapter request is made.
 
@@ -648,9 +650,8 @@ adapter request is made.
 }
 ```
 
-For an open network, use `"security": "open"` and omit `password`. WPA3 uses
-`"security": "wpa3"`. The endpoint never silently converts an invalid security
-value to an open or WPA2 network.
+For an open network, use `"security": "open"` and omit `password`. The endpoint
+never silently converts an invalid security value to an open or WPA2 network.
 
 **Response:**
 ```json

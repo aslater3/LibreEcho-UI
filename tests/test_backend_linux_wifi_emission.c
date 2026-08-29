@@ -41,13 +41,12 @@ int main(void)
     require_contains(captured_args, "\"security\":\"open\"");
 
     memset(&credentials, 0, sizeof(credentials));
-    snprintf(credentials.ssid, sizeof(credentials.ssid), "WPA3 WiFi");
+    snprintf(credentials.ssid, sizeof(credentials.ssid), "Unsupported WPA3 WiFi");
     snprintf(credentials.password, sizeof(credentials.password), "secret-pass");
     snprintf(credentials.security, sizeof(credentials.security), "wpa3");
-    if (connect_wifi(NULL, &credentials) != LE_OK)
+    if (connect_wifi(NULL, &credentials) != LE_INVALID)
         return 1;
-    require_contains(captured_args, "\"security\":\"wpa3\"");
 
-    puts("Linux Wi-Fi adapter emission: open and wpa3 PASS");
+    puts("Linux Wi-Fi adapter emission: open and WPA3 rejected PASS");
     return 0;
 }
