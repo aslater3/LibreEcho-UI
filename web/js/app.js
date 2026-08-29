@@ -546,13 +546,14 @@ function sayLeft(s){if(s<=0)return'due';const h=Math.floor(s/3600),m=Math.floor(
 function timerFormDraft(){const minutes=$('#timer-minutes'),label=$('#timer-label');if(!minutes&&!label)return null;const active=document.activeElement;return{minutes:minutes?.value||'',label:label?.value||'',focused:active?.id==='timer-minutes'||active?.id==='timer-label'?active.id:''}}
 function restoreTimerForm(draft){if(!draft)return;const minutes=$('#timer-minutes'),label=$('#timer-label');if(minutes)minutes.value=draft.minutes;if(label)label.value=draft.label;if(draft.focused)$('#'+draft.focused)?.focus()}
 function utf8Bytes(value){return new TextEncoder().encode(value).length}
+function scheduleTimerRefresh(){state.timer=setTimeout(()=>{if(state.page==='Timers')return render()},1000)}
 async function timersPage(draft=null){
  const generation=state.renderGeneration;
  let t;
  try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==state.renderGeneration)return;throw error}
  if(state.page!=='Timers'||generation!==state.renderGeneration)return;
  const liveDraft=timerFormDraft()||draft;
- if(!t.available){content.innerHTML=panel('Timers',`<div class="empty-state"><p>The timer service is not running on this device.</p></div>`);return}
+ if(!t.available){content.innerHTML=panel('Timers',`<div class="empty-state"><p>The timer service is not running on this device.</p></div>`);scheduleTimerRefresh();return}
  const rows=(t.timers||[]).map(x=>`<tr><td>${esc(x.label||(x.kind==='alarm'?'Alarm':'Timer'))}</td><td>${x.state==='ringing'?'<strong>ringing</strong>':esc(sayLeft(x.seconds_remaining))}</td><td class="right"><button class="link-btn" data-cancel="${x.id}">Cancel</button></td></tr>`).join('');
  content.innerHTML=`<div class="settings-grid">${panel('Timers',
    (t.timers&&t.timers.length
@@ -569,7 +570,7 @@ async function timersPage(draft=null){
   post('/timers',{seconds:Math.round(minutes*60),label},'Timer started')};
  const stop=$('#dismiss-timers');if(stop)stop.onclick=()=>post('/timers/dismiss',{},'Stopped');
  content.querySelectorAll('[data-cancel]').forEach(b=>{b.onclick=()=>del('/timers/'+b.dataset.cancel,'Timer cancelled')});
- state.timer=setTimeout(()=>{if(state.page==='Timers')return render()},1000)}
+ scheduleTimerRefresh()}
 async function render(){++state.renderGeneration;const draft=state.page==='Timers'?timerFormDraft():null;clearTimeout(state.timer);if(state.page!=='Timers')content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Timers')await timersPage(draft);else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations')await integrationsPage();else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000)}
 function showPage(name,updateRoute=true){if(!descriptions[name])name='Overview';if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();state.page=name;if(updateRoute&&location.pathname!=='/'+pageSlug(name))history.pushState(null,'','/'+pageSlug(name));$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===name));$('#page-title').textContent=name;$('#page-subtitle').textContent=descriptions[name];document.title=`${name} · LibreEcho`;document.body.classList.remove('nav-open');render()}
 items.forEach(([name,icon],i)=>{const b=document.createElement('button');b.className='nav-item'+(i?'':' active');b.dataset.page=name;b.innerHTML=`<svg><use href="#${icon}"></use></svg><span>${name}</span>`;b.onclick=()=>showPage(name);nav.appendChild(b)});

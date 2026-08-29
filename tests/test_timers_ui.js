@@ -53,7 +53,7 @@ globalThis.api = async path => {
     reads++;
     if (reads === 2) await new Promise(resolve => { releaseRefresh = resolve; });
     if (reads === 3) await new Promise(resolve => { releaseNavigation = resolve; });
-    return { available: true, ringing: 0, missed: 0,
+    return { available: reads !== 4, ringing: 0, missed: 0,
         timers: [{ id: 1, kind: 'countdown', state: 'pending',
             seconds_remaining: reads === 1 ? 10 : 9, label: 'tea' }] };
 };
@@ -87,6 +87,17 @@ async function main() {
     await navigationRefresh;
     if (content.innerHTML !== 'new timers render sentinel')
         throw new Error('stale timer refresh overwrote the page after navigation');
-    console.log('timers UI refresh preserves form and navigation: ok');
+
+    state.renderGeneration++;
+    await timersPage();
+    if (!content.innerHTML.includes('not running'))
+        throw new Error('unavailable timer state was not rendered');
+    if (typeof scheduled !== 'function')
+        throw new Error('unavailable timer state did not schedule a retry');
+    const retry = scheduled();
+    await retry;
+    if (!content.innerHTML.includes('9s'))
+        throw new Error('timer service retry did not refresh the page');
+    console.log('timers UI refresh preserves form, navigation, and recovery: ok');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
