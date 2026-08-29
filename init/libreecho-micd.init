@@ -61,11 +61,46 @@ export_capture_gain() {
     return 0
 }
 
-is_running() {
+# Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life:
+# it goes stale when the daemon is started from a shell that then exits (the
+# fallback branch of start_service() leaves the child in the caller's process
+# group), and it goes missing when /run is cleared. Matching on the executable
+# means stop and status still see the daemon in both cases, so restart cannot
+# silently leave a second copy running.
+running_pids() {
+    for entry in /proc/[0-9]*; do
+        candidate=${entry#/proc/}
+        [ "$candidate" = "$$" ] && continue
+        [ -r "$entry/cmdline" ] || continue
+        argv0=$(tr '\0' '\n' < "$entry/cmdline" 2>/dev/null | sed -n '1p')
+        [ "$argv0" = "$DAEMON" ] && printf '%s\n' "$candidate"
+    done
+}
+
+pidfile_pid() {
     [ -s "$PIDFILE" ] || return 1
     pid=$(sed -n '1p' "$PIDFILE")
     case "$pid" in *[!0-9]*|'') return 1 ;; esac
-    kill -0 "$pid" 2>/dev/null
+    kill -0 "$pid" 2>/dev/null || return 1
+    printf '%s\n' "$pid"
+}
+
+is_running() {
+    pidfile_pid >/dev/null && return 0
+    [ -n "$(running_pids)" ]
+}
+
+# Sends TERM, waits up to $2 seconds (default 5), then KILL.
+terminate() {
+    target=$1
+    limit=${2:-5}
+    kill "$target" 2>/dev/null || true
+    count=0
+    while kill -0 "$target" 2>/dev/null && [ "$count" -lt "$limit" ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    kill -KILL "$target" 2>/dev/null || true
 }
 
 start_service() {
@@ -76,25 +111,37 @@ start_service() {
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else
-        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+        # setsid detaches the child from this shell's process group. Without it
+        # the daemon dies with the shell that started it -- which is why a
+        # restart issued over adb or ssh appeared to work and then evaporated.
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+        else
+            "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+        fi
         echo $! >"$PIDFILE"
+        # setsid may fork, so $! can be the wrapper rather than the daemon.
+        # Resolve the real pid so the pidfile is not born stale.
+        sleep 1
+        # Lowest pid: daemons that fork a worker share argv[0], and the
+        # supervisor is the one started first.
+        started=$(running_pids | sort -n | sed -n '1p')
+        [ -n "$started" ] && echo "$started" >"$PIDFILE"
     fi
 }
 
 stop_service() {
-    if ! is_running; then rm -f "$PIDFILE"; return 0; fi
-    if command -v start-stop-daemon >/dev/null 2>&1; then
+    if pidfile_pid >/dev/null && command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
     else
-        pid=$(sed -n '1p' "$PIDFILE")
-        kill "$pid" 2>/dev/null || true
-        count=0
-        while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 5 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        kill -KILL "$pid" 2>/dev/null || true
+        pid=$(pidfile_pid) && terminate "$pid" 5
     fi
+    # Sweep anything the pidfile did not account for. Without this a lost or
+    # stale pidfile made stop a no-op that still reported success, and the
+    # following start added a second daemon instead of replacing the first.
+    for stray in $(running_pids); do
+        terminate "$stray" 5
+    done
     rm -f "$PIDFILE"
 }
 

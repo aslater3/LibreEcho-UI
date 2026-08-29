@@ -16,6 +16,7 @@ make build/test-backend-linux-wifi-emission
 python3 tests/test_networkd_health_integration.py
 python3 tests/test_backend_linux_wifi_contract.py
 sh tests/test_network_liveness_contract.sh
+sh tests/test_init_service_control.sh
 sh tests/test_bluetooth_pairing_contract.sh
 sh tests/test_bluetooth_pairing_code_ui.sh
 sh tests/test_bluetooth_io_capability_contract.sh
