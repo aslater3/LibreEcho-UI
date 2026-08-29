@@ -354,6 +354,7 @@ static int json_container(const char *start, char open, char close,
     return 0;
 }
 
+#ifndef LE_BACKEND_LINUX_TESTING
 static int adapter_result(int rc)
 {
     if (rc == LE_ADAPTER_OK)
@@ -362,11 +363,20 @@ static int adapter_result(int rc)
         return LE_NOT_SUPPORTED;
     return LE_IO;
 }
+#endif
 
 /* A missing companion daemon is a normal condition during early bring-up. */
+#ifdef LE_BACKEND_LINUX_TESTING
+extern int le_backend_linux_test_adapter_command(const char *, const char *,
+                                                  const char *, char *, size_t);
+#endif
 static int adapter_command(const char *socket_path, const char *command,
                            const char *args, char *response, size_t response_size)
 {
+#ifdef LE_BACKEND_LINUX_TESTING
+    return le_backend_linux_test_adapter_command(socket_path, command, args,
+                                                 response, response_size);
+#else
     struct le_adapter *adapter;
     int rc;
     int result;
@@ -394,6 +404,7 @@ static int adapter_command(const char *socket_path, const char *command,
     if (result != LE_OK)
         le_log_debug("backend: adapter %s failed (rc=%d)", command, rc);
     return result;
+#endif
 }
 
 #ifdef LE_BACKEND_LINUX_TESTING
@@ -1577,7 +1588,9 @@ static int bluetooth_pairing_mode(struct le_backend *b, int enabled)
     return bluetooth_controller_setting(b, "pairing_mode", enabled);
 }
 
+#ifndef LE_ADAPTER_TIMER_SOCK
 #define LE_ADAPTER_TIMER_SOCK "/run/libreecho/timer.sock"
+#endif
 
 /*
  * Walk the objects of a JSON array. json.c reads scalars from an object but
@@ -1651,10 +1664,13 @@ static int timers(struct le_backend *b, struct le_timer_list *o)
     memset(o, 0, sizeof(*o));
     rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "status", NULL, response,
                          sizeof(response));
-    if (rc != LE_OK)
-        /* No timer daemon is not an error the panel should shout about; it
-           reports the feature as unavailable and shows nothing. */
-        return LE_OK;
+    if (rc != LE_OK) {
+        /* A missing daemon is a normal unavailable capability, but a live
+           daemon that times out or speaks malformed protocol is an outage. */
+        if (rc == LE_NOT_SUPPORTED)
+            return LE_OK;
+        return rc;
+    }
     o->available = 1;
     (void)json_get_int(response, "ringing", &o->ringing);
     (void)json_get_int(response, "missed", &o->missed);

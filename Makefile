@@ -191,6 +191,12 @@ $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emissio
 		-DLE_ADAPTER_NETWORK_SOCK='"/tmp/libreecho-network-backend-test.sock"' \
 		-Isrc -Isrc/adapter $^ -o $@
 
+$(BUILD)/test-backend-linux-timers: tests/test_backend_linux_timers.c \
+	src/json.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) \
+		$(WARN) -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $^ -o $@
+
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
@@ -601,6 +607,7 @@ clean:
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
+		$(BUILD)/test-backend-linux-timers \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \

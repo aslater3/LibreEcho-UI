@@ -111,6 +111,8 @@ make build/test-timer-schedule
 ./build/test-timer-schedule
 make build/test-timer-json
 ./build/test-timer-json
+make build/test-backend-linux-timers
+./build/test-backend-linux-timers
 make build/test-backend-mock-timers
 ./build/test-backend-mock-timers
 make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd

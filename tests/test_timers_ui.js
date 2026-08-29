@@ -46,9 +46,11 @@ let scheduled;
 globalThis.setTimeout = (fn) => { scheduled = fn; return 1; };
 globalThis.clearTimeout = () => {};
 let reads = 0;
+let releaseRefresh;
 globalThis.api = async path => {
     if (path !== '/timers') throw new Error(`unexpected API path ${path}`);
     reads++;
+    if (reads === 2) await new Promise(resolve => { releaseRefresh = resolve; });
     return { available: true, ringing: 0, missed: 0,
         timers: [{ id: 1, kind: 'countdown', state: 'pending',
             seconds_remaining: reads === 1 ? 10 : 9, label: 'tea' }] };
@@ -63,7 +65,10 @@ async function main() {
     minutes.value = '37';
     label.value = 'déjeuner';
     label.focus();
-    await scheduled();
+    const refresh = scheduled();
+    if (typeof releaseRefresh !== 'function') throw new Error('refresh did not reach the slow API');
+    releaseRefresh();
+    await refresh;
     if (reads !== 2) throw new Error(`expected two timer reads, got ${reads}`);
     if (!content.innerHTML.includes('9s')) throw new Error('refreshed timer state was not rendered');
     if (minutes.value !== '37' || label.value !== 'déjeuner')

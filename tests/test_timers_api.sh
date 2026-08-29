@@ -37,6 +37,23 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
 [ "$code" = 400 ] || { echo "FAIL: oversized label returned $code, expected 400"; exit 1; }
 echo "  oversized labels refused: ok"
 
+# Timer fields must come from the request object's top level, not a nested
+# metadata object that happens to use the same names.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" \
+    --data '{"meta":{"seconds":1},"seconds":999999}')
+[ "$code" = 400 ] || { echo "FAIL: nested seconds returned $code, expected 400"; exit 1; }
+# JSON serializers commonly emit non-ASCII labels as Unicode escapes. The
+# decoded UTF-8 bytes still count toward the 47-byte server limit.
+curl -fsS -X POST "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" --data '{"seconds":60,"label":"caf\u00e9"}' \
+    -o /tmp/le-timer-unicode.out
+unicode_id=$(jq -r '.data.id' < /tmp/le-timer-unicode.out)
+curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$unicode_id" \
+    '.data.timers[] | select(.id == $id) | .label == "café"' >/dev/null
+curl -fsS -X DELETE "$URL/api/v1/timers/$unicode_id" -H "$CSRF" >/dev/null
+echo "  top-level fields and Unicode labels: ok"
+
 # The API must reject values outside the bounded countdown range before a
 # backend-specific timer implementation sees them.
 for body in '{"seconds":0}' '{"seconds":-5}' '{"seconds":999999999}' \
