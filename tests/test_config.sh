@@ -32,16 +32,31 @@ jq -e '
   .tts_wyoming_voice == "en_GB-alan-medium"
 ' "$CFG" >/dev/null
 ! grep -qi 'password' "$(dirname "$CFG")/test-suite-config.json"
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"acoustic_events":true}' >/dev/null
+jq -e '.feature_acoustic_events == true' "$CFG" >/dev/null
 exported=$(curl -fsS "$URL/api/v1/config/export" | jq -c '.data')
 printf '%s' "$exported" | grep -q '"schema_version":1'
 printf '%s' "$exported" | grep -q '"hostname_persisted":true'
 printf '%s' "$exported" | jq -e \
     '.partial == false and .unsupported == [] and
      .led_visualizer_enabled == false and .button_tones == false and
+     .feature_acoustic_events == true and
      .button_action == "sound" and .button_action_brightness == 33 and
      .button_action_sounds == "action-1,action-2" and
      .button_mute_brightness == 44' >/dev/null
 ! printf '%s' "$exported" | grep -Eqi 'password|auth_token|telemetry_value|logs'
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"acoustic_events":false}' >/dev/null
+nested_export=$(printf '%s' "$exported" | jq -c 'del(.feature_acoustic_events) | .metadata={"feature_acoustic_events":true}')
+curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "$nested_export" >/dev/null
+curl -fsS "$URL/api/v1/system/features" |
+    jq -e '.ok and .data.acoustic_events == false' >/dev/null
+curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "$exported" >/dev/null
+curl -fsS "$URL/api/v1/system/features" |
+    jq -e '.ok and .data.acoustic_events == true and .data.acoustic_events_available == false' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume":10}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' \
     --data '{"tones":true,"action":"disabled","action_sounds":"action-3","action_brightness":1,"mute_brightness":2}' >/dev/null

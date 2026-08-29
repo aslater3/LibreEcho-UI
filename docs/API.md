@@ -1006,7 +1006,14 @@ Reports the optional feature switches. They are off by default.
     "simulation": false,
     "usb_host": false,
     "usb_role": "device",
-    "usb_role_supported": true
+    "usb_role_supported": true,
+    "https": false,
+    "https_active": false,
+    "https_port": 0,
+    "https_expires": "",
+    "https_fingerprint": "",
+    "acoustic_events": false,
+    "acoustic_events_available": false
   },
   "error": null
 }
@@ -1016,6 +1023,16 @@ Reports the optional feature switches. They are off by default.
 the raw role read back from the kernel (`device`, `host` or `none`), and
 `usb_role_supported` is `false` on hardware or images with no switchable role.
 
+`https` is the persisted preference for serving HTTPS after the next restart;
+`https_active` reports whether the HTTPS listener is active now, while
+`https_port`, `https_expires` and `https_fingerprint` describe the active
+certificate (or are zero/empty when HTTPS is inactive).
+
+`acoustic_events` is a persisted preference reserved for future acoustic-event
+detection. Detection is not implemented, so `acoustic_events_available` is
+always `false`; clients must gate any acoustic-event UI or claims on that field
+rather than on the preference alone.
+
 `simulation` gates `POST /api/v1/audio/simulate`, which plays rendered speech
 into the microphone path so wake-word detection, speech-to-text and the
 assistant can be exercised without speaking in the room. It is a testing
@@ -1024,16 +1041,34 @@ the endpoint answers `403` and the web interface hides its Simulation page.
 
 #### PUT /api/v1/system/features
 
-Switches a feature on or off. The value is persisted with the rest of the
-configuration, and the response is the new feature state.
+Switches one or more feature settings on or off. The persisted settings are
+saved with the rest of the configuration, and the response is the new feature
+state. Send any supported boolean field; `simulation` is not required when
+updating only `acoustic_events` (or `https`).
 
 ```json
-{ "simulation": true }
+{ "acoustic_events": true }
 ```
 
-`simulation` must be a boolean; anything else is rejected with `400`. Hiding the
-menu entry without gating the endpoint would be decoration, so both move
-together: the toggle is the only thing that opens `POST /api/v1/audio/simulate`.
+`simulation`, `https` and `acoustic_events` must each be booleans when present;
+anything else is rejected with `400`, including a mixed update where one field
+is valid and another is not. `acoustic_events` only stores a preference for the
+future detector: because detection is not implemented,
+`acoustic_events_available` remains `false` and clients must not present the
+preference as active detection.
+
+```json
+{ "simulation": true, "acoustic_events": false }
+```
+
+`simulation` gates `POST /api/v1/audio/simulate`, which plays rendered speech
+into the microphone path so wake-word detection, speech-to-text and the
+assistant can be exercised without speaking in the room. It is a testing
+capability rather than something a live device should offer, so while it is off
+the endpoint answers `403` and the web interface hides its Simulation page.
+
+`https` stores whether the HTTPS listener should be enabled after the next
+restart; it does not take effect until then.
 
 `usb_host` moves the OTG port between host mode, where an attached USB drive is
 enumerated, and device mode, where the port serves ADB:

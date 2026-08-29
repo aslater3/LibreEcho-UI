@@ -2341,10 +2341,10 @@
      "System"
     ],
     "summary": "Report optional feature switches",
-    "description": "Optional features are off by default. `simulation` enables POST /audio/simulate; while it is off that endpoint answers 403 and the web interface hides its Simulation page. `usb_host` reports whether the OTG port is currently in host mode, `usb_role` is the raw role read back from the kernel, and `usb_role_supported` is false on images or hardware without a switchable role.",
+    "description": "Optional features are off by default. `simulation` enables POST /audio/simulate; while it is off that endpoint answers 403 and the web interface hides its Simulation page. `usb_host` reports whether the OTG port is currently in host mode, `usb_role` is the raw role read back from the kernel, and `usb_role_supported` is false on images or hardware without a switchable role. `https` is the persisted preference for the next restart; `https_active`, `https_port`, `https_expires` and `https_fingerprint` report the active listener and certificate. `acoustic_events` is a persisted preference reserved for future acoustic-event detection; `acoustic_events_available` is always false until detection is implemented, and clients must gate any acoustic-event UI on it.",
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "$ref": "#/components/responses/FeatureState"
      },
      "405": {
       "$ref": "#/components/responses/Error"
@@ -2356,7 +2356,7 @@
      "System"
     ],
     "summary": "Switch an optional feature on or off",
-    "description": "Send `simulation` to change the persisted feature switch. Send `usb_host` to move the OTG port between host mode (reads an attached USB drive) and device mode (serves ADB); the port cannot do both at once. `usb_host` is applied immediately and is deliberately NOT persisted -- every boot pins the port back to device mode so the ADB recovery path can never be left switched off by a stored setting. Returns 501 when the running kernel exposes no switchable USB role. The response is the new feature state.",
+    "description": "Send any supported boolean feature field to change the persisted setting. `simulation` is not required for an acoustic-only update. `simulation`, `https` and `acoustic_events` are validated independently when present; a mixed update with a non-boolean value is rejected with 400 before any field is applied. `usb_host` moves the OTG port between host mode (reads an attached USB drive) and device mode (serves ADB); it is applied immediately and is deliberately NOT persisted. Returns 501 when the running kernel exposes no switchable USB role. The response is the new feature state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -2375,18 +2375,35 @@
           "default": false,
           "description": "Play rendered speech into the microphone path for testing wake word, speech-to-text and the assistant."
          },
+         "https": {
+          "type": "boolean",
+          "default": false,
+          "description": "Persist whether HTTPS should be enabled after the next restart."
+         },
+         "acoustic_events": {
+          "type": "boolean",
+          "default": false,
+          "description": "Persist the future acoustic-event detection preference. Detection is not implemented while acoustic_events_available is false."
+         },
          "usb_host": {
           "type": "boolean",
+          "default": false,
           "description": "Switch the OTG port immediately between host/storage mode and device/ADB mode. This live setting is not persisted and resets to device mode on reboot."
          }
-        }
+        },
+        "anyOf": [
+         {"required": ["simulation"]},
+         {"required": ["https"]},
+         {"required": ["acoustic_events"]},
+         {"required": ["usb_host"]}
+        ]
        }
       }
      }
     },
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "$ref": "#/components/responses/FeatureState"
      },
      "400": {
       "$ref": "#/components/responses/Error"
@@ -2975,6 +2992,33 @@
      }
     }
    },
+   "FeatureState": {
+    "description": "Feature settings response",
+    "content": {
+     "application/json": {
+      "schema": {
+       "type": "object",
+       "required": [
+        "ok",
+        "data",
+        "error"
+       ],
+       "properties": {
+        "ok": {
+         "type": "boolean"
+        },
+        "data": {
+         "$ref": "#/components/schemas/FeatureState"
+        },
+        "error": {
+         "nullable": true,
+         "$ref": "#/components/schemas/ApiError"
+        }
+       }
+      }
+     }
+    }
+   },
    "NetworkState": {
     "description": "Association and independently verified gateway-liveness state",
     "content": {
@@ -3031,6 +3075,65 @@
      "error": {
       "nullable": true,
       "$ref": "#/components/schemas/ApiError"
+     }
+    }
+   },
+   "FeatureState": {
+    "type": "object",
+    "required": [
+     "simulation",
+     "usb_host",
+     "usb_role",
+     "usb_role_supported",
+     "https",
+     "https_active",
+     "https_port",
+     "https_expires",
+     "https_fingerprint",
+     "acoustic_events",
+     "acoustic_events_available"
+    ],
+    "properties": {
+     "simulation": {
+      "type": "boolean"
+     },
+     "usb_host": {
+      "type": "boolean"
+     },
+     "usb_role": {
+      "type": "string",
+      "enum": [
+       "",
+       "device",
+       "host",
+       "none"
+      ]
+     },
+     "usb_role_supported": {
+      "type": "boolean"
+     },
+     "https": {
+      "type": "boolean"
+     },
+     "https_active": {
+      "type": "boolean"
+     },
+     "https_port": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "https_expires": {
+      "type": "string"
+     },
+     "https_fingerprint": {
+      "type": "string"
+     },
+     "acoustic_events": {
+      "type": "boolean"
+     },
+     "acoustic_events_available": {
+      "type": "boolean",
+      "description": "Always false until acoustic-event detection is implemented."
      }
     }
    },

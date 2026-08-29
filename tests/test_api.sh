@@ -52,6 +52,56 @@ code=$(curl -sS -o /tmp/le-malformed-wifi-security.out -w '%{http_code}' \
 [ "$code" = 400 ]
 ! grep -q 'top-secret' "$CFG"
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
+features=$(curl -fsS "$URL/api/v1/system/features")
+printf '%s' "$features" | jq -e '.ok and .data.acoustic_events == false and .data.acoustic_events_available == false' >/dev/null
+for flag in simulation https acoustic_events usb_host; do
+    code=$(curl -sS -o "/tmp/le-nested-$flag.out" -w '%{http_code}' \
+        -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+        -H 'Content-Type: application/json' --data "{\"wrapper\":{\"$flag\":true}}")
+    [ "$code" = 400 ]
+done
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"simulation":false,"wrapper":{"https":true,"acoustic_events":true,"usb_host":true}}' |
+    jq -e '.ok and .data.simulation == false and .data.https == false and .data.acoustic_events == false' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"acoustic_events":true}' |
+    jq -e '.ok and .data.acoustic_events == true and .data.acoustic_events_available == false' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"simulation":false,"acoustic_events":false}' |
+    jq -e '.ok and .data.simulation == false and .data.acoustic_events == false' >/dev/null
+code=$(curl -sS -o /tmp/le-invalid-acoustic-mixed.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"simulation":true,"acoustic_events":"enabled"}')
+[ "$code" = 400 ]
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"acoustic\u005fevents":true}' |
+    jq -e '.ok and .data.acoustic_events == true and .data.acoustic_events_available == false' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"acoustic_events":false}' >/dev/null
+for payload in \
+    '{"acoustic_events":true,"acoustic_events":"enabled"}' \
+    '{"acoustic_events":true,"acoustic_events":false}' \
+    '{"acoustic_events":true,"acoustic\u005fevents":"enabled"}'; do
+    code=$(curl -sS -o /tmp/le-duplicate-acoustic.out -w '%{http_code}' \
+        -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+        -H 'Content-Type: application/json' --data "$payload")
+    [ "$code" = "400" ]
+done
+curl -fsS "$URL/api/v1/system/features" |
+    jq -e '.ok and .data.acoustic_events == false' >/dev/null
+code=$(curl -sS -o /tmp/le-nested-acoustic.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"wrapper":{"acoustic_events":true}}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" |
+    jq -e '.ok and .data.simulation == false and .data.acoustic_events == false and .data.acoustic_events_available == false' >/dev/null
+code=$(curl -sS -o /tmp/le-invalid-acoustic-usb-mixed.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"usb_host":false,"simulation":true,"acoustic_events":"enabled"}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" |
+    jq -e '.ok and .data.simulation == false and .data.acoustic_events == false' >/dev/null
 expect "$(curl -fsS "$URL/swagger.html")" 'API reference · LibreEcho'
 expect "$(curl -fsS "$URL/js/swagger.js")" 'executeOperation'
 expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'

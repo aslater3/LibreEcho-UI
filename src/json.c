@@ -50,6 +50,62 @@ static int parse_string(struct json_cursor *c)
     return 0;
 }
 
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Parse a member name while comparing its decoded characters to key. */
+static int parse_string_key(struct json_cursor *c, const char *key)
+{
+    size_t key_len = strlen(key), decoded_len = 0;
+    int match = 1;
+
+    if (c->i >= c->n || c->s[c->i++] != '"') return -1;
+    while (c->i < c->n) {
+        unsigned char ch = (unsigned char)c->s[c->i++];
+        if (ch == '"') return match && decoded_len == key_len ? 1 : 0;
+        if (ch < 0x20) return -1;
+        if (ch == '\\') {
+            int value, digit, nibble;
+            if (c->i >= c->n) return -1;
+            ch = (unsigned char)c->s[c->i++];
+            switch (ch) {
+            case '"': case '\\': case '/': break;
+            case 'b': ch = '\b'; break;
+            case 'f': ch = '\f'; break;
+            case 'n': ch = '\n'; break;
+            case 'r': ch = '\r'; break;
+            case 't': ch = '\t'; break;
+            case 'u':
+                value = 0;
+                for (digit = 0; digit < 4; digit++) {
+                    if (c->i >= c->n || (nibble = hex_value(c->s[c->i])) < 0)
+                        return -1;
+                    value = (value << 4) | nibble;
+                    c->i++;
+                }
+                /* Supported feature names are ASCII; other code points can
+                 * never match them but must still be valid member names. */
+                if (value > 0x7f) match = 0;
+                ch = (unsigned char)value;
+                break;
+            default: return -1;
+            }
+        }
+        if (decoded_len < key_len) {
+            if (!match || (unsigned char)key[decoded_len] != ch) match = 0;
+            decoded_len++;
+        } else {
+            match = 0;
+        }
+    }
+    return -1;
+}
+
 static int literal(struct json_cursor *c, const char *value)
 {
     size_t n = strlen(value);
@@ -144,36 +200,65 @@ int json_valid_object(const char *s, size_t n)
     return c.i == c.n;
 }
 
+int json_get_top_level_bool(const char *s, size_t n, const char *key, int *out)
+{
+    struct json_cursor c = {s, n, 0, 0};
+
+    if (!s || !key || !out) return 0;
+    skip_ws(&c);
+    if (c.i >= c.n || c.s[c.i++] != '{') return 0;
+    skip_ws(&c);
+    if (c.i < c.n && c.s[c.i] == '}') return 0;
+    for (;;) {
+        int match;
+
+        if (c.i >= c.n || c.s[c.i] != '"') return -1;
+        match = parse_string_key(&c, key);
+        if (match < 0) return -1;
+        skip_ws(&c);
+        if (c.i >= c.n || c.s[c.i++] != ':') return -1;
+        skip_ws(&c);
+        if (match) {
+            if (literal(&c, "true")) *out = 1;
+            else if (literal(&c, "false")) *out = 0;
+            else return -1;
+            if (c.i < c.n && !ws(c.s[c.i]) && c.s[c.i] != ',' &&
+                c.s[c.i] != '}') return -1;
+            return 1;
+        }
+        if (!parse_value(&c)) return -1;
+        skip_ws(&c);
+        if (c.i < c.n && c.s[c.i] == '}') return 0;
+        if (c.i >= c.n || c.s[c.i++] != ',') return -1;
+        skip_ws(&c);
+    }
+}
+
 int json_duplicate_key(const char *s, size_t n, const char *key)
 {
-    size_t i = 0, key_len, count = 0;
-    int depth = 0;
+    struct json_cursor c = {s, n, 0, 0};
+    size_t count = 0;
+    int match;
+
     if (!s || !key) return 0;
-    key_len = strlen(key);
-    while (i < n) {
-        if (s[i] == '"') {
-            size_t start = ++i;
-            int escaped = 0;
-            while (i < n) {
-                char ch = s[i++];
-                if (escaped) { escaped = 0; continue; }
-                if (ch == '\\') { escaped = 1; continue; }
-                if (ch == '"') break;
-            }
-            if (i > n || !i || s[i - 1] != '"') return 0;
-            if (depth == 1 && i - start - 1 == key_len &&
-                !memcmp(s + start, key, key_len)) {
-                size_t j = i;
-                while (j < n && ws(s[j])) j++;
-                if (j < n && s[j] == ':' && ++count > 1) return 1;
-            }
-            continue;
-        }
-        if (s[i] == '{' || s[i] == '[') depth++;
-        else if ((s[i] == '}' || s[i] == ']') && depth > 0) depth--;
-        i++;
+    skip_ws(&c);
+    if (c.i >= c.n || c.s[c.i++] != '{') return 0;
+    skip_ws(&c);
+    if (c.i < c.n && c.s[c.i] == '}') return 0;
+    for (;;) {
+        if (c.i >= c.n || c.s[c.i] != '"') return 0;
+        match = parse_string_key(&c, key);
+        if (match < 0) return 0;
+        skip_ws(&c);
+        if (c.i >= c.n || c.s[c.i++] != ':') return 0;
+        skip_ws(&c);
+        if (match) count++;
+        if (!parse_value(&c)) return 0;
+        skip_ws(&c);
+        if (c.i < c.n && c.s[c.i] == '}') return count > 1;
+        if (c.i >= c.n || c.s[c.i++] != ',') return 0;
+        skip_ws(&c);
     }
-    return 0;
 }
 
 static const char *find_key(const char *s, const char *k)
