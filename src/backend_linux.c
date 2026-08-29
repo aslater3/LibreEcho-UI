@@ -1593,6 +1593,14 @@ static int wake(struct le_backend *b, struct le_wake_word_state *o)
     if (json_get_bool(response, "enabled", &v) > 0) { o->enabled = v; found = 1; }
     if (json_get_string(response, "wake_word", o->wake_word, sizeof(o->wake_word)) > 0) found = 1;
     if (json_get_string(response, "model_status", o->model_status, sizeof(o->model_status)) > 0) found = 1;
+    /* Capture-health signals the logs-page diagnostic reads: whether the
+       model is actually loaded, whether the mic stream is producing voice
+       activity, and the live processed-frame counter. A "loaded" model
+       with a dead capture stream is the post-playback failure a bare
+       liveness probe misses. */
+    o->model_loaded = o->model_status[0] && !strcmp(o->model_status, "loaded");
+    if (json_get_bool(response, "vad_active", &v) > 0) o->capture_active = v;
+    if (json_get_int(response, "processed_frames", &v) > 0) o->processed_frames = v;
     if (json_get_int(response, "sensitivity", &v) > 0) { o->sensitivity = v; found = 1; }
     if (json_get_int(response, "cooldown_ms", &v) > 0) o->cooldown_ms = v;
     if (json_get_int(response, "detected_count", &v) > 0) o->detected_count = v;
