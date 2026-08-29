@@ -148,6 +148,35 @@ case "$out" in
 esac
 echo "  numeric single-timer cancellation uses the fallback: ok"
 
+# Do not cancel a sole timer when the requested quantity cannot be satisfied.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel two timers"}')
+case "$out" in
+    *'Which timer'*) ;;
+    *) echo "FAIL: unsatisfied cancellation quantity was not rejected: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) echo "FAIL: unsatisfied quantity cancelled the sole timer: $out"; exit 1 ;;
+    *) ;;
+esac
+call "$agent_sock" respond '{"text":"cancel one timer"}' >/dev/null
+echo "  unsatisfied cancellation quantity leaves the timer scheduled: ok"
+
+# "Next" selects the soonest pending timer rather than a literal label.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel my next timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: next-timer cancellation was not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: next-timer cancellation left a timer scheduled: $out"; exit 1 ;;
+esac
+echo "  next-timer cancellation uses the daemon selector: ok"
+
 # Singular voice cancellation is label-targeted and must not clear siblings.
 call "$agent_sock" respond '{"text":"set a timer for ten minutes for the pasta"}' >/dev/null
 call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the tea"}' >/dev/null
@@ -251,6 +280,23 @@ case "$out" in
 esac
 
 echo "  named quantifier-like label cancellation leaves siblings: ok"
+
+# A coordinated universal phrase is a label when another outer timer noun
+# follows it, not a request to clear the entire schedule.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the all timers and alarms"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the all timers and alarms timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: coordinated label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"all timers and alarms"'*)
+        echo "FAIL: coordinated label was not cancelled: $out"; exit 1 ;;
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: coordinated label cancellation changed the wrong timers: $out"; exit 1 ;;
+esac
+echo "  coordinated universal-looking labels remain targeted: ok"
 
 # A label containing the universal phrase after the outer noun must stay a
 # label in the alternate "called" form as well.

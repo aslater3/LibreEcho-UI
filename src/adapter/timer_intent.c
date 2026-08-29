@@ -309,6 +309,20 @@ static int span_is_number_sequence(const char *start, size_t length)
     return found;
 }
 
+static int cancellation_count(const char *text)
+{
+    int count;
+
+    count = number_before(text, "timers");
+    if (count < 0)
+        count = number_before(text, "timer");
+    if (count < 0)
+        count = number_before(text, "alarms");
+    if (count < 0)
+        count = number_before(text, "alarm");
+    return count;
+}
+
 static int span_has_word(const char *start, size_t length, const char *word)
 {
     size_t word_length = strlen(word);
@@ -436,7 +450,10 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
     else if (!strncmp(start, "an ", 3))
         start += 3;
     length = (size_t)(noun - start);
-    (void)copy_cancel_label(out, size, start, length);
+    if (copy_cancel_label(out, size, start, length) && !strcmp(out, "next"))
+        /* "cancel my next timer" uses the daemon's soonest-timer selector;
+           the explicit "called next" form above remains a real label. */
+        out[0] = '\0';
 }
 
 static size_t timer_noun_length(const char *text)
@@ -491,8 +508,13 @@ static int universal_noun_phrase(const char *text, const char *candidate)
     if (starts_word(tail, "and")) {
         tail = after_word(tail, "and");
         tail = skip_timer_determiner(tail);
-        if (timer_noun_length(tail))
-            return 1;
+        noun_length = timer_noun_length(tail);
+        if (noun_length) {
+            tail += noun_length;
+            while (*tail == ' ')
+                ++tail;
+            return !next_timer_noun(tail);
+        }
     }
 
     /* Another noun without coordination belongs to label text, as in
@@ -595,8 +617,10 @@ enum le_timer_intent_kind le_timer_intent_parse(
         if (negates_cancellation(text, cancel_verb))
             return LE_TIMER_INTENT_NONE;
         intent->kind = LE_TIMER_INTENT_CANCEL;
+        cancel_verb = cancel_verb + cancel_verb_length;
+        intent->cancel_count = cancellation_count(text);
         intent->cancel_all = has_universal_timer_noun(
-            cancel_verb + cancel_verb_length);
+            cancel_verb);
         if (!intent->cancel_all)
             extract_cancel_label(text, intent->label, sizeof(intent->label));
         return intent->kind;

@@ -155,6 +155,10 @@ int main(void)
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(intent.label[0] == '\0');
+        assert(intent.cancel_count == 2);
+        assert(le_timer_intent_parse("cancel one timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.cancel_count == 1);
         assert(le_timer_intent_parse("don't cancel my timer", &intent) ==
                LE_TIMER_INTENT_NONE);
         assert(le_timer_intent_parse("do not cancel all timers", &intent) ==
@@ -173,10 +177,22 @@ int main(void)
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(!strcmp(intent.label, "all timers"));
+        assert(le_timer_intent_parse("cancel the all timers and alarms timer",
+                                     &intent) == LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "all timers and alarms"));
         assert(le_timer_intent_parse("cancel the timer called all timers",
                                      &intent) == LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(!strcmp(intent.label, "all timers"));
+        assert(le_timer_intent_parse("cancel my next timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(intent.label[0] == '\0');
+        assert(le_timer_intent_parse("cancel the timer called next", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "next"));
         assert(le_timer_intent_parse("cancel the do not disturb timer",
                                      &intent) == LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);

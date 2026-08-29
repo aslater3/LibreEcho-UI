@@ -38,6 +38,7 @@ struct le_timer_intent {
     enum le_timer_intent_kind kind;
     long long seconds;
     int cancel_all;
+    int cancel_count;
     char label[LE_TIMER_INTENT_LABEL_MAX];
 };
 

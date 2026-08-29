@@ -691,6 +691,10 @@ static int handle_timer_intent(struct agent_state *state,
                          sizeof(response)) != LE_ADAPTER_OK)
             return 0;
         (void)json_get_int(response, "count", &count);
+        if (intent.cancel_count > 0 && count != intent.cancel_count) {
+            count = -1;
+            break;
+        }
         if (count > 1) {
             count = -1;
             break;
