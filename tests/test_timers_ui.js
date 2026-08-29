@@ -151,6 +151,23 @@ async function main() {
         throw new Error('ringing timer still exposed a cancel action');
     if (!content.innerHTML.includes('dismiss-timers'))
         throw new Error('ringing timer did not expose the dismiss action');
+    let releaseSlow;
+    globalThis.api = async path => {
+        if (path !== '/timers') throw new Error(`unexpected API path ${path}`);
+        return new Promise(resolve => {
+            releaseSlow = () => resolve({ available: true, ringing: 0, missed: 0,
+                timers: [] });
+        });
+    };
+    state.page = 'Timers';
+    state.timerViewReady = false;
+    const slowNavigation = render();
+    if (!content.innerHTML.includes('Loading device state'))
+        throw new Error('initial timer navigation did not render loading state');
+    releaseSlow();
+    await slowNavigation;
+    if (!content.innerHTML.includes('No timers set'))
+        throw new Error('slow initial timer navigation did not render the page');
     console.log('timers UI refresh preserves form, navigation, and recovery: ok');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
