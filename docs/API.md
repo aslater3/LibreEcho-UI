@@ -60,6 +60,55 @@ message.
 
 ### System Status
 
+#### GET /api/v1/setup
+
+Returns first-boot setup defaults and the connectivity prerequisites needed by
+the setup page. The response remains available during a degraded Linux boot
+when audio, network, or wake-word companion services are unavailable.
+
+`vendor_firmware.state`, `verification`, `source_layout`, and `error` mirror
+the bounded boot-time vendor-import status. `force_next_boot` reports whether
+the one-shot compatibility marker is pending, and `wlan0_registered` reports
+whether the kernel currently exposes the Wi-Fi interface. A degraded wake-word
+adapter returns the valid fallback `wake_word: "LibreEcho"`.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "wake_word": "LibreEcho",
+    "vendor_firmware": {
+      "state": "ready",
+      "verification": "hash-pinned",
+      "source_layout": "etc/firmware",
+      "error": "none",
+      "force_next_boot": false
+    },
+    "wlan0_registered": true
+  },
+  "error": null
+}
+```
+
+#### POST /api/v1/setup/vendor-import-force-next-boot
+
+Schedules one forced, owner-local firmware import for the next boot. This
+endpoint creates only the mode-`0600` one-shot marker; it does not reboot the
+device. The import remains structurally checked but is reported as
+`forced-unverified`, never hash-pinned.
+
+The request requires normal authentication, `X-LibreEcho-CSRF`, and this exact
+confirmation body:
+
+```json
+{ "confirm": "force-unverified-owner-local-import" }
+```
+
+A successful response reports `force_next_boot: true`,
+`reboot_required: true`, and `verification: "forced-unverified"`. An absent or
+incorrect confirmation returns `400`; non-Linux backends return `501`; and a
+marker write failure returns `503`.
+
 #### GET /api/v1/status
 
 Returns system health and telemetry.
