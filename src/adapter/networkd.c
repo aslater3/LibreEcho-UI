@@ -57,7 +57,7 @@
 #define INPUT_MAX LE_ADAPTER_MSG_MAX
 #define WPA_REPLY_MAX 8192
 #define SCAN_MAX 48
-#define DHCP_TIMEOUT_MS 15000
+#define DHCP_TIMEOUT_MS 90000
 #define SCAN_TIMEOUT_MS 12000
 #define SCAN_POLL_MS 1800
 #define WPA_TIMEOUT_MS 2500
@@ -2466,7 +2466,7 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
 static int wait_for_association(struct daemon_ctx *ctx)
 {
     char reply[WPA_REPLY_MAX], state[32];
-    long long deadline = monotonic_ms() + 4500;
+    long long deadline = monotonic_ms() + 15000;
     while (monotonic_ms() < deadline) {
         if (wpa_call(ctx, "STATUS\n", reply, sizeof(reply)) >= 0 &&
             wpa_value(reply, "wpa_state", state, sizeof(state)) &&
