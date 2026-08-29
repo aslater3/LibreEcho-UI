@@ -105,7 +105,8 @@ echo "  timer survives a restart: ok"
 
 # --- a due timer rings on the audio daemon --------------------------------
 : > "$bus"
-out=$(call add '{"seconds":1,"label":"short"}')
+out=$(call add '{"seconds":600,"label":"shared"}')
+out=$(call add '{"seconds":1,"label":"shared"}')
 short_id=$(printf '%s' "$out" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
 sleep 3
 if [ "$(wc -c < "$bus")" -ne 48000 ]; then
@@ -118,6 +119,22 @@ echo "  due timer rings: ok"
 out=$(call status '{}')
 case "$out" in *'"state":"ringing"'*) ;; *) echo "FAIL: not reported ringing: $out"; exit 1 ;; esac
 echo "  ringing state reported: ok"
+
+# Label cancellation operates on pending timers only; a ringing entry with the
+# same label must not make the pending timer look ambiguous.
+out=$(call cancel '{"label":"shared"}')
+case "$out" in
+    *'"ok":true'*) ;;
+    *) echo "FAIL: pending label cancellation was blocked by ringing sibling: $out"; exit 1 ;;
+esac
+out=$(call status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+items = json.loads(sys.stdin.read())["data"]["timers"]
+shared = [timer for timer in items if timer["label"] == "shared"]
+assert len(shared) == 1 and shared[0]["state"] == "ringing", shared
+' || { echo "FAIL: pending shared label was not cancelled: $out"; exit 1; }
+echo "  label cancellation ignores ringing siblings: ok"
 
 # --- it keeps ringing rather than chirping once ---------------------------
 before=$(stat -c %Y "$bus")

@@ -625,7 +625,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         }
         if (label_result == 1 && label[0]) {
             for (i = 0; i < LE_TIMER_MAX; ++i) {
-                if (ctx->timers.timers[i].state == LE_TIMER_STATE_FREE ||
+                if (ctx->timers.timers[i].state != LE_TIMER_STATE_PENDING ||
                     strcmp(ctx->timers.timers[i].label, label))
                     continue;
                 ++matches;

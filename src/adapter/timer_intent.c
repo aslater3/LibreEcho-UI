@@ -439,41 +439,71 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
     (void)copy_cancel_label(out, size, start, length);
 }
 
-static const char *next_timer_noun(const char *text)
+static size_t timer_noun_length(const char *text)
 {
     static const char *const NOUNS[] = {"timer", "timers", "alarm", "alarms"};
-    const char *noun = NULL;
     size_t i;
 
-    for (i = 0; i < sizeof(NOUNS) / sizeof(NOUNS[0]); ++i) {
-        const char *hit = find_word(text, NOUNS[i]);
+    for (i = 0; i < sizeof(NOUNS) / sizeof(NOUNS[0]); ++i)
+        if (starts_word(text, NOUNS[i]))
+            return strlen(NOUNS[i]);
+    return 0;
+}
 
-        if (hit && (!noun || hit < noun))
-            noun = hit;
+static const char *next_timer_noun(const char *text)
+{
+    while (text && *text) {
+        if (timer_noun_length(text))
+            return text;
+        ++text;
     }
-    return noun;
+    return NULL;
+}
+
+static const char *skip_timer_determiner(const char *text)
+{
+    static const char *const DETERMINERS[] = {
+        "the", "my", "these", "those"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(DETERMINERS) / sizeof(DETERMINERS[0]); ++i)
+        if (starts_word(text, DETERMINERS[i]))
+            return after_word(text, DETERMINERS[i]);
+    return text;
+}
+
+static int universal_noun_phrase(const char *text, const char *candidate)
+{
+    const char *first_noun = next_timer_noun(text);
+    const char *tail;
+    size_t noun_length;
+
+    /* A noun in label text must not turn the request into cancel-all. */
+    noun_length = timer_noun_length(candidate);
+    if (!noun_length || first_noun != candidate)
+        return 0;
+    tail = candidate + noun_length;
+    while (*tail == ' ')
+        ++tail;
+
+    /* "all timers and alarms" is one coordinated universal noun phrase. */
+    if (starts_word(tail, "and")) {
+        tail = after_word(tail, "and");
+        tail = skip_timer_determiner(tail);
+        if (timer_noun_length(tail))
+            return 1;
+    }
+
+    /* Another noun without coordination belongs to label text, as in
+       "cancel the all timers timer" or "cancel the timer called all timers". */
+    return !next_timer_noun(tail);
 }
 
 static int has_universal_timer_noun(const char *text)
 {
     static const char *const QUANTIFIERS[] = {"all", "every", "each"};
-    static const char *const NOUNS[] = {"timer", "timers", "alarm", "alarms"};
-    static const char *const DETERMINERS[] = {
-        "the", "my", "these", "those"
-    };
-    const char *noun;
-    const char *later_noun;
     size_t i;
-
-    /* A named label may itself contain words such as "all timers". Only a
-       cancellation phrase with one timer/alarm noun can be universal; this
-       keeps label text after forms such as "called" out of cancel-all. */
-    noun = next_timer_noun(text);
-    if (!noun)
-        return 0;
-    later_noun = next_timer_noun(noun + strlen("timer"));
-    if (later_noun)
-        return 0;
 
     for (i = 0; i < sizeof(QUANTIFIERS) / sizeof(QUANTIFIERS[0]); ++i) {
         const char *cursor = text;
@@ -481,14 +511,11 @@ static int has_universal_timer_noun(const char *text)
 
         while ((quantifier = find_word(cursor, QUANTIFIERS[i]))) {
             const char *candidate = quantifier + strlen(QUANTIFIERS[i]);
-            size_t j;
 
             while (*candidate == ' ')
                 ++candidate;
             /* "every one of my timers" and "every single timer" have
-               optional words between the quantifier and the noun. Consume
-               them before applying the same `of`/determiner walk as
-               "every timer". */
+               optional words between the quantifier and the noun. */
             if ((!strcmp(QUANTIFIERS[i], "every") ||
                  !strcmp(QUANTIFIERS[i], "each")) &&
                 starts_word(candidate, "single"))
@@ -499,16 +526,9 @@ static int has_universal_timer_noun(const char *text)
                 candidate = after_word(candidate, "one");
             if (starts_word(candidate, "of"))
                 candidate = after_word(candidate, "of");
-            for (j = 0; j < sizeof(DETERMINERS) / sizeof(DETERMINERS[0]);
-                 ++j) {
-                if (starts_word(candidate, DETERMINERS[j])) {
-                    candidate = after_word(candidate, DETERMINERS[j]);
-                    break;
-                }
-            }
-            for (j = 0; j < sizeof(NOUNS) / sizeof(NOUNS[0]); ++j)
-                if (starts_word(candidate, NOUNS[j]) && candidate == noun)
-                    return 1;
+            candidate = skip_timer_determiner(candidate);
+            if (universal_noun_phrase(text, candidate))
+                return 1;
             cursor = quantifier + strlen(QUANTIFIERS[i]);
         }
     }

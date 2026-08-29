@@ -344,6 +344,21 @@ case "$out" in
     *) echo "FAIL: explicit cancel-all left timers: $out"; exit 1 ;;
 esac
 
+# Coordinated timer categories remain one universal cancellation request.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel all timers and alarms"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: coordinated cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: coordinated cancel-all left timers: $out"; exit 1 ;;
+esac
+echo "  coordinated timer and alarm cancellation is universal: ok"
+
 # "single" is an emphatic universal modifier, not a timer label.
 call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
 call "$agent_sock" respond '{"text":"set a timer for fifteen minutes"}' >/dev/null
