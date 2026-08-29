@@ -396,12 +396,14 @@ static void handle_control_client(
             "\"cpu_cost\":17,\"memory_cost_mb\":6,"
             "\"vad_active\":%s,\"vad_floor_rms\":%u,"
             "\"vad_noise_energy\":%llu,\"aec_active\":%s,"
+            "\"processed_frames\":%llu,"
             "\"model\":\"alexa_v0.1\"}",
             ipc->sensitivity, ipc->detected_count,
             metrics->vad_active ? "true" : "false",
             metrics->vad_floor_rms,
             (unsigned long long)metrics->vad_noise_energy,
-            metrics->playback_active ? "true" : "false");
+            metrics->playback_active ? "true" : "false",
+            (unsigned long long)metrics->processed_frames);
         (void)respond(client_fd, id, 1, status);
     } else if (!strcmp(command, "subscribe")) {
         if (add_subscriber(ipc, client_fd) < 0) {
