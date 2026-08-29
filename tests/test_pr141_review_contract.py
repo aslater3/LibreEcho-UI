@@ -80,7 +80,7 @@ assert "enabled_result = json_get_bool(saved, key, &value)" in api
 
 features_start = api.index('if(!strcmp(p,"/api/v1/system/features"))')
 features = api[features_start:api.index('if(!strcmp(p,"/api/v1/integrations/radio/play")', features_start)]
-assert "want_https<0||want_sim<0" in features
+assert "want_host<0||want_https<0||want_sim<0" in features
 assert features.index("persist_configuration(c)") < features.index("unlink(c->sessions_path)")
 
 network_start = api.index('if(!strcmp(p,"/api/v1/network"))')

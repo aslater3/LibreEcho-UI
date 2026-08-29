@@ -47,10 +47,26 @@ int main(void)
     require_condition(sample != NULL, "could not create sample fixture");
     require_condition(fputc(0, sample) != EOF,
                       "could not write sample fixture");
+    require_condition(fputc(0, sample) != EOF,
+                      "could not complete sample fixture");
     require_condition(fclose(sample) == 0, "could not close sample fixture");
     fd = sample_open_fd("preview");
     require_condition(fd >= 0, "readable sample was not opened before playback");
     close(fd);
+    sample = fopen(LE_SOUND_DIR "/empty.raw", "wb");
+    require_condition(sample != NULL, "could not create empty sample fixture");
+    require_condition(fclose(sample) == 0, "could not close empty sample fixture");
+    require_condition(sample_open_fd("empty") < 0,
+                      "empty sample was accepted before playback");
+    sample = fopen(LE_SOUND_DIR "/odd.raw", "wb");
+    require_condition(sample != NULL, "could not create odd sample fixture");
+    require_condition(fputc(0, sample) != EOF,
+                      "could not write odd sample fixture");
+    require_condition(fclose(sample) == 0, "could not close odd sample fixture");
+    require_condition(sample_open_fd("odd") < 0,
+                      "odd-byte sample was accepted before playback");
+    (void)unlink(LE_SOUND_DIR "/empty.raw");
+    (void)unlink(LE_SOUND_DIR "/odd.raw");
     require_condition(sample_open_fd("missing") < 0,
                       "missing sample was accepted before playback");
     require_condition(mkdir(LE_SOUND_DIR "/directory.raw", 0700) == 0,

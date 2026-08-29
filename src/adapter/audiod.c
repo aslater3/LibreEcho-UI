@@ -1519,7 +1519,9 @@ static int sample_open_fd(const char *name)
     if (length < 0 || (size_t)length >= sizeof(path))
         return -1;
     fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0 || fstat(fd, &status) != 0 || !S_ISREG(status.st_mode)) {
+    if (fd < 0 || fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size <= 0 ||
+        (status.st_size % (off_t)sizeof(int16_t)) != 0) {
         if (fd >= 0)
             close(fd);
         return -1;

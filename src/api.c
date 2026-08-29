@@ -1787,8 +1787,8 @@ if(!strcmp(p,"/api/v1/audio/test")&&!strcmp(q->method,"POST")){rc=le_play_test_t
     * HTTPS only binds its port at startup, so this stores the choice and the
     * next restart acts on it. */
    {int hv,want_https=json_get_bool(q->body,"https",&hv),want_sim=json_get_bool(q->body,"simulation",&v);int old_https=c->feature_https,old_sim=c->feature_simulation;
-    if(want_https<0||want_sim<0){err(r,400,LE_INVALID,"simulation or https must be boolean");return;}
-    if(want_https<1&&want_sim<1){err(r,400,LE_INVALID,"simulation or https must be boolean");return;}
+    if(want_host<0||want_https<0||want_sim<0){err(r,400,LE_INVALID,"usb_host, simulation or https must be boolean");return;}
+    if(want_https<1&&want_sim<1){err(r,400,LE_INVALID,"usb_host, simulation or https must be boolean");return;}
     if(want_https>0)c->feature_https=hv;
     if(want_sim>0)c->feature_simulation=v;
     rc=persist_configuration(c);

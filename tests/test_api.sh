@@ -56,6 +56,12 @@ code=$(curl -sS -o /tmp/le-malformed-features.out -w '%{http_code}' \
     --data '{"https":"false","simulation":true}')
 [ "$code" = 400 ]
 curl -fsS "$URL/api/v1/system/features" | jq -e '.ok and .data.simulation == false' >/dev/null
+code=$(curl -sS -o /tmp/le-malformed-usb-feature.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"usb_host":"false","simulation":true}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" | jq -e '.ok and .data.simulation == false' >/dev/null
 code=$(curl -sS -o /tmp/le-malformed-mac-type.out -w '%{http_code}' \
     -X PUT "$URL/api/v1/network" -H "$CSRF" \
     -H 'Content-Type: application/json' \
