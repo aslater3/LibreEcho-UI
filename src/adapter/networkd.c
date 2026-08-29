@@ -1605,6 +1605,8 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
         int best = 1;
         if (!cell->ssid[0])
             continue;
+        if (!strncmp(cell->ssid, "NVRAM WARNING:", 14))
+            continue;
         for (j = 0; j < i; ++j)
             if (!strcmp(cells[j].ssid, cell->ssid) &&
                 cells[j].signal >= cell->signal)
@@ -2394,8 +2396,9 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
     char reply[WPA_REPLY_MAX], quoted[512], command[768];
     int id;
     const char *key_mgmt;
-    if (wpa_call(ctx, "ADD_NETWORK\n", reply, sizeof(reply)) < 0)
+    if (wpa_call(ctx, "ADD_NETWORK", reply, sizeof(reply)) < 0)
         return -2;
+    le_log_info("networkd: ADD_NETWORK reply first=%02x len=%zu", (unsigned char)reply[0], strlen(reply));
     id = (int)strtol(reply, NULL, 10);
     if (id < 0 || (reply[0] < '0' || reply[0] > '9'))
         return -3;
