@@ -546,15 +546,15 @@ function sayLeft(s){if(s<=0)return'due';const h=Math.floor(s/3600),m=Math.floor(
 function timerFormDraft(){const minutes=$('#timer-minutes'),label=$('#timer-label');if(!minutes&&!label)return null;const active=document.activeElement;return{minutes:minutes?.value||'',label:label?.value||'',focused:active?.id==='timer-minutes'||active?.id==='timer-label'?active.id:''}}
 function restoreTimerForm(draft){if(!draft)return;const minutes=$('#timer-minutes'),label=$('#timer-label');if(minutes)minutes.value=draft.minutes;if(label)label.value=draft.label;if(draft.focused)$('#'+draft.focused)?.focus()}
 function utf8Bytes(value){return new TextEncoder().encode(value).length}
-function scheduleTimerRefresh(){state.timer=setTimeout(()=>{if(state.page==='Timers')return render()},1000)}
+function scheduleTimerRefresh(draft=null){const generation=state.renderGeneration;state.timer=setTimeout(()=>{if(state.page==='Timers'&&generation===state.renderGeneration)return timersPage(draft)},1000)}
 async function timersPage(draft=null){
- const generation=state.renderGeneration;
- let t;
- try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==state.renderGeneration)return;scheduleTimerRefresh();return}
+const generation=state.renderGeneration;
+let t;
+try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==state.renderGeneration)return;scheduleTimerRefresh(timerFormDraft()||draft);return}
  if(state.page!=='Timers'||generation!==state.renderGeneration)return;
  const liveDraft=timerFormDraft()||draft;
- if(!t.available){content.innerHTML=panel('Timers',`<div class="empty-state"><p>The timer service is not running on this device.</p></div>`);scheduleTimerRefresh();return}
- const rows=(t.timers||[]).map(x=>`<tr><td>${esc(x.label||(x.kind==='alarm'?'Alarm':'Timer'))}</td><td>${x.state==='ringing'?'<strong>ringing</strong>':esc(sayLeft(x.seconds_remaining))}</td><td class="right"><button class="link-btn" data-cancel="${x.id}">Cancel</button></td></tr>`).join('');
+ if(!t.available){content.innerHTML=panel('Timers',`<div class="empty-state"><p>The timer service is not running on this device.</p></div>`);scheduleTimerRefresh(liveDraft);return}
+ const rows=(t.timers||[]).map(x=>`<tr><td>${esc(x.label||(x.kind==='alarm'?'Alarm':'Timer'))}</td><td>${x.state==='ringing'?'<strong>ringing</strong>':esc(sayLeft(x.seconds_remaining))}</td><td class="right">${x.state==='pending'?`<button class="link-btn" data-cancel="${x.id}">Cancel</button>`:''}</td></tr>`).join('');
  content.innerHTML=`<div class="settings-grid">${panel('Timers',
    (t.timers&&t.timers.length
      ?`<table class="data-table"><thead><tr><th>Name</th><th>Remaining</th><th></th></tr></thead><tbody>${rows}</tbody></table>`

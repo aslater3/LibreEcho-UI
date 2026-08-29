@@ -57,6 +57,13 @@ int main(void)
     assert(timers(NULL, &list) == LE_OK);
     assert(list.available == 1 && list.count == 1 && list.ringing == 1 &&
            list.missed == 2 && !strcmp(list.items[0].label, "tea"));
+    test_response = "{\"id\":7}";
+    {
+        unsigned id = 0;
+        assert(timer_add(NULL, 60, "tea", &id) == LE_OK && id == 7);
+    }
+    test_response = "{\"id\":\"bad\"}";
+    assert(timer_add(NULL, 60, "tea", NULL) == LE_IO);
 
     puts("Linux timer status transport failures propagate: ok");
     return 0;

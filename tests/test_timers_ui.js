@@ -95,7 +95,9 @@ async function main() {
 
     // A failed refresh must obey the same navigation guard as a successful one.
     rejectNext = true;
-    const failedNavigationRefresh = scheduled();
+    state.page = 'Timers';
+    state.renderGeneration++;
+    const failedNavigationRefresh = timersPage();
     state.page = 'Overview';
     state.renderGeneration++;
     content.innerHTML = 'new page after failed refresh sentinel';
@@ -105,6 +107,11 @@ async function main() {
 
     state.page = 'Timers';
     state.renderGeneration++;
+    const draftMinutes = document.querySelector('#timer-minutes');
+    const draftLabel = document.querySelector('#timer-label');
+    draftMinutes.value = '42';
+    draftLabel.value = 'préparation';
+    draftLabel.focus();
     await timersPage();
     if (!content.innerHTML.includes('not running'))
         throw new Error('unavailable timer state was not rendered');
@@ -114,6 +121,10 @@ async function main() {
     await retry;
     if (!content.innerHTML.includes('9s'))
         throw new Error('timer service retry did not refresh the page');
+    if (draftMinutes.value !== '42' || draftLabel.value !== 'préparation')
+        throw new Error('timer form draft was lost during unavailable retry');
+    if (document.activeElement !== draftLabel)
+        throw new Error('timer form focus was lost during unavailable retry');
 
     // An active transient failure must preserve the view and keep polling.
     rejectNext = true;
@@ -127,6 +138,19 @@ async function main() {
     await recovered;
     if (!content.innerHTML.includes('9s'))
         throw new Error('timer polling did not recover after an active failure');
+    state.renderGeneration++;
+    state.page = 'Timers';
+    globalThis.api = async path => {
+        if (path !== '/timers') throw new Error(`unexpected API path ${path}`);
+        return { available: true, ringing: 1, missed: 0,
+            timers: [{ id: 2, kind: 'countdown', state: 'ringing',
+                seconds_remaining: 0, label: 'ring' }] };
+    };
+    await timersPage();
+    if (content.innerHTML.includes('data-cancel'))
+        throw new Error('ringing timer still exposed a cancel action');
+    if (!content.innerHTML.includes('dismiss-timers'))
+        throw new Error('ringing timer did not expose the dismiss action');
     console.log('timers UI refresh preserves form, navigation, and recovery: ok');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

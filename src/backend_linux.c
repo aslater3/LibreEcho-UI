@@ -1788,7 +1788,8 @@ static int timer_add(struct le_backend *b, int seconds, const char *label,
     char response[LE_ADAPTER_MSG_MAX];
     char args[256];
     char escaped[128];
-    int value = 0, rc;
+    long long value = 0;
+    int rc;
     (void)b;
 
     json_escape(escaped, sizeof(escaped), label ? label : "");
@@ -1798,10 +1799,11 @@ static int timer_add(struct le_backend *b, int seconds, const char *label,
                          sizeof(response));
     if (rc != LE_OK)
         return rc;
-    if (id) {
-        (void)json_get_int(response, "id", &value);
+    if (json_get_int64_top_level(response, "id", &value) != 1 || value <= 0 ||
+        value > UINT_MAX)
+        return LE_IO;
+    if (id)
         *id = (unsigned)value;
-    }
     return LE_OK;
 }
 
