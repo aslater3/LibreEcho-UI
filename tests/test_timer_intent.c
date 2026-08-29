@@ -173,6 +173,10 @@ int main(void)
                LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);
         assert(!strcmp(intent.label, "all timers"));
+        assert(le_timer_intent_parse("cancel the timer called all timers",
+                                     &intent) == LE_TIMER_INTENT_CANCEL);
+        assert(!intent.cancel_all);
+        assert(!strcmp(intent.label, "all timers"));
         assert(le_timer_intent_parse("cancel the do not disturb timer",
                                      &intent) == LE_TIMER_INTENT_CANCEL);
         assert(!intent.cancel_all);

@@ -439,15 +439,19 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
     (void)copy_cancel_label(out, size, start, length);
 }
 
-static int has_later_timer_noun(const char *text)
+static const char *next_timer_noun(const char *text)
 {
     static const char *const NOUNS[] = {"timer", "timers", "alarm", "alarms"};
+    const char *noun = NULL;
     size_t i;
 
-    for (i = 0; i < sizeof(NOUNS) / sizeof(NOUNS[0]); ++i)
-        if (starts_word(text, NOUNS[i]) || find_word(text, NOUNS[i]))
-            return 1;
-    return 0;
+    for (i = 0; i < sizeof(NOUNS) / sizeof(NOUNS[0]); ++i) {
+        const char *hit = find_word(text, NOUNS[i]);
+
+        if (hit && (!noun || hit < noun))
+            noun = hit;
+    }
+    return noun;
 }
 
 static int has_universal_timer_noun(const char *text)
@@ -457,44 +461,54 @@ static int has_universal_timer_noun(const char *text)
     static const char *const DETERMINERS[] = {
         "the", "my", "these", "those"
     };
+    const char *noun;
+    const char *later_noun;
     size_t i;
+
+    /* A named label may itself contain words such as "all timers". Only a
+       cancellation phrase with one timer/alarm noun can be universal; this
+       keeps label text after forms such as "called" out of cancel-all. */
+    noun = next_timer_noun(text);
+    if (!noun)
+        return 0;
+    later_noun = next_timer_noun(noun + strlen("timer"));
+    if (later_noun)
+        return 0;
 
     for (i = 0; i < sizeof(QUANTIFIERS) / sizeof(QUANTIFIERS[0]); ++i) {
         const char *cursor = text;
         const char *quantifier;
 
         while ((quantifier = find_word(cursor, QUANTIFIERS[i]))) {
-            const char *noun = quantifier + strlen(QUANTIFIERS[i]);
+            const char *candidate = quantifier + strlen(QUANTIFIERS[i]);
             size_t j;
 
-            while (*noun == ' ')
-                ++noun;
+            while (*candidate == ' ')
+                ++candidate;
             /* "every one of my timers" and "every single timer" have
                optional words between the quantifier and the noun. Consume
                them before applying the same `of`/determiner walk as
                "every timer". */
             if ((!strcmp(QUANTIFIERS[i], "every") ||
                  !strcmp(QUANTIFIERS[i], "each")) &&
-                starts_word(noun, "single"))
-                noun = after_word(noun, "single");
+                starts_word(candidate, "single"))
+                candidate = after_word(candidate, "single");
             if ((!strcmp(QUANTIFIERS[i], "every") ||
                  !strcmp(QUANTIFIERS[i], "each")) &&
-                starts_word(noun, "one"))
-                noun = after_word(noun, "one");
-            if (starts_word(noun, "of"))
-                noun = after_word(noun, "of");
+                starts_word(candidate, "one"))
+                candidate = after_word(candidate, "one");
+            if (starts_word(candidate, "of"))
+                candidate = after_word(candidate, "of");
             for (j = 0; j < sizeof(DETERMINERS) / sizeof(DETERMINERS[0]);
                  ++j) {
-                if (starts_word(noun, DETERMINERS[j])) {
-                    noun = after_word(noun, DETERMINERS[j]);
+                if (starts_word(candidate, DETERMINERS[j])) {
+                    candidate = after_word(candidate, DETERMINERS[j]);
                     break;
                 }
             }
-            for (j = 0; j < sizeof(NOUNS) / sizeof(NOUNS[0]); ++j) {
-                if (starts_word(noun, NOUNS[j]) &&
-                    !has_later_timer_noun(after_word(noun, NOUNS[j])))
+            for (j = 0; j < sizeof(NOUNS) / sizeof(NOUNS[0]); ++j)
+                if (starts_word(candidate, NOUNS[j]) && candidate == noun)
                     return 1;
-            }
             cursor = quantifier + strlen(QUANTIFIERS[i]);
         }
     }

@@ -250,6 +250,26 @@ case "$out" in
     *) echo "FAIL: named quantifier-like label changed the wrong timers: $out"; exit 1 ;;
 esac
 
+echo "  named quantifier-like label cancellation leaves siblings: ok"
+
+# A label containing the universal phrase after the outer noun must stay a
+# label in the alternate "called" form as well.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the all timers"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the timer called all timers"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: called-form quantifier label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"all timers"'*)
+        echo "FAIL: called-form quantifier label was not cancelled: $out"; exit 1 ;;
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: called-form quantifier label changed the wrong timers: $out"; exit 1 ;;
+esac
+
+echo "  called-form quantifier-like label remains targeted: ok"
+
 out=$(call "$agent_sock" respond '{"text":"cancel every question about timers"}')
 case "$out" in
     *'could not find that timer'*) ;;
