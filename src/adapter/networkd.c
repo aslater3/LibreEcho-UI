@@ -60,6 +60,7 @@
 #define DHCP_TIMEOUT_MS 90000
 #define SCAN_TIMEOUT_MS 12000
 #define SCAN_POLL_MS 1800
+#define ASSOCIATION_POLL_MS 100
 #define WPA_TIMEOUT_MS 2500
 #define WEXT_SCAN_BUFFER_SIZE 65535
 #define WEXT_SCAN_RETRY_MS 100
@@ -68,8 +69,10 @@
 #define NL80211_BUFFER_SIZE 65536
 #ifdef LE_NETWORKD_TESTING
 #define NETWORKD_POLL_MAX_MS 5
+#define ASSOCIATION_TIMEOUT_MS 300
 #else
 #define NETWORKD_POLL_MAX_MS 1000
+#define ASSOCIATION_TIMEOUT_MS 15000
 #endif
 
 struct wpa_ctrl {
@@ -123,6 +126,17 @@ struct pending_dhcp {
     long long deadline;
 };
 
+struct pending_association {
+    int active;
+    int client_fd;
+    unsigned long id;
+    int previous_network_id;
+    int candidate_network_id;
+    long long deadline;
+    long long poll_at;
+    char ssid[128];
+};
+
 struct daemon_ctx {
     int listen_fd;
     int netlink_fd;
@@ -139,6 +153,7 @@ struct daemon_ctx {
     struct le_gateway_probe gateway_probe;
     struct client clients[CLIENT_MAX];
     struct pending_scan scan;
+    struct pending_association association;
     struct pending_dhcp dhcp;
 };
 
@@ -933,6 +948,8 @@ static void remove_client(struct daemon_ctx *ctx, int index)
     fd = ctx->clients[index].fd;
     if (ctx->scan.active && ctx->scan.client_fd == fd)
         ctx->scan.client_fd = -1;
+    if (ctx->association.active && ctx->association.client_fd == fd)
+        ctx->association.client_fd = -1;
     if (ctx->dhcp.active && ctx->dhcp.client_fd == fd)
         ctx->dhcp.client_fd = -1;
     close(fd);
@@ -2420,14 +2437,46 @@ static int wpa_quote(char *out, size_t size, const char *value)
     return 0;
 }
 
-static int connect_network(struct daemon_ctx *ctx, const char *ssid,
-                           const char *psk, const char *security)
+static void remove_network_profile(struct daemon_ctx *ctx, int id)
 {
-    char reply[WPA_REPLY_MAX], quoted[512], command[768];
+    char command[64], reply[WPA_REPLY_MAX];
+    if (id < 0 || snprintf(command, sizeof(command), "REMOVE_NETWORK %d\n", id) >=
+                      (int)sizeof(command))
+        return;
+    (void)wpa_ok(ctx, command, reply, sizeof(reply));
+}
+
+static void restore_previous_network(struct daemon_ctx *ctx)
+{
+    char command[64], reply[WPA_REPLY_MAX];
+    int previous = ctx->association.previous_network_id;
+    int candidate = ctx->association.candidate_network_id;
+
+    remove_network_profile(ctx, candidate);
+    if (previous >= 0 &&
+        snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", previous) <
+            (int)sizeof(command)) {
+        (void)wpa_ok(ctx, command, reply, sizeof(reply));
+        (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
+        ctx->network_id = previous;
+    } else {
+        (void)wpa_ok(ctx, "DISCONNECT\n", reply, sizeof(reply));
+        ctx->network_id = -1;
+    }
+}
+
+static int connect_network(struct daemon_ctx *ctx, const char *ssid,
+                           const char *psk, const char *security,
+                           int *previous_id)
+{
+    char reply[WPA_REPLY_MAX], quoted[512], command[768], value[32];
     int id;
     const char *key_mgmt;
-    (void)wpa_ok(ctx, "DISCONNECT", reply, sizeof(reply));
-    (void)wpa_ok(ctx, "REMOVE_NETWORK all", reply, sizeof(reply));
+
+    *previous_id = -1;
+    if (wpa_call(ctx, "STATUS\n", reply, sizeof(reply)) >= 0 &&
+        wpa_value(reply, "id", value, sizeof(value)))
+        *previous_id = (int)strtol(value, NULL, 10);
     if (wpa_call(ctx, "ADD_NETWORK", reply, sizeof(reply)) < 0)
         return -2;
     le_log_info("networkd: ADD_NETWORK reply first=%02x len=%zu", (unsigned char)reply[0], strlen(reply));
@@ -2437,8 +2486,10 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
     if (wpa_quote(quoted, sizeof(quoted), ssid) < 0 ||
         snprintf(command, sizeof(command), "SET_NETWORK %d ssid %s\n", id,
                  quoted) >= (int)sizeof(command) ||
-        wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
+        wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
+        remove_network_profile(ctx, id);
         return -4;
+    }
 
     if (!security || !strcmp(security, "open") || !strcmp(security, "none"))
         key_mgmt = "NONE";
@@ -2446,37 +2497,128 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
         key_mgmt = "WPA-PSK";
     if (snprintf(command, sizeof(command), "SET_NETWORK %d key_mgmt %s\n", id,
                  key_mgmt) >= (int)sizeof(command) ||
-        wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
+        wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
+        remove_network_profile(ctx, id);
         return -5;
+    }
     if (strcmp(key_mgmt, "NONE")) {
         if (!psk || !*psk || wpa_quote(quoted, sizeof(quoted), psk) < 0 ||
             snprintf(command, sizeof(command), "SET_NETWORK %d psk %s\n", id,
                      quoted) >= (int)sizeof(command) ||
-            wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
+            wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
+            remove_network_profile(ctx, id);
             return -6;
+        }
     }
     if (snprintf(command, sizeof(command), "ENABLE_NETWORK %d\n", id) >=
             (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
         snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", id) >=
-            (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
-        wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0)
+            (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
+        remove_network_profile(ctx, id);
         return -7;
-    ctx->network_id = id;
-    return 0;
+    }
+    return id;
 }
 
-static int wait_for_association(struct daemon_ctx *ctx)
+static void finish_association(struct daemon_ctx *ctx, int success)
 {
-    char reply[WPA_REPLY_MAX], state[32];
-    long long deadline = monotonic_ms() + 15000;
-    while (monotonic_ms() < deadline) {
-        if (wpa_call(ctx, "STATUS\n", reply, sizeof(reply)) >= 0 &&
-            wpa_value(reply, "wpa_state", state, sizeof(state)) &&
-            !strcmp(state, "COMPLETED"))
-            return 0;
-        (void)poll(NULL, 0, 100);
+    char command[64], reply[WPA_REPLY_MAX];
+    int fd = ctx->association.client_fd;
+    int ci = client_index(ctx, fd);
+    int candidate = ctx->association.candidate_network_id;
+    int previous = ctx->association.previous_network_id;
+    unsigned long id = ctx->association.id;
+
+    if (!success) {
+        le_log_error("networkd: Wi-Fi association did not complete for ssid=\"%s\"",
+                     ctx->association.ssid);
+        restore_previous_network(ctx);
+        if (ci >= 0) {
+            (void)send_err_fd(fd, id, "Wi-Fi association did not complete");
+            ctx->clients[ci].busy = 0;
+        }
+        memset(&ctx->association, 0, sizeof(ctx->association));
+        ctx->association.client_fd = -1;
+        return;
     }
-    return -8;
+
+    if (wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0) {
+        restore_previous_network(ctx);
+        if (ci >= 0) {
+            (void)send_err_fd(fd, id, "Wi-Fi profile could not be saved");
+            ctx->clients[ci].busy = 0;
+        }
+        memset(&ctx->association, 0, sizeof(ctx->association));
+        ctx->association.client_fd = -1;
+        return;
+    }
+    if (previous >= 0 && previous != candidate) {
+        remove_network_profile(ctx, previous);
+        if (wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0) {
+            (void)wpa_ok(ctx, "RECONFIGURE\n", reply, sizeof(reply));
+            remove_network_profile(ctx, candidate);
+            if (snprintf(command, sizeof(command), "SELECT_NETWORK %d\n",
+                         previous) < (int)sizeof(command))
+                (void)wpa_ok(ctx, command, reply, sizeof(reply));
+            (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
+            ctx->network_id = previous;
+            if (ci >= 0) {
+                (void)send_err_fd(fd, id, "Wi-Fi profile could not be saved");
+                ctx->clients[ci].busy = 0;
+            }
+            memset(&ctx->association, 0, sizeof(ctx->association));
+            ctx->association.client_fd = -1;
+            return;
+        }
+    }
+    ctx->network_id = candidate;
+    reset_network_health(ctx, monotonic_ms());
+    copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ctx->association.ssid);
+    copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
+    memset(&ctx->association, 0, sizeof(ctx->association));
+    ctx->association.client_fd = -1;
+    if (ci >= 0 && start_dhcp(ctx, 0, fd, id) < 0) {
+        ctx->clients[ci].busy = 0;
+        (void)send_err_fd(fd, id, "unable to start DHCP");
+    }
+}
+
+static void check_association(struct daemon_ctx *ctx, long long now)
+{
+    char reply[WPA_REPLY_MAX], state[32], value[32];
+    int completed = 0;
+
+    if (!ctx->association.active || now < ctx->association.poll_at)
+        return;
+    if (wpa_call(ctx, "STATUS\n", reply, sizeof(reply)) >= 0 &&
+        wpa_value(reply, "wpa_state", state, sizeof(state)) &&
+        !strcmp(state, "COMPLETED") &&
+        wpa_value(reply, "id", value, sizeof(value)) &&
+        (int)strtol(value, NULL, 10) == ctx->association.candidate_network_id)
+        completed = 1;
+    if (completed)
+        finish_association(ctx, 1);
+    else if (now >= ctx->association.deadline)
+        finish_association(ctx, 0);
+    else
+        ctx->association.poll_at = now + ASSOCIATION_POLL_MS;
+}
+
+static void cancel_association(struct daemon_ctx *ctx)
+{
+    if (!ctx->association.active)
+        return;
+    restore_previous_network(ctx);
+    if (ctx->association.client_fd >= 0) {
+        int ci = client_index(ctx, ctx->association.client_fd);
+        if (ci >= 0) {
+            (void)send_err_fd(ctx->association.client_fd, ctx->association.id,
+                              "Wi-Fi association was cancelled");
+            ctx->clients[ci].busy = 0;
+        }
+    }
+    memset(&ctx->association, 0, sizeof(ctx->association));
+    ctx->association.client_fd = -1;
 }
 
 static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
@@ -2558,13 +2700,33 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             (void)send_err_fd(ctx->clients[ci].fd, id, "connect requires ssid, psk, security");
             return;
         }
-        if (ctx->dhcp.active) {
-            (void)send_err_fd(ctx->clients[ci].fd, id, "DHCP already in progress");
+        if (ctx->dhcp.active || ctx->association.active) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              ctx->dhcp.active ? "DHCP already in progress" :
+                              "Wi-Fi association already in progress");
             return;
         }
         le_log_info("networkd: connect to ssid=\"%s\" security=%s", ssid, have_security == 1 ? security : "wpa2");
-        connect_result = connect_network(ctx, ssid, have_psk == 1 ? psk : "",
-                                         have_security == 1 ? security : "wpa2");
+        {
+            int previous_id = -1;
+            connect_result = connect_network(ctx, ssid, have_psk == 1 ? psk : "",
+                                             have_security == 1 ? security : "wpa2",
+                                             &previous_id);
+            if (connect_result >= 0) {
+                long long now = monotonic_ms();
+                ctx->association.active = 1;
+                ctx->association.client_fd = ctx->clients[ci].fd;
+                ctx->association.id = id;
+                ctx->association.previous_network_id = previous_id;
+                ctx->association.candidate_network_id = connect_result;
+                ctx->association.deadline = now + ASSOCIATION_TIMEOUT_MS;
+                ctx->association.poll_at = now;
+                copy_string(ctx->association.ssid,
+                            sizeof(ctx->association.ssid), ssid);
+                ctx->clients[ci].busy = 1;
+                return;
+            }
+        }
         if (connect_result < 0) {
             le_log_error("networkd: wpa_supplicant rejected network \\\"%s\\\" at stage %d", ssid, connect_result);
             (void)send_err_fd(ctx->clients[ci].fd, id,
@@ -2576,24 +2738,11 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
                               "wpa_supplicant rejected the network");
             return;
         }
-        connect_result = wait_for_association(ctx);
-        if (connect_result < 0) {
-            le_log_error("networkd: WPA2 association did not complete for ssid=\"%s\"", ssid);
-            (void)send_err_fd(ctx->clients[ci].fd, id,
-                              "Wi-Fi association did not complete");
-            return;
-        }
-        reset_network_health(ctx, monotonic_ms());
-        copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ssid);
-        copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
-        ctx->clients[ci].busy = 1;
-        if (start_dhcp(ctx, 0, ctx->clients[ci].fd, id) < 0) {
-            ctx->clients[ci].busy = 0;
-            (void)send_err_fd(ctx->clients[ci].fd, id, "unable to start DHCP");
-        }
     } else if (!strcmp(cmd, "disconnect")) {
         char reply[WPA_REPLY_MAX];
         le_log_info("networkd: disconnect requested");
+        if (ctx->association.active)
+            cancel_association(ctx);
         if (ctx->dhcp.active)
             cancel_dhcp(ctx);
         if (ctx->wpa.command.fd >= 0)
@@ -2820,6 +2969,8 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
 static void cleanup(struct daemon_ctx *ctx)
 {
     int i;
+    if (ctx->association.active)
+        cancel_association(ctx);
     if (ctx->dhcp.active) {
         (void)kill(ctx->dhcp.pid, SIGTERM);
         (void)waitpid(ctx->dhcp.pid, NULL, 0);
@@ -2854,6 +3005,7 @@ int main(int argc, char **argv)
     le_gateway_probe_init(&ctx.gateway_probe);
     ctx.dhcp.pid = -1;
     ctx.scan.client_fd = -1;
+    ctx.association.client_fd = -1;
     ctx.dhcp.client_fd = -1;
     for (i = 0; i < CLIENT_MAX; ++i)
         ctx.clients[i].fd = -1;
@@ -2929,6 +3081,9 @@ int main(int argc, char **argv)
         }
         if (ctx.scan.active && ctx.scan.deadline - now < timeout)
             timeout = (int)(ctx.scan.deadline > now ? ctx.scan.deadline - now : 0);
+        if (ctx.association.active && ctx.association.poll_at - now < timeout)
+            timeout = (int)(ctx.association.poll_at > now ?
+                            ctx.association.poll_at - now : 0);
         if (ctx.dhcp.active && ctx.dhcp.deadline - now < timeout)
             timeout = (int)(ctx.dhcp.deadline > now ? ctx.dhcp.deadline - now : 0);
         if (ctx.gateway_probe.active &&
@@ -2987,9 +3142,9 @@ int main(int argc, char **argv)
                         break;
                     }
             }
-            /* Explicit client commands win over automatic recovery whether a
-             * probe completed, timed out, or became unavailable in this poll
-             * iteration. */
+            /* Explicit client commands win over association completion and
+             * automatic recovery in this poll iteration. */
+            check_association(&ctx, now);
             check_network_health(&ctx, now);
         }
     }

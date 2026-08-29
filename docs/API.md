@@ -90,6 +90,20 @@ adapter returns the valid fallback `wake_word: "LibreEcho"`.
 }
 ```
 
+#### POST /api/v1/setup
+
+Validates and applies the first-boot hostname, initial volume, Wi-Fi profile,
+wake-word preferences, and privacy choices. Hostname, audio, Wi-Fi, and durable
+configuration failures abort the transaction with stage-specific errors.
+
+Wake-word support is optional: if its companion service returns
+`LE_NOT_SUPPORTED`, setup continues, the submitted `wake_word` and
+`wake_sensitivity` are still written to the canonical configuration, and the
+boot-time restore retries them when the service becomes available. Other
+wake-word errors abort setup. Wi-Fi credentials are passed to the network
+adapter for association but are never returned by the API or written to the
+web configuration.
+
 #### POST /api/v1/setup/vendor-import-force-next-boot
 
 Schedules one forced, owner-local firmware import for the next boot. This

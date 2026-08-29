@@ -26,10 +26,11 @@ assert "setup.step<=1" in js
 assert "setup/vendor-import-force-next-boot" in js
 assert "Account created. Please reload this page" in js
 assert "if(!setup.hardwareReady)" in js
-assert "The saved profile has been retained" in api
+assert "The Wi-Fi connection could not be completed; check the access point and try again" in api
+assert "Setup settings could not be saved" in api
 assert "setup.scanAttempts++<8" in js
 assert "!/[\\u0000-\\u001f]/.test(n.ssid)" in js
 assert "!/^\\\\x(?:00)+$/i.test(n.ssid.trim())" in js
-assert "Initial setup could not complete the Wi-Fi connection. The saved profile has been retained; check the access point and try again." in api
+assert "setup_failure_message(c)" in api
 print('setup account-first browser contract: ok')
 PY

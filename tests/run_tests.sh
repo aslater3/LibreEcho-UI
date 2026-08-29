@@ -3,7 +3,7 @@ set -eu
 PORT=${LIBREECHO_TEST_PORT:-18082}
 URL="http://127.0.0.1:$PORT"
 CFG=./build/test-suite-config.json
-rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
+rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
 make build/test-network-health build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
@@ -142,7 +142,7 @@ kill "$pid"
 wait "$pid" 2>/dev/null || true
 pid=0
 printf '{}\n' >./build/bootstrap-config.json
-rm -f ./build/bootstrap-users ./build/test-bootstrap.log
+rm -f ./build/bootstrap-users ./build/test-bootstrap.log ./build/bootstrap-config.json.setup-complete
 ./build/libreecho-web --backend mock --config ./build/bootstrap-config.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --users-file ./build/bootstrap-users >./build/test-bootstrap.log 2>&1 &
 pid=$!
 sleep 1

@@ -364,8 +364,9 @@ static int adapter_result(int rc)
 }
 
 /* A missing companion daemon is a normal condition during early bring-up. */
-static int adapter_command(const char *socket_path, const char *command,
-                           const char *args, char *response, size_t response_size)
+static int adapter_command_timeout(const char *socket_path, const char *command,
+                                   const char *args, char *response,
+                                   size_t response_size, int io_timeout_ms)
 {
     struct le_adapter *adapter;
     int rc;
@@ -382,6 +383,8 @@ static int adapter_command(const char *socket_path, const char *command,
         le_log_debug("backend: adapter %s connection failed (errno=%d)", command, errno);
         return LE_IO;
     }
+    if (io_timeout_ms > 0)
+        le_adapter_set_io_timeout(adapter, io_timeout_ms);
     rc = le_adapter_call(adapter, command, args, response, response_size);
     le_adapter_close(adapter);
     result = adapter_result(rc);
@@ -390,20 +393,44 @@ static int adapter_command(const char *socket_path, const char *command,
     return result;
 }
 
+static int adapter_command(const char *socket_path, const char *command,
+                           const char *args, char *response, size_t response_size)
+{
+    return adapter_command_timeout(socket_path, command, args, response,
+                                   response_size, 0);
+}
+
 #ifdef LE_BACKEND_LINUX_TESTING
 extern int le_backend_linux_test_adapter_json_command(const char *socket_path,
                                                        const char *command,
                                                        const char *args);
+extern int le_backend_linux_test_adapter_json_command_timeout(
+    const char *socket_path, const char *command, const char *args,
+    int timeout_ms);
 static int adapter_json_command(const char *socket_path, const char *command,
                                 const char *args)
 {
     return le_backend_linux_test_adapter_json_command(socket_path, command, args);
+}
+static int adapter_json_command_timeout(const char *socket_path,
+                                        const char *command, const char *args,
+                                        int timeout_ms)
+{
+    return le_backend_linux_test_adapter_json_command_timeout(
+        socket_path, command, args, timeout_ms);
 }
 #else
 static int adapter_json_command(const char *socket_path, const char *command,
                                 const char *args)
 {
     return adapter_command(socket_path, command, args, NULL, 0);
+}
+static int adapter_json_command_timeout(const char *socket_path,
+                                        const char *command, const char *args,
+                                        int timeout_ms)
+{
+    return adapter_command_timeout(socket_path, command, args, NULL, 0,
+                                   timeout_ms);
 }
 #endif
 
@@ -1193,7 +1220,8 @@ static int connect_wifi(struct le_backend *b, const struct le_wifi_credentials *
                  "{\"ssid\":\"%s\",\"psk\":\"%s\",\"security\":\"%s\"}",
                  ssid, psk, security) >= (int)sizeof(args))
         return LE_INVALID;
-    return adapter_json_command(LE_ADAPTER_NETWORK_SOCK, "connect", args);
+    return adapter_json_command_timeout(LE_ADAPTER_NETWORK_SOCK, "connect",
+                                        args, 120000);
 }
 
 static int disconnect_wifi(struct le_backend *b)

@@ -20,8 +20,9 @@ assert 'TRIGGER_SCAN is only an acknowledgement' not in source
 assert 'struct scan_result' in source
 assert 'static int bogus_ssid(const char *ssid)' in source
 assert 'if (bogus_ssid(ssid))' in source
-assert 'static int wait_for_association(' in source
-assert '(void)wpa_ok(ctx, "REMOVE_NETWORK all"' in source
+assert 'struct pending_association' in source
+assert 'static void check_association(' in source
+assert '(void)wpa_ok(ctx, "REMOVE_NETWORK all"' not in source
 assert 'Wi-Fi association did not complete' in source
 assert "while (command_length && command[command_length - 1] == '\\n')" in source
 assert 'Wi-Fi password rejected by wpa_supplicant' in source
