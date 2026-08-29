@@ -1304,13 +1304,17 @@ static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
 
 /* ----- DHCP child handling --------------------------------------------- */
 
+static void remove_network_profile(struct daemon_ctx *ctx, int id);
+static void restore_previous_network(struct daemon_ctx *ctx);
+
 static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
 {
     int fd = ctx->dhcp.client_fd;
     unsigned long id = ctx->dhcp.id;
     int release = ctx->dhcp.release;
-    char data[LE_ADAPTER_MSG_MAX];
+    char data[LE_ADAPTER_MSG_MAX], command[64], reply[WPA_REPLY_MAX];
     int success = !timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    int network_success;
 
     ctx->dhcp.active = 0;
     ctx->dhcp.pid = -1;
@@ -1319,20 +1323,39 @@ static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
         ctx->state.gateway[0] = '\0';
         ctx->state.dns[0] = '\0';
         copy_string(ctx->state.state, sizeof(ctx->state.state), "disconnected");
+        network_success = success;
     } else {
+        int previous = ctx->association.previous_network_id;
+        int candidate = ctx->association.candidate_network_id;
         refresh_interface_info(ctx);
-        if (success && ctx->state.ip[0])
-            copy_string(ctx->state.state, sizeof(ctx->state.state), "connected");
-        else if (!success)
-            copy_string(ctx->state.state, sizeof(ctx->state.state), "disconnected");
+        network_success = success && ctx->state.ip[0];
+        if (network_success && previous >= 0 && previous != candidate) {
+            remove_network_profile(ctx, previous);
+            if (wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0) {
+                (void)wpa_ok(ctx, "RECONFIGURE\n", reply, sizeof(reply));
+                remove_network_profile(ctx, candidate);
+                if (snprintf(command, sizeof(command), "SELECT_NETWORK %d\n",
+                             previous) < (int)sizeof(command))
+                    (void)wpa_ok(ctx, command, reply, sizeof(reply));
+                (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
+                ctx->network_id = previous;
+                network_success = 0;
+            }
+        } else if (!network_success) {
+            restore_previous_network(ctx);
+        }
+        copy_string(ctx->state.state, sizeof(ctx->state.state),
+                    network_success ? "connected" : "disconnected");
+        memset(&ctx->association, 0, sizeof(ctx->association));
+        ctx->association.client_fd = -1;
     }
     if (fd >= 0) {
         int ci = client_index(ctx, fd);
         if (ci >= 0) {
-            if (success && (!release && !ctx->state.ip[0]))
-                (void)send_err_fd(fd, id, "DHCP completed without an IPv4 address");
-            else if (success)
+            if (network_success)
                 (void)send_ok_fd(fd, id, state_json(&ctx->state, data, sizeof(data)) >= 0 ? data : "{}");
+            else if (success && !release && !ctx->state.ip[0])
+                (void)send_err_fd(fd, id, "DHCP completed without an IPv4 address");
             else if (timed_out)
                 (void)send_err_fd(fd, id, "DHCP timed out");
             else
@@ -2522,11 +2545,10 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
 
 static void finish_association(struct daemon_ctx *ctx, int success)
 {
-    char command[64], reply[WPA_REPLY_MAX];
+    char reply[WPA_REPLY_MAX];
     int fd = ctx->association.client_fd;
     int ci = client_index(ctx, fd);
     int candidate = ctx->association.candidate_network_id;
-    int previous = ctx->association.previous_network_id;
     unsigned long id = ctx->association.id;
 
     if (!success) {
@@ -2552,34 +2574,19 @@ static void finish_association(struct daemon_ctx *ctx, int success)
         ctx->association.client_fd = -1;
         return;
     }
-    if (previous >= 0 && previous != candidate) {
-        remove_network_profile(ctx, previous);
-        if (wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0) {
-            (void)wpa_ok(ctx, "RECONFIGURE\n", reply, sizeof(reply));
-            remove_network_profile(ctx, candidate);
-            if (snprintf(command, sizeof(command), "SELECT_NETWORK %d\n",
-                         previous) < (int)sizeof(command))
-                (void)wpa_ok(ctx, command, reply, sizeof(reply));
-            (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
-            ctx->network_id = previous;
-            if (ci >= 0) {
-                (void)send_err_fd(fd, id, "Wi-Fi profile could not be saved");
-                ctx->clients[ci].busy = 0;
-            }
-            memset(&ctx->association, 0, sizeof(ctx->association));
-            ctx->association.client_fd = -1;
-            return;
-        }
-    }
     ctx->network_id = candidate;
     reset_network_health(ctx, monotonic_ms());
     copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ctx->association.ssid);
     copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
-    memset(&ctx->association, 0, sizeof(ctx->association));
-    ctx->association.client_fd = -1;
-    if (ci >= 0 && start_dhcp(ctx, 0, fd, id) < 0) {
-        ctx->clients[ci].busy = 0;
-        (void)send_err_fd(fd, id, "unable to start DHCP");
+    ctx->association.active = 0;
+    if (start_dhcp(ctx, 0, fd, id) < 0) {
+        restore_previous_network(ctx);
+        if (ci >= 0) {
+            ctx->clients[ci].busy = 0;
+            (void)send_err_fd(fd, id, "unable to start DHCP");
+        }
+        memset(&ctx->association, 0, sizeof(ctx->association));
+        ctx->association.client_fd = -1;
     }
 }
 

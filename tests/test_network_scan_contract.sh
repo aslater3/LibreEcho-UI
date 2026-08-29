@@ -24,6 +24,12 @@ assert 'struct pending_association' in source
 assert 'static void check_association(' in source
 assert '(void)wpa_ok(ctx, "REMOVE_NETWORK all"' not in source
 assert 'Wi-Fi association did not complete' in source
+finish_association = source[source.index('static void finish_association'):source.index('static void check_association')]
+finish_dhcp = source[source.index('static void finish_dhcp'):source.index('static int start_dhcp')]
+assert 'remove_network_profile(ctx, previous)' not in finish_association
+assert 'remove_network_profile(ctx, previous)' in finish_dhcp
+assert 'else if (!network_success)' in finish_dhcp
+assert 'restore_previous_network(ctx);' in finish_dhcp
 assert "while (command_length && command[command_length - 1] == '\\n')" in source
 assert 'Wi-Fi password rejected by wpa_supplicant' in source
 assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
