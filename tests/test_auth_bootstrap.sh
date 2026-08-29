@@ -27,6 +27,10 @@ printf '%s' "$session" | jq -e '.data.username == "admin" and (.data.token | tes
 token=$(printf '%s' "$session" | jq -r '.data.token')
 config=$(curl -fsS "$URL/api/v1/config")
 printf '%s' "$config" | jq -e '.data.authentication == "users" and .data.bootstrap_required == false' >/dev/null
+setup='{"hostname":"bootstrap-echo","ssid":"LibreNet-IoT","security":"wpa2","password":"test-password-123","volume":52,"wake_word":"LibreEcho","wake_sensitivity":72,"local_only":true,"diagnostic_telemetry":false}'
+curl -fsS -X POST "$URL/api/v1/setup" -H "Authorization: Bearer $token" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "$setup" |
+    jq -e '.ok and .data.completed == true' >/dev/null
 curl -fsS "$URL/api/v1/auth/users" -H "Authorization: Bearer $token" | jq -e '.data.users == [{"username":"admin"}]' >/dev/null
 curl -fsS -X POST "$URL/api/v1/auth/users" -H "Authorization: Bearer $token" -H "$CSRF" \
     -H 'Content-Type: application/json' \
