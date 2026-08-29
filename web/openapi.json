@@ -1181,7 +1181,7 @@
         "required": ["seconds"],
         "properties": {
          "seconds": {"type": "integer", "minimum": 1, "maximum": 604800},
-         "label": {"type": "string", "description": "Optional label; its UTF-8 encoding must be no longer than 47 bytes."}
+         "label": {"type": "string", "description": "Optional label; its UTF-8 encoding must be no longer than 47 bytes and must not contain control characters."}
         }
        }
       }

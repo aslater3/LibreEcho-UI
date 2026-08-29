@@ -1673,6 +1673,61 @@ static const char *next_array_object(const char *cursor, char *out,
     return NULL;
 }
 
+static int timer_valid_utf8(const char *text, size_t length)
+{
+    const unsigned char *p = (const unsigned char *)text;
+    size_t i = 0;
+
+    while (i < length) {
+        unsigned char c = p[i];
+
+        if (c <= 0x7f) {
+            ++i;
+        } else if (c >= 0xc2 && c <= 0xdf) {
+            if (i + 1 >= length || (p[i + 1] & 0xc0) != 0x80)
+                return 0;
+            i += 2;
+        } else if (c == 0xe0) {
+            if (i + 2 >= length || p[i + 1] < 0xa0 ||
+                p[i + 1] > 0xbf || (p[i + 2] & 0xc0) != 0x80)
+                return 0;
+            i += 3;
+        } else if ((c >= 0xe1 && c <= 0xec) ||
+                   (c >= 0xee && c <= 0xef)) {
+            if (i + 2 >= length || (p[i + 1] & 0xc0) != 0x80 ||
+                (p[i + 2] & 0xc0) != 0x80)
+                return 0;
+            i += 3;
+        } else if (c == 0xed) {
+            if (i + 2 >= length || p[i + 1] < 0x80 ||
+                p[i + 1] > 0x9f || (p[i + 2] & 0xc0) != 0x80)
+                return 0;
+            i += 3;
+        } else if (c == 0xf0) {
+            if (i + 3 >= length || p[i + 1] < 0x90 ||
+                p[i + 1] > 0xbf || (p[i + 2] & 0xc0) != 0x80 ||
+                (p[i + 3] & 0xc0) != 0x80)
+                return 0;
+            i += 4;
+        } else if (c >= 0xf1 && c <= 0xf3) {
+            if (i + 3 >= length || (p[i + 1] & 0xc0) != 0x80 ||
+                (p[i + 2] & 0xc0) != 0x80 ||
+                (p[i + 3] & 0xc0) != 0x80)
+                return 0;
+            i += 4;
+        } else if (c == 0xf4) {
+            if (i + 3 >= length || p[i + 1] < 0x80 ||
+                p[i + 1] > 0x8f || (p[i + 2] & 0xc0) != 0x80 ||
+                (p[i + 3] & 0xc0) != 0x80)
+                return 0;
+            i += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int timer_entry_parse(const char *entry, struct le_timer_entry *item)
 {
     long long id = 0;
@@ -1691,7 +1746,8 @@ static int timer_entry_parse(const char *entry, struct le_timer_entry *item)
         json_get_string_top_level(entry, "label", item->label,
                                   sizeof(item->label)) != 1)
         return 0;
-    if ((strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm")) ||
+    if (!timer_valid_utf8(item->label, strlen(item->label)) ||
+        (strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm")) ||
         (strcmp(item->state, "pending") && strcmp(item->state, "ringing")))
         return 0;
     item->id = (unsigned)id;

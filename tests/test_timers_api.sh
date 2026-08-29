@@ -49,6 +49,12 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
 [ "$code" = 400 ] || { echo "FAIL: oversized label returned $code, expected 400"; exit 1; }
 echo "  oversized labels refused: ok"
 
+# Decoded JSON control characters are rejected rather than changed in transit.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
+    -H "$CSRF" -H "$JSON" --data '{"seconds":60,"label":"a\nb"}')
+[ "$code" = 400 ] || { echo "FAIL: control-character label returned $code, expected 400"; exit 1; }
+echo "  control-character labels refused: ok"
+
 # Timer fields must come from the request object's top level, not a nested
 # metadata object that happens to use the same names.
 code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/timers" \
