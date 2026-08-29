@@ -6,6 +6,7 @@
 #include "llm_store.h"
 #include "voice_pipeline.h"
 #include "voice_playback.h"
+#include "timer_intent.h"
 #include "voice_reply.h"
 #include "../config_store.h"
 #include "../json.h"
@@ -27,6 +28,7 @@
 #define DEFAULT_CURL "/usr/local/libexec/libreecho-curl"
 #define DEFAULT_MODEL "gpt-5.4"
 #define DEFAULT_AUDIO_SOCKET LE_ADAPTER_AUDIO_SOCK
+#define DEFAULT_TIMER_SOCKET "/run/libreecho/timer.sock"
 #define DEFAULT_TTS_SOCKET LE_ADAPTER_TTS_SOCK
 #define DEFAULT_WAKE_SOCKET LE_ADAPTER_WAKEWORD_SOCK
 #define DEFAULT_STT_SOCKET LE_ADAPTER_STT_SOCK
@@ -73,6 +75,7 @@ struct agent_state {
     char curl_path[384];
     char audio_socket[256];
     char tts_socket[256];
+    char timer_socket[256];
     char wake_socket[256];
     char stt_socket[256];
     char tts_first_pcm_file[384];
@@ -589,6 +592,99 @@ static int response_event(void *context, const char *data)
     return le_voice_reply_feed(&stream->reply, delta);
 }
 
+/* --------------------------- Timer requests ----------------------------- */
+
+/*
+ * Timers are handled here rather than by the language model, which can
+ * describe a timer but cannot start one. Matching locally also means the
+ * common case answers in microseconds instead of a network round trip, and
+ * keeps working with no internet at all.
+ *
+ * Returns 1 when the request was handled and nothing else should run, 0 to
+ * pass the transcript on to the model unchanged.
+ */
+static int handle_timer_intent(struct agent_state *state,
+                               const char *transcript, char *spoken,
+                               size_t spoken_size)
+{
+    struct le_timer_intent intent;
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[256];
+    char speech[LE_TIMER_INTENT_SPEECH_MAX];
+    int ringing = 0;
+    int count = 0;
+    int remaining = 0;
+
+    if (le_timer_intent_parse(transcript, &intent) == LE_TIMER_INTENT_NONE)
+        return 0;
+
+    if (adapter_call(state->timer_socket, 1000, "status", "{}", response,
+                     sizeof(response)) != LE_ADAPTER_OK) {
+        /* No timer daemon: say nothing about timers and let the model answer
+           as it did before this existed. */
+        return 0;
+    }
+    (void)json_get_int(response, "ringing", &ringing);
+
+    switch (intent.kind) {
+    case LE_TIMER_INTENT_DISMISS:
+        /* "Stop" means a dozen things. It only means the timer while one is
+           actually ringing; otherwise this is not our request to answer. */
+        if (ringing <= 0)
+            return 0;
+        (void)adapter_call(state->timer_socket, 1000, "dismiss", "{}",
+                           response, sizeof(response));
+        /* Silence is the confirmation. */
+        spoken[0] = '\0';
+        return 1;
+
+    case LE_TIMER_INTENT_SET:
+        if (intent.seconds <= 0)
+            break;
+        {
+            char label[LE_TIMER_INTENT_LABEL_MAX * 2];
+
+            json_escape(label, sizeof(label), intent.label);
+            snprintf(args, sizeof(args),
+                     "{\"seconds\":%lld,\"label\":\"%s\"}",
+                     intent.seconds, label);
+        }
+        if (adapter_call(state->timer_socket, 1000, "add", args, response,
+                         sizeof(response)) != LE_ADAPTER_OK) {
+            snprintf(speech, sizeof(speech),
+                     "I could not set that timer.");
+            snprintf(spoken, spoken_size, "%s", speech);
+            (void)play_sentence(state, speech);
+            return 1;
+        }
+        break;
+
+    case LE_TIMER_INTENT_CANCEL:
+        if (adapter_call(state->timer_socket, 1000, "cancel_all", "{}",
+                         response, sizeof(response)) != LE_ADAPTER_OK)
+            return 0;
+        (void)json_get_int(response, "cancelled", &count);
+        break;
+
+    case LE_TIMER_INTENT_QUERY:
+        if (adapter_call(state->timer_socket, 1000, "next", "{}", response,
+                         sizeof(response)) != LE_ADAPTER_OK)
+            return 0;
+        (void)json_get_int(response, "count", &count);
+        (void)json_get_int(response, "seconds_remaining", &remaining);
+        break;
+
+    default:
+        return 0;
+    }
+
+    le_timer_intent_speech(&intent, count, remaining, speech, sizeof(speech));
+    snprintf(spoken, spoken_size, "%s", speech);
+    if (speech[0])
+        (void)play_sentence(state, speech);
+    return 1;
+}
+
 static int generate_response(struct agent_state *state,
                              const char *transcript,
                              uint64_t latency_start_ms,
@@ -961,6 +1057,19 @@ static int command_respond(struct agent_state *state, const char *args,
                         sizeof(transcript)) < 1 ||
         !transcript[0])
         return respond(fd, id, 0, "text is required");
+    /* Timers are answered here rather than by the model, which cannot start
+       one. Anything not a timer request falls straight through. */
+    if (handle_timer_intent(state, transcript, full_text,
+                            sizeof(full_text))) {
+        if (escape_json(escaped, sizeof(escaped), full_text) < 0)
+            return respond(fd, id, 0, "response text is too large");
+        length = snprintf(payload, sizeof(payload),
+                          "{\"queued\":true,\"text\":\"%s\","
+                          "\"first_text_ms\":0}", escaped);
+        return length > 0 && length < (int)sizeof(payload)
+            ? respond(fd, id, 1, payload)
+            : respond(fd, id, 0, "response text is too large");
+    }
     if (generate_response(
             state, transcript, 0, full_text, sizeof(full_text),
             error, sizeof(error)) < 0)
@@ -992,6 +1101,18 @@ static void voice_transcript(
     int generated = 0;
 
     pthread_mutex_lock(&state->control_mutex);
+    /*
+     * Timers are handled before the sign-in gate below, deliberately. They
+     * need no language model, so a device with no LLM configured -- or no
+     * internet -- can still set, cancel and silence one. Gating them behind
+     * the model would make the one thing that works offline stop working.
+     */
+    if (handle_timer_intent(state, text, reply, sizeof(reply))) {
+        state->follow_up_armed = 0;
+        state->follow_up_depth = 0;
+        pthread_mutex_unlock(&state->control_mutex);
+        return;
+    }
     if (state->config.enabled &&
         state->auth_state == AUTH_SIGNED_IN) {
         continuation = turn->follow_up && state->follow_up_armed;
@@ -1278,6 +1399,7 @@ int main(int argc, char **argv)
     strcpy(state.credentials_path, DEFAULT_AGENT_CREDENTIALS);
     strcpy(state.curl_path, DEFAULT_CURL);
     strcpy(state.audio_socket, DEFAULT_AUDIO_SOCKET);
+    strcpy(state.timer_socket, DEFAULT_TIMER_SOCKET);
     strcpy(state.tts_socket, DEFAULT_TTS_SOCKET);
     strcpy(state.wake_socket, DEFAULT_WAKE_SOCKET);
     strcpy(state.stt_socket, DEFAULT_STT_SOCKET);
@@ -1301,6 +1423,9 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--audio-socket") && value) {
             snprintf(state.audio_socket, sizeof(state.audio_socket),
                      "%s", argv[++i]);
+        } else if (!strcmp(argv[i], "--timer-socket") && value) {
+            snprintf(state.timer_socket, sizeof(state.timer_socket),
+                     "%s", argv[++i]);
         } else if (!strcmp(argv[i], "--tts-socket") && value) {
             snprintf(state.tts_socket, sizeof(state.tts_socket),
                      "%s", argv[++i]);
@@ -1320,6 +1445,7 @@ int main(int argc, char **argv)
                     "[--credentials PATH] [--curl PATH] "
                     "[--audio-socket PATH] [--tts-socket PATH] "
                     "[--wake-socket PATH] [--stt-socket PATH] "
+                    "[--timer-socket PATH] "
                     "[--tts-first-pcm-file PATH]\n",
                     argv[0]);
             return 2;
