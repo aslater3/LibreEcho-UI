@@ -113,6 +113,15 @@ assert "short_field=json_get_string" in buttons
 assert "long_field=json_get_string" in buttons
 assert "short_field<0||long_field<0" in buttons
 assert "Button settings could not be saved" in buttons
+assert "persist_auth_sessions(c)&&le_auth_save_persisted_sessions" in api
+assert "User was removed, but sessions could not be saved" in api
+assert "old_short[sizeof(c->button_short)]" in api
+assert "memcpy(c->button_short,old_short,sizeof(old_short))" in api
+assert "memcpy(c->button_action_sounds,old_sounds,sizeof(old_sounds))" in api
 assert "button_action_sounds" in Path("tests/test_config.sh").read_text(encoding="utf-8")
+late_start = agentd.index("if (!state->first_pcm_ms")
+late_end = agentd.index("pthread_mutex_unlock(&state->metrics_mutex);", late_start)
+late_update = agentd[late_start:late_end]
+assert "save_history_state(state, state->history_generation" in late_update
 
 print("PR 141 transport/auth/USB/radio source contract: ok")
