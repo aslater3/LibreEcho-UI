@@ -2426,6 +2426,8 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
     char reply[WPA_REPLY_MAX], quoted[512], command[768];
     int id;
     const char *key_mgmt;
+    (void)wpa_ok(ctx, "DISCONNECT", reply, sizeof(reply));
+    (void)wpa_ok(ctx, "REMOVE_NETWORK all", reply, sizeof(reply));
     if (wpa_call(ctx, "ADD_NETWORK", reply, sizeof(reply)) < 0)
         return -2;
     le_log_info("networkd: ADD_NETWORK reply first=%02x len=%zu", (unsigned char)reply[0], strlen(reply));
