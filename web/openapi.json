@@ -2372,22 +2372,18 @@
         "properties": {
          "simulation": {
           "type": "boolean",
-          "default": false,
           "description": "Play rendered speech into the microphone path for testing wake word, speech-to-text and the assistant."
          },
          "https": {
           "type": "boolean",
-          "default": false,
           "description": "Persist whether HTTPS should be enabled after the next restart."
          },
          "acoustic_events": {
           "type": "boolean",
-          "default": false,
           "description": "Persist the future acoustic-event detection preference. Detection is not implemented while acoustic_events_available is false."
          },
          "usb_host": {
           "type": "boolean",
-          "default": false,
           "description": "Switch the OTG port immediately between host/storage mode and device/ADB mode. This live setting is not persisted and resets to device mode on reboot."
          }
         },
@@ -3011,7 +3007,7 @@
          "$ref": "#/components/schemas/FeatureState"
         },
         "error": {
-         "$ref": "#/components/schemas/ApiError"
+         "$ref": "#/components/schemas/NullableApiError"
         }
        }
       }
@@ -3037,7 +3033,7 @@
          "$ref": "#/components/schemas/NetworkState"
         },
         "error": {
-         "$ref": "#/components/schemas/ApiError"
+         "$ref": "#/components/schemas/NullableApiError"
         }
        }
       }
@@ -3049,7 +3045,7 @@
     "content": {
      "application/json": {
       "schema": {
-       "$ref": "#/components/schemas/Envelope"
+       "$ref": "#/components/schemas/ErrorEnvelope"
       }
      }
     }
@@ -3071,7 +3067,7 @@
       "nullable": true
      },
      "error": {
-      "$ref": "#/components/schemas/ApiError"
+      "$ref": "#/components/schemas/NullableApiError"
      }
     }
    },
@@ -3269,7 +3265,41 @@
      }
     }
    },
+   "ErrorEnvelope": {
+    "type": "object",
+    "required": [
+     "ok",
+     "data",
+     "error"
+    ],
+    "properties": {
+     "ok": {
+      "type": "boolean"
+     },
+     "data": {
+      "nullable": true
+     },
+     "error": {
+      "$ref": "#/components/schemas/ApiError"
+     }
+    }
+   },
    "ApiError": {
+    "type": "object",
+    "properties": {
+     "code": {
+      "type": "string"
+     },
+     "reason": {
+      "type": "string",
+      "description": "Sanitized installer reason token when an OTA update is rejected"
+     },
+     "message": {
+      "type": "string"
+     }
+    }
+   },
+   "NullableApiError": {
     "type": "object",
     "nullable": true,
     "properties": {
@@ -3353,7 +3383,7 @@
       }
      },
      "error": {
-      "$ref": "#/components/schemas/ApiError"
+      "$ref": "#/components/schemas/NullableApiError"
      }
     }
    }

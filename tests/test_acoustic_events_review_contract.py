@@ -96,7 +96,26 @@ response_ref = feature_path["get"]["responses"]["200"]["$ref"]
 response_name = response_ref.rsplit("/", 1)[-1]
 response_schema = openapi["components"]["responses"][response_name]["content"]["application/json"]["schema"]
 error_schema = response_schema["properties"]["error"]
-assert error_schema == {"$ref": "#/components/schemas/ApiError"}
-assert openapi["components"]["schemas"]["ApiError"]["nullable"] is True
+assert error_schema == {"$ref": "#/components/schemas/NullableApiError"}
+assert openapi["components"]["schemas"]["ApiError"].get("nullable") is not True
+assert openapi["components"]["schemas"]["NullableApiError"]["nullable"] is True
+
+for key in feature_keys:
+    assert "default" not in feature_path["put"]["requestBody"]["content"]["application/json"]["schema"]["properties"][key], (
+        f"partial feature update {key} must not advertise a default"
+    )
+
+for name in ("Envelope", "FeatureState", "NetworkState", "VoicePipelineEnvelope"):
+    schema = openapi["components"]["schemas"].get(name)
+    if schema is not None and "error" in schema.get("properties", {}):
+        assert schema["properties"]["error"] == {"$ref": "#/components/schemas/NullableApiError"}
+for name in ("FeatureState", "NetworkState"):
+    response = openapi["components"]["responses"][name]["content"]["application/json"]["schema"]
+    assert response["properties"]["error"] == {"$ref": "#/components/schemas/NullableApiError"}
+error_response = openapi["components"]["responses"]["Error"]["content"]["application/json"]["schema"]
+assert error_response == {"$ref": "#/components/schemas/ErrorEnvelope"}
+assert openapi["components"]["schemas"]["ErrorEnvelope"]["properties"]["error"] == {
+    "$ref": "#/components/schemas/ApiError"
+}
 
 print("acoustic events review contracts: ok")
