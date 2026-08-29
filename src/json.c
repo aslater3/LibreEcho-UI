@@ -236,34 +236,29 @@ int json_get_top_level_bool(const char *s, size_t n, const char *key, int *out)
 
 int json_duplicate_key(const char *s, size_t n, const char *key)
 {
-    size_t i = 0, key_len, count = 0;
-    int depth = 0;
+    struct json_cursor c = {s, n, 0, 0};
+    size_t count = 0;
+    int match;
+
     if (!s || !key) return 0;
-    key_len = strlen(key);
-    while (i < n) {
-        if (s[i] == '"') {
-            size_t start = ++i;
-            int escaped = 0;
-            while (i < n) {
-                char ch = s[i++];
-                if (escaped) { escaped = 0; continue; }
-                if (ch == '\\') { escaped = 1; continue; }
-                if (ch == '"') break;
-            }
-            if (i > n || !i || s[i - 1] != '"') return 0;
-            if (depth == 1 && i - start - 1 == key_len &&
-                !memcmp(s + start, key, key_len)) {
-                size_t j = i;
-                while (j < n && ws(s[j])) j++;
-                if (j < n && s[j] == ':' && ++count > 1) return 1;
-            }
-            continue;
-        }
-        if (s[i] == '{' || s[i] == '[') depth++;
-        else if ((s[i] == '}' || s[i] == ']') && depth > 0) depth--;
-        i++;
+    skip_ws(&c);
+    if (c.i >= c.n || c.s[c.i++] != '{') return 0;
+    skip_ws(&c);
+    if (c.i < c.n && c.s[c.i] == '}') return 0;
+    for (;;) {
+        if (c.i >= c.n || c.s[c.i] != '"') return 0;
+        match = parse_string_key(&c, key);
+        if (match < 0) return 0;
+        skip_ws(&c);
+        if (c.i >= c.n || c.s[c.i++] != ':') return 0;
+        skip_ws(&c);
+        if (match) count++;
+        if (!parse_value(&c)) return 0;
+        skip_ws(&c);
+        if (c.i < c.n && c.s[c.i] == '}') return count > 1;
+        if (c.i >= c.n || c.s[c.i++] != ',') return 0;
+        skip_ws(&c);
     }
-    return 0;
 }
 
 static const char *find_key(const char *s, const char *k)
