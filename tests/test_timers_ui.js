@@ -114,6 +114,19 @@ async function main() {
     await retry;
     if (!content.innerHTML.includes('9s'))
         throw new Error('timer service retry did not refresh the page');
+
+    // An active transient failure must preserve the view and keep polling.
+    rejectNext = true;
+    const activeFailure = scheduled();
+    await activeFailure;
+    if (!content.innerHTML.includes('9s'))
+        throw new Error('active timer refresh failure discarded the current view');
+    if (typeof scheduled !== 'function')
+        throw new Error('active timer refresh failure did not schedule a retry');
+    const recovered = scheduled();
+    await recovered;
+    if (!content.innerHTML.includes('9s'))
+        throw new Error('timer polling did not recover after an active failure');
     console.log('timers UI refresh preserves form, navigation, and recovery: ok');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

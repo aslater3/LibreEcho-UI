@@ -550,7 +550,7 @@ function scheduleTimerRefresh(){state.timer=setTimeout(()=>{if(state.page==='Tim
 async function timersPage(draft=null){
  const generation=state.renderGeneration;
  let t;
- try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==state.renderGeneration)return;throw error}
+ try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==state.renderGeneration)return;scheduleTimerRefresh();return}
  if(state.page!=='Timers'||generation!==state.renderGeneration)return;
  const liveDraft=timerFormDraft()||draft;
  if(!t.available){content.innerHTML=panel('Timers',`<div class="empty-state"><p>The timer service is not running on this device.</p></div>`);scheduleTimerRefresh();return}
