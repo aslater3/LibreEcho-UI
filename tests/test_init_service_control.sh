@@ -11,7 +11,7 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-SOURCE_INIT=init/libreecho-micd.init
+SOURCE_INIT=init/libreecho-buttond.init
 WORK=build/test-init-service-control
 fails=0
 
@@ -30,6 +30,9 @@ for f in init/*.init; do
     grep -q 'for stray in \$(running_pids)' "$f" || fail "$name: stop does not sweep strays"
     if grep -q '\$DAEMON" \$ARGS </dev/null' "$f"; then
         grep -q 'setsid "\$DAEMON"' "$f" || fail "$name: start fallback does not setsid"
+        start_body=$(sed -n '/^start_service()/,/^}/p' "$f")
+        printf '%s\n' "$start_body" | grep -q 'sleep 1' && \
+            fail "$name: start fallback still has a fixed one-second wait"
     fi
 done
 [ "$fails" -eq 0 ] && pass "every pidfile-managed init script has the guards"
@@ -38,7 +41,11 @@ done
 rm -rf "$WORK"; mkdir -p "$WORK"
 DAEMON=$ROOT/$WORK/fake-daemon
 PIDFILE=$ROOT/$WORK/fake.pid
-export DAEMON PIDFILE
+LOGFILE=$ROOT/$WORK/fake.log
+AUDIO_SOCK=$ROOT/$WORK/audio.sock
+LED_SOCK=$ROOT/$WORK/led.sock
+ARGS=
+export DAEMON PIDFILE LOGFILE AUDIO_SOCK LED_SOCK ARGS
 
 # A purpose-built ELF binary. A #!/bin/sh script reports its interpreter as
 # argv[0], and coreutils is a multi-call binary that refuses to run under
@@ -53,8 +60,11 @@ if [ -z "$CC" ]; then
 else
     "$CC" -w -o "$DAEMON" "$WORK/fake.c"
 
-    # Pull the helpers out of the shipped script.
-    eval "$(sed -n '/^running_pids()/,/^}/p; /^pidfile_pid()/,/^}/p; /^is_running()/,/^}/p; /^terminate()/,/^}/p' "$SOURCE_INIT")"
+    # Pull the helpers, including the real fallback launcher, out of the
+    # shipped script. buttond is used because its start helper has no hardware
+    # prerequisites and can therefore be exercised as-is with temporary paths.
+    HELPERS=$(sed -n '/^running_pids()/,/^}/p; /^pidfile_pid()/,/^}/p; /^is_running()/,/^}/p; /^terminate()/,/^}/p; /^start_service()/,/^}/p' "$SOURCE_INIT")
+    eval "$HELPERS"
 
     count() { running_pids | wc -l | tr -d ' '; }
 
@@ -80,6 +90,30 @@ else
     for stray in $(running_pids); do terminate "$stray" 5; done
     check "terminate clears the process" "$(count)" 0
     kill -0 "$first" 2>/dev/null && kill -9 "$first" 2>/dev/null || true
+
+    echo "behavioural: fallback start survives launcher exit"
+    rm -f "$PIDFILE"
+    # start-stop-daemon is normally in /usr/sbin; excluding sbin forces the
+    # shipped setsid fallback while retaining setsid and the basic coreutils.
+    (
+        PATH=/usr/bin:/bin
+        export PATH
+        eval "$HELPERS"
+        start_service
+    )
+    started=$(sed -n '1p' "$PIDFILE" 2>/dev/null || true)
+    case "$started" in *[!0-9]*|'') started_live=no ;; *) kill -0 "$started" 2>/dev/null && started_live=yes || started_live=no ;; esac
+    check "fallback writes a live pid" "$started_live" yes
+    started_argv0=
+    if [ "$started_live" = yes ] && [ -r "/proc/$started/cmdline" ]; then
+        started_argv0=$(tr '\0' '\n' < "/proc/$started/cmdline" 2>/dev/null | sed -n '1p')
+    fi
+    check "pidfile identifies the daemon" "$started_argv0" "$DAEMON"
+    # The launcher subshell has already exited at this point. The daemon must
+    # still be present, proving the setsid path actually detached it.
+    sleep 0.1
+    check "daemon survives launcher shell exit" "$(kill -0 "$started" 2>/dev/null && echo yes || echo no)" yes
+    for stray in $(running_pids); do terminate "$stray" 5; done
 fi
 
 rm -rf "$WORK"
