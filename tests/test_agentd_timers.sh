@@ -354,8 +354,34 @@ timers = json.loads(sys.stdin.read())["data"]["timers"]
 assert len(timers) == 2, timers
 assert all(timer["label"] == "duplicate" for timer in timers), timers
 ' || { echo "FAIL: ambiguous cancellation changed the schedule: $out"; exit 1; }
+out=$(call "$agent_sock" respond '{"text":"cancel the missing timer"}')
+case "$out" in
+    *'could not find that timer'*) ;;
+    *) echo "FAIL: missing label was not reported as missing: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.loads(sys.stdin.read())["data"]["timers"]
+assert len(timers) == 2, timers
+' || { echo "FAIL: missing-label cancellation changed the schedule: $out"; exit 1; }
 call "$agent_sock" respond '{"text":"cancel all timers"}' >/dev/null
 echo "  singular, verb, and universal cancellation are scoped correctly: ok"
+
+# A valid label must not rescue a malformed id selector. The daemon must reject
+# the request before it can mutate the schedule through the label path.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the all timers"}' >/dev/null
+out=$(call "$timer_sock" cancel '{"id":"bad","label":"all timers"}')
+case "$out" in
+    *'"ok":false'*) ;;
+    *) echo "FAIL: malformed id fell through to label cancellation: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"all timers"'*) ;;
+    *) echo "FAIL: malformed id changed the labelled timer: $out"; exit 1 ;;
+esac
+echo "  malformed id cannot fall through to label cancellation: ok"
 
 # --- "stop" with nothing ringing is not a timer request -------------------
 # It means a dozen other things, so it must fall through rather than being

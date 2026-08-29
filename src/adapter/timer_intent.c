@@ -92,6 +92,26 @@ static const char *after_word(const char *text, const char *word)
     return text;
 }
 
+static const char *first_cancel_verb(const char *text, size_t *length)
+{
+    static const char *const VERBS[] = {"cancel", "delete", "remove", "clear"};
+    const char *verb = NULL;
+    size_t i;
+
+    if (length)
+        *length = 0;
+    for (i = 0; i < sizeof(VERBS) / sizeof(VERBS[0]); ++i) {
+        const char *hit = find_word(text, VERBS[i]);
+
+        if (hit && (!verb || hit < verb)) {
+            verb = hit;
+            if (length)
+                *length = strlen(VERBS[i]);
+        }
+    }
+    return verb;
+}
+
 /*
  * Read a count immediately before `unit`. Handles digits, single words, and
  * the two-word forms speech produces ("twenty five"). Returns -1 when there
@@ -359,27 +379,19 @@ static void extract_label(const char *text, char *out, size_t size)
 
 static void extract_cancel_label(const char *text, char *out, size_t size)
 {
-    static const char *const VERBS[] = {"cancel", "delete", "remove", "clear"};
     static const char *const NOUNS[] = {"timer", "timers", "alarm", "alarms"};
-    const char *verb = NULL;
+    const char *verb;
     const char *cancel;
     const char *noun = NULL;
     const char *marker;
     const char *start;
     const char *stop;
-    size_t verb_length = 0;
+    size_t verb_length;
     size_t length;
     size_t i;
 
     out[0] = '\0';
-    for (i = 0; i < sizeof(VERBS) / sizeof(VERBS[0]); ++i) {
-        const char *hit = find_word(text, VERBS[i]);
-
-        if (hit && (!verb || hit < verb)) {
-            verb = hit;
-            verb_length = strlen(VERBS[i]);
-        }
-    }
+    verb = first_cancel_verb(text, &verb_length);
     if (!verb)
         return;
     cancel = verb + verb_length;
@@ -409,7 +421,7 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
     for (i = 0; i < sizeof(NOUNS) / sizeof(NOUNS[0]); ++i) {
         const char *hit = find_word(cancel, NOUNS[i]);
 
-        if (hit && (!noun || hit < noun))
+        if (hit && (!noun || hit > noun))
             noun = hit;
     }
     if (!noun)
@@ -425,6 +437,17 @@ static void extract_cancel_label(const char *text, char *out, size_t size)
         start += 3;
     length = (size_t)(noun - start);
     (void)copy_cancel_label(out, size, start, length);
+}
+
+static int has_later_timer_noun(const char *text)
+{
+    static const char *const NOUNS[] = {"timer", "timers", "alarm", "alarms"};
+    size_t i;
+
+    for (i = 0; i < sizeof(NOUNS) / sizeof(NOUNS[0]); ++i)
+        if (starts_word(text, NOUNS[i]) || find_word(text, NOUNS[i]))
+            return 1;
+    return 0;
 }
 
 static int has_universal_timer_noun(const char *text)
@@ -467,9 +490,11 @@ static int has_universal_timer_noun(const char *text)
                     break;
                 }
             }
-            for (j = 0; j < sizeof(NOUNS) / sizeof(NOUNS[0]); ++j)
-                if (starts_word(noun, NOUNS[j]))
+            for (j = 0; j < sizeof(NOUNS) / sizeof(NOUNS[0]); ++j) {
+                if (starts_word(noun, NOUNS[j]) &&
+                    !has_later_timer_noun(after_word(noun, NOUNS[j])))
                     return 1;
+            }
             cursor = quantifier + strlen(QUANTIFIERS[i]);
         }
     }
@@ -488,10 +513,23 @@ static int negates_setting(const char *text)
            (has_word(text, "don") && has_word(text, "t"));
 }
 
+static int negates_cancellation(const char *text, const char *verb)
+{
+    const char *not = find_word(text, "not");
+    const char *never = find_word(text, "never");
+    const char *don = find_word(text, "don");
+    const char *t = find_word(text, "t");
+
+    return (not && not < verb) || (never && never < verb) ||
+           (don && t && don < verb && t < verb);
+}
+
 enum le_timer_intent_kind le_timer_intent_parse(
     const char *transcript, struct le_timer_intent *intent)
 {
     char text[NORMAL_MAX];
+    const char *cancel_verb;
+    size_t cancel_verb_length;
     int found = 0;
     long long seconds;
 
@@ -515,15 +553,16 @@ enum le_timer_intent_kind le_timer_intent_parse(
     if (!mentions_timer(text))
         return LE_TIMER_INTENT_NONE;
 
-    if (has_word(text, "cancel") || has_word(text, "delete") ||
-        has_word(text, "remove") || has_word(text, "clear")) {
+    cancel_verb = first_cancel_verb(text, &cancel_verb_length);
+    if (cancel_verb) {
         /* A negated cancellation is not an instruction to mutate the
            schedule. Check this before extracting labels or universal
            quantifiers, because both paths can issue destructive commands. */
-        if (negates_setting(text))
+        if (negates_cancellation(text, cancel_verb))
             return LE_TIMER_INTENT_NONE;
         intent->kind = LE_TIMER_INTENT_CANCEL;
-        intent->cancel_all = has_universal_timer_noun(text);
+        intent->cancel_all = has_universal_timer_noun(
+            cancel_verb + cancel_verb_length);
         if (!intent->cancel_all)
             extract_cancel_label(text, intent->label, sizeof(intent->label));
         return intent->kind;

@@ -208,6 +208,30 @@ case "$out" in
 esac
 echo "  label cancellation targets one timer: ok"
 
+# A present malformed id is a protocol error, not permission to fall through
+# to a valid label selector.
+out=$(call cancel '{"id":"bad","label":"one"}')
+case "$out" in
+    *'"ok":false'*) ;;
+    *) echo "FAIL: malformed cancel id accepted: $out"; exit 1 ;;
+esac
+out=$(call status '{}')
+case "$out" in
+    *'"label":"one"'*) ;;
+    *) echo "FAIL: malformed cancel id changed the labelled timer: $out"; exit 1 ;;
+esac
+out=$(call cancel '{"id":1.5,"label":"one"}')
+case "$out" in
+    *'"ok":false'*) ;;
+    *) echo "FAIL: fractional cancel id accepted: $out"; exit 1 ;;
+esac
+out=$(call status '{}')
+case "$out" in
+    *'"label":"one"'*) ;;
+    *) echo "FAIL: fractional cancel id changed the labelled timer: $out"; exit 1 ;;
+esac
+echo "  malformed cancel id refused without label fallback: ok"
+
 out=$(call cancel_all '{}')
 case "$out" in
     *'"cancelled":1'*) ;;

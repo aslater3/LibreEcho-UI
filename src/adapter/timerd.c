@@ -609,9 +609,14 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         size_t i;
         int matches = 0;
         unsigned int matched = 0;
+        unsigned int timer_id = 0;
+        int id_result = args ? json_get_uint(args, "id", &timer_id) : 0;
 
-        if (args && json_get_int(args, "id", &value) == 1) {
-            if (le_timer_cancel(&ctx->timers, (unsigned int)value) !=
+        if (id_result < 0 || (id_result > 0 && timer_id == 0))
+            return le_adapter_respond_err(
+                out, size, id, "cancel id must be a positive integer");
+        if (id_result > 0) {
+            if (le_timer_cancel(&ctx->timers, timer_id) !=
                 LE_TIMER_OK)
                 return le_adapter_respond_err(out, size, id,
                                               "no such timer");
