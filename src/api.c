@@ -809,6 +809,7 @@ static void auth_bootstrap_json(struct api_context*c,const struct api_request*q,
     if(!api_bootstrap_required_internal(c)){err(r,409,LE_BUSY,"Initial account setup has already been completed");return;}
     if(!auth_credentials(q,username,password,confirm)||strcmp(password,confirm)){err(r,400,LE_INVALID,"Username, password, and matching password confirmation are required");goto clear;}
     if(le_auth_add_user(&c->auth,c->users_path,username,password)||le_auth_login(&c->auth,username,password,token,sizeof(token),&expires)){err(r,400,LE_INVALID,"Account details are invalid or could not be saved");goto clear;}
+    c->setup_completed=0;
     json_escape(escaped,sizeof(escaped),username);
     api_log(c,"info","Initial local account created");
     out(r,200,"{\"ok\":true,\"data\":{\"token\":\"%s\",\"username\":\"%s\",\"expires_in\":%d},\"error\":null}",token,escaped,expires);
