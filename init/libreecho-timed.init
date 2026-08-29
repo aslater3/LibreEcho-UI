@@ -71,13 +71,26 @@ start_service() {
         else
             "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
         fi
-        echo $! >"$PIDFILE"
-        # setsid may fork, so $! can be the wrapper rather than the daemon.
-        # Resolve the real pid so the pidfile is not born stale.
-        sleep 1
-        # Lowest pid: daemons that fork a worker share argv[0], and the
-        # supervisor is the one started first.
-        started=$(running_pids | sort -n | sed -n '1p')
+        launched=$!
+        echo "$launched" >"$PIDFILE"
+        # setsid normally execs the daemon in-place, so the common case resolves
+        # immediately. If it forks, poll briefly for the real daemon instead of
+        # delaying every service start by a fixed second.
+        started=
+        count=0
+        while [ "$count" -lt 20 ]; do
+            if [ -r "/proc/$launched/cmdline" ]; then
+                argv0=$(tr '\0' '\n' < "/proc/$launched/cmdline" 2>/dev/null | sed -n '1p')
+                if [ "$argv0" = "$DAEMON" ]; then
+                    started=$launched
+                    break
+                fi
+            fi
+            started=$(running_pids | sort -n | sed -n '1p')
+            [ -n "$started" ] && break
+            sleep 0.05
+            count=$((count + 1))
+        done
         [ -n "$started" ] && echo "$started" >"$PIDFILE"
     fi
 }
