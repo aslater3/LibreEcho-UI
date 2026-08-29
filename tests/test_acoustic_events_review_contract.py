@@ -11,7 +11,14 @@ from pathlib import Path
 import json
 
 api_c = Path("src/api.c").read_text(encoding="utf-8")
+api_h = Path("src/api.h").read_text(encoding="utf-8")
 openapi = json.loads(Path("web/openapi.json").read_text(encoding="utf-8"))
+
+# USB role is live kernel state, not a persisted feature preference. Keeping a
+# context member or export key would make config export claim a restorable
+# setting that config import cannot consume.
+assert "feature_usb_host" not in api_c
+assert "feature_usb_host" not in api_h
 
 
 def assert_no_nullable_ref_siblings(value):

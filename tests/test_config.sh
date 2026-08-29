@@ -46,6 +46,7 @@ printf '%s' "$exported" | jq -e \
      .button_action_sounds == "action-1,action-2" and
      .button_mute_brightness == 44' >/dev/null
 ! printf '%s' "$exported" | grep -Eqi 'password|auth_token|telemetry_value|logs'
+! printf '%s' "$exported" | grep -q '"feature_usb_host"'
 curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
     -H 'Content-Type: application/json' --data '{"acoustic_events":false}' >/dev/null
 duplicate_import="${exported%?},\"feature_acoustic_events\":\"enabled\"}"
