@@ -19,7 +19,11 @@ assert "inherited != keep_fd" in Path("src/inherited_fds.c").read_text(encoding=
 assert "relay_ls=socket(AF_INET,SOCK_STREAM,0)" in http
 assert "c[i].secure_transport=1" in http
 assert "q.https=c->secure_transport;" in http
+assert http.index("bind(tls_ls") < http.index("if(o->run_user[0])")
+assert http.index("listen(tls_ls,max)") < http.index("if(o->run_user[0])")
 assert http.index("if(o->tls_port>0)") < http.index("if(o->run_user[0])")
+assert "build/test-agentd" in runner
+assert "./build/test-agentd" in runner
 assert "make build/test-auth-transport" in runner
 assert "make build/test-inherited-fds" in runner
 assert "make build/test-radiod-json" in runner

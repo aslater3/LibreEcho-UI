@@ -15,6 +15,7 @@ int main(void)
     char users[128], sessions[160], bootstrap_users[128];
     char bootstrap_sessions[160], csrf[65], token[LE_AUTH_TOKEN_MAX];
     char http_token[LE_AUTH_TOKEN_MAX];
+    char evicting_http_token[LE_AUTH_TOKEN_MAX];
     char filled_tokens[LE_AUTH_MAX_SESSIONS][LE_AUTH_TOKEN_MAX];
     struct le_auth_db seed;
     struct le_backend *backend = NULL;
@@ -134,11 +135,24 @@ int main(void)
     api_handle(&api, &request, &response);
     CHECK(response.status == 200);
     {
+        const char *start = strstr(response.body, "\"token\":\"");
+        CHECK(start != NULL);
+        start += strlen("\"token\":\"");
+        CHECK(sscanf(start, "%64[0-9a-f]", evicting_http_token) == 1);
+    }
+    {
         char persisted[1024] = {0};
         FILE *file = fopen(sessions, "r");
+        int lines = 0;
+        char *line;
         CHECK(file != NULL);
         CHECK(fread(persisted, 1, sizeof(persisted) - 1, file) < sizeof(persisted));
         CHECK(fclose(file) == 0);
+        for (line = persisted; *line; ++line)
+            if (*line == '\n')
+                ++lines;
+        CHECK(lines == LE_AUTH_MAX_SESSIONS - 1);
+        CHECK(strstr(persisted, evicting_http_token) == NULL);
         CHECK(strstr(persisted, filled_tokens[0]) == NULL);
         CHECK(strstr(persisted, filled_tokens[LE_AUTH_MAX_SESSIONS - 1]) != NULL);
     }
