@@ -1450,6 +1450,14 @@ static const char *scan_security(const char *flags)
     return "open";
 }
 
+struct scan_result {
+    char ssid[256];
+    char flags[128];
+    int signal;
+    int frequency;
+    int five_ghz;
+};
+
 static int bogus_ssid(const char *ssid);
 
 static int parse_scan_results(const char *reply, char *data, size_t size)
@@ -1457,15 +1465,11 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
     const char *line = reply;
     size_t used = 0;
     int count = 0, i;
-    struct scan_result {
-        char ssid[256];
-        char flags[128];
-        int signal;
-    } results[SCAN_MAX];
+    struct scan_result results[SCAN_MAX];
     memset(results, 0, sizeof(results));
     while (*line) {
         char row[512], *fields[5], *p;
-        char ssid[256], flags[128], signal[32];
+        char ssid[256], flags[128], signal[32], frequency[32];
         int field = 0, duplicate = -1, level;
         const char *end = strchr(line, '\n');
         size_t len = end ? (size_t)(end - line) : strlen(line);
@@ -1484,6 +1488,7 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
         }
         if (field == 5 && strcmp(fields[0], "bssid / frequency / signal level / flags / ssid")) {
             copy_string(signal, sizeof(signal), fields[2]);
+            copy_string(frequency, sizeof(frequency), fields[1]);
             copy_string(flags, sizeof(flags), fields[3]);
             copy_string(ssid, sizeof(ssid), fields[4]);
             if (bogus_ssid(ssid)) {
@@ -1493,27 +1498,54 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
                 continue;
             }
             level = (int)strtol(signal, NULL, 10);
-            for (i = 0; i < count; ++i) {
-                if (!strcmp(results[i].ssid, ssid)) {
-                    duplicate = i;
-                    break;
+            {
+                int freq = (int)strtol(frequency, NULL, 10);
+                int five_ghz = freq >= 5000 && freq < 6000;
+                for (i = 0; i < count; ++i) {
+                    if (!strcmp(results[i].ssid, ssid)) {
+                        duplicate = i;
+                        break;
+                    }
                 }
-            }
-            if (duplicate >= 0) {
-                if (level > results[duplicate].signal) {
-                    copy_string(results[duplicate].flags,
-                                sizeof(results[duplicate].flags), flags);
-                    results[duplicate].signal = level;
+                if (duplicate >= 0) {
+                    if (five_ghz > results[duplicate].five_ghz ||
+                        (five_ghz == results[duplicate].five_ghz &&
+                         level > results[duplicate].signal)) {
+                        copy_string(results[duplicate].flags,
+                                    sizeof(results[duplicate].flags), flags);
+                        results[duplicate].signal = level;
+                        results[duplicate].frequency = freq;
+                        results[duplicate].five_ghz = five_ghz;
+                    }
+                } else if (count < SCAN_MAX) {
+                    copy_string(results[count].ssid,
+                                sizeof(results[count].ssid), ssid);
+                    copy_string(results[count].flags,
+                                sizeof(results[count].flags), flags);
+                    results[count].signal = level;
+                    results[count].frequency = freq;
+                    results[count++].five_ghz = five_ghz;
                 }
-            } else if (count < SCAN_MAX) {
-                copy_string(results[count].ssid, sizeof(results[count].ssid), ssid);
-                copy_string(results[count].flags, sizeof(results[count].flags), flags);
-                results[count++].signal = level;
             }
         }
         if (!end)
             break;
         line = end + 1;
+    }
+    for (i = 0; i < count; ++i) {
+        int j;
+        for (j = i + 1; j < count; ++j) {
+            int better = results[j].five_ghz > results[i].five_ghz ||
+                         (results[j].five_ghz == results[i].five_ghz &&
+                          (results[j].signal > results[i].signal ||
+                           (results[j].signal == results[i].signal &&
+                            strcmp(results[j].ssid, results[i].ssid) < 0)));
+            if (better) {
+                struct scan_result swap = results[i];
+                results[i] = results[j];
+                results[j] = swap;
+            }
+        }
     }
     if (append_text(data, size, &used, "{\"networks\":[") < 0)
         return -1;
@@ -1524,8 +1556,9 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
             append_json_string(data, size, &used, results[i].ssid) < 0 ||
             append_text(data, size, &used, ",\"security\":") < 0 ||
             append_json_string(data, size, &used, scan_security(results[i].flags)) < 0 ||
-            append_text(data, size, &used, ",\"signal\":%d}",
-                        rssi_to_percent(results[i].signal)) < 0)
+            append_text(data, size, &used, ",\"signal\":%d,\"frequency\":%d,\"band\":\"%s\"}",
+                        rssi_to_percent(results[i].signal), results[i].frequency,
+                        results[i].five_ghz ? "5ghz" : "2.4ghz") < 0)
                 return -1;
     }
     if (append_text(data, size, &used, "]}") < 0)

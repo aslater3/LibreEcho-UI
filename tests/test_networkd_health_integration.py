@@ -449,6 +449,29 @@ def test_scan_deduplicates_ssid_and_keeps_strongest_bssid():
             stop_daemon(process, wpa)
 
 
+def test_scan_orders_five_ghz_before_signal_sorted_24ghz():
+    rows = (
+        "bssid / frequency / signal level / flags / ssid\n"
+        "00:11:22:33:44:70\t2412\t-20\t[WPA2-PSK-CCMP][ESS]\tStrong24\n"
+        "00:11:22:33:44:71\t5785\t-70\t[WPA2-PSK-CCMP][ESS]\tPreferred5G\n"
+        "00:11:22:33:44:72\t2437\t-45\t[WPA2-PSK-CCMP][ESS]\tWeak24\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-band-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", scan_results=rows)
+        try:
+            result = adapter_request(adapter, 51, "scan", timeout=4)
+            assert result["ok"] is True, result
+            networks = result["data"]["networks"]
+            assert [entry["ssid"] for entry in networks] == [
+                "Preferred5G", "Strong24", "Weak24"]
+            assert networks[0]["band"] == "5ghz"
+            assert networks[1]["band"] == "2.4ghz"
+        finally:
+            stop_daemon(process, wpa)
+
+
 def main():
     test_ordered_recovery_and_one_shot_reboot()
     test_recovery_can_succeed_without_supervisor_request()
@@ -461,6 +484,7 @@ def main():
     test_preassociation_failure_restores_working_profile()
     test_preassociation_failure_does_not_restore_when_disconnected()
     test_scan_deduplicates_ssid_and_keeps_strongest_bssid()
+    test_scan_orders_five_ghz_before_signal_sorted_24ghz()
     print("networkd event-loop recovery integration: ok")
 
 
