@@ -12,6 +12,8 @@ quiesce = body.index('quiesce_factory_reset_services')
 clear = body.index('le_factory_reset_clear')
 resume = body.index('resume_factory_reset_services')
 reboot = body.index('linux_reboot')
+assert 'run_service_action(factory_reset_services[i], "stop") != 0' in source
+assert 'run_service_action(factory_reset_services[i], "status") == 0' in source
 assert quiesce < clear < reboot
 assert clear < resume
 assert body.count('resume_factory_reset_services') >= 2

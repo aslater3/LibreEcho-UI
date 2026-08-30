@@ -800,7 +800,9 @@ on the product image and checked-in systemd service), including device-local
 accounts, setup completion, Wi-Fi profiles/PSKs, assistant credentials, timers,
 and all mutable user configuration. The reset synchronizes both persistent
 directories and reboots. Installed feature payloads, OTA artifacts, and release
-identity outside those directories are preserved.
+identity outside those directories are preserved. The checked-in systemd
+service migrates legacy `web-config.json`, setup completion, and users from
+`/etc/libreecho` only when their new destinations do not already exist.
 The operation requires `X-LibreEcho-Confirm: confirm-device-action`; missing
 directories are accepted, while any unexpected deletion or durability failure
 aborts the reboot and returns HTTP 503. Backends without destructive-action

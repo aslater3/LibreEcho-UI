@@ -6,11 +6,11 @@ After=network.target
 User=libreecho
 Group=libreecho
 RuntimeDirectory=libreecho
-ExecStartPre=+/usr/bin/install -d -o libreecho -g libreecho -m 0700 /data/libreecho /data/libreecho/config /data/libreecho/secrets
+ExecStartPre=+/usr/local/libexec/libreecho-web-migrate-state
 Environment=LIBREECHO_DATA_ROOT=/data/libreecho
 ExecStart=/usr/local/sbin/libreecho-web --backend linux --config /data/libreecho/config/web-config.json --web-root /usr/local/share/libreecho/web --listen 127.0.0.1:8080 --users-file /data/libreecho/config/users
-CapabilityBoundingSet=CAP_SYS_BOOT
-AmbientCapabilities=CAP_SYS_BOOT
+CapabilityBoundingSet=CAP_SYS_BOOT CAP_KILL
+AmbientCapabilities=CAP_SYS_BOOT CAP_KILL
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

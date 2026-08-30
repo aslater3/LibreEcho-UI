@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+legacy_root=${LIBREECHO_LEGACY_CONFIG_ROOT:-/etc/libreecho}
+data_root=${LIBREECHO_DATA_ROOT:-/data/libreecho}
+owner=${LIBREECHO_STATE_OWNER:-libreecho}
+group=${LIBREECHO_STATE_GROUP:-libreecho}
+
+install -d -m 0700 -o "$owner" -g "$group" \
+    "$data_root" "$data_root/config" "$data_root/secrets"
+
+for name in web-config.json web-config.json.setup-complete users; do
+    source_path=$legacy_root/$name
+    target_path=$data_root/config/$name
+    if [ -f "$source_path" ] && [ ! -e "$target_path" ]; then
+        install -m 0600 -o "$owner" -g "$group" \
+            "$source_path" "$target_path"
+    fi
+done

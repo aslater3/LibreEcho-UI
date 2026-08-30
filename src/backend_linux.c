@@ -2062,7 +2062,8 @@ static int quiesce_factory_reset_services(unsigned char *stopped)
         if (access(factory_reset_services[i], X_OK) != 0 ||
             run_service_action(factory_reset_services[i], "status") != 0)
             continue;
-        if (run_service_action(factory_reset_services[i], "stop") != 0) {
+        if (run_service_action(factory_reset_services[i], "stop") != 0 ||
+            run_service_action(factory_reset_services[i], "status") == 0) {
             resume_factory_reset_services(stopped);
             return -1;
         }
