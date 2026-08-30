@@ -98,7 +98,20 @@ struct le_playback_state {
     int metadata_available;
     char title[LE_MEDIA_TEXT+1], artist[LE_MEDIA_TEXT+1], album[LE_MEDIA_TEXT+1];
 };
+/* One entry from the timer daemon's schedule. */
+struct le_timer_entry {
+    unsigned id;
+    char kind[16];
+    char state[16];
+    long seconds_remaining;
+    char label[48];
+};
+struct le_timer_list {
+    struct le_timer_entry items[16];
+    int count, ringing, missed, available;
+};
 struct le_backend;
+struct le_timer_list;
 
 int le_backend_init(struct le_backend **out, const char *mode, const char *mock_path, const char *config_path, unsigned seed);
 void le_backend_destroy(struct le_backend *b);

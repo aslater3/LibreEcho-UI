@@ -91,6 +91,8 @@ python3 tests/test_web_ui_behaviour_contract.py
 node tests/test_kernel_log_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
+node tests/test_timers_ui.js
+LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py

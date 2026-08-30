@@ -28,6 +28,7 @@ struct le_backend_ops {
     shift every op after it. A backend that leaves it null reports the
     feature unsupported, which is the right answer for the mock. */
  int (*sound_sample)(struct le_backend*,const char*);
+ int (*timers)(struct le_backend*,struct le_timer_list*); int (*timer_add)(struct le_backend*,int,const char*,unsigned*); int (*timer_cancel)(struct le_backend*,unsigned); int (*timer_dismiss)(struct le_backend*,int*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

@@ -205,6 +205,12 @@ $(BUILD)/test-timer-persistence: tests/test_timer_persistence.c \
 		src/adapter/timer_schedule.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/json.c src/log.c -o $@
 
+$(BUILD)/test-backend-linux-timers: tests/test_backend_linux_timers.c \
+	src/json.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) \
+		$(WARN) -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $^ -o $@
+
 $(BUILD)/test-gateway-probe: tests/test_gateway_probe.c \
 		src/adapter/gateway_probe.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@

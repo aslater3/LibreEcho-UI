@@ -2546,7 +2546,8 @@ static const struct le_backend_ops ops = {
     linux_reboot, linux_shutdown, factory_reset, tick, control,
     spotify, spotify_set,
     light,
-    sound_sample
+    sound_sample,
+    timers, timer_add, timer_cancel, timer_dismiss
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)
