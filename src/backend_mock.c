@@ -1,4 +1,5 @@
 #include "backend_internal.h"
+#include "adapter/timer_schedule.h"
 #include "config_store.h"
 #include "json.h"
 #include "version.h"

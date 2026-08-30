@@ -7,7 +7,7 @@ CFG=./build/e2e-config.json
 LOG=./build/e2e-server.log
 
 mkdir -p ./build
-rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$LOG"
+rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete" "$LOG"
 
 make build/libreecho-web
 

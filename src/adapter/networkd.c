@@ -57,9 +57,11 @@
 #define INPUT_MAX LE_ADAPTER_MSG_MAX
 #define WPA_REPLY_MAX 8192
 #define SCAN_MAX 48
-#define DHCP_TIMEOUT_MS 15000
+#define SCAN_OUTPUT_MAX 12
+#define DHCP_TIMEOUT_MS 90000
 #define SCAN_TIMEOUT_MS 12000
 #define SCAN_POLL_MS 1800
+#define ASSOCIATION_POLL_MS 100
 #define WPA_TIMEOUT_MS 2500
 #define WEXT_SCAN_BUFFER_SIZE 65535
 #define WEXT_SCAN_RETRY_MS 100
@@ -68,8 +70,10 @@
 #define NL80211_BUFFER_SIZE 65536
 #ifdef LE_NETWORKD_TESTING
 #define NETWORKD_POLL_MAX_MS 5
+#define ASSOCIATION_TIMEOUT_MS 300
 #else
 #define NETWORKD_POLL_MAX_MS 1000
+#define ASSOCIATION_TIMEOUT_MS 15000
 #endif
 
 struct wpa_ctrl {
@@ -123,6 +127,17 @@ struct pending_dhcp {
     long long deadline;
 };
 
+struct pending_association {
+    int active;
+    int client_fd;
+    unsigned long id;
+    int previous_network_id;
+    int candidate_network_id;
+    long long deadline;
+    long long poll_at;
+    char ssid[128];
+};
+
 struct daemon_ctx {
     int listen_fd;
     int netlink_fd;
@@ -139,6 +154,7 @@ struct daemon_ctx {
     struct le_gateway_probe gateway_probe;
     struct client clients[CLIENT_MAX];
     struct pending_scan scan;
+    struct pending_association association;
     struct pending_dhcp dhcp;
 };
 
@@ -373,13 +389,17 @@ static int wpa_ctrl_request(struct wpa_ctrl *ctrl, const char *command,
     struct pollfd pfd;
     long long deadline = monotonic_ms() + timeout_ms;
     ssize_t sent;
+    size_t command_length;
 
     if (ctrl->fd < 0 || !command || !reply || size < 2) {
         errno = EINVAL;
         return -1;
     }
-    sent = send(ctrl->fd, command, strlen(command), MSG_NOSIGNAL);
-    if (sent < 0 || (size_t)sent != strlen(command))
+    command_length = strlen(command);
+    while (command_length && command[command_length - 1] == '\n')
+        --command_length;
+    sent = send(ctrl->fd, command, command_length, MSG_NOSIGNAL);
+    if (sent < 0 || (size_t)sent != command_length)
         return -1;
 
     for (;;) {
@@ -929,6 +949,8 @@ static void remove_client(struct daemon_ctx *ctx, int index)
     fd = ctx->clients[index].fd;
     if (ctx->scan.active && ctx->scan.client_fd == fd)
         ctx->scan.client_fd = -1;
+    if (ctx->association.active && ctx->association.client_fd == fd)
+        ctx->association.client_fd = -1;
     if (ctx->dhcp.active && ctx->dhcp.client_fd == fd)
         ctx->dhcp.client_fd = -1;
     close(fd);
@@ -1283,13 +1305,17 @@ static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
 
 /* ----- DHCP child handling --------------------------------------------- */
 
+static void remove_network_profile(struct daemon_ctx *ctx, int id);
+static void restore_previous_network(struct daemon_ctx *ctx);
+
 static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
 {
     int fd = ctx->dhcp.client_fd;
     unsigned long id = ctx->dhcp.id;
     int release = ctx->dhcp.release;
-    char data[LE_ADAPTER_MSG_MAX];
+    char data[LE_ADAPTER_MSG_MAX], command[64], reply[WPA_REPLY_MAX];
     int success = !timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    int network_success;
 
     ctx->dhcp.active = 0;
     ctx->dhcp.pid = -1;
@@ -1298,20 +1324,39 @@ static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
         ctx->state.gateway[0] = '\0';
         ctx->state.dns[0] = '\0';
         copy_string(ctx->state.state, sizeof(ctx->state.state), "disconnected");
+        network_success = success;
     } else {
+        int previous = ctx->association.previous_network_id;
+        int candidate = ctx->association.candidate_network_id;
         refresh_interface_info(ctx);
-        if (success && ctx->state.ip[0])
-            copy_string(ctx->state.state, sizeof(ctx->state.state), "connected");
-        else if (!success)
-            copy_string(ctx->state.state, sizeof(ctx->state.state), "disconnected");
+        network_success = success && ctx->state.ip[0];
+        if (network_success && previous >= 0 && previous != candidate) {
+            remove_network_profile(ctx, previous);
+            if (wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0) {
+                (void)wpa_ok(ctx, "RECONFIGURE\n", reply, sizeof(reply));
+                remove_network_profile(ctx, candidate);
+                if (snprintf(command, sizeof(command), "SELECT_NETWORK %d\n",
+                             previous) < (int)sizeof(command))
+                    (void)wpa_ok(ctx, command, reply, sizeof(reply));
+                (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
+                ctx->network_id = previous;
+                network_success = 0;
+            }
+        } else if (!network_success) {
+            restore_previous_network(ctx);
+        }
+        copy_string(ctx->state.state, sizeof(ctx->state.state),
+                    network_success ? "connected" : "disconnected");
+        memset(&ctx->association, 0, sizeof(ctx->association));
+        ctx->association.client_fd = -1;
     }
     if (fd >= 0) {
         int ci = client_index(ctx, fd);
         if (ci >= 0) {
-            if (success && (!release && !ctx->state.ip[0]))
-                (void)send_err_fd(fd, id, "DHCP completed without an IPv4 address");
-            else if (success)
+            if (network_success)
                 (void)send_ok_fd(fd, id, state_json(&ctx->state, data, sizeof(data)) >= 0 ? data : "{}");
+            else if (success && !release && !ctx->state.ip[0])
+                (void)send_err_fd(fd, id, "DHCP completed without an IPv4 address");
             else if (timed_out)
                 (void)send_err_fd(fd, id, "DHCP timed out");
             else
@@ -1339,11 +1384,11 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
         return -1;
     if (pid == 0) {
         if (release)
-            execl("/sbin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
-                  "-R", (char *)NULL);
+            execl("/bin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
+                  "-R", "-s", "/etc/udhcpc.script", (char *)NULL);
         else
-            execl("/sbin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
-                  (char *)NULL);
+            execl("/bin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
+                  "-s", "/etc/udhcpc.script", (char *)NULL);
         _exit(127);
     }
     ctx->dhcp.active = 1;
@@ -1397,26 +1442,127 @@ static const char *scan_security(const char *flags)
 {
     if (!flags || !*flags)
         return "open";
-    if (strstr(flags, "SAE") || strstr(flags, "WPA3"))
-        return "wpa3";
     if (strstr(flags, "WPA2"))
         return "wpa2";
+    if (strstr(flags, "SAE") || strstr(flags, "WPA3"))
+        return "unsupported";
     if (strstr(flags, "WPA"))
         return "wpa";
     return "open";
 }
 
+struct scan_result {
+    char ssid[IW_ESSID_MAX_SIZE + 1];
+    char flags[128];
+    int signal;
+    int signal_percent;
+    int frequency;
+    int five_ghz;
+};
+
+static int scan_result_strength(const struct scan_result *result)
+{
+    if (result->signal_percent >= 0)
+        return result->signal_percent;
+    return rssi_to_percent(result->signal);
+}
+
+static int scan_result_better(const struct scan_result *a,
+                              const struct scan_result *b)
+{
+    int a_strength, b_strength;
+
+    if (a->five_ghz != b->five_ghz)
+        return a->five_ghz > b->five_ghz;
+    a_strength = scan_result_strength(a);
+    b_strength = scan_result_strength(b);
+    if (a_strength != b_strength)
+        return a_strength > b_strength;
+    if (a->signal_percent < 0 && b->signal_percent < 0 &&
+        a->signal != b->signal)
+        return a->signal > b->signal;
+    return strcmp(a->ssid, b->ssid) < 0;
+}
+
+static int serialize_scan_results(struct scan_result *results, int count,
+                                  char *data, size_t size)
+{
+    size_t used = 0;
+    int i, emitted = 0;
+
+    for (i = 0; i < count; ++i) {
+        int j;
+        for (j = i + 1; j < count; ++j) {
+            if (scan_result_better(&results[j], &results[i])) {
+                struct scan_result swap = results[i];
+                results[i] = results[j];
+                results[j] = swap;
+            }
+        }
+    }
+    if (append_text(data, size, &used, "{\"networks\":[") < 0)
+        return -1;
+    for (i = 0; i < count; ++i) {
+        char entry[640];
+        size_t entry_used = 0;
+        int j, duplicate = 0;
+        for (j = 0; j < i; ++j)
+            if (!strcmp(results[j].ssid, results[i].ssid))
+                duplicate = 1;
+        if (duplicate)
+            continue;
+        if (emitted >= SCAN_OUTPUT_MAX)
+            break;
+        if (append_text(entry, sizeof(entry), &entry_used, "{\"ssid\":") < 0 ||
+            append_json_string(entry, sizeof(entry), &entry_used, results[i].ssid) < 0 ||
+            append_text(entry, sizeof(entry), &entry_used, ",\"security\":") < 0 ||
+            append_json_string(entry, sizeof(entry), &entry_used,
+                               scan_security(results[i].flags)) < 0 ||
+            append_text(entry, sizeof(entry), &entry_used, ",\"signal\":%d}",
+                        results[i].signal_percent >= 0 ?
+                        results[i].signal_percent :
+                        rssi_to_percent(results[i].signal)) < 0)
+            return -1;
+        if (used + entry_used + (emitted ? 1 : 0) + 2 >= size)
+            break;
+        if (emitted++ && append_text(data, size, &used, ",") < 0)
+            return -1;
+        if (append_text(data, size, &used, "%s", entry) < 0)
+            return -1;
+    }
+    if (append_text(data, size, &used, "]}") < 0)
+        return -1;
+    return (int)used;
+}
+
+static int wext_frequency_mhz(const struct iw_freq *frequency)
+{
+    long long value;
+    int exponent;
+
+    if (!frequency)
+        return 0;
+    value = frequency->m;
+    exponent = frequency->e;
+    while (exponent-- > 0 && value <= 6000000000LL)
+        value *= 10;
+    if (value > 1000000)
+        value /= 1000000;
+    return value > 0 && value < 10000 ? (int)value : 0;
+}
+
+static int bogus_ssid(const char *ssid);
+
 static int parse_scan_results(const char *reply, char *data, size_t size)
 {
     const char *line = reply;
-    size_t used = 0;
-    int count = 0;
-    if (append_text(data, size, &used, "{\"networks\":[") < 0)
-        return -1;
-    while (*line && count < SCAN_MAX) {
+    int count = 0, i;
+    struct scan_result results[SCAN_MAX];
+    memset(results, 0, sizeof(results));
+    while (*line) {
         char row[512], *fields[5], *p;
-        char ssid[256], flags[128], signal[32];
-        int field = 0;
+        char ssid[256], flags[128], signal[32], frequency[32];
+        int field = 0, duplicate = -1, level;
         const char *end = strchr(line, '\n');
         size_t len = end ? (size_t)(end - line) : strlen(line);
         if (len >= sizeof(row))
@@ -1434,26 +1580,63 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
         }
         if (field == 5 && strcmp(fields[0], "bssid / frequency / signal level / flags / ssid")) {
             copy_string(signal, sizeof(signal), fields[2]);
+            copy_string(frequency, sizeof(frequency), fields[1]);
             copy_string(flags, sizeof(flags), fields[3]);
             copy_string(ssid, sizeof(ssid), fields[4]);
-            if (count && append_text(data, size, &used, ",") < 0)
-                return -1;
-            if (append_text(data, size, &used, "{\"ssid\":") < 0 ||
-                append_json_string(data, size, &used, ssid) < 0 ||
-                append_text(data, size, &used, ",\"security\":") < 0 ||
-                append_json_string(data, size, &used, scan_security(flags)) < 0 ||
-                append_text(data, size, &used, ",\"signal\":%d}",
-                            rssi_to_percent((int)strtol(signal, NULL, 10))) < 0)
-                return -1;
-            ++count;
+            if (bogus_ssid(ssid)) {
+                if (!end)
+                    break;
+                line = end + 1;
+                continue;
+            }
+            level = (int)strtol(signal, NULL, 10);
+            {
+                int freq = (int)strtol(frequency, NULL, 10);
+                int five_ghz = freq >= 5000 && freq < 6000;
+                for (i = 0; i < count; ++i) {
+                    if (!strcmp(results[i].ssid, ssid)) {
+                        duplicate = i;
+                        break;
+                    }
+                }
+                if (duplicate >= 0) {
+                    if (five_ghz > results[duplicate].five_ghz ||
+                        (five_ghz == results[duplicate].five_ghz &&
+                         level > results[duplicate].signal)) {
+                        copy_string(results[duplicate].flags,
+                                    sizeof(results[duplicate].flags), flags);
+                        results[duplicate].signal = level;
+                        results[duplicate].signal_percent = -1;
+                        results[duplicate].frequency = freq;
+                        results[duplicate].five_ghz = five_ghz;
+                    }
+                } else if (count < SCAN_MAX) {
+                    copy_string(results[count].ssid,
+                                sizeof(results[count].ssid), ssid);
+                    copy_string(results[count].flags,
+                                sizeof(results[count].flags), flags);
+                    results[count].signal = level;
+                    results[count].signal_percent = -1;
+                    results[count].frequency = freq;
+                    results[count++].five_ghz = five_ghz;
+                }
+            }
         }
         if (!end)
             break;
         line = end + 1;
     }
-    if (append_text(data, size, &used, "]}") < 0)
-        return -1;
-    return (int)used;
+    for (i = 0; i < count; ++i) {
+        int j;
+        for (j = i + 1; j < count; ++j) {
+            if (scan_result_better(&results[j], &results[i])) {
+                struct scan_result swap = results[i];
+                results[i] = results[j];
+                results[j] = swap;
+            }
+        }
+    }
+    return serialize_scan_results(results, count, data, size);
 }
 
 struct wext_scan_cell {
@@ -1461,7 +1644,30 @@ struct wext_scan_cell {
     char security[16];
     int signal;
     int encrypted;
+    int frequency;
+    int rssi_dbm;
+    int five_ghz;
 };
+
+static int bogus_ssid(const char *ssid)
+{
+    size_t i;
+    if (!ssid || !*ssid || !strncmp(ssid, "NVRAM WARNING:", 14))
+        return 1;
+    if (!strncmp(ssid, "\\x00", 4)) {
+        for (i = 0; ssid[i]; ++i)
+            if (ssid[i] != '\\' && ssid[i] != 'x' &&
+                (ssid[i] < '0' || ssid[i] > '9') &&
+                (ssid[i] < 'a' || ssid[i] > 'f') &&
+                (ssid[i] < 'A' || ssid[i] > 'F'))
+                return 0;
+        return 1;
+    }
+    for (i = 0; ssid[i]; ++i)
+        if ((unsigned char)ssid[i] < 32)
+            return 1;
+    return 0;
+}
 
 static int wext_signal_percent(const struct iw_quality *quality)
 {
@@ -1486,6 +1692,7 @@ static struct wext_scan_cell *wext_new_cell(struct wext_scan_cell *cells,
     cell = &cells[(*count)++];
     memset(cell, 0, sizeof(*cell));
     copy_string(cell->security, sizeof(cell->security), "unknown");
+    cell->rssi_dbm = -127;
     return cell;
 }
 
@@ -1516,7 +1723,9 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
 {
     struct wext_scan_cell cells[SCAN_MAX];
     struct wext_scan_cell *current = NULL;
-    size_t offset = 0, count = 0, i, used = 0, emitted = 0;
+    size_t offset = 0, count = 0, i;
+    struct scan_result results[SCAN_MAX];
+    int result_count = 0;
 
     memset(cells, 0, sizeof(cells));
     while (offset + IW_EV_LCP_PK_LEN <= length) {
@@ -1545,10 +1754,19 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
                 memcpy(current->ssid, event + IW_EV_POINT_PK_LEN,
                        payload_length);
             current->ssid[payload_length] = '\0';
+        } else if (current && command == SIOCGIWFREQ &&
+                   event_length >= IW_EV_LCP_PK_LEN + sizeof(struct iw_freq)) {
+            struct iw_freq frequency;
+            memcpy(&frequency, event + IW_EV_LCP_PK_LEN, sizeof(frequency));
+            current->frequency = wext_frequency_mhz(&frequency);
+            current->five_ghz = current->frequency >= 5000 &&
+                                current->frequency < 6000;
         } else if (current && command == IWEVQUAL &&
                    event_length >= IW_EV_QUAL_PK_LEN) {
             struct iw_quality quality;
             memcpy(&quality, event + IW_EV_LCP_PK_LEN, sizeof(quality));
+            if (quality.updated & IW_QUAL_DBM)
+                current->rssi_dbm = (int)(signed char)quality.level;
             current->signal = wext_signal_percent(&quality);
         } else if (current && command == SIOCGIWENCODE &&
                    event_length >= IW_EV_POINT_PK_LEN) {
@@ -1571,26 +1789,51 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
         offset += event_length;
     }
 
-    if (offset != length || append_text(data, data_size, &used,
-                                        "{\"networks\":[") < 0)
+    if (offset != length)
         return -1;
     for (i = 0; i < count; ++i) {
-        struct wext_scan_cell *cell = &cells[i];
-        if (!cell->ssid[0])
-            continue;
-        if (emitted++ && append_text(data, data_size, &used, ",") < 0)
-            return -1;
-        if (cell->encrypted)
-            copy_string(cell->security, sizeof(cell->security), "wpa2");
-        if (append_text(data, data_size, &used, "{\"ssid\":") < 0 ||
-            append_json_string(data, data_size, &used, cell->ssid) < 0 ||
-            append_text(data, data_size, &used, ",\"security\":") < 0 ||
-            append_json_string(data, data_size, &used, cell->security) < 0 ||
-            append_text(data, data_size, &used, ",\"signal\":%d}",
-                        cell->signal) < 0)
-            return -1;
+        size_t j;
+        for (j = i + 1; j < count; ++j) {
+            int better = 0;
+            if (cells[j].five_ghz != cells[i].five_ghz)
+                better = cells[j].five_ghz > cells[i].five_ghz;
+            else if (cells[j].rssi_dbm != cells[i].rssi_dbm)
+                better = cells[j].rssi_dbm > cells[i].rssi_dbm;
+            else if (cells[j].signal != cells[i].signal)
+                better = cells[j].signal > cells[i].signal;
+            else
+                better = strcmp(cells[j].ssid, cells[i].ssid) < 0;
+            if (better) {
+                struct wext_scan_cell swap = cells[i];
+                cells[i] = cells[j];
+                cells[j] = swap;
+            }
+        }
     }
-    return append_text(data, data_size, &used, "]}") < 0 ? -1 : (int)used;
+    memset(results, 0, sizeof(results));
+    for (i = 0; i < count && result_count < SCAN_MAX; ++i) {
+        size_t j;
+        if (bogus_ssid(cells[i].ssid))
+            continue;
+        for (j = 0; j < (size_t)result_count; ++j)
+            if (!strcmp(results[j].ssid, cells[i].ssid))
+                break;
+        if (j < (size_t)result_count)
+            continue;
+        copy_string(results[result_count].ssid,
+                    sizeof(results[result_count].ssid), cells[i].ssid);
+        copy_string(results[result_count].flags,
+                    sizeof(results[result_count].flags),
+                    cells[i].encrypted ? "WPA2" : "");
+        results[result_count].signal = cells[i].rssi_dbm != -127 ?
+                                       cells[i].rssi_dbm : cells[i].signal;
+        results[result_count].signal_percent = cells[i].rssi_dbm == -127 ?
+                                               cells[i].signal : -1;
+        results[result_count].frequency = cells[i].frequency;
+        results[result_count].five_ghz = cells[i].five_ghz;
+        ++result_count;
+    }
+    return serialize_scan_results(results, result_count, data, data_size);
 }
 
 static int wext_scan(const char *iface, char *data, size_t data_size)
@@ -1905,13 +2148,15 @@ static void nl80211_parse_ies(const unsigned char *ies, size_t length,
         *encrypted = has_rsn || has_wpa;
 }
 
-static int nl80211_append_bss(const struct nlattr *bss, char *data,
-                              size_t data_size, size_t *used, int *emitted)
+static int nl80211_append_bss(const struct nlattr *bss,
+                              struct scan_result *result)
 {
-    const struct nlattr *bssid, *signal, *ies, *beacon;
+    const struct nlattr *bssid, *signal, *signal_unspec, *frequency, *ies, *beacon;
     char ssid[IW_ESSID_MAX_SIZE + 1];
     int encrypted = 0;
     int signal_dbm = -100;
+    int signal_percent = -1;
+    int frequency_mhz = 0;
     const void *payload;
     size_t payload_length;
 
@@ -1933,21 +2178,41 @@ static int nl80211_append_bss(const struct nlattr *bss, char *data,
         return 0;
     signal = nl_find((unsigned char *)bss + NLA_HDRLEN,
                      bss->nla_len - NLA_HDRLEN, NL80211_BSS_SIGNAL_MBM);
-    if (signal && signal->nla_len >= NLA_HDRLEN + sizeof(int32_t))
+    signal_unspec = nl_find((unsigned char *)bss + NLA_HDRLEN,
+                            bss->nla_len - NLA_HDRLEN,
+                            NL80211_BSS_SIGNAL_UNSPEC);
+    frequency = nl_find((unsigned char *)bss + NLA_HDRLEN,
+                        bss->nla_len - NLA_HDRLEN, NL80211_BSS_FREQUENCY);
+    if (frequency && frequency->nla_len >= NLA_HDRLEN + sizeof(uint32_t))
+        memcpy(&frequency_mhz, (unsigned char *)frequency + NLA_HDRLEN,
+               sizeof(frequency_mhz));
+    if (signal && signal->nla_len >= NLA_HDRLEN + sizeof(int32_t)) {
         memcpy(&signal_dbm, (unsigned char *)signal + NLA_HDRLEN,
                sizeof(signal_dbm));
-    signal_dbm /= 100;
-    if (*emitted && append_text(data, data_size, used, ",") < 0)
+        signal_dbm /= 100;
+    } else {
+        signal = NULL;
+    }
+    if (!signal && signal_unspec &&
+        signal_unspec->nla_len >= NLA_HDRLEN + sizeof(uint8_t)) {
+        uint8_t value;
+        memcpy(&value, (unsigned char *)signal_unspec + NLA_HDRLEN,
+               sizeof(value));
+        signal_percent = value > 100 ? 100 : value;
+    }
+    if (!result)
         return -1;
-    if (append_text(data, data_size, used, "{\"ssid\":") < 0 ||
-        append_json_string(data, data_size, used, ssid) < 0 ||
-        append_text(data, data_size, used, ",\"security\":") < 0 ||
-        append_json_string(data, data_size, used, encrypted ? "wpa2" : "open") < 0 ||
-        append_text(data, data_size, used, ",\"signal\":%d}",
-                    rssi_to_percent(signal_dbm)) < 0)
-        return -1;
-    ++*emitted;
-    return 0;
+    if (!signal && signal_percent < 0)
+        return 0;
+    memset(result, 0, sizeof(*result));
+    copy_string(result->ssid, sizeof(result->ssid), ssid);
+    result->signal = signal_dbm;
+    result->signal_percent = signal_percent;
+    result->frequency = frequency_mhz;
+    result->five_ghz = frequency_mhz >= 5000 && frequency_mhz < 6000;
+    if (encrypted)
+        copy_string(result->flags, sizeof(result->flags), "WPA2");
+    return 1;
 }
 
 static int nl80211_wait_for_scan_event(int fd, unsigned char *buffer,
@@ -2012,9 +2277,10 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
 {
     struct nlmsghdr *header;
     struct genlmsghdr *generic;
-    size_t used = NLMSG_LENGTH(GENL_HDRLEN), output = 0;
+    size_t used = NLMSG_LENGTH(GENL_HDRLEN);
     long long deadline = monotonic_ms() + NL80211_SCAN_RETRY_MS;
-    int remaining, emitted = 0;
+    int remaining, result_count = 0;
+    struct scan_result results[SCAN_MAX];
     ssize_t received;
     struct pollfd descriptor = { fd, POLLIN, 0 };
 
@@ -2031,8 +2297,6 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
     generic->cmd = NL80211_CMD_GET_SCAN;
     generic->version = 1;
     if (send(fd, buffer, used, 0) < 0)
-        return -1;
-    if (append_text(data, data_size, &output, "{\"networks\":[") < 0)
         return -1;
     for (;;) {
         int wait_ms = (int)(deadline - monotonic_ms());
@@ -2062,8 +2326,16 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
             size_t payload_length;
             const struct nlattr *bss;
             if (header->nlmsg_type == NLMSG_DONE) {
-                return append_text(data, data_size, &output, "]}") < 0 ?
-                    -1 : (int)output;
+                int i, j;
+                for (i = 0; i < result_count; ++i)
+                    for (j = i + 1; j < result_count; ++j)
+                        if (scan_result_better(&results[j], &results[i])) {
+                            struct scan_result swap = results[i];
+                            results[i] = results[j];
+                            results[j] = swap;
+                        }
+                return serialize_scan_results(results, result_count,
+                                               data, data_size);
             }
             if (header->nlmsg_type == NLMSG_ERROR) {
                 struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
@@ -2076,9 +2348,13 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
             payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
             bss = nl_find((unsigned char *)generic + GENL_HDRLEN,
                           payload_length, NL80211_ATTR_BSS);
-            if (bss && emitted < SCAN_MAX &&
-                nl80211_append_bss(bss, data, data_size, &output, &emitted) < 0)
-                return -1;
+            if (bss && result_count < SCAN_MAX) {
+                int parsed = nl80211_append_bss(bss, &results[result_count]);
+                if (parsed < 0)
+                    return -1;
+                if (parsed > 0)
+                    ++result_count;
+            }
         }
     }
 }
@@ -2351,48 +2627,215 @@ static int wpa_quote(char *out, size_t size, const char *value)
     return 0;
 }
 
-static int connect_network(struct daemon_ctx *ctx, const char *ssid,
-                           const char *psk, const char *security)
+static int existing_network_id(struct daemon_ctx *ctx)
 {
-    char reply[WPA_REPLY_MAX], quoted[512], command[768];
+    char reply[WPA_REPLY_MAX], *line, *next, *field, *fields[4];
+    int id, field_count;
+    if (wpa_call(ctx, "LIST_NETWORKS\n", reply, sizeof(reply)) < 0)
+        return -1;
+    line = reply;
+    while (line && *line) {
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = '\0';
+        field_count = 0;
+        field = line;
+        while (field_count < 4) {
+            fields[field_count++] = field;
+            field = strchr(field, '\t');
+            if (!field)
+                break;
+            *field++ = '\0';
+        }
+        if (field_count == 4 && sscanf(fields[0], "%d", &id) == 1 &&
+            strstr(fields[3], "[CURRENT]"))
+            return id;
+        line = next;
+    }
+    return -1;
+}
+
+static void remove_network_profile(struct daemon_ctx *ctx, int id)
+{
+    char command[64], reply[WPA_REPLY_MAX];
+    if (id < 0 || snprintf(command, sizeof(command), "REMOVE_NETWORK %d\n", id) >=
+                      (int)sizeof(command))
+        return;
+    (void)wpa_ok(ctx, command, reply, sizeof(reply));
+}
+
+static void restore_network_profile(struct daemon_ctx *ctx, int previous,
+                                    int candidate)
+{
+    char command[64], reply[WPA_REPLY_MAX];
+    if (candidate >= 0)
+        remove_network_profile(ctx, candidate);
+    if (previous >= 0 &&
+        snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", previous) <
+            (int)sizeof(command)) {
+        (void)wpa_ok(ctx, command, reply, sizeof(reply));
+        (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
+        ctx->network_id = previous;
+    } else {
+        (void)wpa_ok(ctx, "DISCONNECT\n", reply, sizeof(reply));
+        ctx->network_id = -1;
+    }
+}
+
+static void restore_previous_network(struct daemon_ctx *ctx)
+{
+    restore_network_profile(ctx, ctx->association.previous_network_id,
+                            ctx->association.candidate_network_id);
+}
+
+static int connect_network(struct daemon_ctx *ctx, const char *ssid,
+                           const char *psk, const char *security,
+                           int *previous_id)
+{
+    char reply[WPA_REPLY_MAX], quoted[512], command[768], value[32];
     int id;
     const char *key_mgmt;
-    if (wpa_call(ctx, "ADD_NETWORK\n", reply, sizeof(reply)) < 0)
+
+    *previous_id = -1;
+    if (wpa_call(ctx, "STATUS\n", reply, sizeof(reply)) >= 0 &&
+        wpa_value(reply, "id", value, sizeof(value)))
+        *previous_id = (int)strtol(value, NULL, 10);
+    if (*previous_id < 0)
+        *previous_id = existing_network_id(ctx);
+    if (wpa_ok(ctx, "DISABLE_NETWORK all\n", reply, sizeof(reply)) < 0) {
+        restore_network_profile(ctx, *previous_id, -1);
         return -1;
+    }
+    if (wpa_call(ctx, "ADD_NETWORK", reply, sizeof(reply)) < 0) {
+        restore_network_profile(ctx, *previous_id, -1);
+        return -2;
+    }
+    le_log_info("networkd: ADD_NETWORK reply first=%02x len=%zu", (unsigned char)reply[0], strlen(reply));
     id = (int)strtol(reply, NULL, 10);
-    if (id < 0 || (reply[0] < '0' || reply[0] > '9'))
-        return -1;
+    if (id < 0 || (reply[0] < '0' || reply[0] > '9')) {
+        restore_network_profile(ctx, *previous_id, -1);
+        return -3;
+    }
     if (wpa_quote(quoted, sizeof(quoted), ssid) < 0 ||
         snprintf(command, sizeof(command), "SET_NETWORK %d ssid %s\n", id,
                  quoted) >= (int)sizeof(command) ||
-        wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
-        return -1;
+        wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
+        restore_network_profile(ctx, *previous_id, id);
+        return -4;
+    }
 
     if (!security || !strcmp(security, "open") || !strcmp(security, "none"))
         key_mgmt = "NONE";
-    else if (strstr(security, "wpa3") || strstr(security, "SAE"))
-        key_mgmt = "SAE";
     else
         key_mgmt = "WPA-PSK";
     if (snprintf(command, sizeof(command), "SET_NETWORK %d key_mgmt %s\n", id,
                  key_mgmt) >= (int)sizeof(command) ||
-        wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
-        return -1;
+        wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
+        restore_network_profile(ctx, *previous_id, id);
+        return -5;
+    }
     if (strcmp(key_mgmt, "NONE")) {
         if (!psk || !*psk || wpa_quote(quoted, sizeof(quoted), psk) < 0 ||
             snprintf(command, sizeof(command), "SET_NETWORK %d psk %s\n", id,
                      quoted) >= (int)sizeof(command) ||
-            wpa_ok(ctx, command, reply, sizeof(reply)) < 0)
-            return -1;
+            wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
+            restore_network_profile(ctx, *previous_id, id);
+            return -6;
+        }
     }
     if (snprintf(command, sizeof(command), "ENABLE_NETWORK %d\n", id) >=
             (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
         snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", id) >=
-            (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
-        wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0)
-        return -1;
-    ctx->network_id = id;
-    return 0;
+            (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
+        restore_network_profile(ctx, *previous_id, id);
+        return -7;
+    }
+    return id;
+}
+
+static void finish_association(struct daemon_ctx *ctx, int success)
+{
+    char reply[WPA_REPLY_MAX];
+    int fd = ctx->association.client_fd;
+    int ci = client_index(ctx, fd);
+    int candidate = ctx->association.candidate_network_id;
+    unsigned long id = ctx->association.id;
+
+    if (!success) {
+        le_log_error("networkd: Wi-Fi association did not complete for ssid=\"%s\"",
+                     ctx->association.ssid);
+        restore_previous_network(ctx);
+        if (ci >= 0) {
+            (void)send_err_fd(fd, id, "Wi-Fi association did not complete");
+            ctx->clients[ci].busy = 0;
+        }
+        memset(&ctx->association, 0, sizeof(ctx->association));
+        ctx->association.client_fd = -1;
+        return;
+    }
+
+    if (wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0) {
+        restore_previous_network(ctx);
+        if (ci >= 0) {
+            (void)send_err_fd(fd, id, "Wi-Fi profile could not be saved");
+            ctx->clients[ci].busy = 0;
+        }
+        memset(&ctx->association, 0, sizeof(ctx->association));
+        ctx->association.client_fd = -1;
+        return;
+    }
+    ctx->network_id = candidate;
+    reset_network_health(ctx, monotonic_ms());
+    copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ctx->association.ssid);
+    copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
+    ctx->association.active = 0;
+    if (start_dhcp(ctx, 0, fd, id) < 0) {
+        restore_previous_network(ctx);
+        if (ci >= 0) {
+            ctx->clients[ci].busy = 0;
+            (void)send_err_fd(fd, id, "unable to start DHCP");
+        }
+        memset(&ctx->association, 0, sizeof(ctx->association));
+        ctx->association.client_fd = -1;
+    }
+}
+
+static void check_association(struct daemon_ctx *ctx, long long now)
+{
+    char reply[WPA_REPLY_MAX], state[32], value[32];
+    int completed = 0;
+
+    if (!ctx->association.active || now < ctx->association.poll_at)
+        return;
+    if (wpa_call(ctx, "STATUS\n", reply, sizeof(reply)) >= 0 &&
+        wpa_value(reply, "wpa_state", state, sizeof(state)) &&
+        !strcmp(state, "COMPLETED") &&
+        wpa_value(reply, "id", value, sizeof(value)) &&
+        (int)strtol(value, NULL, 10) == ctx->association.candidate_network_id)
+        completed = 1;
+    if (completed)
+        finish_association(ctx, 1);
+    else if (now >= ctx->association.deadline)
+        finish_association(ctx, 0);
+    else
+        ctx->association.poll_at = now + ASSOCIATION_POLL_MS;
+}
+
+static void cancel_association(struct daemon_ctx *ctx)
+{
+    if (!ctx->association.active)
+        return;
+    restore_previous_network(ctx);
+    if (ctx->association.client_fd >= 0) {
+        int ci = client_index(ctx, ctx->association.client_fd);
+        if (ci >= 0) {
+            (void)send_err_fd(ctx->association.client_fd, ctx->association.id,
+                              "Wi-Fi association was cancelled");
+            ctx->clients[ci].busy = 0;
+        }
+    }
+    memset(&ctx->association, 0, sizeof(ctx->association));
+    ctx->association.client_fd = -1;
 }
 
 static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
@@ -2469,32 +2912,54 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         int have_ssid = json_string_arg(args, "ssid", ssid, sizeof(ssid));
         int have_psk = json_string_arg(args, "psk", psk, sizeof(psk));
         int have_security = json_string_arg(args, "security", security, sizeof(security));
+        int connect_result;
         if (have_ssid != 1 || have_psk < 0 || have_security < 0) {
             (void)send_err_fd(ctx->clients[ci].fd, id, "connect requires ssid, psk, security");
             return;
         }
-        if (ctx->dhcp.active) {
-            (void)send_err_fd(ctx->clients[ci].fd, id, "DHCP already in progress");
+        if (ctx->dhcp.active || ctx->association.active) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              ctx->dhcp.active ? "DHCP already in progress" :
+                              "Wi-Fi association already in progress");
             return;
         }
         le_log_info("networkd: connect to ssid=\"%s\" security=%s", ssid, have_security == 1 ? security : "wpa2");
-        if (connect_network(ctx, ssid, have_psk == 1 ? psk : "",
-                            have_security == 1 ? security : "wpa2") < 0) {
-            le_log_error("networkd: wpa_supplicant rejected network \"%s\"", ssid);
-            (void)send_err_fd(ctx->clients[ci].fd, id, "wpa_supplicant rejected network");
-            return;
+        {
+            int previous_id = -1;
+            connect_result = connect_network(ctx, ssid, have_psk == 1 ? psk : "",
+                                             have_security == 1 ? security : "wpa2",
+                                             &previous_id);
+            if (connect_result >= 0) {
+                long long now = monotonic_ms();
+                ctx->association.active = 1;
+                ctx->association.client_fd = ctx->clients[ci].fd;
+                ctx->association.id = id;
+                ctx->association.previous_network_id = previous_id;
+                ctx->association.candidate_network_id = connect_result;
+                ctx->association.deadline = now + ASSOCIATION_TIMEOUT_MS;
+                ctx->association.poll_at = now;
+                copy_string(ctx->association.ssid,
+                            sizeof(ctx->association.ssid), ssid);
+                ctx->clients[ci].busy = 1;
+                return;
+            }
         }
-        reset_network_health(ctx, monotonic_ms());
-        copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ssid);
-        copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
-        ctx->clients[ci].busy = 1;
-        if (start_dhcp(ctx, 0, ctx->clients[ci].fd, id) < 0) {
-            ctx->clients[ci].busy = 0;
-            (void)send_err_fd(ctx->clients[ci].fd, id, "unable to start DHCP");
+        if (connect_result < 0) {
+            le_log_error("networkd: wpa_supplicant rejected network \\\"%s\\\" at stage %d", ssid, connect_result);
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              connect_result == -2 ? "wpa_supplicant unavailable" :
+                              connect_result == -4 ? "SSID rejected by wpa_supplicant" :
+                              connect_result == -5 ? "WPA2 security rejected by wpa_supplicant" :
+                              connect_result == -6 ? "Wi-Fi password rejected by wpa_supplicant" :
+                              connect_result == -7 ? "Wi-Fi network could not be enabled or selected" :
+                              "wpa_supplicant rejected the network");
+            return;
         }
     } else if (!strcmp(cmd, "disconnect")) {
         char reply[WPA_REPLY_MAX];
         le_log_info("networkd: disconnect requested");
+        if (ctx->association.active)
+            cancel_association(ctx);
         if (ctx->dhcp.active)
             cancel_dhcp(ctx);
         if (ctx->wpa.command.fd >= 0)
@@ -2721,6 +3186,8 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
 static void cleanup(struct daemon_ctx *ctx)
 {
     int i;
+    if (ctx->association.active)
+        cancel_association(ctx);
     if (ctx->dhcp.active) {
         (void)kill(ctx->dhcp.pid, SIGTERM);
         (void)waitpid(ctx->dhcp.pid, NULL, 0);
@@ -2755,6 +3222,7 @@ int main(int argc, char **argv)
     le_gateway_probe_init(&ctx.gateway_probe);
     ctx.dhcp.pid = -1;
     ctx.scan.client_fd = -1;
+    ctx.association.client_fd = -1;
     ctx.dhcp.client_fd = -1;
     for (i = 0; i < CLIENT_MAX; ++i)
         ctx.clients[i].fd = -1;
@@ -2830,6 +3298,9 @@ int main(int argc, char **argv)
         }
         if (ctx.scan.active && ctx.scan.deadline - now < timeout)
             timeout = (int)(ctx.scan.deadline > now ? ctx.scan.deadline - now : 0);
+        if (ctx.association.active && ctx.association.poll_at - now < timeout)
+            timeout = (int)(ctx.association.poll_at > now ?
+                            ctx.association.poll_at - now : 0);
         if (ctx.dhcp.active && ctx.dhcp.deadline - now < timeout)
             timeout = (int)(ctx.dhcp.deadline > now ? ctx.dhcp.deadline - now : 0);
         if (ctx.gateway_probe.active &&
@@ -2888,9 +3359,9 @@ int main(int argc, char **argv)
                         break;
                     }
             }
-            /* Explicit client commands win over automatic recovery whether a
-             * probe completed, timed out, or became unavailable in this poll
-             * iteration. */
+            /* Explicit client commands win over association completion and
+             * automatic recovery in this poll iteration. */
+            check_association(&ctx, now);
             check_network_health(&ctx, now);
         }
     }

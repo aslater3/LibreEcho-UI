@@ -1004,6 +1004,7 @@ static int handle_timer_intent(struct agent_state *state,
     int ringing = 0;
     int count = 0;
     int remaining = 0;
+    int timer_id = 0;
 
     if (le_timer_intent_parse(transcript, &intent) == LE_TIMER_INTENT_NONE)
         return 0;
@@ -1050,10 +1051,52 @@ static int handle_timer_intent(struct agent_state *state,
         break;
 
     case LE_TIMER_INTENT_CANCEL:
-        if (adapter_call(state->timer_socket, 1000, "cancel_all", "{}",
-                         response, sizeof(response)) != LE_ADAPTER_OK)
+        if (intent.cancel_all) {
+            if (adapter_call(state->timer_socket, 1000, "cancel_all", "{}",
+                             response, sizeof(response)) != LE_ADAPTER_OK)
+                return 0;
+            (void)json_get_int(response, "cancelled", &count);
+            break;
+        }
+        if (intent.label[0]) {
+            char label[LE_TIMER_INTENT_LABEL_MAX * 2];
+
+            json_escape(label, sizeof(label), intent.label);
+            snprintf(args, sizeof(args), "{\"label\":\"%s\"}", label);
+            if (adapter_call(state->timer_socket, 1000, "cancel", args,
+                             response, sizeof(response)) != LE_ADAPTER_OK) {
+                if (!strcmp(response, "timer label is ambiguous"))
+                    snprintf(spoken, spoken_size,
+                             "Which timer should I cancel?");
+                else
+                    snprintf(spoken, spoken_size,
+                             "I could not find that timer.");
+                (void)play_sentence(state, spoken);
+                return 1;
+            }
+            count = 1;
+            break;
+        }
+        if (adapter_call(state->timer_socket, 1000, "next", "{}", response,
+                         sizeof(response)) != LE_ADAPTER_OK)
             return 0;
-        (void)json_get_int(response, "cancelled", &count);
+        (void)json_get_int(response, "count", &count);
+        if (intent.cancel_count > 0 && count != intent.cancel_count) {
+            count = -1;
+            break;
+        }
+        if (count > 1) {
+            count = -1;
+            break;
+        }
+        if (count == 1) {
+            if (json_get_int(response, "id", &timer_id) != 1)
+                return 0;
+            snprintf(args, sizeof(args), "{\"id\":%d}", timer_id);
+            if (adapter_call(state->timer_socket, 1000, "cancel", args,
+                             response, sizeof(response)) != LE_ADAPTER_OK)
+                return 0;
+        }
         break;
 
     case LE_TIMER_INTENT_QUERY:

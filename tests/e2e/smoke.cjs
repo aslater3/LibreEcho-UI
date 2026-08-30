@@ -206,6 +206,7 @@ async function mobileSuite(browser) {
 (async () => {
   const browser = await chromium.launch({ headless: true });
   try {
+    await setupReadinessSuite(browser);
     await desktopSuite(browser);
     await mobileSuite(browser);
   } finally {
