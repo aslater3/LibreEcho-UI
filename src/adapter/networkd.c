@@ -1383,10 +1383,10 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
         return -1;
     if (pid == 0) {
         if (release)
-            execl("/sbin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
+            execl("/bin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
                   "-R", (char *)NULL);
         else
-            execl("/sbin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
+            execl("/bin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
                   (char *)NULL);
         _exit(127);
     }
@@ -2460,6 +2460,28 @@ static int wpa_quote(char *out, size_t size, const char *value)
     return 0;
 }
 
+static int existing_network_id(struct daemon_ctx *ctx)
+{
+    char reply[WPA_REPLY_MAX], *line, *next;
+    int fallback = -1, id;
+    if (wpa_call(ctx, "LIST_NETWORKS\n", reply, sizeof(reply)) < 0)
+        return -1;
+    line = reply;
+    while (line && *line) {
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = '\0';
+        if (sscanf(line, "%d", &id) == 1) {
+            if (strstr(line, "[CURRENT]"))
+                return id;
+            if (fallback < 0)
+                fallback = id;
+        }
+        line = next;
+    }
+    return fallback;
+}
+
 static void remove_network_profile(struct daemon_ctx *ctx, int id)
 {
     char command[64], reply[WPA_REPLY_MAX];
@@ -2500,6 +2522,10 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
     if (wpa_call(ctx, "STATUS\n", reply, sizeof(reply)) >= 0 &&
         wpa_value(reply, "id", value, sizeof(value)))
         *previous_id = (int)strtol(value, NULL, 10);
+    if (*previous_id < 0)
+        *previous_id = existing_network_id(ctx);
+    if (wpa_ok(ctx, "DISABLE_NETWORK all\n", reply, sizeof(reply)) < 0)
+        return -1;
     if (wpa_call(ctx, "ADD_NETWORK", reply, sizeof(reply)) < 0)
         return -2;
     le_log_info("networkd: ADD_NETWORK reply first=%02x len=%zu", (unsigned char)reply[0], strlen(reply));

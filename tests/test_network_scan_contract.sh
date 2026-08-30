@@ -31,7 +31,11 @@ assert 'remove_network_profile(ctx, previous)' in finish_dhcp
 assert 'else if (!network_success)' in finish_dhcp
 assert 'restore_previous_network(ctx);' in finish_dhcp
 assert "while (command_length && command[command_length - 1] == '\\n')" in source
-assert 'Wi-Fi password rejected by wpa_supplicant' in source
+assert 'execl("/bin/udhcpc"' in source
+assert 'execl("/sbin/udhcpc"' not in source
+assert 'LIST_NETWORKS' in source
+assert 'DISABLE_NETWORK all' in source
+assert 'previous_network_id' in source
 assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
 assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));' in source
 assert 'level = normalize_rssi_dbm((int)statistics.qual.level);' in source
