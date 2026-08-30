@@ -12,6 +12,7 @@ make build/test-network-health build/test-adapter-client-events build/test-gatew
 ./build/test-gateway-probe
 ./build/test-factory-reset
 sh tests/test_factory_reset_service.sh
+sh tests/test_factory_reset_bluetooth_contract.sh
 make build/test-backend-linux-wifi-emission
 ./build/test-backend-linux-wifi-emission
 ./build/test-bt-mgmt-events

@@ -121,16 +121,19 @@ int main(void)
 {
     char template[] = "/tmp/libreecho-factory-reset.XXXXXX";
     char failed_template[] = "/tmp/libreecho-factory-reset-fail.XXXXXX";
+    char depth_template[] = "/tmp/libreecho-factory-reset-depth.XXXXXX";
     char symlink_template[] = "/tmp/libreecho-factory-reset-link.XXXXXX";
     char target_template[] = "/tmp/libreecho-factory-reset-target.XXXXXX";
     char name[512];
     char target_name[512];
     char *root = mkdtemp(template);
     char *failed_root = mkdtemp(failed_template);
+    char *depth_root = mkdtemp(depth_template);
     char *symlink_root = mkdtemp(symlink_template);
     char *target_root = mkdtemp(target_template);
+    int depth;
 
-    assert(root != NULL && failed_root != NULL);
+    assert(root != NULL && failed_root != NULL && depth_root != NULL);
     assert(symlink_root != NULL && target_root != NULL);
     build_tree(root);
     path(target_name, sizeof(target_name), target_root, "preserved-target");
@@ -141,13 +144,28 @@ int main(void)
     assert_reset(root);
     assert(access(target_name, F_OK) == 0);
 
-    build_tree(failed_root);
     path(name, sizeof(name), failed_root, "config");
-    assert(chmod(name, 0500) == 0);
+    mkdir_ok(name);
+    path(name, sizeof(name), failed_root, "secrets");
+    write_ok(name);
+    path(name, sizeof(name), failed_root, "features");
+    mkdir_ok(name);
+    path(name, sizeof(name), failed_root, "features/payload.squashfs");
+    write_ok(name);
     assert(le_factory_reset_clear(failed_root) != 0);
-    assert(chmod(name, 0700) == 0);
-    path(name, sizeof(name), failed_root, "features/assistant/payload.squashfs");
+    path(name, sizeof(name), failed_root, "features/payload.squashfs");
     assert(access(name, F_OK) == 0);
+
+    build_tree(depth_root);
+    path(name, sizeof(name), depth_root, "config/deep");
+    mkdir_ok(name);
+    for (depth = 0; depth < 40; ++depth) {
+        size_t used = strlen(name);
+        assert(used + 2 < sizeof(name));
+        memcpy(name + used, "/d", 3);
+        mkdir_ok(name);
+    }
+    assert(le_factory_reset_clear(depth_root) != 0);
 
     path(name, sizeof(name), symlink_root, "secrets");
     mkdir_ok(name);

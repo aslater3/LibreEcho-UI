@@ -9,14 +9,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static int clear_contents(int fd)
+#define FACTORY_RESET_MAX_DEPTH 32U
+
+static int clear_contents(int directory_fd, unsigned depth)
 {
     DIR *directory;
     struct dirent *entry;
     int scan_fd;
     int result = 0;
 
-    scan_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    scan_fd = openat(directory_fd, ".",
+                     O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (scan_fd < 0)
         return -1;
     directory = fdopendir(scan_fd);
@@ -30,24 +33,31 @@ static int clear_contents(int fd)
 
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
             continue;
-        if (fstatat(fd, entry->d_name, &state, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (fstatat(directory_fd, entry->d_name, &state,
+                    AT_SYMLINK_NOFOLLOW) != 0) {
             result = -1;
             continue;
         }
         if (S_ISDIR(state.st_mode)) {
-            int child = openat(fd, entry->d_name,
-                               O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            int child;
+
+            if (depth >= FACTORY_RESET_MAX_DEPTH) {
+                result = -1;
+                continue;
+            }
+            child = openat(directory_fd, entry->d_name,
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
             if (child < 0) {
                 result = -1;
                 continue;
             }
-            if (clear_contents(child) != 0)
+            if (clear_contents(child, depth + 1U) != 0)
                 result = -1;
             if (close(child) != 0)
                 result = -1;
-            if (unlinkat(fd, entry->d_name, AT_REMOVEDIR) != 0)
+            if (unlinkat(directory_fd, entry->d_name, AT_REMOVEDIR) != 0)
                 result = -1;
-        } else if (unlinkat(fd, entry->d_name, 0) != 0) {
+        } else if (unlinkat(directory_fd, entry->d_name, 0) != 0) {
             result = -1;
         }
         errno = 0;
@@ -56,7 +66,7 @@ static int clear_contents(int fd)
         result = -1;
     if (closedir(directory) != 0)
         result = -1;
-    if (fsync(fd) != 0)
+    if (fsync(directory_fd) != 0)
         result = -1;
     return result;
 }
@@ -70,7 +80,7 @@ static int clear_directory(int root_fd, const char *name)
                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
         return errno == ENOENT ? 0 : -1;
-    result = clear_contents(fd);
+    result = clear_contents(fd, 0U);
     if (close(fd) != 0)
         result = -1;
     return result;
