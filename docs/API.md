@@ -794,7 +794,16 @@ Shutdown device. Requires confirmation.
 
 #### POST /api/v1/system/factory-reset
 
-Factory reset device. Requires confirmation.
+Permanently removes every file and nested directory below the product image's
+`/data/libreecho/config` and `/data/libreecho/secrets` directories, including
+device-local accounts, setup completion, Wi-Fi profiles/PSKs, assistant
+credentials, timers, and all mutable user configuration. The reset synchronizes
+both persistent directories and reboots. Installed feature payloads, OTA
+artifacts, and release identity outside those directories are preserved.
+The operation requires `X-LibreEcho-Confirm: confirm-device-action`; missing
+directories are accepted, while any unexpected deletion or durability failure
+aborts the reboot and returns HTTP 503. Unprivileged Linux deployments and
+backends without destructive-action support return HTTP 501.
 
 #### PUT /api/v1/system/update/channel
 

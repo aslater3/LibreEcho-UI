@@ -107,7 +107,10 @@ async function waitForDevice(estimate,title){
   }
  }finally{clearInterval(ticker)}}
 async function power(path,name){
- if(!confirm(`${name} this LibreEcho device?`))return;
+ const question=path==='factory-reset'
+  ?'Factory reset this LibreEcho device? This permanently removes accounts, Wi-Fi profiles and passwords, assistant credentials, timers and all device settings.'
+  :`${name} this LibreEcho device?`;
+ if(!confirm(question))return;
  if(state.busy)return;
  let estimate=45;
  try{estimate=(await api('/system')).boot_estimate_seconds||45}catch(_){/* keep the default */}
@@ -123,7 +126,7 @@ async function power(path,name){
     means the request was refused. */
  let refused=null;
  const fired=api(`/system/${path}`,{method:'POST',body:'{}',headers:{'X-LibreEcho-Confirm':'confirm-device-action'}})
-   .catch(e=>{if(/^Request failed \((4|5)\d\d\)$/.test(e.message)||/refused|not permitted|confirm/i.test(e.message))refused=e});
+   .catch(e=>{if(/^Request failed \((4|5)\d\d\)$/.test(e.message)||/device action failed|refused|not permitted|confirm/i.test(e.message))refused=e});
  await Promise.race([fired,new Promise(r=>setTimeout(r,1500))]);
  if(refused){toast(refused.message,true);return}
  await waitForDevice(estimate,'Restarting your LibreEcho');}

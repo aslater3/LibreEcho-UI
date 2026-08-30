@@ -14,6 +14,7 @@ DAEMON=${DAEMON:-/usr/local/sbin/libreecho-btd}
 PIDFILE=${PIDFILE:-/var/run/libreecho-btd.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-btd.log}
 SOCKET=${SOCKET:-/run/libreecho/bluetooth.sock}
+BT_STATE_DIR=${BT_STATE_DIR:-/data/libreecho/config}
 ARGS=${ARGS:---foreground --socket $SOCKET}
 
 # Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life:
@@ -60,7 +61,7 @@ terminate() {
 
 start_service() {
     if is_running; then echo "libreecho-btd already running"; return 0; fi
-    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")" "$BT_STATE_DIR"
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else

@@ -1853,6 +1853,7 @@
      "System"
     ],
     "summary": "Factory-reset device",
+    "description": "Permanently removes every file and nested directory below the product image's /data/libreecho/config and /data/libreecho/secrets directories, including accounts, setup completion, Wi-Fi profiles and PSKs, assistant credentials, timers, and all mutable user configuration. The reset synchronizes both persistent directories and reboots. Installed feature payloads, OTA artifacts, and release identity outside those directories are preserved. Unprivileged Linux deployments return 501 without deleting state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1866,6 +1867,12 @@
       "$ref": "#/components/responses/Success"
      },
      "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -1891,6 +1898,12 @@
      },
      "403": {
       "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }
@@ -1914,6 +1927,12 @@
       "$ref": "#/components/responses/Success"
      },
      "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
