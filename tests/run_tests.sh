@@ -51,6 +51,7 @@ sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_wake_word_ui_contract.py
 python3 tools/test_virtual_echo.py
+node tests/test_timers_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -113,6 +114,12 @@ make build/test-timer-intent
 ./build/test-timer-intent
 make build/test-timer-schedule
 ./build/test-timer-schedule
+make build/test-timer-json
+./build/test-timer-json
+make build/test-backend-linux-timers
+./build/test-backend-linux-timers
+make build/test-backend-mock-timers
+./build/test-backend-mock-timers
 make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
 ./build/test-timer-persistence
 sh tests/test_timerd.sh
@@ -125,6 +132,7 @@ trap cleanup EXIT INT TERM
 i=0
 while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-server.log; exit 1; }; sleep 0.1; done
 LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
@@ -133,6 +141,7 @@ sh tests/test_memory.sh "$pid"
 kill "$pid"
 wait "$pid" 2>/dev/null || true
 pid=0
+sh tests/test_timers_linux_validation.sh
 ./tools/create-user.sh test-user test-password-123 >./build/test-users
 chmod 600 ./build/test-users
 ./build/libreecho-web --backend mock --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --users-file ./build/test-users >./build/test-users.log 2>&1 &

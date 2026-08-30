@@ -306,6 +306,51 @@ Use `POST /api/v1/audio/announce/stop` with `{}` to interrupt the active
 announcement. State-changing API calls require the normal CSRF header and,
 when configured, local API authentication.
 
+### Timers and alarms
+
+#### GET /api/v1/timers
+
+Returns the bounded timer schedule. Each entry has an `id`, `kind` (`countdown`
+or `alarm`), `state` (`pending` or `ringing`), `seconds_remaining`, and an
+optional `label`. The response also includes `ringing`, `missed`, and
+`available`. When `timerd` is absent, this GET still returns HTTP 200 with
+`available: false`, an empty `timers` array, and zero `ringing`/`missed`
+counts. Timer writes return the standard 503 unavailable response instead.
+
+#### POST /api/v1/timers
+
+Creates a countdown and requires `X-LibreEcho-CSRF`.
+
+```json
+{ "seconds": 600, "label": "pasta" }
+```
+
+`seconds` is required and must be 1–604800. `label` is optional, but if
+present must be a valid JSON string whose UTF-8 encoding is no longer than 47
+bytes; oversized, malformed, or control-character labels return HTTP 400 rather
+than being truncated or changed. Leading whitespace is preserved when the
+schedule is persisted and restored. Success returns
+HTTP 201 with `{ "id": number }`. The fixed schedule holds at most 16 active
+entries; a valid request when it is full returns HTTP 409 with error code
+`busy`.
+
+#### POST /api/v1/timers/dismiss
+
+Dismisses all currently ringing timers, leaves pending timers untouched, and
+returns `{ "dismissed": number }`. Requires `X-LibreEcho-CSRF`.
+
+#### DELETE /api/v1/timers/{id}
+
+Cancels one pending timer by numeric ID. Ringing timers are not cancelled by
+this route; use `/timers/dismiss` to silence them. The entire path component
+must be a nonzero decimal integer; malformed, ringing, out-of-range, missing,
+or already-cancelled IDs return HTTP 404 without removing another timer.
+Requires `X-LibreEcho-CSRF`.
+
+The timer page refreshes its status while open so countdowns and ringing state
+remain current. Timer state is persisted atomically with a restrictive
+permissions policy and is restored after the wall clock becomes valid.
+
 ### Voice assistant
 
 The voice assistant uses local wake-word detection, post-AEC microphone audio,
