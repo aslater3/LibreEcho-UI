@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+python3 - <<'PY'
+from pathlib import Path
+source = Path('src/backend_linux.c').read_text()
+assert '"/etc/init.d/libreecho-btd.init"' in source
+assert '"/etc/init.d/libreecho-timerd.init"' in source
+start = source.index('static int factory_reset(')
+end = source.index('static const struct le_backend_ops', start)
+body = source[start:end]
+quiesce = body.index('quiesce_factory_reset_services')
+clear = body.index('le_factory_reset_clear')
+resume = body.index('resume_factory_reset_services')
+reboot = body.index('linux_reboot')
+assert quiesce < clear < reboot
+assert clear < resume
+assert body.count('resume_factory_reset_services') >= 2
+print('factory reset quiesces autonomous persistent-state writers: ok')
+PY
