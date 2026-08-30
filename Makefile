@@ -137,6 +137,12 @@ $(BUILD)/test-network-health: tests/test_network_health.c \
 		src/adapter/network_health.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
+$(BUILD)/test-adapter-client-events: tests/test_adapter_client_events.c \
+		src/adapter/adapter_client.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $^ -o $@
+
 $(BUILD)/test-timer-intent: tests/test_timer_intent.c \
 		src/adapter/timer_intent.c
 	@mkdir -p $(BUILD)
