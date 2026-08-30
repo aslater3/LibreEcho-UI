@@ -154,20 +154,20 @@ async function setupReadinessSuite(browser) {
   await context.close();
 }
 
-async function checkFactoryResetFailure(page) {
+async function checkFactoryResetFailure(page, status, message) {
   await page.route('**/api/v1/system/factory-reset', route => route.fulfill({
-    status: 503,
+    status,
     contentType: 'application/json',
     body: JSON.stringify({ ok: false, data: null,
-      error: { code: 7, message: 'Device action failed' } })
+      error: { code: 7, message } })
   }));
   await selectPage(page, 'Device');
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#power-reset').click();
-  await page.waitForFunction(() =>
-    /Device action failed/i.test(document.querySelector('#toast')?.textContent || ''),
-    null, { timeout: 5000 });
-  assert.match(await page.locator('#toast').innerText(), /Device action failed/i);
+  await page.waitForFunction(expected =>
+    (document.querySelector('#toast')?.textContent || '').includes(expected),
+    message, { timeout: 5000 });
+  assert.match(await page.locator('#toast').innerText(), new RegExp(message, 'i'));
   assert.equal(await page.locator('dialog.reboot-dialog').count(), 0,
     'failed factory reset must not enter the reboot wait loop');
   await page.unroute('**/api/v1/system/factory-reset');
@@ -197,7 +197,8 @@ async function desktopSuite(browser) {
   for (const destination of destinations) await selectPage(page, destination);
 
   await checkAudioMutation(page);
-  await checkFactoryResetFailure(page);
+  await checkFactoryResetFailure(page, 503, 'Device action failed');
+  await checkFactoryResetFailure(page, 501, 'Device action is not available');
   assert.deepEqual(failures, [], `browser failures:\n${failures.join('\n')}`);
 
   await context.close();
