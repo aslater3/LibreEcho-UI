@@ -675,7 +675,10 @@ false.
 
 #### GET /api/v1/network/wifi/scan
 
-Scan for WiFi networks.
+Scan for WiFi networks. Results are ordered with 5 GHz networks first, then by
+signal strength (strongest first), with SSID as a stable tie-breaker. The
+response is bounded to the first 12 distinct results for the fixed adapter
+message size.
 
 **Response:**
 ```json

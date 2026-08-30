@@ -133,7 +133,9 @@ async function setupReadinessSuite(browser) {
     return route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify(envelope({ networks: [
-        { ssid: 'ReadinessNet', security: 'wpa2', signal: 81 }
+        { ssid: 'Readiness5', security: 'wpa2', signal: 40 },
+        { ssid: 'Readiness24', security: 'wpa2', signal: 95 },
+        { ssid: 'ReadinessWeak', security: 'wpa2', signal: 20 }
       ] }))
     });
   });
@@ -141,9 +143,12 @@ async function setupReadinessSuite(browser) {
   await page.goto('/setup.html', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => typeof setup !== 'undefined' && setup.step === 1);
   await page.evaluate(() => { setup.step = 2; render(); });
-  await page.getByText('ReadinessNet', { exact: true }).waitFor({
+  await page.getByText('Readiness5', { exact: true }).waitFor({
     state: 'visible', timeout: 4000
   });
+  assert.deepEqual(await page.locator('.wifi-option strong').allTextContents(), [
+    'Readiness5', 'Readiness24', 'ReadinessWeak'
+  ], 'scan results should preserve the backend preferred-band order');
   assert.ok(setupReads >= 2, 'scan retry should refresh setup readiness');
   assert.equal(scans, 1, 'scan should start once wlan0 becomes ready');
   await context.close();

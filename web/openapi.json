@@ -1644,6 +1644,7 @@
      "Network"
     ],
     "summary": "Scan Wi-Fi networks",
+    "description": "Returns distinct SSIDs ordered with 5 GHz preferred, then descending signal strength and a stable SSID tie-breaker. The response is bounded to the first 12 distinct results for the fixed adapter message size.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
