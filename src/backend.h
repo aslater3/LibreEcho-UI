@@ -98,7 +98,20 @@ struct le_playback_state {
     int metadata_available;
     char title[LE_MEDIA_TEXT+1], artist[LE_MEDIA_TEXT+1], album[LE_MEDIA_TEXT+1];
 };
+/* One entry from the timer daemon's schedule. */
+struct le_timer_entry {
+    unsigned id;
+    char kind[16];
+    char state[16];
+    long seconds_remaining;
+    char label[48];
+};
+struct le_timer_list {
+    struct le_timer_entry items[16];
+    int count, ringing, missed, available;
+};
 struct le_backend;
+struct le_timer_list;
 
 int le_backend_init(struct le_backend **out, const char *mode, const char *mock_path, const char *config_path, unsigned seed);
 void le_backend_destroy(struct le_backend *b);
@@ -113,6 +126,7 @@ int le_get_bluetooth_state(struct le_backend*,struct le_bluetooth_state*); int l
 int le_bluetooth_scan(struct le_backend*,int); int le_bluetooth_pair(struct le_backend*,const char*,int,int); int le_bluetooth_unpair(struct le_backend*,const char*,int); int le_bluetooth_disconnect(struct le_backend*,const char*,int); int le_bluetooth_pairing_response(struct le_backend*,const char*,int,const char*,unsigned int,const char*); int le_bluetooth_set_discoverable(struct le_backend*,int); int le_bluetooth_set_connectable(struct le_backend*,int); int le_bluetooth_set_pairing_mode(struct le_backend*,int);
 int le_get_airplay_state(struct le_backend*,struct le_airplay_state*); int le_set_airplay_enabled(struct le_backend*,int);
 int le_get_playback_state(struct le_backend*,struct le_playback_state*);
+int le_get_timers(struct le_backend*,struct le_timer_list*); int le_add_timer(struct le_backend*,int,const char*,unsigned*); int le_cancel_timer(struct le_backend*,unsigned); int le_dismiss_timers(struct le_backend*,int*);
 int le_reboot(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);
 int le_backend_tick(struct le_backend*); int le_backend_mock_control(struct le_backend*,const char*,const char*);
 

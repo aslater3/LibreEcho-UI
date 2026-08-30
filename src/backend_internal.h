@@ -1,6 +1,9 @@
 #ifndef LE_BACKEND_INTERNAL_H
 #define LE_BACKEND_INTERNAL_H
 #include "backend.h"
+#ifdef LE_MOCK_TESTING
+#include <time.h>
+#endif
 struct le_backend_ops {
  void (*destroy)(struct le_backend*); int (*status)(struct le_backend*,struct le_system_status*); int (*device)(struct le_backend*,struct le_device_info*);
  int (*audio)(struct le_backend*,struct le_audio_state*); int (*volume)(struct le_backend*,int); int (*gain)(struct le_backend*,int); int (*mute)(struct le_backend*,int); int (*tone)(struct le_backend*); int (*tts_voice)(struct le_backend*,const char*); int (*announce)(struct le_backend*,const char*); int (*stop_speech)(struct le_backend*); int (*noise_start)(struct le_backend*,const char*,int,int); int (*noise_stop)(struct le_backend*); int (*simulate_audio)(struct le_backend*,const char*); int (*radio_play)(struct le_backend*,const char*); int (*radio_stop)(struct le_backend*); int (*radio_playing)(struct le_backend*,struct le_radio_status*);
@@ -25,7 +28,11 @@ struct le_backend_ops {
     shift every op after it. A backend that leaves it null reports the
     feature unsupported, which is the right answer for the mock. */
  int (*sound_sample)(struct le_backend*,const char*);
+ int (*timers)(struct le_backend*,struct le_timer_list*); int (*timer_add)(struct le_backend*,int,const char*,unsigned*); int (*timer_cancel)(struct le_backend*,unsigned); int (*timer_dismiss)(struct le_backend*,int*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);
+#ifdef LE_MOCK_TESTING
+void le_mock_test_set_time(time_t); void le_mock_test_use_real_time(void);
+#endif
 #endif

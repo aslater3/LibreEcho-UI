@@ -459,6 +459,7 @@ static int json_container(const char *start, char open, char close,
     return 0;
 }
 
+#ifndef LE_BACKEND_LINUX_TESTING
 static int adapter_result(int rc)
 {
     if (rc == LE_ADAPTER_OK)
@@ -467,11 +468,22 @@ static int adapter_result(int rc)
         return LE_NOT_SUPPORTED;
     return LE_IO;
 }
+#endif
 
 /* A missing companion daemon is a normal condition during early bring-up. */
-static int adapter_command(const char *socket_path, const char *command,
-                           const char *args, char *response, size_t response_size)
+#ifdef LE_BACKEND_LINUX_TESTING
+extern int le_backend_linux_test_adapter_command(const char *, const char *,
+                                                  const char *, char *, size_t);
+#endif
+static int adapter_command_timeout(const char *socket_path, const char *command,
+                                   const char *args, char *response,
+                                   size_t response_size, int io_timeout_ms)
 {
+#ifdef LE_BACKEND_LINUX_TESTING
+    (void)io_timeout_ms;
+    return le_backend_linux_test_adapter_command(socket_path, command, args,
+                                                 response, response_size);
+#else
     struct le_adapter *adapter;
     int rc;
     int result;
@@ -487,28 +499,61 @@ static int adapter_command(const char *socket_path, const char *command,
         le_log_debug("backend: adapter %s connection failed (errno=%d)", command, errno);
         return LE_IO;
     }
+    if (io_timeout_ms > 0)
+        le_adapter_set_io_timeout(adapter, io_timeout_ms);
     rc = le_adapter_call(adapter, command, args, response, response_size);
     le_adapter_close(adapter);
+    if (rc == LE_ADAPTER_ERR_REJECTED && command && response &&
+        !strcmp(command, "cancel") && !strcmp(response, "no such timer"))
+        return LE_INVALID;
+    if (rc == LE_ADAPTER_ERR_REJECTED && command && response &&
+        !strcmp(command, "add") && !strcmp(response, "no free timer slots"))
+        return LE_BUSY;
     result = adapter_result(rc);
     if (result != LE_OK)
         le_log_debug("backend: adapter %s failed (rc=%d)", command, rc);
     return result;
+#endif
+}
+
+static int adapter_command(const char *socket_path, const char *command,
+                           const char *args, char *response, size_t response_size)
+{
+    return adapter_command_timeout(socket_path, command, args, response,
+                                   response_size, 0);
 }
 
 #ifdef LE_BACKEND_LINUX_TESTING
 extern int le_backend_linux_test_adapter_json_command(const char *socket_path,
                                                        const char *command,
                                                        const char *args);
+extern int le_backend_linux_test_adapter_json_command_timeout(
+    const char *socket_path, const char *command, const char *args,
+    int timeout_ms);
 static int adapter_json_command(const char *socket_path, const char *command,
                                 const char *args)
 {
     return le_backend_linux_test_adapter_json_command(socket_path, command, args);
+}
+static int adapter_json_command_timeout(const char *socket_path,
+                                        const char *command, const char *args,
+                                        int timeout_ms)
+{
+    return le_backend_linux_test_adapter_json_command_timeout(
+        socket_path, command, args, timeout_ms);
 }
 #else
 static int adapter_json_command(const char *socket_path, const char *command,
                                 const char *args)
 {
     return adapter_command(socket_path, command, args, NULL, 0);
+}
+static int adapter_json_command_timeout(const char *socket_path,
+                                        const char *command, const char *args,
+                                        int timeout_ms)
+{
+    return adapter_command_timeout(socket_path, command, args, NULL, 0,
+                                   timeout_ms);
 }
 #endif
 
@@ -1546,8 +1591,7 @@ static int connect_wifi(struct le_backend *b, const struct le_wifi_credentials *
     if (!credentials || !credentials->ssid[0]) return LE_INVALID;
     if (credentials->security[0] &&
         strcmp(credentials->security, "open") &&
-        strcmp(credentials->security, "wpa2") &&
-        strcmp(credentials->security, "wpa3"))
+        strcmp(credentials->security, "wpa2"))
         return LE_INVALID;
     security_value = credentials->security[0] ? credentials->security : "wpa2";
     json_escape(ssid, sizeof(ssid), credentials->ssid);
@@ -1557,7 +1601,8 @@ static int connect_wifi(struct le_backend *b, const struct le_wifi_credentials *
                  "{\"ssid\":\"%s\",\"psk\":\"%s\",\"security\":\"%s\"}",
                  ssid, psk, security) >= (int)sizeof(args))
         return LE_INVALID;
-    return adapter_json_command(LE_ADAPTER_NETWORK_SOCK, "connect", args);
+    return adapter_json_command_timeout(LE_ADAPTER_NETWORK_SOCK, "connect",
+                                        args, 120000);
 }
 
 static int disconnect_wifi(struct le_backend *b)
@@ -1997,6 +2042,292 @@ static int bluetooth_pairing_mode(struct le_backend *b, int enabled)
     return bluetooth_controller_setting(b, "pairing_mode", enabled);
 }
 
+#ifndef LE_ADAPTER_TIMER_SOCK
+#define LE_ADAPTER_TIMER_SOCK "/run/libreecho/timer.sock"
+#endif
+
+/*
+ * Walk the objects of a JSON array. json.c reads scalars from an object but
+ * has no array support, and the timer list is the first place that needs it.
+ * Rather than teach the parser arrays, find each {...} in the value and hand
+ * it to the existing scalar getters -- the entries are flat objects, so brace
+ * counting is enough and there is nothing to nest wrongly.
+ */
+static const char *next_array_object(const char *cursor, char *out,
+                                     size_t size)
+{
+    int depth = 0;
+    int in_string = 0;
+    int escaped = 0;
+    size_t used = 0;
+
+    if (!cursor)
+        return NULL;
+    while (*cursor && *cursor != '{') {
+        if (*cursor == ']')
+            return NULL;
+        ++cursor;
+    }
+    if (!*cursor)
+        return NULL;
+    for (; *cursor; ++cursor) {
+        if (used + 1 < size)
+            out[used++] = *cursor;
+        if (in_string) {
+            if (escaped)
+                escaped = 0;
+            else if (*cursor == '\\')
+                escaped = 1;
+            else if (*cursor == '"')
+                in_string = 0;
+            continue;
+        }
+        if (*cursor == '"') {
+            in_string = 1;
+            continue;
+        }
+        if (*cursor == '{')
+            ++depth;
+        if (*cursor == '}') {
+            --depth;
+            if (!depth) {
+                out[used] = '\0';
+                return cursor + 1;
+            }
+        }
+    }
+    return NULL;
+}
+
+static int timer_valid_utf8(const char *text, size_t length)
+{
+    const unsigned char *p = (const unsigned char *)text;
+    size_t i = 0;
+
+    while (i < length) {
+        unsigned char c = p[i];
+
+        if (c <= 0x7f) {
+            ++i;
+        } else if (c >= 0xc2 && c <= 0xdf) {
+            if (i + 1 >= length || (p[i + 1] & 0xc0) != 0x80)
+                return 0;
+            i += 2;
+        } else if (c == 0xe0) {
+            if (i + 2 >= length || p[i + 1] < 0xa0 ||
+                p[i + 1] > 0xbf || (p[i + 2] & 0xc0) != 0x80)
+                return 0;
+            i += 3;
+        } else if ((c >= 0xe1 && c <= 0xec) ||
+                   (c >= 0xee && c <= 0xef)) {
+            if (i + 2 >= length || (p[i + 1] & 0xc0) != 0x80 ||
+                (p[i + 2] & 0xc0) != 0x80)
+                return 0;
+            i += 3;
+        } else if (c == 0xed) {
+            if (i + 2 >= length || p[i + 1] < 0x80 ||
+                p[i + 1] > 0x9f || (p[i + 2] & 0xc0) != 0x80)
+                return 0;
+            i += 3;
+        } else if (c == 0xf0) {
+            if (i + 3 >= length || p[i + 1] < 0x90 ||
+                p[i + 1] > 0xbf || (p[i + 2] & 0xc0) != 0x80 ||
+                (p[i + 3] & 0xc0) != 0x80)
+                return 0;
+            i += 4;
+        } else if (c >= 0xf1 && c <= 0xf3) {
+            if (i + 3 >= length || (p[i + 1] & 0xc0) != 0x80 ||
+                (p[i + 2] & 0xc0) != 0x80 ||
+                (p[i + 3] & 0xc0) != 0x80)
+                return 0;
+            i += 4;
+        } else if (c == 0xf4) {
+            if (i + 3 >= length || p[i + 1] < 0x80 ||
+                p[i + 1] > 0x8f || (p[i + 2] & 0xc0) != 0x80 ||
+                (p[i + 3] & 0xc0) != 0x80)
+                return 0;
+            i += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int timer_entry_parse(const char *entry, struct le_timer_entry *item)
+{
+    long long id = 0;
+    long long remaining = 0;
+
+    if (!entry || !item || !json_valid_object(entry, strlen(entry)))
+        return 0;
+    if (json_get_int64_top_level(entry, "id", &id) != 1 || id <= 0 ||
+        id > UINT_MAX ||
+        json_get_int64_top_level(entry, "seconds_remaining", &remaining) != 1 ||
+        remaining < 0 || remaining > LONG_MAX ||
+        json_get_string_top_level(entry, "kind", item->kind,
+                                  sizeof(item->kind)) != 1 ||
+        json_get_string_top_level(entry, "state", item->state,
+                                  sizeof(item->state)) != 1)
+        return 0;
+    if (json_get_string_top_level(entry, "label", item->label,
+                                  sizeof(item->label)) != 1)
+        return 0;
+    if (!timer_valid_utf8(item->label, strlen(item->label)))
+        return 0;
+    if ((strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm")) ||
+        (strcmp(item->state, "pending") && strcmp(item->state, "ringing")))
+        return 0;
+    item->id = (unsigned)id;
+    item->seconds_remaining = (long)remaining;
+    return 1;
+}
+
+static int timer_array_parse(const char *array, size_t array_size,
+                             struct le_timer_list *out)
+{
+    const char *cursor;
+    const char *end;
+    char entry[512];
+
+    if (!array || array_size < 2 || array[0] != '[' ||
+        array[array_size - 1] != ']')
+        return 0;
+    cursor = array + 1;
+    end = array + array_size - 1;
+    while (cursor < end && isspace((unsigned char)*cursor))
+        ++cursor;
+    if (cursor == end)
+        return 1;
+    for (;;) {
+        const char *next;
+
+        if (cursor >= end || *cursor != '{' ||
+            out->count >= (int)(sizeof(out->items) / sizeof(out->items[0])))
+            return 0;
+        next = next_array_object(cursor, entry, sizeof(entry));
+        if (!next || next > end ||
+            !timer_entry_parse(entry, &out->items[out->count]))
+            return 0;
+        ++out->count;
+        cursor = next;
+        while (cursor < end && isspace((unsigned char)*cursor))
+            ++cursor;
+        if (cursor == end)
+            return 1;
+        if (*cursor != ',')
+            return 0;
+        ++cursor;
+        while (cursor < end && isspace((unsigned char)*cursor))
+            ++cursor;
+    }
+}
+
+#ifdef LE_TIMER_JSON_TEST
+const char *le_test_next_array_object(const char *cursor, char *out,
+                                      size_t size)
+{
+    return next_array_object(cursor, out, size);
+}
+#endif
+
+static int timers(struct le_backend *b, struct le_timer_list *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    const char *array;
+    size_t array_size;
+    long long count;
+    int actual_ringing;
+    int i;
+    int rc;
+    (void)b;
+
+    memset(o, 0, sizeof(*o));
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "status", NULL, response,
+                         sizeof(response));
+    if (rc != LE_OK) {
+        /* A missing daemon is a normal unavailable capability, but a live
+           daemon that times out or speaks malformed protocol is an outage. */
+        if (rc == LE_NOT_SUPPORTED)
+            return LE_OK;
+        return rc;
+    }
+    if (!json_valid_object(response, strlen(response)) ||
+        json_get_int64_top_level(response, "ringing", &count) != 1 ||
+        count < 0 || count > INT_MAX)
+        return LE_IO;
+    o->ringing = (int)count;
+    if (json_get_int64_top_level(response, "missed", &count) != 1 ||
+        count < 0 || count > INT_MAX)
+        return LE_IO;
+    o->missed = (int)count;
+    if (json_get_array_top_level(response, "timers", &array, &array_size) != 1 ||
+        !timer_array_parse(array, array_size, o))
+        return LE_IO;
+    actual_ringing = 0;
+    for (i = 0; i < o->count; ++i)
+        actual_ringing += !strcmp(o->items[i].state, "ringing");
+    if (actual_ringing != o->ringing)
+        return LE_IO;
+    o->available = 1;
+    return LE_OK;
+}
+
+static int timer_add(struct le_backend *b, int seconds, const char *label,
+                     unsigned *id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[256];
+    char escaped[128];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    json_escape(escaped, sizeof(escaped), label ? label : "");
+    snprintf(args, sizeof(args), "{\"seconds\":%d,\"label\":\"%s\"}",
+             seconds, escaped);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "add", args, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "id", &value) != 1 || value <= 0 ||
+        value > UINT_MAX)
+        return LE_IO;
+    if (id)
+        *id = (unsigned)value;
+    return LE_OK;
+}
+
+static int timer_cancel(struct le_backend *b, unsigned id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[64];
+    (void)b;
+
+    snprintf(args, sizeof(args), "{\"id\":%u}", id);
+    return adapter_command(LE_ADAPTER_TIMER_SOCK, "cancel", args, response,
+                           sizeof(response));
+}
+
+static int timer_dismiss(struct le_backend *b, int *stopped)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    long long dismissed = 0;
+    int rc;
+    (void)b;
+
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "dismiss", "{}", response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "dismissed", &dismissed) != 1 ||
+        dismissed < 0 || dismissed > INT_MAX)
+        return LE_IO;
+    if (stopped)
+        *stopped = (int)dismissed;
+    return LE_OK;
+}
+
 static int airplay(struct le_backend *b, struct le_airplay_state *o)
 {
     char response[LE_ADAPTER_MSG_MAX];
@@ -2215,7 +2546,8 @@ static const struct le_backend_ops ops = {
     linux_reboot, linux_shutdown, factory_reset, tick, control,
     spotify, spotify_set,
     light,
-    sound_sample
+    sound_sample,
+    timers, timer_add, timer_cancel, timer_dismiss
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

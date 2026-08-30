@@ -19,11 +19,12 @@
       <a class="setup-brand" href="/setup.html"><img src="/assets/mark.svg" alt=""><span><strong><em>Libre</em>Echo</strong><small>First-boot setup</small></span></a>
       <div class="ap-state"><i></i><span><strong>Setup access point</strong><small>Direct, local connection</small></span></div>
       <ol class="steps" aria-label="Setup progress">
-        <li class="active" data-step-marker="0"><b>1</b><span>Welcome<small>Meet your LibreEcho</small></span></li>
-        <li data-step-marker="1"><b>2</b><span>Network<small>Connect to your Wi-Fi</small></span></li>
-        <li data-step-marker="2"><b>3</b><span>Essentials<small>Name, sound and voice</small></span></li>
-        <li data-step-marker="3"><b>4</b><span>Privacy<small>Choose your defaults</small></span></li>
-        <li data-step-marker="4"><b>5</b><span>Review<small>Apply configuration</small></span></li>
+        <li class="active" data-step-marker="0"><b>1</b><span>Account<small>Protect your control centre</small></span></li>
+        <li data-step-marker="1"><b>2</b><span>Welcome<small>Meet your LibreEcho</small></span></li>
+        <li data-step-marker="2"><b>3</b><span>Network<small>Connect to your Wi-Fi</small></span></li>
+        <li data-step-marker="3"><b>4</b><span>Essentials<small>Name, sound and voice</small></span></li>
+        <li data-step-marker="4"><b>5</b><span>Privacy<small>Choose your defaults</small></span></li>
+        <li data-step-marker="5"><b>6</b><span>Review<small>Apply configuration</small></span></li>
       </ol>
       <p class="side-note">Setup data is sent only to this device. Wi-Fi credentials are never returned by the API.</p>
     </aside>
@@ -32,6 +33,17 @@
       <div id="setup-error" class="error-banner" role="alert" hidden></div>
 
       <section class="setup-page active" data-step="0">
+        <span class="eyebrow">First-run security</span>
+        <h1>Create your local account.</h1>
+        <p class="lead">Start by protecting the control centre. This account is created on the device and is required before Wi-Fi and the remaining setup steps can be changed.</p>
+        <div class="form-card">
+          <label><span>Username</span><input id="setup-username" maxlength="31" autocomplete="username" required pattern="[A-Za-z0-9._-]+"><small>Letters, numbers, dots, underscores, and hyphens.</small></label>
+          <label><span>Password</span><input id="setup-account-password" type="password" maxlength="128" autocomplete="new-password" required><small>Use at least 8 characters.</small></label>
+          <label><span>Confirm password</span><input id="setup-account-confirm" type="password" maxlength="128" autocomplete="new-password" required></label>
+        </div>
+      </section>
+
+      <section class="setup-page" data-step="1">
         <span class="eyebrow">Welcome to LibreEcho</span>
         <h1>Let’s get your device ready.</h1>
         <p class="lead">You’re connected directly to LibreEcho’s temporary setup network. This short wizard will connect it to your Wi-Fi and establish safe local defaults.</p>
@@ -42,20 +54,27 @@
         </div>
       </section>
 
-      <section class="setup-page" data-step="1">
+      <section class="setup-page" data-step="2">
         <span class="eyebrow">Network</span>
-        <h1>Connect LibreEcho to Wi-Fi.</h1>
+        <h1>Connect LibreEcho to <span class="no-wrap">Wi-Fi</span>.</h1>
         <p class="lead">Select a network or enter its name manually. The temporary setup access point may disappear while the device joins your LAN.</p>
+        <section class="firmware-state" id="vendor-firmware-state" aria-live="polite">
+          <div class="firmware-state-copy">
+            <strong id="vendor-firmware-title">Checking Wi-Fi hardware…</strong>
+            <small id="vendor-firmware-detail">Reading the boot-time firmware import and driver state.</small>
+          </div>
+          <button class="secondary compact" id="force-vendor-import" type="button" hidden>Force retry next boot</button>
+        </section>
         <div class="section-heading"><h2>Nearby networks</h2><button class="text-button" id="scan-wifi" type="button">Scan again</button></div>
         <div id="wifi-list" class="wifi-list" aria-live="polite"><p class="muted">Scanning for networks…</p></div>
         <div class="form-grid">
           <label><span>Network name (SSID)</span><input id="setup-ssid" maxlength="63" autocomplete="off" required></label>
-          <label><span>Security</span><select id="setup-security"><option value="wpa2">WPA2</option><option value="wpa3">WPA3</option><option value="open">Open</option></select></label>
+          <label><span>Security</span><select id="setup-security"><option value="wpa2">WPA2</option><option value="open">Open</option></select></label>
           <label class="wide" id="password-field"><span>Wi-Fi password</span><div class="password-input"><input id="setup-password" type="password" maxlength="127" autocomplete="new-password"><button id="show-password" type="button" aria-label="Show password">Show</button></div><small>At least 8 characters. It will not be exposed through the web API.</small></label>
         </div>
       </section>
 
-      <section class="setup-page" data-step="2">
+      <section class="setup-page" data-step="3">
         <span class="eyebrow">Essentials</span>
         <h1>Make it yours.</h1>
         <p class="lead">Choose how the device appears on your network and set comfortable starting values.</p>
@@ -67,7 +86,7 @@
         </div>
       </section>
 
-      <section class="setup-page" data-step="3">
+      <section class="setup-page" data-step="4">
         <span class="eyebrow">Privacy</span>
         <h1>Private by default.</h1>
         <p class="lead">These conservative defaults can be changed later. No cloud dependency is required.</p>
@@ -78,7 +97,7 @@
         <div class="privacy-note"><strong>Microphone audio retention starts off.</strong><span>Crash reporting, remote API access, SSH and third-party integrations also remain disabled.</span></div>
       </section>
 
-      <section class="setup-page" data-step="4">
+      <section class="setup-page" data-step="5">
         <span class="eyebrow">Review</span>
         <h1>Ready to connect.</h1>
         <p class="lead">LibreEcho will save these settings, join your Wi-Fi and close its temporary setup access point.</p>
@@ -86,7 +105,7 @@
         <label class="confirm"><input id="setup-confirm" type="checkbox"><span>I understand this connection may close when LibreEcho leaves setup mode.</span></label>
       </section>
 
-      <section class="setup-page complete" data-step="5">
+      <section class="setup-page complete" data-step="6">
         <div class="success-ring">✓</div>
         <span class="eyebrow">Setup complete</span>
         <h1>LibreEcho is joining your network.</h1>

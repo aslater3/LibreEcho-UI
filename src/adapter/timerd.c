@@ -21,8 +21,10 @@
 #include "../json.h"
 #include "../log.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -36,6 +38,7 @@
 #define STATE_PATH "/data/libreecho/config/timers"
 #define MAX_CLIENTS 4
 #define POLL_CAP_MS 60000
+#define RESTORE_RETRY_MS 1000
 #define AUDIO_TIMEOUT_MS 1000
 
 /* The ring: a two-tone cue every RING_PERIOD_MS. Long enough to be a pattern
@@ -97,7 +100,10 @@ static long long wall_epoch(void)
 /* ------------------------------ persistence ----------------------------- */
 
 /*
- * One record per line: "kind due_epoch label".
+ * One record per line: "v3 kind id due_epoch @hex:label_bytes". Older v2 and
+ * whitespace-delimited records without the v2 marker are still accepted when
+ * loading. Encoding new labels removes the whitespace ambiguity in the
+ * original format and preserves every byte of the label across a restart.
  *
  * Countdowns are stored as a wall-clock instant even though they run on the
  * monotonic clock, because the monotonic clock restarts at boot and a stored
@@ -112,6 +118,134 @@ static int path_suffix(char *out, size_t size, const char *path,
 
     written = snprintf(out, size, "%s%s", path, suffix);
     return written < 0 || (size_t)written >= size ? -1 : 0;
+}
+
+static int state_hex_value(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+static int state_encode_label(char *out, size_t size, const char *label)
+{
+    static const char hex[] = "0123456789abcdef";
+    size_t i;
+    size_t length = label ? strlen(label) : 0;
+
+    if (length >= LE_TIMER_LABEL_MAX || size < 6 + length * 2)
+        return -1;
+    memcpy(out, "@hex:", 5);
+    for (i = 0; i < length; ++i) {
+        unsigned char byte = (unsigned char)label[i];
+        out[5 + i * 2] = hex[byte >> 4];
+        out[6 + i * 2] = hex[byte & 15];
+    }
+    out[5 + length * 2] = '\0';
+    return 0;
+}
+
+static int state_decode_label(const char *text, char *out, size_t size)
+{
+    size_t i;
+    size_t length;
+
+    if (!text || !out || size == 0)
+        return -1;
+    if (strncmp(text, "@hex:", 5)) {
+        length = strlen(text);
+        if (length >= size)
+            return -1;
+        memcpy(out, text, length + 1);
+        return 0;
+    }
+    length = strlen(text + 5);
+    if ((length & 1) || length / 2 >= size)
+        return -1;
+    for (i = 0; i < length; i += 2) {
+        int high = state_hex_value(text[5 + i]);
+        int low = state_hex_value(text[5 + i + 1]);
+        if (high < 0 || low < 0)
+            return -1;
+        out[i / 2] = (char)((high << 4) | low);
+    }
+    out[length / 2] = '\0';
+    return 1;
+}
+
+/* Parse the fixed header without letting scanf consume label whitespace. The
+   legacy format has one separator after the due time, so every additional
+   space is part of the label. V2 labels are encoded and may safely skip all
+   formatting whitespace before the @hex: value. */
+static int state_parse_header(const char *line, char *kind, size_t kind_size,
+                              unsigned int *restore_id, long long *due,
+                              size_t *label_offset, int *format)
+{
+    const char *cursor = line;
+    const char *token;
+    char *number_end;
+    size_t length;
+
+    if (!line || !kind || kind_size == 0 || !restore_id || !due ||
+        !label_offset || !format)
+        return -1;
+    while (*cursor && isspace((unsigned char)*cursor))
+        ++cursor;
+    *format = 0;
+    *restore_id = 0;
+    if ((!strncmp(cursor, "v2", 2) || !strncmp(cursor, "v3", 2)) &&
+        isspace((unsigned char)cursor[2])) {
+        *format = cursor[1] - '0';
+        cursor += 2;
+        while (*cursor && isspace((unsigned char)*cursor))
+            ++cursor;
+    }
+    token = cursor;
+    while (*cursor && !isspace((unsigned char)*cursor))
+        ++cursor;
+    length = (size_t)(cursor - token);
+    if (!length || length >= kind_size)
+        return -1;
+    memcpy(kind, token, length);
+    kind[length] = '\0';
+    if (!*cursor)
+        return -1;
+    while (*cursor && isspace((unsigned char)*cursor))
+        ++cursor;
+    if (*format == 3) {
+        unsigned long value;
+
+        errno = 0;
+        value = strtoul(cursor, &number_end, 10);
+        if (errno == ERANGE || number_end == cursor || value == 0 ||
+            value > UINT_MAX || (*number_end && !isspace((unsigned char)*number_end)))
+            return -1;
+        *restore_id = (unsigned int)value;
+        cursor = number_end;
+        while (*cursor && isspace((unsigned char)*cursor))
+            ++cursor;
+    }
+    errno = 0;
+    *due = strtoll(cursor, &number_end, 10);
+    if (errno == ERANGE || number_end == cursor)
+        return -1;
+    if (*number_end && !isspace((unsigned char)*number_end))
+        return -1;
+    if (!*number_end) {
+        *label_offset = (size_t)(number_end - line);
+    } else if (*format >= 2) {
+        while (*number_end && isspace((unsigned char)*number_end))
+            ++number_end;
+        *label_offset = (size_t)(number_end - line);
+    } else {
+        /* Consume exactly the format separator; preserve label whitespace. */
+        *label_offset = (size_t)(number_end + 1 - line);
+    }
+    return 0;
 }
 
 static int fsync_parent(const char *path)
@@ -145,7 +279,6 @@ static int state_load_at(struct context *ctx, long long now_ms,
 enum state_save_result {
     STATE_SAVE_FAILED = 0,
     STATE_SAVE_OK = 1,
-    /* The new file is committed, but its directory durability step failed. */
     STATE_SAVE_COMMITTED_DURABILITY_FAILED = 2
 };
 
@@ -167,9 +300,7 @@ static int state_finalize(const char *path)
         return -1;
     }
 #endif
-    if (fsync_parent(path) != 0)
-        return -1;
-    return 0;
+    return fsync_parent(path);
 }
 
 static enum state_save_result state_save_at(struct context *ctx,
@@ -215,6 +346,7 @@ static enum state_save_result state_save_at(struct context *ctx,
     }
     for (i = 0; i < LE_TIMER_MAX; ++i) {
         const struct le_timer *timer = &ctx->timers.timers[i];
+        char encoded_label[6 + LE_TIMER_LABEL_MAX * 2];
         long long due;
 
         if (timer->state == LE_TIMER_STATE_FREE)
@@ -231,9 +363,11 @@ static enum state_save_result state_save_at(struct context *ctx,
                 continue;
             due = now_epoch + (timer->due_monotonic_ms - now_ms) / 1000LL;
         }
-        if (fprintf(file, "%s %lld %s\n",
+        if (state_encode_label(encoded_label, sizeof(encoded_label),
+                               timer->label) < 0 ||
+            fprintf(file, "v3 %s %u %lld %s\n",
                     timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown",
-                    due, timer->label) < 0) {
+                    timer->id, due, encoded_label) < 0) {
             fclose(file);
             unlink(temporary);
             return STATE_SAVE_FAILED;
@@ -329,32 +463,52 @@ static int state_load_at(struct context *ctx, long long now_ms,
         long long due = 0;
         char label[LE_TIMER_LABEL_MAX];
         unsigned int id = 0;
-        int consumed = 0;
+        unsigned int restore_id = 0;
+        size_t label_offset = 0;
+        int format = 0;
 
         label[0] = '\0';
-        if (sscanf(line, "%15s %lld %n", kind, &due, &consumed) < 2)
+        if (state_parse_header(line, kind, sizeof(kind), &restore_id, &due,
+                               &label_offset, &format) < 0)
             continue;
-        if (consumed > 0) {
+        if (label_offset < sizeof(line)) {
             size_t length;
 
-            strncpy(label, line + consumed, sizeof(label) - 1);
-            label[sizeof(label) - 1] = '\0';
-            length = strlen(label);
-            while (length && (label[length - 1] == '\n' ||
-                              label[length - 1] == '\r'))
-                label[--length] = '\0';
+            length = strlen(line + label_offset);
+            while (length && (line[label_offset + length - 1] == '\n' ||
+                              line[label_offset + length - 1] == '\r'))
+                line[label_offset + --length] = '\0';
+            if (format >= 2) {
+                if (state_decode_label(line + label_offset, label,
+                                       sizeof(label)) < 0)
+                    continue;
+            } else {
+                if (length >= sizeof(label))
+                    continue;
+                memcpy(label, line + label_offset, length + 1);
+            }
         }
 
         if (!strcmp(kind, "alarm")) {
-            if (le_timer_restore_alarm(&ctx->timers, due, label, now_epoch,
-                                       now_ms, &id) != LE_TIMER_OK)
+            if ((format >= 3
+                     ? le_timer_restore_alarm_with_id(&ctx->timers, restore_id,
+                                                      due, label, now_epoch,
+                                                      now_ms, &id)
+                     : le_timer_restore_alarm(&ctx->timers, due, label,
+                                              now_epoch, now_ms, &id)) !=
+                LE_TIMER_OK)
                 ++ctx->timers.missed;
         } else if (!strcmp(kind, "countdown")) {
             /* Restored against the wall clock it was saved with, then handed
                back to the monotonic clock it runs on. The restore API retains
                a slightly overdue record so the scheduler can apply its grace. */
-            if (le_timer_restore_countdown(&ctx->timers, due, label, now_epoch,
-                                          now_ms, &id) != LE_TIMER_OK)
+            if ((format >= 3
+                     ? le_timer_restore_countdown_with_id(
+                           &ctx->timers, restore_id, due, label, now_epoch,
+                           now_ms, &id)
+                     : le_timer_restore_countdown(&ctx->timers, due, label,
+                                                  now_epoch, now_ms, &id)) !=
+                LE_TIMER_OK)
                 ++ctx->timers.missed;
         }
     }
@@ -375,6 +529,19 @@ static int state_load(struct context *ctx)
     if (result)
         ctx->state_loaded = 1;
     return result;
+}
+
+static long long timer_poll_timeout(const struct context *ctx,
+                                    long long now_ms, long long now_epoch)
+{
+    long long timeout = le_timer_poll_timeout_ms(&ctx->timers, now_ms,
+                                                 now_epoch, POLL_CAP_MS);
+
+    /* NTP can make the wall clock valid while poll is sleeping. Retry the
+       deferred restore promptly instead of waiting for the full cap. */
+    if (!ctx->state_loaded && timeout > RESTORE_RETRY_MS)
+        timeout = RESTORE_RETRY_MS;
+    return timeout;
 }
 
 /* -------------------------------- ringing ------------------------------- */
@@ -415,9 +582,8 @@ static void ring_tick(struct context *ctx, long long now_ms)
     if (now_ms < ctx->next_ring_ms)
         return;
     audio_cue(ctx);
-    /* audio_cue may block on the adapter socket. Do not schedule from the
-       timestamp captured before that wait, or the next cue and any save in
-       this cycle will use a stale monotonic snapshot. */
+    /* audio_cue may block on the adapter socket. Refresh the timestamp so the
+       next cue and any save in this cycle use the current monotonic time. */
     now_ms = monotonic_ms();
     ctx->next_ring_ms = now_ms + RING_PERIOD_MS;
 }
@@ -496,6 +662,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
     char data[LE_ADAPTER_MSG_MAX];
     char label[LE_TIMER_LABEL_MAX];
     int value = 0;
+    long long wide_value = 0;
     int label_result = 0;
 
     label[0] = '\0';
@@ -515,16 +682,16 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         unsigned int created = 0;
         int result;
 
-        if (!args || json_get_int(args, "seconds", &value) < 1)
+        if (!args || json_get_int64(args, "seconds", &wide_value) != 1)
             return le_adapter_respond_err(out, size, id,
                                           "add requires seconds");
-        result = le_timer_add_countdown(&ctx->timers, value, label,
+        result = le_timer_add_countdown(&ctx->timers, wide_value, label,
                                         monotonic_ms(), &created);
         if (result != LE_TIMER_OK)
             return le_adapter_respond_err(out, size, id, add_error(result));
         ctx->dirty = 1;
         snprintf(data, sizeof(data), "{\"id\":%u}", created);
-        le_log_info("timerd: countdown %u for %d s", created, value);
+        le_log_info("timerd: countdown %u for %lld s", created, wide_value);
         return le_adapter_respond_ok(out, size, id, data);
     }
 
@@ -574,6 +741,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         long long now_ms = monotonic_ms();
         long long now_epoch = wall_epoch();
         long long soonest = -1;
+        unsigned int soonest_id = 0;
         char label[LE_TIMER_LABEL_MAX * 2] = "";
         int count = 0;
         size_t i;
@@ -593,24 +761,58 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
                 remaining = 0;
             if (soonest < 0 || remaining < soonest) {
                 soonest = remaining;
+                soonest_id = timer->id;
                 json_escape(label, sizeof(label), timer->label);
             }
         }
         snprintf(data, sizeof(data),
-                 "{\"count\":%d,\"seconds_remaining\":%lld,"
+                 "{\"count\":%d,\"id\":%u,\"seconds_remaining\":%lld,"
                  "\"label\":\"%s\"}",
-                 count, soonest < 0 ? 0 : soonest, label);
+                 count, soonest_id, soonest < 0 ? 0 : soonest, label);
         return le_adapter_respond_ok(out, size, id, data);
     }
 
     if (!strcmp(cmd, "cancel")) {
-        if (!args || json_get_int(args, "id", &value) < 1)
-            return le_adapter_respond_err(out, size, id,
-                                          "cancel requires id");
-        if (le_timer_cancel(&ctx->timers, (unsigned int)value) != LE_TIMER_OK)
-            return le_adapter_respond_err(out, size, id, "no such timer");
-        ctx->dirty = 1;
-        return le_adapter_respond_ok(out, size, id, "{}");
+        size_t i;
+        int matches = 0;
+        unsigned int matched = 0;
+        unsigned int timer_id = 0;
+        int id_result = args ? json_get_uint(args, "id", &timer_id) : 0;
+
+        if (id_result < 0 || (id_result > 0 && timer_id == 0))
+            return le_adapter_respond_err(
+                out, size, id, "cancel id must be a positive integer");
+        if (id_result > 0) {
+            if (le_timer_cancel_at(&ctx->timers, timer_id, monotonic_ms(),
+                                   wall_epoch()) !=
+                LE_TIMER_OK)
+                return le_adapter_respond_err(out, size, id,
+                                              "no such timer");
+            ctx->dirty = 1;
+            return le_adapter_respond_ok(out, size, id, "{}");
+        }
+        if (label_result == 1 && label[0]) {
+            for (i = 0; i < LE_TIMER_MAX; ++i) {
+                if (ctx->timers.timers[i].state != LE_TIMER_STATE_PENDING ||
+                    strcmp(ctx->timers.timers[i].label, label))
+                    continue;
+                ++matches;
+                matched = ctx->timers.timers[i].id;
+            }
+            if (matches != 1)
+                return le_adapter_respond_err(
+                    out, size, id,
+                    matches > 1 ? "timer label is ambiguous"
+                                : "no such timer");
+            if (le_timer_cancel_at(&ctx->timers, matched, monotonic_ms(),
+                                   wall_epoch()) != LE_TIMER_OK)
+                return le_adapter_respond_err(out, size, id,
+                                              "no such timer");
+            ctx->dirty = 1;
+            return le_adapter_respond_ok(out, size, id, "{}");
+        }
+        return le_adapter_respond_err(out, size, id,
+                                      "cancel requires id or label");
     }
 
     /* What "Alexa, stop" reaches. Silences every ring and leaves pending
@@ -785,8 +987,7 @@ int main(int argc, char **argv)
             ++nfds;
         }
 
-        timeout = le_timer_poll_timeout_ms(&ctx.timers, now_ms, now_epoch,
-                                           POLL_CAP_MS);
+        timeout = timer_poll_timeout(&ctx, now_ms, now_epoch);
         if (le_timer_ringing_count(&ctx.timers) > 0) {
             long long until_ring = ctx.next_ring_ms - now_ms;
 

@@ -1,6 +1,7 @@
 #include "timer_intent.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -73,6 +74,44 @@ static const char *find_word(const char *haystack, const char *word)
     return hit ? hit + 1 : NULL;
 }
 
+static int starts_word(const char *text, const char *word)
+{
+    size_t length = strlen(word);
+
+    return !strncmp(text, word, length) &&
+           (text[length] == '\0' || text[length] == ' ');
+}
+
+static const char *after_word(const char *text, const char *word)
+{
+    if (!starts_word(text, word))
+        return text;
+    text += strlen(word);
+    while (*text == ' ')
+        ++text;
+    return text;
+}
+
+static const char *first_cancel_verb(const char *text, size_t *length)
+{
+    static const char *const VERBS[] = {"cancel", "delete", "remove", "clear"};
+    const char *verb = NULL;
+    size_t i;
+
+    if (length)
+        *length = 0;
+    for (i = 0; i < sizeof(VERBS) / sizeof(VERBS[0]); ++i) {
+        const char *hit = find_word(text, VERBS[i]);
+
+        if (hit && (!verb || hit < verb)) {
+            verb = hit;
+            if (length)
+                *length = strlen(VERBS[i]);
+        }
+    }
+    return verb;
+}
+
 /*
  * Read a count immediately before `unit`. Handles digits, single words, and
  * the two-word forms speech produces ("twenty five"). Returns -1 when there
@@ -106,8 +145,9 @@ static int number_before(const char *text, const char *unit)
         length = (size_t)(end - cursor);
         if (length >= sizeof(words[0]))
             break;
-        memcpy(words[count], cursor, length);
-        words[count][length] = '\0';
+        if (snprintf(words[count], sizeof(words[count]), "%.*s",
+                     (int)length, cursor) < 0)
+            break;
         ++count;
         if (cursor > text)
             --cursor;
@@ -202,6 +242,128 @@ static long long parse_duration(const char *text, int *found)
     return total;
 }
 
+static int copy_label(char *out, size_t size, const char *start, size_t length)
+{
+    int written;
+
+    if (!out || !size || !start || length > (size_t)INT_MAX)
+        return 0;
+    while (length && start[length - 1] == ' ')
+        --length;
+    if (!length || length >= size)
+        return 0;
+    written = snprintf(out, size, "%.*s", (int)length, start);
+    if (written < 0 || (size_t)written >= size) {
+        out[0] = '\0';
+        return 0;
+    }
+    /* A duration is not a name: "ten minute" is when, not a label. */
+    if (strstr(out, "minute") || strstr(out, "hour") ||
+        strstr(out, "second")) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+static int is_number_token(const char *start, size_t length)
+{
+    size_t i;
+
+    if (!start || !length)
+        return 0;
+    if (isdigit((unsigned char)start[0])) {
+        for (i = 1; i < length; ++i)
+            if (!isdigit((unsigned char)start[i]))
+                return 0;
+        return 1;
+    }
+    for (i = 0; i < sizeof(WORD_NUMBERS) / sizeof(WORD_NUMBERS[0]); ++i)
+        if (strlen(WORD_NUMBERS[i].word) == length &&
+            !strncmp(start, WORD_NUMBERS[i].word, length))
+            return 1;
+    return 0;
+}
+
+static int span_is_number_sequence(const char *start, size_t length)
+{
+    size_t offset = 0;
+    int found = 0;
+
+    while (offset < length) {
+        size_t token_length;
+
+        while (offset < length && start[offset] == ' ')
+            ++offset;
+        if (offset >= length)
+            break;
+        token_length = offset;
+        while (token_length < length && start[token_length] != ' ')
+            ++token_length;
+        if (token_length == offset ||
+            !is_number_token(start + offset, token_length - offset))
+            return 0;
+        found = 1;
+        offset = token_length;
+    }
+    return found;
+}
+
+static int cancellation_count(const char *text)
+{
+    int count;
+
+    count = number_before(text, "timers");
+    if (count < 0)
+        count = number_before(text, "timer");
+    if (count < 0)
+        count = number_before(text, "alarms");
+    if (count < 0)
+        count = number_before(text, "alarm");
+    return count;
+}
+
+static int span_has_word(const char *start, size_t length, const char *word)
+{
+    size_t word_length = strlen(word);
+    size_t offset = 0;
+
+    while (offset < length) {
+        size_t token_length;
+
+        while (offset < length && start[offset] == ' ')
+            ++offset;
+        token_length = offset;
+        while (token_length < length && start[token_length] != ' ')
+            ++token_length;
+        if (token_length - offset == word_length &&
+            !strncmp(start + offset, word, word_length))
+            return 1;
+        offset = token_length;
+    }
+    return 0;
+}
+
+static int copy_cancel_label(char *out, size_t size, const char *start,
+                             size_t length)
+{
+    if (!out || !size || !start || !length)
+        return 0;
+    /* Quantities and duration units select a timer; they are never stored
+       names. Reject them before copying transcript bytes into the label. */
+    if (span_is_number_sequence(start, length) ||
+        span_has_word(start, length, "minute") ||
+        span_has_word(start, length, "minutes") ||
+        span_has_word(start, length, "hour") ||
+        span_has_word(start, length, "hours") ||
+        span_has_word(start, length, "second") ||
+        span_has_word(start, length, "seconds")) {
+        out[0] = '\0';
+        return 0;
+    }
+    return copy_label(out, size, start, length);
+}
+
 /*
  * The trailing "for X" of "set a timer for the pasta". Only taken when it is
  * not the duration, so "for ten minutes" never becomes a label.
@@ -224,21 +386,175 @@ static void extract_label(const char *text, char *out, size_t size)
            names the pasta and not the duration after it. */
         stop = strstr(hit, " for ");
         length = stop ? (size_t)(stop - hit) : strlen(hit);
-        while (length && hit[length - 1] == ' ')
-            --length;
-        if (!length || length >= size)
-            continue;
-        memcpy(out, hit, length);
-        out[length] = '\0';
-        /* A duration is not a name: "for the next ten minutes" is not a
-           label, it is when. */
-        if (strstr(out, "minute") || strstr(out, "hour") ||
-            strstr(out, "second")) {
-            out[0] = '\0';
-            continue;
-        }
+        if (copy_label(out, size, hit, length))
+            return;
+    }
+}
+
+static void extract_cancel_label(const char *text, char *out, size_t size)
+{
+    static const char *const NOUNS[] = {"timer", "timers", "alarm", "alarms"};
+    const char *verb;
+    const char *cancel;
+    const char *noun = NULL;
+    const char *marker;
+    const char *start;
+    const char *stop;
+    size_t verb_length;
+    size_t length;
+    size_t i;
+
+    out[0] = '\0';
+    verb = first_cancel_verb(text, &verb_length);
+    if (!verb)
+        return;
+    cancel = verb + verb_length;
+    while (*cancel == ' ')
+        ++cancel;
+
+    /* "cancel timer called pasta" and "delete the timer for the pasta". */
+    marker = strstr(cancel, " called ");
+    if (!marker)
+        marker = strstr(cancel, " for the ");
+    if (!marker)
+        marker = strstr(cancel, " for my ");
+    if (marker) {
+        if (!strncmp(marker, " called ", strlen(" called ")))
+            start = marker + strlen(" called ");
+        else if (!strncmp(marker, " for the ", strlen(" for the ")))
+            start = marker + strlen(" for the ");
+        else
+            start = marker + strlen(" for my ");
+        stop = strstr(start, " for ");
+        length = stop ? (size_t)(stop - start) : strlen(start);
+        (void)copy_cancel_label(out, size, start, length);
         return;
     }
+
+    /* "cancel the pasta timer" / "remove the kitchen alarm". */
+    for (i = 0; i < sizeof(NOUNS) / sizeof(NOUNS[0]); ++i) {
+        const char *hit = find_word(cancel, NOUNS[i]);
+
+        if (hit && (!noun || hit > noun))
+            noun = hit;
+    }
+    if (!noun)
+        return;
+    start = cancel;
+    if (!strncmp(start, "the ", 4))
+        start += 4;
+    else if (!strncmp(start, "my ", 3))
+        start += 3;
+    else if (!strncmp(start, "a ", 2))
+        start += 2;
+    else if (!strncmp(start, "an ", 3))
+        start += 3;
+    length = (size_t)(noun - start);
+    if (copy_cancel_label(out, size, start, length) && !strcmp(out, "next"))
+        /* "cancel my next timer" uses the daemon's soonest-timer selector;
+           the explicit "called next" form above remains a real label. */
+        out[0] = '\0';
+}
+
+static size_t timer_noun_length(const char *text)
+{
+    static const char *const NOUNS[] = {"timer", "timers", "alarm", "alarms"};
+    size_t i;
+
+    for (i = 0; i < sizeof(NOUNS) / sizeof(NOUNS[0]); ++i)
+        if (starts_word(text, NOUNS[i]))
+            return strlen(NOUNS[i]);
+    return 0;
+}
+
+static const char *next_timer_noun(const char *text)
+{
+    while (text && *text) {
+        if (timer_noun_length(text))
+            return text;
+        ++text;
+    }
+    return NULL;
+}
+
+static const char *skip_timer_determiner(const char *text)
+{
+    static const char *const DETERMINERS[] = {
+        "the", "my", "these", "those"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(DETERMINERS) / sizeof(DETERMINERS[0]); ++i)
+        if (starts_word(text, DETERMINERS[i]))
+            return after_word(text, DETERMINERS[i]);
+    return text;
+}
+
+static int universal_noun_phrase(const char *text, const char *candidate)
+{
+    const char *first_noun = next_timer_noun(text);
+    const char *tail;
+    size_t noun_length;
+
+    /* A noun in label text must not turn the request into cancel-all. */
+    noun_length = timer_noun_length(candidate);
+    if (!noun_length || first_noun != candidate)
+        return 0;
+    tail = candidate + noun_length;
+    while (*tail == ' ')
+        ++tail;
+
+    /* "all timers and alarms" is one coordinated universal noun phrase. */
+    if (starts_word(tail, "and")) {
+        tail = after_word(tail, "and");
+        tail = skip_timer_determiner(tail);
+        noun_length = timer_noun_length(tail);
+        if (noun_length) {
+            tail += noun_length;
+            while (*tail == ' ')
+                ++tail;
+            return !next_timer_noun(tail);
+        }
+    }
+
+    /* Another noun without coordination belongs to label text, as in
+       "cancel the all timers timer" or "cancel the timer called all timers". */
+    return !next_timer_noun(tail);
+}
+
+static int has_universal_timer_noun(const char *text)
+{
+    static const char *const QUANTIFIERS[] = {"all", "every", "each"};
+    size_t i;
+
+    for (i = 0; i < sizeof(QUANTIFIERS) / sizeof(QUANTIFIERS[0]); ++i) {
+        const char *cursor = text;
+        const char *quantifier;
+
+        while ((quantifier = find_word(cursor, QUANTIFIERS[i]))) {
+            const char *candidate = quantifier + strlen(QUANTIFIERS[i]);
+
+            while (*candidate == ' ')
+                ++candidate;
+            /* "every one of my timers" and "every single timer" have
+               optional words between the quantifier and the noun. */
+            if ((!strcmp(QUANTIFIERS[i], "every") ||
+                 !strcmp(QUANTIFIERS[i], "each")) &&
+                starts_word(candidate, "single"))
+                candidate = after_word(candidate, "single");
+            if ((!strcmp(QUANTIFIERS[i], "every") ||
+                 !strcmp(QUANTIFIERS[i], "each")) &&
+                starts_word(candidate, "one"))
+                candidate = after_word(candidate, "one");
+            if (starts_word(candidate, "of"))
+                candidate = after_word(candidate, "of");
+            candidate = skip_timer_determiner(candidate);
+            if (universal_noun_phrase(text, candidate))
+                return 1;
+            cursor = quantifier + strlen(QUANTIFIERS[i]);
+        }
+    }
+    return 0;
 }
 
 static int mentions_timer(const char *text)
@@ -253,10 +569,23 @@ static int negates_setting(const char *text)
            (has_word(text, "don") && has_word(text, "t"));
 }
 
+static int negates_cancellation(const char *text, const char *verb)
+{
+    const char *not = find_word(text, "not");
+    const char *never = find_word(text, "never");
+    const char *don = find_word(text, "don");
+    const char *t = find_word(text, "t");
+
+    return (not && not < verb) || (never && never < verb) ||
+           (don && t && don < verb && t < verb);
+}
+
 enum le_timer_intent_kind le_timer_intent_parse(
     const char *transcript, struct le_timer_intent *intent)
 {
     char text[NORMAL_MAX];
+    const char *cancel_verb;
+    size_t cancel_verb_length;
     int found = 0;
     long long seconds;
 
@@ -270,7 +599,6 @@ enum le_timer_intent_kind le_timer_intent_parse(
     /* Silence first: while something is ringing this is the only thing
        anyone is trying to say, and it is the shortest phrasing. */
     if (has_word(text, "stop") || has_word(text, "dismiss") ||
-        has_word(text, "snooze") ||
         (has_word(text, "shut") && has_word(text, "up")) ||
         (has_word(text, "turn") && has_word(text, "off") &&
          mentions_timer(text))) {
@@ -281,9 +609,20 @@ enum le_timer_intent_kind le_timer_intent_parse(
     if (!mentions_timer(text))
         return LE_TIMER_INTENT_NONE;
 
-    if (has_word(text, "cancel") || has_word(text, "delete") ||
-        has_word(text, "remove") || has_word(text, "clear")) {
+    cancel_verb = first_cancel_verb(text, &cancel_verb_length);
+    if (cancel_verb) {
+        /* A negated cancellation is not an instruction to mutate the
+           schedule. Check this before extracting labels or universal
+           quantifiers, because both paths can issue destructive commands. */
+        if (negates_cancellation(text, cancel_verb))
+            return LE_TIMER_INTENT_NONE;
         intent->kind = LE_TIMER_INTENT_CANCEL;
+        cancel_verb = cancel_verb + cancel_verb_length;
+        intent->cancel_count = cancellation_count(text);
+        intent->cancel_all = has_universal_timer_noun(
+            cancel_verb);
+        if (!intent->cancel_all)
+            extract_cancel_label(text, intent->label, sizeof(intent->label));
         return intent->kind;
     }
 
@@ -329,6 +668,13 @@ int le_timer_intent_say_duration(long long seconds, char *out, size_t size)
         return 0;
     if (seconds <= 0)
         return snprintf(out, size, "no time");
+    if (hours && minutes && rest)
+        return snprintf(out, size, "%lld hour%s, %lld minute%s and %lld "
+                        "second%s", hours, hours == 1 ? "" : "s", minutes,
+                        minutes == 1 ? "" : "s", rest, rest == 1 ? "" : "s");
+    if (hours && rest)
+        return snprintf(out, size, "%lld hour%s and %lld second%s", hours,
+                        hours == 1 ? "" : "s", rest, rest == 1 ? "" : "s");
     if (hours && minutes)
         return snprintf(out, size, "%lld hour%s and %lld minute%s", hours,
                         hours == 1 ? "" : "s", minutes,
@@ -364,7 +710,9 @@ int le_timer_intent_speech(const struct le_timer_intent *intent, int count,
                             duration, intent->label);
         return snprintf(out, size, "%s, starting now.", duration);
     case LE_TIMER_INTENT_CANCEL:
-        if (count <= 0)
+        if (count < 0)
+            return snprintf(out, size, "Which timer should I cancel?");
+        if (count == 0)
             return snprintf(out, size, "There are no timers to cancel.");
         if (count == 1)
             return snprintf(out, size, "Timer cancelled.");

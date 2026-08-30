@@ -182,12 +182,34 @@ $(BUILD)/test-timer-schedule: tests/test_timer_schedule.c \
 	@mkdir -p $(BUILD)
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
+$(BUILD)/test-timer-json: tests/test_timer_json.c \
+	src/backend_linux.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_TIMER_JSON_TEST $(CSTD) $(WARN) \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-backend-mock-timers: tests/test_backend_mock_timers.c \
+	src/backend_mock.c src/config_store.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_DEV_CONTROLS -DLE_MOCK_TESTING $(CSTD) $(WARN) \
+		-Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $^ -o $@
+
 $(BUILD)/test-timer-persistence: tests/test_timer_persistence.c \
-		src/adapter/timer_schedule.c src/adapter/adapter_client.c \
-		src/adapter/adapter_server.c src/json.c src/log.c
+	src/adapter/timerd.c src/adapter/timer_schedule.c \
+	src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -ffunction-sections -fdata-sections \
-		-Wl,--gc-sections -Isrc -Isrc/adapter $^ -o $@
+		-Wl,--gc-sections -Isrc -Isrc/adapter tests/test_timer_persistence.c \
+		src/adapter/timer_schedule.c src/adapter/adapter_client.c \
+		src/adapter/adapter_server.c src/json.c src/log.c -o $@
+
+$(BUILD)/test-backend-linux-timers: tests/test_backend_linux_timers.c \
+	src/json.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) \
+		$(WARN) -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-gateway-probe: tests/test_gateway_probe.c \
 		src/adapter/gateway_probe.c

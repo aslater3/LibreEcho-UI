@@ -3,7 +3,7 @@ set -eu
 PORT=${LIBREECHO_TEST_PORT:-18082}
 URL="http://127.0.0.1:$PORT"
 CFG=./build/test-suite-config.json
-rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
+rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
 python3 tests/test_github_link_contract.py
@@ -29,6 +29,7 @@ make build/test-backend-linux-wifi-emission build/test-thermal-zone-selection bu
 python3 tests/test_networkd_health_integration.py
 python3 tests/test_backend_linux_wifi_contract.py
 sh tests/test_network_liveness_contract.sh
+sh tests/test_init_service_control.sh
 sh tests/test_bluetooth_pairing_contract.sh
 sh tests/test_bluetooth_pairing_code_ui.sh
 sh tests/test_bluetooth_io_capability_contract.sh
@@ -51,6 +52,9 @@ make build/test-sdp-wire-format
 make build/test-avdtp-wire-format
 ./build/test-avdtp-wire-format
 sh tests/test_network_scan_contract.sh
+sh tests/test_setup_account_first.sh
+sh tests/test_setup_optional_adapters.sh
+sh tests/test_login_brand_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 make build/test-audiod-review build/test-led-night-review build/test-wake-led-profile
@@ -87,6 +91,8 @@ python3 tests/test_web_ui_behaviour_contract.py
 node tests/test_kernel_log_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
+node tests/test_timers_ui.js
+LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -170,6 +176,12 @@ make build/test-timer-intent
 ./build/test-timer-intent
 make build/test-timer-schedule
 ./build/test-timer-schedule
+make build/test-timer-json
+./build/test-timer-json
+make build/test-backend-linux-timers
+./build/test-backend-linux-timers
+make build/test-backend-mock-timers
+./build/test-backend-mock-timers
 make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
 ./build/test-timer-persistence
 sh tests/test_timerd.sh
@@ -195,6 +207,7 @@ sh tests/test_memory.sh "$pid"
 kill "$pid"
 wait "$pid" 2>/dev/null || true
 pid=0
+sh tests/test_timers_linux_validation.sh
 ./tools/create-user.sh test-user test-password-123 >./build/test-users
 chmod 600 ./build/test-users
 ./build/libreecho-web --backend mock --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --users-file ./build/test-users >./build/test-users.log 2>&1 &
@@ -205,7 +218,7 @@ kill "$pid"
 wait "$pid" 2>/dev/null || true
 pid=0
 printf '{}\n' >./build/bootstrap-config.json
-rm -f ./build/bootstrap-users ./build/test-bootstrap.log
+rm -f ./build/bootstrap-users ./build/test-bootstrap.log ./build/bootstrap-config.json.setup-complete
 ./build/libreecho-web --backend mock --config ./build/bootstrap-config.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --users-file ./build/bootstrap-users >./build/test-bootstrap.log 2>&1 &
 pid=$!
 sleep 1
@@ -251,7 +264,21 @@ last_sync_epoch=1700000000
 config_source=image
 servers=time.cloudflare.com,time.nist.gov
 EOF
+cat >./build/test-vendor-import.status <<'EOF'
+state=ready
+verification=hash-pinned
+source_partition=system_a
+source_layout=etc/firmware
+force_requested=0
+error=none
+EOF
+mkdir -p ./build/test-vendor-config
+rm -f ./build/test-vendor-config/vendor-import-force-next-boot
+: >./build/test-wlan0
 LIBREECHO_TIME_STATUS=./build/test-time.status \
+LIBREECHO_VENDOR_STATUS_PATH=./build/test-vendor-import.status \
+LIBREECHO_VENDOR_FORCE_MARKER=./build/test-vendor-config/vendor-import-force-next-boot \
+LIBREECHO_WLAN0_PATH=./build/test-wlan0 \
 ./build/libreecho-web --backend linux --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" >./build/test-linux.log 2>&1 &
 pid=$!
 sleep 1
@@ -262,6 +289,29 @@ code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/confi
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export_linux.sh
+curl -fsS "$URL/api/v1/setup" | jq -e \
+    '.data.vendor_firmware.state == "ready" and
+     .data.vendor_firmware.verification == "hash-pinned" and
+     .data.vendor_firmware.source_layout == "etc/firmware" and
+     .data.vendor_firmware.force_next_boot == false and
+     .data.wake_word == "LibreEcho" and
+     .data.wlan0_registered == true' >/dev/null
+mv ./build/test-vendor-import.status ./build/test-vendor-import.status.saved
+curl -fsS "$URL/api/v1/setup" | jq -e \
+    '.data.vendor_firmware.state == "unavailable" and
+     .data.wlan0_registered == true and
+     .data.wake_word == "LibreEcho"' >/dev/null
+mv ./build/test-vendor-import.status.saved ./build/test-vendor-import.status
+CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
+curl -fsS -X POST "$URL/api/v1/setup/vendor-import-force-next-boot" \
+    -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"confirm":"force-unverified-owner-local-import"}' | jq -e \
+    '.ok and .data.force_next_boot == true and
+     .data.verification == "forced-unverified" and
+     .data.reboot_required == true' >/dev/null
+[ "$(cat ./build/test-vendor-config/vendor-import-force-next-boot)" = \
+  "force-unverified-owner-local-import-v1" ]
+[ "$(stat -c '%a' ./build/test-vendor-config/vendor-import-force-next-boot)" = 600 ]
 curl -fsS "$URL/api/v1/system" | jq -e \
     '.ok and .data.ntp == true and .data.ntp_state == "synchronized" and
      .data.clock_source == "ntp" and .data.rtc_available == true and
