@@ -10,13 +10,11 @@ docs = Path('docs/API.md').read_text()
 required = [
     'User=libreecho',
     'Group=libreecho',
-    'StateDirectory=libreecho',
-    'StateDirectoryMode=0700',
-    'ExecStartPre=/bin/mkdir -p /var/lib/libreecho/config /var/lib/libreecho/secrets',
-    'Environment=LIBREECHO_DATA_ROOT=/var/lib/libreecho',
-    '--config /var/lib/libreecho/config/web-config.json',
-    '--users-file /var/lib/libreecho/config/users',
-    'ReadWritePaths=/var/lib/libreecho /run/libreecho',
+    'ExecStartPre=+/usr/bin/install -d -o libreecho -g libreecho -m 0700 /data/libreecho /data/libreecho/config /data/libreecho/secrets',
+    'Environment=LIBREECHO_DATA_ROOT=/data/libreecho',
+    '--config /data/libreecho/config/web-config.json',
+    '--users-file /data/libreecho/config/users',
+    'ReadWritePaths=/data/libreecho /run/libreecho',
     'CapabilityBoundingSet=CAP_SYS_BOOT',
     'AmbientCapabilities=CAP_SYS_BOOT',
     'NoNewPrivileges=true',
@@ -25,6 +23,7 @@ required = [
 for value in required:
     assert value in service, f'missing hardened factory-reset service contract: {value}'
 assert '--config /etc/libreecho/web-config.json' not in service
+assert '/var/lib/libreecho' not in service
 assert 'rc==LE_NOT_SUPPORTED?501:503' in api
 for route in ('/system/factory-reset', '/system/reboot', '/system/shutdown'):
     assert {'200', '403', '501', '503'} <= set(openapi['paths'][route]['post']['responses'])

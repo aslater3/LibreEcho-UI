@@ -6,18 +6,16 @@ After=network.target
 User=libreecho
 Group=libreecho
 RuntimeDirectory=libreecho
-StateDirectory=libreecho
-StateDirectoryMode=0700
-ExecStartPre=/bin/mkdir -p /var/lib/libreecho/config /var/lib/libreecho/secrets
-Environment=LIBREECHO_DATA_ROOT=/var/lib/libreecho
-ExecStart=/usr/local/sbin/libreecho-web --backend linux --config /var/lib/libreecho/config/web-config.json --web-root /usr/local/share/libreecho/web --listen 127.0.0.1:8080 --users-file /var/lib/libreecho/config/users
+ExecStartPre=+/usr/bin/install -d -o libreecho -g libreecho -m 0700 /data/libreecho /data/libreecho/config /data/libreecho/secrets
+Environment=LIBREECHO_DATA_ROOT=/data/libreecho
+ExecStart=/usr/local/sbin/libreecho-web --backend linux --config /data/libreecho/config/web-config.json --web-root /usr/local/share/libreecho/web --listen 127.0.0.1:8080 --users-file /data/libreecho/config/users
 CapabilityBoundingSet=CAP_SYS_BOOT
 AmbientCapabilities=CAP_SYS_BOOT
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/libreecho /run/libreecho
+ReadWritePaths=/data/libreecho /run/libreecho
 Restart=on-failure
 
 [Install]

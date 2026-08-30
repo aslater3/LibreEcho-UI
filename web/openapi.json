@@ -1853,7 +1853,7 @@
      "System"
     ],
     "summary": "Factory-reset device",
-    "description": "Permanently removes every file and nested directory below the configured persistent data root's config and secrets directories (the product image uses /data/libreecho; the systemd unit uses /var/lib/libreecho), including accounts, setup completion, Wi-Fi profiles and PSKs, assistant credentials, timers, and all mutable user configuration. The reset synchronizes both persistent directories and reboots. Installed feature payloads, OTA artifacts, and release identity outside those directories are preserved.",
+    "description": "Permanently removes every file and nested directory below the configured persistent data root's config and secrets directories (/data/libreecho on the product image and checked-in systemd service), including accounts, setup completion, Wi-Fi profiles and PSKs, assistant credentials, timers, and all mutable user configuration. The reset synchronizes both persistent directories and reboots. Installed feature payloads, OTA artifacts, and release identity outside those directories are preserved.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
