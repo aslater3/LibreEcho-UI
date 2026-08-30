@@ -17,13 +17,13 @@ BINARY = ROOT / "build/test-networkd-health"
 class FakeWpa:
     def __init__(self, path: Path, fail_reassociate: bool = False,
                  association_fails: bool = False, scan_results: str = "",
-                 fail_command: str = ""):
+                 fail_command: str = "", initial_connected: bool = True):
         self.path = path
         self.fail_reassociate = fail_reassociate
         self.association_fails = association_fails
         self.scan_results = scan_results
         self.fail_command = fail_command
-        self.connected = True
+        self.connected = initial_connected
         self.network_id = 0
         self.next_network_id = 1
         self.monitor_addr = None
@@ -57,13 +57,17 @@ class FakeWpa:
                 response = "OK\n"
             elif command == "STATUS":
                 state = "COMPLETED" if self.connected else "DISCONNECTED"
-                response = (f"wpa_state={state}\nssid=IntegrationNet\n"
-                            f"id={self.network_id}\n")
+                response = f"wpa_state={state}\nssid=IntegrationNet\n"
+                if self.connected:
+                    response += f"id={self.network_id}\n"
             elif command == "SIGNAL_POLL":
                 response = "RSSI=-45\n"
             elif command == "ADD_NETWORK":
                 response = f"{self.next_network_id}\n"
                 self.next_network_id += 1
+            elif command == "LIST_NETWORKS":
+                current = "\t[CURRENT]" if self.connected else ""
+                response = f"network id / ssid / bssid / flags\n0\tIntegrationNet\tany{current}\n"
             elif command == "DISCONNECT":
                 self.connected = False
                 response = "OK\n"
@@ -153,7 +157,8 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
                  fail_interface=None, invalid_reboot_path=False,
                  barrier_at=None, preexisting_reboot=None,
                  preexisting_guard=False, reboot_fifo=False,
-                 association_fails=False, scan_results="", fail_command=""):
+                 association_fails=False, scan_results="", fail_command="",
+                 initial_connected=True):
     wpa_path = directory / "wpa.sock"
     adapter_path = directory / "network.sock"
     action_log = directory / "actions.log"
@@ -168,7 +173,8 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
         guard_path.write_text("network-reboot-v1\n")
     wpa = FakeWpa(wpa_path, fail_reassociate=fail_reassociate,
                   association_fails=association_fails,
-                  scan_results=scan_results, fail_command=fail_command)
+                  scan_results=scan_results, fail_command=fail_command,
+                  initial_connected=initial_connected)
     env = os.environ.copy()
     env.update({
         "LIBREECHO_NETWORKD_TEST_FIXTURE": "1",
@@ -401,6 +407,26 @@ def test_preassociation_failure_restores_working_profile():
             stop_daemon(process, wpa)
 
 
+def test_preassociation_failure_does_not_restore_when_disconnected():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-disconnected-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", fail_command="SET_NETWORK 1 ssid",
+            initial_connected=False)
+        try:
+            result = adapter_request(
+                adapter, 43, "connect",
+                {"ssid": "RejectedNet", "psk": "", "security": "open"})
+            assert result["ok"] is False, result
+            assert "SSID rejected" in result["error"]
+            assert "REMOVE_NETWORK 1" in wpa.commands
+            assert "SELECT_NETWORK 0" not in wpa.commands
+            assert "SAVE_CONFIG" not in wpa.commands
+            assert wpa.connected is False
+        finally:
+            stop_daemon(process, wpa)
+
+
 def test_scan_deduplicates_ssid_and_keeps_strongest_bssid():
     rows = (
         "bssid / frequency / signal level / flags / ssid\n"
@@ -431,6 +457,7 @@ def main():
     test_action_failures_remain_bounded()
     test_pending_association_keeps_daemon_responsive_and_restores_profile()
     test_preassociation_failure_restores_working_profile()
+    test_preassociation_failure_does_not_restore_when_disconnected()
     test_scan_deduplicates_ssid_and_keeps_strongest_bssid()
     print("networkd event-loop recovery integration: ok")
 

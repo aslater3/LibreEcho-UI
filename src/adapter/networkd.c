@@ -2463,7 +2463,7 @@ static int wpa_quote(char *out, size_t size, const char *value)
 static int existing_network_id(struct daemon_ctx *ctx)
 {
     char reply[WPA_REPLY_MAX], *line, *next;
-    int fallback = -1, id;
+    int id;
     if (wpa_call(ctx, "LIST_NETWORKS\n", reply, sizeof(reply)) < 0)
         return -1;
     line = reply;
@@ -2474,12 +2474,10 @@ static int existing_network_id(struct daemon_ctx *ctx)
         if (sscanf(line, "%d", &id) == 1) {
             if (strstr(line, "[CURRENT]"))
                 return id;
-            if (fallback < 0)
-                fallback = id;
         }
         line = next;
     }
-    return fallback;
+    return -1;
 }
 
 static void remove_network_profile(struct daemon_ctx *ctx, int id)
