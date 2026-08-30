@@ -126,7 +126,7 @@ async function power(path,name){
     means the request was refused. */
  let refused=null;
  const fired=api(`/system/${path}`,{method:'POST',body:'{}',headers:{'X-LibreEcho-Confirm':'confirm-device-action'}})
-   .catch(e=>{if(/^Request failed \((4|5)\d\d\)$/.test(e.message)||/device action failed|refused|not permitted|confirm/i.test(e.message))refused=e});
+   .catch(e=>{if(/^Request failed \((4|5)\d\d\)$/.test(e.message)||/device action|refused|not permitted|confirm/i.test(e.message))refused=e});
  await Promise.race([fired,new Promise(r=>setTimeout(r,1500))]);
  if(refused){toast(refused.message,true);return}
  await waitForDevice(estimate,'Restarting your LibreEcho');}

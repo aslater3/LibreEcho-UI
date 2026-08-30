@@ -5,6 +5,7 @@ from pathlib import Path
 source = Path('src/backend_linux.c').read_text()
 assert '"/etc/init.d/libreecho-btd.init"' in source
 assert '"/etc/init.d/libreecho-timerd.init"' in source
+assert '"/etc/init.d/libreecho-agentd.init"' in source
 start = source.index('static int factory_reset(')
 end = source.index('static const struct le_backend_ops', start)
 body = source[start:end]
