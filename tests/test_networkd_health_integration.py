@@ -16,11 +16,13 @@ BINARY = ROOT / "build/test-networkd-health"
 
 class FakeWpa:
     def __init__(self, path: Path, fail_reassociate: bool = False,
-                 association_fails: bool = False, scan_results: str = ""):
+                 association_fails: bool = False, scan_results: str = "",
+                 fail_command: str = ""):
         self.path = path
         self.fail_reassociate = fail_reassociate
         self.association_fails = association_fails
         self.scan_results = scan_results
+        self.fail_command = fail_command
         self.connected = True
         self.network_id = 0
         self.next_network_id = 1
@@ -43,6 +45,13 @@ class FakeWpa:
                 return
             command = payload.decode("utf-8", "replace").strip()
             self.commands.append(command)
+            if self.fail_command and command.startswith(self.fail_command):
+                response = "FAIL\n"
+                try:
+                    self.sock.sendto(response.encode(), peer)
+                except OSError:
+                    pass
+                continue
             if command == "ATTACH":
                 self.monitor_addr = peer
                 response = "OK\n"
@@ -144,7 +153,7 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
                  fail_interface=None, invalid_reboot_path=False,
                  barrier_at=None, preexisting_reboot=None,
                  preexisting_guard=False, reboot_fifo=False,
-                 association_fails=False, scan_results=""):
+                 association_fails=False, scan_results="", fail_command=""):
     wpa_path = directory / "wpa.sock"
     adapter_path = directory / "network.sock"
     action_log = directory / "actions.log"
@@ -159,7 +168,7 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
         guard_path.write_text("network-reboot-v1\n")
     wpa = FakeWpa(wpa_path, fail_reassociate=fail_reassociate,
                   association_fails=association_fails,
-                  scan_results=scan_results)
+                  scan_results=scan_results, fail_command=fail_command)
     env = os.environ.copy()
     env.update({
         "LIBREECHO_NETWORKD_TEST_FIXTURE": "1",
@@ -371,6 +380,27 @@ def test_pending_association_keeps_daemon_responsive_and_restores_profile():
             stop_daemon(process, wpa)
 
 
+def test_preassociation_failure_restores_working_profile():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-preassoc-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", fail_command="SET_NETWORK 1 ssid")
+        try:
+            result = adapter_request(
+                adapter, 42, "connect",
+                {"ssid": "RejectedNet", "psk": "", "security": "open"})
+            assert result["ok"] is False, result
+            assert "SSID rejected" in result["error"]
+            assert "DISABLE_NETWORK all" in wpa.commands
+            assert "REMOVE_NETWORK 1" in wpa.commands
+            assert "SELECT_NETWORK 0" in wpa.commands
+            assert "SAVE_CONFIG" in wpa.commands
+            assert wpa.network_id == 0
+            assert wpa.connected is True
+        finally:
+            stop_daemon(process, wpa)
+
+
 def test_scan_deduplicates_ssid_and_keeps_strongest_bssid():
     rows = (
         "bssid / frequency / signal level / flags / ssid\n"
@@ -400,6 +430,7 @@ def main():
     test_non_regular_reboot_request_fails_closed_without_blocking()
     test_action_failures_remain_bounded()
     test_pending_association_keeps_daemon_responsive_and_restores_profile()
+    test_preassociation_failure_restores_working_profile()
     test_scan_deduplicates_ssid_and_keeps_strongest_bssid()
     print("networkd event-loop recovery integration: ok")
 

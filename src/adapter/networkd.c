@@ -1384,10 +1384,10 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
     if (pid == 0) {
         if (release)
             execl("/bin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
-                  "-R", (char *)NULL);
+                  "-R", "-s", "/etc/udhcpc.script", (char *)NULL);
         else
             execl("/bin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
-                  (char *)NULL);
+                  "-s", "/etc/udhcpc.script", (char *)NULL);
         _exit(127);
     }
     ctx->dhcp.active = 1;
@@ -2491,13 +2491,12 @@ static void remove_network_profile(struct daemon_ctx *ctx, int id)
     (void)wpa_ok(ctx, command, reply, sizeof(reply));
 }
 
-static void restore_previous_network(struct daemon_ctx *ctx)
+static void restore_network_profile(struct daemon_ctx *ctx, int previous,
+                                    int candidate)
 {
     char command[64], reply[WPA_REPLY_MAX];
-    int previous = ctx->association.previous_network_id;
-    int candidate = ctx->association.candidate_network_id;
-
-    remove_network_profile(ctx, candidate);
+    if (candidate >= 0)
+        remove_network_profile(ctx, candidate);
     if (previous >= 0 &&
         snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", previous) <
             (int)sizeof(command)) {
@@ -2508,6 +2507,12 @@ static void restore_previous_network(struct daemon_ctx *ctx)
         (void)wpa_ok(ctx, "DISCONNECT\n", reply, sizeof(reply));
         ctx->network_id = -1;
     }
+}
+
+static void restore_previous_network(struct daemon_ctx *ctx)
+{
+    restore_network_profile(ctx, ctx->association.previous_network_id,
+                            ctx->association.candidate_network_id);
 }
 
 static int connect_network(struct daemon_ctx *ctx, const char *ssid,
@@ -2524,19 +2529,25 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
         *previous_id = (int)strtol(value, NULL, 10);
     if (*previous_id < 0)
         *previous_id = existing_network_id(ctx);
-    if (wpa_ok(ctx, "DISABLE_NETWORK all\n", reply, sizeof(reply)) < 0)
+    if (wpa_ok(ctx, "DISABLE_NETWORK all\n", reply, sizeof(reply)) < 0) {
+        restore_network_profile(ctx, *previous_id, -1);
         return -1;
-    if (wpa_call(ctx, "ADD_NETWORK", reply, sizeof(reply)) < 0)
+    }
+    if (wpa_call(ctx, "ADD_NETWORK", reply, sizeof(reply)) < 0) {
+        restore_network_profile(ctx, *previous_id, -1);
         return -2;
+    }
     le_log_info("networkd: ADD_NETWORK reply first=%02x len=%zu", (unsigned char)reply[0], strlen(reply));
     id = (int)strtol(reply, NULL, 10);
-    if (id < 0 || (reply[0] < '0' || reply[0] > '9'))
+    if (id < 0 || (reply[0] < '0' || reply[0] > '9')) {
+        restore_network_profile(ctx, *previous_id, -1);
         return -3;
+    }
     if (wpa_quote(quoted, sizeof(quoted), ssid) < 0 ||
         snprintf(command, sizeof(command), "SET_NETWORK %d ssid %s\n", id,
                  quoted) >= (int)sizeof(command) ||
         wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
-        remove_network_profile(ctx, id);
+        restore_network_profile(ctx, *previous_id, id);
         return -4;
     }
 
@@ -2547,7 +2558,7 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
     if (snprintf(command, sizeof(command), "SET_NETWORK %d key_mgmt %s\n", id,
                  key_mgmt) >= (int)sizeof(command) ||
         wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
-        remove_network_profile(ctx, id);
+        restore_network_profile(ctx, *previous_id, id);
         return -5;
     }
     if (strcmp(key_mgmt, "NONE")) {
@@ -2555,7 +2566,7 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
             snprintf(command, sizeof(command), "SET_NETWORK %d psk %s\n", id,
                      quoted) >= (int)sizeof(command) ||
             wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
-            remove_network_profile(ctx, id);
+            restore_network_profile(ctx, *previous_id, id);
             return -6;
         }
     }
@@ -2563,7 +2574,7 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
             (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
         snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", id) >=
             (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
-        remove_network_profile(ctx, id);
+        restore_network_profile(ctx, *previous_id, id);
         return -7;
     }
     return id;

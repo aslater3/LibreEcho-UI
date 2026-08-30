@@ -32,6 +32,7 @@ assert 'else if (!network_success)' in finish_dhcp
 assert 'restore_previous_network(ctx);' in finish_dhcp
 assert "while (command_length && command[command_length - 1] == '\\n')" in source
 assert 'execl("/bin/udhcpc"' in source
+assert '"-s", "/etc/udhcpc.script"' in source
 assert 'execl("/sbin/udhcpc"' not in source
 assert 'LIST_NETWORKS' in source
 assert 'DISABLE_NETWORK all' in source
