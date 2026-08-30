@@ -57,6 +57,7 @@
 #define INPUT_MAX LE_ADAPTER_MSG_MAX
 #define WPA_REPLY_MAX 8192
 #define SCAN_MAX 48
+#define SCAN_OUTPUT_MAX 12
 #define DHCP_TIMEOUT_MS 90000
 #define SCAN_TIMEOUT_MS 12000
 #define SCAN_POLL_MS 1800
@@ -1454,6 +1455,7 @@ struct scan_result {
     char ssid[256];
     char flags[128];
     int signal;
+    int signal_percent;
     int frequency;
     int five_ghz;
 };
@@ -1472,7 +1474,7 @@ static int serialize_scan_results(struct scan_result *results, int count,
                                   char *data, size_t size)
 {
     size_t used = 0;
-    int i, emitted = 0, truncated = 0;
+    int i, emitted = 0;
     if (append_text(data, size, &used, "{\"networks\":[") < 0)
         return -1;
     for (i = 0; i < count; ++i) {
@@ -1484,25 +1486,26 @@ static int serialize_scan_results(struct scan_result *results, int count,
                 duplicate = 1;
         if (duplicate)
             continue;
+        if (emitted >= SCAN_OUTPUT_MAX)
+            break;
         if (append_text(entry, sizeof(entry), &entry_used, "{\"ssid\":") < 0 ||
             append_json_string(entry, sizeof(entry), &entry_used, results[i].ssid) < 0 ||
             append_text(entry, sizeof(entry), &entry_used, ",\"security\":") < 0 ||
             append_json_string(entry, sizeof(entry), &entry_used,
                                scan_security(results[i].flags)) < 0 ||
             append_text(entry, sizeof(entry), &entry_used, ",\"signal\":%d}",
+                        results[i].signal_percent >= 0 ?
+                        results[i].signal_percent :
                         rssi_to_percent(results[i].signal)) < 0)
             return -1;
-        if (used + entry_used + (emitted ? 1 : 0) + 32 >= size) {
-            truncated = 1;
+        if (used + entry_used + (emitted ? 1 : 0) + 2 >= size)
             break;
-        }
         if (emitted++ && append_text(data, size, &used, ",") < 0)
             return -1;
         if (append_text(data, size, &used, "%s", entry) < 0)
             return -1;
     }
-    if (append_text(data, size, &used, "]%s}",
-                    truncated ? ",\"truncated\":true" : "") < 0)
+    if (append_text(data, size, &used, "]}") < 0)
         return -1;
     return (int)used;
 }
@@ -1562,6 +1565,7 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
                         copy_string(results[duplicate].flags,
                                     sizeof(results[duplicate].flags), flags);
                         results[duplicate].signal = level;
+                        results[duplicate].signal_percent = -1;
                         results[duplicate].frequency = freq;
                         results[duplicate].five_ghz = five_ghz;
                     }
@@ -1571,6 +1575,7 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
                     copy_string(results[count].flags,
                                 sizeof(results[count].flags), flags);
                     results[count].signal = level;
+                    results[count].signal_percent = -1;
                     results[count].frequency = freq;
                     results[count++].five_ghz = five_ghz;
                 }
@@ -1712,11 +1717,13 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
                    event_length >= IW_EV_LCP_PK_LEN + sizeof(struct iw_freq)) {
             struct iw_freq frequency;
             memcpy(&frequency, event + IW_EV_LCP_PK_LEN, sizeof(frequency));
-            current->frequency = (int)frequency.m;
-            while (frequency.e > 0 && current->frequency <= 6000) {
-                current->frequency *= 10;
-                --frequency.e;
-            }
+            long long frequency_hz = frequency.m;
+            int exponent = frequency.e;
+            while (exponent-- > 0 && frequency_hz <= 6000000000LL)
+                frequency_hz *= 10;
+            current->frequency = frequency_hz > 100000 ?
+                                 (int)(frequency_hz / 1000000) :
+                                 (int)frequency_hz;
             current->five_ghz = current->frequency >= 5000 &&
                                 current->frequency < 6000;
         } else if (current && command == IWEVQUAL &&
@@ -1785,6 +1792,8 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
                     cells[i].encrypted ? "WPA2" : "");
         results[result_count].signal = cells[i].rssi_dbm != -127 ?
                                        cells[i].rssi_dbm : cells[i].signal;
+        results[result_count].signal_percent = cells[i].rssi_dbm == -127 ?
+                                               cells[i].signal : -1;
         results[result_count].frequency = cells[i].frequency;
         results[result_count].five_ghz = cells[i].five_ghz;
         ++result_count;
@@ -2147,11 +2156,12 @@ static int nl80211_append_bss(const struct nlattr *bss,
     memset(result, 0, sizeof(*result));
     copy_string(result->ssid, sizeof(result->ssid), ssid);
     result->signal = signal_dbm;
+    result->signal_percent = -1;
     result->frequency = frequency_mhz;
     result->five_ghz = frequency_mhz >= 5000 && frequency_mhz < 6000;
     if (encrypted)
         copy_string(result->flags, sizeof(result->flags), "WPA2");
-    return 0;
+    return 1;
 }
 
 static int nl80211_wait_for_scan_event(int fd, unsigned char *buffer,
@@ -2287,9 +2297,13 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
             payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
             bss = nl_find((unsigned char *)generic + GENL_HDRLEN,
                           payload_length, NL80211_ATTR_BSS);
-            if (bss && result_count < SCAN_MAX &&
-                nl80211_append_bss(bss, &results[result_count]) == 0)
-                ++result_count;
+            if (bss && result_count < SCAN_MAX) {
+                int parsed = nl80211_append_bss(bss, &results[result_count]);
+                if (parsed < 0)
+                    return -1;
+                if (parsed > 0)
+                    ++result_count;
+            }
         }
     }
 }

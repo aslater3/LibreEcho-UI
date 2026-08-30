@@ -485,8 +485,7 @@ def test_dense_scan_truncates_without_failing():
         try:
             result = adapter_request(adapter, 52, "scan", timeout=4)
             assert result["ok"] is True, result
-            assert result["data"]["truncated"] is True
-            assert 0 < len(result["data"]["networks"]) < 48
+            assert 0 < len(result["data"]["networks"]) <= 12
         finally:
             stop_daemon(process, wpa)
 

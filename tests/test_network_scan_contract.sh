@@ -42,10 +42,10 @@ assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));'
 assert 'level = normalize_rssi_dbm((int)statistics.qual.level);' in source
 assert 'static int serialize_scan_results(' in source
 assert 'static int scan_result_better(' in source
+assert 'SCAN_OUTPUT_MAX 12' in source
 assert 'NL80211_BSS_FREQUENCY' in source
 assert 'SIOCGIWFREQ' in source
 assert 'nl80211_append_bss(bss, &results[result_count])' in source
 assert 'return serialize_scan_results(results, result_count, data, data_size);' in source
-assert 'truncated ? ",\\"truncated\\":true"' in source
 print('network scan EOPNOTSUPP/nl80211 and signed RSSI contract: ok')
 PY
