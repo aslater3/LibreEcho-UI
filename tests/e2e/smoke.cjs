@@ -163,6 +163,10 @@ async function desktopSuite(browser) {
   assert.ok(response && response.ok(), 'dashboard document should load successfully');
   await waitForPage(page, 'Overview');
   await page.waitForFunction(() => document.querySelector('#backend-badge')?.textContent.includes('mock'), null, { timeout: 7000 });
+  assert.equal(await page.locator('#cpu-dashboard .cpu-core').count(), 4);
+  assert.equal(await page.locator('#cpu-dashboard .cpu-core-grid').evaluate(grid =>
+    getComputedStyle(grid).gridTemplateColumns.split(' ').length), 4,
+  'desktop CPU dashboard should retain four columns');
   assert.doesNotMatch(await page.locator('#device-online').innerText(), /Connecting/i);
 
   await checkPwa(context, page);
@@ -192,6 +196,30 @@ async function mobileSuite(browser) {
   const response = await page.goto('/', { waitUntil: 'domcontentloaded' });
   assert.ok(response && response.ok(), 'mobile dashboard document should load successfully');
   await waitForPage(page, 'Overview');
+
+  for (const width of [390, 375]) {
+    await page.setViewportSize({ width, height: 844 });
+    const cpuLayout = await page.locator('#cpu-dashboard').evaluate(panel => {
+      const panelBox = panel.getBoundingClientRect();
+      const grid = panel.querySelector('.cpu-core-grid');
+      return {
+        panelClientWidth: panel.clientWidth,
+        panelScrollWidth: panel.scrollWidth,
+        gridClientWidth: grid.clientWidth,
+        gridScrollWidth: grid.scrollWidth,
+        cardsInside: [...grid.children].every(card => {
+          const box = card.getBoundingClientRect();
+          return box.left >= panelBox.left - 1 && box.right <= panelBox.right + 1;
+        })
+      };
+    });
+    assert.ok(cpuLayout.panelScrollWidth <= cpuLayout.panelClientWidth + 1,
+      `${width}px CPU panel overflows by ${cpuLayout.panelScrollWidth - cpuLayout.panelClientWidth}px`);
+    assert.ok(cpuLayout.gridScrollWidth <= cpuLayout.gridClientWidth + 1,
+      `${width}px CPU grid overflows by ${cpuLayout.gridScrollWidth - cpuLayout.gridClientWidth}px`);
+    assert.equal(cpuLayout.cardsInside, true,
+      `every CPU card should remain inside its panel at ${width}px`);
+  }
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   assert.ok(overflow <= 1, `mobile layout overflows viewport by ${overflow}px`);

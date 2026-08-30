@@ -3,15 +3,21 @@ Description=LibreEcho web administration interface
 After=network.target
 
 [Service]
-ExecStart=/usr/local/sbin/libreecho-web --backend linux --config /etc/libreecho/web-config.json --web-root /usr/local/share/libreecho/web --listen 127.0.0.1:8080
 User=libreecho
 Group=libreecho
 RuntimeDirectory=libreecho
+StateDirectory=libreecho
+StateDirectoryMode=0700
+ExecStartPre=/bin/mkdir -p /var/lib/libreecho/config /var/lib/libreecho/secrets
+Environment=LIBREECHO_DATA_ROOT=/var/lib/libreecho
+ExecStart=/usr/local/sbin/libreecho-web --backend linux --config /var/lib/libreecho/config/web-config.json --web-root /usr/local/share/libreecho/web --listen 127.0.0.1:8080 --users-file /var/lib/libreecho/config/users
+CapabilityBoundingSet=CAP_SYS_BOOT
+AmbientCapabilities=CAP_SYS_BOOT
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/libreecho /run/libreecho
+ReadWritePaths=/var/lib/libreecho /run/libreecho
 Restart=on-failure
 
 [Install]

@@ -7,6 +7,7 @@
 #include "json.h"
 #include "log.h"
 #include "version.h"
+#include "factory_reset.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -2015,24 +2016,17 @@ static int linux_shutdown(struct le_backend *b)
 
 static int factory_reset(struct le_backend *b)
 {
-    static const char marker[] = "FACTORY_RESET";
-    int fd;
-    int close_rc;
-    ssize_t written;
+    const char *data_root = getenv("LIBREECHO_DATA_ROOT");
 
     (void)b;
+    if (!data_root || !data_root[0])
+        data_root = "/data/libreecho";
     le_log_info("backend: factory reset requested");
-    fd = open("/tmp/.libreecho_factory_reset", O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) {
-        le_log_perr("backend: cannot write factory reset marker");
+    if (le_factory_reset_clear(data_root) != 0) {
+        le_log_error("backend: persistent factory reset failed");
         return LE_IO;
     }
-    written = write(fd, marker, sizeof(marker) - 1);
-    close_rc = close(fd);
-    if (written != (ssize_t)(sizeof(marker) - 1) || close_rc < 0) {
-        le_log_error("backend: factory reset marker write incomplete");
-        return LE_IO;
-    }
+    sync();
     return linux_reboot(b);
 }
 
