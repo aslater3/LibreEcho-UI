@@ -89,9 +89,10 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_voice_dsp.c src/adapter/voice_dsp.c \
     -o build/test-voice-dsp
 ./build/test-voice-dsp
-make build/test-voice-aec build/test-voice-reference
+make build/test-voice-aec build/test-voice-reference build/test-spoken-time
 ./build/test-voice-aec
 ./build/test-voice-reference
+./build/test-spoken-time
 make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
 make build/test-voice-reply build/test-voice-playback

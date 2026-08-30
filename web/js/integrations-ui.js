@@ -107,6 +107,7 @@ function deviceAssistantBody(a,selected) {
     <div>
       ${field('Provider',a.provider_name||a.provider,'assistant-provider','text','disabled')}
       ${field('Model',a.model||'','assistant-model')}
+      ${clockFormatField(a.clock_format)}
       <label class="field"><span>Voice response prompt</span><textarea id="assistant-prompt" rows="8">${esc(a.prompt||'')}</textarea></label>
       ${saveButton('save-assistant')}
     </div>
@@ -120,6 +121,17 @@ function deviceAssistantBody(a,selected) {
       ${signedIn?`<label class="field"><span>Test prompt</span><input id="assistant-test-text" value="Say hello in one short sentence."></label>${action('Speak test response','assistant-test')}`:''}
     </div>
   </div>`;
+}
+
+// The assistant reads the time out loud, so this picks how it says it rather
+// than how anything is displayed. Anything the daemon has not set yet means a
+// device on the old build, which spoke 24-hour; show 12, the new default.
+function clockFormatField(value) {
+  const twelve = value !== '24';
+  return `<label class="field"><span>Spoken time format</span><select id="assistant-clock-format">`+
+    `<option value="12" ${twelve?'selected':''}>12-hour (2:30 PM)</option>`+
+    `<option value="24" ${twelve?'':'selected'}>24-hour (14:30)</option>`+
+    `</select></label>`;
 }
 
 async function setAssistantProvider(provider,enabled,pipeline) {
@@ -258,11 +270,12 @@ async function integrationsPage() {
     if($('#local-test'))$('#local-test').onclick=()=>post('/assistant/respond',{text:$('#local-test-text').value},'Test response queued');
 
     if(deviceSelected) {
-      bindDirty(['#assistant-model','#assistant-prompt'],'#save-assistant');
+      bindDirty(['#assistant-model','#assistant-clock-format','#assistant-prompt'],'#save-assistant');
       $('#save-assistant').onclick=()=>mutate('/assistant',{
         provider:'openai-codex',
         enabled:deviceEnabled,
         model:$('#assistant-model').value.trim(),
+        clock_format:$('#assistant-clock-format').value,
         prompt:$('#assistant-prompt').value.trim()
       },'On Device Voice Assistant settings saved');
       if($('#assistant-auth-start'))$('#assistant-auth-start').onclick=()=>assistantAction('/assistant/auth/start','ChatGPT device sign-in started');

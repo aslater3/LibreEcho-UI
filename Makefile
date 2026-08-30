@@ -36,6 +36,7 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/timer_intent.c src/adapter/llm
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 	src/adapter/voice_listening_led.c \
+	src/adapter/spoken_time.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c \
 	src/config_store.c src/json.c src/log.c
 WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
@@ -392,6 +393,10 @@ $(BUILD)/test-voice-reference: tests/test_voice_reference.c src/adapter/voice_re
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
 		$^ $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
+$(BUILD)/test-spoken-time: tests/test_spoken_time.c src/adapter/spoken_time.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -o $@
+
 $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
 		src/adapter/adapter_client.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -620,7 +625,8 @@ clean:
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-backend-linux-timers $(BUILD)/test-factory-reset \
-		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
+		$(BUILD)/test-wake-led $(BUILD)/test-spoken-time \
+		$(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
 		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
