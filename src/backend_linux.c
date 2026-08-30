@@ -2072,12 +2072,29 @@ static int quiesce_factory_reset_services(unsigned char *stopped)
     return 0;
 }
 
+static int clear_legacy_bluetooth_state(void)
+{
+    static const char *const paths[] = {
+        "/etc/libreecho/bluetooth.devices",
+        "/etc/libreecho/bluetooth.keys"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        if (unlink(paths[i]) != 0 && errno != ENOENT)
+            return -1;
+    }
+    return 0;
+}
+
 static int factory_reset(struct le_backend *b)
 {
     const char *data_root = getenv("LIBREECHO_DATA_ROOT");
     unsigned char stopped[FACTORY_RESET_SERVICE_COUNT];
     int result;
 
+    if (geteuid() != 0)
+        return LE_NOT_SUPPORTED;
     if (!data_root || !data_root[0])
         data_root = "/data/libreecho";
     le_log_info("backend: factory reset requested");
@@ -2085,7 +2102,8 @@ static int factory_reset(struct le_backend *b)
         le_log_error("backend: persistent-state daemons could not be stopped");
         return LE_IO;
     }
-    if (le_factory_reset_clear(data_root) != 0) {
+    if (clear_legacy_bluetooth_state() != 0 ||
+        le_factory_reset_clear(data_root) != 0) {
         resume_factory_reset_services(stopped);
         le_log_error("backend: persistent factory reset failed");
         return LE_IO;

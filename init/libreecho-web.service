@@ -3,19 +3,15 @@ Description=LibreEcho web administration interface
 After=network.target
 
 [Service]
+ExecStart=/usr/local/sbin/libreecho-web --backend linux --config /etc/libreecho/web-config.json --web-root /usr/local/share/libreecho/web --listen 127.0.0.1:8080
 User=libreecho
 Group=libreecho
 RuntimeDirectory=libreecho
-ExecStartPre=+/usr/local/libexec/libreecho-web-migrate-state
-Environment=LIBREECHO_DATA_ROOT=/data/libreecho
-ExecStart=/usr/local/sbin/libreecho-web --backend linux --config /data/libreecho/config/web-config.json --web-root /usr/local/share/libreecho/web --listen 127.0.0.1:8080 --users-file /data/libreecho/config/users
-CapabilityBoundingSet=CAP_SYS_BOOT CAP_KILL
-AmbientCapabilities=CAP_SYS_BOOT CAP_KILL
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/data/libreecho /run/libreecho
+ReadWritePaths=/etc/libreecho /run/libreecho
 Restart=on-failure
 
 [Install]
