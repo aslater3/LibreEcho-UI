@@ -43,8 +43,8 @@
 #define CONFIGURE_HELPER "/sbin/wmt_configure"
 #define BT_ON_HELPER "/sbin/wmt_bt_on"
 #define FIRMWARE_DIR "/lib/firmware"
-#define DEVICE_DB "/etc/libreecho/bluetooth.devices"
-#define KEY_DB "/etc/libreecho/bluetooth.keys"
+#define DEVICE_DB "/data/libreecho/config/bluetooth.devices"
+#define KEY_DB "/data/libreecho/config/bluetooth.keys"
 #define MEDIA_BUS_PATH "/run/libreecho-audio/media.pcm"
 
 #define BTPROTO_HCI 1

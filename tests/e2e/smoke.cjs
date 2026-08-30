@@ -100,6 +100,79 @@ async function checkAudioMutation(page) {
   assert.equal(await persisted.inputValue(), '63', 'saved volume should survive navigation and re-render');
 }
 
+async function setupReadinessSuite(browser) {
+  const context = await browser.newContext({ baseURL });
+  await context.addInitScript(() => {
+    sessionStorage.setItem('libreecho-token', 'setup-e2e-token');
+  });
+  const page = await context.newPage();
+  let setupReads = 0;
+  let scans = 0;
+  const envelope = data => ({ ok: true, data, error: null });
+  await page.route('**/api/v1/config', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify(envelope({ csrf_token: 'c'.repeat(64), bootstrap_required: false }))
+  }));
+  await page.route('**/api/v1/setup', route => {
+    setupReads += 1;
+    const ready = setupReads > 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(envelope({
+        completed: false, backend: 'linux', hostname: 'libreecho', volume: 52,
+        wake_word: 'LibreEcho', wake_sensitivity: 68, local_only: true,
+        diagnostic_telemetry: false, network_state: 'unavailable', ssid: '',
+        wlan0_registered: ready,
+        vendor_firmware: { state: 'ready', verification: 'hash-pinned',
+          source_layout: 'etc/firmware', error: 'none', force_next_boot: false }
+      }))
+    });
+  });
+  await page.route('**/api/v1/network/wifi/scan', route => {
+    scans += 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(envelope({ networks: [
+        { ssid: 'Readiness5', security: 'wpa2', signal: 40 },
+        { ssid: 'Readiness24', security: 'wpa2', signal: 95 },
+        { ssid: 'ReadinessWeak', security: 'wpa2', signal: 20 }
+      ] }))
+    });
+  });
+
+  await page.goto('/setup.html', { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => typeof setup !== 'undefined' && setup.step === 1);
+  await page.evaluate(() => { setup.step = 2; render(); });
+  await page.getByText('Readiness5', { exact: true }).waitFor({
+    state: 'visible', timeout: 4000
+  });
+  assert.deepEqual(await page.locator('.wifi-option strong').allTextContents(), [
+    'Readiness5', 'Readiness24', 'ReadinessWeak'
+  ], 'scan results should preserve the backend preferred-band order');
+  assert.ok(setupReads >= 2, 'scan retry should refresh setup readiness');
+  assert.equal(scans, 1, 'scan should start once wlan0 becomes ready');
+  await context.close();
+}
+
+async function checkFactoryResetFailure(page, status, message) {
+  await page.route('**/api/v1/system/factory-reset', route => route.fulfill({
+    status,
+    contentType: 'application/json',
+    body: JSON.stringify({ ok: false, data: null,
+      error: { code: 7, message } })
+  }));
+  await selectPage(page, 'Device');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#power-reset').click();
+  await page.waitForFunction(expected =>
+    (document.querySelector('#toast')?.textContent || '').includes(expected),
+    message, { timeout: 5000 });
+  assert.match(await page.locator('#toast').innerText(), new RegExp(message, 'i'));
+  assert.equal(await page.locator('dialog.reboot-dialog').count(), 0,
+    'failed factory reset must not enter the reboot wait loop');
+  await page.unroute('**/api/v1/system/factory-reset');
+}
+
 async function desktopSuite(browser) {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
@@ -109,6 +182,10 @@ async function desktopSuite(browser) {
   assert.ok(response && response.ok(), 'dashboard document should load successfully');
   await waitForPage(page, 'Overview');
   await page.waitForFunction(() => document.querySelector('#backend-badge')?.textContent.includes('mock'), null, { timeout: 7000 });
+  assert.equal(await page.locator('#cpu-dashboard .cpu-core').count(), 4);
+  assert.equal(await page.locator('#cpu-dashboard .cpu-core-grid').evaluate(grid =>
+    getComputedStyle(grid).gridTemplateColumns.split(' ').length), 4,
+  'desktop CPU dashboard should retain four columns');
   assert.doesNotMatch(await page.locator('#device-online').innerText(), /Connecting/i);
 
   await checkPwa(context, page);
@@ -120,6 +197,8 @@ async function desktopSuite(browser) {
   for (const destination of destinations) await selectPage(page, destination);
 
   await checkAudioMutation(page);
+  await checkFactoryResetFailure(page, 503, 'Device action failed');
+  await checkFactoryResetFailure(page, 501, 'Device action is not available');
   assert.deepEqual(failures, [], `browser failures:\n${failures.join('\n')}`);
 
   await context.close();
@@ -138,6 +217,30 @@ async function mobileSuite(browser) {
   const response = await page.goto('/', { waitUntil: 'domcontentloaded' });
   assert.ok(response && response.ok(), 'mobile dashboard document should load successfully');
   await waitForPage(page, 'Overview');
+
+  for (const width of [390, 375]) {
+    await page.setViewportSize({ width, height: 844 });
+    const cpuLayout = await page.locator('#cpu-dashboard').evaluate(panel => {
+      const panelBox = panel.getBoundingClientRect();
+      const grid = panel.querySelector('.cpu-core-grid');
+      return {
+        panelClientWidth: panel.clientWidth,
+        panelScrollWidth: panel.scrollWidth,
+        gridClientWidth: grid.clientWidth,
+        gridScrollWidth: grid.scrollWidth,
+        cardsInside: [...grid.children].every(card => {
+          const box = card.getBoundingClientRect();
+          return box.left >= panelBox.left - 1 && box.right <= panelBox.right + 1;
+        })
+      };
+    });
+    assert.ok(cpuLayout.panelScrollWidth <= cpuLayout.panelClientWidth + 1,
+      `${width}px CPU panel overflows by ${cpuLayout.panelScrollWidth - cpuLayout.panelClientWidth}px`);
+    assert.ok(cpuLayout.gridScrollWidth <= cpuLayout.gridClientWidth + 1,
+      `${width}px CPU grid overflows by ${cpuLayout.gridScrollWidth - cpuLayout.gridClientWidth}px`);
+    assert.equal(cpuLayout.cardsInside, true,
+      `every CPU card should remain inside its panel at ${width}px`);
+  }
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   assert.ok(overflow <= 1, `mobile layout overflows viewport by ${overflow}px`);
@@ -163,6 +266,7 @@ async function mobileSuite(browser) {
 (async () => {
   const browser = await chromium.launch({ headless: true });
   try {
+    await setupReadinessSuite(browser);
     await desktopSuite(browser);
     await mobileSuite(browser);
   } finally {

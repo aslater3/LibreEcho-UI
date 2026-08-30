@@ -15,10 +15,19 @@ BINARY = ROOT / "build/test-networkd-health"
 
 
 class FakeWpa:
-    def __init__(self, path: Path, fail_reassociate: bool = False):
+    def __init__(self, path: Path, fail_reassociate: bool = False,
+                 association_fails: bool = False, scan_results: str = "",
+                 fail_command: str = "", initial_connected: bool = True):
         self.path = path
         self.fail_reassociate = fail_reassociate
-        self.connected = True
+        self.association_fails = association_fails
+        self.scan_results = scan_results
+        self.fail_command = fail_command
+        self.connected = initial_connected
+        self.network_id = 0
+        self.next_network_id = 1
+        self.monitor_addr = None
+        self.saved_ssid = "IntegrationNet"
         self.commands = []
         self.stop_event = threading.Event()
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -37,25 +46,52 @@ class FakeWpa:
                 return
             command = payload.decode("utf-8", "replace").strip()
             self.commands.append(command)
-            if command == "STATUS":
+            if self.fail_command and command.startswith(self.fail_command):
+                response = "FAIL\n"
+                try:
+                    self.sock.sendto(response.encode(), peer)
+                except OSError:
+                    pass
+                continue
+            if command == "ATTACH":
+                self.monitor_addr = peer
+                response = "OK\n"
+            elif command == "STATUS":
                 state = "COMPLETED" if self.connected else "DISCONNECTED"
-                response = f"wpa_state={state}\nssid=IntegrationNet\nid=0\n"
+                response = f"wpa_state={state}\nssid=IntegrationNet\n"
+                if self.connected:
+                    response += f"id={self.network_id}\n"
             elif command == "SIGNAL_POLL":
                 response = "RSSI=-45\n"
             elif command == "ADD_NETWORK":
-                response = "0\n"
+                response = f"{self.next_network_id}\n"
+                self.next_network_id += 1
+            elif command == "LIST_NETWORKS":
+                current = "\t[CURRENT]" if self.connected else ""
+                response = f"network id / ssid / bssid / flags\n0\t{self.saved_ssid}\tany{current}\n"
             elif command == "DISCONNECT":
                 self.connected = False
                 response = "OK\n"
             elif command.startswith("SELECT_NETWORK"):
-                self.connected = True
+                self.network_id = int(command.split()[1])
+                self.connected = self.network_id == 0 or not self.association_fails
                 response = "OK\n"
+            elif command.startswith("REMOVE_NETWORK"):
+                response = "OK\n"
+            elif command == "SCAN":
+                response = "OK\n"
+            elif command == "SCAN_RESULTS":
+                response = self.scan_results or (
+                    "bssid / frequency / signal level / flags / ssid\n")
             elif command == "REASSOCIATE" and self.fail_reassociate:
                 response = "FAIL\n"
             else:
                 response = "OK\n"
             try:
                 self.sock.sendto(response.encode(), peer)
+                if command == "SCAN" and self.monitor_addr:
+                    self.sock.sendto(b"CTRL-EVENT-SCAN-RESULTS\n",
+                                     self.monitor_addr)
             except OSError:
                 pass
 
@@ -86,11 +122,11 @@ def read_actions(path: Path):
 
 
 def queue_adapter_request(path: Path, request_id: int, command: str,
-                          args=None):
+                          args=None, timeout=2):
     request = {"v": 1, "id": request_id, "cmd": command,
                "args": args if args is not None else {}}
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(2)
+    client.settimeout(timeout)
     client.connect(str(path))
     client.sendall((json.dumps(request) + "\n").encode())
     return client
@@ -111,15 +147,19 @@ def read_adapter_response(client, request_id: int):
             return response
 
 
-def adapter_request(path: Path, request_id: int, command: str, args=None):
-    with queue_adapter_request(path, request_id, command, args) as client:
+def adapter_request(path: Path, request_id: int, command: str, args=None,
+                    timeout=2):
+    with queue_adapter_request(path, request_id, command, args,
+                               timeout=timeout) as client:
         return read_adapter_response(client, request_id)
 
 
 def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
                  fail_interface=None, invalid_reboot_path=False,
                  barrier_at=None, preexisting_reboot=None,
-                 preexisting_guard=False, reboot_fifo=False):
+                 preexisting_guard=False, reboot_fifo=False,
+                 association_fails=False, scan_results="", fail_command="",
+                 initial_connected=True):
     wpa_path = directory / "wpa.sock"
     adapter_path = directory / "network.sock"
     action_log = directory / "actions.log"
@@ -132,7 +172,10 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
         os.mkfifo(reboot_path)
     if preexisting_guard:
         guard_path.write_text("network-reboot-v1\n")
-    wpa = FakeWpa(wpa_path, fail_reassociate=fail_reassociate)
+    wpa = FakeWpa(wpa_path, fail_reassociate=fail_reassociate,
+                  association_fails=association_fails,
+                  scan_results=scan_results, fail_command=fail_command,
+                  initial_connected=initial_connected)
     env = os.environ.copy()
     env.update({
         "LIBREECHO_NETWORKD_TEST_FIXTURE": "1",
@@ -316,6 +359,137 @@ def test_action_failures_remain_bounded():
             stop_daemon(process, wpa)
 
 
+def test_pending_association_keeps_daemon_responsive_and_restores_profile():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-connect-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", association_fails=True)
+        try:
+            client = queue_adapter_request(
+                adapter, 40, "connect",
+                {"ssid": "UnavailableNet", "psk": "", "security": "open"})
+            try:
+                started = time.monotonic()
+                status = adapter_request(adapter, 41, "status")
+                assert time.monotonic() - started < 0.5
+                assert status["ok"] is True
+                result = read_adapter_response(client, 40)
+            finally:
+                client.close()
+            assert result["ok"] is False
+            assert "association" in result["error"].lower()
+            assert "REMOVE_NETWORK all" not in wpa.commands
+            assert "REMOVE_NETWORK 1" in wpa.commands
+            assert "SELECT_NETWORK 0" in wpa.commands
+            assert wpa.network_id == 0
+            assert wpa.connected is True
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_preassociation_failure_restores_working_profile():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-preassoc-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", fail_command="SET_NETWORK 1 ssid")
+        try:
+            result = adapter_request(
+                adapter, 42, "connect",
+                {"ssid": "RejectedNet", "psk": "", "security": "open"})
+            assert result["ok"] is False, result
+            assert "SSID rejected" in result["error"]
+            assert "DISABLE_NETWORK all" in wpa.commands
+            assert "REMOVE_NETWORK 1" in wpa.commands
+            assert "SELECT_NETWORK 0" in wpa.commands
+            assert "SAVE_CONFIG" in wpa.commands
+            assert wpa.network_id == 0
+            assert wpa.connected is True
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_preassociation_failure_does_not_restore_when_disconnected():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-disconnected-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", fail_command="SET_NETWORK 1 ssid",
+            initial_connected=False)
+        try:
+            wpa.saved_ssid = "Office [CURRENT]"
+            result = adapter_request(
+                adapter, 43, "connect",
+                {"ssid": "RejectedNet", "psk": "", "security": "open"})
+            assert result["ok"] is False, result
+            assert "SSID rejected" in result["error"]
+            assert "REMOVE_NETWORK 1" in wpa.commands
+            assert "SELECT_NETWORK 0" not in wpa.commands
+            assert "SAVE_CONFIG" not in wpa.commands
+            assert wpa.connected is False
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_scan_deduplicates_ssid_and_keeps_strongest_bssid():
+    rows = (
+        "bssid / frequency / signal level / flags / ssid\n"
+        "00:11:22:33:44:55\t2412\t-79\t[WPA2-PSK-CCMP][ESS]\tMeshNet\n"
+        "00:11:22:33:44:66\t2437\t-41\t[WPA2-PSK-CCMP][ESS]\tMeshNet\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-scan-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", scan_results=rows)
+        try:
+            result = adapter_request(adapter, 50, "scan", timeout=4)
+            assert result["ok"] is True, result
+            networks = result["data"]["networks"]
+            assert [entry["ssid"] for entry in networks] == ["MeshNet"]
+            assert networks[0]["signal"] > 70, networks
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_scan_orders_five_ghz_before_signal_sorted_24ghz():
+    rows = (
+        "bssid / frequency / signal level / flags / ssid\n"
+        "00:11:22:33:44:70\t2412\t-20\t[WPA2-PSK-CCMP][ESS]\tStrong24\n"
+        "00:11:22:33:44:71\t5785\t-70\t[WPA2-PSK-CCMP][ESS]\tPreferred5G\n"
+        "00:11:22:33:44:72\t2437\t-45\t[WPA2-PSK-CCMP][ESS]\tWeak24\n"
+        "00:11:22:33:44:73\t2462\t-20\t[WPA2-PSK-CCMP][ESS]\tClampStrong\n"
+        "00:11:22:33:44:74\t2467\t-30\t[WPA2-PSK-CCMP][ESS]\tClampWeak\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-band-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", scan_results=rows)
+        try:
+            result = adapter_request(adapter, 51, "scan", timeout=4)
+            assert result["ok"] is True, result
+            networks = result["data"]["networks"]
+            assert [entry["ssid"] for entry in networks] == [
+                "Preferred5G", "ClampStrong", "Strong24", "ClampWeak", "Weak24"]
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_dense_scan_truncates_without_failing():
+    rows = "bssid / frequency / signal level / flags / ssid\n"
+    rows += "".join(
+        f"00:11:22:33:45:{i:02x}\t2412\t-{40 + i % 20}\t"
+        f"[WPA2-PSK-CCMP][ESS]\tNetwork-{i:02d}-" + "x" * 180 + "\n"
+        for i in range(48))
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-dense-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", scan_results=rows)
+        try:
+            result = adapter_request(adapter, 52, "scan", timeout=4)
+            assert result["ok"] is True, result
+            assert 0 < len(result["data"]["networks"]) <= 12
+        finally:
+            stop_daemon(process, wpa)
+
+
 def main():
     test_ordered_recovery_and_one_shot_reboot()
     test_recovery_can_succeed_without_supervisor_request()
@@ -324,6 +498,12 @@ def main():
     test_stale_non_reboot_request_is_not_accepted()
     test_non_regular_reboot_request_fails_closed_without_blocking()
     test_action_failures_remain_bounded()
+    test_pending_association_keeps_daemon_responsive_and_restores_profile()
+    test_preassociation_failure_restores_working_profile()
+    test_preassociation_failure_does_not_restore_when_disconnected()
+    test_scan_deduplicates_ssid_and_keeps_strongest_bssid()
+    test_scan_orders_five_ghz_before_signal_sorted_24ghz()
+    test_dense_scan_truncates_without_failing()
     print("networkd event-loop recovery integration: ok")
 
 
