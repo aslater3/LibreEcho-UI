@@ -2190,6 +2190,8 @@ static int nl80211_append_bss(const struct nlattr *bss,
         memcpy(&signal_dbm, (unsigned char *)signal + NLA_HDRLEN,
                sizeof(signal_dbm));
         signal_dbm /= 100;
+    } else {
+        signal = NULL;
     }
     if (!signal && signal_unspec &&
         signal_unspec->nla_len >= NLA_HDRLEN + sizeof(uint8_t)) {
