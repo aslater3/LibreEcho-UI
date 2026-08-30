@@ -1452,7 +1452,7 @@ static const char *scan_security(const char *flags)
 }
 
 struct scan_result {
-    char ssid[256];
+    char ssid[IW_ESSID_MAX_SIZE + 1];
     char flags[128];
     int signal;
     int signal_percent;
@@ -1460,12 +1460,26 @@ struct scan_result {
     int five_ghz;
 };
 
+static int scan_result_strength(const struct scan_result *result)
+{
+    if (result->signal_percent >= 0)
+        return result->signal_percent;
+    return rssi_to_percent(result->signal);
+}
+
 static int scan_result_better(const struct scan_result *a,
                               const struct scan_result *b)
 {
+    int a_strength, b_strength;
+
     if (a->five_ghz != b->five_ghz)
         return a->five_ghz > b->five_ghz;
-    if (a->signal != b->signal)
+    a_strength = scan_result_strength(a);
+    b_strength = scan_result_strength(b);
+    if (a_strength != b_strength)
+        return a_strength > b_strength;
+    if (a->signal_percent < 0 && b->signal_percent < 0 &&
+        a->signal != b->signal)
         return a->signal > b->signal;
     return strcmp(a->ssid, b->ssid) < 0;
 }
@@ -1475,6 +1489,17 @@ static int serialize_scan_results(struct scan_result *results, int count,
 {
     size_t used = 0;
     int i, emitted = 0;
+
+    for (i = 0; i < count; ++i) {
+        int j;
+        for (j = i + 1; j < count; ++j) {
+            if (scan_result_better(&results[j], &results[i])) {
+                struct scan_result swap = results[i];
+                results[i] = results[j];
+                results[j] = swap;
+            }
+        }
+    }
     if (append_text(data, size, &used, "{\"networks\":[") < 0)
         return -1;
     for (i = 0; i < count; ++i) {
@@ -1508,6 +1533,22 @@ static int serialize_scan_results(struct scan_result *results, int count,
     if (append_text(data, size, &used, "]}") < 0)
         return -1;
     return (int)used;
+}
+
+static int wext_frequency_mhz(const struct iw_freq *frequency)
+{
+    long long value;
+    int exponent;
+
+    if (!frequency)
+        return 0;
+    value = frequency->m;
+    exponent = frequency->e;
+    while (exponent-- > 0 && value <= 6000000000LL)
+        value *= 10;
+    if (value > 1000000)
+        value /= 1000000;
+    return value > 0 && value < 10000 ? (int)value : 0;
 }
 
 static int bogus_ssid(const char *ssid);
@@ -1717,13 +1758,7 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
                    event_length >= IW_EV_LCP_PK_LEN + sizeof(struct iw_freq)) {
             struct iw_freq frequency;
             memcpy(&frequency, event + IW_EV_LCP_PK_LEN, sizeof(frequency));
-            long long frequency_hz = frequency.m;
-            int exponent = frequency.e;
-            while (exponent-- > 0 && frequency_hz <= 6000000000LL)
-                frequency_hz *= 10;
-            current->frequency = frequency_hz > 100000 ?
-                                 (int)(frequency_hz / 1000000) :
-                                 (int)frequency_hz;
+            current->frequency = wext_frequency_mhz(&frequency);
             current->five_ghz = current->frequency >= 5000 &&
                                 current->frequency < 6000;
         } else if (current && command == IWEVQUAL &&
@@ -2116,10 +2151,11 @@ static void nl80211_parse_ies(const unsigned char *ies, size_t length,
 static int nl80211_append_bss(const struct nlattr *bss,
                               struct scan_result *result)
 {
-    const struct nlattr *bssid, *signal, *frequency, *ies, *beacon;
+    const struct nlattr *bssid, *signal, *signal_unspec, *frequency, *ies, *beacon;
     char ssid[IW_ESSID_MAX_SIZE + 1];
     int encrypted = 0;
     int signal_dbm = -100;
+    int signal_percent = -1;
     int frequency_mhz = 0;
     const void *payload;
     size_t payload_length;
@@ -2142,21 +2178,34 @@ static int nl80211_append_bss(const struct nlattr *bss,
         return 0;
     signal = nl_find((unsigned char *)bss + NLA_HDRLEN,
                      bss->nla_len - NLA_HDRLEN, NL80211_BSS_SIGNAL_MBM);
+    signal_unspec = nl_find((unsigned char *)bss + NLA_HDRLEN,
+                            bss->nla_len - NLA_HDRLEN,
+                            NL80211_BSS_SIGNAL_UNSPEC);
     frequency = nl_find((unsigned char *)bss + NLA_HDRLEN,
                         bss->nla_len - NLA_HDRLEN, NL80211_BSS_FREQUENCY);
     if (frequency && frequency->nla_len >= NLA_HDRLEN + sizeof(uint32_t))
         memcpy(&frequency_mhz, (unsigned char *)frequency + NLA_HDRLEN,
                sizeof(frequency_mhz));
-    if (signal && signal->nla_len >= NLA_HDRLEN + sizeof(int32_t))
+    if (signal && signal->nla_len >= NLA_HDRLEN + sizeof(int32_t)) {
         memcpy(&signal_dbm, (unsigned char *)signal + NLA_HDRLEN,
                sizeof(signal_dbm));
-    signal_dbm /= 100;
+        signal_dbm /= 100;
+    }
+    if (!signal && signal_unspec &&
+        signal_unspec->nla_len >= NLA_HDRLEN + sizeof(uint8_t)) {
+        uint8_t value;
+        memcpy(&value, (unsigned char *)signal_unspec + NLA_HDRLEN,
+               sizeof(value));
+        signal_percent = value > 100 ? 100 : value;
+    }
     if (!result)
         return -1;
+    if (!signal && signal_percent < 0)
+        return 0;
     memset(result, 0, sizeof(*result));
     copy_string(result->ssid, sizeof(result->ssid), ssid);
     result->signal = signal_dbm;
-    result->signal_percent = -1;
+    result->signal_percent = signal_percent;
     result->frequency = frequency_mhz;
     result->five_ghz = frequency_mhz >= 5000 && frequency_mhz < 6000;
     if (encrypted)

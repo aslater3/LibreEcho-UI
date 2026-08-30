@@ -44,7 +44,9 @@ assert 'static int serialize_scan_results(' in source
 assert 'static int scan_result_better(' in source
 assert 'SCAN_OUTPUT_MAX 12' in source
 assert 'NL80211_BSS_FREQUENCY' in source
+assert 'NL80211_BSS_SIGNAL_UNSPEC' in source
 assert 'SIOCGIWFREQ' in source
+assert 'signal_percent' in source
 assert 'nl80211_append_bss(bss, &results[result_count])' in source
 assert 'return serialize_scan_results(results, result_count, data, data_size);' in source
 print('network scan EOPNOTSUPP/nl80211 and signed RSSI contract: ok')
