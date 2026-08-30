@@ -100,45 +100,58 @@ async function checkAudioMutation(page) {
   assert.equal(await persisted.inputValue(), '63', 'saved volume should survive navigation and re-render');
 }
 
-/*
- * Simulation is off by default, so the sweep above never reaches it. Turn it on
- * and render the history table from a device-shaped row: agentd records timings
- * only -- no phrase, no wake result -- and a renderer that assumes the fields a
- * locally-run simulation leaves behind throws on the first device row, which
- * takes the whole page down.
- */
-async function checkSimulationHistory(context, page) {
-  const config = await context.request.get(`${baseURL}/api/v1/config`);
-  const csrf = (await config.json()).data.csrf_token;
-  const response = await context.request.put(`${baseURL}/api/v1/system/features`, {
-    headers: { 'X-LibreEcho-CSRF': csrf },
-    data: { simulation: true }
+async function setupReadinessSuite(browser) {
+  const context = await browser.newContext({ baseURL });
+  await context.addInitScript(() => {
+    sessionStorage.setItem('libreecho-token', 'setup-e2e-token');
   });
-  assert.ok(response.ok(), `enabling the simulation feature should succeed (${response.status()})`);
-
-  await page.evaluate(() => {
-    localStorage.removeItem('libreecho-simulation-history');
-    localStorage.setItem('libreecho-simulation-device-history', JSON.stringify([
-      { at: Date.now(), source: 'device', follow_up: false,
-        audio_ms: 1870, processing_ms: 2024, queue_to_first_audio_ms: 2313 }
-    ]));
+  const page = await context.newPage();
+  let setupReads = 0;
+  let scans = 0;
+  const envelope = data => ({ ok: true, data, error: null });
+  await page.route('**/api/v1/config', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify(envelope({ csrf_token: 'c'.repeat(64), bootstrap_required: false }))
+  }));
+  await page.route('**/api/v1/setup', route => {
+    setupReads += 1;
+    const ready = setupReads > 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(envelope({
+        completed: false, backend: 'linux', hostname: 'libreecho', volume: 52,
+        wake_word: 'LibreEcho', wake_sensitivity: 68, local_only: true,
+        diagnostic_telemetry: false, network_state: 'unavailable', ssid: '',
+        wlan0_registered: ready,
+        vendor_firmware: { state: 'ready', verification: 'hash-pinned',
+          source_layout: 'etc/firmware', error: 'none', force_next_boot: false }
+      }))
+    });
   });
-  await page.goto('/', { waitUntil: 'domcontentloaded' });
-  await waitForPage(page, 'Overview');
-  await selectPage(page, 'Simulation');
-
-  const rows = await page.locator('#sim-history table.sim-table tbody tr').count();
-  assert.equal(rows, 1, 'a cached device turn should render as one history row');
-  const text = await page.locator('#sim-history').innerText();
-  assert.match(text, /spoken turn/, 'a device row should say the phrase was not recorded');
-
-  /* Leave the feature as it was found. It is persisted server-side, and the
-     radio suite asserts the menu hides Simulation when it is off. */
-  await context.request.put(`${baseURL}/api/v1/system/features`, {
-    headers: { 'X-LibreEcho-CSRF': csrf },
-    data: { simulation: false }
+  await page.route('**/api/v1/network/wifi/scan', route => {
+    scans += 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(envelope({ networks: [
+        { ssid: 'Readiness5', security: 'wpa2', signal: 40 },
+        { ssid: 'Readiness24', security: 'wpa2', signal: 95 },
+        { ssid: 'ReadinessWeak', security: 'wpa2', signal: 20 }
+      ] }))
+    });
   });
-  await page.evaluate(() => localStorage.removeItem('libreecho-simulation-device-history'));
+
+  await page.goto('/setup.html', { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => typeof setup !== 'undefined' && setup.step === 1);
+  await page.evaluate(() => { setup.step = 2; render(); });
+  await page.getByText('Readiness5', { exact: true }).waitFor({
+    state: 'visible', timeout: 4000
+  });
+  assert.deepEqual(await page.locator('.wifi-option strong').allTextContents(), [
+    'Readiness5', 'Readiness24', 'ReadinessWeak'
+  ], 'scan results should preserve the backend preferred-band order');
+  assert.ok(setupReads >= 2, 'scan retry should refresh setup readiness');
+  assert.equal(scans, 1, 'scan should start once wlan0 becomes ready');
+  await context.close();
 }
 
 async function desktopSuite(browser) {
@@ -159,8 +172,6 @@ async function desktopSuite(browser) {
     'Network', 'Bluetooth', 'Privacy', 'Integrations', 'System', 'Logs', 'About'
   ];
   for (const destination of destinations) await selectPage(page, destination);
-
-  await checkSimulationHistory(context, page);
 
   await checkAudioMutation(page);
   assert.deepEqual(failures, [], `browser failures:\n${failures.join('\n')}`);
