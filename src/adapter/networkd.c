@@ -1458,13 +1458,61 @@ struct scan_result {
     int five_ghz;
 };
 
+static int scan_result_better(const struct scan_result *a,
+                              const struct scan_result *b)
+{
+    if (a->five_ghz != b->five_ghz)
+        return a->five_ghz > b->five_ghz;
+    if (a->signal != b->signal)
+        return a->signal > b->signal;
+    return strcmp(a->ssid, b->ssid) < 0;
+}
+
+static int serialize_scan_results(struct scan_result *results, int count,
+                                  char *data, size_t size)
+{
+    size_t used = 0;
+    int i, emitted = 0, truncated = 0;
+    if (append_text(data, size, &used, "{\"networks\":[") < 0)
+        return -1;
+    for (i = 0; i < count; ++i) {
+        char entry[640];
+        size_t entry_used = 0;
+        int j, duplicate = 0;
+        for (j = 0; j < i; ++j)
+            if (!strcmp(results[j].ssid, results[i].ssid))
+                duplicate = 1;
+        if (duplicate)
+            continue;
+        if (append_text(entry, sizeof(entry), &entry_used, "{\"ssid\":") < 0 ||
+            append_json_string(entry, sizeof(entry), &entry_used, results[i].ssid) < 0 ||
+            append_text(entry, sizeof(entry), &entry_used, ",\"security\":") < 0 ||
+            append_json_string(entry, sizeof(entry), &entry_used,
+                               scan_security(results[i].flags)) < 0 ||
+            append_text(entry, sizeof(entry), &entry_used, ",\"signal\":%d}",
+                        rssi_to_percent(results[i].signal)) < 0)
+            return -1;
+        if (used + entry_used + (emitted ? 1 : 0) + 32 >= size) {
+            truncated = 1;
+            break;
+        }
+        if (emitted++ && append_text(data, size, &used, ",") < 0)
+            return -1;
+        if (append_text(data, size, &used, "%s", entry) < 0)
+            return -1;
+    }
+    if (append_text(data, size, &used, "]%s}",
+                    truncated ? ",\"truncated\":true" : "") < 0)
+        return -1;
+    return (int)used;
+}
+
 static int bogus_ssid(const char *ssid);
 
 static int parse_scan_results(const char *reply, char *data, size_t size)
 {
     const char *line = reply;
-    size_t used = 0;
-    int count = 0, i, emitted = 0, truncated = 0;
+    int count = 0, i;
     struct scan_result results[SCAN_MAX];
     memset(results, 0, sizeof(results));
     while (*line) {
@@ -1535,45 +1583,14 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
     for (i = 0; i < count; ++i) {
         int j;
         for (j = i + 1; j < count; ++j) {
-            int better = results[j].five_ghz > results[i].five_ghz ||
-                         (results[j].five_ghz == results[i].five_ghz &&
-                          (results[j].signal > results[i].signal ||
-                           (results[j].signal == results[i].signal &&
-                            strcmp(results[j].ssid, results[i].ssid) < 0)));
-            if (better) {
+            if (scan_result_better(&results[j], &results[i])) {
                 struct scan_result swap = results[i];
                 results[i] = results[j];
                 results[j] = swap;
             }
         }
     }
-    if (append_text(data, size, &used, "{\"networks\":[") < 0)
-        return -1;
-    for (i = 0; i < count; ++i) {
-        char entry[640];
-        size_t entry_used = 0;
-        if (append_text(entry, sizeof(entry), &entry_used, "{\"ssid\":") < 0 ||
-            append_json_string(entry, sizeof(entry), &entry_used, results[i].ssid) < 0 ||
-            append_text(entry, sizeof(entry), &entry_used, ",\"security\":") < 0 ||
-            append_json_string(entry, sizeof(entry), &entry_used, scan_security(results[i].flags)) < 0 ||
-            append_text(entry, sizeof(entry), &entry_used, ",\"signal\":%d,\"rssi_dbm\":%d,\"frequency\":%d,\"band\":\"%s\"}",
-                        rssi_to_percent(results[i].signal), results[i].signal,
-                        results[i].frequency,
-                        results[i].five_ghz ? "5ghz" : "2.4ghz") < 0)
-            return -1;
-        if (used + entry_used + (emitted ? 1 : 0) + 2 >= size) {
-            truncated = 1;
-            break;
-        }
-        if (emitted++ && append_text(data, size, &used, ",") < 0)
-            return -1;
-        if (append_text(data, size, &used, "%s", entry) < 0)
-            return -1;
-    }
-    if (append_text(data, size, &used, "]%s}",
-                    truncated ? ",\"truncated\":true" : "") < 0)
-        return -1;
-    return (int)used;
+    return serialize_scan_results(results, count, data, size);
 }
 
 struct wext_scan_cell {
@@ -1660,7 +1677,9 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
 {
     struct wext_scan_cell cells[SCAN_MAX];
     struct wext_scan_cell *current = NULL;
-    size_t offset = 0, count = 0, i, used = 0, emitted = 0;
+    size_t offset = 0, count = 0, i;
+    struct scan_result results[SCAN_MAX];
+    int result_count = 0;
 
     memset(cells, 0, sizeof(cells));
     while (offset + IW_EV_LCP_PK_LEN <= length) {
@@ -1728,8 +1747,7 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
         offset += event_length;
     }
 
-    if (offset != length || append_text(data, data_size, &used,
-                                        "{\"networks\":[") < 0)
+    if (offset != length)
         return -1;
     for (i = 0; i < count; ++i) {
         size_t j;
@@ -1750,31 +1768,28 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
             }
         }
     }
-    for (i = 0; i < count; ++i) {
-        struct wext_scan_cell *cell = &cells[i];
+    memset(results, 0, sizeof(results));
+    for (i = 0; i < count && result_count < SCAN_MAX; ++i) {
         size_t j;
-        int duplicate = 0;
-        if (bogus_ssid(cell->ssid))
+        if (bogus_ssid(cells[i].ssid))
             continue;
-        for (j = 0; j < i; ++j)
-            if (!strcmp(cells[j].ssid, cell->ssid))
-                duplicate = 1;
-        if (duplicate)
+        for (j = 0; j < (size_t)result_count; ++j)
+            if (!strcmp(results[j].ssid, cells[i].ssid))
+                break;
+        if (j < (size_t)result_count)
             continue;
-        if (emitted++ && append_text(data, data_size, &used, ",") < 0)
-            return -1;
-        if (cell->encrypted)
-            copy_string(cell->security, sizeof(cell->security), "wpa2");
-        if (append_text(data, data_size, &used, "{\"ssid\":") < 0 ||
-            append_json_string(data, data_size, &used, cell->ssid) < 0 ||
-            append_text(data, data_size, &used, ",\"security\":") < 0 ||
-            append_json_string(data, data_size, &used, cell->security) < 0 ||
-            append_text(data, data_size, &used, ",\"signal\":%d,\"rssi_dbm\":%d,\"frequency\":%d,\"band\":\"%s\"}",
-                        cell->signal, cell->rssi_dbm, cell->frequency,
-                        cell->five_ghz ? "5ghz" : "2.4ghz") < 0)
-            return -1;
+        copy_string(results[result_count].ssid,
+                    sizeof(results[result_count].ssid), cells[i].ssid);
+        copy_string(results[result_count].flags,
+                    sizeof(results[result_count].flags),
+                    cells[i].encrypted ? "WPA2" : "");
+        results[result_count].signal = cells[i].rssi_dbm != -127 ?
+                                       cells[i].rssi_dbm : cells[i].signal;
+        results[result_count].frequency = cells[i].frequency;
+        results[result_count].five_ghz = cells[i].five_ghz;
+        ++result_count;
     }
-    return append_text(data, data_size, &used, "]}") < 0 ? -1 : (int)used;
+    return serialize_scan_results(results, result_count, data, data_size);
 }
 
 static int wext_scan(const char *iface, char *data, size_t data_size)
@@ -2089,8 +2104,8 @@ static void nl80211_parse_ies(const unsigned char *ies, size_t length,
         *encrypted = has_rsn || has_wpa;
 }
 
-static int nl80211_append_bss(const struct nlattr *bss, char *data,
-                              size_t data_size, size_t *used, int *emitted)
+static int nl80211_append_bss(const struct nlattr *bss,
+                              struct scan_result *result)
 {
     const struct nlattr *bssid, *signal, *frequency, *ies, *beacon;
     char ssid[IW_ESSID_MAX_SIZE + 1];
@@ -2127,17 +2142,15 @@ static int nl80211_append_bss(const struct nlattr *bss, char *data,
         memcpy(&signal_dbm, (unsigned char *)signal + NLA_HDRLEN,
                sizeof(signal_dbm));
     signal_dbm /= 100;
-    if (*emitted && append_text(data, data_size, used, ",") < 0)
+    if (!result)
         return -1;
-    if (append_text(data, data_size, used, "{\"ssid\":") < 0 ||
-        append_json_string(data, data_size, used, ssid) < 0 ||
-        append_text(data, data_size, used, ",\"security\":") < 0 ||
-        append_json_string(data, data_size, used, encrypted ? "wpa2" : "open") < 0 ||
-        append_text(data, data_size, used, ",\"signal\":%d,\"rssi_dbm\":%d,\"frequency\":%d,\"band\":\"%s\"}",
-                    rssi_to_percent(signal_dbm), signal_dbm, frequency_mhz,
-                    frequency_mhz >= 5000 && frequency_mhz < 6000 ? "5ghz" : "2.4ghz") < 0)
-        return -1;
-    ++*emitted;
+    memset(result, 0, sizeof(*result));
+    copy_string(result->ssid, sizeof(result->ssid), ssid);
+    result->signal = signal_dbm;
+    result->frequency = frequency_mhz;
+    result->five_ghz = frequency_mhz >= 5000 && frequency_mhz < 6000;
+    if (encrypted)
+        copy_string(result->flags, sizeof(result->flags), "WPA2");
     return 0;
 }
 
@@ -2203,9 +2216,10 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
 {
     struct nlmsghdr *header;
     struct genlmsghdr *generic;
-    size_t used = NLMSG_LENGTH(GENL_HDRLEN), output = 0;
+    size_t used = NLMSG_LENGTH(GENL_HDRLEN);
     long long deadline = monotonic_ms() + NL80211_SCAN_RETRY_MS;
-    int remaining, emitted = 0;
+    int remaining, result_count = 0;
+    struct scan_result results[SCAN_MAX];
     ssize_t received;
     struct pollfd descriptor = { fd, POLLIN, 0 };
 
@@ -2222,8 +2236,6 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
     generic->cmd = NL80211_CMD_GET_SCAN;
     generic->version = 1;
     if (send(fd, buffer, used, 0) < 0)
-        return -1;
-    if (append_text(data, data_size, &output, "{\"networks\":[") < 0)
         return -1;
     for (;;) {
         int wait_ms = (int)(deadline - monotonic_ms());
@@ -2253,8 +2265,16 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
             size_t payload_length;
             const struct nlattr *bss;
             if (header->nlmsg_type == NLMSG_DONE) {
-                return append_text(data, data_size, &output, "]}") < 0 ?
-                    -1 : (int)output;
+                int i, j;
+                for (i = 0; i < result_count; ++i)
+                    for (j = i + 1; j < result_count; ++j)
+                        if (scan_result_better(&results[j], &results[i])) {
+                            struct scan_result swap = results[i];
+                            results[i] = results[j];
+                            results[j] = swap;
+                        }
+                return serialize_scan_results(results, result_count,
+                                               data, data_size);
             }
             if (header->nlmsg_type == NLMSG_ERROR) {
                 struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
@@ -2267,9 +2287,9 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
             payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
             bss = nl_find((unsigned char *)generic + GENL_HDRLEN,
                           payload_length, NL80211_ATTR_BSS);
-            if (bss && emitted < SCAN_MAX &&
-                nl80211_append_bss(bss, data, data_size, &output, &emitted) < 0)
-                return -1;
+            if (bss && result_count < SCAN_MAX &&
+                nl80211_append_bss(bss, &results[result_count]) == 0)
+                ++result_count;
         }
     }
 }

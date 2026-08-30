@@ -455,6 +455,8 @@ def test_scan_orders_five_ghz_before_signal_sorted_24ghz():
         "00:11:22:33:44:70\t2412\t-20\t[WPA2-PSK-CCMP][ESS]\tStrong24\n"
         "00:11:22:33:44:71\t5785\t-70\t[WPA2-PSK-CCMP][ESS]\tPreferred5G\n"
         "00:11:22:33:44:72\t2437\t-45\t[WPA2-PSK-CCMP][ESS]\tWeak24\n"
+        "00:11:22:33:44:73\t2462\t-20\t[WPA2-PSK-CCMP][ESS]\tClampStrong\n"
+        "00:11:22:33:44:74\t2467\t-30\t[WPA2-PSK-CCMP][ESS]\tClampWeak\n"
     )
     with tempfile.TemporaryDirectory(prefix="libreecho-networkd-band-") as temp:
         directory = Path(temp)
@@ -465,9 +467,7 @@ def test_scan_orders_five_ghz_before_signal_sorted_24ghz():
             assert result["ok"] is True, result
             networks = result["data"]["networks"]
             assert [entry["ssid"] for entry in networks] == [
-                "Preferred5G", "Strong24", "Weak24"]
-            assert networks[0]["band"] == "5ghz"
-            assert networks[1]["band"] == "2.4ghz"
+                "Preferred5G", "ClampStrong", "Strong24", "ClampWeak", "Weak24"]
         finally:
             stop_daemon(process, wpa)
 
@@ -476,7 +476,7 @@ def test_dense_scan_truncates_without_failing():
     rows = "bssid / frequency / signal level / flags / ssid\n"
     rows += "".join(
         f"00:11:22:33:45:{i:02x}\t2412\t-{40 + i % 20}\t"
-        f"[WPA2-PSK-CCMP][ESS]\tNetwork-{i:02d}-abcdefghijklmnop\n"
+        f"[WPA2-PSK-CCMP][ESS]\tNetwork-{i:02d}-" + "x" * 180 + "\n"
         for i in range(48))
     with tempfile.TemporaryDirectory(prefix="libreecho-networkd-dense-") as temp:
         directory = Path(temp)

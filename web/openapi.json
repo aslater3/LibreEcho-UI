@@ -1579,7 +1579,7 @@
      "Network"
     ],
     "summary": "Scan Wi-Fi networks",
-    "description": "Returns distinct SSIDs ordered with 5 GHz preferred, then descending raw RSSI and a stable SSID tie-breaker. Each result includes signal (0-100), rssi_dbm, frequency in MHz, and band (5ghz or 2.4ghz). Dense scans may set data.truncated to true.",
+    "description": "Returns distinct SSIDs ordered with 5 GHz preferred, then descending signal strength and a stable SSID tie-breaker. Dense scans may set data.truncated to true when the fixed adapter message limit is reached.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
