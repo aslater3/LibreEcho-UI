@@ -630,7 +630,10 @@ false.
 
 #### GET /api/v1/network/wifi/scan
 
-Scan for WiFi networks.
+Scan for WiFi networks. Results are ordered with 5 GHz networks first, then by
+raw RSSI (strongest first), with SSID as a stable tie-breaker. The `signal`
+field is a 0–100 display percentage; `rssi_dbm` preserves the raw value used
+for ordering. `frequency` is in MHz and `band` is `5ghz` or `2.4ghz`.
 
 **Response:**
 ```json
@@ -638,8 +641,8 @@ Scan for WiFi networks.
   "ok": true,
   "data": {
     "networks": [
-      { "ssid": "MyNetwork", "security": "wpa2", "signal": 75 },
-      { "ssid": "OtherNetwork", "security": "wpa2", "signal": 45 }
+      { "ssid": "MyNetwork", "security": "wpa2", "signal": 75, "rssi_dbm": -47, "frequency": 5180, "band": "5ghz" },
+      { "ssid": "OtherNetwork", "security": "wpa2", "signal": 45, "rssi_dbm": -67, "frequency": 2412, "band": "2.4ghz" }
     ]
   },
   "error": null

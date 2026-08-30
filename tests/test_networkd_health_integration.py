@@ -472,6 +472,25 @@ def test_scan_orders_five_ghz_before_signal_sorted_24ghz():
             stop_daemon(process, wpa)
 
 
+def test_dense_scan_truncates_without_failing():
+    rows = "bssid / frequency / signal level / flags / ssid\n"
+    rows += "".join(
+        f"00:11:22:33:45:{i:02x}\t2412\t-{40 + i % 20}\t"
+        f"[WPA2-PSK-CCMP][ESS]\tNetwork-{i:02d}-abcdefghijklmnop\n"
+        for i in range(48))
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-dense-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", scan_results=rows)
+        try:
+            result = adapter_request(adapter, 52, "scan", timeout=4)
+            assert result["ok"] is True, result
+            assert result["data"]["truncated"] is True
+            assert 0 < len(result["data"]["networks"]) < 48
+        finally:
+            stop_daemon(process, wpa)
+
+
 def main():
     test_ordered_recovery_and_one_shot_reboot()
     test_recovery_can_succeed_without_supervisor_request()
@@ -485,6 +504,7 @@ def main():
     test_preassociation_failure_does_not_restore_when_disconnected()
     test_scan_deduplicates_ssid_and_keeps_strongest_bssid()
     test_scan_orders_five_ghz_before_signal_sorted_24ghz()
+    test_dense_scan_truncates_without_failing()
     print("networkd event-loop recovery integration: ok")
 
 

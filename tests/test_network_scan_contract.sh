@@ -40,5 +40,12 @@ assert 'previous_network_id' in source
 assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
 assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));' in source
 assert 'level = normalize_rssi_dbm((int)statistics.qual.level);' in source
+assert 'NL80211_BSS_FREQUENCY' in source
+assert 'SIOCGIWFREQ' in source
+assert 'rssi_dbm' in source
+assert 'frequency' in source
+assert 'band' in source
+assert 'truncated = 1' in source
+assert 'truncated ?' in source
 print('network scan EOPNOTSUPP/nl80211 and signed RSSI contract: ok')
 PY
