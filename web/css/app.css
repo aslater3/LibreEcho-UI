@@ -27,7 +27,7 @@ nav{display:grid;gap:4px}
 .version-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.version-line p{margin:0}.update-available{border:1px solid #4d9965;border-radius:5px;background:#143225;color:#75df93;padding:3px 6px;font-size:10px;font-weight:700;cursor:pointer}.update-available:hover{background:#1b432e}.light .update-available{border-color:#7fba92;background:#e5f4e9;color:#176c37}.light .update-available:hover{background:#d6ecdd}
 .status-card p{margin:12px 0 0}
 .online{color:#5cdd7d}
-.online span{display:inline-block;width:12px;height:12px;border-radius:50%;background:#4fda71;margin-right:10px;box-shadow:0 0 12px #38d760}
+.online span{display:inline-block;width:12px;height:12px;border-radius:50%;background:#4fda71;margin-right:10px;box-shadow:0 0 12px #38d760}.online.unavailable{color:#ff7272}.online.unavailable span{background:#ff5252;box-shadow:0 0 12px #ff5252}
 .github-card{text-decoration:none;display:flex;align-items:center;gap:13px;color:#f0f4f8}
 .github-card small{display:block;color:#92a5b7;margin-top:3px}
 .github-dot{font-size:30px;color:#dde6ef}
