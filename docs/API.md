@@ -60,6 +60,69 @@ message.
 
 ### System Status
 
+#### GET /api/v1/setup
+
+Returns first-boot setup defaults and the connectivity prerequisites needed by
+the setup page. The response remains available during a degraded Linux boot
+when audio, network, or wake-word companion services are unavailable.
+
+`vendor_firmware.state`, `verification`, `source_layout`, and `error` mirror
+the bounded boot-time vendor-import status. `force_next_boot` reports whether
+the one-shot compatibility marker is pending, and `wlan0_registered` reports
+whether the kernel currently exposes the Wi-Fi interface. A degraded wake-word
+adapter returns the valid fallback `wake_word: "LibreEcho"`.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "wake_word": "LibreEcho",
+    "vendor_firmware": {
+      "state": "ready",
+      "verification": "hash-pinned",
+      "source_layout": "etc/firmware",
+      "error": "none",
+      "force_next_boot": false
+    },
+    "wlan0_registered": true
+  },
+  "error": null
+}
+```
+
+#### POST /api/v1/setup
+
+Validates and applies the first-boot hostname, initial volume, Wi-Fi profile,
+wake-word preferences, and privacy choices. Hostname, audio, Wi-Fi, and durable
+configuration failures abort the transaction with stage-specific errors.
+
+Wake-word support is optional: if its companion service returns
+`LE_NOT_SUPPORTED`, setup continues, the submitted `wake_word` and
+`wake_sensitivity` are still written to the canonical configuration, and the
+boot-time restore retries them when the service becomes available. Other
+wake-word errors abort setup. Wi-Fi credentials are passed to the network
+adapter for association but are never returned by the API or written to the
+web configuration.
+
+#### POST /api/v1/setup/vendor-import-force-next-boot
+
+Schedules one forced, owner-local firmware import for the next boot. This
+endpoint creates only the mode-`0600` one-shot marker; it does not reboot the
+device. The import remains structurally checked but is reported as
+`forced-unverified`, never hash-pinned.
+
+The request requires normal authentication, `X-LibreEcho-CSRF`, and this exact
+confirmation body:
+
+```json
+{ "confirm": "force-unverified-owner-local-import" }
+```
+
+A successful response reports `force_next_boot: true`,
+`reboot_required: true`, and `verification: "forced-unverified"`. An absent or
+incorrect confirmation returns `400`; non-Linux backends return `501`; and a
+marker write failure returns `503`.
+
 #### GET /api/v1/status
 
 Returns system health and telemetry.
@@ -242,6 +305,51 @@ access to the model, PCM FIFO, ALSA device, or amplifier.
 Use `POST /api/v1/audio/announce/stop` with `{}` to interrupt the active
 announcement. State-changing API calls require the normal CSRF header and,
 when configured, local API authentication.
+
+### Timers and alarms
+
+#### GET /api/v1/timers
+
+Returns the bounded timer schedule. Each entry has an `id`, `kind` (`countdown`
+or `alarm`), `state` (`pending` or `ringing`), `seconds_remaining`, and an
+optional `label`. The response also includes `ringing`, `missed`, and
+`available`. When `timerd` is absent, this GET still returns HTTP 200 with
+`available: false`, an empty `timers` array, and zero `ringing`/`missed`
+counts. Timer writes return the standard 503 unavailable response instead.
+
+#### POST /api/v1/timers
+
+Creates a countdown and requires `X-LibreEcho-CSRF`.
+
+```json
+{ "seconds": 600, "label": "pasta" }
+```
+
+`seconds` is required and must be 1–604800. `label` is optional, but if
+present must be a valid JSON string whose UTF-8 encoding is no longer than 47
+bytes; oversized, malformed, or control-character labels return HTTP 400 rather
+than being truncated or changed. Leading whitespace is preserved when the
+schedule is persisted and restored. Success returns
+HTTP 201 with `{ "id": number }`. The fixed schedule holds at most 16 active
+entries; a valid request when it is full returns HTTP 409 with error code
+`busy`.
+
+#### POST /api/v1/timers/dismiss
+
+Dismisses all currently ringing timers, leaves pending timers untouched, and
+returns `{ "dismissed": number }`. Requires `X-LibreEcho-CSRF`.
+
+#### DELETE /api/v1/timers/{id}
+
+Cancels one pending timer by numeric ID. Ringing timers are not cancelled by
+this route; use `/timers/dismiss` to silence them. The entire path component
+must be a nonzero decimal integer; malformed, ringing, out-of-range, missing,
+or already-cancelled IDs return HTTP 404 without removing another timer.
+Requires `X-LibreEcho-CSRF`.
+
+The timer page refreshes its status while open so countdowns and ringing state
+remain current. Timer state is persisted atomically with a restrictive
+permissions policy and is restored after the wall clock becomes valid.
 
 ### Voice assistant
 
@@ -567,7 +675,10 @@ false.
 
 #### GET /api/v1/network/wifi/scan
 
-Scan for WiFi networks.
+Scan for WiFi networks. Results are ordered with 5 GHz networks first, then by
+signal strength (strongest first), with SSID as a stable tie-breaker. The
+response is bounded to the first 12 distinct results for the fixed adapter
+message size.
 
 **Response:**
 ```json
@@ -585,8 +696,10 @@ Scan for WiFi networks.
 
 #### POST /api/v1/network/wifi/connect
 
-Connect to a WiFi network. The `security` field accepts exactly `open`, `wpa2`,
-or `wpa3`; if omitted, it defaults to `wpa2` for backward compatibility.
+Connect to a WiFi network. The `security` field accepts exactly `open` or `wpa2`;
+if omitted, it defaults to `wpa2` for backward compatibility. WPA3/SAE is not
+advertised or accepted because the shipped MT8163 path is WEXT-only and has no
+verified SAE capability.
 Malformed or unsupported security values are rejected with HTTP 400 before any
 adapter request is made.
 
@@ -599,9 +712,8 @@ adapter request is made.
 }
 ```
 
-For an open network, use `"security": "open"` and omit `password`. WPA3 uses
-`"security": "wpa3"`. The endpoint never silently converts an invalid security
-value to an open or WPA2 network.
+For an open network, use `"security": "open"` and omit `password`. The endpoint
+never silently converts an invalid security value to an open or WPA2 network.
 
 **Response:**
 ```json
@@ -682,7 +794,16 @@ Shutdown device. Requires confirmation.
 
 #### POST /api/v1/system/factory-reset
 
-Factory reset device. Requires confirmation.
+Permanently removes every file and nested directory below the product image's
+`/data/libreecho/config` and `/data/libreecho/secrets` directories, including
+device-local accounts, setup completion, Wi-Fi profiles/PSKs, assistant
+credentials, timers, and all mutable user configuration. The reset synchronizes
+both persistent directories and reboots. Installed feature payloads, OTA
+artifacts, and release identity outside those directories are preserved.
+The operation requires `X-LibreEcho-Confirm: confirm-device-action`; missing
+directories are accepted, while any unexpected deletion or durability failure
+aborts the reboot and returns HTTP 503. Unprivileged Linux deployments and
+backends without destructive-action support return HTTP 501.
 
 #### PUT /api/v1/system/update/channel
 

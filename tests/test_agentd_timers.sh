@@ -1,0 +1,477 @@
+#!/bin/sh
+# Setting a timer by voice, end to end through the agent.
+#
+# The parser and the schedule are unit-tested. What this covers is that the
+# two are actually joined up: that a spoken request reaches the timer daemon
+# and creates a real timer, and -- the part worth proving -- that it does so
+# with no language model configured at all. Timers are the thing that should
+# keep working when the internet does not.
+set -eu
+
+AGENTD=./build/libreecho-agentd
+TIMERD=./build/libreecho-timerd
+[ -x "$AGENTD" ] || { echo "agentd not built"; exit 1; }
+[ -x "$TIMERD" ] || { echo "timerd not built"; exit 1; }
+
+dir=$(mktemp -d)
+agent_sock="$dir/agent.sock"
+timer_sock="$dir/timer.sock"
+
+cleanup() {
+    for name in agentd timerd; do
+        [ -f "$dir/$name.pid" ] && kill "$(cat "$dir/$name.pid")" 2>/dev/null || true
+    done
+    rm -rf "$dir"
+}
+trap cleanup EXIT INT TERM
+
+call() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, socket, sys
+sock, cmd, args = sys.argv[1], sys.argv[2], sys.argv[3]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(10); s.connect(sock)
+s.sendall((json.dumps({"v": 1, "id": 1, "cmd": cmd,
+                       "args": json.loads(args)}) + "\n").encode())
+print(s.recv(65536).decode().strip())
+s.close()
+PY
+}
+
+wait_socket() {
+    waited=0
+    while [ ! -S "$1" ] && [ "$waited" -lt 10 ]; do sleep 1; waited=$((waited+1)); done
+    [ -S "$1" ] || { echo "FAIL: $1 never appeared"; cat "$dir"/*.log 2>/dev/null; exit 1; }
+}
+
+"$TIMERD" --foreground --socket "$timer_sock" --state "$dir/timers" \
+    --audio-socket "$dir/absent-audio.sock" >"$dir/timerd.log" 2>&1 &
+echo $! > "$dir/timerd.pid"
+wait_socket "$timer_sock"
+
+# No credentials and no provider: the assistant is not signed in. That is the
+# point -- the timer must still work.
+printf '{}' > "$dir/agent.json"
+"$AGENTD" --socket "$agent_sock" --config "$dir/agent.json" \
+    --credentials "$dir/absent-credentials.json" \
+    --timer-socket "$timer_sock" \
+    --audio-socket "$dir/absent-audio.sock" \
+    --tts-socket "$dir/absent-tts.sock" >"$dir/agentd.log" 2>&1 &
+echo $! > "$dir/agentd.pid"
+wait_socket "$agent_sock"
+
+# --- a spoken request creates a real timer --------------------------------
+out=$(call "$agent_sock" respond '{"text":"set a timer for ten minutes"}')
+case "$out" in
+    *'"ok":true'*) ;;
+    *) echo "FAIL: agent rejected the request: $out"; cat "$dir/agentd.log"; exit 1 ;;
+esac
+case "$out" in
+    *'10 minutes'*) ;;
+    *) echo "FAIL: confirmation did not mention the duration: $out"; exit 1 ;;
+esac
+echo "  spoken request answered without a language model: ok"
+
+out=$(call "$timer_sock" status '{}')
+# A little time has passed, so check the range rather than an exact second.
+printf '%s' "$out" | python3 -c '
+import json, sys
+data = json.loads(sys.stdin.read())["data"]
+timers = data["timers"]
+assert len(timers) == 1, "expected one timer, got %r" % (timers,)
+assert timers[0]["kind"] == "countdown", timers[0]
+left = timers[0]["seconds_remaining"]
+assert 540 < left <= 600, "ten minutes should be near 600 seconds, got %d" % left
+' || { echo "FAIL: no usable timer was created: $out"; exit 1; }
+echo "  the timer daemon actually has the timer: ok"
+
+# --- a question is left for the model -------------------------------------
+# The matcher must not swallow things it cannot answer. With no model signed
+# in this fails, and failing is correct: it proves the request was passed on
+# rather than answered locally.
+out=$(call "$agent_sock" respond '{"text":"what is the capital of France"}')
+case "$out" in
+    *'"ok":false'*) ;;
+    *) echo "FAIL: a general question was answered by the timer matcher: $out"; exit 1 ;;
+esac
+echo "  a general question is still passed to the model: ok"
+
+# --- asking about the timer -----------------------------------------------
+out=$(call "$agent_sock" respond '{"text":"how long is left on my timer"}')
+case "$out" in
+    *'minutes'*) ;;
+    *) echo "FAIL: query not answered: $out"; exit 1 ;;
+esac
+echo "  time remaining answered: ok"
+
+# --- cancelling -----------------------------------------------------------
+out=$(call "$agent_sock" respond '{"text":"cancel my timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: cancel not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: the timer was not cancelled: $out"; exit 1 ;;
+esac
+echo "  cancelling by voice removes the timer: ok"
+
+# A duration qualifier is not a timer identity. With one unlabeled timer,
+# cancellation must use the single-timer fallback rather than search for
+# a label such as "ten minute".
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the ten minute timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: duration-only cancellation was not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: duration-only cancellation left the timer scheduled: $out"; exit 1 ;;
+esac
+echo "  duration-only cancellation uses the single-timer fallback: ok"
+
+# A numeric quantity is not a stored label. With exactly one unlabeled timer,
+# the singular quantity must use the same single-timer fallback.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel one timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: numeric single-timer cancellation was not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: numeric single-timer cancellation left the timer scheduled: $out"; exit 1 ;;
+esac
+echo "  numeric single-timer cancellation uses the fallback: ok"
+
+# Do not cancel a sole timer when the requested quantity cannot be satisfied.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel two timers"}')
+case "$out" in
+    *'Which timer'*) ;;
+    *) echo "FAIL: unsatisfied cancellation quantity was not rejected: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) echo "FAIL: unsatisfied quantity cancelled the sole timer: $out"; exit 1 ;;
+    *) ;;
+esac
+call "$agent_sock" respond '{"text":"cancel one timer"}' >/dev/null
+echo "  unsatisfied cancellation quantity leaves the timer scheduled: ok"
+
+# "Next" selects the soonest pending timer rather than a literal label.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel my next timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: next-timer cancellation was not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: next-timer cancellation left a timer scheduled: $out"; exit 1 ;;
+esac
+echo "  next-timer cancellation uses the daemon selector: ok"
+
+# Singular voice cancellation is label-targeted and must not clear siblings.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the pasta"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the tea"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for twenty minutes for the coffee"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the pasta timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"tea"'*'"timers"'*'"label":"pasta"'*)
+        echo "FAIL: label cancellation left pasta or removed tea: $out"; exit 1 ;;
+    *'"label":"tea"'*) ;;
+    *) echo "FAIL: label cancellation did not preserve the sibling: $out"; exit 1 ;;
+esac
+
+# With multiple timers and no identity, do not pick an arbitrary timer.
+out=$(call "$agent_sock" respond '{"text":"cancel my timer"}')
+case "$out" in
+    *'Which timer'*) ;;
+    *) echo "FAIL: ambiguous singular cancellation was not rejected: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"tea"'*) ;;
+    *) echo "FAIL: ambiguous cancellation changed the schedule: $out"; exit 1 ;;
+esac
+
+# All accepted cancellation verbs must target their named timer.
+out=$(call "$agent_sock" respond '{"text":"delete the tea timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: delete label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"tea"'*)
+        echo "FAIL: delete label cancellation left tea: $out"; exit 1 ;;
+    *'"label":"coffee"'*) ;;
+    *) echo "FAIL: delete label cancellation changed the wrong timer: $out"; exit 1 ;;
+esac
+out=$(call "$agent_sock" respond '{"text":"remove the coffee timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: remove label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: remove label cancellation left a timer: $out"; exit 1 ;;
+esac
+
+# A numeric first word may be part of a stored name. It must remain a label
+# when another name word follows, rather than being treated as a count.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the two eggs"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the alpha"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the two eggs timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: numeric-leading label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"two eggs"'*)
+        echo "FAIL: numeric-leading label was not cancelled: $out"; exit 1 ;;
+    *'"label":"alpha"'*) ;;
+    *) echo "FAIL: numeric-leading label cancellation changed the wrong timer: $out"; exit 1 ;;
+esac
+echo "  numeric-leading timer labels remain targetable: ok"
+call "$agent_sock" respond '{"text":"cancel the alpha timer"}' >/dev/null
+
+# Alarm is an accepted noun as well as timer, and every cancellation verb must
+# carry the label through to the daemon.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the kitchen"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"clear the kitchen alarm"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: alarm label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: alarm label cancellation left a timer: $out"; exit 1 ;;
+esac
+
+# Quantifiers only mean cancel-all when they directly quantify a timer/alarm
+# noun. They must remain label text (or non-universal wording) elsewhere.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the all hands"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the alpha"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for twenty minutes for the beta"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the all hands timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: quantifier-like label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: named quantifier-like label changed the wrong timers: $out"; exit 1 ;;
+esac
+
+echo "  named quantifier-like label cancellation leaves siblings: ok"
+
+# A coordinated universal phrase is a label when another outer timer noun
+# follows it, not a request to clear the entire schedule.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the all timers and alarms"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the all timers and alarms timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: coordinated label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"all timers and alarms"'*)
+        echo "FAIL: coordinated label was not cancelled: $out"; exit 1 ;;
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: coordinated label cancellation changed the wrong timers: $out"; exit 1 ;;
+esac
+echo "  coordinated universal-looking labels remain targeted: ok"
+
+# A label containing the universal phrase after the outer noun must stay a
+# label in the alternate "called" form as well.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the all timers"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the timer called all timers"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: called-form quantifier label cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"all timers"'*)
+        echo "FAIL: called-form quantifier label was not cancelled: $out"; exit 1 ;;
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: called-form quantifier label changed the wrong timers: $out"; exit 1 ;;
+esac
+
+echo "  called-form quantifier-like label remains targeted: ok"
+
+out=$(call "$agent_sock" respond '{"text":"cancel every question about timers"}')
+case "$out" in
+    *'could not find that timer'*) ;;
+    *) echo "FAIL: unrelated quantifier became cancel-all: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: unrelated quantifier changed the schedule: $out"; exit 1 ;;
+esac
+
+# A quantity is not universal wording and must not clear the schedule.
+for phrase in 'cancel one timer' 'cancel two timers'; do
+    call "$agent_sock" respond "{\"text\":\"$phrase\"}" >/dev/null
+    out=$(call "$timer_sock" status '{}')
+    case "$out" in
+        *'"label":"alpha"'*'"label":"beta"'*) ;;
+        *) echo "FAIL: $phrase was treated as cancel-all: $out"; exit 1 ;;
+    esac
+done
+
+# Explicit negation must not turn into a destructive cancellation. With the
+# alpha and beta timers still pending, both forms must fall through to the
+# unavailable model and leave the schedule unchanged.
+for phrase in "don't cancel all timers" "do not cancel my timer"; do
+    out=$(call "$agent_sock" respond "{\"text\":\"$phrase\"}")
+    case "$out" in
+        *'"ok":false'*) ;;
+        *) echo "FAIL: negated cancellation was handled destructively: $out"; exit 1 ;;
+    esac
+done
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"alpha"'*'"label":"beta"'*) ;;
+    *) echo "FAIL: negated cancellation changed the schedule: $out"; exit 1 ;;
+esac
+echo "  negated cancellation leaves the schedule unchanged: ok"
+
+# The "every one of" construction is universal, even though "one" appears
+# between the quantifier and the timer noun.
+out=$(call "$agent_sock" respond '{"text":"cancel every one of my timers"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: every-one-of cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: every-one-of cancel-all left timers: $out"; exit 1 ;;
+esac
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"delete each one of the alarms"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: each-one-of cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: each-one-of cancel-all left timers: $out"; exit 1 ;;
+esac
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel all timers"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: explicit cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: explicit cancel-all left timers: $out"; exit 1 ;;
+esac
+
+# Coordinated timer categories remain one universal cancellation request.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel all timers and alarms"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: coordinated cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: coordinated cancel-all left timers: $out"; exit 1 ;;
+esac
+echo "  coordinated timer and alarm cancellation is universal: ok"
+
+# "single" is an emphatic universal modifier, not a timer label.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel every single timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: every-single cancel-all not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: every-single cancel-all left timers: $out"; exit 1 ;;
+esac
+
+# Two equal labels are an ambiguity, not a missing timer. Preserve both until
+# the caller supplies a disambiguating request.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the duplicate"}' >/dev/null
+call "$agent_sock" respond '{"text":"set a timer for fifteen minutes for the duplicate"}' >/dev/null
+out=$(call "$agent_sock" respond '{"text":"cancel the duplicate timer"}')
+case "$out" in
+    *'Which timer should I cancel?'*) ;;
+    *) echo "FAIL: ambiguous label was reported as missing: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.loads(sys.stdin.read())["data"]["timers"]
+assert len(timers) == 2, timers
+assert all(timer["label"] == "duplicate" for timer in timers), timers
+' || { echo "FAIL: ambiguous cancellation changed the schedule: $out"; exit 1; }
+out=$(call "$agent_sock" respond '{"text":"cancel the missing timer"}')
+case "$out" in
+    *'could not find that timer'*) ;;
+    *) echo "FAIL: missing label was not reported as missing: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.loads(sys.stdin.read())["data"]["timers"]
+assert len(timers) == 2, timers
+' || { echo "FAIL: missing-label cancellation changed the schedule: $out"; exit 1; }
+call "$agent_sock" respond '{"text":"cancel all timers"}' >/dev/null
+echo "  singular, verb, and universal cancellation are scoped correctly: ok"
+
+# A valid label must not rescue a malformed id selector. The daemon must reject
+# the request before it can mutate the schedule through the label path.
+call "$agent_sock" respond '{"text":"set a timer for ten minutes for the all timers"}' >/dev/null
+out=$(call "$timer_sock" cancel '{"id":"bad","label":"all timers"}')
+case "$out" in
+    *'"ok":false'*) ;;
+    *) echo "FAIL: malformed id fell through to label cancellation: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"label":"all timers"'*) ;;
+    *) echo "FAIL: malformed id changed the labelled timer: $out"; exit 1 ;;
+esac
+echo "  malformed id cannot fall through to label cancellation: ok"
+
+# --- "stop" with nothing ringing is not a timer request -------------------
+# It means a dozen other things, so it must fall through rather than being
+# answered as if a timer had been silenced.
+out=$(call "$agent_sock" respond '{"text":"stop"}')
+case "$out" in
+    *'"ok":false'*) ;;
+    *) echo "FAIL: \"stop\" was taken as a timer request with nothing ringing: $out"; exit 1 ;;
+esac
+echo "  \"stop\" with nothing ringing falls through: ok"
+
+echo "agentd timers: ok"

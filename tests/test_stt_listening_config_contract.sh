@@ -10,8 +10,8 @@ api=Path('src/api.c').read_text()
 stt=Path('src/adapter/stt_engine_wyoming.c').read_text()
 openapi=json.loads(Path('web/openapi.json').read_text())
 assert 'config_number stt_max_utterance_ms 6000' in init
-assert 'export LE_STT_END_SILENCE_MS=$(config_number stt_end_silence_ms 1500)' in init
-assert 'export LE_STT_VAD_FLOOR_RMS=$(config_number stt_vad_floor_rms 45)' in init
+assert 'export LE_STT_END_SILENCE_MS=$(config_number stt_end_silence_ms 1000)' in init
+assert 'export LE_STT_VAD_FLOOR_RMS=$(config_number stt_vad_floor_rms 16)' in init
 assert 'config_read(c->config_path, saved' in api
 assert 'stt_max_utterance_ms' in api
 assert 'stt_end_silence_ms' in api

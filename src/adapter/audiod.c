@@ -223,6 +223,7 @@ struct audio_hw {
     time_t noise_started;
     int startup_sound;
     int amplifier_on;
+    char system_audio_bus[PATH_MAX];
 };
 
 struct client {
@@ -1105,6 +1106,8 @@ static void audio_init(struct audio_hw *audio, int card)
     /* Boot playback is a hard-disabled image policy.  Keep the UI truthful
      * even when an older persistent config still requests a startup sound. */
     audio->startup_sound = 0;
+    (void)snprintf(audio->system_audio_bus, sizeof(audio->system_audio_bus),
+                   "%s", LE_SYSTEM_AUDIO_BUS);
     (void)snprintf(audio->ctl_path, sizeof(audio->ctl_path),
                    "/dev/snd/controlC%d", card);
     (void)snprintf(audio->pcm_path, sizeof(audio->pcm_path),
@@ -1197,12 +1200,14 @@ static int write_tone_fd(int fd)
     return 0;
 }
 
-static int write_chirp_fd(int fd)
+static int write_cue_fd(int fd, long first_hz, long second_hz,
+                        long duration_ms)
 {
     unsigned char buffer[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS *
                          sizeof(int16_t)];
-    size_t total = (size_t)LE_PCM_RATE * LE_CHIRP_MS / 1000U;
+    size_t total = (size_t)LE_PCM_RATE * (size_t)duration_ms / 1000U;
     size_t done = 0;
+    double phase = 0.0;
 
     while (done < total) {
         size_t frames = total - done < LE_TONE_CHUNK_FRAMES
@@ -1214,12 +1219,8 @@ static int write_chirp_fd(int fd)
 
         for (i = 0; i < frames; ++i) {
             size_t index = done + i;
-            /* Second half steps up a fifth, which reads as a question
-               being acknowledged rather than an error. */
-            double hz = index * 2U < total ? LE_CHIRP_LOW_HZ
-                                           : LE_CHIRP_HIGH_HZ;
-            /* Ramp both ends so the bus does not get a click, which is
-               louder and more startling than the tone itself. */
+            double hz = index * 2U < total ? (double)first_hz
+                                           : (double)second_hz;
             double ramp = 1.0;
             size_t edge = total / 8U ? total / 8U : 1U;
             int16_t value;
@@ -1228,9 +1229,11 @@ static int write_chirp_fd(int fd)
                 ramp = (double)index / (double)edge;
             else if (index + edge > total)
                 ramp = (double)(total - index) / (double)edge;
-            value = (int16_t)(sin(2.0 * 3.14159265358979323846 * hz *
-                                  (double)index / (double)LE_PCM_RATE) *
-                              LE_CHIRP_AMPLITUDE * ramp);
+            value = (int16_t)(sin(phase) * LE_CHIRP_AMPLITUDE * ramp);
+            phase += 2.0 * 3.14159265358979323846 * hz /
+                     (double)LE_PCM_RATE;
+            if (phase >= 2.0 * 3.14159265358979323846)
+                phase -= 2.0 * 3.14159265358979323846;
             samples[i * 2] = value;
             samples[i * 2 + 1] = value;
         }
@@ -1459,15 +1462,17 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
     return 0;
 }
 
-static int start_wake_chirp(const struct audio_hw *audio)
+static int start_cue(const struct audio_hw *audio, long first_hz,
+                     long second_hz, long duration_ms)
 {
     int fd;
     pid_t pid;
 
-    if (!audio->output_available ||
-        access(LE_SYSTEM_AUDIO_BUS, F_OK) < 0)
+    if (first_hz < 20 || first_hz > 20000 || second_hz < 20 ||
+        second_hz > 20000 || duration_ms < 1 || duration_ms > 5000 ||
+        access(audio->system_audio_bus, F_OK) < 0)
         return -1;
-    fd = open(LE_SYSTEM_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
         return -1;
     pid = fork();
@@ -1476,12 +1481,20 @@ static int start_wake_chirp(const struct audio_hw *audio)
         return -1;
     }
     if (pid == 0) {
-        int result = write_chirp_fd(fd);
+        int result = write_cue_fd(fd, first_hz, second_hz, duration_ms);
         close(fd);
         _exit(result == 0 ? 0 : 1);
     }
     close(fd);
     return 0;
+}
+
+static int start_wake_chirp(const struct audio_hw *audio)
+{
+    if (!audio->output_available)
+        return -1;
+    return start_cue(audio, (long)LE_CHIRP_LOW_HZ, (long)LE_CHIRP_HIGH_HZ,
+                     LE_CHIRP_MS);
 }
 
 static int start_test_tone(const struct audio_hw *audio)
@@ -1634,6 +1647,22 @@ static int handle_request(struct audio_hw *audio, char *message,
         stop_noise(audio);
         le_log_info("audiod: noise stopped");
         return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "cue")) {
+        long first_hz;
+        long second_hz;
+        long duration_ms;
+
+        if (json_long(message, "first_hz", &first_hz) < 0 ||
+            json_long(message, "second_hz", &second_hz) < 0 ||
+            json_long(message, "ms", &duration_ms) < 0 ||
+            start_cue(audio, first_hz, second_hz, duration_ms) < 0)
+            return response_error(response, response_size, id,
+                                  "cue must specify usable audio output and "
+                                  "20-20000Hz tones lasting 1-5000ms");
+        le_log_info("audiod: cue requested (%ldHz, %ldHz, %ldms)",
+                    first_hz, second_hz, duration_ms);
+        return response_ok(response, response_size, id, "{\"playing\":true}");
     }
     if (!strcmp(command, "wake_chirp")) {
         if (start_wake_chirp(audio) < 0)
@@ -1821,13 +1850,14 @@ static int accept_client(int listen_fd, struct client clients[LE_MAX_CLIENTS])
 
 static void usage(const char *program)
 {
-    fprintf(stderr, "usage: %s [--socket PATH] [--card NUM] [--foreground] [--verbose] [--debug] [--quiet]\n",
+    fprintf(stderr, "usage: %s [--socket PATH] [--card NUM] [--system-bus PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
             program);
 }
 
 int main(int argc, char **argv)
 {
     const char *socket_path = LE_DEFAULT_SOCKET;
+    const char *system_bus = LE_SYSTEM_AUDIO_BUS;
     int card = 0;
     int foreground = 0;
     int listen_fd;
@@ -1852,6 +1882,8 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
             card = (int)parsed;
+        } else if (!strcmp(argv[i], "--system-bus") && i + 1 < argc) {
+            system_bus = argv[++i];
         } else if (!strcmp(argv[i], "--foreground")) {
             foreground = 1;
         } else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "--debug") ||
@@ -1878,6 +1910,12 @@ int main(int argc, char **argv)
     (void)sigaction(SIGCHLD, &child_action, NULL);
 
     audio_init(&audio, card);
+    if (snprintf(audio.system_audio_bus, sizeof(audio.system_audio_bus),
+                 "%s", system_bus) >= (int)sizeof(audio.system_audio_bus)) {
+        usage(argv[0]);
+        audio_destroy(&audio);
+        return EXIT_FAILURE;
+    }
     listen_fd = listen_socket(socket_path);
     if (listen_fd < 0) {
         perror("audiod: listen socket");

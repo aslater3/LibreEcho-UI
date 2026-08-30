@@ -1158,6 +1158,71 @@
     }
    }
   },
+  "/timers": {
+   "get": {
+    "tags": ["Timers"],
+    "summary": "List timers and alarms",
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "post": {
+    "tags": ["Timers"],
+    "summary": "Create a countdown timer",
+    "security": [{"BearerAuth": []}],
+    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": ["seconds"],
+        "properties": {
+         "seconds": {"type": "integer", "minimum": 1, "maximum": 604800},
+         "label": {"type": "string", "description": "Optional label; its UTF-8 encoding must be no longer than 47 bytes and must not contain control characters."}
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {"$ref": "#/components/responses/Success"},
+     "400": {"$ref": "#/components/responses/Error"},
+     "409": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/timers/dismiss": {
+   "post": {
+    "tags": ["Timers"],
+    "summary": "Dismiss ringing timers",
+    "security": [{"BearerAuth": []}],
+    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/timers/{id}": {
+   "delete": {
+    "tags": ["Timers"],
+    "summary": "Cancel a pending timer; use dismiss for ringing timers",
+    "security": [{"BearerAuth": []}],
+    "parameters": [
+     {"$ref": "#/components/parameters/Csrf"},
+     {"name": "id", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}}
+    ],
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "404": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
   "/device": {
    "get": {
     "tags": [
@@ -1579,6 +1644,7 @@
      "Network"
     ],
     "summary": "Scan Wi-Fi networks",
+    "description": "Returns distinct SSIDs ordered with 5 GHz preferred, then descending signal strength and a stable SSID tie-breaker. The response is bounded to the first 12 distinct results for the fixed adapter message size.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1665,7 +1731,7 @@
      "Setup"
     ],
     "summary": "Read first-boot setup state",
-    "description": "Returns safe initial values and whether first-boot setup is complete. Wi-Fi credentials are never returned.",
+    "description": "Returns safe initial values, boot-time owner-local firmware import state, live wlan0 registration, and whether first-boot setup is complete. Wi-Fi credentials are never returned.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1677,7 +1743,7 @@
      "Setup"
     ],
     "summary": "Complete first-boot AP-mode setup",
-    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. This one-time operation is rejected after setup completes.",
+    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. Hostname, audio, Wi-Fi and persistence failures return stage-specific errors. If and only if the optional wake adapter reports not-supported, setup continues and persists wake_word and wake_sensitivity for later restore. This one-time operation is rejected after setup completes.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1694,6 +1760,55 @@
       "$ref": "#/components/responses/Error"
      },
      "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/setup/vendor-import-force-next-boot": {
+   "post": {
+    "tags": [
+     "Setup"
+    ],
+    "summary": "Schedule a one-shot unverified owner-local firmware import",
+    "description": "Creates a mode-0600 one-shot marker consumed on the next boot. Hash matching is bypassed only for that boot; safe paths, the complete four-file inventory, bounded sizes, and MT8163 ROM patch routing metadata remain mandatory. The result is reported as forced-unverified.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "confirm"
+        ],
+        "properties": {
+         "confirm": {
+          "type": "string",
+          "enum": [
+           "force-unverified-owner-local-import"
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
       "$ref": "#/components/responses/Error"
      },
      "501": {
@@ -1738,6 +1853,7 @@
      "System"
     ],
     "summary": "Factory-reset device",
+    "description": "Permanently removes every file and nested directory below the product image's /data/libreecho/config and /data/libreecho/secrets directories, including accounts, setup completion, Wi-Fi profiles and PSKs, assistant credentials, timers, and all mutable user configuration. The reset synchronizes both persistent directories and reboots. Installed feature payloads, OTA artifacts, and release identity outside those directories are preserved. Unprivileged Linux deployments return 501 without deleting state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1751,6 +1867,12 @@
       "$ref": "#/components/responses/Success"
      },
      "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -1776,6 +1898,12 @@
      },
      "403": {
       "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }
@@ -1799,6 +1927,12 @@
       "$ref": "#/components/responses/Success"
      },
      "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -2225,7 +2359,7 @@
   "requestBodies": {
    "WifiConnect": {
     "required": true,
-    "description": "Wi-Fi credentials. `security` accepts exactly `open`, `wpa2`, or `wpa3`; when omitted it defaults to `wpa2`.",
+    "description": "Wi-Fi credentials. `security` accepts exactly `open` or `wpa2`; when omitted it defaults to `wpa2`. WPA3/SAE is not supported by the shipped MT8163 WEXT path.",
     "content": {
      "application/json": {
       "schema": {
@@ -2273,8 +2407,7 @@
           "security": {
            "type": "string",
            "enum": [
-            "wpa2",
-            "wpa3"
+            "wpa2"
            ],
            "default": "wpa2"
           }

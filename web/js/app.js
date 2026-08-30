@@ -1,8 +1,8 @@
 'use strict';
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
-const state={page:'Overview',csrf:'',token:sessionStorage.getItem('libreecho-token')||'',username:sessionStorage.getItem('libreecho-username')||'',authMode:'development-disabled',timer:null,data:{},busy:false};
-const items=[['Overview','home'],['Device','device'],['Users','shield'],['Audio','audio'],['Baby Monitor','mic'],['Wake Word','mic'],['Simulation','mic'],['LED & Buttons','sun'],['Network','wifi'],['Bluetooth','bluetooth'],['Privacy','shield'],['Integrations','puzzle'],['System','gear'],['Logs','log'],['About','info']];
-const descriptions={Overview:'Your LibreEcho at a glance',Device:'Identity, hardware and power controls',Users:'Manage local accounts and access',Audio:'Playback, microphone and volume controls','Baby Monitor':'Listen to selected microphones locally','Wake Word':'Configure local wake-word detection',Simulation:'Speak test phrases into the microphone path','LED & Buttons':'Customise light-ring behaviour and controls',Network:'Wi-Fi, addressing and connectivity',Bluetooth:'Scan, pair and manage nearby devices',Privacy:'Local processing and data retention controls',Integrations:'Connect services and home automation',System:'Updates, backup and advanced settings',Logs:'Diagnostics and troubleshooting',About:'Project, licences and version information'};
+const state={page:'Overview',csrf:'',token:sessionStorage.getItem('libreecho-token')||'',username:sessionStorage.getItem('libreecho-username')||'',authMode:'development-disabled',timer:null,renderGeneration:0,timerViewReady:false,data:{},busy:false};
+const items=[['Overview','home'],['Device','device'],['Users','shield'],['Audio','audio'],['Timers','info'],['Baby Monitor','mic'],['Wake Word','mic'],['Simulation','mic'],['LED & Buttons','sun'],['Network','wifi'],['Bluetooth','bluetooth'],['Privacy','shield'],['Integrations','puzzle'],['System','gear'],['Logs','log'],['About','info']];
+const descriptions={Overview:'Your LibreEcho at a glance',Device:'Identity, hardware and power controls',Users:'Manage local accounts and access',Audio:'Playback, microphone and volume controls',Timers:'View and manage timers and alarms','Baby Monitor':'Listen to selected microphones locally','Wake Word':'Configure local wake-word detection',Simulation:'Speak test phrases into the microphone path','LED & Buttons':'Customise light-ring behaviour and controls',Network:'Wi-Fi, addressing and connectivity',Bluetooth:'Scan, pair and manage nearby devices',Privacy:'Local processing and data retention controls',Integrations:'Connect services and home automation',System:'Updates, backup and advanced settings',Logs:'Diagnostics and troubleshooting',About:'Project, licences and version information'};
 const nav=$('#nav'),content=$('#content');
 document.body.classList.add('auth-pending');
 function esc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
@@ -108,7 +108,10 @@ async function waitForDevice(estimate,title){
   }
  }finally{clearInterval(ticker)}}
 async function power(path,name){
- if(!confirm(`${name} this LibreEcho device?`))return;
+ const question=path==='factory-reset'
+  ?'Factory reset this LibreEcho device? This permanently removes accounts, Wi-Fi profiles and passwords, assistant credentials, timers and all device settings.'
+  :`${name} this LibreEcho device?`;
+ if(!confirm(question))return;
  if(state.busy)return;
  let estimate=45;
  try{estimate=(await api('/system')).boot_estimate_seconds||45}catch(_){/* keep the default */}
@@ -124,7 +127,7 @@ async function power(path,name){
     means the request was refused. */
  let refused=null;
  const fired=api(`/system/${path}`,{method:'POST',body:'{}',headers:{'X-LibreEcho-Confirm':'confirm-device-action'}})
-   .catch(e=>{if(/^Request failed \((4|5)\d\d\)$/.test(e.message)||/refused|not permitted|confirm/i.test(e.message))refused=e});
+   .catch(e=>{if(/^Request failed \((4|5)\d\d\)$/.test(e.message)||/device action|refused|not permitted|confirm/i.test(e.message))refused=e});
  await Promise.race([fired,new Promise(r=>setTimeout(r,1500))]);
  if(refused){toast(refused.message,true);return}
  await waitForDevice(estimate,'Restarting your LibreEcho');}
@@ -535,8 +538,46 @@ async function systemPage(){
 }
 async function logsPage(){const [l,d]=await Promise.all([api('/logs'),api('/diagnostics')]);const clock=l.entries.some(x=>Number(x.timestamp)<1577836800)?'Device clock unset; relative boot time is shown where available':'Device clock available';content.innerHTML=`${panel('Service logs',`<div class="log-toolbar"><input id="log-filter" placeholder="Filter logs" aria-label="Filter logs">${action('Refresh','log-refresh')}</div><div class="log-viewer" id="log-viewer">${l.entries.length?l.entries.map(x=>`<div data-log="${esc(x.message.toLowerCase())}"><time>${logTime(x.timestamp,x.boot_seconds)}</time><span class="level ${x.level}">${x.level}</span><span>${esc(x.message)}</span></div>`).join(''):'<p class="muted">No logs available.</p>'}</div><p class="muted">Source: ${esc(l.source||'web-memory')}; bounded to ${l.capacity} entries. ${clock}. Relative time is from boot; secrets are redacted before logging.</p>`)}<div class="settings-grid diagnostics">${panel('Diagnostic checks',d.checks.map(x=>`<div class="status-line"><span class="status-dot ${x.status==='ok'?'ok':''}"></span><span>${esc(x.name)}</span><strong>${esc(x.status)}</strong></div>`).join(''))}${panel('Mock fault injection',state.data.status?.simulated?`<p class="muted">Use <code>tools/mockctl.sh</code> with <code>--dev-controls</code> to inject deterministic faults.</p>${action('Fail next Wi-Fi scan','fail-wifi','danger-btn')}`:unsupported('Fault injection is only available in mock development builds.'))}</div>`;$('#log-filter').oninput=e=>$$('[data-log]').forEach(x=>x.hidden=!x.dataset.log.includes(e.target.value.toLowerCase()));$('#log-refresh').onclick=render;if($('#fail-wifi'))$('#fail-wifi').onclick=()=>post('/dev/mock',{action:'fail-next',value:'wifi-scan'},'Next Wi-Fi scan will fail')}
 function aboutPage(){content.innerHTML=`<div class="settings-grid">${panel('LibreEcho',`<img class="about-mark" src="/assets/mark.svg" alt="LibreEcho mark"><p>Open source voice-assistant software built for privacy, repairability and local control.</p><dl class="facts"><dt>Web API</dt><dd>v1</dd><dt>Frontend</dt><dd>Dependency-free HTML, CSS and JavaScript</dd><dt>Daemon</dt><dd>Portable C99</dd><dt>Licence</dt><dd>MIT</dd></dl>`)}${panel('Hardware independence',`<p class="muted">The same frontend API works with both the realistic mock backend and the conservative Linux hardware adapter.</p><div class="privacy-callout">Open. Private. Yours.</div>`)}</div>`}
-async function render(){let rendered=true;clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations')await integrationsPage();else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){errorView(e);rendered=false}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000);return rendered}
-function showPage(name,updateRoute=true){if(!descriptions[name])name='Overview';if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();state.page=name;if(updateRoute&&location.pathname!=='/'+pageSlug(name))history.pushState(null,'','/'+pageSlug(name));$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===name));$('#page-title').textContent=name;$('#page-subtitle').textContent=descriptions[name];document.title=`${name} · LibreEcho`;document.body.classList.remove('nav-open');return render()}
+
+/*
+ * Timers.
+ *
+ * Countdowns are shown as time remaining rather than a due time: the device
+ * has no battery-backed clock, so a countdown started before NTP lands has a
+ * due time that is decades wrong while its remaining time is always right.
+ */
+function sayLeft(s){if(s<=0)return'due';const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;if(h)return m?`${h}h ${m}m`:`${h}h`;if(m)return sec?`${m}m ${sec}s`:`${m}m`;return`${sec}s`}
+function timerFormDraft(){const minutes=$('#timer-minutes'),label=$('#timer-label');if(!minutes&&!label)return null;const active=document.activeElement;return{minutes:minutes?.value||'',label:label?.value||'',focused:active?.id==='timer-minutes'||active?.id==='timer-label'?active.id:''}}
+function restoreTimerForm(draft){if(!draft)return;const minutes=$('#timer-minutes'),label=$('#timer-label');if(minutes)minutes.value=draft.minutes;if(label)label.value=draft.label;if(draft.focused)$('#'+draft.focused)?.focus()}
+function utf8Bytes(value){return new TextEncoder().encode(value).length}
+function scheduleTimerRefresh(draft=null){const generation=state.renderGeneration;state.timer=setTimeout(()=>{if(state.page==='Timers'&&generation===state.renderGeneration)return timersPage(draft)},1000)}
+async function timersPage(draft=null){
+const generation=state.renderGeneration;
+let t;
+try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==state.renderGeneration)return;if(!state.timerViewReady){content.innerHTML=panel('Timers','<div class="panel loading">Loading timer service…</div>');state.timerViewReady=true}scheduleTimerRefresh(timerFormDraft()||draft);return}
+ if(state.page!=='Timers'||generation!==state.renderGeneration)return;
+ const liveDraft=timerFormDraft()||draft;
+ if(!t.available){content.innerHTML=panel('Timers',`<div class="empty-state"><p>The timer service is not running on this device.</p></div>`);state.timerViewReady=true;scheduleTimerRefresh(liveDraft);return}
+ const rows=(t.timers||[]).map(x=>`<tr><td>${esc(x.label||(x.kind==='alarm'?'Alarm':'Timer'))}</td><td>${x.state==='ringing'?'<strong>ringing</strong>':esc(sayLeft(x.seconds_remaining))}</td><td class="right">${x.state==='pending'?`<button class="link-btn" data-cancel="${x.id}">Cancel</button>`:''}</td></tr>`).join('');
+ state.timerViewReady=true;
+ content.innerHTML=`<div class="settings-grid">${panel('Timers',
+   (t.timers&&t.timers.length
+     ?`<table class="data-table"><thead><tr><th>Name</th><th>Remaining</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+     :`<div class="empty-state"><p>No timers set.</p></div>`)
+   +(t.ringing>0?`<div class="button-row">${action('Stop ringing','dismiss-timers','primary-btn')}</div>`:'')
+   +(t.missed>0?`<p class="muted">${t.missed} timer${t.missed===1?'':'s'} came due while the device was off and ${t.missed===1?'was':'were'} not rung.</p>`:''))}
+  ${panel('New timer',`<label class="field"><span>Minutes</span><input id="timer-minutes" type="number" min="1" max="1440" value="10"></label><label class="field"><span>Name (optional)</span><input id="timer-label" type="text" placeholder="pasta"></label><div class="button-row">${action('Start timer','add-timer','primary-btn')}</div><p class="muted">Optional name: up to 47 UTF-8 bytes. Timers can also be set by voice: “set a timer for ten minutes”.</p>`)}</div>`;
+ restoreTimerForm(liveDraft);
+ $('#add-timer').onclick=()=>{
+  const minutes=+$('#timer-minutes').value,label=$('#timer-label').value||'';
+  if(!(minutes>=1)){toast('Enter a length of at least one minute',true);return}
+  if(utf8Bytes(label)>47){toast('Timer name must be no longer than 47 UTF-8 bytes',true);return}
+  post('/timers',{seconds:Math.round(minutes*60),label},'Timer started')};
+ const stop=$('#dismiss-timers');if(stop)stop.onclick=()=>post('/timers/dismiss',{},'Stopped');
+ content.querySelectorAll('[data-cancel]').forEach(b=>{b.onclick=()=>del('/timers/'+b.dataset.cancel,'Timer cancelled')});
+ scheduleTimerRefresh()}
+async function render(){++state.renderGeneration;const draft=state.page==='Timers'?timerFormDraft():null;clearTimeout(state.timer);if(state.page!=='Timers'||!state.timerViewReady)content.innerHTML='<div class="panel loading">Loading device state…</div>';let rendered=true;try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Timers')await timersPage(draft);else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations')await integrationsPage();else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){errorView(e);rendered=false}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000);return rendered}
+function showPage(name,updateRoute=true){if(!descriptions[name])name='Overview';if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();if(state.page==='Timers'&&name!=='Timers')state.timerViewReady=false;state.page=name;if(updateRoute&&location.pathname!=='/'+pageSlug(name))history.pushState(null,'','/'+pageSlug(name));$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===name));$('#page-title').textContent=name;$('#page-subtitle').textContent=descriptions[name];document.title=`${name} · LibreEcho`;document.body.classList.remove('nav-open');return render()}
 items.forEach(([name,icon],i)=>{const b=document.createElement('button');b.className='nav-item'+(i?'':' active');b.dataset.page=name;b.innerHTML=`<svg><use href="#${icon}"></use></svg><span>${name}</span>`;b.onclick=()=>showPage(name);nav.appendChild(b)});
 $('#reboot').onclick=()=>power('reboot','Reboot');$('#theme').onclick=()=>{const light=document.body.classList.toggle('light');localStorage.setItem('libreecho-theme',light?'light':'dark');$('#theme').textContent=light?'☾':'☼'};$('#menu').onclick=()=>document.body.classList.toggle('nav-open');
 $('#update-available').onclick=()=>showPage('System');
