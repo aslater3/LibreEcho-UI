@@ -27,6 +27,7 @@ class FakeWpa:
         self.network_id = 0
         self.next_network_id = 1
         self.monitor_addr = None
+        self.saved_ssid = "IntegrationNet"
         self.commands = []
         self.stop_event = threading.Event()
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -67,7 +68,7 @@ class FakeWpa:
                 self.next_network_id += 1
             elif command == "LIST_NETWORKS":
                 current = "\t[CURRENT]" if self.connected else ""
-                response = f"network id / ssid / bssid / flags\n0\tIntegrationNet\tany{current}\n"
+                response = f"network id / ssid / bssid / flags\n0\t{self.saved_ssid}\tany{current}\n"
             elif command == "DISCONNECT":
                 self.connected = False
                 response = "OK\n"
@@ -414,6 +415,7 @@ def test_preassociation_failure_does_not_restore_when_disconnected():
             directory, "1,1,1", fail_command="SET_NETWORK 1 ssid",
             initial_connected=False)
         try:
+            wpa.saved_ssid = "Office [CURRENT]"
             result = adapter_request(
                 adapter, 43, "connect",
                 {"ssid": "RejectedNet", "psk": "", "security": "open"})

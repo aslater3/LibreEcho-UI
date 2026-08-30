@@ -2462,8 +2462,8 @@ static int wpa_quote(char *out, size_t size, const char *value)
 
 static int existing_network_id(struct daemon_ctx *ctx)
 {
-    char reply[WPA_REPLY_MAX], *line, *next;
-    int id;
+    char reply[WPA_REPLY_MAX], *line, *next, *field, *fields[4];
+    int id, field_count;
     if (wpa_call(ctx, "LIST_NETWORKS\n", reply, sizeof(reply)) < 0)
         return -1;
     line = reply;
@@ -2471,10 +2471,18 @@ static int existing_network_id(struct daemon_ctx *ctx)
         next = strchr(line, '\n');
         if (next)
             *next++ = '\0';
-        if (sscanf(line, "%d", &id) == 1) {
-            if (strstr(line, "[CURRENT]"))
-                return id;
+        field_count = 0;
+        field = line;
+        while (field_count < 4) {
+            fields[field_count++] = field;
+            field = strchr(field, '\t');
+            if (!field)
+                break;
+            *field++ = '\0';
         }
+        if (field_count == 4 && sscanf(fields[0], "%d", &id) == 1 &&
+            strstr(fields[3], "[CURRENT]"))
+            return id;
         line = next;
     }
     return -1;
