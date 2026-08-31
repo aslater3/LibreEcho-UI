@@ -6,6 +6,7 @@ CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
+python3 tests/test_github_link_contract.py
 make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
 ./build/test-network-health
 ./build/test-adapter-client-events
