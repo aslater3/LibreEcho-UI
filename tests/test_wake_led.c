@@ -8,7 +8,7 @@ static int status_contains(const char *socket_path, const char *needle)
 {
     struct le_adapter *adapter =
         le_adapter_connect(socket_path, 500);
-    char status[1024];
+    char status[LE_ADAPTER_MSG_MAX];
     int result;
 
     if (!adapter)
