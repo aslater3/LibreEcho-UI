@@ -49,6 +49,7 @@ make build/test-buttond-timing
 sh tests/test_buttond_contract.sh
 sh tests/test_input_capability_state_contract.sh
 sh tests/test_bluetooth_startup_readiness_contract.sh
+sh tests/test_bluetooth_startup_optionality_contract.sh
 sh tests/test_bluetooth_decoder_state_contract.sh
 make build/test-wake-led
 sh tests/test_microphone_fanout_contract.sh
@@ -130,6 +131,7 @@ make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
 ./build/test-timer-persistence
 sh tests/test_timerd.sh
 make build/libreecho-agentd
+sh tests/test_agentd_startup_readiness_contract.sh
 sh tests/test_agentd_timers.sh
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!

@@ -28,6 +28,7 @@ USERS_FILE=${USERS_FILE:-/data/libreecho/config/users}
 ARGS="$ARGS --users-file $USERS_FILE"
 STARTUP_READY=${STARTUP_READY:-/run/libreecho/startup-ready}
 STARTUP_READY_TIMEOUT_TICKS=${STARTUP_READY_TIMEOUT_TICKS:-600}
+BT_READY_PATH=${BT_READY_PATH:-/run/libreecho/bluetooth-ready}
 PORT=10700
 [ -r /etc/default/libreecho-wyomingd ] && . /etc/default/libreecho-wyomingd
 
@@ -73,19 +74,65 @@ terminate() {
     kill -KILL "$target" 2>/dev/null || true
 }
 
+bluetooth_integration_state() {
+    integrations=
+    if [ -r "$CONFIG_FILE" ]; then
+        integrations=$(sed -n \
+            's/.*"integrations"[[:space:]]*:[[:space:]]*\([^,}]*\).*$/\1/p' \
+            "$CONFIG_FILE" 2>/dev/null | sed -n '1p' | tr -d '[:space:]')
+    fi
+    if [ -z "$integrations" ]; then
+        printf '%s\n' disabled
+        return 0
+    fi
+    case "$integrations" in
+        *[!0-9]*)
+            printf '%s\n' unknown
+            return 0
+            ;;
+    esac
+    if [ $((integrations & 8)) -ne 0 ]; then
+        printf '%s\n' enabled
+    else
+        printf '%s\n' disabled
+    fi
+}
+
+bluetooth_ready() {
+    case "$(bluetooth_integration_state)" in
+        disabled) return 0 ;;
+        enabled) [ -f "$BT_READY_PATH" ] ;;
+        *)
+            echo "libreecho-web: Bluetooth integration state is invalid" >&2
+            return 1
+            ;;
+    esac
+}
+
 startup_services_ready() {
     service=
-    for service in networkd timed audiod micd ledd btd airplayd web; do
+    for service in networkd timed audiod micd ledd airplayd web; do
         pidfile="/var/run/libreecho-$service.pid"
         [ -s "$pidfile" ] || return 1
         pid=$(sed -n '1p' "$pidfile")
         case "$pid" in *[!0-9]*|'') return 1 ;; esac
         kill -0 "$pid" 2>/dev/null || return 1
     done
-    for socket in network audio mic led bluetooth airplay; do
+    for socket in network audio mic led airplay; do
         [ -S "/run/libreecho/$socket.sock" ] || return 1
     done
-    [ -f /run/libreecho/bluetooth-ready ] || return 1
+    case "$(bluetooth_integration_state)" in
+        disabled) ;;
+        enabled)
+            [ -s /var/run/libreecho-btd.pid ] || return 1
+            pid=$(sed -n '1p' /var/run/libreecho-btd.pid)
+            case "$pid" in *[!0-9]*|'') return 1 ;; esac
+            kill -0 "$pid" 2>/dev/null || return 1
+            [ -S /run/libreecho/bluetooth.sock ] || return 1
+            bluetooth_ready || return 1
+            ;;
+        *) return 1 ;;
+    esac
     if [ -S /run/libreecho/stt.sock ] &&
        [ -S /run/libreecho/tts.sock ] &&
        [ -S /run/libreecho/agent.sock ]; then
