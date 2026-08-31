@@ -23,7 +23,14 @@ grep -q 'STARTUP_READY=.*startup-ready' init/libreecho-ledd.init
 grep -q -- '--startup-ready $STARTUP_READY' init/libreecho-ledd.init
 grep -q 'mark_startup_ready()' init/libreecho-web.init
 grep -q 'tmp="$STARTUP_READY.tmp"' init/libreecho-web.init
-grep -q 'for socket in network audio mic led bluetooth airplay' init/libreecho-web.init
+grep -q 'bluetooth_integration_state()' init/libreecho-web.init
+grep -q 'bluetooth_ready()' init/libreecho-web.init
+grep -q 'case "$(bluetooth_integration_state)"' init/libreecho-web.init
+grep -q '\[ -f "$BT_READY_PATH" \]' init/libreecho-web.init
+if grep -q 'for socket in network audio mic led bluetooth airplay' init/libreecho-web.init; then
+    echo 'unconditional Bluetooth readiness loop remains' >&2
+    exit 1
+fi
 grep -q 'wyoming_service_ready()' init/libreecho-web.init
 grep -q '/proc/net/tcp' init/libreecho-web.init
 grep -q 'wyoming_service_ready' init/libreecho-web.init
