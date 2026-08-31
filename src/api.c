@@ -936,6 +936,14 @@ static int handle_voice_pipeline(struct api_context *c,
                                  const struct api_request *q,
                                  struct api_response *r)
 {
+    char previous_mode[sizeof(c->voice_pipeline_mode)];
+    char previous_stt_uri[sizeof(c->stt_wyoming_uri)];
+    char previous_stt_model[sizeof(c->stt_wyoming_model)];
+    char previous_tts_uri[sizeof(c->tts_wyoming_uri)];
+    char previous_tts_voice[sizeof(c->tts_wyoming_voice)];
+    int previous_max_utterance;
+    int previous_end_silence;
+    int previous_vad_floor;
     int rc;
 
     if (strcmp(q->path, "/api/v1/voice-pipeline"))
@@ -953,10 +961,36 @@ static int handle_voice_pipeline(struct api_context *c,
             "Voice pipeline configuration is required");
         return 1;
     }
+    ensure_voice_pipeline_config(c);
+    snprintf(previous_mode, sizeof(previous_mode), "%s",
+             c->voice_pipeline_mode);
+    snprintf(previous_stt_uri, sizeof(previous_stt_uri), "%s",
+             c->stt_wyoming_uri);
+    snprintf(previous_stt_model, sizeof(previous_stt_model), "%s",
+             c->stt_wyoming_model);
+    snprintf(previous_tts_uri, sizeof(previous_tts_uri), "%s",
+             c->tts_wyoming_uri);
+    snprintf(previous_tts_voice, sizeof(previous_tts_voice), "%s",
+             c->tts_wyoming_voice);
+    previous_max_utterance = c->stt_max_utterance_ms;
+    previous_end_silence = c->stt_end_silence_ms;
+    previous_vad_floor = c->stt_vad_floor_rms;
+
     rc = voice_pipeline_update(c, q->body);
     if (rc) {
         err(r, 400, rc,
             "Voice pipeline mode, endpoints, model, or voice is invalid");
+        return 1;
+    }
+    if (!strcmp(previous_mode, c->voice_pipeline_mode) &&
+        !strcmp(previous_stt_uri, c->stt_wyoming_uri) &&
+        !strcmp(previous_stt_model, c->stt_wyoming_model) &&
+        !strcmp(previous_tts_uri, c->tts_wyoming_uri) &&
+        !strcmp(previous_tts_voice, c->tts_wyoming_voice) &&
+        previous_max_utterance == c->stt_max_utterance_ms &&
+        previous_end_silence == c->stt_end_silence_ms &&
+        previous_vad_floor == c->stt_vad_floor_rms) {
+        voice_pipeline_json(c, r);
         return 1;
     }
     rc = persist_configuration(c);

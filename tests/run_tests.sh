@@ -43,6 +43,7 @@ sh tests/test_input_capability_state_contract.sh
 sh tests/test_bluetooth_startup_readiness_contract.sh
 sh tests/test_bluetooth_startup_optionality_contract.sh
 sh tests/test_agentd_startup_readiness_contract.sh
+sh tests/test_tts_voice_switch_idempotence.sh
 sh tests/test_bluetooth_decoder_state_contract.sh
 make build/test-wake-led
 sh tests/test_microphone_fanout_contract.sh

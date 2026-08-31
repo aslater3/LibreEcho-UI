@@ -9,6 +9,10 @@ curl -fsS -X PUT "$URL/api/v1/network" -H "$CSRF" -H 'Content-Type: application/
 curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data '{"short_press":"Play / pause","long_press":"Reboot device"}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"local_only":true,"diagnostic_telemetry":false,"crash_reports":false,"audio_retention":"none","log_retention_hours":168}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: application/json' --data '{"mode":"custom","stt_wyoming_uri":"tcp://198.51.100.10:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://198.51.100.10:10200","tts_voice":"en_GB-alan-medium"}' >/dev/null
+config_stamp_before=$(stat -c '%y:%s' "$CFG")
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: application/json' --data '{"mode":"custom","stt_wyoming_uri":"tcp://198.51.100.10:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://198.51.100.10:10200","tts_voice":"en_GB-alan-medium"}' >/dev/null
+config_stamp_after=$(stat -c '%y:%s' "$CFG")
+[ "$config_stamp_before" = "$config_stamp_after" ]
 curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 grep -q '"volume": 37' "$CFG"
 jq -e '

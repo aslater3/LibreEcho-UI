@@ -146,6 +146,11 @@ switch_voice() {
         echo "libreecho-ttsd: voice must be northern-male or southern-female" >&2
         return 1
     }
+    current=$(selected_voice)
+    if [ "$selected" = "$current" ] && is_running && [ -S "$SOCKET" ]; then
+        echo "libreecho-ttsd: voice $selected already selected"
+        return 0
+    fi
     mkdir -p "$(dirname "$VOICE_FILE")"
     printf '%s\n' "$selected" >"$VOICE_FILE.new" || return 1
     chmod 0600 "$VOICE_FILE.new"
