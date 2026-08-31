@@ -156,7 +156,7 @@ $(BUILD)/test-watchdog-policy: tests/test_watchdog_policy.c \
 # sequences; the test supplies its own le_wake_engine, so no ONNX runtime or
 # model is needed to exercise the decoding rules.
 $(BUILD)/test-wake-decode: tests/test_wake_decode.c \
-	src/adapter/wake_worker.c
+	src/adapter/wake_worker.c src/adapter/wake_accept.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
 		$^ -lpthread -lm -o $@
@@ -333,6 +333,7 @@ WAKE_ORT_ARCHIVES = \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
 	$(WAKE_ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
 	$(WAKE_ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
+	$(WAKE_ORT_BUILD)/_deps/google_nsync-build/libnsync_cpp.a \
 	$(RE2_ARCHIVE)
 WAKE_ORT_ABSEIL = $$(find $(WAKE_ORT_BUILD)/_deps/abseil_cpp-build \
 	-name '*.a')
@@ -456,6 +457,10 @@ $(BUILD)/test-voice-reference: tests/test_voice_reference.c src/adapter/voice_re
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
 		$^ $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
+
+$(BUILD)/test-wake-accept: tests/test_wake_accept.c src/adapter/wake_accept.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -o $@
 
 $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
 		src/adapter/adapter_client.c src/log.c
@@ -606,7 +611,8 @@ $(BUILD)/voice_aec.wake.arm.o: src/adapter/voice_aec.h
 $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
 $(BUILD)/voice_dsp.wake.arm.o: src/adapter/voice_dsp.h
 $(BUILD)/wake_worker.wake.arm.o: src/adapter/wake_worker.h \
-	src/adapter/wake_engine.h
+	src/adapter/wake_engine.h src/adapter/wake_accept.h
+$(BUILD)/wake_accept.wake.arm.o: src/adapter/wake_accept.h
 $(BUILD)/wake_engine_onnx.arm.o: src/adapter/wake_engine.h
 
 $(BUILD)/log.wake.arm.o: src/log.c
@@ -623,6 +629,7 @@ WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/voice_dsp.wake.arm.o \
 	$(BUILD)/voice_stream.wake.arm.o \
 	$(BUILD)/wake_worker.wake.arm.o \
+	$(BUILD)/wake_accept.wake.arm.o \
 	$(BUILD)/wake_led.wake.arm.o \
 	$(BUILD)/adapter_client.wake.arm.o \
 	$(BUILD)/adapter_server.wake.arm.o \
@@ -698,7 +705,7 @@ clean:
 		$(BUILD)/test-light-sensor \
 		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \
 		$(BUILD)/test-wake-decode \
-		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
+		$(BUILD)/test-wake-led $(BUILD)/test-wake-accept $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
 		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
