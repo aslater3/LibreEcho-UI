@@ -110,7 +110,7 @@ start_service() {
     fi
     export LE_TTS_THREADS=${LE_TTS_THREADS:-4}
     export LE_TTS_STREAMING=${LE_TTS_STREAMING:-1}
-    export LE_TTS_IN_PROCESS=${LE_TTS_IN_PROCESS:-1}
+    export LE_TTS_IN_PROCESS=${LE_TTS_IN_PROCESS:-0}
     export LE_TTS_CPU_BOOST=${LE_TTS_CPU_BOOST:-1}
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
     if command -v start-stop-daemon >/dev/null 2>&1; then
@@ -146,6 +146,11 @@ switch_voice() {
         echo "libreecho-ttsd: voice must be northern-male or southern-female" >&2
         return 1
     }
+    current=$(selected_voice)
+    if [ "$selected" = "$current" ] && is_running && [ -S "$SOCKET" ]; then
+        echo "libreecho-ttsd: voice $selected already selected"
+        return 0
+    fi
     mkdir -p "$(dirname "$VOICE_FILE")"
     printf '%s\n' "$selected" >"$VOICE_FILE.new" || return 1
     chmod 0600 "$VOICE_FILE.new"

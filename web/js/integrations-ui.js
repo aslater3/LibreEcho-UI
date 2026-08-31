@@ -43,12 +43,13 @@ function assistantTelemetry(a) {
 }
 
 function pipelineStatus(pipeline) {
-  const stt=pipeline?.stt||{},tts=pipeline?.tts||{};
+  const stt=pipeline?.stt||{},tts=pipeline?.tts||{},mode=pipeline?.mode||'local';
+  const speechPath=mode==='local'?'On-device wakeword, STT and TTS':mode==='custom'?'Wyoming STT/TTS endpoints':mode;
   return `<dl class="facts">
     <dt>Wake word</dt><dd class="connected">On device</dd>
     <dt>Speech recognition</dt><dd class="${stt.reachable?'connected':''}">${stt.reachable?'Whisper reachable':stt.configured?'Whisper unavailable':'Not configured'}</dd>
     <dt>Speech output</dt><dd class="${tts.reachable?'connected':''}">${tts.reachable?'Piper reachable':tts.configured?'Piper unavailable':'Not configured'}</dd>
-    <dt>Pipeline mode</dt><dd>${esc(pipeline?.mode||'local')}</dd>
+    <dt>Speech path</dt><dd>${esc(speechPath)}</dd>
   </dl>`;
 }
 
