@@ -51,7 +51,36 @@ static void destroy(struct le_backend*b){save(M(b));free(b->data);}static int st
 static int device(struct le_backend*b,struct le_device_info*o){struct mock_state*m=M(b);memset(o,0,sizeof(*o));strcpy(o->name,m->device_name);strcpy(o->hostname,m->net.hostname);strcpy(o->model,"Amazon Echo (2nd generation)");strcpy(o->serial,"DEV-MOCK-4C454348");snprintf(o->os_version,sizeof(o->os_version),"%s",LE_OS_VERSION_STRING);strcpy(o->kernel,"3.18-compatible mock");strcpy(o->hardware_revision,"MT8163 development profile");strcpy(o->backend,"mock");return LE_OK;}
 static int audio(struct le_backend*b,struct le_audio_state*o){*o=M(b)->audio;return LE_OK;}static int volume(struct le_backend*b,int v){if(v<0||v>100)return LE_INVALID;if(fail(M(b),"audio"))return LE_IO;M(b)->audio.volume=v;return save(M(b));}static int gain(struct le_backend*b,int v){if(v<0||v>100)return LE_INVALID;M(b)->audio.microphone_gain=v;return save(M(b));}static int mute(struct le_backend*b,int v){M(b)->audio.muted=!!v;return save(M(b));}static int tone(struct le_backend*b){return fail(M(b),"audio-test")?LE_IO:LE_OK;}static int tts_voice(struct le_backend*b,const char*v){if(strcmp(v,"northern-male")&&strcmp(v,"southern-female"))return LE_INVALID;strcpy(M(b)->audio.tts_voice,v);return save(M(b));}
 static int led(struct le_backend*b,struct le_led_state*o){mock_sync_led(M(b));*o=M(b)->led;if(!o->visualizer_mood[0])strcpy(o->visualizer_mood,o->visualizer_active?"balanced":"idle");return LE_OK;}static int colour(struct le_backend*b,uint8_t r,uint8_t g,uint8_t bl){if(fail(M(b),"led"))return LE_IO;M(b)->led.current.r=r;M(b)->led.current.g=g;M(b)->led.current.b=bl;return save(M(b));}static int brightness(struct le_backend*b,int v){if(v<0||v>100)return LE_INVALID;M(b)->led.current.brightness=v;return save(M(b));}static int visualizer_enabled(struct le_backend*b,int v){if(v!=0&&v!=1)return LE_INVALID;M(b)->led.visualizer_enabled=v;if(!v){M(b)->led.visualizer_active=0;M(b)->led.visualizer_owner[0]=0;strcpy(M(b)->led.visualizer_mood,"idle");memset(M(b)->led.visualizer_levels,0,sizeof(M(b)->led.visualizer_levels));}return save(M(b));}static int boot_led(struct le_backend*b,const struct le_led_profile*p){M(b)->led.boot=*p;return save(M(b));}static int led_profile(struct le_backend*b,const char*n,const struct le_led_profile*p){if(!n||!p||p->brightness<0||p->brightness>100)return LE_INVALID;if(!strcmp(n,"listening"))M(b)->led.listening=*p;else if(!strcmp(n,"thinking"))M(b)->led.thinking=*p;else if(!strcmp(n,"error"))M(b)->led.error=*p;else if(!strcmp(n,"dnd"))M(b)->led.dnd=*p;else if(!strcmp(n,"night"))M(b)->led.night=*p;else return LE_INVALID;return save(M(b));}static int led_test(struct le_backend*b){return fail(M(b),"led-test")?LE_IO:LE_OK;}
-static int network(struct le_backend*b,struct le_network_state*o){*o=M(b)->net;return LE_OK;}static int scan(struct le_backend*b,struct le_wifi_scan*o){size_t i;if(fail(M(b),"wifi-scan"))return LE_IO;*o=M(b)->scan;for(i=0;i<o->count;i++){o->networks[i].signal+=(int)(rnd(M(b))%7)-3;if(o->networks[i].signal<0)o->networks[i].signal=0;if(o->networks[i].signal>100)o->networks[i].signal=100;}return LE_OK;}
+static int network(struct le_backend*b,struct le_network_state*o){*o=M(b)->net;return LE_OK;}static void mock_wifi_details(struct le_wifi_network *network, size_t index)
+{
+    static const int frequencies[] = {5180, 2412, 2462, 2437};
+    if (!network)
+        return;
+    network->frequency_mhz = frequencies[index % 4];
+    network->channel = network->frequency_mhz >= 5000 ?
+                       (network->frequency_mhz - 5000) / 5 :
+                       (network->frequency_mhz - 2407) / 5;
+    snprintf(network->band, sizeof(network->band), "%s",
+             network->frequency_mhz >= 5000 ? "5 GHz" : "2.4 GHz");
+    network->rssi_dbm = -35 - (int)index * 12;
+    if (!strcmp(network->security, "wpa3-transition")) {
+        snprintf(network->capabilities, sizeof(network->capabilities),
+                 "WPA2-PSK, WPA3-SAE");
+        network->wpa2_attempt = 1;
+    } else if (!strcmp(network->security, "wpa3-only")) {
+        snprintf(network->capabilities, sizeof(network->capabilities),
+                 "WPA3-SAE");
+        network->wpa2_attempt = 0;
+    } else if (!strcmp(network->security, "wpa2")) {
+        snprintf(network->capabilities, sizeof(network->capabilities),
+                 "WPA2-PSK");
+        network->wpa2_attempt = 1;
+    } else {
+        snprintf(network->capabilities, sizeof(network->capabilities), "open");
+        network->wpa2_attempt = 0;
+    }
+}
+static int scan(struct le_backend*b,struct le_wifi_scan*o){size_t i;if(fail(M(b),"wifi-scan"))return LE_IO;*o=M(b)->scan;for(i=0;i<o->count;i++){mock_wifi_details(&o->networks[i],i);o->networks[i].signal+=(int)(rnd(M(b))%7)-3;if(o->networks[i].signal<0)o->networks[i].signal=0;if(o->networks[i].signal>100)o->networks[i].signal=100;}return LE_OK;}
 static int connect_wifi(struct le_backend*b,const struct le_wifi_credentials*c){struct mock_state*m=M(b);if(!c->ssid[0])return LE_INVALID;if(fail(m,"wifi-connect")||!strcmp(c->ssid,"FailNet")){strcpy(m->net.state,"failed");strcpy(m->net.connectivity,"disconnected");m->net.gateway_reachable=-1;m->recover_at=time(0)+4;return LE_IO;}strcpy(m->net.state,"connecting");strcpy(m->net.connectivity,"unknown");m->net.gateway_reachable=-1;memcpy(m->pending_ssid,c->ssid,sizeof(m->pending_ssid));m->pending_ssid[sizeof(m->pending_ssid)-1]=0;m->connect_at=time(0)+2;m->net.internet=0;return LE_OK;}static int disconnect_wifi(struct le_backend*b){struct mock_state*m=M(b);strcpy(m->net.state,"disconnected");strcpy(m->net.connectivity,"disconnected");m->net.gateway_reachable=-1;m->net.ssid[0]=m->net.ip[0]=0;m->net.signal=m->net.internet=0;return save(m);}static int hostname(struct le_backend*b,const char*s){size_t i,n=strlen(s);if(n<1||n>63)return LE_INVALID;for(i=0;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'))return LE_INVALID;strcpy(M(b)->net.hostname,s);return save(M(b));}
 static int wake(struct le_backend*b,struct le_wake_word_state*o){if(!M(b)->wake_available)return LE_NOT_SUPPORTED;*o=M(b)->wake;return LE_OK;}static int wake_set(struct le_backend*b,const char*s){if(!M(b)->wake_available)return LE_NOT_SUPPORTED;if(!s[0]||strlen(s)>=LE_TEXT)return LE_INVALID;strcpy(M(b)->wake.wake_word,s);return save(M(b));}static int sensitivity(struct le_backend*b,int v){if(!M(b)->wake_available)return LE_NOT_SUPPORTED;if(v<0||v>100)return LE_INVALID;M(b)->wake.sensitivity=v;return save(M(b));}static int wake_test(struct le_backend*b){if(!M(b)->wake_available)return LE_NOT_SUPPORTED;if(!M(b)->wake.enabled)return LE_BUSY;M(b)->wake.detected_count++;return LE_OK;}
 static int bluetooth(struct le_backend*b,struct le_bluetooth_state*o){*o=M(b)->bluetooth;return LE_OK;}static int bluetooth_set(struct le_backend*b,int enabled){if(enabled!=0&&enabled!=1)return LE_INVALID;M(b)->bluetooth.activation_attempted=1;M(b)->bluetooth.enabled=enabled;strcpy(M(b)->bluetooth.state,enabled?"up":"off");strcpy(M(b)->bluetooth.hci,enabled?"hci0":"none");return LE_OK;}

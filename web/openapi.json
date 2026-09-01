@@ -1643,10 +1643,11 @@
     "tags": [
      "Network"
     ],
-    "summary": "Scan Wi-Fi networks",
-    "description": "Returns distinct SSIDs ordered with 5 GHz preferred, then descending signal strength and a stable SSID tie-breaker. The response is bounded to the first 12 distinct results for the fixed adapter message size.",
+    "summary": "Scan Wi-Fi networks with radio metadata and security capabilities",
+    "description": "Returns distinct SSIDs ordered with 5 GHz preferred, then descending signal strength and a stable SSID tie-breaker. Each result preserves frequency_mhz, channel, band, RSSI in rssi_dbm, advertised security capabilities, and whether an explicit WPA2 attempt is appropriate. WPA3/SAE-advertised networks remain visible; the response is bounded to the first 12 distinct results for the fixed adapter message size.",
     "responses": {
      "200": {
+      "description": "Each network includes frequency_mhz, channel, band, rssi_dbm, capabilities, and wpa2_attempt; security distinguishes wpa3-transition from wpa3-only.",
       "$ref": "#/components/responses/Success"
      },
      "501": {

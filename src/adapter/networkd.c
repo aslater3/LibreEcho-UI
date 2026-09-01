@@ -1440,15 +1440,44 @@ static void check_dhcp_timeout(struct daemon_ctx *ctx)
 
 static const char *scan_security(const char *flags)
 {
-    if (!flags || !*flags)
-        return "open";
-    if (strstr(flags, "WPA2"))
+    int wpa2 = flags && (strstr(flags, "WPA2") || strstr(flags, "WPA-PSK"));
+    int wpa3 = flags && (strstr(flags, "SAE") || strstr(flags, "WPA3"));
+    if (wpa2 && wpa3)
+        return "wpa3-transition";
+    if (wpa3)
+        return "wpa3-only";
+    if (wpa2)
         return "wpa2";
-    if (strstr(flags, "SAE") || strstr(flags, "WPA3"))
-        return "unsupported";
-    if (strstr(flags, "WPA"))
+    if (flags && strstr(flags, "WPA"))
         return "wpa";
     return "open";
+}
+
+static int scan_wpa2_attempt(const char *flags)
+{
+    return flags && (strstr(flags, "WPA2") || strstr(flags, "WPA-PSK"));
+}
+
+static int scan_channel(int frequency)
+{
+    if (frequency >= 2412 && frequency <= 2484)
+        return frequency == 2484 ? 14 : (frequency - 2407) / 5;
+    if (frequency >= 5000 && frequency <= 5925)
+        return (frequency - 5000) / 5;
+    if (frequency >= 5955 && frequency <= 7115)
+        return (frequency - 5950) / 5;
+    return 0;
+}
+
+static const char *scan_band(int frequency)
+{
+    if (frequency >= 2400 && frequency < 2500)
+        return "2.4 GHz";
+    if (frequency >= 5000 && frequency < 5925)
+        return "5 GHz";
+    if (frequency >= 5925 && frequency < 7120)
+        return "6 GHz";
+    return "unknown";
 }
 
 struct scan_result {
@@ -1456,7 +1485,9 @@ struct scan_result {
     char flags[128];
     int signal;
     int signal_percent;
+    int rssi_dbm;
     int frequency;
+    int channel;
     int five_ghz;
 };
 
@@ -1518,10 +1549,18 @@ static int serialize_scan_results(struct scan_result *results, int count,
             append_text(entry, sizeof(entry), &entry_used, ",\"security\":") < 0 ||
             append_json_string(entry, sizeof(entry), &entry_used,
                                scan_security(results[i].flags)) < 0 ||
-            append_text(entry, sizeof(entry), &entry_used, ",\"signal\":%d}",
+            append_text(entry, sizeof(entry), &entry_used, ",\"capabilities\":") < 0 ||
+            append_json_string(entry, sizeof(entry), &entry_used,
+                               results[i].flags[0] ? results[i].flags : "open") < 0 ||
+            append_text(entry, sizeof(entry), &entry_used,
+                        ",\"signal\":%d,\"rssi_dbm\":%d,\"frequency_mhz\":%d,\"channel\":%d,\"band\":\"%s\",\"wpa2_attempt\":%s}",
                         results[i].signal_percent >= 0 ?
                         results[i].signal_percent :
-                        rssi_to_percent(results[i].signal)) < 0)
+                        rssi_to_percent(results[i].signal),
+                        results[i].rssi_dbm, results[i].frequency,
+                        results[i].channel,
+                        scan_band(results[i].frequency),
+                        scan_wpa2_attempt(results[i].flags) ? "true" : "false") < 0)
             return -1;
         if (used + entry_used + (emitted ? 1 : 0) + 2 >= size)
             break;
@@ -1607,7 +1646,9 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
                                     sizeof(results[duplicate].flags), flags);
                         results[duplicate].signal = level;
                         results[duplicate].signal_percent = -1;
+                        results[duplicate].rssi_dbm = level < 0 ? level : -1;
                         results[duplicate].frequency = freq;
+                        results[duplicate].channel = scan_channel(freq);
                         results[duplicate].five_ghz = five_ghz;
                     }
                 } else if (count < SCAN_MAX) {
@@ -1617,7 +1658,9 @@ static int parse_scan_results(const char *reply, char *data, size_t size)
                                 sizeof(results[count].flags), flags);
                     results[count].signal = level;
                     results[count].signal_percent = -1;
+                    results[count].rssi_dbm = level < 0 ? level : -1;
                     results[count].frequency = freq;
+                    results[count].channel = scan_channel(freq);
                     results[count++].five_ghz = five_ghz;
                 }
             }
@@ -1829,7 +1872,10 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
                                        cells[i].rssi_dbm : cells[i].signal;
         results[result_count].signal_percent = cells[i].rssi_dbm == -127 ?
                                                cells[i].signal : -1;
+        results[result_count].rssi_dbm = cells[i].rssi_dbm != -127 ?
+                                         cells[i].rssi_dbm : -1;
         results[result_count].frequency = cells[i].frequency;
+        results[result_count].channel = scan_channel(cells[i].frequency);
         results[result_count].five_ghz = cells[i].five_ghz;
         ++result_count;
     }
@@ -2118,41 +2164,88 @@ static int nl80211_trigger_scan(int fd, int family, unsigned int ifindex,
 }
 
 static void nl80211_parse_ies(const unsigned char *ies, size_t length,
-                              char *ssid, size_t ssid_size, int *encrypted)
+                              char *ssid, size_t ssid_size, int *encrypted,
+                              char *capabilities, size_t capabilities_size)
 {
     size_t offset = 0;
-    int has_rsn = 0, has_wpa = 0;
+    int has_rsn = 0, has_wpa = 0, has_psk = 0, has_sae = 0;
 
     if (ssid_size)
         ssid[0] = '\0';
     if (encrypted)
         *encrypted = 0;
+    if (capabilities && capabilities_size)
+        capabilities[0] = '\0';
     while (ies && offset + 2 <= length) {
         unsigned int id = ies[offset];
         size_t item_length = ies[offset + 1];
+        const unsigned char *item = ies + offset + 2;
         if (offset + 2 + item_length > length)
             break;
         if (id == 0 && ssid_size) {
             size_t copy = item_length < ssid_size - 1 ? item_length : ssid_size - 1;
-            memcpy(ssid, ies + offset + 2, copy);
+            memcpy(ssid, item, copy);
             ssid[copy] = '\0';
         } else if (id == 48) {
+            size_t pos, pairwise_count, akm_count;
             has_rsn = 1;
+            if (item_length >= 8) {
+                pos = 2 + 4;
+                if (pos + 2 <= item_length) {
+                    memcpy(&pairwise_count, item + pos, sizeof(uint16_t));
+                    pairwise_count = (unsigned int)item[pos] |
+                                     ((unsigned int)item[pos + 1] << 8);
+                    pos += 2 + pairwise_count * 4;
+                    if (pos + 2 <= item_length) {
+                        akm_count = (unsigned int)item[pos] |
+                                     ((unsigned int)item[pos + 1] << 8);
+                        pos += 2;
+                        while (akm_count-- && pos + 4 <= item_length) {
+                            if (item[pos] == 0x00 && item[pos + 1] == 0x0f &&
+                                item[pos + 2] == 0xac) {
+                                if (item[pos + 3] == 2)
+                                    has_psk = 1;
+                                if (item[pos + 3] == 8)
+                                    has_sae = 1;
+                            }
+                            pos += 4;
+                        }
+                    }
+                }
+            }
         } else if (id == 221 && item_length >= 4 &&
-                   !memcmp(ies + offset + 2, "\x00\x50\xf2\x01", 4)) {
+                   !memcmp(item, "\x00\x50\xf2\x01", 4)) {
             has_wpa = 1;
+            has_psk = 1;
         }
         offset += 2 + item_length;
     }
     if (encrypted)
         *encrypted = has_rsn || has_wpa;
+    if (capabilities && capabilities_size) {
+        if (has_psk)
+            copy_string(capabilities, capabilities_size, "WPA2-PSK");
+        if (has_sae) {
+            size_t used = strlen(capabilities);
+            if (used && used + 2 < capabilities_size)
+                copy_string(capabilities + used, capabilities_size - used, ", ");
+            used = strlen(capabilities);
+            if (used < capabilities_size)
+                copy_string(capabilities + used, capabilities_size - used,
+                            "WPA3-SAE");
+        }
+        if (!capabilities[0] && has_wpa)
+            copy_string(capabilities, capabilities_size, "WPA-PSK");
+        if (!capabilities[0] && encrypted)
+            copy_string(capabilities, capabilities_size, "encrypted");
+    }
 }
 
 static int nl80211_append_bss(const struct nlattr *bss,
                               struct scan_result *result)
 {
     const struct nlattr *bssid, *signal, *signal_unspec, *frequency, *ies, *beacon;
-    char ssid[IW_ESSID_MAX_SIZE + 1];
+    char ssid[IW_ESSID_MAX_SIZE + 1], capabilities[128];
     int encrypted = 0;
     int signal_dbm = -100;
     int signal_percent = -1;
@@ -2173,7 +2266,8 @@ static int nl80211_append_bss(const struct nlattr *bss,
         return 0;
     payload = (unsigned char *)ies + NLA_HDRLEN;
     payload_length = ies->nla_len - NLA_HDRLEN;
-    nl80211_parse_ies(payload, payload_length, ssid, sizeof(ssid), &encrypted);
+    nl80211_parse_ies(payload, payload_length, ssid, sizeof(ssid), &encrypted,
+                       capabilities, sizeof(capabilities));
     if (!ssid[0])
         return 0;
     signal = nl_find((unsigned char *)bss + NLA_HDRLEN,
@@ -2205,13 +2299,18 @@ static int nl80211_append_bss(const struct nlattr *bss,
     if (!signal && signal_percent < 0)
         return 0;
     memset(result, 0, sizeof(*result));
+    result->rssi_dbm = -1;
     copy_string(result->ssid, sizeof(result->ssid), ssid);
     result->signal = signal_dbm;
     result->signal_percent = signal_percent;
+    result->rssi_dbm = signal ? signal_dbm : -1;
     result->frequency = frequency_mhz;
+    result->channel = scan_channel(frequency_mhz);
     result->five_ghz = frequency_mhz >= 5000 && frequency_mhz < 6000;
-    if (encrypted)
-        copy_string(result->flags, sizeof(result->flags), "WPA2");
+    if (capabilities[0])
+        copy_string(result->flags, sizeof(result->flags), capabilities);
+    else if (encrypted)
+        copy_string(result->flags, sizeof(result->flags), "encrypted");
     return 1;
 }
 
