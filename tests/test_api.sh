@@ -54,6 +54,12 @@ curl -fsS -X PUT "$URL/api/v1/led" -H "$CSRF" \
     --data '{"visualizer_enabled":false}' |
     jq -e '.ok and .data.visualizer_enabled == false and
            .data.visualizer_active == false' >/dev/null
+jq -e '
+  .hostname == "kitchen-echo" and
+  .volume == 52 and
+  .wake_sensitivity == 72 and
+  .privacy_local_only == true
+' "$CFG" >/dev/null
 curl -fsS -X PUT "$URL/api/v1/led" -H "$CSRF" \
     -H 'Content-Type: application/json' \
     --data '{"visualizer_enabled":true}' |

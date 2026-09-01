@@ -1343,7 +1343,14 @@ static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
                 network_success = 0;
             }
         } else if (!network_success) {
-            restore_previous_network(ctx);
+            if (previous < 0 && candidate >= 0) {
+                remove_network_profile(ctx, candidate);
+                (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
+                ctx->network_id = -1;
+            } else {
+                restore_previous_network(ctx);
+                (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
+            }
         }
         copy_string(ctx->state.state, sizeof(ctx->state.state),
                     network_success ? "connected" : "disconnected");
@@ -2674,7 +2681,8 @@ static void restore_network_profile(struct daemon_ctx *ctx, int previous,
         snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", previous) <
             (int)sizeof(command)) {
         (void)wpa_ok(ctx, command, reply, sizeof(reply));
-        (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
+        if (!strcmp(ctx->state.state, "connected"))
+            (void)wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply));
         ctx->network_id = previous;
     } else {
         (void)wpa_ok(ctx, "DISCONNECT\n", reply, sizeof(reply));

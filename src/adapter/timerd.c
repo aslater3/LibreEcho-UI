@@ -449,6 +449,7 @@ static int state_load_at(struct context *ctx, long long now_ms,
 {
     char line[256];
     FILE *file;
+    int dropped = 0;
 
     if (!ctx->state_path || !ctx->state_path[0])
         return 1;
@@ -496,8 +497,10 @@ static int state_load_at(struct context *ctx, long long now_ms,
                                                       now_ms, &id)
                      : le_timer_restore_alarm(&ctx->timers, due, label,
                                               now_epoch, now_ms, &id)) !=
-                LE_TIMER_OK)
+                LE_TIMER_OK) {
                 ++ctx->timers.missed;
+                dropped = 1;
+            }
         } else if (!strcmp(kind, "countdown")) {
             /* Restored against the wall clock it was saved with, then handed
                back to the monotonic clock it runs on. The restore API retains
@@ -508,11 +511,15 @@ static int state_load_at(struct context *ctx, long long now_ms,
                            now_ms, &id)
                      : le_timer_restore_countdown(&ctx->timers, due, label,
                                                   now_epoch, now_ms, &id)) !=
-                LE_TIMER_OK)
+                LE_TIMER_OK) {
                 ++ctx->timers.missed;
+                dropped = 1;
+            }
         }
     }
     fclose(file);
+    if (dropped)
+        ctx->dirty = 1;
     if (le_timer_active_count(&ctx->timers))
         le_log_info("timerd: restored %d timer(s)",
                     le_timer_active_count(&ctx->timers));

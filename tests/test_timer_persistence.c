@@ -175,6 +175,12 @@ int main(void)
     assert(state_load_at(&context, 5000, SYNCED_EPOCH + 60) == 1);
     assert(le_timer_active_count(&context.timers) == 0);
     assert(context.timers.missed == 1);
+    assert(context.dirty == 1);
+    context.state_loaded = 1;
+    save_if_dirty(&context, 5000, SYNCED_EPOCH + 60);
+    assert(context.dirty == 0);
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "stale") == NULL);
 
     /* Saves are private, preserve the previous copy, and leave no temp file. */
     le_timer_set_init(&context.timers);

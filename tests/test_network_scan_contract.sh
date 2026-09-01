@@ -41,6 +41,10 @@ assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
 assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));' in source
 assert 'level = normalize_rssi_dbm((int)statistics.qual.level);' in source
 assert 'static int serialize_scan_results(' in source
+finish_dhcp = source[source.index('static void finish_dhcp'):source.index('static int start_dhcp')]
+assert 'if (previous < 0 && candidate >= 0)' in finish_dhcp
+assert 'remove_network_profile(ctx, candidate);' in finish_dhcp
+assert 'wpa_ok(ctx, "SAVE_CONFIG\\n", reply, sizeof(reply));' in finish_dhcp
 scan_security = source[source.index('static const char *scan_security'):source.index('struct scan_result')]
 assert scan_security.index('strstr(flags, "SAE")') < scan_security.index('strstr(flags, "WPA2")')
 assert scan_security.index('strstr(flags, "WPA3")') < scan_security.index('strstr(flags, "WPA2")')
