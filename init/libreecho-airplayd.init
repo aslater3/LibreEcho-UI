@@ -200,7 +200,7 @@ trim_log() {
 
 start_service() {
     if is_running; then echo "libreecho-airplayd already running"; return 0; fi
-    mount_runtime || true
+    mount_runtime || return 1
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
     trim_log
     if command -v start-stop-daemon >/dev/null 2>&1; then

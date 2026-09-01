@@ -80,6 +80,7 @@ sh tests/test_setup_connectivity_contract.sh
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 sh tests/test_airplay_led_bridge.sh
+sh tests/test_airplay_mount_failure.sh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
