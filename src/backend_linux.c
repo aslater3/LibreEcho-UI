@@ -1208,8 +1208,27 @@ static int scan(struct le_backend *b, struct le_wifi_scan *o)
             if (json_get_string(object, "security", o->networks[o->count].security,
                                 sizeof(o->networks[o->count].security)) < 1)
                 strcpy(o->networks[o->count].security, "unknown");
+            if (json_get_string(object, "capabilities",
+                                o->networks[o->count].capabilities,
+                                sizeof(o->networks[o->count].capabilities)) < 1)
+                o->networks[o->count].capabilities[0] = '\0';
+            if (json_get_string(object, "band", o->networks[o->count].band,
+                                sizeof(o->networks[o->count].band)) < 1)
+                strcpy(o->networks[o->count].band, "unknown");
             if (json_get_int(object, "signal", &o->networks[o->count].signal) < 1)
                 o->networks[o->count].signal = 0;
+            if (json_get_int(object, "rssi_dbm", &o->networks[o->count].rssi_dbm) < 1)
+                o->networks[o->count].rssi_dbm = -1;
+            if (json_get_int(object, "frequency_mhz",
+                             &o->networks[o->count].frequency_mhz) < 1)
+                o->networks[o->count].frequency_mhz = 0;
+            if (json_get_int(object, "channel", &o->networks[o->count].channel) < 1)
+                o->networks[o->count].channel = 0;
+            if (json_get_bool(object, "wpa2_attempt",
+                              &o->networks[o->count].wpa2_attempt) < 1)
+                o->networks[o->count].wpa2_attempt =
+                    !strcmp(o->networks[o->count].security, "wpa2") ||
+                    !strcmp(o->networks[o->count].security, "wpa3-transition");
             if (o->networks[o->count].signal < 0) o->networks[o->count].signal = 0;
             if (o->networks[o->count].signal > 100) o->networks[o->count].signal = 100;
             ++o->count;
