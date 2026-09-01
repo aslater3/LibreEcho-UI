@@ -56,6 +56,8 @@ int main(void)
     expect_seconds("set a timer for one hour and ten minutes", 4200);
     expect_seconds("set a timer for one hour and thirty seconds", 3630);
     expect_seconds("set a timer for twenty five minutes", 1500);
+    expect_seconds("set a timer for seventy minutes", 4200);
+    expect_seconds("set a timer for eighty seconds", 80);
     /* "a minute" is a count of one, not a missing number. */
     expect_seconds("set a timer for a minute", 60);
     expect_seconds("set a timer for an hour", 3600);

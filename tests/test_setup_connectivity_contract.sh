@@ -13,6 +13,7 @@ grep -q 'vendor_firmware' src/api.c
 grep -q 'snprintf(w.wake_word,sizeof(w.wake_word),"LibreEcho")' src/api.c
 grep -q 'if(!le_get_wake_word_state(c->backend,&next_wake))w=next_wake' src/api.c
 grep -q 'setup.hardwareReady=!!current.wlan0_registered' web/js/setup.js
+grep -q "n.security!=='unsupported'" web/js/setup.js
 grep -q 'wlan0_registered' src/api.c
 grep -q '/api/v1/setup/vendor-import-force-next-boot' src/api.c
 grep -q 'config_write_atomic(vendor_force_marker_path()' src/api.c
