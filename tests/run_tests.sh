@@ -8,7 +8,8 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/con
 ./build/test-unit
 python3 tests/test_github_link_contract.py
 python3 tests/test_setup_wifi_ui_contract.py
-make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
+make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
+./build/test-networkd-scan-security
 ./build/test-network-health
 ./build/test-adapter-client-events
 ./build/test-gateway-probe
@@ -59,6 +60,7 @@ python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_startup_state_contract.py
 python3 tests/test_wake_word_ui_contract.py
 python3 tools/test_virtual_echo.py
+node tests/test_wifi_security_interaction.js
 node tests/test_timers_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py

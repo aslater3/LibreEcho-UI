@@ -1448,6 +1448,8 @@ static const char *scan_security(const char *flags)
         return "wpa3-only";
     if (wpa2)
         return "wpa2";
+    if (flags && strstr(flags, "encrypted"))
+        return "wpa";
     if (flags && strstr(flags, "WPA"))
         return "wpa";
     return "open";

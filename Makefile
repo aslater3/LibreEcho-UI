@@ -192,6 +192,12 @@ $(BUILD)/test-networkd-health: $(NETWORKD_SOURCES)
 	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_NETWORKD_TESTING $(CSTD) \
 		$(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
+$(BUILD)/test-networkd-scan-security: tests/test_networkd_scan_security.c \
+	src/adapter/networkd.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter tests/test_networkd_scan_security.c -o $@
+
 $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emission.c \
 		src/json.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
@@ -618,7 +624,8 @@ clean:
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
-		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
+		$(BUILD)/test-networkd-health $(BUILD)/test-networkd-scan-security \
+		$(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-backend-linux-timers $(BUILD)/test-factory-reset \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
