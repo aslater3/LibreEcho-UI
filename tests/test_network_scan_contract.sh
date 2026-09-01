@@ -41,6 +41,9 @@ assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
 assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));' in source
 assert 'level = normalize_rssi_dbm((int)statistics.qual.level);' in source
 assert 'static int serialize_scan_results(' in source
+scan_security = source[source.index('static const char *scan_security'):source.index('struct scan_result')]
+assert scan_security.index('strstr(flags, "SAE")') < scan_security.index('strstr(flags, "WPA2")')
+assert scan_security.index('strstr(flags, "WPA3")') < scan_security.index('strstr(flags, "WPA2")')
 assert 'static int scan_result_better(' in source
 assert 'SCAN_OUTPUT_MAX 12' in source
 assert 'NL80211_BSS_FREQUENCY' in source

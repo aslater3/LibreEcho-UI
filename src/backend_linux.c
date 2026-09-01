@@ -2015,6 +2015,7 @@ static int linux_shutdown(struct le_backend *b)
 }
 
 static const char *const factory_reset_services[] = {
+    "/etc/init.d/libreecho-networkd.init",
     "/etc/init.d/libreecho-btd.init",
     "/etc/init.d/libreecho-timerd.init",
     "/etc/init.d/libreecho-agentd.init"

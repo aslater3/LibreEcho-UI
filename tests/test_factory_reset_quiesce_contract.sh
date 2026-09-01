@@ -3,6 +3,7 @@ set -eu
 python3 - <<'PY'
 from pathlib import Path
 source = Path('src/backend_linux.c').read_text()
+assert '"/etc/init.d/libreecho-networkd.init"' in source
 assert '"/etc/init.d/libreecho-btd.init"' in source
 assert '"/etc/init.d/libreecho-timerd.init"' in source
 assert '"/etc/init.d/libreecho-agentd.init"' in source

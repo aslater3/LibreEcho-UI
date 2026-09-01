@@ -1442,10 +1442,10 @@ static const char *scan_security(const char *flags)
 {
     if (!flags || !*flags)
         return "open";
-    if (strstr(flags, "WPA2"))
-        return "wpa2";
     if (strstr(flags, "SAE") || strstr(flags, "WPA3"))
         return "unsupported";
+    if (strstr(flags, "WPA2"))
+        return "wpa2";
     if (strstr(flags, "WPA"))
         return "wpa";
     return "open";
