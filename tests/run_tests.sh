@@ -64,6 +64,8 @@ python3 tests/test_startup_state_contract.py
 sh tests/test_legacy_setup_completion_contract.sh
 python3 tests/test_wake_word_ui_contract.py
 python3 tests/test_home_location_panel_contract.py
+sh tests/test_timer_live_miss_persistence_contract.sh
+sh tests/test_timer_presync_admission_contract.sh
 python3 tools/test_virtual_echo.py
 node tests/test_timers_ui.js
 python3 tests/test_issue_34.py

@@ -689,6 +689,9 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         unsigned int created = 0;
         int result;
 
+        if (!ctx->state_loaded)
+            return le_adapter_respond_err(out, size, id,
+                                          "timer schedule is restoring; retry after clock synchronises");
         if (!args || json_get_int64(args, "seconds", &wide_value) != 1)
             return le_adapter_respond_err(out, size, id,
                                           "add requires seconds");
@@ -957,6 +960,7 @@ int main(int argc, char **argv)
         long long now_epoch = wall_epoch();
         long long timeout;
         int count;
+        unsigned int missed_before = ctx.timers.missed;
         int result;
         nfds_t j;
 
@@ -964,6 +968,8 @@ int main(int argc, char **argv)
             (void)state_load(&ctx);
         count = le_timer_step(&ctx.timers, now_ms, now_epoch, fired,
                               LE_TIMER_MAX);
+        if (ctx.timers.missed != missed_before)
+            ctx.dirty = 1;
         if (count > 0) {
             int k;
 

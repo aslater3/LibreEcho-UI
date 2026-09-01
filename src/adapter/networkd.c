@@ -1831,7 +1831,7 @@ static int wext_parse_scan_events(const unsigned char *stream, size_t length,
                     sizeof(results[result_count].ssid), cells[i].ssid);
         copy_string(results[result_count].flags,
                     sizeof(results[result_count].flags),
-                    cells[i].encrypted ? "WPA2" : "");
+                    cells[i].encrypted ? "unsupported" : "");
         results[result_count].signal = cells[i].rssi_dbm != -127 ?
                                        cells[i].rssi_dbm : cells[i].signal;
         results[result_count].signal_percent = cells[i].rssi_dbm == -127 ?

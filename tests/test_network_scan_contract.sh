@@ -40,7 +40,7 @@ assert 'previous_network_id' in source
 assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
 assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));' in source
 assert 'level = normalize_rssi_dbm((int)statistics.qual.level);' in source
-assert 'static int serialize_scan_results(' in source
+assert 'cells[i].encrypted ? "unsupported" : ""' in source
 finish_dhcp = source[source.index('static void finish_dhcp'):source.index('static int start_dhcp')]
 assert 'if (previous < 0 && candidate >= 0)' in finish_dhcp
 assert 'remove_network_profile(ctx, candidate);' in finish_dhcp
