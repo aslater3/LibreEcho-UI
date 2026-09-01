@@ -57,7 +57,7 @@ def test_persisted_auth_root() -> None:
             assert (root / "data/libreecho/config/web-config.json").is_file()
             status, page = http(port, "/")
             assert status == 200
-            assert b"Setup \xc2\xb7 LibreEcho" in page
+            assert b"LibreEcho Control Centre" in page
             status, body = http(port, "/api/v1/config")
             assert status == 200
             config = json.loads(body)["data"]

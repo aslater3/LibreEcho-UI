@@ -15,6 +15,7 @@ grep -q 'if(!le_get_wake_word_state(c->backend,&next_wake))w=next_wake' src/api.
 grep -q 'setup.hardwareReady=!!current.wlan0_registered' web/js/setup.js
 grep -q 'wlan0_registered' src/api.c
 grep -q '/api/v1/setup/vendor-import-force-next-boot' src/api.c
+grep -q 'config_write_atomic(vendor_force_marker_path()' src/api.c
 grep -q 'GET /api/v1/setup' docs/API.md
 grep -q 'POST /api/v1/setup/vendor-import-force-next-boot' docs/API.md
 grep -q 'force-unverified-owner-local-import' docs/API.md
