@@ -18,6 +18,6 @@ assert "lat<-90||lat>90||lon<-180||lon>180" in source
 assert "lat===originalLat&&lon===originalLon" in source
 assert "The place changed but the coordinates did not" in source
 assert "This image cannot clear old coordinates safely" in source
-assert "/js/integrations-ui.js?rev=29" in index, "browser cache revision was not advanced"
+assert "/js/integrations-ui.js?rev=32" in index, "browser cache revision was not advanced"
 
 print("home location panel and validation contract: ok")

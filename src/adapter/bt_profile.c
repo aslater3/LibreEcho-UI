@@ -128,6 +128,21 @@
 #define LE_SDP_ATTR_VERSION_NUMBER_LIST 0x0200
 #define LE_SDP_ATTR_SERVICE_DATABASE_STATE 0x0201
 #define LE_SDP_ATTR_FEATURES 0x0311
+#define LE_SDP_ATTR_DID_SPECIFICATION_ID 0x0200
+#define LE_SDP_ATTR_DID_VENDOR_ID 0x0201
+#define LE_SDP_ATTR_DID_PRODUCT_ID 0x0202
+#define LE_SDP_ATTR_DID_VERSION 0x0203
+#define LE_SDP_ATTR_DID_PRIMARY_RECORD 0x0204
+#define LE_SDP_ATTR_DID_VENDOR_ID_SOURCE 0x0205
+
+/* Device Identification Profile identity for the Echo 2nd-gen hardware
+ * carrying LibreEcho.  The vendor/product pair is the underlying Lab126 USB
+ * identity; the version is the Device ID profile version, not the OS version. */
+#define LE_DID_SPECIFICATION_ID 0x0103
+#define LE_DID_VENDOR_ID 0x1949
+#define LE_DID_PRODUCT_ID 0x7232
+#define LE_DID_VERSION 0x0100
+#define LE_DID_VENDOR_ID_SOURCE_USB 0x0002
 
 struct sockaddr_l2_local {
     sa_family_t l2_family;
@@ -265,6 +280,15 @@ static size_t sdp_put_uint32(uint8_t *out, size_t size, size_t offset,
     out[offset + 3] = (uint8_t)(value >> 8);
     out[offset + 4] = (uint8_t)value;
     return offset + 5;
+}
+
+static size_t sdp_put_bool(uint8_t *out, size_t size, size_t offset, int value)
+{
+    if (offset + 2 > size)
+        return offset;
+    out[offset] = 0x28; /* Boolean, one-byte value */
+    out[offset + 1] = value ? 1 : 0;
+    return offset + 2;
 }
 
 static size_t sdp_put_text(uint8_t *out, size_t size, size_t offset,
@@ -553,11 +577,31 @@ static void build_record_set(struct le_profile_sessions *sessions,
         offset = sdp_put_uuid_list_attr(record->data, sizeof(record->data),
                                         offset, LE_SDP_ATTR_CLASS_ID_LIST,
                                         pnp_classes, 1);
-        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
-                              LE_SDP_ATTR_RECORD_STATE);
-        offset = sdp_put_uint32(record->data, sizeof(record->data), offset, 1);
         offset = sdp_put_browse_list(record->data, sizeof(record->data),
                                      offset);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_DID_SPECIFICATION_ID);
+        offset = sdp_put_uint16(record->data, sizeof(record->data), offset,
+                                LE_DID_SPECIFICATION_ID);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_DID_VENDOR_ID);
+        offset = sdp_put_uint16(record->data, sizeof(record->data), offset,
+                                LE_DID_VENDOR_ID);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_DID_PRODUCT_ID);
+        offset = sdp_put_uint16(record->data, sizeof(record->data), offset,
+                                LE_DID_PRODUCT_ID);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_DID_VERSION);
+        offset = sdp_put_uint16(record->data, sizeof(record->data), offset,
+                                LE_DID_VERSION);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_DID_PRIMARY_RECORD);
+        offset = sdp_put_bool(record->data, sizeof(record->data), offset, 1);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_DID_VENDOR_ID_SOURCE);
+        offset = sdp_put_uint16(record->data, sizeof(record->data), offset,
+                                LE_DID_VENDOR_ID_SOURCE_USB);
         record->length = offset;
     }
 }

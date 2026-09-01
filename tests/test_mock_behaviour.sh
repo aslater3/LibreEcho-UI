@@ -11,7 +11,11 @@ code=$(curl -sS -o /tmp/le-fault.out -w '%{http_code}' "$URL/api/v1/network/wifi
 ctl trigger wake-word
 curl -fsS "$URL/api/v1/wake-word" | grep -q '"detected_count":1'
 curl -fsS -X POST "$URL/api/v1/network/wifi/connect" -H "$CSRF" -H 'Content-Type: application/json' --data '{"ssid":"LibreNet-IoT","password":"top-secret","security":"wpa2"}' >/dev/null
-sleep 3
-curl -fsS "$URL/api/v1/network" | grep -q '"ssid":"LibreNet-IoT"'
+attempt=0
+while ! curl -fsS "$URL/api/v1/network" | grep -q '"ssid":"LibreNet-IoT"'; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 30 ] || { echo "mock Wi-Fi association did not complete" >&2; exit 1; }
+    sleep 0.2
+done
 ! curl -fsS "$URL/api/v1/logs" | grep -q 'top-secret'
 echo 'mock: ok'
