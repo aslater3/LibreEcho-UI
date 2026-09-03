@@ -107,10 +107,11 @@ readiness failure returns `503` and leaves the setup-completion marker unwritten
 so setup remains retryable. Wi-Fi credentials are passed to the network
 adapter for association but are never returned by the API or written to the
 web configuration. The successful response includes the best-known `ip`; the
-completion page always uses `http://<ip>:8080/` as the primary LAN link and
-`http://<hostname>.local:8080/` as a separate mDNS alternative. The `.local`
-name depends on AirPlay 2/Avahi and client mDNS support, so the IP link remains
-available when that service is disabled or unavailable.
+completion page uses the setup page's visible protocol and port for both the
+primary `<ip>` LAN link and the separate `<hostname>.local` mDNS alternative.
+This preserves externally mapped ports and HTTPS reverse-proxy access. The
+`.local` name depends on AirPlay 2/Avahi and client mDNS support, so the IP link
+remains available when that service is disabled or unavailable.
 
 #### POST /api/v1/setup/vendor-import-force-next-boot
 

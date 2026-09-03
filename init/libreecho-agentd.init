@@ -23,6 +23,7 @@ AUDIO_SOCKET=${AUDIO_SOCKET:-/run/libreecho/audio.sock}
 TTS_SOCKET=${TTS_SOCKET:-/run/libreecho/tts.sock}
 AGENT_DEPENDENCY_TIMEOUT_SECONDS=${AGENT_DEPENDENCY_TIMEOUT_SECONDS:-90}
 AGENT_DEPENDENCY_POLL_SECONDS=${AGENT_DEPENDENCY_POLL_SECONDS:-1}
+FEATURE_POLICY_FILE=${FEATURE_POLICY_FILE:-/etc/libreecho/feature-policy}
 case "$AGENT_DEPENDENCY_TIMEOUT_SECONDS" in
     ''|*[!0-9]*) AGENT_DEPENDENCY_TIMEOUT_SECONDS=90 ;;
 esac
@@ -93,16 +94,21 @@ terminate() {
 }
 
 dependency_sockets_ready() {
-    [ -S "$WAKE_SOCKET" ] &&
-        [ -S "$STT_SOCKET" ] &&
+    if [ "$(feature_policy)" != redistributable ] && [ ! -S "$WAKE_SOCKET" ]; then
+        return 1
+    fi
+    [ -S "$STT_SOCKET" ] &&
         [ -S "$AUDIO_SOCKET" ] &&
         [ -S "$TTS_SOCKET" ]
+}
+
+feature_policy() {
+    sed -n '1p' "$FEATURE_POLICY_FILE" 2>/dev/null
 }
 
 missing_dependency_sockets() {
     missing=
     for dependency in \
-        "wakeword:$WAKE_SOCKET" \
         "stt:$STT_SOCKET" \
         "audio:$AUDIO_SOCKET" \
         "tts:$TTS_SOCKET"; do
@@ -116,6 +122,9 @@ missing_dependency_sockets() {
             fi
         fi
     done
+    if [ "$(feature_policy)" != redistributable ] && [ ! -S "$WAKE_SOCKET" ]; then
+        if [ -n "$missing" ]; then missing="wakeword,$missing"; else missing=wakeword; fi
+    fi
     printf '%s\n' "$missing"
 }
 
