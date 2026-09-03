@@ -100,7 +100,11 @@ Wake-word support is optional: if its companion service returns
 `LE_NOT_SUPPORTED`, setup continues, the submitted `wake_word` and
 `wake_sensitivity` are still written to the canonical configuration, and the
 boot-time restore retries them when the service becomes available. Other
-wake-word errors abort setup. Wi-Fi credentials are passed to the network
+wake-word errors abort setup. After settings and Wi-Fi are committed, setup
+synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features`
+helper and waits for `/run/libreecho/startup-ready`. A reconciliation or
+readiness failure returns `503` and leaves the setup-completion marker unwritten,
+so setup remains retryable. Wi-Fi credentials are passed to the network
 adapter for association but are never returned by the API or written to the
 web configuration. The successful response includes the best-known `ip`; the
 completion page always uses `http://<ip>:8080/` as the primary LAN link and
