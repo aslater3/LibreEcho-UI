@@ -22,6 +22,7 @@ def test_setup_completion_uses_visible_origin_for_ip_and_mdns_links():
     assert "window.location.protocol" in SETUP_JS
     assert "window.location.port" in SETUP_JS
     assert "http://libreecho.local:8080/" not in SETUP_HTML
+    assert "visible protocol and port" in API_DOC
     assert "AirPlay" in SETUP_HTML and "Avahi" in SETUP_HTML
     assert "mdns_available" in SETUP_JS
 
