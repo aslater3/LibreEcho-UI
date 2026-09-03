@@ -36,7 +36,7 @@ if grep -q 'for socket in network audio mic led bluetooth airplay' init/libreech
     exit 1
 fi
 grep -q 'wyoming_service_ready()' init/libreecho-web.init
-grep -q '"$(feature_policy)" != redistributable' init/libreecho-web.init
+! awk '/^wyoming_service_ready\(\)/,/^}/' init/libreecho-web.init | grep -q 'redistributable'
 grep -q '/proc/net/tcp' init/libreecho-web.init
 grep -q 'wyoming_service_ready' init/libreecho-web.init
 

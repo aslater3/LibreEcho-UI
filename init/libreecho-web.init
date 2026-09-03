@@ -200,14 +200,12 @@ wyoming_service_ready() {
     pid=$(sed -n '1p' "$pidfile")
     case "$pid" in *[!0-9]*|'') return 1 ;; esac
     kill -0 "$pid" 2>/dev/null || return 1
-    if [ "$(feature_policy)" != redistributable ]; then
-        [ -S /run/libreecho/wakeword.sock ] || return 1
-        wake_pidfile=/var/run/libreecho-waked.pid
-        [ -s "$wake_pidfile" ] || return 1
-        wake_pid=$(sed -n '1p' "$wake_pidfile")
-        case "$wake_pid" in *[!0-9]*|'') return 1 ;; esac
-        kill -0 "$wake_pid" 2>/dev/null || return 1
-    fi
+    [ -S /run/libreecho/wakeword.sock ] || return 1
+    wake_pidfile=/var/run/libreecho-waked.pid
+    [ -s "$wake_pidfile" ] || return 1
+    wake_pid=$(sed -n '1p' "$wake_pidfile")
+    case "$wake_pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$wake_pid" 2>/dev/null || return 1
     port_hex=$(printf '%04X' "$PORT") || return 1
     awk -v port="$port_hex" \
         '$4 == "0A" && $2 ~ (":" port "$") { found = 1 }
