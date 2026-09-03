@@ -15,12 +15,13 @@ API_DOC = (ROOT / "docs/API.md").read_text(encoding="utf-8")
 OPENAPI = json.loads((ROOT / "web/openapi.json").read_text(encoding="utf-8"))
 
 
-def test_setup_completion_exposes_fixed_port_ip_primary_and_mdns_alternative():
+def test_setup_completion_uses_visible_origin_for_ip_and_mdns_links():
     assert 'id="lan-link"' in SETUP_HTML
     assert 'id="mdns-link"' in SETUP_HTML
     assert "deviceIp" in SETUP_JS
-    assert ":8080" in SETUP_JS
-    assert "window.location.port" not in SETUP_JS
+    assert "window.location.protocol" in SETUP_JS
+    assert "window.location.port" in SETUP_JS
+    assert "http://libreecho.local:8080/" not in SETUP_HTML
     assert "AirPlay" in SETUP_HTML and "Avahi" in SETUP_HTML
     assert "mdns_available" in SETUP_JS
 
