@@ -22,6 +22,8 @@ import sys
 source = Path(sys.argv[1]).read_text()
 assert 'AGENT_DEPENDENCY_TIMEOUT_SECONDS=${AGENT_DEPENDENCY_TIMEOUT_SECONDS:-90}' in source
 assert 'AGENT_DEPENDENCY_POLL_SECONDS=${AGENT_DEPENDENCY_POLL_SECONDS:-1}' in source
+assert 'FEATURE_POLICY_FILE=${FEATURE_POLICY_FILE:-/etc/libreecho/feature-policy}' in source
+assert '"$(feature_policy)" != redistributable' in source
 assert 'dependency_sockets_ready()' in source
 assert 'missing_dependency_sockets()' in source
 assert 'wait_for_dependency_sockets()' in source
@@ -42,11 +44,13 @@ AGENT_DEPENDENCY_TIMEOUT_SECONDS=1
 AGENT_DEPENDENCY_POLL_SECONDS=2
 export WAKE_SOCKET STT_SOCKET AUDIO_SOCKET TTS_SOCKET
 export AGENT_DEPENDENCY_TIMEOUT_SECONDS AGENT_DEPENDENCY_POLL_SECONDS
+FEATURE_POLICY_FILE=$WORK/feature-policy
+export FEATURE_POLICY_FILE
 
 # Extract the actual production functions; do not reimplement their logic in
 # the test.  The temporary socket variables above exercise the same paths the
 # init script uses during boot.
-HELPERS=$(sed -n '/^dependency_sockets_ready()/,/^}/p; /^missing_dependency_sockets()/,/^}/p; /^wait_for_dependency_sockets()/,/^}/p' "$SOURCE")
+HELPERS=$(sed -n '/^feature_policy()/,/^}/p; /^dependency_sockets_ready()/,/^}/p; /^missing_dependency_sockets()/,/^}/p; /^wait_for_dependency_sockets()/,/^}/p' "$SOURCE")
 eval "$HELPERS"
 
 start=$(date +%s)
@@ -88,6 +92,37 @@ elapsed=$(( $(date +%s) - start ))
 [ -S "$STT_SOCKET" ]
 [ -S "$AUDIO_SOCKET" ]
 [ -S "$TTS_SOCKET" ]
+kill "$PRODUCER" 2>/dev/null || true
+wait "$PRODUCER" 2>/dev/null || true
+PRODUCER=0
+
+# The redistributable image intentionally omits the noncommercial wake-word
+# payload. Agentd must still start its API/text and manually-triggered voice
+# paths once STT, audio and TTS are ready.
+rm -f "$WAKE_SOCKET" "$STT_SOCKET" "$AUDIO_SOCKET" "$TTS_SOCKET"
+FEATURE_POLICY_FILE=$WORK/feature-policy
+printf '%s\n' redistributable >"$FEATURE_POLICY_FILE"
+export FEATURE_POLICY_FILE
+python3 - "$WORK" <<'PY' &
+import socket
+import sys
+import time
+root = sys.argv[1]
+sockets = []
+for name in ('stt.sock', 'audio.sock', 'tts.sock'):
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(root + '/' + name)
+    server.listen(1)
+    sockets.append(server)
+time.sleep(3)
+PY
+PRODUCER=$!
+i=0
+while [ ! -S "$STT_SOCKET" ] || [ ! -S "$AUDIO_SOCKET" ] || [ ! -S "$TTS_SOCKET" ]; do
+    i=$((i + 1)); [ "$i" -lt 30 ] || exit 1; sleep 0.1
+done
+wait_for_dependency_sockets
+test ! -S "$WAKE_SOCKET"
 kill "$PRODUCER" 2>/dev/null || true
 wait "$PRODUCER" 2>/dev/null || true
 PRODUCER=0
