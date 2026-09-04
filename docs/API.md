@@ -76,7 +76,7 @@ adapter returns the valid fallback `wake_word: "LibreEcho"`.
 {
   "ok": true,
   "data": {
-    "wake_word": "LibreEcho",
+    "wake_word": "Alexa",
     "vendor_firmware": {
       "state": "ready",
       "verification": "hash-pinned",
@@ -100,18 +100,20 @@ Wake-word support is optional: if its companion service returns
 `LE_NOT_SUPPORTED`, setup continues, the submitted `wake_word` and
 `wake_sensitivity` are still written to the canonical configuration, and the
 boot-time restore retries them when the service becomes available. Other
-wake-word errors abort setup. After settings and Wi-Fi are committed, setup
-synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features`
+wake-word errors abort setup. The bundled image currently exposes `Alexa` as
+the supported first-run wake model. After settings and Wi-Fi are committed,
+setup synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features`
 helper and waits for `/run/libreecho/startup-ready`. A reconciliation or
 readiness failure returns `503` and leaves the setup-completion marker unwritten,
 so setup remains retryable. Wi-Fi credentials are passed to the network
 adapter for association but are never returned by the API or written to the
 web configuration. The successful response includes the best-known `ip`; the
-completion page uses the setup page's visible protocol and port for both the
-primary `<ip>` LAN link and the separate `<hostname>.local` mDNS alternative.
-This preserves externally mapped ports and HTTPS reverse-proxy access. The
-`.local` name depends on AirPlay 2/Avahi and client mDNS support, so the IP link
-remains available when that service is disabled or unavailable.
+completion page uses the device's HTTP port `8080` for both the primary `<ip>`
+LAN link and the separate `<hostname>.local` mDNS alternative. It must not copy
+a host-side ADB forwarding port or reverse-proxy port from the setup page's
+visible origin into normal user-facing device links. The `.local` name depends
+on AirPlay 2/Avahi and client mDNS support, so the IP link remains available
+when that service is disabled or unavailable.
 
 #### POST /api/v1/setup/vendor-import-force-next-boot
 
