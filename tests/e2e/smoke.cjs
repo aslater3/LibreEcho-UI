@@ -142,6 +142,10 @@ async function setupReadinessSuite(browser) {
 
   await page.goto('/setup.html', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => typeof setup !== 'undefined' && setup.step === 1);
+  assert.equal(await page.locator('#setup-wake').inputValue(), 'Alexa',
+    'unsupported setup fallback must normalize to the bundled wake model');
+  assert.equal(await page.evaluate(() => setup.data.wake_word), 'Alexa',
+    'normalized wake model must remain valid for setup submission');
   await page.evaluate(() => { setup.step = 2; render(); });
   await page.getByText('Readiness5', { exact: true }).waitFor({
     state: 'visible', timeout: 4000
