@@ -255,22 +255,30 @@ static void test_hostname_refresh_is_noop_while_disabled(void)
     assert(ctx.enabled == 0);
 }
 
-static void test_hostname_refresh_fails_closed_when_restart_is_unavailable(void)
+static void test_hostname_refresh_failure_remains_retryable(void)
 {
     struct airplay_ctx ctx;
-    char message[] = "{\"v\":1,\"id\":18,\"cmd\":\"refresh_hostname\",\"args\":{}}";
+    char first_message[] = "{\"v\":1,\"id\":18,\"cmd\":\"refresh_hostname\",\"args\":{}}";
+    char retry_message[] = "{\"v\":1,\"id\":19,\"cmd\":\"refresh_hostname\",\"args\":{}}";
     char response[512];
     int length;
 
     init_ctx(&ctx);
     ctx.enabled = 1;
     ctx.engine_pid = -1;
-    length = request(&ctx, message, response, sizeof(response));
+    length = request(&ctx, first_message, response, sizeof(response));
     assert(length > 0);
     assert(strstr(response, "\"id\":18"));
     assert(strstr(response, "\"ok\":false"));
     assert(strstr(response, "hostname refresh failed"));
-    assert(ctx.enabled == 0);
+    assert(ctx.enabled == 1);
+
+    length = request(&ctx, retry_message, response, sizeof(response));
+    assert(length > 0);
+    assert(strstr(response, "\"id\":19"));
+    assert(strstr(response, "\"ok\":false"));
+    assert(strstr(response, "hostname refresh failed"));
+    assert(ctx.enabled == 1);
 }
 
 int main(void)
@@ -283,7 +291,7 @@ int main(void)
     test_oversized_field_is_ignored();
     test_fifo_is_nonblocking();
     test_hostname_refresh_is_noop_while_disabled();
-    test_hostname_refresh_fails_closed_when_restart_is_unavailable();
+    test_hostname_refresh_failure_remains_retryable();
     puts("AirPlay metadata ingestion: ok");
     return 0;
 }

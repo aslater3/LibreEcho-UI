@@ -1161,8 +1161,15 @@ static int refresh_hostname(struct airplay_ctx *ctx)
 {
     if (!ctx->enabled)
         return 0;
-    if (set_enabled(ctx, 0) < 0 || set_enabled(ctx, 1) < 0)
+    if (set_enabled(ctx, 0) < 0)
         return -1;
+    if (set_enabled(ctx, 1) < 0) {
+        /* The integration remains administratively enabled even when this
+         * runtime restart fails, so the event loop and later requests retry
+         * rather than reporting a disabled stack as refreshed. */
+        ctx->enabled = 1;
+        return -1;
+    }
     le_log_info("airplayd: registration stack restarted after hostname change");
     return 0;
 }
