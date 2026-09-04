@@ -199,11 +199,12 @@ $(BUILD)/test-networkd-scan-security: tests/test_networkd_scan_security.c \
 		-Isrc -Isrc/adapter tests/test_networkd_scan_security.c -o $@
 
 $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emission.c \
-		src/json.c src/log.c
+		src/backend_linux.c src/json.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-DLE_ADAPTER_NETWORK_SOCK='"/tmp/libreecho-network-backend-test.sock"' \
-		-Isrc -Isrc/adapter $^ -o $@
+		-Isrc -Isrc/adapter tests/test_backend_linux_wifi_emission.c \
+		src/json.c src/log.c -o $@
 
 $(BUILD)/test-backend-linux-timers: tests/test_backend_linux_timers.c \
 	src/json.c src/log.c
