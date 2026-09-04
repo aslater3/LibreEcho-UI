@@ -1271,6 +1271,7 @@ static int disconnect_wifi(struct le_backend *b)
 static int hostname(struct le_backend *b, const char *name)
 {
     size_t i, length;
+    int rc;
     (void)b;
     if (!name) return LE_INVALID;
     length = strlen(name);
@@ -1280,7 +1281,11 @@ static int hostname(struct le_backend *b, const char *name)
     for (i = 0; i < length; i++)
         if (!isalnum((unsigned char)name[i]) && name[i] != '-')
             return LE_INVALID;
-    return sethostname(name, length) == 0 ? LE_OK : LE_IO;
+    if (sethostname(name, length) != 0)
+        return LE_IO;
+    rc = adapter_json_command_timeout(LE_ADAPTER_AIRPLAY_SOCK,
+                                      "refresh_hostname", NULL, 40000);
+    return rc == LE_NOT_SUPPORTED ? LE_OK : rc;
 }
 
 static int wake(struct le_backend *b, struct le_wake_word_state *o)
