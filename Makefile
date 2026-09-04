@@ -275,6 +275,7 @@ WAKE_ORT_ARCHIVES = \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
 	$(WAKE_ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
 	$(WAKE_ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
+	$(WAKE_ORT_BUILD)/_deps/google_nsync-build/libnsync_cpp.a \
 	$(RE2_ARCHIVE)
 WAKE_ORT_ABSEIL = $$(find $(WAKE_ORT_BUILD)/_deps/abseil_cpp-build \
 	-name '*.a')
@@ -403,6 +404,14 @@ $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
 		src/adapter/adapter_client.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -o $@
+
+# Exercises the runtime backend dispatcher against a build-host stub, so the
+# selection logic is covered without an ONNX runtime or a model.
+$(BUILD)/test-wake-engine-select: tests/test_wake_engine_select.c \
+	src/adapter/wake_engine.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_WAKE_ENGINE_STUB $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-voice-stream: tests/test_voice_stream.c \
 		src/adapter/voice_stream.c
@@ -542,6 +551,7 @@ $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
 $(BUILD)/voice_dsp.wake.arm.o: src/adapter/voice_dsp.h
 $(BUILD)/wake_worker.wake.arm.o: src/adapter/wake_worker.h \
 	src/adapter/wake_engine.h
+$(BUILD)/wake_engine.wake.arm.o: src/adapter/wake_engine.h
 $(BUILD)/wake_engine_onnx.arm.o: src/adapter/wake_engine.h
 
 $(BUILD)/log.wake.arm.o: src/log.c
@@ -558,6 +568,7 @@ WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/voice_dsp.wake.arm.o \
 	$(BUILD)/voice_stream.wake.arm.o \
 	$(BUILD)/wake_worker.wake.arm.o \
+	$(BUILD)/wake_engine.wake.arm.o \
 	$(BUILD)/wake_led.wake.arm.o \
 	$(BUILD)/adapter_client.wake.arm.o \
 	$(BUILD)/adapter_server.wake.arm.o \
@@ -628,7 +639,8 @@ clean:
 		$(BUILD)/test-networkd-health $(BUILD)/test-networkd-scan-security \
 		$(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-backend-linux-timers $(BUILD)/test-factory-reset \
-		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
+		$(BUILD)/test-wake-led $(BUILD)/test-wake-engine-select \
+		$(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
 		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
