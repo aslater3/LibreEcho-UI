@@ -567,10 +567,11 @@ static void mute_indicator(struct context *ctx, int muted)
     if (le_adapter_call(adapter, "pattern", args, NULL, 0) != LE_ADAPTER_OK)
         le_log_warn("buttond: mute indicator %s rejected by the LED daemon",
                     muted ? "on" : "off");
-    else
+    else {
         le_log_info("buttond: mute indicator %s", muted ? "on" : "off");
+        ctx->indicated_mute = muted ? 1 : 0;
+    }
     le_adapter_close(adapter);
-    ctx->indicated_mute = muted ? 1 : 0;
 }
 
 /*

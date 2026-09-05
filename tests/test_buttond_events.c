@@ -103,6 +103,10 @@ static void mock_daemon(int listen_fd, const char *log_path, int audio)
             snprintf(response, sizeof(response),
                      "{\"v\":1,\"id\":1,\"ok\":true,\"data\":{}}\n");
         }
+        /* Reserved fixture brightness injects a real adapter rejection. */
+        if (!audio && strstr(request, "\"brightness\":26"))
+            snprintf(response, sizeof(response),
+                     "{\"v\":1,\"id\":1,\"ok\":false,\"error\":\"fixture rejection\"}\n");
         assert(write(fd, response, strlen(response)) == (ssize_t)strlen(response));
         close(fd);
 
@@ -206,6 +210,13 @@ int main(void)
     mute_indicator(&ctx, ctx.muted);
     assert(ctx.indicated_mute == 1);
     assert(log_contains(led_log, "\"brightness\":25"));
+    ctx.indicated_mute = -1;
+    ctx.mute_brightness = 26;
+    mute_indicator(&ctx, 1);
+    assert(ctx.indicated_mute == -1);
+    ctx.mute_brightness = 25;
+    mute_indicator(&ctx, 1);
+    assert(ctx.indicated_mute == 1);
 
     nanosleep(&pause, NULL);
     assert(log_contains(audio_log, "\"cmd\":\"set_mute\""));
