@@ -177,6 +177,54 @@ async function checkFactoryResetFailure(page, status, message) {
   await page.unroute('**/api/v1/system/factory-reset');
 }
 
+async function authenticatedStartupSuite(browser) {
+  for (const accepted of [true, false]) {
+    const context = await browser.newContext({ baseURL });
+    await context.addInitScript(() => sessionStorage.setItem('libreecho-token', 'startup-test-token'));
+    const page = await context.newPage();
+    await page.route('**/login', route => route.fulfill({ contentType: 'text/html', body: '<main>Sign in</main>' }));
+    await page.route('**/api/v1/config', async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.data.authentication = 'users';
+      body.data.bootstrap_required = false;
+      await route.fulfill({ response, json: body });
+    });
+    let releaseAuth;
+    const authGate = new Promise(resolve => { releaseAuth = resolve; });
+    let authStarted;
+    const started = new Promise(resolve => { authStarted = resolve; });
+    await page.route('**/api/v1/auth', async route => {
+      authStarted();
+      await authGate;
+      await route.fulfill({ status: accepted ? 200 : 401,
+        json: accepted ? { ok: true, data: { username: 'fixture' }, error: null }
+          : { ok: false, data: null, error: { message: 'Session expired' } } });
+    });
+    try {
+      await page.goto('/', { waitUntil: 'domcontentloaded' });
+      await Promise.race([started, new Promise((_, reject) => setTimeout(() => reject(new Error('Auth request not started')), 5000))]);
+      assert.equal(await page.locator('.app-shell').isVisible(), false,
+        'application must remain hidden while authentication is pending');
+      releaseAuth();
+      if (accepted) {
+        await waitForPage(page, 'Overview');
+        await page.locator('.app-shell').waitFor({ state: 'visible', timeout: 5000 });
+        assert.equal(await page.locator('body').evaluate(body => body.classList.contains('auth-pending')), false);
+        await selectPage(page, 'Device');
+      } else {
+        await page.waitForFunction(() => location.pathname === '/login', null, { timeout: 5000 });
+        await page.getByText('Sign in', { exact: true }).waitFor({ state: 'visible', timeout: 5000 });
+        assert.equal(await page.locator('.app-shell').isVisible(), false,
+          'rejected authentication must not reveal the application');
+      }
+    } finally {
+      releaseAuth();
+      await context.close();
+    }
+  }
+}
+
 async function desktopSuite(browser) {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
@@ -271,6 +319,7 @@ async function mobileSuite(browser) {
   const browser = await chromium.launch({ headless: true });
   try {
     await setupReadinessSuite(browser);
+    await authenticatedStartupSuite(browser);
     await desktopSuite(browser);
     await mobileSuite(browser);
   } finally {
