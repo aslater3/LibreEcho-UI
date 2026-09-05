@@ -21,7 +21,7 @@ i=0
 while ! curl -fsS "$URL/api/v1/network" | jq -e '.data.state == "connected" and .data.ssid == "LibreNet-IoT"' >/dev/null; do
     i=$((i + 1))
     if [ "$i" -ge 50 ]; then
-        curl -fsS "$URL/api/v1/network" | jq '.data | {state, connectivity}' >&2
+        curl -fsS "$URL/api/v1/network" | jq '.data | {state, connectivity, ssid}' >&2
         exit 1
     fi
     sleep 0.1
