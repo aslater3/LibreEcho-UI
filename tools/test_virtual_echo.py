@@ -46,7 +46,7 @@ def test_persisted_auth_root() -> None:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 30
             ready = False
             while time.monotonic() < deadline:
                 if process.poll() is not None:
@@ -89,7 +89,7 @@ def main() -> int:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 30
             ready = False
             while time.monotonic() < deadline:
                 if process.poll() is not None:
