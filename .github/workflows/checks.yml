@@ -56,12 +56,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make -j2 SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/libreecho-ledd
+          make -j2 SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/libreecho-ledd build/libreecho-buttond
           ./build/test-button-settings
           ./build/test-buttond-privacy
           ./build/test-buttond-events
           sh tests/test_input_capability_state_contract.sh
           sh tests/test_led_pattern_ownership.sh
+          python3 tests/test_buttond_led_restart.py
 
       - name: Run complete UI test suite
         shell: bash

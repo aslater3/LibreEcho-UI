@@ -941,7 +941,8 @@ int main(int argc, char **argv)
                 ctx.audio_poll_warned = 0;
             }
             (void)sync_privacy_state(&ctx);
-            if (ctx.muted >= 0 && ctx.muted != ctx.indicated_mute)
+            /* Reassert the persistent underlay after a ledd restart too. */
+            if (ctx.muted >= 0)
                 mute_indicator(&ctx, ctx.muted);
             next_status_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
         }

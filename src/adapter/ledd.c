@@ -171,6 +171,8 @@ struct daemon_context {
     struct colour pattern_colour;
     unsigned int pattern_repeats;
     double pattern_started;
+    int mute_pattern_active;
+    struct colour mute_pattern_colour;
     int pattern_previous_kind;
     struct colour pattern_previous_colour;
     unsigned int pattern_previous_repeats;
@@ -1848,6 +1850,8 @@ static void copy_pattern_owner(char *destination, const char *source)
 static void stop_pattern(struct daemon_context *ctx, const char *owner,
                          double now)
 {
+    if (!owner || !owner[0] || !strcmp(owner, "mute"))
+        ctx->mute_pattern_active = 0;
     if (!ctx->pattern_active)
         return;
     if (owner && owner[0]) {
@@ -1870,6 +1874,14 @@ static void stop_pattern(struct daemon_context *ctx, const char *owner,
             return;
         }
     }
+    if (owner && owner[0] && ctx->mute_pattern_active) {
+        ctx->pattern_kind = PATTERN_SOLID;
+        ctx->pattern_colour = ctx->mute_pattern_colour;
+        ctx->pattern_repeats = 0;
+        copy_pattern_owner(ctx->pattern_owner, "mute");
+        ctx->pattern_started = now;
+        return;
+    }
     ctx->pattern_active = 0;
     ctx->pattern_kind = PATTERN_NONE;
     ctx->pattern_previous_kind = PATTERN_NONE;
@@ -1886,6 +1898,17 @@ static void start_pattern(struct daemon_context *ctx, int kind,
                           const struct colour *colour, unsigned int repeats,
                           const char *owner, double now)
 {
+    /* Mute is a persistent underlay, not another transient stack entry.
+       Heartbeats update it without interrupting an action or pairing cue. */
+    if (owner && !strcmp(owner, "mute")) {
+        ctx->mute_pattern_active = 1;
+        ctx->mute_pattern_colour = *colour;
+        if (ctx->pattern_active && strcmp(ctx->pattern_owner, "mute")) {
+            if (!strcmp(ctx->pattern_previous_owner, "mute"))
+                ctx->pattern_previous_colour = *colour;
+            return;
+        }
+    }
     if (ctx->pattern_active) {
         if (!owner || !owner[0] || strcmp(ctx->pattern_owner, owner)) {
         ctx->pattern_previous_kind = ctx->pattern_kind;
@@ -1935,7 +1958,9 @@ static void update_pattern(struct daemon_context *ctx, double now)
                 ctx->pattern_started = now;
                 update_pattern(ctx, now);
             } else {
-                stop_pattern(ctx, NULL, now);
+                char finished_owner[32];
+                copy_pattern_owner(finished_owner, ctx->pattern_owner);
+                stop_pattern(ctx, finished_owner, now);
             }
             return;
         }

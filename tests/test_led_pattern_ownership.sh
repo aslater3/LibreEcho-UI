@@ -116,7 +116,24 @@ restored = call("status")
 assert restored["pattern"] == "solid" and restored["pattern_owner"] == "mute", restored
 call("pattern", {"name": "stop", "owner": "action"})
 assert call("status")["pattern_owner"] == "mute"
+# Three owners and a heartbeat must still restore the persistent mute ring.
+call("pattern", {"name": "pulse", "owner": "bluetooth", "brightness": 70})
+call("pattern", {"name": "flash", "owner": "action", "repeats": 1})
+call("pattern", {"name": "solid", "owner": "mute", "brightness": 25})
+assert call("status")["pattern_owner"] == "action"
+time.sleep(0.6)
+assert call("status")["pattern_owner"] == "bluetooth"
+call("pattern", {"name": "stop", "owner": "bluetooth"})
+assert call("status")["pattern_owner"] == "mute"
 call("pattern", {"name": "stop", "owner": "mute"})
+assert call("status")["pattern_active"] is False
+# An unmute beneath two overlays must not resurrect the mute ring later.
+call("pattern", {"name": "solid", "owner": "mute"})
+call("pattern", {"name": "pulse", "owner": "bluetooth"})
+call("pattern", {"name": "flash", "owner": "action", "repeats": 1})
+call("pattern", {"name": "stop", "owner": "mute"})
+time.sleep(0.6)
+call("pattern", {"name": "stop", "owner": "bluetooth"})
 assert call("status")["pattern_active"] is False
 PY
 
