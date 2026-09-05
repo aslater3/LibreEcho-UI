@@ -38,6 +38,9 @@ def test_persisted_auth_root() -> None:
         )
         users.write_text(record)
         users.chmod(0o600)
+        config = root / "data/libreecho/config/web-config.json"
+        config.write_text('{"integrations": 0}\n')
+        config.chmod(0o600)
         process = subprocess.Popen(
             ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -77,6 +80,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="libreecho-virtual-") as temp:
         root = Path(temp)
         port = 18181
+        config = root / "data/libreecho/config/web-config.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('{"integrations": 0}\n')
+        config.chmod(0o600)
         process = subprocess.Popen(
             ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
