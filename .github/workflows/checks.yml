@@ -56,8 +56,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make -j2 SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" build/test-button-settings
+          make -j2 SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" build/test-button-settings build/test-buttond-privacy build/test-buttond-events
           ./build/test-button-settings
+          ./build/test-buttond-privacy
+          ./build/test-buttond-events
 
       - name: Run complete UI test suite
         shell: bash

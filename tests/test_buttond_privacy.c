@@ -202,6 +202,26 @@ int main(void)
     sync_privacy_state(&ctx);
     assert(ctx.muted == 0);
 
+    /* Legacy KEY_POWER must not reverse a transition observed before dispatch. */
+    write_state(BUTTOND_PRIVACY_STATE_PATH, 1);
+    sync_privacy_state(&ctx);
+    before = log_count(audio_log, "\"cmd\":\"set_mute\"");
+    handle_key(&ctx, KEY_POWER, 1);
+    assert(ctx.muted == 1);
+    assert(log_count(audio_log, "\"cmd\":\"set_mute\"") == before);
+    write_state(BUTTOND_PRIVACY_STATE_PATH, 0);
+    sync_privacy_state(&ctx);
+    handle_key(&ctx, KEY_POWER, 1);
+    assert(ctx.muted == 0);
+    /* Also cover completion after KEY_POWER dispatch. */
+    handle_key(&ctx, KEY_POWER, 1);
+    assert(ctx.muted == 0);
+    write_state(BUTTOND_PRIVACY_STATE_PATH, 1);
+    sync_privacy_state(&ctx);
+    assert(ctx.muted == 1);
+    write_state(BUTTOND_PRIVACY_STATE_PATH, 0);
+    sync_privacy_state(&ctx);
+
     /* Unchanged hardware zero never clears a separate API/software mute. */
     ctx.muted = 1;
     sync_privacy_state(&ctx);

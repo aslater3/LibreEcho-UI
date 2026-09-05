@@ -817,6 +817,7 @@ static void handle_key(struct context *ctx, int code, int value)
         }
         return;              /* no autorepeat: once per press */
     case KEY_MUTE:
+    case KEY_POWER:
         if (value == 1) {
             int state;
             (void)refresh_audio(ctx);
@@ -826,7 +827,6 @@ static void handle_key(struct context *ctx, int code, int value)
                 toggle_mute(ctx);
         }
         return;
-    case KEY_POWER:
     case KEY_MICMUTE:
         if (value == 1) {
             (void)refresh_audio(ctx);
