@@ -32,6 +32,17 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             build-essential bubblewrap jq libspeexdsp-dev nodejs
 
+      - name: Enable user namespaces for virtual service harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+
       - name: Stage SpeexDSP host dependency
         shell: bash
         run: |
@@ -40,6 +51,34 @@ jobs:
           cp -a /usr/include/speex "$RUNNER_TEMP/speexdsp/include/"
           cp "$(gcc -print-file-name=libspeexdsp.a)" \
             "$RUNNER_TEMP/speexdsp/lib/libspeexdsp.a"
+
+      - name: Verify button settings persistence regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j2 SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/libreecho-ledd build/libreecho-buttond
+          ./build/test-button-settings
+          ./build/test-buttond-privacy
+          ./build/test-buttond-events
+          sh tests/test_input_capability_state_contract.sh
+          sh tests/test_led_pattern_ownership.sh
+          python3 tests/test_buttond_led_restart.py
+
+      - name: Verify configuration and mock integration before full suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          make clean
+          make -j2 SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" all
+          ./build/libreecho-web --backend mock --config ./build/preflight-config.json --mock-config ./config/mock-state.json --web-root ./web --listen 127.0.0.1:18082 --seed 42 --dev-controls >./build/preflight-server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18082/api/v1/status >/dev/null 2>&1; then break; fi
+            sleep 0.1
+          done
+          LIBREECHO_TEST_CONFIG=./build/preflight-config.json sh tests/test_config.sh
+          sh tests/test_mock_behaviour.sh
 
       - name: Run complete UI test suite
         shell: bash

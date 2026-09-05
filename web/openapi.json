@@ -1045,7 +1045,7 @@
     "tags": [
      "LED and buttons"
     ],
-    "summary": "Read button mappings and live physical-input capability state",
+    "summary": "Read physical button capability, mute-lamp ownership, and sound settings",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1059,16 +1059,36 @@
     "tags": [
      "LED and buttons"
     ],
-    "summary": "Update button mappings",
+    "summary": "Update physical button sound rotation and press tones",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
      }
     ],
     "requestBody": {
-     "$ref": "#/components/requestBodies/JsonObject"
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "minProperties": 1,
+        "anyOf": [{"required": ["short_press"]}, {"required": ["long_press"]}, {"required": ["tones"]}, {"required": ["action"]}, {"required": ["action_sounds"]}, {"required": ["action_brightness"]}, {"required": ["mute_brightness"]}],
+        "properties": {
+         "short_press": {"type": "string", "maxLength": 31, "description": "Legacy compatibility field; does not control physical mappings."},
+         "long_press": {"type": "string", "maxLength": 31, "description": "Legacy compatibility field; does not control physical mappings."},
+         "tones": {"type": "boolean"},
+         "action": {"type": "string", "enum": ["sound", "disabled"]},
+         "action_sounds": {"type": "string", "maxLength": 191, "pattern": "^(action-[123](,action-[123])*)?$"},
+         "action_brightness": {"type": "integer", "minimum": 0, "maximum": 100},
+         "mute_brightness": {"type": "integer", "minimum": 0, "maximum": 100}
+        }
+       }
+      }
+     }
     },
     "responses": {
+     "400": {"description": "No recognized button field or invalid settings."},
+     "503": {"description": "Persistence failed; prior preferences remain active."},
      "200": {
       "$ref": "#/components/responses/Success"
      },

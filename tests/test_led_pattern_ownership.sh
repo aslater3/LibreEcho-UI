@@ -15,7 +15,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-./build/libreecho-ledd --foreground --stub --socket "$socket_path" \
+${LIBREECHO_LED_TEST_BINARY:-./build/libreecho-ledd} --foreground --stub --socket "$socket_path" \
     >"$log_path" 2>&1 &
 pid=$!
 
@@ -41,6 +41,9 @@ sequence = 0
 def call(command, arguments=None):
     global sequence
     sequence += 1
+    if command == "pattern" and arguments.get("name") != "stop":
+        arguments = {"r": 255, "g": 0, "b": 0, "brightness": 60,
+                     "repeats": 0, **arguments}
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(1)
     client.connect(path)
@@ -93,6 +96,46 @@ call("pattern", {"name": "stop", "owner": "announcement"})
 restored = call("status")
 assert restored["pattern"] == "pulse", restored
 assert restored["pattern_owner"] == "bluetooth", restored
+call("pattern", {"name": "stop", "owner": "bluetooth"})
+assert call("status")["pattern_active"] is False
+
+# The mute ring persists beyond the old meter timeout and returns after an
+# action-button flash; neither owner may erase the other accidentally.
+import time
+call("pattern", {"name": "solid", "r": 255, "g": 0, "b": 0,
+                 "brightness": 60, "repeats": 0, "owner": "mute"})
+time.sleep(1.6)
+muted = call("status")
+assert muted["pattern_active"] and muted["pattern"] == "solid", muted
+assert muted["pattern_owner"] == "mute", muted
+call("pattern", {"name": "flash", "r": 255, "g": 170, "b": 0,
+                 "brightness": 70, "repeats": 1, "owner": "action"})
+# A second action press restarts the flash without replacing its saved mute ring.
+time.sleep(0.1)
+call("pattern", {"name": "flash", "r": 255, "g": 170, "b": 0,
+                 "brightness": 70, "repeats": 1, "owner": "action"})
+time.sleep(0.6)
+restored = call("status")
+assert restored["pattern"] == "solid" and restored["pattern_owner"] == "mute", restored
+call("pattern", {"name": "stop", "owner": "action"})
+assert call("status")["pattern_owner"] == "mute"
+# Three owners and a heartbeat must still restore the persistent mute ring.
+call("pattern", {"name": "pulse", "owner": "bluetooth", "brightness": 70})
+call("pattern", {"name": "flash", "owner": "action", "repeats": 1})
+call("pattern", {"name": "solid", "owner": "mute", "brightness": 25})
+assert call("status")["pattern_owner"] == "action"
+time.sleep(0.6)
+assert call("status")["pattern_owner"] == "bluetooth"
+call("pattern", {"name": "stop", "owner": "bluetooth"})
+assert call("status")["pattern_owner"] == "mute"
+call("pattern", {"name": "stop", "owner": "mute"})
+assert call("status")["pattern_active"] is False
+# An unmute beneath two overlays must not resurrect the mute ring later.
+call("pattern", {"name": "solid", "owner": "mute"})
+call("pattern", {"name": "pulse", "owner": "bluetooth"})
+call("pattern", {"name": "flash", "owner": "action", "repeats": 1})
+call("pattern", {"name": "stop", "owner": "mute"})
+time.sleep(0.6)
 call("pattern", {"name": "stop", "owner": "bluetooth"})
 assert call("status")["pattern_active"] is False
 PY
