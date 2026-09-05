@@ -42,11 +42,15 @@ sh tests/test_setup_optional_adapters.sh
 sh tests/test_login_brand_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
-make build/test-audiod-review build/test-led-night-review
+make build/test-action-sample build/test-audiod-review build/test-led-night-review
+./build/test-action-sample
 ./build/test-audiod-review
 ./build/test-led-night-review
 sh tests/test_startup_animation.sh
-make build/test-buttond-timing
+make build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing
+./build/test-button-settings
+./build/test-buttond-privacy
+./build/test-buttond-events
 ./build/test-buttond-timing
 sh tests/test_buttond_contract.sh
 sh tests/test_input_capability_state_contract.sh

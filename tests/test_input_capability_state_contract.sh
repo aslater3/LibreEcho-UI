@@ -15,6 +15,16 @@ checks = {
     'buttond derives capabilities from evdev key bits':
         'volume_capable' in buttond and 'mute_capable' in buttond and
         'TEST_BIT(KEY_MICMUTE, key_bits)' in buttond,
+    'buttond detects final action key and legacy PMIC mute':
+        'TEST_BIT(KEY_HELP, key_bits)' in buttond and
+        'TEST_BIT(KEY_POWER, key_bits)' in buttond and
+        'ctx->devices[ctx->device_count].action_capable = action_capable' in buttond and
+        'ctx->action_capable |= ctx->devices[i].action_capable' in buttond and
+        'action=%d' in buttond,
+    'privacy synchronization has a bounded poll interval':
+        '#define PRIVACY_POLL_MS 100' in buttond and
+        'timeout > PRIVACY_POLL_MS' in buttond and
+        'timeout = PRIVACY_POLL_MS;' in buttond,
     'buttond stores capability bits per device':
         'struct device' in buttond and
         'ctx->devices[ctx->device_count].volume_capable = volume_capable' in buttond and

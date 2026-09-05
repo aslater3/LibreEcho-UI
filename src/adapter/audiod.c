@@ -1462,6 +1462,95 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
     return 0;
 }
 
+#ifndef LE_SOUND_DIR
+#define LE_SOUND_DIR "/usr/local/share/libreecho/sounds"
+#endif
+
+static int sample_name_ok(const char *name)
+{
+    size_t i;
+    if (!name || !name[0] || strlen(name) > 48)
+        return 0;
+    for (i = 0; name[i]; i++)
+        if (!((name[i] >= 'a' && name[i] <= 'z') ||
+              (name[i] >= '0' && name[i] <= '9') ||
+              name[i] == '-' || name[i] == '_'))
+            return 0;
+    return 1;
+}
+
+static int sample_open_fd(const char *name)
+{
+    char path[224];
+    struct stat status;
+    int fd;
+    int length = snprintf(path, sizeof(path), "%s/%s.raw", LE_SOUND_DIR, name);
+    if (length < 0 || (size_t)length >= sizeof(path))
+        return -1;
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size <= 0 || status.st_size % (off_t)sizeof(int16_t) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int write_sample_fd(int fd, int sample_fd)
+{
+    unsigned char output[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS * sizeof(int16_t)];
+    int16_t input[LE_TONE_CHUNK_FRAMES];
+    FILE *file = fdopen(sample_fd, "rb");
+    size_t frames;
+    if (!file) { close(sample_fd); return -1; }
+    while ((frames = fread(input, sizeof(int16_t), LE_TONE_CHUNK_FRAMES, file)) > 0) {
+        int16_t *samples = (int16_t *)output;
+        size_t bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t), sent = 0, i;
+        for (i = 0; i < frames; i++) {
+            samples[i * 2] = input[i];
+            samples[i * 2 + 1] = input[i];
+        }
+        while (sent < bytes) {
+            ssize_t n = write(fd, output + sent, bytes - sent);
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pfd = {fd, POLLOUT, 0};
+                int rc;
+                do { rc = poll(&pfd, 1, 1000); } while (rc < 0 && errno == EINTR);
+                if (rc > 0) continue;
+            }
+            if (n <= 0) { fclose(file); return -1; }
+            sent += (size_t)n;
+        }
+    }
+    int failed = ferror(file);
+    fclose(file);
+    return failed ? -1 : 0;
+}
+
+static int start_sample(const struct audio_hw *audio, const char *name)
+{
+    int fd, sample_fd;
+    pid_t pid;
+    if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0)
+        return -1;
+    sample_fd = sample_open_fd(name);
+    if (sample_fd < 0)
+        return -1;
+    fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) { close(sample_fd); return -1; }
+    pid = fork();
+    if (pid < 0) { close(sample_fd); close(fd); return -1; }
+    if (pid == 0) {
+        int result = write_sample_fd(fd, sample_fd);
+        close(fd);
+        _exit(result < 0 ? 1 : 0);
+    }
+    close(sample_fd);
+    close(fd);
+    return 0;
+}
+
 static int start_cue(const struct audio_hw *audio, long first_hz,
                      long second_hz, long duration_ms)
 {
@@ -1646,6 +1735,17 @@ static int handle_request(struct audio_hw *audio, char *message,
     if (!strcmp(command, "noise_stop")) {
         stop_noise(audio);
         le_log_info("audiod: noise stopped");
+        return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "sample")) {
+        char name[64] = "";
+        (void)json_string(message, "name", name, sizeof(name));
+        if (!sample_name_ok(name))
+            return response_error(response, response_size, id,
+                                  "sample name must be lowercase letters, digits, - or _");
+        if (start_sample(audio, name) < 0)
+            return response_error(response, response_size, id,
+                                  "sample could not be played");
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "cue")) {

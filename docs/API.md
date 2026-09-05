@@ -1082,28 +1082,38 @@ Trigger wake word test.
 
 #### PUT /api/v1/buttons
 
-Update button mappings.
+Update physical button sound settings. The physical action button (`KEY_HELP`) supports the curated sound rotation; volume up/down and `KEY_POWER`/`KEY_MUTE`/`KEY_MICMUTE` mute handling are also advertised. Listen, play/pause, and legacy short/long action mappings remain inactive and are not presented as working.
 
-**Request:**
+The physical mute lamp/privacy latch is kernel-owned. Userspace synchronizes the software mute state and ring indicator but does not write the privacy sysfs latch, avoiding a workqueue/double-toggle race.
+
+**Request:** All fields are optional; a `PUT` may update any subset and preserves unspecified settings. At least one supported field is required. The legacy `short_press` and `long_press` strings remain accepted for compatibility, but do not control physical action mappings.
 ```json
 {
-  "short_press": "Start listening",
-  "long_press": "Open pairing mode"
+  "tones": true,
+  "action": "sound",
+  "action_sounds": "action-1,action-2,action-3",
+  "action_brightness": 70,
+  "mute_brightness": 60
 }
 ```
+
+`action` is `sound` or `disabled`; `action_sounds` is empty or a bounded comma-separated list containing only the exact entries `action-1`, `action-2`, and `action-3` (with no path separators or other characters). The bundled clips are installed under `/usr/local/share/libreecho/sounds` as mono signed-16-bit little-endian 48 kHz PCM. Settings persist in the normal web configuration store.
 
 **Response:**
 ```json
 {
   "ok": true,
   "data": {
-    "short_press": "Start listening",
-    "long_press": "Open pairing mode",
     "available": false,
     "state": "stale",
     "volume_capable": false,
     "hardware_mute": false,
     "action_capable": false,
+    "tones": true,
+    "action": "sound",
+    "action_sounds": "action-1,action-2,action-3",
+    "action_brightness": 70,
+    "mute_brightness": 60,
     "stale": true
   },
   "error": null

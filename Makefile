@@ -129,6 +129,27 @@ $(BUILD)/libreecho-ttsd-wyoming: src/adapter/ttsd.c \
 	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc \
 		-DLE_TTSD_ENGINE_WYOMING $^ $(LDFLAGS) -lpthread -lm -o $@
 
+$(BUILD)/test-button-settings: tests/test_button_settings.c \
+	$(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
+		$^ $(LDFLAGS) -lm -o $@
+
+$(BUILD)/test-buttond-privacy: tests/test_buttond_privacy.c \
+	src/adapter/buttond.c src/adapter/buttond_timing.c \
+	src/adapter/adapter_client.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		src/adapter/adapter_client.c src/json.c src/log.c -o $@
+
+$(BUILD)/test-buttond-events: tests/test_buttond_events.c \
+	src/adapter/buttond.c src/adapter/buttond_timing.c \
+	src/adapter/adapter_client.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		src/adapter/adapter_client.c src/json.c src/log.c -o $@
+
 $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 		src/adapter/buttond_timing.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
@@ -230,6 +251,14 @@ $(BUILD)/test-wyomingd: tests/test_wyomingd.c $(BUILD)/libreecho-wyomingd
 
 test-wyomingd: $(BUILD)/test-wyomingd
 	./$(BUILD)/test-wyomingd
+
+$(BUILD)/test-action-sample: tests/test_action_sample.c \
+		src/adapter/audiod.c src/adapter/adapter_client.c \
+		src/adapter/adapter_server.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
 
 $(BUILD)/test-audiod-review: tests/test_audiod_review.c \
 		src/adapter/audiod.c src/adapter/adapter_client.c \
@@ -606,11 +635,12 @@ test:
 	sh tests/run_tests.sh
 
 install: $(TARGET) $(LOGD_TARGET) adapters
-	install -d $(DESTDIR)$(PREFIX)/sbin $(DESTDIR)$(PREFIX)/share/libreecho/web $(DESTDIR)/etc/libreecho $(DESTDIR)/etc/init.d $(DESTDIR)/var/log/libreecho
+	install -d $(DESTDIR)$(PREFIX)/sbin $(DESTDIR)$(PREFIX)/share/libreecho/web $(DESTDIR)$(PREFIX)/share/libreecho/sounds $(DESTDIR)/etc/libreecho $(DESTDIR)/etc/init.d $(DESTDIR)/var/log/libreecho
 	install -m 0755 $(TARGET) $(DESTDIR)$(PREFIX)/sbin/libreecho-web
 	install -m 0755 $(LOGD_TARGET) $(DESTDIR)$(PREFIX)/sbin/libreecho-logd
 	install -m 0755 $(ADAPTER_TARGETS) $(DESTDIR)$(PREFIX)/sbin/
 	cp -R web/* $(DESTDIR)$(PREFIX)/share/libreecho/web/
+	install -m 0644 sounds/*.raw $(DESTDIR)$(PREFIX)/share/libreecho/sounds/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
 	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-timerd.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init $(DESTDIR)/etc/init.d/
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
@@ -633,6 +663,9 @@ clean:
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
 		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
 		$(BUILD)/test-audiod-review $(BUILD)/test-led-night-review \
+		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \
+		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-timing \
+		$(BUILD)/test-action-sample \
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \
 		$(BUILD)/test-agentd \

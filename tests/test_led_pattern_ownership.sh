@@ -15,7 +15,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-./build/libreecho-ledd --foreground --stub --socket "$socket_path" \
+${LIBREECHO_LED_TEST_BINARY:-./build/libreecho-ledd} --foreground --stub --socket "$socket_path" \
     >"$log_path" 2>&1 &
 pid=$!
 
@@ -94,6 +94,25 @@ restored = call("status")
 assert restored["pattern"] == "pulse", restored
 assert restored["pattern_owner"] == "bluetooth", restored
 call("pattern", {"name": "stop", "owner": "bluetooth"})
+assert call("status")["pattern_active"] is False
+
+# The mute ring persists beyond the old meter timeout and returns after an
+# action-button flash; neither owner may erase the other accidentally.
+import time
+call("pattern", {"name": "solid", "r": 255, "g": 0, "b": 0,
+                 "brightness": 60, "repeats": 0, "owner": "mute"})
+time.sleep(1.6)
+muted = call("status")
+assert muted["pattern_active"] and muted["pattern"] == "solid", muted
+assert muted["pattern_owner"] == "mute", muted
+call("pattern", {"name": "flash", "r": 255, "g": 170, "b": 0,
+                 "brightness": 70, "repeats": 1, "owner": "action"})
+time.sleep(0.6)
+restored = call("status")
+assert restored["pattern"] == "solid" and restored["pattern_owner"] == "mute", restored
+call("pattern", {"name": "stop", "owner": "action"})
+assert call("status")["pattern_owner"] == "mute"
+call("pattern", {"name": "stop", "owner": "mute"})
 assert call("status")["pattern_active"] is False
 PY
 
