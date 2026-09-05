@@ -870,6 +870,8 @@ static const char *control_name_or_default(const struct audio_control *control,
 /* Percent is not a round trip through the raw control, so ignore a point
    of rounding rather than reacting to it. */
 #define VOLUME_GUARD_TOLERANCE 2
+/* How often the guard re-reads the mixer while idle, in milliseconds. */
+#define VOLUME_GUARD_POLL_MS 250
 
 static int audio_set_volume(struct audio_hw *audio, int volume);
 static int airplay_media_active(void);
@@ -917,11 +919,19 @@ static void refresh_state(struct audio_hw *audio)
         if (!airplay_media_active() && audio->requested_volume >= 0 &&
             abs(audio->volume - audio->requested_volume) >
                 VOLUME_GUARD_TOLERANCE) {
-            le_log_warn("audiod: volume changed underneath us: requested "
-                        "%d%%, control now reads %d%% (raw %lld of %lld..%lld)"
-                        "; restoring",
-                        audio->requested_volume, audio->volume,
-                        value, min, max);
+            /* One line, not one per playback. The flag was set here but never
+               tested, so an outside writer that fires on every stream -- which
+               is what this device does -- filled the log ring with this message
+               and evicted everything else, including the microphone and
+               wake-word lines needed to diagnose an unrelated fault. The
+               restore below still runs every time; only the warning is
+               one-shot, and setting the volume again re-arms it. */
+            if (!audio->volume_guard_warned)
+                le_log_warn("audiod: volume changed underneath us: requested "
+                            "%d%%, control now reads %d%% (raw %lld of %lld..%lld)"
+                            "; restoring",
+                            audio->requested_volume, audio->volume,
+                            value, min, max);
             audio->volume_guard_warned = 1;
             if (audio_set_volume(audio, audio->requested_volume) == 0)
                 audio->volume = audio->requested_volume;
@@ -995,6 +1005,10 @@ static int audio_set_volume(struct audio_hw *audio, int volume)
     audio->volume = volume;
     audio->notification_volume = volume;
     audio->requested_volume = volume;
+    /* A fresh request re-arms the guard warning: the next time an outside
+       writer overrides this level it is news again, rather than silence
+       because it was reported once hours ago. */
+    audio->volume_guard_warned = 0;
     return 0;
 }
 
@@ -1200,12 +1214,12 @@ static int write_tone_fd(int fd)
     return 0;
 }
 
-static int write_cue_fd(int fd, long first_hz, long second_hz,
-                        long duration_ms)
+static int write_chirp_fd(int fd, double first_hz, double second_hz,
+                          unsigned int ms)
 {
     unsigned char buffer[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS *
                          sizeof(int16_t)];
-    size_t total = (size_t)LE_PCM_RATE * (size_t)duration_ms / 1000U;
+    size_t total = (size_t)LE_PCM_RATE * ms / 1000U;
     size_t done = 0;
     double phase = 0.0;
 
@@ -1219,8 +1233,11 @@ static int write_cue_fd(int fd, long first_hz, long second_hz,
 
         for (i = 0; i < frames; ++i) {
             size_t index = done + i;
-            double hz = index * 2U < total ? (double)first_hz
-                                           : (double)second_hz;
+            /* Second half steps up a fifth, which reads as a question
+               being acknowledged rather than an error. */
+            double hz = index * 2U < total ? first_hz : second_hz;
+            /* Ramp both ends so the bus does not get a click, which is
+               louder and more startling than the tone itself. */
             double ramp = 1.0;
             size_t edge = total / 8U ? total / 8U : 1U;
             int16_t value;
@@ -1462,15 +1479,141 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
     return 0;
 }
 
-static int start_cue(const struct audio_hw *audio, long first_hz,
-                     long second_hz, long duration_ms)
+#ifndef LE_SOUND_DIR
+#define LE_SOUND_DIR "/usr/local/share/libreecho/sounds"
+#endif
+
+/*
+ * Play a bundled sound. The files are raw mono S16LE at the bus rate, so this
+ * is a copy with each sample doubled into both channels -- no decoder, no
+ * format negotiation, nothing to go wrong in an image that has to boot.
+ *
+ * The name is restricted to a plain filename under the sound directory: this
+ * is reachable from the adapter socket, and a caller must not be able to walk
+ * out of it and stream an arbitrary file to the speaker.
+ */
+static int sample_name_ok(const char *name)
+{
+    size_t i;
+
+    if (!name || !name[0] || strlen(name) > 48)
+        return 0;
+    for (i = 0; name[i]; i++) {
+        if ((name[i] >= 'a' && name[i] <= 'z') ||
+            (name[i] >= '0' && name[i] <= '9') ||
+            name[i] == '-' || name[i] == '_')
+            continue;
+        return 0;
+    }
+    return 1;
+}
+
+static int sample_open_fd(const char *name)
+{
+    char path[224];
+    struct stat status;
+    int fd;
+    int length;
+
+    length = snprintf(path, sizeof(path), "%s/%s.raw", LE_SOUND_DIR, name);
+    if (length < 0 || (size_t)length >= sizeof(path))
+        return -1;
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size <= 0 ||
+        (status.st_size % (off_t)sizeof(int16_t)) != 0) {
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int write_sample_fd(int fd, int sample_fd)
+{
+    unsigned char out[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS * sizeof(int16_t)];
+    int16_t in[LE_TONE_CHUNK_FRAMES];
+    FILE *file = fdopen(sample_fd, "rb");
+    size_t frames;
+
+    if (!file) {
+        close(sample_fd);
+        return -1;
+    }
+    while ((frames = fread(in, sizeof(int16_t), LE_TONE_CHUNK_FRAMES, file)) > 0) {
+        int16_t *samples = (int16_t *)out;
+        size_t bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t);
+        size_t sent = 0;
+        size_t i;
+
+        for (i = 0; i < frames; i++) {
+            samples[i * 2] = in[i];
+            samples[i * 2 + 1] = in[i];
+        }
+        while (sent < bytes) {
+            ssize_t n = write(fd, out + sent, bytes - sent);
+
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pfd = { fd, POLLOUT, 0 };
+                int rc;
+
+                do {
+                    rc = poll(&pfd, 1, 1000);
+                } while (rc < 0 && errno == EINTR);
+                if (rc <= 0)
+                    break;
+                continue;
+            }
+            if (n <= 0)
+                break;
+            sent += (size_t)n;
+        }
+    }
+    fclose(file);
+    return 0;
+}
+
+static int start_sample(const struct audio_hw *audio, const char *name)
+{
+    int fd;
+    int sample_fd;
+    pid_t pid;
+
+    if (!audio->output_available || access(LE_SYSTEM_AUDIO_BUS, F_OK) < 0)
+        return -1;
+    sample_fd = sample_open_fd(name);
+    if (sample_fd < 0)
+        return -1;
+    fd = open(LE_SYSTEM_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        close(sample_fd);
+        return -1;
+    }
+    pid = fork();
+    if (pid < 0) {
+        close(sample_fd);
+        close(fd);
+        return -1;
+    }
+    if (pid == 0) {
+        int result = write_sample_fd(fd, sample_fd);
+        close(fd);
+        _exit(result < 0 ? 1 : 0);
+    }
+    close(sample_fd);
+    close(fd);
+    return 0;
+}
+
+static int start_cue(const struct audio_hw *audio, double first_hz,
+                     double second_hz, unsigned int ms)
 {
     int fd;
     pid_t pid;
 
-    if (first_hz < 20 || first_hz > 20000 || second_hz < 20 ||
-        second_hz > 20000 || duration_ms < 1 || duration_ms > 5000 ||
-        access(audio->system_audio_bus, F_OK) < 0)
+    if (access(audio->system_audio_bus, F_OK) < 0)
         return -1;
     fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
@@ -1481,20 +1624,12 @@ static int start_cue(const struct audio_hw *audio, long first_hz,
         return -1;
     }
     if (pid == 0) {
-        int result = write_cue_fd(fd, first_hz, second_hz, duration_ms);
+        int result = write_chirp_fd(fd, first_hz, second_hz, ms);
         close(fd);
         _exit(result == 0 ? 0 : 1);
     }
     close(fd);
     return 0;
-}
-
-static int start_wake_chirp(const struct audio_hw *audio)
-{
-    if (!audio->output_available)
-        return -1;
-    return start_cue(audio, (long)LE_CHIRP_LOW_HZ, (long)LE_CHIRP_HIGH_HZ,
-                     LE_CHIRP_MS);
 }
 
 static int start_test_tone(const struct audio_hw *audio)
@@ -1648,24 +1783,56 @@ static int handle_request(struct audio_hw *audio, char *message,
         le_log_info("audiod: noise stopped");
         return response_ok(response, response_size, id, "{}");
     }
-    if (!strcmp(command, "cue")) {
-        long first_hz;
-        long second_hz;
-        long duration_ms;
+    /*
+     * Button feedback. The buttons are on top of the device where nobody can
+     * see the ring while pressing them, so a press with no sound is
+     * indistinguishable from a press that did not register -- which is how a
+     * mute button that was reporting the wrong keycode went unnoticed.
+     *
+     * Direction is carried by the interval, not the pitch: rising for up and
+     * for leaving mute, falling for down and for entering it. That stays
+     * legible to someone who cannot hear the absolute pitch well, and it
+     * matches the wake chirp already reading as "I heard you".
+     */
+    if (!strcmp(command, "sample")) {
+        char name[64] = "";
 
-        if (json_long(message, "first_hz", &first_hz) < 0 ||
-            json_long(message, "second_hz", &second_hz) < 0 ||
-            json_long(message, "ms", &duration_ms) < 0 ||
-            start_cue(audio, first_hz, second_hz, duration_ms) < 0)
+        (void)json_string(message, "name", name, sizeof(name));
+        if (!sample_name_ok(name))
             return response_error(response, response_size, id,
-                                  "cue must specify usable audio output and "
-                                  "20-20000Hz tones lasting 1-5000ms");
-        le_log_info("audiod: cue requested (%ldHz, %ldHz, %ldms)",
-                    first_hz, second_hz, duration_ms);
-        return response_ok(response, response_size, id, "{\"playing\":true}");
+                                  "sample name must be lowercase letters, digits, - or _");
+        if (start_sample(audio, name) < 0)
+            return response_error(response, response_size, id,
+                                  "sample could not be played");
+        return response_ok(response, response_size, id, "{}");
     }
+
+    if (!strcmp(command, "cue")) {
+        long first = 0, second = 0, ms = LE_CHIRP_MS;
+
+        if (json_long(message, "first_hz", &first) < 0 ||
+            json_long(message, "second_hz", &second) < 0)
+            return response_error(response, response_size, id,
+                                  "cue requires first_hz and second_hz");
+        if (first < 60 || first > 8000 || second < 60 || second > 8000)
+            return response_error(response, response_size, id,
+                                  "cue frequencies must be 60-8000 Hz");
+        /* Optional so every existing caller keeps the acknowledgement length
+           it was written for. Capped because this plays on the same bus the
+           microphone hears, and a long one would overlap a spoken command. */
+        (void)json_long(message, "ms", &ms);
+        if (ms < 40 || ms > 800)
+            ms = LE_CHIRP_MS;
+        if (start_cue(audio, (double)first, (double)second,
+                      (unsigned int)ms) < 0)
+            return response_error(response, response_size, id,
+                                  "audio output unavailable");
+        return response_ok(response, response_size, id, "{}");
+    }
+
     if (!strcmp(command, "wake_chirp")) {
-        if (start_wake_chirp(audio) < 0)
+        if (start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ,
+                      LE_CHIRP_MS) < 0)
             return response_error(response, response_size, id,
                                   "audio output unavailable");
         return response_ok(response, response_size, id, "{}");
@@ -1947,11 +2114,32 @@ int main(int argc, char **argv)
             ++nfds;
         }
 
-        poll_result = poll(pollfds, nfds, -1);
+        /*
+         * Bounded rather than infinite, so the volume guard in refresh_state
+         * runs on a clock instead of only when something asks for status.
+         *
+         * Something outside this daemon resets the codec mixer to unity when
+         * playback starts -- 26% became 100% mid-answer, which is deafening
+         * at close range. The guard already detected and restored it, but it
+         * only ran on a status request, so the window stayed open for as long
+         * as nothing happened to poll. Checking four times a second closes it
+         * to a quarter of a second.
+         *
+         * This is a mitigation, not the fix. The writer is in the AirPlay
+         * audio engine, which ships in a feature squashfs and cannot be
+         * replaced by an OTA, so the real repair cannot reach a device this
+         * way. Two mixer reads a second is a cheap price for not being
+         * startled.
+         */
+        poll_result = poll(pollfds, nfds, VOLUME_GUARD_POLL_MS);
         if (poll_result < 0) {
             if (errno == EINTR)
                 continue;
             break;
+        }
+        if (poll_result == 0) {
+            refresh_state(&audio);
+            continue;
         }
         if (pollfds[0].revents & POLLIN)
             (void)accept_client(listen_fd, clients);

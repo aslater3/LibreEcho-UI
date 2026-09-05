@@ -48,10 +48,16 @@ curl -fsS -X POST "$URL/api/v1/setup" \
   -H 'Content-Type: application/json' \
   --data "$setup" >/dev/null
 
-if ! LIBREECHO_E2E_URL="$URL" node tests/e2e/smoke.cjs; then
-  echo '--- libreecho-web E2E server log ---' >&2
-  cat "$LOG" >&2
-  exit 1
-fi
+# features-radio.cjs was never wired in here, so its expectations drifted
+# unnoticed until nothing it asserted was true any more. It runs after smoke
+# because it leaves the simulation feature off, which is how smoke expects to
+# find it.
+for suite in smoke features-radio; do
+  if ! LIBREECHO_E2E_URL="$URL" node "tests/e2e/$suite.cjs"; then
+    echo "--- libreecho-web E2E server log ($suite) ---" >&2
+    cat "$LOG" >&2
+    exit 1
+  fi
+done
 
 echo 'playwright e2e: ok'

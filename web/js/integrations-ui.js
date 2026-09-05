@@ -166,17 +166,77 @@ function bindProviderToggle(id,provider,pipeline) {
   input.onchange=()=>setAssistantProvider(provider,input.checked,pipeline);
 }
 
+/*
+ * app.js owns the existing Home location & weather card and its provider
+ * helpers. integrations-ui.js replaces app.js's Integrations renderer, so it
+ * must render and bind that existing card itself rather than silently hiding
+ * the released configuration surface.
+ */
+function bindHomeLocation(a) {
+  if(a.unsupported||!$('#wx-provider'))return;
+  const original={
+    location:String(a.home_location||'').trim(),
+    latitude:String(a.latitude||'').trim(),
+    longitude:String(a.longitude||'').trim()
+  };
+  $('#wx-location').value=original.location;
+  $('#wx-lat').value=original.latitude;
+  $('#wx-lon').value=original.longitude;
+  bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+  $('#save-wx').onclick=()=>{
+    const provider=wxId($('#wx-provider').value);
+    const location=$('#wx-location').value.trim();
+    const latitude=$('#wx-lat').value.trim();
+    const longitude=$('#wx-lon').value.trim();
+    const haveLatitude=latitude.length>0;
+    const haveLongitude=longitude.length>0;
+    const lat=haveLatitude?Number(latitude):null;
+    const lon=haveLongitude?Number(longitude):null;
+    const originalLat=original.latitude?Number(original.latitude):null;
+    const originalLon=original.longitude?Number(original.longitude):null;
+    let problem='';
+
+    if(haveLatitude!==haveLongitude) {
+      problem='Enter both latitude and longitude, or leave both unchanged.';
+    } else if(haveLatitude&&(!Number.isFinite(lat)||!Number.isFinite(lon)||
+              lat<-90||lat>90||lon<-180||lon>180)) {
+      problem='Latitude must be -90 to 90 and longitude must be -180 to 180.';
+    } else if(location&&!haveLatitude&&provider!=='off') {
+      problem='This place needs coordinates before weather can be enabled.';
+    } else if(original.location&&location!==original.location&&haveLatitude&&
+              lat===originalLat&&lon===originalLon) {
+      problem='The place changed but the coordinates did not. Update both coordinates before saving.';
+    } else if(!location&&!haveLatitude&&
+              (original.location||original.latitude||original.longitude)) {
+      problem='This image cannot clear old coordinates safely. Select Off or replace them with the new location.';
+    }
+    if(problem){toast(problem,true);return;}
+    mutate('/assistant',{
+      weather_provider:provider,
+      home_location:location,
+      latitude,
+      longitude
+    },'Home location saved');
+  };
+}
+
 async function integrationsPage() {
   const [d,a,pipeline]=await Promise.all([
     api('/integrations'),
     api('/assistant').catch(error=>({unsupported:error.message})),
     api('/voice-pipeline').catch(()=>({mode:'local',stt:{},tts:{}}))
   ]);
+  /*
+   * integrationBlurb/integrationStatus come from app.js, which loads first.
+   * An integration the image was built without reports installed:false; it is
+   * listed so the absence is visible, but renders no toggle or save button --
+   * enabling it could only ever fail. The handler loop below skips those rows.
+   */
   const integrations=d.items.map(x=>collapsiblePanel(x.name,
-    `<p class="muted">${x.id==='rest'?'Versioned local device API.':'Optional local integration; no cloud connection required.'}</p>
-    ${toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
-    <div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${x.enabled?'Enabled':'Not configured'}</span></div>
-    ${saveButton('save-int-'+x.id)}`
+    `<p class="muted">${integrationBlurb(x)}</p>
+    ${x.installed===false?'':toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
+    <div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${integrationStatus(x)}</span></div>
+    ${x.installed===false?'':saveButton('save-int-'+x.id)}`
   )).join('');
 
   if(a.unsupported) {
@@ -201,7 +261,13 @@ async function integrationsPage() {
       toggleId:'use-local-provider',
       enabled:localEnabled,
       body:localAssistantBody(a,localSelected,pipeline),
-      open:localSelected
+      /*
+       * Collapsed even when this is the selected provider. Opening on
+       * selection meant the page arrived expanded on every load for anyone
+       * actually using it -- the same "stop expanding panels" complaint that
+       * closed Home location, the voice assistant and Internet radio.
+       */
+      open:false
     });
     const devicePanel=assistantProviderPanel({
       title:'On Device Voice Assistant',
@@ -212,15 +278,17 @@ async function integrationsPage() {
       toggleId:'use-device-provider',
       enabled:deviceEnabled,
       body:deviceAssistantBody(a,deviceSelected),
-      open:deviceSelected
+      open:false
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}</section>
+      ${weatherCard(a)}
       ${integrations}
     </div>`;
 
     bindProviderToggle('#use-local-provider','openai-compatible',pipeline);
     bindProviderToggle('#use-device-provider','openai-codex',pipeline);
+    bindHomeLocation(a);
 
     bindDirty(['#local-base-url','#local-model','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
     $('#save-local-assistant').onclick=async()=>{
@@ -282,7 +350,9 @@ async function integrationsPage() {
   }
 
   d.items.forEach(x=>{
+    const save=$('#save-int-'+x.id);
+    if(!save)return;                       /* not installed: nothing rendered to bind */
     bindDirty(['#int-'+x.id],'#save-int-'+x.id);
-    $('#save-int-'+x.id).onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
+    save.onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
   });
 }

@@ -6,21 +6,31 @@ OS_VERSION=$(tr -d '\r\n' < VERSION)
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 expect(){ printf '%s' "$1" | grep -q "$2" || { echo "expected $2 in $1" >&2; exit 1; }; }
 expect "$(curl -fsS "$URL/api/v1/status")" '"backend":"mock"'
+curl -fsS "$URL/api/v1/status" | jq -e '.ok and (.data.light_lux | type == "number")' >/dev/null
+code=$(curl -sS -o /tmp/le-light-post.out -w '%{http_code}' -X POST "$URL/api/v1/light" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-light-head.out -w '%{http_code}' -I "$URL/api/v1/light")
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-light-get.out -w '%{http_code}' "$URL/api/v1/light")
+[ "$code" = 501 ]
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
+curl -fsS "$URL/api/v1/config" | jq -e --arg version "LibreEcho OS $OS_VERSION" '.ok and .data.os_version == $version' >/dev/null
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
-setup_state=$(curl -fsS "$URL/api/v1/setup")
-expect "$setup_state" '"completed":false'
-printf '%s' "$setup_state" | jq -e \
-    '.data.vendor_firmware.state == "not-applicable" and
-     .data.vendor_firmware.verification == "not-applicable" and
-     .data.vendor_firmware.force_next_boot == false and
-     .data.wlan0_registered == true' >/dev/null
-code=$(curl -sS -o /tmp/le-force-vendor-import.out -w '%{http_code}' \
-    -X POST "$URL/api/v1/setup/vendor-import-force-next-boot" \
-    -H "$CSRF" -H 'Content-Type: application/json' \
-    --data '{"confirm":"force-unverified-owner-local-import"}')
-[ "$code" = 501 ]
+history=$(curl -fsS "$URL/api/v1/assistant/history")
+printf '%s' "$history" | jq -e '.ok and .data.history_generation == 1 and (.data.turns | length == 1) and .data.turns[0].first_pcm_ms == 3100' >/dev/null
+code=$(curl -sS -o /tmp/le-history-method.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+clear_code=$(curl -fsS -o /tmp/le-history-clear.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history/clear" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$clear_code" = 200 ]
+curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and .data.history_generation == 2 and (.data.turns | length == 0)' >/dev/null
+code=$(curl -sS -o /tmp/le-usb-nul.out -w '%{http_code}' "$URL/api/v1/storage/usb?path=Music%00/Other")
+[ "$code" = 400 ]
+curl -sS -X POST "$URL/api/v1/assistant/respond" -H "$CSRF" -H 'Content-Type: application/json' --data '{"text":"slow test"}' >/tmp/le-assistant-respond.out &
+respond_pid=$!
+timeout 1 curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and (.data.turns | length == 0)' >/dev/null
+wait "$respond_pid"
+expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
 expect "$(curl -fsS "$URL/")" 'First-boot setup'
 code=$(curl -sS -o /tmp/le-bad-setup.out -w '%{http_code}' -X POST "$URL/api/v1/setup" -H "$CSRF" -H 'Content-Type: application/json' --data '{"hostname":"bad host"}')
 [ "$code" = 400 ]
@@ -40,11 +50,57 @@ code=$(curl -sS -o /tmp/le-malformed-wifi-security.out -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     --data '{"ssid":"LibreNet-IoT","password":"top-secret","security":"open\\nrest"}')
 [ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-features.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"https":"false","simulation":true}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" | jq -e '.ok and .data.simulation == false' >/dev/null
+code=$(curl -sS -o /tmp/le-malformed-usb-feature.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"usb_host":"false","simulation":true}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" | jq -e '.ok and .data.simulation == false' >/dev/null
+code=$(curl -sS -o /tmp/le-malformed-mac-type.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/network" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"ssh":true,"wifi_mac":123}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.ssh == false' >/dev/null
+mac64=$(python3 -c 'print("a" * 64)')
+code=$(curl -sS -o /tmp/le-malformed-mac-length.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/network" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data "{\"wifi_mac\":\"$mac64\"}")
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-radio-enabled.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/integrations/radio" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"station_count":1,"station_0_word":"test","station_0_name":"Test","station_0_url":"https://example.com/test","station_0_enabled":"yes"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-radio-name.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/integrations/radio" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"station_count":1,"station_0_word":"test","station_0_name":123,"station_0_url":"http://example.com/test"}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/integrations/radio" | jq -e '.ok and (.data.stations | length) == 0' >/dev/null
 ! grep -q 'top-secret' "$CFG"
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
 expect "$(curl -fsS "$URL/swagger.html")" 'API reference · LibreEcho'
 expect "$(curl -fsS "$URL/js/swagger.js")" 'executeOperation'
 expect "$(curl -fsS "$URL/api/v1/device")" '"serial":"DEV-MOCK'
+spotify=$(curl -fsS "$URL/api/v1/spotify")
+printf '%s' "$spotify" | jq -e '.ok and .data.installed == true and .data.enabled == false and .data.playing == false and .data.device_name == "LibreEcho (mock)" and .data.status == "stopped"' >/dev/null
+code=$(curl -sS -o /tmp/le-spotify-head.out -w '%{http_code}' -I "$URL/api/v1/spotify")
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-spotify-method.out -w '%{http_code}' -X POST "$URL/api/v1/spotify" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+spotify_name='LibreEcho "Test" \\ Speaker'
+spotify_name_payload=$(jq -cn --arg value "$spotify_name" '{action:"set-spotify-device-name",value:$value}')
+curl -fsS -X POST "$URL/api/v1/dev/mock" -H "$CSRF" -H 'Content-Type: application/json' --data "$spotify_name_payload" | jq -e '.ok' >/dev/null
+curl -fsS "$URL/api/v1/spotify" | jq -e --arg name "$spotify_name" '.ok and .data.device_name == $name' >/dev/null
+curl -fsS -X POST "$URL/api/v1/dev/mock" -H "$CSRF" -H 'Content-Type: application/json' --data '{"action":"set-spotify-device-name","value":"LibreEcho (mock)"}' >/dev/null
 curl -fsS "$URL/api/v1/playback" | jq -e \
     '.ok and .data.state == "playing" and
      .data.source == "airplay2" and .data.buses.media == true and
@@ -112,6 +168,13 @@ curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: applicatio
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"connectable":false}' | jq -e '.ok and .data.capabilities.connectable == false' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/bluetooth" -H "$CSRF" -H 'Content-Type: application/json' --data '{"discoverable":true}' | jq -e '.ok and .data.capabilities.discoverable == true' >/dev/null
 curl -fsS -X POST "$URL/api/v1/bluetooth/scan" -H "$CSRF" -H 'Content-Type: application/json' --data '{}' | jq -e '.ok and .data.scanning == true' >/dev/null
+# Starting a scan clears the previous results; the device is only discovered,
+# and so only pairable, once the scan has ended on its own.
+i=0
+while curl -fsS "$URL/api/v1/bluetooth" | jq -e '.data.scanning == true' >/dev/null; do
+    i=$((i+1)); [ "$i" -lt 30 ] || { echo 'bluetooth scan never finished' >&2; exit 1; }
+    sleep 0.5
+done
 curl -fsS -X POST "$URL/api/v1/bluetooth/pair" -H "$CSRF" -H 'Content-Type: application/json' --data '{"address":"10:20:30:40:50:60","type":0,"io_capability":3}' | jq -e '.ok and (.data.known_devices | length) == 1' >/dev/null
 curl -fsS -X POST "$URL/api/v1/bluetooth/unpair" -H "$CSRF" -H 'Content-Type: application/json' --data '{"address":"10:20:30:40:50:60","type":0}' | jq -e '.ok and (.data.known_devices | length) == 0' >/dev/null
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and (.data.connectivity == "unknown" or .data.connectivity == "healthy") and .data.recovery_stage == "none" and ((.data.gateway_reachable | type) == "boolean" or .data.gateway_reachable == null) and .data.liveness_failures == 0' >/dev/null
@@ -188,8 +251,11 @@ expect "$(curl -fsS "$URL/api/v1/system")" '"rtc_available":false'
 curl -fsS "$URL/api/v1/system/update" | jq -e \
     '.ok and .data.supported == false and
      .data.current_slot == "-" and .data.inactive_slot == "-" and
-     .data.pending_reboot == false and .data.max_upload_bytes == 33554432 and
-     .data.installed_version == "LibreEcho OS '"$OS_VERSION"'" and .data.latest_version == "" and
+     .data.pending_reboot == false and
+     .data.max_upload_ceiling_bytes == 33554432 and
+     .data.max_upload_bytes <= .data.max_upload_ceiling_bytes and
+     .data.max_upload_bytes >= 0 and
+     .data.installed_version == "" and .data.latest_version == "" and
      .data.channel == "stable" and .data.source == "github-releases" and
      .data.source_reachable == "unknown" and
      .data.check_status == "not-checked" and .data.check_error == "" and
@@ -234,6 +300,39 @@ code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' -X DELETE "$URL/api/v1/b
 [ "$code" = 405 ]
 code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' "$URL/api/v1/integrations/home-assistant")
 [ "$code" = 405 ]
+# Action sounds use audiod's lowercase, 48-character sample-name contract and
+# the preview endpoint is POST-only.
+for method in GET PUT DELETE; do
+    if [ "$method" = GET ]; then
+        code=$(curl -sS -o /tmp/le-sample-method.out -w '%{http_code}' \
+            -X "$method" "$URL/api/v1/audio/sample" -H "$CSRF")
+    else
+        code=$(curl -sS -o /tmp/le-sample-method.out -w '%{http_code}' \
+            -X "$method" "$URL/api/v1/audio/sample" -H "$CSRF" \
+            -H 'Content-Type: application/json' --data '{}')
+    fi
+    [ "$code" = 405 ]
+done
+code=$(curl -sS -o /tmp/le-sample-uppercase.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/audio/sample" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data '{"name":"Action-1"}')
+[ "$code" = 400 ]
+name49=$(python3 -c 'print("a" * 49)')
+code=$(curl -sS -o /tmp/le-sample-too-long.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/audio/sample" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "{\"name\":\"$name49\"}")
+[ "$code" = 400 ]
+name48=$(python3 -c 'print("a" * 48)')
+code=$(curl -sS -o /tmp/le-sample-valid.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/audio/sample" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "{\"name\":\"$name48\"}")
+[ "$code" = 501 ]
+buttons=$(curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"action_sounds":"action-2,action-3"}')
+printf '%s' "$buttons" | jq -e '.ok and .data.action_sounds == "action-2,action-3"' >/dev/null
+curl -fsS "$URL/api/v1/buttons" | jq -e \
+    '.ok and .data.action_sounds == "action-2,action-3" and (.data.available_sounds | type == "array")' >/dev/null
 escaped=$(curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data '{"short_press":"say \"hi\"","long_press":"path\\test"}')
 printf '%s' "$escaped" | jq -e '.ok and .data.short_press == "say \"hi\"" and .data.long_press == "path\\test"' >/dev/null
 curl -fsS "$URL/api/v1/buttons" | jq -e '.ok and .data.short_press == "say \"hi\"" and .data.long_press == "path\\test"' >/dev/null
