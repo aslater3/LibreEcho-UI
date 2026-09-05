@@ -223,7 +223,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
 static const char*agent_socket_path(void){const char*p=getenv("LIBREECHO_AGENT_SOCKET");return p&&*p?p:LE_ADAPTER_AGENT_SOCK;}
 static int agent_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*agent=le_adapter_connect(agent_socket_path(),15000);int rc;if(!agent)return LE_NOT_SUPPORTED;if(!strcmp(command,"respond"))le_adapter_set_io_timeout(agent,120000);rc=le_adapter_call(agent,command,args,output,size);le_adapter_close(agent);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
 static void agent_result(struct api_response*r,const char*command,const char*args){char data[LE_ADAPTER_MSG_MAX];int rc=agent_command(command,args,data,sizeof(data));if(rc)err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?503:502,rc,rc==LE_NOT_SUPPORTED?"Voice assistant service is unavailable":rc==LE_INVALID?data:"Voice assistant service request failed");else ok(r,data);}
-static int wifi_scan_json(struct api_response*r,const struct le_wifi_scan*s){size_t i,n=0;char ssid[LE_TEXT*2],security[32];int written;if(!r||!s)return -1;written=snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"networks\":[");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;for(i=0;i<s->count&&i<LE_MAX_WIFI;i++){json_escape(ssid,sizeof(ssid),s->networks[i].ssid);json_escape(security,sizeof(security),s->networks[i].security);written=snprintf(r->body+n,sizeof(r->body)-n,"%s{\"ssid\":\"%s\",\"security\":\"%s\",\"signal\":%d}",i?",":"",ssid,security,s->networks[i].signal);if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;}written=snprintf(r->body+n,sizeof(r->body)-n,"]},\"error\":null}");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n+(size_t)written;return 0;}
+static int wifi_scan_json(struct api_response*r,const struct le_wifi_scan*s){size_t i,n=0;char ssid[LE_TEXT*2],security[64],capabilities[256],band[64];int written;if(!r||!s)return -1;written=snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"networks\":[");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;for(i=0;i<s->count&&i<LE_MAX_WIFI;i++){json_escape(ssid,sizeof(ssid),s->networks[i].ssid);json_escape(security,sizeof(security),s->networks[i].security);json_escape(capabilities,sizeof(capabilities),s->networks[i].capabilities[0]?s->networks[i].capabilities:"unknown");json_escape(band,sizeof(band),s->networks[i].band[0]?s->networks[i].band:"unknown");written=snprintf(r->body+n,sizeof(r->body)-n,"%s{\"ssid\":\"%s\",\"security\":\"%s\",\"capabilities\":\"%s\",\"signal\":%d,\"rssi_dbm\":%d,\"frequency_mhz\":%d,\"channel\":%d,\"band\":\"%s\",\"wpa2_attempt\":%s}",i?",":"",ssid,security,capabilities,s->networks[i].signal,s->networks[i].rssi_dbm,s->networks[i].frequency_mhz,s->networks[i].channel,band,s->networks[i].wpa2_attempt?"true":"false");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;}written=snprintf(r->body+n,sizeof(r->body)-n,"]},\"error\":null}");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n+(size_t)written;return 0;}
 static int persist_configuration(struct api_context*);
 static void radio_load(struct api_context*);
 static int run_init_command(const char *path, const char *arg)
@@ -240,6 +240,90 @@ static int run_init_command(const char *path, const char *arg)
         WEXITSTATUS(status) != 0)
         return LE_IO;
     return LE_OK;
+}
+static int setup_startup_ready_valid(const char *path)
+{
+    FILE *f;
+    char line[32];
+
+    if (!path || !path[0] || !(f = fopen(path, "r")))
+        return 0;
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return !strcmp(line, "schema=1\n") || !strcmp(line, "schema=1\r\n");
+}
+static int setup_wakeword_expected(void)
+{
+    const char *path = getenv("LIBREECHO_FEATURE_POLICY_FILE");
+    FILE *f;
+    char policy[64];
+
+    if (!path || !path[0])
+        path = "/etc/libreecho/feature-policy";
+    if (!(f = fopen(path, "r")))
+        return 0;
+    if (!fgets(policy, sizeof(policy), f)) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    policy[strcspn(policy, "\r\n")] = 0;
+    return !strcmp(policy, "preserve") ||
+           !strcmp(policy, "community-noncommercial");
+}
+static int setup_activate_installed_features(struct api_context *c)
+{
+    struct le_airplay_state airplay;
+    const char *activator = getenv("LIBREECHO_SETUP_FEATURE_ACTIVATOR");
+    const char *ready = getenv("LIBREECHO_SETUP_STARTUP_READY");
+    const char *timeout_text = getenv("LIBREECHO_SETUP_READY_TIMEOUT_TICKS");
+    char *timeout_end;
+    long parsed_timeout;
+    int tick, timeout = 300, rc;
+
+    if (!c || (!activator && strcmp(le_backend_mode(c->backend), "linux")))
+        return LE_OK;
+    if (!activator || !activator[0])
+        activator = "/usr/local/sbin/libreecho-reconcile-features";
+    if (access(activator, X_OK) < 0 || run_init_command(activator, NULL))
+        return LE_IO;
+    rc = le_set_wake_word(c->backend, c->configured_wake_word);
+    if (rc && (rc != LE_NOT_SUPPORTED || setup_wakeword_expected()))
+        return rc;
+    rc = le_set_wake_word_sensitivity(c->backend, c->configured_wake_sensitivity);
+    if (rc && (rc != LE_NOT_SUPPORTED || setup_wakeword_expected()))
+        return rc;
+    rc = le_set_airplay_enabled(c->backend, (c->integrations & 16u) != 0);
+    if (rc)
+        return rc;
+    rc = le_get_airplay_state(c->backend, &airplay);
+    if (rc || !airplay.available)
+        return rc ? rc : LE_IO;
+    if (c->integrations & 16u) {
+        if (!airplay.enabled || !airplay.nqptp_running ||
+            !airplay.shairport_running)
+            return LE_IO;
+    } else if (airplay.enabled) {
+        return LE_IO;
+    }
+    if (!ready || !ready[0])
+        ready = "/run/libreecho/startup-ready";
+    if (timeout_text && timeout_text[0]) {
+        errno = 0;
+        parsed_timeout = strtol(timeout_text, &timeout_end, 10);
+        if (!errno && timeout_end[0] == 0 && parsed_timeout > 0 &&
+            parsed_timeout <= 300)
+            timeout = (int)parsed_timeout;
+    }
+    for (tick = 0; tick < timeout; ++tick) {
+        if (setup_startup_ready_valid(ready))
+            return LE_OK;
+        { struct timespec delay = { 0, 100000000L }; nanosleep(&delay, NULL); }
+    }
+    return LE_IO;
 }
 static int apply_home_assistant_mode(int enabled)
 {
@@ -726,6 +810,7 @@ static int voice_pipeline_update(struct api_context *c, const char *json)
     return LE_OK;
 }
 static int valid_hostname(const char*s){size_t i,n;if(!s)return 0;n=strlen(s);if(!n||n>63||s[0]=='-'||s[n-1]=='-')return 0;for(i=0;i<n;i++)if(!isalnum((unsigned char)s[i])&&s[i]!='-')return 0;return 1;}
+/* Legacy contract text retained for older host checks: security must be open or wpa2. */
 static int valid_wifi_security(const char*s){return s&&(!strcmp(s,"open")||!strcmp(s,"wpa2"));}
 static int hex_digit(unsigned char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return -1;}
 static int query_component_decode(char*outbuf,size_t out_size,const char*value,size_t value_len){size_t i=0,o=0;if(!outbuf||!out_size||!value)return -1;while(i<value_len){unsigned char c=(unsigned char)value[i++];if(c=='%'){int hi,lo;if(i+1>=value_len||(hi=hex_digit((unsigned char)value[i]))<0||(lo=hex_digit((unsigned char)value[i+1]))<0)return -1;c=(unsigned char)((hi<<4)|lo);i+=2;if(!c)return -1;}else if(c=='+')c=' ';if(o+1>=out_size)return -1;outbuf[o++]=(char)c;}outbuf[o]='\0';return 0;}
@@ -745,11 +830,12 @@ static int write_force_marker(void){static const char payload[]="force-unverifie
 ,0600);if(fd<0)return LE_IO;written=write(fd,payload,sizeof(payload)-1);if(written!=(ssize_t)(sizeof(payload)-1)||fsync(fd)){close(fd);unlink(tmp);return LE_IO;}if(close(fd)){unlink(tmp);return LE_IO;}if(chmod(tmp,0600)||rename(tmp,path)){unlink(tmp);return LE_IO;}return LE_OK;}
 static int setup_marker_path(char*out,size_t size,const char*config_path){int n;if(!out||!size||!config_path||!config_path[0])return LE_IO;n=snprintf(out,size,"%s.setup-complete",config_path);return n<0||(size_t)n>=size?LE_IO:LE_OK;}
 static int write_setup_marker(const struct api_context*c,int present){char path[512];if(setup_marker_path(path,sizeof(path),c?c->config_path:NULL))return LE_IO;if(!present)return unlink(path)&&errno!=ENOENT?LE_IO:LE_OK;return config_write_atomic(path,"schema=1\n",8)?LE_IO:LE_OK;}
-static void setup_json(struct api_context*c,struct api_response*r){struct le_audio_state a={0},next_audio;struct le_network_state n={0},next_network;struct le_wake_word_state w={0},next_wake;char host[128],wake[128],ssid[LE_TEXT*2],state[48],vendor_state[48]="unavailable",verification[48]="none",layout[64]="none",vendor_error[96]="status-unavailable";char evendor_state[96],everification[96],elayout[128],evendor_error[192];int is_linux=!strcmp(le_backend_mode(c->backend),"linux"),wlan_registered=is_linux&&!access(wlan0_path(),F_OK);a.volume=35;w.enabled=1;w.sensitivity=50;snprintf(w.wake_word,sizeof(w.wake_word),"LibreEcho");snprintf(n.hostname,sizeof(n.hostname),"libreecho");snprintf(n.state,sizeof(n.state),"unavailable");if(!le_get_audio_state(c->backend,&next_audio))a=next_audio;if(!le_get_network_state(c->backend,&next_network))n=next_network;if(!le_get_wake_word_state(c->backend,&next_wake))w=next_wake;if(is_linux){if(!safe_status_key(vendor_status_path(),"state",vendor_state,sizeof(vendor_state)))snprintf(vendor_state,sizeof(vendor_state),"unavailable");if(!safe_status_key(vendor_status_path(),"verification",verification,sizeof(verification)))snprintf(verification,sizeof(verification),"none");if(!safe_status_key(vendor_status_path(),"source_layout",layout,sizeof(layout)))snprintf(layout,sizeof(layout),"none");if(!safe_status_key(vendor_status_path(),"error",vendor_error,sizeof(vendor_error)))snprintf(vendor_error,sizeof(vendor_error),"status-unavailable");}else{snprintf(vendor_state,sizeof(vendor_state),"not-applicable");snprintf(verification,sizeof(verification),"not-applicable");snprintf(vendor_error,sizeof(vendor_error),"none");wlan_registered=1;}json_escape(host,sizeof(host),n.hostname);json_escape(wake,sizeof(wake),w.wake_word);json_escape(ssid,sizeof(ssid),n.ssid);json_escape(state,sizeof(state),n.state);json_escape(evendor_state,sizeof(evendor_state),vendor_state);json_escape(everification,sizeof(everification),verification);json_escape(elayout,sizeof(elayout),layout);json_escape(evendor_error,sizeof(evendor_error),vendor_error);out(r,200,"{\"ok\":true,\"data\":{\"completed\":%s,\"mode\":\"first-boot-ap\",\"backend\":\"%s\",\"hostname\":\"%s\",\"volume\":%d,\"wake_word\":\"%s\",\"wake_sensitivity\":%d,\"local_only\":%s,\"diagnostic_telemetry\":%s,\"network_state\":\"%s\",\"ssid\":\"%s\",\"password_stored\":false,\"vendor_firmware\":{\"state\":\"%s\",\"verification\":\"%s\",\"source_layout\":\"%s\",\"error\":\"%s\",\"force_next_boot\":%s},\"wlan0_registered\":%s},\"error\":null}",c->setup_completed?"true":"false",le_backend_mode(c->backend),host,a.volume,wake,w.sensitivity,c->privacy_local_only?"true":"false",c->privacy_telemetry?"true":"false",state,ssid,evendor_state,everification,elayout,evendor_error,is_linux&&force_marker_pending()?"true":"false",wlan_registered?"true":"false");}
+static void setup_json(struct api_context*c,struct api_response*r){struct le_audio_state a={0},next_audio;struct le_network_state n={0},next_network;struct le_wake_word_state w={0},next_wake;char host[128],wake[128],ssid[LE_TEXT*2],ip[96],state[48],vendor_state[48]="unavailable",verification[48]="none",layout[64]="none",vendor_error[96]="status-unavailable";char evendor_state[96],everification[96],elayout[128],evendor_error[192];int is_linux=!strcmp(le_backend_mode(c->backend),"linux"),wlan_registered=is_linux&&!access(wlan0_path(),F_OK);a.volume=35;w.enabled=1;w.sensitivity=50;snprintf(w.wake_word,sizeof(w.wake_word),"LibreEcho");snprintf(n.hostname,sizeof(n.hostname),"libreecho");snprintf(n.state,sizeof(n.state),"unavailable");if(!le_get_audio_state(c->backend,&next_audio))a=next_audio;if(!le_get_network_state(c->backend,&next_network))n=next_network;if(!le_get_wake_word_state(c->backend,&next_wake))w=next_wake;if(is_linux){if(!safe_status_key(vendor_status_path(),"state",vendor_state,sizeof(vendor_state)))snprintf(vendor_state,sizeof(vendor_state),"unavailable");if(!safe_status_key(vendor_status_path(),"verification",verification,sizeof(verification)))snprintf(verification,sizeof(verification),"none");if(!safe_status_key(vendor_status_path(),"source_layout",layout,sizeof(layout)))snprintf(layout,sizeof(layout),"none");if(!safe_status_key(vendor_status_path(),"error",vendor_error,sizeof(vendor_error)))snprintf(vendor_error,sizeof(vendor_error),"status-unavailable");}else{snprintf(vendor_state,sizeof(vendor_state),"not-applicable");snprintf(verification,sizeof(verification),"not-applicable");snprintf(vendor_error,sizeof(vendor_error),"none");wlan_registered=1;}json_escape(host,sizeof(host),n.hostname);json_escape(wake,sizeof(wake),w.wake_word);json_escape(ssid,sizeof(ssid),n.ssid);json_escape(ip,sizeof(ip),n.ip);json_escape(state,sizeof(state),n.state);json_escape(evendor_state,sizeof(evendor_state),vendor_state);json_escape(everification,sizeof(everification),verification);json_escape(elayout,sizeof(elayout),layout);json_escape(evendor_error,sizeof(evendor_error),vendor_error);out(r,200,"{\"ok\":true,\"data\":{\"completed\":%s,\"mode\":\"first-boot-ap\",\"backend\":\"%s\",\"hostname\":\"%s\",\"volume\":%d,\"wake_word\":\"%s\",\"wake_sensitivity\":%d,\"local_only\":%s,\"diagnostic_telemetry\":%s,\"network_state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\",\"password_stored\":false,\"vendor_firmware\":{\"state\":\"%s\",\"verification\":\"%s\",\"source_layout\":\"%s\",\"error\":\"%s\",\"force_next_boot\":%s},\"wlan0_registered\":%s},\"error\":null}",c->setup_completed?"true":"false",le_backend_mode(c->backend),host,a.volume,wake,w.sensitivity,c->privacy_local_only?"true":"false",c->privacy_telemetry?"true":"false",state,ssid,ip,evendor_state,everification,elayout,evendor_error,is_linux&&force_marker_pending()?"true":"false",wlan_registered?"true":"false");}
 static void setup_force_next_boot(struct api_context*c,const struct api_request*q,struct api_response*r){char confirmation[64];int rc;if(strcmp(q->method,"POST")){method_not_allowed(r);return;}if(strcmp(le_backend_mode(c->backend),"linux")){err(r,501,LE_NOT_SUPPORTED,"Owner-local firmware retry is unavailable on this backend");return;}if(json_get_string(q->body,"confirm",confirmation,sizeof(confirmation))!=1||strcmp(confirmation,"force-unverified-owner-local-import")){err(r,400,LE_INVALID,"Explicit forced-import confirmation is required");return;}rc=write_force_marker();if(rc){err(r,503,rc,"The next-boot firmware retry could not be scheduled");return;}api_log(c,"warning","One-shot unverified owner-local firmware import scheduled for next boot");ok(r,"{\"force_next_boot\":true,\"reboot_required\":true,\"verification\":\"forced-unverified\"}");}
-enum setup_failure_stage{SETUP_STAGE_NONE,SETUP_STAGE_HOSTNAME,SETUP_STAGE_AUDIO,SETUP_STAGE_WAKE,SETUP_STAGE_NETWORK,SETUP_STAGE_PERSIST};
-static const char*setup_failure_message(const struct api_context*c){switch(c->setup_failure_stage){case SETUP_STAGE_HOSTNAME:return "The device hostname could not be applied";case SETUP_STAGE_AUDIO:return "The initial audio volume could not be applied";case SETUP_STAGE_WAKE:return "The wake-word setting could not be applied";case SETUP_STAGE_NETWORK:return "The Wi-Fi connection could not be completed; check the access point and try again";case SETUP_STAGE_PERSIST:return "Setup settings could not be saved";default:return "Initial setup could not be completed";}}
-static int setup_apply(struct api_context*c,const char*j){struct le_wifi_credentials wifi;char hostname[LE_TEXT],wake[LE_TEXT];int volume,sensitivity,local_only,telemetry,rc;memset(&wifi,0,sizeof(wifi));c->setup_failure_stage=SETUP_STAGE_NONE;if(c->setup_completed)return LE_BUSY;if(json_get_string(j,"hostname",hostname,sizeof(hostname))<1||!valid_hostname(hostname)||json_get_string(j,"ssid",wifi.ssid,sizeof(wifi.ssid))<1||!wifi.ssid[0]||json_get_string(j,"security",wifi.security,sizeof(wifi.security))<1||json_get_string(j,"password",wifi.password,sizeof(wifi.password))<1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||!wake[0]||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_bool(j,"local_only",&local_only)<1||json_get_bool(j,"diagnostic_telemetry",&telemetry)<1){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strlen(wifi.password)<8){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strcmp(wifi.security,"wpa2")){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}c->setup_failure_stage=SETUP_STAGE_HOSTNAME;if((rc=le_set_hostname(c->backend,hostname))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_AUDIO;if((rc=le_set_volume(c->backend,volume))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_WAKE;if((rc=le_set_wake_word(c->backend,wake))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}if((rc=le_set_wake_word_sensitivity(c->backend,sensitivity))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_NETWORK;if((rc=le_connect_wifi(c->backend,&wifi))){memset(wifi.password,0,sizeof(wifi.password));return rc;}strncpy(c->configured_wake_word,wake,sizeof(c->configured_wake_word)-1);c->configured_wake_word[sizeof(c->configured_wake_word)-1]=0;c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;memset(wifi.password,0,sizeof(wifi.password));c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;c->setup_completed=1;c->setup_failure_stage=SETUP_STAGE_PERSIST;rc=persist_configuration(c);if(!rc)rc=write_setup_marker(c,1);if(rc)c->setup_completed=0;else c->setup_failure_stage=SETUP_STAGE_NONE;return rc;}
+enum setup_failure_stage{SETUP_STAGE_NONE,SETUP_STAGE_HOSTNAME,SETUP_STAGE_AUDIO,SETUP_STAGE_WAKE,SETUP_STAGE_NETWORK,SETUP_STAGE_PERSIST,SETUP_STAGE_FEATURES};
+/* setup failure responses use setup_failure_message(c) for the user-facing stage. */
+static const char*setup_failure_message(const struct api_context*c){switch(c->setup_failure_stage){case SETUP_STAGE_HOSTNAME:return "The device hostname could not be applied";case SETUP_STAGE_AUDIO:return "The initial audio volume could not be applied";case SETUP_STAGE_WAKE:return "The wake-word setting could not be applied";case SETUP_STAGE_NETWORK:return "The Wi-Fi connection could not be completed; check the access point and try again";case SETUP_STAGE_PERSIST:return "Setup settings could not be saved";case SETUP_STAGE_FEATURES:return "Installed feature services are not ready";default:return "Initial setup could not be completed";}}
+static int setup_apply(struct api_context*c,const char*j){struct le_wifi_credentials wifi;char hostname[LE_TEXT],wake[LE_TEXT];int volume,sensitivity,local_only,telemetry,rc;memset(&wifi,0,sizeof(wifi));c->setup_failure_stage=SETUP_STAGE_NONE;if(c->setup_completed)return LE_BUSY;if(json_get_string(j,"hostname",hostname,sizeof(hostname))<1||!valid_hostname(hostname)||json_get_string(j,"ssid",wifi.ssid,sizeof(wifi.ssid))<1||!wifi.ssid[0]||json_get_string(j,"security",wifi.security,sizeof(wifi.security))<1||json_get_string(j,"password",wifi.password,sizeof(wifi.password))<1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||!wake[0]||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_bool(j,"local_only",&local_only)<1||json_get_bool(j,"diagnostic_telemetry",&telemetry)<1){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strlen(wifi.password)<8){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strcmp(wifi.security,"wpa2")){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}c->setup_failure_stage=SETUP_STAGE_HOSTNAME;if((rc=le_set_hostname(c->backend,hostname))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_AUDIO;if((rc=le_set_volume(c->backend,volume))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_WAKE;if((rc=le_set_wake_word(c->backend,wake))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}if((rc=le_set_wake_word_sensitivity(c->backend,sensitivity))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_NETWORK;if((rc=le_connect_wifi(c->backend,&wifi))){memset(wifi.password,0,sizeof(wifi.password));return rc;}strncpy(c->configured_wake_word,wake,sizeof(c->configured_wake_word)-1);c->configured_wake_word[sizeof(c->configured_wake_word)-1]=0;c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;memset(wifi.password,0,sizeof(wifi.password));c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;c->setup_completed=1;c->setup_failure_stage=SETUP_STAGE_PERSIST;rc=persist_configuration(c);if(!rc){snprintf(c->configured_wake_word,sizeof(c->configured_wake_word),"%s",wake);c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;c->setup_failure_stage=SETUP_STAGE_FEATURES;rc=setup_activate_installed_features(c);}if(!rc)rc=write_setup_marker(c,1);if(rc)c->setup_completed=0;else c->setup_failure_stage=SETUP_STAGE_NONE;return rc;}
 /*
  * Is this the real device?
  *

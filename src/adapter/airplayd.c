@@ -1157,6 +1157,23 @@ fail:
     return -1;
 }
 
+static int refresh_hostname(struct airplay_ctx *ctx)
+{
+    if (!ctx->enabled)
+        return 0;
+    if (set_enabled(ctx, 0) < 0)
+        return -1;
+    if (set_enabled(ctx, 1) < 0) {
+        /* The integration remains administratively enabled even when this
+         * runtime restart fails, so the event loop and later requests retry
+         * rather than reporting a disabled stack as refreshed. */
+        ctx->enabled = 1;
+        return -1;
+    }
+    le_log_info("airplayd: registration stack restarted after hostname change");
+    return 0;
+}
+
 static int request(struct airplay_ctx *ctx, char *message,
                    char *response, size_t response_size)
 {
@@ -1212,6 +1229,12 @@ static int request(struct airplay_ctx *ctx, char *message,
         if (set_enabled(ctx, enabled) < 0)
             return le_adapter_respond_err(response, response_size, id,
                                           "AirPlay 2 binaries or configuration are unavailable");
+        return le_adapter_respond_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "refresh_hostname")) {
+        if (refresh_hostname(ctx) < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "AirPlay 2 hostname refresh failed");
         return le_adapter_respond_ok(response, response_size, id, "{}");
     }
     return le_adapter_respond_err(response, response_size, id, "unknown command");

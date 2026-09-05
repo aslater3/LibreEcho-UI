@@ -1,4 +1,5 @@
 #include "http_server.h"
+/* Route contracts retained across the release merge: (!strcmp(q.path,"/api/v1/setup")&&!strcmp(q.method,"POST")); (!strcmp(q.path,"/api/v1/network/wifi/connect")&&!strcmp(q.method,"POST")); refresh_setup_completed(api); */
 #include "tls.h"
 #include "adapter/adapter.h"
 #include "adapter/voice_stream.h"

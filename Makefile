@@ -46,7 +46,7 @@ WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/diagnostic_export.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/diagnostic_export.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -233,12 +233,19 @@ $(BUILD)/test-networkd-health: $(NETWORKD_SOURCES)
 	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_NETWORKD_TESTING $(CSTD) \
 		$(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
+$(BUILD)/test-networkd-scan-security: tests/test_networkd_scan_security.c \
+	src/adapter/networkd.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter tests/test_networkd_scan_security.c -o $@
+
 $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emission.c \
-		src/json.c src/log.c
+		src/backend_linux.c src/json.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-DLE_ADAPTER_NETWORK_SOCK='"/tmp/libreecho-network-backend-test.sock"' \
-		-Isrc -Isrc/adapter $^ -o $@
+		-Isrc -Isrc/adapter tests/test_backend_linux_wifi_emission.c \
+		src/json.c src/log.c -o $@
 
 $(BUILD)/test-thermal-zone-selection: tests/test_thermal_zone_selection.c \
 	src/backend_linux.c src/json.c src/log.c
@@ -266,6 +273,10 @@ $(BUILD)/test-radiod-json: tests/test_radiod_json.c src/adapter/radiod.c src/jso
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/json.c -lm -o $@
+
+$(BUILD)/test-factory-reset: tests/test_factory_reset.c src/factory_reset.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c

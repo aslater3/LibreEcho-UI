@@ -22,38 +22,64 @@ INTERVAL=${INTERVAL:-5}
 
 ARGS=${ARGS:---foreground --interval $INTERVAL --start-delay $START_DELAY}
 
-is_running() {
+running_pids() {
+    for entry in /proc/[0-9]*; do
+        candidate=${entry#/proc/}
+        [ "$candidate" = "$$" ] && continue
+        [ -r "$entry/cmdline" ] || continue
+        argv0=$(tr '\0' '\n' < "$entry/cmdline" 2>/dev/null | sed -n '1p')
+        [ "$argv0" = "$DAEMON" ] && printf '%s\n' "$candidate"
+    done
+}
+
+pidfile_pid() {
     [ -s "$PIDFILE" ] || return 1
     pid=$(sed -n '1p' "$PIDFILE")
     case "$pid" in *[!0-9]*|'') return 1 ;; esac
-    kill -0 "$pid" 2>/dev/null
+    kill -0 "$pid" 2>/dev/null || return 1
+    printf '%s\n' "$pid"
 }
 
+running_pids() {
+    for entry in /proc/[0-9]*; do
+        candidate=${entry#/proc/}
+        [ "$candidate" = "$$" ] && continue
+        [ -r "$entry/cmdline" ] || continue
+        argv0=$(tr '\0' '\n' < "$entry/cmdline" 2>/dev/null | sed -n '1p')
+        [ "$argv0" = "$DAEMON" ] && printf '%s\n' "$candidate"
+    done
+}
+pidfile_pid() {
+    [ -s "$PIDFILE" ] || return 1
+    pid=$(sed -n '1p' "$PIDFILE")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    printf '%s\n' "$pid"
+}
+is_running() { pidfile_pid >/dev/null && return 0; [ -n "$(running_pids)" ]; }
+terminate() {
+    target=$1; limit=${2:-5}; kill "$target" 2>/dev/null || true; count=0
+    while kill -0 "$target" 2>/dev/null && [ "$count" -lt "$limit" ]; do sleep 1; count=$((count + 1)); done
+    kill -KILL "$target" 2>/dev/null || true
+}
 start_service() {
-    if is_running; then echo "libreecho-watchdogd already running"; return 0; fi
+    if is_running; then echo "${DAEMON##*/} already running"; return 0; fi
+    [ -x "$DAEMON" ] || { echo "${DAEMON##*/}: not on this image"; return 0; }
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")"
     if command -v start-stop-daemon >/dev/null 2>&1; then
-        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS \
-            </dev/null >>"$LOGFILE" 2>&1
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS
     else
-        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
-        echo $! >"$PIDFILE"
+        if command -v setsid >/dev/null 2>&1; then setsid "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+        else "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 & fi
+        launched=$!; echo "$launched" >"$PIDFILE"; started=; count=0
+        while [ "$count" -lt 20 ]; do started=$(running_pids | sort -n | sed -n '1p'); [ -n "$started" ] && break; sleep 0.05; count=$((count + 1)); done
+        [ -n "$started" ] && echo "$started" >"$PIDFILE"
     fi
 }
-
 stop_service() {
-    if is_running && command -v start-stop-daemon >/dev/null 2>&1; then
-        start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
-    elif is_running; then
-        pid=$(sed -n '1p' "$PIDFILE")
-        kill "$pid" 2>/dev/null || true
-        count=0
-        while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 5 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        kill -KILL "$pid" 2>/dev/null || true
-    fi
+    if pidfile_pid >/dev/null && command -v start-stop-daemon >/dev/null 2>&1; then start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
+    else pid=$(pidfile_pid) && terminate "$pid" 5; fi
+    for stray in $(running_pids); do terminate "$stray" 5; done
     rm -f "$PIDFILE"
 }
 
