@@ -68,7 +68,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" build/libreecho-web
+          make clean
+          make -j2 SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" all
           ./build/libreecho-web --backend mock --config ./build/preflight-config.json --mock-config ./config/mock-state.json --web-root ./web --listen 127.0.0.1:18082 --seed 42 --dev-controls >./build/preflight-server.log 2>&1 &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
