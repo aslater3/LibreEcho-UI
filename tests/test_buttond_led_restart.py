@@ -72,7 +72,8 @@ with tempfile.TemporaryDirectory(prefix="le-button-restart-") as directory:
 
         try:
             first = start_led()
-            button = subprocess.Popen(["./build/libreecho-buttond"], env={**os.environ, "LE_AUDIO_SOCK": str(audio), "LE_LED_SOCK": str(led)}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log = open(root / "button.log", "w")
+            button = subprocess.Popen(["./build/libreecho-buttond"], env={**os.environ, "LE_AUDIO_SOCK": str(audio), "LE_LED_SOCK": str(led)}, stdout=log, stderr=log)
             processes.append(button)
             wait_for(lambda: call(led, "status")["pattern_owner"] == "mute")
             first.terminate()
@@ -81,6 +82,8 @@ with tempfile.TemporaryDirectory(prefix="le-button-restart-") as directory:
             start_led()
             wait_for(lambda: call(led, "status")["pattern_owner"] == "mute")
             assert button.poll() is None
+            assert (root / "button.log").read_text().count("mute indicator on") == 1
+            log.close()
         finally:
             for process in reversed(processes):
                 if process.poll() is None:

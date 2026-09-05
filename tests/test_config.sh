@@ -27,7 +27,9 @@ jq -e '
 ' "$CFG" >/dev/null
 ! grep -qi 'password' "$CFG"
 # Exercise all new preferences through export/import, not just legacy labels.
+previous_config=$(jq -cS . "$CFG")
 curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tones":false,"action":"disabled","action_sounds":"action-3","action_brightness":23,"mute_brightness":31}' >/dev/null
+[ "$(jq -cS . "$CFG.bak")" = "$previous_config" ]
 exported=$(curl -fsS "$URL/api/v1/config/export" | jq -c '.data')
 printf '%s' "$exported" | grep -q '"schema_version":1'
 printf '%s' "$exported" | grep -q '"hostname_persisted":true'
