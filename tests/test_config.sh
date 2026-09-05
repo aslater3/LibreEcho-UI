@@ -1,5 +1,5 @@
 #!/bin/sh
-set -eu
+set -eux
 URL=${LIBREECHO_TEST_URL:-http://127.0.0.1:18082}
 CFG=${LIBREECHO_TEST_CONFIG:-./build/test-suite-config.json}
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
