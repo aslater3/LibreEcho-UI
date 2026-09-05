@@ -32,6 +32,17 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             build-essential bubblewrap jq libspeexdsp-dev nodejs
 
+      - name: Enable user namespaces for virtual service harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+
       - name: Stage SpeexDSP host dependency
         shell: bash
         run: |
