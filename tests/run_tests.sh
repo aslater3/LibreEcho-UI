@@ -230,7 +230,12 @@ LIBREECHO_VENDOR_FORCE_MARKER=./build/test-vendor-config/vendor-import-force-nex
 LIBREECHO_WLAN0_PATH=./build/test-wlan0 \
 ./build/libreecho-web --backend linux --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" >./build/test-linux.log 2>&1 &
 pid=$!
-sleep 1
+i=0
+while ! curl -sS "$URL/api/v1/config" >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || { printf '%s\n' 'Linux API validation server did not start' >&2; exit 1; }
+    sleep 0.1
+done
 code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio")
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.available == false and .data.unavailable == true' /tmp/le-linux-audio.out >/dev/null
