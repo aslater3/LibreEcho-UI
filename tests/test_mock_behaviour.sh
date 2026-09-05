@@ -17,7 +17,15 @@ ctl trigger wake-word
 curl -fsS "$URL/api/v1/wake-word" | grep -q '"detected_count":1'
 curl -fsS -X POST "$URL/api/v1/network/wifi/connect" -H "$CSRF" -H 'Content-Type: application/json' --data '{"ssid":"LibreNet-IoT","password":"top-secret","security":"wpa2"}' >/dev/null
 stage=wifi-completion
-sleep 3
-curl -fsS "$URL/api/v1/network" | grep -q '"ssid":"LibreNet-IoT"'
+i=0
+while ! curl -fsS "$URL/api/v1/network" | jq -e '.data.state == "connected" and .data.ssid == "LibreNet-IoT"' >/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -ge 50 ]; then
+        curl -fsS "$URL/api/v1/network" | jq '.data | {state, connectivity}' >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+stage=log-redaction
 ! curl -fsS "$URL/api/v1/logs" | grep -q 'top-secret'
 echo 'mock: ok'

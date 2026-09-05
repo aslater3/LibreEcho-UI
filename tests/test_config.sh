@@ -25,7 +25,7 @@ jq -e '
   .tts_wyoming_uri == "tcp://198.51.100.10:10200" and
   .tts_wyoming_voice == "en_GB-alan-medium"
 ' "$CFG" >/dev/null
-! grep -qi 'password' "$(dirname "$CFG")/test-suite-config.json"
+! grep -qi 'password' "$CFG"
 # Exercise all new preferences through export/import, not just legacy labels.
 curl -fsS -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tones":false,"action":"disabled","action_sounds":"action-3","action_brightness":23,"mute_brightness":31}' >/dev/null
 exported=$(curl -fsS "$URL/api/v1/config/export" | jq -c '.data')
