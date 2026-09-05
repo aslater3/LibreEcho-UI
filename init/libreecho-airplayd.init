@@ -25,9 +25,10 @@ ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 
 # The controller is always started, but the AirPlay children follow the
 # persisted integration toggle.  Bit 16 is the AirPlay 2 flag in the shared
-# integrations mask.  Keep this default-off when the persistent config is
-# absent or malformed.
-airplay_enabled_at_boot=0
+# integrations mask.  AirPlay/mDNS is enabled by default after payload
+# staging; bit 16 is the explicit persistent user-controlled disable.
+# persistent AirPlay disable is represented by clearing bit 16.
+airplay_enabled_at_boot=1
 if [ -r "$CONFIG" ]; then
     integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
     case "$integrations" in
@@ -35,6 +36,8 @@ if [ -r "$CONFIG" ]; then
         *)
             if [ $((integrations & 16)) -ne 0 ]; then
                 airplay_enabled_at_boot=1
+            else
+                airplay_enabled_at_boot=0
             fi
             ;;
     esac
@@ -200,7 +203,7 @@ trim_log() {
 
 start_service() {
     if is_running; then echo "libreecho-airplayd already running"; return 0; fi
-    mount_runtime || true
+    mount_runtime || return 1
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
     trim_log
     if command -v start-stop-daemon >/dev/null 2>&1; then

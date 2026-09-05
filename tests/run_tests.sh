@@ -8,6 +8,16 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/con
 ./build/test-unit
 python3 tests/test_github_link_contract.py
 python3 tests/test_about_supported_devices.py
+python3 tests/test_setup_wifi_ui_contract.py
+make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
+./build/test-networkd-scan-security
+./build/test-network-health
+./build/test-adapter-client-events
+./build/test-gateway-probe
+./build/test-factory-reset
+sh tests/test_factory_reset_bluetooth_contract.sh
+sh tests/test_factory_reset_quiesce_contract.sh
+make build/test-backend-linux-wifi-emission
 make build/test-auth-sessions
 ./build/test-auth-sessions
 make build/test-auth-transport
@@ -77,11 +87,13 @@ make build/test-wake-decode
 sh tests/test_buttond_contract.sh
 sh tests/test_input_capability_state_contract.sh
 sh tests/test_bluetooth_startup_readiness_contract.sh
+sh tests/test_bluetooth_startup_optionality_contract.sh
 sh tests/test_bluetooth_decoder_state_contract.sh
 make build/test-wake-led
 sh tests/test_microphone_fanout_contract.sh
 sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
+python3 tests/test_startup_state_contract.py
 python3 tests/test_wake_word_ui_contract.py
 sh tests/test_local_llm_ui_contract.sh
 python3 tests/test_home_location_panel_contract.py
@@ -119,6 +131,8 @@ make build/test-radiod-json
 ./build/test-radiod-json
 sh tests/test_radio_icy_metadata.sh
 sh tests/test_airplay_led_bridge.sh
+sh tests/test_airplay_setup_persistence.sh
+sh tests/test_airplay_mount_failure.sh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
@@ -187,6 +201,7 @@ make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
 ./build/test-timer-persistence
 sh tests/test_timerd.sh
 make build/libreecho-agentd
+sh tests/test_agentd_startup_readiness_contract.sh
 sh tests/test_agentd_timers.sh
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!

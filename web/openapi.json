@@ -2140,10 +2140,11 @@
     "tags": [
      "Network"
     ],
-    "summary": "Scan Wi-Fi networks",
-    "description": "Returns distinct SSIDs ordered with 5 GHz preferred, then descending signal strength and a stable SSID tie-breaker. The response is bounded to the first 12 distinct results for the fixed adapter message size.",
+    "summary": "Scan Wi-Fi networks with radio metadata and security capabilities",
+    "description": "Returns distinct SSIDs ordered with 5 GHz preferred, then descending signal strength and a stable SSID tie-breaker. Each result preserves frequency_mhz, channel, band, RSSI in rssi_dbm, advertised security capabilities, and whether an explicit WPA2 attempt is appropriate. WPA3/SAE-advertised networks remain visible; the response is bounded to the first 12 distinct results for the fixed adapter message size.",
     "responses": {
      "200": {
+      "description": "Each network includes frequency_mhz, channel, band, rssi_dbm, capabilities, and wpa2_attempt; security distinguishes wpa3-transition from wpa3-only.",
       "$ref": "#/components/responses/Success"
      },
      "501": {
@@ -2301,7 +2302,7 @@
      "Setup"
     ],
     "summary": "Complete first-boot AP-mode setup",
-    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. Hostname, audio, Wi-Fi and persistence failures return stage-specific errors. If and only if the optional wake adapter reports not-supported, setup continues and persists wake_word and wake_sensitivity for later restore. This one-time operation is rejected after setup completes.",
+    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. Hostname, audio, Wi-Fi and persistence failures return stage-specific errors. After the settings and Wi-Fi commit, the daemon synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features` helper and waits for `/run/libreecho/startup-ready` before completing setup. Reconciliation or readiness failure returns 503 and leaves setup incomplete; if and only if the optional wake adapter reports not-supported, setup continues and persists wake_word and wake_sensitivity for later restore. This one-time operation is rejected after setup completes.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -2383,6 +2384,7 @@
      "System"
     ],
     "summary": "Factory-reset device",
+    "description": "Permanently removes every file and nested directory below the product image's /data/libreecho/config and /data/libreecho/secrets directories, including accounts, setup completion, Wi-Fi profiles and PSKs, assistant credentials, timers, and all mutable user configuration. The reset synchronizes both persistent directories and reboots. Installed feature payloads, OTA artifacts, and release identity outside those directories are preserved. Unprivileged Linux deployments return 501 without deleting state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -2396,6 +2398,12 @@
       "$ref": "#/components/responses/Success"
      },
      "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -2483,6 +2491,12 @@
      },
      "403": {
       "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }
@@ -2506,6 +2520,12 @@
       "$ref": "#/components/responses/Success"
      },
      "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }

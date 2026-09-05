@@ -7,6 +7,7 @@
 #include "json.h"
 #include "log.h"
 #include "version.h"
+#include "factory_reset.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -1570,8 +1571,27 @@ static int scan(struct le_backend *b, struct le_wifi_scan *o)
             if (json_get_string(object, "security", o->networks[o->count].security,
                                 sizeof(o->networks[o->count].security)) < 1)
                 strcpy(o->networks[o->count].security, "unknown");
+            if (json_get_string(object, "capabilities",
+                                o->networks[o->count].capabilities,
+                                sizeof(o->networks[o->count].capabilities)) < 1)
+                o->networks[o->count].capabilities[0] = '\0';
+            if (json_get_string(object, "band", o->networks[o->count].band,
+                                sizeof(o->networks[o->count].band)) < 1)
+                strcpy(o->networks[o->count].band, "unknown");
             if (json_get_int(object, "signal", &o->networks[o->count].signal) < 1)
                 o->networks[o->count].signal = 0;
+            if (json_get_int(object, "rssi_dbm", &o->networks[o->count].rssi_dbm) < 1)
+                o->networks[o->count].rssi_dbm = -1;
+            if (json_get_int(object, "frequency_mhz",
+                             &o->networks[o->count].frequency_mhz) < 1)
+                o->networks[o->count].frequency_mhz = 0;
+            if (json_get_int(object, "channel", &o->networks[o->count].channel) < 1)
+                o->networks[o->count].channel = 0;
+            if (json_get_bool(object, "wpa2_attempt",
+                              &o->networks[o->count].wpa2_attempt) < 1)
+                o->networks[o->count].wpa2_attempt =
+                    !strcmp(o->networks[o->count].security, "wpa2") ||
+                    !strcmp(o->networks[o->count].security, "wpa3-transition");
             if (o->networks[o->count].signal < 0) o->networks[o->count].signal = 0;
             if (o->networks[o->count].signal > 100) o->networks[o->count].signal = 100;
             ++o->count;
@@ -1614,6 +1634,7 @@ static int disconnect_wifi(struct le_backend *b)
 static int hostname(struct le_backend *b, const char *name)
 {
     size_t i, length;
+    int rc;
     (void)b;
     if (!name) return LE_INVALID;
     length = strlen(name);
@@ -1623,7 +1644,11 @@ static int hostname(struct le_backend *b, const char *name)
     for (i = 0; i < length; i++)
         if (!isalnum((unsigned char)name[i]) && name[i] != '-')
             return LE_INVALID;
-    return sethostname(name, length) == 0 ? LE_OK : LE_IO;
+    if (sethostname(name, length) != 0)
+        return LE_IO;
+    rc = adapter_json_command_timeout(LE_ADAPTER_AIRPLAY_SOCK,
+                                      "refresh_hostname", NULL, 40000);
+    return rc == LE_NOT_SUPPORTED ? LE_OK : rc;
 }
 
 static int wake(struct le_backend *b, struct le_wake_word_state *o)
@@ -2489,27 +2514,106 @@ static int linux_shutdown(struct le_backend *b)
     return reboot(LINUX_REBOOT_CMD_POWER_OFF) == 0 ? LE_OK : LE_IO;
 }
 
+static const char *const factory_reset_services[] = {
+    "/etc/init.d/libreecho-btd.init",
+    "/etc/init.d/libreecho-timerd.init",
+    "/etc/init.d/libreecho-agentd.init"
+};
+
+#define FACTORY_RESET_SERVICE_COUNT \
+    (sizeof(factory_reset_services) / sizeof(factory_reset_services[0]))
+
+static int run_service_action(const char *script, const char *action)
+{
+    pid_t pid;
+    pid_t waited;
+    int status;
+
+    pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        execl(script, script, action, (char *)NULL);
+        _exit(127);
+    }
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0)
+        return -1;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static void resume_factory_reset_services(const unsigned char *stopped)
+{
+    size_t i;
+
+    for (i = 0; i < FACTORY_RESET_SERVICE_COUNT; ++i) {
+        if (stopped[i])
+            (void)run_service_action(factory_reset_services[i], "start");
+    }
+}
+
+static int quiesce_factory_reset_services(unsigned char *stopped)
+{
+    size_t i;
+
+    memset(stopped, 0, FACTORY_RESET_SERVICE_COUNT);
+    for (i = 0; i < FACTORY_RESET_SERVICE_COUNT; ++i) {
+        if (access(factory_reset_services[i], X_OK) != 0 ||
+            run_service_action(factory_reset_services[i], "status") != 0)
+            continue;
+        if (run_service_action(factory_reset_services[i], "stop") != 0 ||
+            run_service_action(factory_reset_services[i], "status") == 0) {
+            resume_factory_reset_services(stopped);
+            return -1;
+        }
+        stopped[i] = 1;
+    }
+    return 0;
+}
+
+static int clear_legacy_bluetooth_state(void)
+{
+    static const char *const paths[] = {
+        "/etc/libreecho/bluetooth.devices",
+        "/etc/libreecho/bluetooth.keys"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        if (unlink(paths[i]) != 0 && errno != ENOENT)
+            return -1;
+    }
+    return 0;
+}
+
 static int factory_reset(struct le_backend *b)
 {
-    static const char marker[] = "FACTORY_RESET";
-    int fd;
-    int close_rc;
-    ssize_t written;
+    const char *data_root = getenv("LIBREECHO_DATA_ROOT");
+    unsigned char stopped[FACTORY_RESET_SERVICE_COUNT];
+    int result;
 
-    (void)b;
+    if (geteuid() != 0)
+        return LE_NOT_SUPPORTED;
+    if (!data_root || !data_root[0])
+        data_root = "/data/libreecho";
     le_log_info("backend: factory reset requested");
-    fd = open("/tmp/.libreecho_factory_reset", O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) {
-        le_log_perr("backend: cannot write factory reset marker");
+    if (quiesce_factory_reset_services(stopped) != 0) {
+        le_log_error("backend: persistent-state daemons could not be stopped");
         return LE_IO;
     }
-    written = write(fd, marker, sizeof(marker) - 1);
-    close_rc = close(fd);
-    if (written != (ssize_t)(sizeof(marker) - 1) || close_rc < 0) {
-        le_log_error("backend: factory reset marker write incomplete");
+    if (clear_legacy_bluetooth_state() != 0 ||
+        le_factory_reset_clear(data_root) != 0) {
+        resume_factory_reset_services(stopped);
+        le_log_error("backend: persistent factory reset failed");
         return LE_IO;
     }
-    return linux_reboot(b);
+    sync();
+    result = linux_reboot(b);
+    if (result != LE_OK)
+        resume_factory_reset_services(stopped);
+    return result;
 }
 
 static int tick(struct le_backend *b)

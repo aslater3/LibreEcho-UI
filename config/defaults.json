@@ -11,7 +11,7 @@
   "led_b": 118,
   "led_brightness": 70,
   "led_visualizer_enabled": true,
-  "wake_word": "LibreEcho",
+  "wake_word": "Alexa",
   "wake_enabled": true,
   "wake_sensitivity": 68,
   "voice_pipeline_mode": "local",

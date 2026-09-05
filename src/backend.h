@@ -46,7 +46,10 @@ struct le_led_state {
     uint8_t visualizer_levels[LE_LED_PIXELS];
     struct le_led_pixel pixels[LE_LED_PIXELS];
 };
-struct le_wifi_network { char ssid[LE_TEXT], security[16]; int signal; };
+struct le_wifi_network {
+    char ssid[LE_TEXT], security[32], capabilities[128], band[16];
+    int signal, rssi_dbm, frequency_mhz, channel, wpa2_attempt;
+};
 struct le_wifi_scan { struct le_wifi_network networks[LE_MAX_WIFI]; size_t count; };
 struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };
 struct le_network_state {

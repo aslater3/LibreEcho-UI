@@ -107,7 +107,7 @@ adapter returns the valid fallback `wake_word: "LibreEcho"`.
 {
   "ok": true,
   "data": {
-    "wake_word": "LibreEcho",
+    "wake_word": "Alexa",
     "vendor_firmware": {
       "state": "ready",
       "verification": "hash-pinned",
@@ -131,9 +131,20 @@ Wake-word support is optional: if its companion service returns
 `LE_NOT_SUPPORTED`, setup continues, the submitted `wake_word` and
 `wake_sensitivity` are still written to the canonical configuration, and the
 boot-time restore retries them when the service becomes available. Other
-wake-word errors abort setup. Wi-Fi credentials are passed to the network
+wake-word errors abort setup. The bundled image currently exposes `Alexa` as
+the supported first-run wake model. After settings and Wi-Fi are committed,
+setup synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features`
+helper and waits for `/run/libreecho/startup-ready`. A reconciliation or
+readiness failure returns `503` and leaves the setup-completion marker unwritten,
+so setup remains retryable. Wi-Fi credentials are passed to the network
 adapter for association but are never returned by the API or written to the
-web configuration.
+web configuration. The successful response includes the best-known `ip`; the
+completion page uses the device's HTTP port `8080` for both the primary `<ip>`
+LAN link and the separate `<hostname>.local` mDNS alternative. It must not copy
+a host-side ADB forwarding port or reverse-proxy port from the setup page's
+visible origin into normal user-facing device links. The `.local` name depends
+on AirPlay 2/Avahi and client mDNS support, so the IP link remains available
+when that service is disabled or unavailable.
 
 #### POST /api/v1/setup/vendor-import-force-next-boot
 
@@ -923,7 +934,13 @@ unset.
 Scan for WiFi networks. Results are ordered with 5 GHz networks first, then by
 signal strength (strongest first), with SSID as a stable tie-breaker. The
 response is bounded to the first 12 distinct results for the fixed adapter
-message size.
+message size. Every result retains frequency_mhz, channel, band, rssi_dbm, and
+advertised security capabilities. WPA3/SAE advertisements remain visible.
+
+`security` is `open`, `wpa2`, `wpa3-transition` (WPA2-PSK and WPA3-SAE),
+`wpa3-only`, or `wpa`. `wpa2_attempt` is true only when the advertisement
+includes a WPA2/PSK path that the shipped client can explicitly try. A
+`wpa3-only` network remains visible but does not receive a WPA2 button.
 
 **Response:**
 ```json
@@ -931,8 +948,18 @@ message size.
   "ok": true,
   "data": {
     "networks": [
-      { "ssid": "MyNetwork", "security": "wpa2", "signal": 75 },
-      { "ssid": "OtherNetwork", "security": "wpa2", "signal": 45 }
+      {
+        "ssid": "MyNetwork", "security": "wpa3-transition",
+        "capabilities": "WPA2-PSK, WPA3-SAE", "signal": 75,
+        "rssi_dbm": -54, "frequency_mhz": 5180, "channel": 36,
+        "band": "5 GHz", "wpa2_attempt": true
+      },
+      {
+        "ssid": "WPA3Only", "security": "wpa3-only",
+        "capabilities": "WPA3-SAE", "signal": 45,
+        "rssi_dbm": -68, "frequency_mhz": 2412, "channel": 1,
+        "band": "2.4 GHz", "wpa2_attempt": false
+      }
     ]
   },
   "error": null
@@ -942,9 +969,11 @@ message size.
 #### POST /api/v1/network/wifi/connect
 
 Connect to a WiFi network. The `security` field accepts exactly `open` or `wpa2`;
-if omitted, it defaults to `wpa2` for backward compatibility. WPA3/SAE is not
-advertised or accepted because the shipped MT8163 path is WEXT-only and has no
-verified SAE capability.
+if omitted, it defaults to `wpa2` for backward compatibility. For a scan result
+with `wpa2_attempt: true`, the UI's explicit **Try WPA2** action submits
+`security: "wpa2"`. This is a bounded compatibility attempt only: the client
+does not claim WPA3/SAE support, and the response/error reports the actual
+association result.
 Malformed or unsupported security values are rejected with HTTP 400 before any
 adapter request is made.
 
@@ -1039,7 +1068,16 @@ Shutdown device. Requires confirmation.
 
 #### POST /api/v1/system/factory-reset
 
-Factory reset device. Requires confirmation.
+Permanently removes every file and nested directory below the product image's
+`/data/libreecho/config` and `/data/libreecho/secrets` directories, including
+device-local accounts, setup completion, Wi-Fi profiles/PSKs, assistant
+credentials, timers, and all mutable user configuration. The reset synchronizes
+both persistent directories and reboots. Installed feature payloads, OTA
+artifacts, and release identity outside those directories are preserved.
+The operation requires `X-LibreEcho-Confirm: confirm-device-action`; missing
+directories are accepted, while any unexpected deletion or durability failure
+aborts the reboot and returns HTTP 503. Unprivileged Linux deployments and
+backends without destructive-action support return HTTP 501.
 
 #### PUT /api/v1/system/update/channel
 
