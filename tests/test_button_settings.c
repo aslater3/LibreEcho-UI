@@ -102,8 +102,12 @@ int main(void)
           context.button_action_brightness == 11 &&
           context.button_mute_brightness == 22,
           "full button settings update is applied");
-    CHECK(api_persist_configuration(&context) == LE_OK,
-          "button settings persist atomically");
+    { char saved[4096]; int value = -1;
+      CHECK(config_read(config_path, saved, sizeof(saved)) > 0 &&
+            json_get_bool(saved, "button_tones", &value) == 1 && value == 0 &&
+            strstr(saved, "action-3,action-1") != NULL,
+            "PUT persists button settings without an explicit save");
+    }
 
     CHECK(request(&context, "PUT", "{\"action_brightness\":33}",
                   &response) == 200,
@@ -168,8 +172,14 @@ int main(void)
           strstr(response.body, "path\\\\test") != NULL,
           "legacy button fields are escaped in GET response");
 
-    CHECK(api_persist_configuration(&context) == LE_OK,
-          "legacy and new settings persist together");
+    { char original_path[sizeof(context.config_path)];
+      snprintf(original_path, sizeof(original_path), "%s", context.config_path);
+      snprintf(context.config_path, sizeof(context.config_path), "%s/child", config_path);
+      CHECK(request(&context, "PUT", "{\"tones\":false}", &response) == 503,
+            "failed persistence returns 503");
+      CHECK(context.button_tones == 1, "failed persistence preserves context");
+      snprintf(context.config_path, sizeof(context.config_path), "%s", original_path);
+    }
     CHECK(le_backend_init(&restarted_backend, "mock", NULL, NULL, 8) == LE_OK &&
           api_init(&restarted, restarted_backend, 1, 1, NULL, NULL, csrf,
                    config_path, NULL) == 0,
