@@ -41,6 +41,9 @@ sequence = 0
 def call(command, arguments=None):
     global sequence
     sequence += 1
+    if command == "pattern" and arguments.get("name") != "stop":
+        arguments = {"r": 255, "g": 0, "b": 0, "brightness": 60,
+                     "repeats": 0, **arguments}
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(1)
     client.connect(path)
