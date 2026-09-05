@@ -3,6 +3,11 @@ set -eu
 
 python3 - <<'PY'
 from pathlib import Path
+import json
+operation = json.loads(Path('web/openapi.json').read_text())['paths']['/buttons']['put']
+schema = operation['requestBody']['content']['application/json']['schema']
+assert {tuple(case['required']) for case in schema['anyOf']} == {(key,) for key in schema['properties']}
+assert '400' in operation['responses'] and '503' in operation['responses']
 
 buttond = Path('src/adapter/buttond.c').read_text()
 api = Path('src/api.c').read_text()
@@ -25,6 +30,9 @@ checks = {
         '#define PRIVACY_POLL_MS 100' in buttond and
         'timeout > PRIVACY_POLL_MS' in buttond and
         'timeout = PRIVACY_POLL_MS;' in buttond,
+    'button preferences load before first event':
+        buttond.index('refresh_tone_setting(&ctx);') < buttond.index('discover(&ctx);') and
+        buttond.index('refresh_tone_setting(&ctx);') < buttond.index('while (!stop_requested)'),
     'buttond stores capability bits per device':
         'struct device' in buttond and
         'ctx->devices[ctx->device_count].volume_capable = volume_capable' in buttond and

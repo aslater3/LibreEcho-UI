@@ -1887,10 +1887,12 @@ static void start_pattern(struct daemon_context *ctx, int kind,
                           const char *owner, double now)
 {
     if (ctx->pattern_active) {
+        if (!owner || !owner[0] || strcmp(ctx->pattern_owner, owner)) {
         ctx->pattern_previous_kind = ctx->pattern_kind;
         ctx->pattern_previous_colour = ctx->pattern_colour;
         ctx->pattern_previous_repeats = ctx->pattern_repeats;
         copy_pattern_owner(ctx->pattern_previous_owner, ctx->pattern_owner);
+        }
     } else {
         ctx->pattern_saved = ctx->state.current;
         ctx->pattern_saved_animation = ctx->animation_active;

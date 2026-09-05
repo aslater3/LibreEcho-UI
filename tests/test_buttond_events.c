@@ -6,6 +6,8 @@
  * endpoints are small AF_UNIX mock servers.  It does not require /dev/uinput
  * or claim physical evdev evidence.
  */
+static char test_config_path[256];
+#define LE_BUTTOND_CONFIG test_config_path
 #define main buttond_program_main
 #include "../src/adapter/buttond.c"
 #undef main
@@ -21,7 +23,7 @@ static char directory[] = "/tmp/libreecho-button-events-XXXXXX";
 
 static void cleanup(void)
 {
-    const char *files[] = {"audio.sock", "led.sock", "audio.log", "led.log"};
+    const char *files[] = {"audio.sock", "led.sock", "audio.log", "led.log", "config.json"};
     size_t i;
     char path[256];
     if (getpid() != fixture_owner) return;
@@ -187,6 +189,23 @@ int main(void)
     strcpy(ctx.action, "disabled");
     handle_key(&ctx, KEY_HELP, 1);
     assert(ctx.action_index == 0);
+
+    /* Read saved preferences and force an already-muted ring to be refreshed. */
+    snprintf(test_config_path, sizeof(test_config_path), "%s/config.json", directory);
+    { FILE *saved = fopen(test_config_path, "w");
+      assert(saved != NULL);
+      fputs("{\"button_tones\":false,\"button_action\":\"disabled\","
+            "\"button_action_sounds\":\"\",\"button_mute_brightness\":25}", saved);
+      assert(fclose(saved) == 0);
+    }
+    ctx.muted = ctx.indicated_mute = 1;
+    refresh_tone_setting(&ctx);
+    assert(ctx.tones == 0 && !strcmp(ctx.action, "disabled"));
+    assert(!ctx.action_sounds[0]);
+    assert(ctx.mute_brightness == 25 && ctx.indicated_mute == -1);
+    mute_indicator(&ctx, ctx.muted);
+    assert(ctx.indicated_mute == 1);
+    assert(log_contains(led_log, "\"brightness\":25"));
 
     nanosleep(&pause, NULL);
     assert(log_contains(audio_log, "\"cmd\":\"set_mute\""));

@@ -1097,7 +1097,7 @@ The physical mute lamp/privacy latch is kernel-owned. Userspace synchronizes the
 }
 ```
 
-`action` is `sound` or `disabled`; `action_sounds` is empty or a bounded comma-separated list containing only the exact entries `action-1`, `action-2`, and `action-3` (with no path separators or other characters). The bundled clips are installed under `/usr/local/share/libreecho/sounds` as mono signed-16-bit little-endian 48 kHz PCM. Settings persist in the normal web configuration store.
+`action` is `sound` or `disabled`; `action_sounds` is empty or a bounded comma-separated list containing only the exact entries `action-1`, `action-2`, and `action-3` (with no path separators or other characters). The bundled clips are installed under `/usr/local/share/libreecho/sounds` as mono signed-16-bit little-endian 48 kHz PCM. Settings are atomically persisted in the normal web configuration store before a successful response. Invalid or unrecognized-only payloads return `400`; persistence failures return `503` and retain the prior in-memory settings. Configuration export/import includes these preferences; older imports without them preserve the current values. Saved preferences are loaded before button events and refreshed periodically, including mute brightness while the ring is active.
 
 **Response:**
 ```json

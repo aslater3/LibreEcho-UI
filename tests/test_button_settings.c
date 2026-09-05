@@ -122,6 +122,8 @@ int main(void)
     CHECK(context.button_tones == 1 && context.button_action_brightness == 33,
           "partial boolean update preserves other settings");
 
+    expect_invalid_without_mutation(&context, "{\"bogus\":true}",
+                                    "unrecognized-only settings are rejected");
     expect_invalid_without_mutation(&context, "{}",
                                     "missing button settings are rejected");
     expect_invalid_without_mutation(&context, "{\"tones\":\"true\"}",

@@ -38,11 +38,10 @@ def test_persisted_auth_root() -> None:
         )
         users.write_text(record)
         users.chmod(0o600)
-        config = root / "data/libreecho/config/web-config.json"
-        config.write_text('{"integrations": 0}\n')
-        config.chmod(0o600)
+        # Reused authenticated root deliberately has no configuration marker.
+        assert not (root / "data/libreecho/config/web-config.json").exists()
         process = subprocess.Popen(
-            ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port)],
+            ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port), "--timeout", "30"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
@@ -85,7 +84,7 @@ def main() -> int:
         config.write_text('{"integrations": 0}\n')
         config.chmod(0o600)
         process = subprocess.Popen(
-            ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port)],
+            ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port), "--timeout", "30"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:

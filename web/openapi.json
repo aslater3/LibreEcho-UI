@@ -1072,6 +1072,7 @@
        "schema": {
         "type": "object",
         "minProperties": 1,
+        "anyOf": [{"required": ["short_press"]}, {"required": ["long_press"]}, {"required": ["tones"]}, {"required": ["action"]}, {"required": ["action_sounds"]}, {"required": ["action_brightness"]}, {"required": ["mute_brightness"]}],
         "properties": {
          "short_press": {"type": "string", "maxLength": 31, "description": "Legacy compatibility field; does not control physical mappings."},
          "long_press": {"type": "string", "maxLength": 31, "description": "Legacy compatibility field; does not control physical mappings."},
@@ -1086,6 +1087,8 @@
      }
     },
     "responses": {
+     "400": {"description": "No recognized button field or invalid settings."},
+     "503": {"description": "Persistence failed; prior preferences remain active."},
      "200": {
       "$ref": "#/components/responses/Success"
      },

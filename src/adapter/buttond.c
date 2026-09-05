@@ -37,7 +37,9 @@
 
 #define INPUT_DIR "/dev/input"
 #define MAX_DEVICES 8
+#ifndef LE_BUTTOND_CONFIG
 #define LE_BUTTOND_CONFIG "/data/libreecho/config/web-config.json"
+#endif
 #define CONNECT_TIMEOUT_MS 400
 #define PRIVACY_POLL_MS 100
 #define METER_OWNER "buttons"
@@ -400,8 +402,10 @@ static void refresh_tone_setting(struct context *ctx)
         value >= 0 && value <= 100)
         ctx->action_brightness = (unsigned int)value;
     if (json_get_int(buffer, "button_mute_brightness", &value) > 0 &&
-        value >= 0 && value <= 100)
+        value >= 0 && value <= 100 && ctx->mute_brightness != (unsigned int)value) {
         ctx->mute_brightness = (unsigned int)value;
+        ctx->indicated_mute = -1; /* Reapply changed brightness at this status tick. */
+    }
     (void)json_get_string(buffer, "button_action", ctx->action,
                           sizeof(ctx->action));
     /*
@@ -884,6 +888,7 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
+    refresh_tone_setting(&ctx);
     discover(&ctx);
     if (!ctx.device_count)
         le_log_warn("buttond: no input device reports volume or mute keys yet; "

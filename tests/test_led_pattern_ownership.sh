@@ -107,6 +107,10 @@ assert muted["pattern_active"] and muted["pattern"] == "solid", muted
 assert muted["pattern_owner"] == "mute", muted
 call("pattern", {"name": "flash", "r": 255, "g": 170, "b": 0,
                  "brightness": 70, "repeats": 1, "owner": "action"})
+# A second action press restarts the flash without replacing its saved mute ring.
+time.sleep(0.1)
+call("pattern", {"name": "flash", "r": 255, "g": 170, "b": 0,
+                 "brightness": 70, "repeats": 1, "owner": "action"})
 time.sleep(0.6)
 restored = call("status")
 assert restored["pattern"] == "solid" and restored["pattern_owner"] == "mute", restored
