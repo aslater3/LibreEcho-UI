@@ -71,6 +71,22 @@ int main(void)
     strcpy(request, "{\"v\":1,\"id\":4,\"cmd\":\"sample\",\"args\":{\"name\":\"action-1\"}}");
     handle_request(&audio, request, response, sizeof(response));
     if (!strstr(response, "\"ok\":false")) goto done;
+    /* A live sample writer occupies the only slot; never fork another. */
+    sample_fd = open(sample_path, O_WRONLY | O_TRUNC);
+    if (sample_fd < 0 || write(sample_fd, mono, sizeof(mono)) != sizeof(mono)) goto done;
+    close(sample_fd);
+    sample_fd = -1;
+    audio.sample_pid = fork();
+    if (audio.sample_pid < 0) goto done;
+    if (!audio.sample_pid) { for (;;) pause(); }
+    if (start_sample(&audio, "action-1") != -1) {
+        kill(audio.sample_pid, SIGKILL);
+        waitpid(audio.sample_pid, NULL, 0);
+        goto done;
+    }
+    kill(audio.sample_pid, SIGKILL);
+    waitpid(audio.sample_pid, NULL, 0);
+    audio.sample_pid = 0;
     status = 0;
     puts("action sample: real FIFO duplicated-mono playback and invalid/missing/odd PCM rejection: ok");
 done:

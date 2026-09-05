@@ -214,10 +214,12 @@ int main(void)
     ctx.mute_brightness = 26;
     mute_indicator(&ctx, 1);
     assert(ctx.indicated_mute == -1);
+    assert(ctx.indicator_warned == 1);
     ctx.mute_brightness = 25;
     mute_indicator(&ctx, 1);
     assert(ctx.indicated_mute == 1);
 
+    assert(ctx.indicator_warned == 0);
     nanosleep(&pause, NULL);
     assert(log_contains(audio_log, "\"cmd\":\"set_mute\""));
     assert(log_contains(audio_log, "\"cmd\":\"sample\""));

@@ -215,6 +215,7 @@ struct audio_hw {
     /* The running sleep-noise child, so a second start replaces the first
        rather than layering two generators onto the same bus. */
     pid_t noise_pid;
+    pid_t sample_pid;
     int noise_colour;
     long noise_seconds;
     int noise_level;
@@ -261,6 +262,8 @@ static void reap_children(struct audio_hw *audio)
     for (;;) {
         done = waitpid(-1, NULL, WNOHANG);
         if (done > 0) {
+            if (done == audio->sample_pid)
+                audio->sample_pid = 0;
             if (done == audio->noise_pid)
                 clear_noise_state(audio);
             continue;
@@ -1528,12 +1531,18 @@ static int write_sample_fd(int fd, int sample_fd)
     return failed ? -1 : 0;
 }
 
-static int start_sample(const struct audio_hw *audio, const char *name)
+static int start_sample(struct audio_hw *audio, const char *name)
 {
     int fd, sample_fd;
     pid_t pid;
     if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0)
         return -1;
+    if (audio->sample_pid > 0) {
+        pid_t done = waitpid(audio->sample_pid, NULL, WNOHANG);
+        if (done == 0 || (done < 0 && errno != ECHILD))
+            return -1;
+        audio->sample_pid = 0;
+    }
     sample_fd = sample_open_fd(name);
     if (sample_fd < 0)
         return -1;
@@ -1546,6 +1555,7 @@ static int start_sample(const struct audio_hw *audio, const char *name)
         close(fd);
         _exit(result < 0 ? 1 : 0);
     }
+    audio->sample_pid = pid;
     close(sample_fd);
     close(fd);
     return 0;

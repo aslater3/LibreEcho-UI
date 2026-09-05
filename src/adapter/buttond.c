@@ -96,7 +96,8 @@ struct context {
     int held_key;        /* key code being held, 0 when idle */
     int rescan_requested;
     size_t logged_device_count;  /* last count announced, so a steady state stays quiet */
-    int indicated_mute;          /* mute state the ring is currently showing; -1 unknown */
+    int indicated_mute;
+    int indicator_warned;          /* mute state the ring is currently showing; -1 unknown */
     int audio_poll_warned;       /* so an unreachable audiod is reported once, not every tick */
     int tones;                   /* press cues; read from the web config, on by default */
     char action[24];             /* what the action button does; only "sound" is wired */
@@ -548,7 +549,9 @@ static void mute_indicator(struct context *ctx, int muted)
 
     adapter = le_adapter_connect(ctx->led_sock, CONNECT_TIMEOUT_MS);
     if (!adapter) {
-        le_log_warn("buttond: LED daemon unavailable; mute indicator not shown");
+        if (!ctx->indicator_warned)
+            le_log_warn("buttond: LED daemon unavailable; mute indicator not shown");
+        ctx->indicator_warned = 1;
         return;
     }
     if (muted)
@@ -564,10 +567,13 @@ static void mute_indicator(struct context *ctx, int muted)
                  "{\"name\":\"stop\",\"owner\":\"mute\"}");
     /* The kernel owns the physical mute lamp; this daemon owns only the
        software mute state and the ring indicator. */
-    if (le_adapter_call(adapter, "pattern", args, NULL, 0) != LE_ADAPTER_OK)
-        le_log_warn("buttond: mute indicator %s rejected by the LED daemon",
-                    muted ? "on" : "off");
-    else {
+    if (le_adapter_call(adapter, "pattern", args, NULL, 0) != LE_ADAPTER_OK) {
+        if (!ctx->indicator_warned)
+            le_log_warn("buttond: mute indicator %s rejected by the LED daemon",
+                        muted ? "on" : "off");
+        ctx->indicator_warned = 1;
+    } else {
+        ctx->indicator_warned = 0;
         if (ctx->indicated_mute != (muted ? 1 : 0))
             le_log_info("buttond: mute indicator %s", muted ? "on" : "off");
         ctx->indicated_mute = muted ? 1 : 0;
