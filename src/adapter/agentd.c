@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "adapter.h"
+#include "stop_intent.h"
 #include "llm_http.h"
 #include "llm_provider.h"
 #include "llm_store.h"
@@ -39,6 +40,7 @@
 #define DEFAULT_TTS_SOCKET LE_ADAPTER_TTS_SOCK
 #define DEFAULT_WAKE_SOCKET LE_ADAPTER_WAKEWORD_SOCK
 #define DEFAULT_STT_SOCKET LE_ADAPTER_STT_SOCK
+#define DEFAULT_RADIO_SOCKET LE_ADAPTER_RADIO_SOCK
 #define DEFAULT_TTS_FIRST_PCM_FILE "/run/libreecho/tts-first-pcm"
 #define FOLLOW_UP_PLAYBACK_WAIT_MS 60000U
 #define FOLLOW_UP_MAX_DEPTH 2U
@@ -87,6 +89,7 @@ struct agent_state {
     char timer_socket[256];
     char wake_socket[256];
     char stt_socket[256];
+    char radio_socket[256];
     char tts_first_pcm_file[384];
     time_t next_auth_poll;
     unsigned int poll_minimum;
@@ -1522,6 +1525,78 @@ static int command_respond(struct agent_state *state, const char *args,
         : respond(fd, id, 0, "response is too large");
 }
 
+
+/*
+ * "Stop" said to a device that is making noise. Without this the word reached
+ * the language model, which asked what to stop, which armed a follow-up listen,
+ * which fed the next "stop" back in as conversation -- so the person repeated
+ * themselves while the music kept playing. Returns 1 when the request was
+ * handled here and the model must not see it.
+ */
+static int handle_stop_intent(struct agent_state *state, const char *transcript)
+{
+    struct le_stop_state playing;
+    struct le_stop_plan plan;
+    char response[LE_ADAPTER_MSG_MAX];
+    char document[768];
+    FILE *status;
+
+    if (!le_stop_intent_matches(transcript))
+        return 0;
+
+    memset(&playing, 0, sizeof(playing));
+    if (adapter_call(state->radio_socket, 250, "status", NULL,
+                     response, sizeof(response)) == LE_ADAPTER_OK &&
+        strstr(response, "\"playing\":true"))
+        playing.radio_playing = 1;
+    if (adapter_call(state->tts_socket, 250, "status", NULL,
+                     response, sizeof(response)) == LE_ADAPTER_OK &&
+        strstr(response, "\"speaking\":true"))
+        playing.speaking = 1;
+    if (adapter_call(state->audio_socket, 250, "status", NULL,
+                     response, sizeof(response)) == LE_ADAPTER_OK &&
+        strstr(response, "\"noise_active\":true"))
+        playing.noise_active = 1;
+    /*
+     * The media bus records who owns it. Reading the file rather than asking
+     * audiod keeps this cheap and works even when the owner is the AirPlay
+     * engine, which is a separate process entirely.
+     */
+    status = fopen("/run/libreecho-audio/status.json", "r");
+    if (status) {
+        if (fgets(document, sizeof(document), status) &&
+            (strstr(document, "\"active\":\"airplay2\"") ||
+             strstr(document, "\"active\":\"bluetooth\"")))
+            playing.external_source = 1;
+        fclose(status);
+    }
+
+    le_stop_intent_plan(&playing, &plan);
+
+    if (plan.action == LE_STOP_NONE)
+        return 0;
+    if (plan.action == LE_STOP_EXTERNAL) {
+        (void)play_sentence(state, le_stop_external_speech());
+        return 1;
+    }
+    if (plan.stop_radio)
+        (void)adapter_call(state->radio_socket, 1000, "stop", NULL,
+                           response, sizeof(response));
+    if (plan.stop_noise)
+        (void)adapter_call(state->audio_socket, 1000, "noise_stop", NULL,
+                           response, sizeof(response));
+    if (plan.stop_speech) {
+        le_voice_playback_stop(&state->playback);
+        (void)adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
+                           response, sizeof(response));
+    }
+    /* Silence is the confirmation, and it is also what keeps a follow-up
+       listen from arming and starting the loop over again. */
+    le_log_info("agentd: stop handled radio=%d speech=%d noise=%d",
+                plan.stop_radio, plan.stop_speech, plan.stop_noise);
+    return 1;
+}
+
 static void voice_transcript(
     void *context, const char *text,
     const struct le_voice_pipeline_turn *turn)
@@ -1575,6 +1650,10 @@ static void voice_transcript(
             (unsigned long long)turn->stt_processing_ms,
             (unsigned long long)turn->stt_total_ms,
             (unsigned long)strlen(text));
+        if (handle_stop_intent(state, text)) {
+            pthread_mutex_unlock(&state->control_mutex);
+            return;
+        }
         if (generate_response(
                 state, input,
                 turn->endpoint && turn->transcript_received_ms >= 500
@@ -1900,6 +1979,7 @@ int main(int argc, char **argv)
     strcpy(state.tts_socket, DEFAULT_TTS_SOCKET);
     strcpy(state.wake_socket, DEFAULT_WAKE_SOCKET);
     strcpy(state.stt_socket, DEFAULT_STT_SOCKET);
+    strcpy(state.radio_socket, DEFAULT_RADIO_SOCKET);
     strcpy(state.tts_first_pcm_file, DEFAULT_TTS_FIRST_PCM_FILE);
     state.poll_minimum = 3;
     for (i = 1; i < argc; ++i) {
