@@ -1026,6 +1026,79 @@ and requester-supplied paths. The browser's **Download diagnostic bundle**
 action downloads this response as JSON and offers its short `summary` for
 copying into an issue template. No server-side temporary file is created.
 
+#### GET /api/v1/provenance
+
+Returns additive build provenance and the bounded, read-only feature component
+observations used by About, System, OTA status, and diagnostic export. The
+`components` array follows the Platform feature manifest and
+transaction journal contract; the UI does not derive a release from the OS
+version or from a legacy manifest that lacks release identity. Missing or
+malformed values are reported as `"unavailable"`; `effective` is `present` only
+when the bounded hash of the canonical `payload.squashfs` (and, for a runtime
+manifest, `runtime.squashfs`) matches its expected metadata. Hashing is performed
+incrementally by the daemon's existing event loop; while an actual artifact is
+being verified, its observation is `pending`, and no manifest hash is reported as
+verified. `present` is emitted only after the actual bytes match metadata. Each
+artifact is limited to 512 MiB (536870912 bytes): an oversized artifact, read
+error, growth or other identity/stat instability is `unavailable`. A missing
+artifact remains `missing`, while a readable same-identity artifact whose bytes
+do not match remains `mismatch`.
+The settled `effective` value is `missing`, `mismatch`, or `unavailable` for
+the distinct observations above. The
+`candidate_kind`, `candidate_payload_sha256`, and `candidate_status` fields are
+independent staged-asset observations: candidate kind is `runtime` only for a
+`.runtime.squashfs` asset and `replacement` only for a `.payload.squashfs`
+asset, so a full replacement cannot be presented as a runtime capsule.
+`runtime_capsule_sha256` is `null` when no matching runtime capsule hash was
+observed. The array is limited to the five allow-listed feature IDs and the
+encoded component data is bounded to 8192 bytes.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "os_version": "LibreEcho OS 0.13.11",
+    "source_commit": "public-build-identity",
+    "source_dirty": false,
+    "source_digest": "public-build-digest",
+    "transaction_state": "none",
+    "last_transaction_result": "idle",
+    "components": [
+      {
+        "feature_id": "tts",
+        "release": "radar-puffin-v0.13.11",
+        "source_commit": "0123456789012345678901234567890123456789",
+        "effective_payload_sha256": "unavailable",
+        "runtime_capsule_sha256": null,
+        "candidate_kind": "unavailable",
+        "candidate_payload_sha256": "unavailable",
+        "candidate_status": "unavailable",
+        "running_daemon_sha256": "unavailable",
+        "running_daemon_status": "unavailable",
+        "effective": "missing",
+        "activation": "unavailable",
+        "last_transaction_result": "idle"
+      }
+    ]
+  },
+  "error": null
+}
+```
+
+The same `components`, `transaction_state`, and `last_transaction_result` fields are additive in
+`GET /api/v1/system/update` and in `POST /api/v1/diagnostics/export`. The
+Platform-side mapping is read-only: runtime manifests supply `feature_id`,
+`product_release`, `source_commit`, `base_payload_sha256` for the expected
+canonical full payload, `payload.sha256` for the expected runtime capsule or
+replacement payload, and the allow-listed daemon file hash. The UI hashes the
+canonical filenames `payload.squashfs` and (for runtime actions)
+`runtime.squashfs` directly with bounded reads and a keyed stat cache. Candidate
+metadata comes from `/data/libreecho/update/staging/manifest`; its actual bytes
+are read only from the corresponding safe staged feature path and are reported
+separately as runtime or replacement. The staging manifest also supplies reboot
+activation and signed transaction identity; the feature transaction journal
+supplies the observed result. No Platform fields are invented by the UI.
+
 ### Wake Word
 
 #### GET /api/v1/wake-word

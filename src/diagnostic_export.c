@@ -1,4 +1,5 @@
 #include "api.h"
+#include "feature_provenance.h"
 #include "json.h"
 #include "version.h"
 #include <ctype.h>
@@ -284,7 +285,8 @@ static int append_logs(struct diag_writer *w, const struct api_context *c)
         return -1;
     for (i = 0; i < count; ++i) {
         const char *line = c->logs[(first + i) % LE_MAX_LOGS];
-        char level[32], message[LE_DIAG_TEXT], redacted[LE_DIAG_TEXT * 2];
+        char level[32], escaped_level[LE_DIAG_TEXT * 2];
+        char message[LE_DIAG_TEXT], redacted[LE_DIAG_TEXT * 2];
         int boot_seconds = 0;
         int parsed = json_get_string(line, "level", level, sizeof(level)) > 0 &&
                      json_get_string(line, "message", message, sizeof(message)) > 0;
@@ -294,9 +296,10 @@ static int append_logs(struct diag_writer *w, const struct api_context *c)
             snprintf(level, sizeof(level), "unknown");
             snprintf(message, sizeof(message), "unavailable");
         }
+        redacted_json(escaped_level, sizeof(escaped_level), level);
         redacted_json(redacted, sizeof(redacted), message);
         if (diag_append(w, "%s{\"level\":\"%s\",\"boot_seconds\":%d,\"message\":\"%s\"}",
-                        i ? "," : "", level, boot_seconds, redacted))
+                        i ? "," : "", escaped_level, boot_seconds, redacted))
             return -1;
     }
     return diag_append(w, "],\"malformed_entries\":%s},", c->log_count > LE_MAX_LOGS ? "true" : "false");
@@ -320,6 +323,9 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
     char channel[16] = "stable", active_slot[16] = "unavailable";
     char pending_slot[16] = "unavailable", update_state[64] = "idle";
     char pending_version[96] = "unavailable";
+    char components[LE_FEATURE_COMPONENTS_JSON_MAX];
+    char escaped_transaction_state[80], escaped_last_result[80];
+    le_feature_transaction_state transaction;
     size_t reset_bytes = 0, pstore_bytes = 0, file_bytes = 0;
     int reset_warning = 0, pstore_warning = 0, file_warning = 0;
     int status_rc, device_rc, network_rc, audio_rc, wake_rc, bluetooth_rc, playback_rc;
@@ -332,6 +338,13 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
     memset(&wake, 0, sizeof(wake));
     memset(&bluetooth, 0, sizeof(bluetooth));
     memset(&playback, 0, sizeof(playback));
+    le_feature_transaction_state_read(&transaction);
+    le_feature_components_json(components, sizeof(components),
+                               &transaction);
+    json_value(escaped_transaction_state, sizeof(escaped_transaction_state),
+               transaction.state);
+    json_value(escaped_last_result, sizeof(escaped_last_result),
+               transaction.last_result);
     status_rc = le_get_system_status(c->backend, &status);
     device_rc = le_get_device_info(c->backend, &device);
     /* The Linux backend's adapter calls use synchronous socket timeouts. Keep
@@ -405,10 +418,11 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
         (void)diag_append(&w, "\"boot_image\":\"unavailable\",\"kernel\":\"%s\",\"dtb\":\"unavailable\",\"ui\":\"%s\",\"platform\":\"%s\",",
                           escaped, LE_OS_VERSION_STRING, platform);
     }
-    (void)diag_append(&w, "\"os_version\":\"%s\",\"source_commit\":\"%s\",\"source_dirty\":%s,\"source_digest\":\"%s\",\"running_service\":{\"name\":\"libreecho-web\",\"version\":\"%s\",\"backend\":\"%s\"}},",
+    (void)diag_append(&w, "\"os_version\":\"%s\",\"source_commit\":\"%s\",\"source_dirty\":%s,\"source_digest\":\"%s\",\"components\":%s,\"transaction_state\":\"%s\",\"last_transaction_result\":\"%s\",\"running_service\":{\"name\":\"libreecho-web\",\"version\":\"%s\",\"backend\":\"%s\"}},",
                       LE_OS_VERSION_STRING, LE_SOURCE_COMMIT,
                       !strcmp(LE_SOURCE_DIRTY, "1") ? "true" : "false",
-                      LE_SOURCE_DIGEST, LE_OS_VERSION_STRING, le_backend_mode(c->backend));
+                      LE_SOURCE_DIGEST, components, escaped_transaction_state,
+                      escaped_last_result, LE_OS_VERSION_STRING, le_backend_mode(c->backend));
     (void)diag_append(&w, "\"runtime\":{");
     if (status_rc)
         append_unavailable(&w, "system");

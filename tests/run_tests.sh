@@ -76,6 +76,14 @@ sh tests/test_device_identity.sh
 # sh tests/test_cpu_online_mask.sh
 python3 tests/test_public_source_safety.py
 python3 tests/test_diagnostic_export_contract.py
+python3 tests/test_feature_provenance_contract.py
+node tests/test_provenance_ui.js
+make build/test-feature-provenance
+./build/test-feature-provenance
+make build/test-diagnostic-export
+./build/test-diagnostic-export
+make build/libreecho-web
+python3 tests/test_feature_provenance_http.py
 sh tests/test_source_provenance.sh
 sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
