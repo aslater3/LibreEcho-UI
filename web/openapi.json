@@ -1275,7 +1275,7 @@
      "Diagnostics"
     ],
     "summary": "Prepare redacted diagnostics",
-    "description": "Authenticated action returning a bounded, deterministic-ordered JSON diagnostic bundle. It includes public-safe release identity and available runtime, network, audio, wake-word, Bluetooth, playback, privacy, reset/pstore-summary and bounded log evidence. Wi-Fi credentials, SSID/BSSID, IP/MAC/Bluetooth addresses, owner identifiers, tokens, private paths, media metadata, signing material and raw pstore are omitted or redacted. Missing or malformed subsystem data is represented as unavailable without failing the export.",
+    "description": "Authenticated action returning a bounded, deterministic-ordered JSON diagnostic bundle. It includes public-safe release identity, canonical components and transaction state/result observations, and available runtime, network, audio, wake-word, Bluetooth, playback, privacy, reset/pstore-summary and bounded log evidence. Wi-Fi credentials, SSID/BSSID, IP/MAC/Bluetooth addresses, owner identifiers, tokens, private paths, media metadata, signing material and raw pstore are omitted or redacted. Missing or malformed subsystem data is represented as unavailable without failing the export.",
     "security": [
      {
       "BearerAuth": []
@@ -1738,7 +1738,7 @@
      "System"
     ],
     "summary": "Read build and source provenance",
-    "description": "Returns the OS version, source commit, clean/dirty source flag, and content digest embedded at build time.",
+    "description": "Returns the OS version, source commit, clean/dirty source flag, content digest, and canonical bounded `components` observations. Each component reports the allow-listed feature_id, release, source_commit, effective_payload_sha256 (the observed canonical payload hash only when it matches metadata), nullable runtime_capsule_sha256, candidate_kind, candidate_payload_sha256, candidate_status, running_daemon_sha256, running_daemon_status, effective state, activation, and last_transaction_result. Hashing is incremental in the daemon's existing event loop: `pending` means actual-byte verification is still in progress and no manifest hash is trusted; `present` is emitted only after actual bytes match metadata. Each artifact is limited to 512 MiB (536870912 bytes). Oversized, read-error, growth-unstable, or identity/stat-unstable artifacts are `unavailable`; missing artifacts are `missing`; readable same-identity byte mismatches are `mismatch`. Candidate kind is runtime only for `.runtime.squashfs` and replacement only for `.payload.squashfs`, preventing a full replacement from masquerading as a runtime capsule. Top-level transaction_state and last_transaction_result mirror the read-only Platform transaction state. Missing or malformed identity is unavailable/null; releases are never inferred from OS version or filenames. The five-component JSON is bounded to 8192 bytes.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -2020,7 +2020,7 @@
      "System"
     ],
     "summary": "Read signed A/B update and source-check state",
-    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, and whether the installed update helper supports unsigned manual uploads.",
+    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, whether the installed update helper supports unsigned manual uploads, and canonical bounded components plus transaction_state and last_transaction_result observations.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"

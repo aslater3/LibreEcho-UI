@@ -1,4 +1,5 @@
 #include "http_server.h"
+#include "feature_provenance.h"
 #include "adapter/adapter.h"
 #include "adapter/voice_stream.h"
 #include <arpa/inet.h>
@@ -204,7 +205,9 @@ return-1;
 return-1;
 }if(o->run_user[0]){struct passwd*pw=getpwnam(o->run_user);if(!pw){fprintf(stderr,"Unknown privilege-drop user: %s\n",o->run_user);close(ls);return-1;}if(setgroups(0,0)||setgid(pw->pw_gid)||setuid(pw->pw_uid)){perror("privilege drop");close(ls);return-1;}fprintf(stderr,"Dropped privileges to %s\n",o->run_user);}
 fprintf(stderr,"LibreEcho listening on http://%s:%d (%s backend)\n",o->listen_host,o->port,le_backend_mode(api->backend));
-while(*running){p[0].fd=ls;
+while(*running){
+le_feature_provenance_tick();
+p[0].fd=ls;
 p[0].events=POLLIN;
 for(i=0;
 i<max;
