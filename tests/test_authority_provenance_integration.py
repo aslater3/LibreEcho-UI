@@ -88,6 +88,7 @@ def check_http(fixture):
                 assert time.monotonic() < deadline and server.poll() is None, 'HTTP server not ready'
                 time.sleep(0.02)
         assert request('/api/v1/provenance')[0] == 401
+        csrf = response['data']['csrf_token']
         password = secrets.token_urlsafe(24)
         status, response = request('/api/v1/auth/bootstrap', 'POST',
                                    {'username': 'fixture', 'password': password, 'password_confirm': password},
@@ -105,10 +106,23 @@ def check_http(fixture):
             time.sleep(0.02)
         validate_authority(authority)
         assert next(f for f in authority['features'] if f['feature_id'] == 'stt')['release'] == '0.13.13'
-        fixture.signature.unlink()
-        status, response = request('/api/v1/provenance', headers=auth)
-        assert status == 200 and not response['data']['authority_provenance']['available']
-        validate_authority(response['data']['authority_provenance'])
+        for available in (True, False):
+            if not available:
+                fixture.signature.unlink()
+            for path, method, fields in (
+                ('/provenance', 'GET', ('data', 'authority_provenance')),
+                ('/system/update', 'GET', ('data', 'authority_provenance')),
+                ('/diagnostics/export', 'POST', ('data', 'release_identity', 'authority_provenance')),
+            ):
+                status, response = request('/api/v1' + path, method,
+                                           {} if method == 'POST' else None,
+                                           {**auth, 'X-LibreEcho-CSRF': csrf})
+                assert status == 200, (path, status, response)
+                observed = response
+                for field in fields:
+                    observed = observed[field]
+                assert observed['available'] is available, (path, observed)
+                validate_response(response, path, method.lower(), fields)
     finally:
         server.terminate()
         try:
@@ -119,18 +133,46 @@ def check_http(fixture):
         assert server.poll() is not None
 
 
+def json_schema(node):
+    if isinstance(node, list):
+        return [json_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    result = {key: json_schema(item) for key, item in node.items() if key != 'nullable'}
+    return {'anyOf': [result, {'type': 'null'}]} if node.get('nullable') else result
+
+
 def validate_authority(value):
     import jsonschema
     document = json.loads((ROOT / 'web/openapi.json').read_text())
-    schema = document['components']['schemas']['AuthorityProvenance']
-    def json_schema(node):
-        if isinstance(node, list):
-            return [json_schema(item) for item in node]
-        if not isinstance(node, dict):
-            return node
-        result = {key: json_schema(item) for key, item in node.items() if key != 'nullable'}
-        return {'anyOf': [result, {'type': 'null'}]} if node.get('nullable') else result
-    jsonschema.validate(value, json_schema(schema))
+    jsonschema.validate(value, json_schema(document['components']['schemas']['AuthorityProvenance']))
+
+
+def validate_response(value, path, method, fields):
+    import copy
+    import jsonschema
+    document = json.loads((ROOT / 'web/openapi.json').read_text())
+    response = document['paths'][path][method]['responses']['200']
+    if '$ref' in response:
+        response = document['components']['responses'][response['$ref'].rsplit('/', 1)[1]]
+    schema = json_schema({'components': document['components'], **response['content']['application/json']['schema']})
+    assert isinstance(schema, dict)
+    jsonschema.validate(value, schema)
+    for mutation in ('missing', 'malformed'):
+        invalid = copy.deepcopy(value)
+        parent = invalid
+        for field in fields[:-1]:
+            parent = parent[field]
+        if mutation == 'missing':
+            del parent[fields[-1]]
+        else:
+            parent[fields[-1]]['available'] = 'not-a-boolean'
+        try:
+            jsonschema.validate(invalid, schema)
+        except jsonschema.ValidationError:
+            pass
+        else:
+            raise AssertionError(f'{path} response schema accepted {mutation} signed authority')
 
 
 def child(folder, case):

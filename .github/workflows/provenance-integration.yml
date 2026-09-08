@@ -31,7 +31,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: aslater3/LibreEcho-Platform
-          ref: f6b569ded42e0a23c37cddd48590b7b8338f578c
+          ref: c34d26e7f2266191e056f7b8ed2822f524f46d75
           path: platform
           persist-credentials: false
       - name: Install host-only verification dependencies

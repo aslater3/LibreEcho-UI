@@ -1412,7 +1412,7 @@
      "Diagnostics"
     ],
     "summary": "Prepare redacted diagnostics",
-    "description": "Authenticated action returning a bounded, deterministic-ordered JSON diagnostic bundle. It includes public-safe release identity, canonical components and transaction state/result observations, and available runtime, network, audio, wake-word, Bluetooth, playback, privacy, reset/pstore-summary and bounded log evidence. Wi-Fi credentials, SSID/BSSID, IP/MAC/Bluetooth addresses, owner identifiers, tokens, private paths, media metadata, signing material and raw pstore are omitted or redacted. Missing or malformed subsystem data is represented as unavailable without failing the export.",
+    "description": "Authenticated action returning a bounded, deterministic-ordered JSON diagnostic bundle. It includes public-safe release identity, canonical components and transaction state/result observations, and available runtime, network, audio, wake-word, Bluetooth, playback, privacy, reset/pstore-summary and bounded log evidence. Wi-Fi credentials, SSID/BSSID, IP/MAC/Bluetooth addresses, owner identifiers, tokens, private paths, media metadata, signing material and raw pstore are omitted or redacted. Missing or malformed subsystem data is represented as unavailable without failing the export. data.release_identity.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity.",
     "security": [
      {
       "BearerAuth": []
@@ -1425,7 +1425,42 @@
     ],
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Successful response including separately verified signed authority (or explicitly unavailable authority).",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "required": [
+              "release_identity"
+             ],
+             "properties": {
+              "release_identity": {
+               "type": "object",
+               "required": [
+                "authority_provenance"
+               ],
+               "properties": {
+                "authority_provenance": {
+                 "$ref": "#/components/schemas/AuthorityProvenance"
+                }
+               }
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
      }
     }
    }
@@ -2184,10 +2219,37 @@
      "System"
     ],
     "summary": "Read signed A/B update and source-check state",
-    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, whether the installed update helper supports unsigned manual uploads, and canonical bounded components plus transaction_state and last_transaction_result observations.",
+    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, whether the installed update helper supports unsigned manual uploads, and canonical bounded components plus transaction_state and last_transaction_result observations. data.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity.",
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Successful response including separately verified signed authority (or explicitly unavailable authority).",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "required": [
+              "authority_provenance"
+             ],
+             "properties": {
+              "authority_provenance": {
+               "$ref": "#/components/schemas/AuthorityProvenance"
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
      }
     }
    }

@@ -984,6 +984,12 @@ JSON object is the request body. The response is ordered consistently and is
 capped at 24 KiB of bundle data, so this endpoint does not create a server-side
 temporary file or archive.
 
+The bundle includes `data.release_identity.authority_provenance`, the same
+separately verified signed-authority object returned at
+`data.authority_provenance` by `GET /api/v1/provenance` and
+`GET /api/v1/system/update`. Missing, invalid, stale, or timed-out authority is
+explicitly unavailable, not inferred from original build metadata.
+
 The bundle includes public-safe product/release identity (including source
 commit/digest, running web-service identity, channel, slot/update state and
 kernel/UI/platform fields when available), system resource summaries,

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Focused contract checks for the bounded feature provenance UI slice."""
+import json
 from pathlib import Path
 
 api = Path("src/api.c").read_text()
@@ -49,4 +50,28 @@ assert "LE_FEATURE_CONTROL_MAX" in formatter
 assert "LE_FEATURE_RECORD_MAX" in formatter
 assert "LE_HASH_PENDING" in formatter
 assert "le_feature_provenance_tick" in Path("src/http_server.c").read_text()
+document = json.loads(openapi)
+
+
+def expanded(node):
+    if "$ref" in node:
+        target = document
+        for part in node["$ref"].removeprefix("#/").split("/"):
+            target = target[part]
+        return expanded(target)
+    return [node] + [item for child in node.get("allOf", []) for item in expanded(child)]
+
+
+for path, method, fields in (
+    ("/provenance", "get", ("data", "authority_provenance")),
+    ("/system/update", "get", ("data", "authority_provenance")),
+    ("/diagnostics/export", "post", ("data", "release_identity", "authority_provenance")),
+):
+    response = expanded(document["paths"][path][method]["responses"]["200"])[0]
+    schema = response["content"]["application/json"]["schema"]
+    for field in fields:
+        nodes = expanded(schema)
+        assert any(field in node.get("required", []) for node in nodes), (path, field)
+        schema = [node["properties"][field] for node in nodes if field in node.get("properties", {})][-1]
+    assert schema == {"$ref": "#/components/schemas/AuthorityProvenance"}, path
 print("feature provenance contract: ok")
