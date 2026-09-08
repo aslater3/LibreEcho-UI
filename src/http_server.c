@@ -1,5 +1,6 @@
 #include "http_server.h"
 #include "feature_provenance.h"
+#include "authority_provenance.h"
 #include "adapter/adapter.h"
 #include "adapter/voice_stream.h"
 #include <arpa/inet.h>
@@ -207,6 +208,7 @@ return-1;
 fprintf(stderr,"LibreEcho listening on http://%s:%d (%s backend)\n",o->listen_host,o->port,le_backend_mode(api->backend));
 while(*running){
 le_feature_provenance_tick();
+le_authority_provenance_tick();
 p[0].fd=ls;
 p[0].events=POLLIN;
 for(i=0;

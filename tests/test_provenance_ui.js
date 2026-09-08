@@ -108,11 +108,17 @@ const components = ['airplay2', 'tts', 'wakeword', 'stt', 'assistant'].map((feat
 const html = provenancePanel({
     os_version: 'LibreEcho OS 0.13.11', source_commit: hashes.source,
     source_digest: hashes.effective, transaction_state: 'none',
-    last_transaction_result: 'installed', components
+    last_transaction_result: 'installed', components,
+    authority_provenance: {
+        available: true, transaction_id: 'txn-01314',
+        manifest_sha256: hashes.effective, manifest_sig_sha256: hashes.capsule,
+        features: [{ feature_id: 'tts', release: 'radar-puffin-v0.13.14',
+            source_commit: hashes.source, kind: 'runtime' }]
+    }
 });
-assert.strictEqual((html.match(/<tr>/g) || []).length, 6, 'header plus five component rows');
-assert.strictEqual((html.match(/<details/g) || []).length, 6, 'five rows plus build identity details');
-assert.strictEqual((html.match(/<summary/g) || []).length, 6, 'every native details control has a summary');
+assert.strictEqual((html.match(/<tr>/g) || []).length, 8, 'component header/five rows plus authority header/one row');
+assert.strictEqual((html.match(/<details/g) || []).length, 7, 'five rows plus build identity and authority details');
+assert.strictEqual((html.match(/<summary/g) || []).length, 7, 'every native details control has a summary');
 assert(html.includes('class="data-table provenance-table"'));
 assert(html.includes('radar-puffin-v0.13.11'));
 assert(html.includes('Installed · Running · Candidate runtime present · Restart required · Installed'));
@@ -124,8 +130,11 @@ assert(html.includes('Candidate (runtime) SHA-256'));
 assert(html.includes('Candidate status'));
 assert(html.includes('Copy source commit'));
 assert(html.includes('Copy build source digest'));
+assert(html.includes('Signed authorizing authority'));
+assert(html.includes('Authorizing release'));
+assert(html.includes('radar-puffin-v0.13.14'));
 assert(html.includes('Unavailable'), 'null and missing identity use an honest friendly fallback');
-const firstTechnicalDetails = html.indexOf('<details class="provenance-details">');
+const firstTechnicalDetails = html.indexOf('<details class="provenance-details');
 assert(firstTechnicalDetails > 0);
 assert(!html.slice(0, firstTechnicalDetails).includes(hashes.source), 'full source commit is not inline by default');
 assert(!html.slice(0, firstTechnicalDetails).includes(hashes.effective), 'full payload hash is not inline by default');

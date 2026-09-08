@@ -1056,6 +1056,44 @@ asset, so a full replacement cannot be presented as a runtime capsule. `candidat
 observed. The array is limited to the five allow-listed feature IDs and the
 encoded component data is bounded to 8192 bytes.
 
+`authority_provenance` is a separate read-only signed-authority observation, also
+included in diagnostic export. The UI asynchronously runs Platform's existing
+`libreecho-feature-transaction provenance` command; it does not introduce a second
+signature verifier or verify signatures in the HTTP request handler. The helper
+verifies committed system authority, retained runtime authority, the installed
+transaction identity, and current canonical bytes before emitting identity.
+
+On success it has `available: true`, schema `libreecho-feature-provenance-v1`,
+`transaction_id`, `installed_sha256`, `manifest_sha256`, `manifest_sig_sha256`, and
+five `features`. Each feature has `feature_id`, `action` (`preserve`, `runtime`, or
+`replace`), `kind` (`base` or `runtime`), signed authorizing `release` and
+`source_commit`, `payload_sha256`, `manifest_sha256`, nullable `runtime_sha256` and
+`runtime_manifest_sha256`, and `daemon_sha256`. The latter measures the mounted
+executable, **not a running process**. A preserved runtime capsule retains its own
+older signed authority. These are authorizing identities, not a claim of the
+original feature build's source; they do not replace the legacy `components`
+identity fields.
+
+Missing, stale, partial, tampered, timed-out, or otherwise unverifiable evidence
+produces `available: false`, the same schema, `reason: "unavailable"`,
+`transaction_id: null`, and `features: []`, with no release/source claims. Relevant
+canonical payload, manifest, mounted daemon, authority/signature, transaction,
+public-key and verifier changes invalidate the observation. Failed verification
+is retried with bounded backoff; the HTTP loop remains serviceable. No OTA state,
+confirmation, settings, or feature data is changed by this read-only path. About
+and System display signed authorizing identity in native expandable details,
+separate from measured component status and running-process hashes.
+
+Host verification after `make`:
+
+```sh
+LIBREECHO_PLATFORM_SRC=/path/to/companion-platform python3 tests/test_authority_provenance_integration.py
+```
+
+The dedicated `Signed provenance integration` workflow pins the companion
+Platform commit and uses fresh ephemeral test keys, not release signing keys.
+Host passes do not claim hardware acceptance or establish target verifier timing.
+
 ```json
 {
   "ok": true,
@@ -1066,6 +1104,7 @@ encoded component data is bounded to 8192 bytes.
     "source_digest": "public-build-digest",
     "transaction_state": "none",
     "last_transaction_result": "idle",
+    "authority_provenance": {"available": false, "schema": "libreecho-feature-provenance-v1", "reason": "unavailable", "transaction_id": null, "features": []},
     "components": [
       {
         "feature_id": "tts",

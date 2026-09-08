@@ -42,7 +42,7 @@ WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
 	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
-SOURCES = src/main.c src/http_server.c src/api.c src/diagnostic_export.c src/feature_provenance.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/factory_reset.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+SOURCES = src/main.c src/http_server.c src/api.c src/diagnostic_export.c src/feature_provenance.c src/authority_provenance.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/factory_reset.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -133,6 +133,11 @@ $(BUILD)/test-button-settings: tests/test_button_settings.c \
 	$(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
 		$^ $(LDFLAGS) -lm -o $@
+
+$(BUILD)/test-authority-provenance: tests/test_authority_provenance.c \
+	src/authority_provenance.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
 $(BUILD)/test-feature-provenance: tests/test_feature_provenance.c \
 	src/feature_provenance.c src/json.c
