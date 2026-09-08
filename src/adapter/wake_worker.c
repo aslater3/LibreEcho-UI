@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "wake_worker.h"
+#include "wake_accept.h"
 
 #include "wake_engine.h"
 
@@ -144,8 +145,9 @@ static void decode_score(struct wake_worker_impl *worker,
     }
     if (decoder->observations[peak].detection_sample <
             decoder->lockout_until_sample ||
-        !decoder->observations[peak].vad_active ||
-        decoder->scores[peak] < accept_threshold || support < 2)
+        !le_wake_accept(decoder->scores[peak], accept_threshold, support,
+                        decoder->observations[peak].vad_active,
+                        decoder->observations[peak].playback_active))
         return;
 
     ++worker->metrics.events;
