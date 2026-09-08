@@ -1104,6 +1104,14 @@ void le_feature_transaction_state_read(le_feature_transaction_state *state)
         snprintf(state->state, sizeof(state->state), "unknown");
         snprintf(state->last_result, sizeof(state->last_result), "unknown");
     } else if (rollback_file == LE_FILE_READY) {
+        /* Platform archives pending verbatim before confirmation, not a new phase. */
+        if (!text_value(rollback_text, "transaction_id", value, sizeof(value)) ||
+            !text_value(rollback_text, "phase", value, sizeof(value)) ||
+            strcmp(value, "prepared")) {
+            snprintf(state->state, sizeof(state->state), "unknown");
+            snprintf(state->last_result, sizeof(state->last_result), "unknown");
+            return;
+        }
         state->rollback = 1;
         snprintf(state->state, sizeof(state->state), "rollback");
         snprintf(state->last_result, sizeof(state->last_result), "rolled-back");

@@ -421,13 +421,50 @@ static void assert_invalid_record_unknown(const char *name, int kind)
 
 static void test_invalid_transaction_records_fail_closed(void)
 {
-    static const char *names[] = {"pending", "feature-commit", "installed"};
+    static const char *names[] = {"pending", "feature-commit", "installed", "rolled-back"};
     size_t i;
     int kind;
     setup();
     for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
         for (kind = 0; kind < 3; ++kind)
             assert_invalid_record_unknown(names[i], kind);
+    le_feature_provenance_shutdown();
+}
+
+static void test_rollback_record_validation(void)
+{
+    static const char *invalid[] = {
+        "", "not a transaction record\n", "phase=prepared\n",
+        "transaction_id=txn-failed\n",
+        "transaction_id=\nphase=prepared\n",
+        "transaction_id=txn-failed\nphase=corrupt\n",
+        "transaction_id=txn-failed\nphase=installed\n",
+        "transaction_id=txn-failed\nphase=confirmed\n"
+    };
+    char path[1024];
+    size_t i;
+    le_feature_transaction_state transaction;
+    setup();
+    join_path(path, sizeof(path), update_root, "/rolled-back");
+    for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        write_file(path, invalid[i]);
+        le_feature_transaction_state_read(&transaction);
+        assert(!strcmp(transaction.state, "unknown"));
+        assert(!strcmp(transaction.last_result, "unknown"));
+        assert(!transaction.rollback);
+    }
+    /* Platform record_fallback() copies the prepared pending record verbatim. */
+    write_file(path, "schema=2\ntransaction_id=txn-failed\nversion=0.13.14\n"
+               "slot=B\nfeature_ids=tts\nphase=prepared\nstate=reboot-pending\n");
+    le_feature_transaction_state_read(&transaction);
+    assert(!strcmp(transaction.state, "rollback"));
+    assert(!strcmp(transaction.last_result, "rolled-back"));
+    assert(transaction.rollback);
+    assert(!transaction.pending && !transaction.commit_pending && !transaction.reboot_required);
+    assert(unlink(path) == 0);
+    le_feature_transaction_state_read(&transaction);
+    assert(!strcmp(transaction.state, "none"));
+    assert(!strcmp(transaction.last_result, "idle"));
     le_feature_provenance_shutdown();
 }
 
@@ -556,7 +593,7 @@ static void test_authority_identity_and_transaction_precedence(void)
     assert_component_contains(output, "assistant", "\"source_commit\":\"unavailable\"");
 
     join_path(path, sizeof(path), update_root, "/rolled-back");
-    write_file(path, "transaction_id=txn-old\nphase=rolled-back\n");
+    write_file(path, "transaction_id=txn-old\nphase=prepared\n");
     le_feature_transaction_state transaction;
     le_feature_transaction_state_read(&transaction);
     assert(!strcmp(transaction.state, "none"));
@@ -598,6 +635,7 @@ int main(void)
     test_manifest_replacement_during_incremental_read();
     test_production_manifest_bounds_and_filename_allowlist();
     test_invalid_transaction_records_fail_closed();
+    test_rollback_record_validation();
     test_candidate_control_namespace_fails_closed();
     test_authority_identity_and_transaction_precedence();
     puts("feature provenance formatter: ok");

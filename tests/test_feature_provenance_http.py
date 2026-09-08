@@ -488,6 +488,29 @@ def main() -> int:
             assert diagnostic_data["release_identity"]["transaction_state"] == "commit"
             assert diagnostic_data["release_identity"]["last_transaction_result"] == "commit-pending"
             print("POST /api/v1/diagnostics/export: HTTP 200; exact feature payload/runtime fields")
+            # With no live/current record, invalid rollback evidence is unknown.
+            # Platform copies pending verbatim; a valid rollback retains prepared.
+            (update_root / "feature-commit").unlink()
+            for record, expected_state, expected_result in (
+                ("", "unknown", "unknown"),
+                ("not a transaction record\n", "unknown", "unknown"),
+                ("transaction_id=txn-failed\nphase=corrupt\n", "unknown", "unknown"),
+                ("schema=2\ntransaction_id=txn-failed\nphase=prepared\n", "rollback", "rolled-back"),
+            ):
+                (update_root / "rolled-back").write_text(record)
+                for endpoint in ("/api/v1/provenance", "/api/v1/system/update", "/api/v1/diagnostics/export"):
+                    exporting = endpoint.endswith("/export")
+                    status, raw, response = http(
+                        base_url, endpoint, "POST" if exporting else "GET",
+                        {} if exporting else None,
+                        {**auth, "X-LibreEcho-CSRF": csrf} if exporting else auth,
+                    )
+                    assert_status(status, raw, 200, "rollback record validation")
+                    data = response["data"]["release_identity"] if exporting else response["data"]
+                    assert data["transaction_state"] == expected_state, data
+                    assert data["last_transaction_result"] == expected_result, data
+                    assert all(item["last_transaction_result"] == expected_result for item in components(data))
+            print("rollback records: malformed/empty remain unknown; copied prepared record reports rollback across all three APIs")
             print("http_smoke: ok")
     finally:
         if server is not None and server.poll() is None:
