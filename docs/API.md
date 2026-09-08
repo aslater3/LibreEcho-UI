@@ -1069,8 +1069,8 @@ encoded component data is bounded to 8192 bytes.
     "components": [
       {
         "feature_id": "tts",
-        "release": "radar-puffin-v0.13.11",
-        "source_commit": "0123456789012345678901234567890123456789",
+        "release": "unavailable",
+        "source_commit": "unavailable",
         "effective_payload_sha256": "unavailable",
         "runtime_capsule_sha256": null,
         "candidate_kind": "unavailable",

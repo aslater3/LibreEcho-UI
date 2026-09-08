@@ -30,6 +30,12 @@ typedef enum {
     LE_HASH_PENDING = 2
 } le_hash_result;
 
+typedef enum {
+    LE_FILE_MISSING = 0,
+    LE_FILE_READY = 1,
+    LE_FILE_UNAVAILABLE = -1
+} le_file_result;
+
 typedef struct {
     int valid;
     char path[LE_FEATURE_PATH_MAX];
@@ -219,7 +225,7 @@ static int path_join(char *out, size_t size, const char *root, const char *name)
     return n >= 0 && (size_t)n < size;
 }
 
-static int read_bounded(const char *path, char *out, size_t size)
+static le_file_result read_bounded_status(const char *path, char *out, size_t size)
 {
     int fd;
     struct stat st, after;
@@ -227,18 +233,19 @@ static int read_bounded(const char *path, char *out, size_t size)
     size_t used = 0;
 
     if (!out || size < 2)
-        return 0;
+        return LE_FILE_UNAVAILABLE;
     out[0] = 0;
     fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK
 #ifdef O_NOFOLLOW
               | O_NOFOLLOW
 #endif
     );
-    if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) ||
+    if (fd < 0)
+        return errno == ENOENT ? LE_FILE_MISSING : LE_FILE_UNAVAILABLE;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) ||
         st.st_size < 0 || (off_t)st.st_size >= (off_t)size) {
-        if (fd >= 0)
-            close(fd);
-        return 0;
+        close(fd);
+        return LE_FILE_UNAVAILABLE;
     }
     while (used < (size_t)st.st_size &&
            (n = read(fd, out + used, (size_t)st.st_size - used)) > 0)
@@ -248,10 +255,15 @@ static int read_bounded(const char *path, char *out, size_t size)
     close(fd);
     if (n < 0 || used != (size_t)st.st_size || after.st_size != st.st_size) {
         out[0] = 0;
-        return 0;
+        return LE_FILE_UNAVAILABLE;
     }
     out[used] = 0;
-    return 1;
+    return LE_FILE_READY;
+}
+
+static int read_bounded(const char *path, char *out, size_t size)
+{
+    return read_bounded_status(path, out, size) == LE_FILE_READY;
 }
 
 static int text_key_present(const char *text, const char *key)
@@ -297,6 +309,72 @@ static int text_value(const char *text, const char *key, char *out, size_t size)
         line = end + 1;
     }
     return 0;
+}
+
+static int control_key_allowed(const char *key, size_t key_length)
+{
+    static const char *global_keys[] = {
+        "format", "manifest_version", "board", "soc", "architecture",
+        "image_profile", "transaction_type", "transaction_id", "version",
+        "update_channel", "service_profile", "feature_policy",
+        "minimum_updater_schema", "feature_asset_base", "commit_policy",
+        "feature_ids", "boot_filename", "boot_size", "boot_sha256"
+    };
+    static const char *feature_fields[] = {
+        "action", "asset", "size", "sha256", "manifest_asset", "manifest_size",
+        "manifest_sha256", "activation", "base_payload_sha256",
+        "base_manifest_sha256", "daemon_path", "daemon_sha256", "release",
+        "source_commit"
+    };
+    char value[128];
+    size_t i, j;
+    int n;
+    if (!key || !key_length || key_length >= sizeof(value))
+        return 0;
+    memcpy(value, key, key_length);
+    value[key_length] = 0;
+    for (i = 0; i < sizeof(global_keys) / sizeof(global_keys[0]); ++i)
+        if (!strcmp(value, global_keys[i]))
+            return 1;
+    for (i = 0; i < LE_FEATURE_COUNT; ++i)
+        for (j = 0; j < sizeof(feature_fields) / sizeof(feature_fields[0]); ++j) {
+            n = snprintf(value, sizeof(value), "feature_%s_%s", feature_ids[i],
+                         feature_fields[j]);
+            if (n >= 0 && (size_t)n < sizeof(value) && key_length == (size_t)n &&
+                !memcmp(value, key, key_length))
+                return 1;
+        }
+    return 0;
+}
+
+static int control_document_valid(const char *text)
+{
+    const char *line = text;
+    int declarations = 0;
+    if (!text)
+        return 0;
+    while (*line) {
+        const char *end = strchr(line, '\n');
+        const char *equals = memchr(line, '=', end ? (size_t)(end - line) : strlen(line));
+        size_t length = end ? (size_t)(end - line) : strlen(line);
+        size_t key_length;
+        if (!length) {
+            if (!end)
+                break;
+            line = end + 1;
+            continue;
+        }
+        if (!equals || equals == line || equals == line + length - 1)
+            return 0;
+        key_length = (size_t)(equals - line);
+        if (!control_key_allowed(line, key_length))
+            return 0;
+        declarations = 1;
+        if (!end)
+            break;
+        line = end + 1;
+    }
+    return declarations;
 }
 
 static int control_file_value(const char *path, const char *key, char *out, size_t size)
@@ -834,18 +912,20 @@ static void candidate_identity(int index, char *kind, size_t kind_size,
 {
     char manifest_path[LE_FEATURE_PATH_MAX], text[LE_FEATURE_CONTROL_MAX + 1U], action[32], asset[160];
     char expected[80], path[LE_FEATURE_PATH_MAX], observed[65];
-    struct stat listed;
     le_hash_result result;
+    le_file_result control_result;
     snprintf(kind, kind_size, "unavailable");
     snprintf(status, status_size, "unavailable");
     snprintf(hash, hash_size, "unavailable");
     if (!path_join(manifest_path, sizeof(manifest_path), update_root(), "staging/manifest"))
         return;
-    if (!read_bounded(manifest_path, text, sizeof(text))) {
-        if (lstat(manifest_path, &listed) && errno == ENOENT)
-            snprintf(status, status_size, "missing");
+    control_result = read_bounded_status(manifest_path, text, sizeof(text));
+    if (control_result == LE_FILE_MISSING) {
+        snprintf(status, status_size, "missing");
         return;
     }
+    if (control_result != LE_FILE_READY || !control_document_valid(text))
+        return;
     {
         char key[128], asset_key[128], hash_key[128];
         snprintf(key, sizeof(key), "feature_%s_action", feature_ids[index]);
@@ -953,34 +1033,43 @@ void le_feature_transaction_state_read(le_feature_transaction_state *state)
     memset(state, 0, sizeof(*state));
     snprintf(state->state, sizeof(state->state), "none");
     snprintf(state->last_result, sizeof(state->last_result), "idle");
-    pending_file = path_join(path, sizeof(path), update_root(), "pending") &&
-                   read_bounded(path, pending_text, sizeof(pending_text));
-    if (pending_file) {
+    pending_file = path_join(path, sizeof(path), update_root(), "pending") ?
+                   read_bounded_status(path, pending_text, sizeof(pending_text)) :
+                   LE_FILE_UNAVAILABLE;
+    if (pending_file == LE_FILE_READY) {
         pending_valid = text_value(pending_text, "transaction_id", pending_tx, sizeof(pending_tx)) &&
                         text_value(pending_text, "phase", value, sizeof(value)) &&
                         (!strcmp(value, "prepared") || !strcmp(value, "confirmed"));
         if (!pending_valid)
             inconsistent = 1;
+    } else if (pending_file == LE_FILE_UNAVAILABLE) {
+        inconsistent = 1;
     }
-    commit_file = path_join(path, sizeof(path), update_root(), "feature-commit") &&
-                  read_bounded(path, commit_text, sizeof(commit_text));
-    if (commit_file) {
+    commit_file = path_join(path, sizeof(path), update_root(), "feature-commit") ?
+                  read_bounded_status(path, commit_text, sizeof(commit_text)) :
+                  LE_FILE_UNAVAILABLE;
+    if (commit_file == LE_FILE_READY) {
         commit_valid = text_value(commit_text, "transaction_id", commit_tx, sizeof(commit_tx)) &&
                        text_value(commit_text, "phase", value, sizeof(value)) &&
                        (!strcmp(value, "prepared") || !strcmp(value, "confirmed"));
         if (!commit_valid)
             inconsistent = 1;
+    } else if (commit_file == LE_FILE_UNAVAILABLE) {
+        inconsistent = 1;
     }
     if (pending_valid && commit_valid && strcmp(pending_tx, commit_tx))
         inconsistent = 1;
-    installed_file = path_join(path, sizeof(path), update_root(), "installed") &&
-                     read_bounded(path, installed_text, sizeof(installed_text));
-    if (installed_file) {
+    installed_file = path_join(path, sizeof(path), update_root(), "installed") ?
+                     read_bounded_status(path, installed_text, sizeof(installed_text)) :
+                     LE_FILE_UNAVAILABLE;
+    if (installed_file == LE_FILE_READY) {
         installed_valid = text_value(installed_text, "transaction_id", installed_tx, sizeof(installed_tx)) &&
                           text_value(installed_text, "phase", value, sizeof(value)) &&
                           !strcmp(value, "installed");
         if (!installed_valid)
             inconsistent = 1;
+    } else if (installed_file == LE_FILE_UNAVAILABLE) {
+        inconsistent = 1;
     }
     if (inconsistent) {
         snprintf(state->state, sizeof(state->state), "unknown");
@@ -1008,9 +1097,13 @@ void le_feature_transaction_state_read(le_feature_transaction_state *state)
         snprintf(state->last_result, sizeof(state->last_result), "installed");
         return;
     }
-    rollback_file = path_join(path, sizeof(path), update_root(), "rolled-back") &&
-                    read_bounded(path, rollback_text, sizeof(rollback_text));
-    if (rollback_file) {
+    rollback_file = path_join(path, sizeof(path), update_root(), "rolled-back") ?
+                    read_bounded_status(path, rollback_text, sizeof(rollback_text)) :
+                    LE_FILE_UNAVAILABLE;
+    if (rollback_file == LE_FILE_UNAVAILABLE) {
+        snprintf(state->state, sizeof(state->state), "unknown");
+        snprintf(state->last_result, sizeof(state->last_result), "unknown");
+    } else if (rollback_file == LE_FILE_READY) {
         state->rollback = 1;
         snprintf(state->state, sizeof(state->state), "rollback");
         snprintf(state->last_result, sizeof(state->last_result), "rolled-back");
