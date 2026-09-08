@@ -78,6 +78,10 @@ python3 tests/test_public_source_safety.py
 python3 tests/test_diagnostic_export_contract.py
 python3 tests/test_feature_provenance_contract.py
 node tests/test_provenance_ui.js
+make build/test-authority-provenance
+./build/test-authority-provenance
+# Real signed cross-repository integration runs in provenance-integration.yml
+# with its exact Platform checkout; it is distinct from the mock C reader test.
 make build/test-feature-provenance
 ./build/test-feature-provenance
 make build/test-diagnostic-export
