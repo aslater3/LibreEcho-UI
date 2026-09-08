@@ -185,7 +185,7 @@ def main() -> int:
                 "feature_id": "airplay2",
                 "format": "squashfs-lz4",
                 "payload": {
-                    "filename": "payload.squashfs",
+                    "filename": "airplay2.squashfs",
                     "sha256": legacy_hash,
                     "size": len(legacy_payload),
                 },
@@ -201,7 +201,7 @@ def main() -> int:
                 f"feature_tts_sha256={staged_runtime_hash}\n"
                 "feature_tts_activation=reboot\n", encoding="ascii"
             )
-            (update_root / "feature-commit").write_text("phase=prepared\n", encoding="ascii")
+            (update_root / "feature-commit").write_text("transaction_id=txn-live\nphase=prepared\n", encoding="ascii")
             print("fixture_json_validation: ok (json.dump + python -m json.tool)")
 
             port = free_loopback_port()
@@ -300,7 +300,7 @@ def main() -> int:
             print("POST /api/v1/setup: HTTP 200; setup_completed=true; marker=present")
 
             expected_tts = {
-                "feature_id": "tts", "release": release, "source_commit": source,
+                "feature_id": "tts", "release": "unavailable", "source_commit": "unavailable",
                 "effective_payload_sha256": base_hash, "runtime_capsule_sha256": runtime_hash,
                 "candidate_kind": "runtime", "candidate_payload_sha256": staged_runtime_hash,
                 "candidate_status": "present",
@@ -312,7 +312,7 @@ def main() -> int:
                 "feature_id": "airplay2", "release": "unavailable", "source_commit": "unavailable",
                 "effective_payload_sha256": legacy_hash, "runtime_capsule_sha256": None,
                 "candidate_kind": "unavailable", "candidate_payload_sha256": "unavailable",
-                "candidate_status": "unavailable",
+                "candidate_status": "missing",
                 "running_daemon_sha256": "not-running", "running_daemon_status": "not-running",
                 "effective": "present", "activation": "unavailable", "last_transaction_result": "commit-pending",
             }
@@ -438,7 +438,7 @@ def main() -> int:
                 "product_release": "radar-puffin-v0.13.11",
                 "source_commit": source,
                 "payload": {
-                    "filename": "payload.squashfs",
+                    "filename": "assistant.squashfs",
                     "sha256": "0" * 64,
                     "size": 512 * 1024 * 1024,
                 },

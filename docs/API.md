@@ -1032,23 +1032,26 @@ Returns additive build provenance and the bounded, read-only feature component
 observations used by About, System, OTA status, and diagnostic export. The
 `components` array follows the Platform feature manifest and
 transaction journal contract; the UI does not derive a release from the OS
-version or from a legacy manifest that lacks release identity. Missing or
-malformed values are reported as `"unavailable"`; `effective` is `present` only
-when the bounded hash of the canonical `payload.squashfs` (and, for a runtime
-manifest, `runtime.squashfs`) matches its expected metadata. Hashing is performed
-incrementally by the daemon's existing event loop; while an actual artifact is
-being verified, its observation is `pending`, and no manifest hash is reported as
-verified. `present` is emitted only after the actual bytes match metadata. Each
-artifact is limited to 512 MiB (536870912 bytes): an oversized artifact, read
-error, growth or other identity/stat instability is `unavailable`. A missing
-artifact remains `missing`, while a readable same-identity artifact whose bytes
-do not match remains `mismatch`.
+version, filenames, mutable installed manifests, or a legacy manifest that lacks
+release identity. Missing or malformed values are reported as `"unavailable"`;
+`effective` is `present` only when the bounded hash of the canonical
+`payload.squashfs` (and, for a runtime manifest, `runtime.squashfs`) matches its
+expected metadata. Hashing is performed incrementally by the daemon's existing
+event loop; while an actual artifact is being verified, its observation is
+`pending`, and no manifest hash is reported as verified. `present` is emitted
+only after the actual bytes match metadata. Each artifact is limited to 512 MiB
+(536870912 bytes): an oversized artifact, read error, growth or other
+identity/stat instability is `unavailable`. Feature metadata is bounded to 256
+KiB (262144 bytes) inclusive; signed OTA control input is bounded to 64 KiB
+(65536 bytes) inclusive, and transaction records to 8192 bytes inclusive. A
+missing artifact remains `missing`, while a readable same-identity artifact
+whose bytes do not match remains `mismatch`.
 The settled `effective` value is `missing`, `mismatch`, or `unavailable` for
 the distinct observations above. The
 `candidate_kind`, `candidate_payload_sha256`, and `candidate_status` fields are
 independent staged-asset observations: candidate kind is `runtime` only for a
 `.runtime.squashfs` asset and `replacement` only for a `.payload.squashfs`
-asset, so a full replacement cannot be presented as a runtime capsule.
+asset, so a full replacement cannot be presented as a runtime capsule. `candidate_status` is `missing` only when no feature candidate is declared; an unreadable or malformed declaration remains `unavailable`.
 `runtime_capsule_sha256` is `null` when no matching runtime capsule hash was
 observed. The array is limited to the five allow-listed feature IDs and the
 encoded component data is bounded to 8192 bytes.
@@ -1087,17 +1090,20 @@ encoded component data is bounded to 8192 bytes.
 
 The same `components`, `transaction_state`, and `last_transaction_result` fields are additive in
 `GET /api/v1/system/update` and in `POST /api/v1/diagnostics/export`. The
-Platform-side mapping is read-only: runtime manifests supply `feature_id`,
-`product_release`, `source_commit`, `base_payload_sha256` for the expected
-canonical full payload, `payload.sha256` for the expected runtime capsule or
-replacement payload, and the allow-listed daemon file hash. The UI hashes the
-canonical filenames `payload.squashfs` and (for runtime actions)
-`runtime.squashfs` directly with bounded reads and a keyed stat cache. Candidate
-metadata comes from `/data/libreecho/update/staging/manifest`; its actual bytes
-are read only from the corresponding safe staged feature path and are reported
-separately as runtime or replacement. The staging manifest also supplies reboot
-activation and signed transaction identity; the feature transaction journal
-supplies the observed result. No Platform fields are invented by the UI.
+Platform-side mapping is read-only: mutable feature manifests supply only the
+expected artifact hashes and canonical filenames for byte observations. Release
+and source identity are emitted only when a verified committed authority is
+available (`committed-manifest`/`.sig` or the corresponding committed runtime
+authority); this UI does not verify signatures and therefore reports those
+identity fields as `"unavailable"` rather than treating mutable installed
+records as provenance. The UI hashes the canonical filenames `payload.squashfs`
+and (for runtime actions) `runtime.squashfs` directly with bounded reads and a
+keyed stat cache. Candidate metadata comes from `/data/libreecho/update/staging/manifest`;
+its actual bytes are read only from the corresponding safe staged feature path
+and are reported separately as runtime or replacement. The staging manifest also
+supplies reboot activation and signed transaction identity; the feature
+transaction journal supplies the observed result. No Platform fields are
+invented by the UI.
 
 ### Wake Word
 

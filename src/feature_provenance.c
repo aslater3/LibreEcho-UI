@@ -12,11 +12,16 @@
 #include <unistd.h>
 
 #define LE_FEATURE_COUNT 5
-#define LE_FEATURE_FILE_MAX 65536
+#define LE_FEATURE_FILE_MAX (256U * 1024U)
+#define LE_FEATURE_FILE_BUFFER (LE_FEATURE_FILE_MAX + 1U)
+#define LE_FEATURE_CONTROL_MAX 65536U
+#define LE_FEATURE_RECORD_MAX 8192U
 #define LE_FEATURE_PATH_MAX 256
 #define LE_FEATURE_HASH_CACHE_COUNT 32
-#define LE_FEATURE_HASH_CHUNK 65536
+#define LE_FEATURE_HASH_CHUNK 16384
 #define LE_FEATURE_HASH_MAX (512ULL * 1024ULL * 1024ULL)
+#define LE_FEATURE_MANIFEST_CHUNK 16384
+#define LE_FEATURE_MANIFEST_SLOTS 2
 
 typedef enum {
     LE_HASH_MISSING = 0,
@@ -53,6 +58,35 @@ typedef struct {
 } le_hash_job;
 
 static le_hash_job hash_job = {0};
+
+typedef enum {
+    LE_MANIFEST_MISSING = 0,
+    LE_MANIFEST_READY = 1,
+    LE_MANIFEST_UNAVAILABLE = -1,
+    LE_MANIFEST_PENDING = 2
+} le_manifest_result;
+
+typedef struct {
+    int valid;
+    char path[LE_FEATURE_PATH_MAX];
+    struct stat st;
+    char hash[65];
+    le_manifest_result result;
+} le_manifest_cache_entry;
+
+typedef struct {
+    int active;
+    int index;
+    int runtime;
+    int fd;
+    char path[LE_FEATURE_PATH_MAX];
+    struct stat before;
+    size_t used;
+} le_manifest_job;
+
+static le_manifest_cache_entry manifest_cache[LE_FEATURE_COUNT][LE_FEATURE_MANIFEST_SLOTS];
+static char manifest_data[LE_FEATURE_COUNT][LE_FEATURE_MANIFEST_SLOTS][LE_FEATURE_FILE_BUFFER];
+static le_manifest_job manifest_job = {0};
 
 static unsigned int sha_rotr(unsigned int value, unsigned int count)
 {
@@ -188,7 +222,7 @@ static int path_join(char *out, size_t size, const char *root, const char *name)
 static int read_bounded(const char *path, char *out, size_t size)
 {
     int fd;
-    struct stat st;
+    struct stat st, after;
     ssize_t n = 0;
     size_t used = 0;
 
@@ -206,15 +240,37 @@ static int read_bounded(const char *path, char *out, size_t size)
             close(fd);
         return 0;
     }
-    while (used < size - 1 && (n = read(fd, out + used, size - 1 - used)) > 0)
+    while (used < (size_t)st.st_size &&
+           (n = read(fd, out + used, (size_t)st.st_size - used)) > 0)
         used += (size_t)n;
+    if (fstat(fd, &after))
+        n = -1;
     close(fd);
-    if (n < 0 || used >= size - 1) {
+    if (n < 0 || used != (size_t)st.st_size || after.st_size != st.st_size) {
         out[0] = 0;
         return 0;
     }
     out[used] = 0;
     return 1;
+}
+
+static int text_key_present(const char *text, const char *key)
+{
+    const char *line = text;
+    size_t key_len = strlen(key);
+
+    if (!text)
+        return 0;
+    while (*line) {
+        const char *end = strchr(line, '\n');
+        size_t length = end ? (size_t)(end - line) : strlen(line);
+        if (length >= key_len + 1 && !strncmp(line, key, key_len) && line[key_len] == '=')
+            return 1;
+        if (!end)
+            break;
+        line = end + 1;
+    }
+    return 0;
 }
 
 static int text_value(const char *text, const char *key, char *out, size_t size)
@@ -243,9 +299,9 @@ static int text_value(const char *text, const char *key, char *out, size_t size)
     return 0;
 }
 
-static int file_value(const char *path, const char *key, char *out, size_t size)
+static int control_file_value(const char *path, const char *key, char *out, size_t size)
 {
-    char text[2048];
+    char text[LE_FEATURE_CONTROL_MAX + 1U];
     return read_bounded(path, text, sizeof(text)) && text_value(text, key, out, size);
 }
 
@@ -300,74 +356,8 @@ static int copy_hash_json(const char *json, const char *object, const char *key,
 }
 
 static int feature_manifest(int index, char *path, size_t path_size,
-                            char *json, size_t json_size, int *runtime,
-                            int *availability)
-{
-    char name[160];
-    struct stat st;
-    if (runtime)
-        *runtime = 0;
-    if (availability)
-        *availability = 0;
-    if (!path_join(name, sizeof(name), feature_ids[index], "runtime-manifest.json") ||
-        !path_join(path, path_size, feature_root(), name))
-        return 0;
-    if (read_bounded(path, json, json_size)) {
-        if (!json_valid_object(json, strlen(json))) {
-            if (availability)
-                *availability = -1;
-            return 0;
-        }
-        if (runtime)
-            *runtime = 1;
-        if (availability)
-            *availability = 1;
-        return 1;
-    }
-    /* An existing runtime generation whose metadata is unreadable is not a
-     * license to reinterpret the feature as the base generation. */
-    if (!lstat(path, &st)) {
-        if (availability)
-            *availability = -1;
-        return 0;
-    }
-    if (errno != ENOENT) {
-        if (availability)
-            *availability = -1;
-        return 0;
-    }
-    if (!path_join(name, sizeof(name), feature_ids[index], "runtime.squashfs") ||
-        !path_join(path, path_size, feature_root(), name))
-        return 0;
-    /* A runtime capsule without its metadata is an unavailable runtime
-     * generation, distinct from a feature with no runtime generation. */
-    if (!lstat(path, &st)) {
-        if (availability)
-            *availability = -1;
-        return 0;
-    }
-    if (errno != ENOENT) {
-        if (availability)
-            *availability = -1;
-        return 0;
-    }
-    if (!path_join(name, sizeof(name), feature_ids[index], "manifest.json") ||
-        !path_join(path, path_size, feature_root(), name))
-        return 0;
-    if (!read_bounded(path, json, json_size)) {
-        if (!lstat(path, &st) && availability)
-            *availability = -1;
-        return 0;
-    }
-    if (!json_valid_object(json, strlen(json))) {
-        if (availability)
-            *availability = -1;
-        return 0;
-    }
-    if (availability)
-        *availability = 1;
-    return 1;
-}
+                            const char **json, int *runtime,
+                            int *availability);
 
 static int same_stat(const struct stat *left, const struct stat *right)
 {
@@ -376,6 +366,196 @@ static int same_stat(const struct stat *left, const struct stat *right)
            left->st_mtim.tv_nsec == right->st_mtim.tv_nsec &&
            left->st_ctim.tv_sec == right->st_ctim.tv_sec &&
            left->st_ctim.tv_nsec == right->st_ctim.tv_nsec;
+}
+
+static void manifest_job_close(void)
+{
+    if (manifest_job.active && manifest_job.fd >= 0)
+        close(manifest_job.fd);
+    memset(&manifest_job, 0, sizeof(manifest_job));
+    manifest_job.fd = -1;
+}
+
+static void manifest_cache_set(int index, int runtime, const char *path,
+                               const struct stat *st, le_manifest_result result)
+{
+    le_manifest_cache_entry *entry = &manifest_cache[index][runtime ? 1 : 0];
+    memset(entry, 0, sizeof(*entry));
+    entry->valid = 1;
+    snprintf(entry->path, sizeof(entry->path), "%s", path);
+    if (st)
+        entry->st = *st;
+    entry->result = result;
+}
+
+static int manifest_fields_valid(int index, int runtime, const char *json)
+{
+    char id[64], filename[160], hash[80], expected[160];
+    if (!json_valid_object(json, strlen(json)) ||
+        json_file_value(json, "feature_id", id, sizeof(id)) == 0 ||
+        strcmp(id, feature_ids[index]) ||
+        !json_object_value(json, "payload", "filename", filename, sizeof(filename)) ||
+        !json_object_value(json, "payload", "sha256", hash, sizeof(hash)) ||
+        !valid_hash(hash))
+        return 0;
+    if (runtime)
+        snprintf(expected, sizeof(expected), "runtime.squashfs");
+    else
+        snprintf(expected, sizeof(expected), "%s.squashfs", feature_ids[index]);
+    return !strcmp(filename, expected);
+}
+
+static void manifest_job_finish(le_manifest_result result)
+{
+    le_manifest_cache_entry *entry;
+    char *json = manifest_data[manifest_job.index][manifest_job.runtime ? 1 : 0];
+    if (result == LE_MANIFEST_READY) {
+        json[manifest_job.used] = 0;
+        if (!manifest_fields_valid(manifest_job.index, manifest_job.runtime, json))
+            result = LE_MANIFEST_UNAVAILABLE;
+    }
+    entry = &manifest_cache[manifest_job.index][manifest_job.runtime ? 1 : 0];
+    memset(entry, 0, sizeof(*entry));
+    entry->valid = 1;
+    snprintf(entry->path, sizeof(entry->path), "%s", manifest_job.path);
+    entry->st = manifest_job.before;
+    entry->result = result;
+    manifest_job_close();
+}
+
+static le_manifest_result manifest_observe(int index, int runtime,
+                                           char *path, size_t path_size)
+{
+    le_manifest_cache_entry *entry = &manifest_cache[index][runtime ? 1 : 0];
+    struct stat listed, opened;
+    int fd;
+    char dir[LE_FEATURE_PATH_MAX];
+    const char *name = runtime ? "runtime-manifest.json" : "manifest.json";
+    if (!path_join(dir, sizeof(dir), feature_root(), feature_ids[index]) ||
+        !path_join(path, path_size, dir, name))
+        return LE_MANIFEST_UNAVAILABLE;
+    if (lstat(path, &listed)) {
+        if (errno == ENOENT) {
+            memset(entry, 0, sizeof(*entry));
+            return LE_MANIFEST_MISSING;
+        }
+        manifest_cache_set(index, runtime, path, NULL, LE_MANIFEST_UNAVAILABLE);
+        return LE_MANIFEST_UNAVAILABLE;
+    }
+    if (!S_ISREG(listed.st_mode) || listed.st_size < 0 ||
+        (unsigned long long)listed.st_size > LE_FEATURE_FILE_MAX) {
+        manifest_cache_set(index, runtime, path, &listed, LE_MANIFEST_UNAVAILABLE);
+        return LE_MANIFEST_UNAVAILABLE;
+    }
+    if (entry->valid && !strcmp(entry->path, path) && same_stat(&entry->st, &listed))
+        return entry->result;
+    if (manifest_job.active) {
+        if (manifest_job.index == index && manifest_job.runtime == runtime &&
+            !strcmp(manifest_job.path, path) && same_stat(&manifest_job.before, &listed))
+            return LE_MANIFEST_PENDING;
+        return LE_MANIFEST_PENDING;
+    }
+#ifdef O_NOFOLLOW
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+#else
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+#endif
+    if (fd < 0)
+        return errno == ENOENT ? LE_MANIFEST_MISSING : LE_MANIFEST_UNAVAILABLE;
+    if (fstat(fd, &opened) || !S_ISREG(opened.st_mode) || !same_stat(&listed, &opened)) {
+        close(fd);
+        manifest_cache_set(index, runtime, path, &listed, LE_MANIFEST_UNAVAILABLE);
+        return LE_MANIFEST_UNAVAILABLE;
+    }
+    memset(&manifest_job, 0, sizeof(manifest_job));
+    manifest_job.active = 1;
+    manifest_job.index = index;
+    manifest_job.runtime = runtime;
+    manifest_job.fd = fd;
+    manifest_job.before = opened;
+    snprintf(manifest_job.path, sizeof(manifest_job.path), "%s", path);
+    return LE_MANIFEST_PENDING;
+}
+
+static int feature_manifest(int index, char *path, size_t path_size,
+                            const char **json, int *runtime,
+                            int *availability)
+{
+    char runtime_path[LE_FEATURE_PATH_MAX], base_path[LE_FEATURE_PATH_MAX];
+    char runtime_artifact[LE_FEATURE_PATH_MAX], dir[LE_FEATURE_PATH_MAX];
+    struct stat st;
+    le_manifest_result result;
+    if (json)
+        *json = NULL;
+    if (runtime)
+        *runtime = 0;
+    if (availability)
+        *availability = 0;
+    result = manifest_observe(index, 1, runtime_path, sizeof(runtime_path));
+    if (result == LE_MANIFEST_READY) {
+        if (path)
+            snprintf(path, path_size, "%s", runtime_path);
+        if (json)
+            *json = manifest_data[index][1];
+        if (runtime)
+            *runtime = 1;
+        if (availability)
+            *availability = 1;
+        return 1;
+    }
+    if (result == LE_MANIFEST_PENDING) {
+        if (availability)
+            *availability = 2;
+        return 0;
+    }
+    if (result == LE_MANIFEST_UNAVAILABLE ||
+        (!lstat(runtime_path, &st) && S_ISREG(st.st_mode))) {
+        if (availability)
+            *availability = -1;
+        return 0;
+    }
+    if (!path_join(dir, sizeof(dir), feature_root(), feature_ids[index]) ||
+        !path_join(runtime_artifact, sizeof(runtime_artifact), dir, "runtime.squashfs"))
+        return 0;
+    if (!lstat(runtime_artifact, &st)) {
+        if (availability)
+            *availability = -1;
+        return 0;
+    }
+    if (errno != ENOENT) {
+        if (availability)
+            *availability = -1;
+        return 0;
+    }
+    {
+        if (!path_join(dir, sizeof(dir), feature_root(), feature_ids[index]) ||
+            !path_join(base_path, sizeof(base_path), dir, "payload.squashfs"))
+            return 0;
+    }
+    if (!lstat(base_path, &st) && (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))) {
+        if (availability)
+            *availability = -1;
+        return 0;
+    }
+    result = manifest_observe(index, 0, path, path_size);
+    if (result == LE_MANIFEST_READY) {
+        if (json)
+            *json = manifest_data[index][0];
+        if (availability)
+            *availability = 1;
+        return 1;
+    }
+    if (result == LE_MANIFEST_PENDING) {
+        if (availability)
+            *availability = 2;
+        return 0;
+    }
+    if (result == LE_MANIFEST_UNAVAILABLE) {
+        if (availability)
+            *availability = -1;
+        return 0;
+    }
+    return 0;
 }
 
 static int safe_prefixes(const char *path)
@@ -560,6 +740,41 @@ static le_hash_result hash_path(const char *path, int allow_final_symlink,
     return hash_job_start(path, fd, &opened);
 }
 
+static le_manifest_result manifest_job_step(void)
+{
+    char *buffer;
+    struct stat after, path_after;
+    ssize_t count;
+    size_t want;
+    if (!manifest_job.active)
+        return LE_MANIFEST_UNAVAILABLE;
+    buffer = manifest_data[manifest_job.index][manifest_job.runtime ? 1 : 0];
+    want = LE_FEATURE_FILE_MAX - manifest_job.used;
+    if (!want)
+        want = 1;
+    if (want > LE_FEATURE_MANIFEST_CHUNK)
+        want = LE_FEATURE_MANIFEST_CHUNK;
+    count = read(manifest_job.fd, buffer + manifest_job.used, want);
+    if (count > 0) {
+        manifest_job.used += (size_t)count;
+        if (manifest_job.used > LE_FEATURE_FILE_MAX) {
+            manifest_job_finish(LE_MANIFEST_UNAVAILABLE);
+            return LE_MANIFEST_UNAVAILABLE;
+        }
+        return LE_MANIFEST_PENDING;
+    }
+    if (count < 0 && errno == EINTR)
+        return LE_MANIFEST_PENDING;
+    if (count < 0 || manifest_job.used != (size_t)manifest_job.before.st_size ||
+        fstat(manifest_job.fd, &after) || !same_stat(&manifest_job.before, &after) ||
+        lstat(manifest_job.path, &path_after) || !same_stat(&manifest_job.before, &path_after)) {
+        manifest_job_finish(LE_MANIFEST_UNAVAILABLE);
+        return LE_MANIFEST_UNAVAILABLE;
+    }
+    manifest_job_finish(LE_MANIFEST_READY);
+    return LE_MANIFEST_READY;
+}
+
 static void daemon_identity(int index, char *status, size_t status_size,
                             char *hash, size_t hash_size)
 {
@@ -617,25 +832,35 @@ static void candidate_identity(int index, char *kind, size_t kind_size,
                                char *status, size_t status_size,
                                char *hash, size_t hash_size)
 {
-    char manifest_path[LE_FEATURE_PATH_MAX], text[2048], action[32], asset[160];
+    char manifest_path[LE_FEATURE_PATH_MAX], text[LE_FEATURE_CONTROL_MAX + 1U], action[32], asset[160];
     char expected[80], path[LE_FEATURE_PATH_MAX], observed[65];
+    struct stat listed;
     le_hash_result result;
     snprintf(kind, kind_size, "unavailable");
     snprintf(status, status_size, "unavailable");
     snprintf(hash, hash_size, "unavailable");
-    if (!path_join(manifest_path, sizeof(manifest_path), update_root(), "staging/manifest") ||
-        !read_bounded(manifest_path, text, sizeof(text)))
+    if (!path_join(manifest_path, sizeof(manifest_path), update_root(), "staging/manifest"))
         return;
+    if (!read_bounded(manifest_path, text, sizeof(text))) {
+        if (lstat(manifest_path, &listed) && errno == ENOENT)
+            snprintf(status, status_size, "missing");
+        return;
+    }
     {
-        char key[128];
+        char key[128], asset_key[128], hash_key[128];
         snprintf(key, sizeof(key), "feature_%s_action", feature_ids[index]);
-        if (!text_value(text, key, action, sizeof(action)))
+        snprintf(asset_key, sizeof(asset_key), "feature_%s_asset", feature_ids[index]);
+        snprintf(hash_key, sizeof(hash_key), "feature_%s_sha256", feature_ids[index]);
+        if (!text_value(text, key, action, sizeof(action))) {
+            if (text_key_present(text, key) || text_key_present(text, asset_key) ||
+                text_key_present(text, hash_key))
+                return;
+            snprintf(status, status_size, "missing");
             return;
-        snprintf(key, sizeof(key), "feature_%s_asset", feature_ids[index]);
-        if (!text_value(text, key, asset, sizeof(asset)))
+        }
+        if (!text_value(text, asset_key, asset, sizeof(asset)))
             return;
-        snprintf(key, sizeof(key), "feature_%s_sha256", feature_ids[index]);
-        if (!text_value(text, key, expected, sizeof(expected)) ||
+        if (!text_value(text, hash_key, expected, sizeof(expected)) ||
             !valid_hash(expected) || !valid_asset_name(asset))
             return;
     }
@@ -716,53 +941,82 @@ static int append(char *out, size_t size, size_t *used, const char *format, ...)
 
 void le_feature_transaction_state_read(le_feature_transaction_state *state)
 {
-    char path[256], text[2048], value[64];
-    int pending_file, commit_file, rollback_file;
+    char path[256], pending_text[LE_FEATURE_RECORD_MAX + 1U];
+    char commit_text[LE_FEATURE_RECORD_MAX + 1U], installed_text[LE_FEATURE_RECORD_MAX + 1U];
+    char rollback_text[LE_FEATURE_RECORD_MAX + 1U], value[128];
+    char pending_tx[128], commit_tx[128], installed_tx[128];
+    int pending_file, commit_file, installed_file, rollback_file;
+    int pending_valid = 0, commit_valid = 0, installed_valid = 0, inconsistent = 0;
 
     if (!state)
         return;
     memset(state, 0, sizeof(*state));
     snprintf(state->state, sizeof(state->state), "none");
     snprintf(state->last_result, sizeof(state->last_result), "idle");
-
     pending_file = path_join(path, sizeof(path), update_root(), "pending") &&
-                   read_bounded(path, text, sizeof(text));
+                   read_bounded(path, pending_text, sizeof(pending_text));
     if (pending_file) {
+        pending_valid = text_value(pending_text, "transaction_id", pending_tx, sizeof(pending_tx)) &&
+                        text_value(pending_text, "phase", value, sizeof(value)) &&
+                        (!strcmp(value, "prepared") || !strcmp(value, "confirmed"));
+        if (!pending_valid)
+            inconsistent = 1;
+    }
+    commit_file = path_join(path, sizeof(path), update_root(), "feature-commit") &&
+                  read_bounded(path, commit_text, sizeof(commit_text));
+    if (commit_file) {
+        commit_valid = text_value(commit_text, "transaction_id", commit_tx, sizeof(commit_tx)) &&
+                       text_value(commit_text, "phase", value, sizeof(value)) &&
+                       (!strcmp(value, "prepared") || !strcmp(value, "confirmed"));
+        if (!commit_valid)
+            inconsistent = 1;
+    }
+    if (pending_valid && commit_valid && strcmp(pending_tx, commit_tx))
+        inconsistent = 1;
+    installed_file = path_join(path, sizeof(path), update_root(), "installed") &&
+                     read_bounded(path, installed_text, sizeof(installed_text));
+    if (installed_file) {
+        installed_valid = text_value(installed_text, "transaction_id", installed_tx, sizeof(installed_tx)) &&
+                          text_value(installed_text, "phase", value, sizeof(value)) &&
+                          !strcmp(value, "installed");
+        if (!installed_valid)
+            inconsistent = 1;
+    }
+    if (inconsistent) {
+        snprintf(state->state, sizeof(state->state), "unknown");
+        snprintf(state->last_result, sizeof(state->last_result), "unknown");
+        return;
+    }
+    if (commit_valid) {
+        state->commit_pending = 1;
+        snprintf(state->state, sizeof(state->state), "commit");
+        snprintf(state->last_result, sizeof(state->last_result), "commit-pending");
+        return;
+    }
+    if (pending_valid) {
         state->pending = 1;
         snprintf(state->state, sizeof(state->state), "pending");
-        if (text_value(text, "state", value, sizeof(value)) && !strcmp(value, "reboot-pending")) {
+        if (text_value(pending_text, "state", value, sizeof(value)) && !strcmp(value, "reboot-pending")) {
             state->reboot_required = 1;
             snprintf(state->last_result, sizeof(state->last_result), "reboot-required");
         } else {
             snprintf(state->last_result, sizeof(state->last_result), "pending");
         }
+        return;
     }
-
-    commit_file = path_join(path, sizeof(path), update_root(), "feature-commit") &&
-                  read_bounded(path, text, sizeof(text));
-    if (commit_file) {
-        state->commit_pending = 1;
-        snprintf(state->state, sizeof(state->state), "commit");
-        if (text_value(text, "phase", value, sizeof(value)) &&
-            (!strcmp(value, "prepared") || !strcmp(value, "confirmed")))
-            snprintf(state->last_result, sizeof(state->last_result), "commit-pending");
-        else
-            snprintf(state->last_result, sizeof(state->last_result), "pending");
+    if (installed_valid) {
+        snprintf(state->last_result, sizeof(state->last_result), "installed");
+        return;
     }
-
     rollback_file = path_join(path, sizeof(path), update_root(), "rolled-back") &&
-                    read_bounded(path, text, sizeof(text));
+                    read_bounded(path, rollback_text, sizeof(rollback_text));
     if (rollback_file) {
         state->rollback = 1;
         snprintf(state->state, sizeof(state->state), "rollback");
         snprintf(state->last_result, sizeof(state->last_result), "rolled-back");
     }
-    if (!state->pending && !state->commit_pending && !state->rollback) {
-        path_join(path, sizeof(path), update_root(), "installed");
-        if (file_value(path, "phase", value, sizeof(value)) && !strcmp(value, "installed"))
-            snprintf(state->last_result, sizeof(state->last_result), "installed");
-    }
 }
+
 
 void le_feature_components_json(char *out, size_t size,
                                 const le_feature_transaction_state *transaction)
@@ -775,7 +1029,8 @@ void le_feature_components_json(char *out, size_t size,
     if (!append(out, size, &used, "["))
         return;
     for (i = 0; i < LE_FEATURE_COUNT; ++i) {
-        char path[LE_FEATURE_PATH_MAX], json[LE_FEATURE_FILE_MAX];
+        char path[LE_FEATURE_PATH_MAX];
+        const char *json = NULL;
         char release[160] = "unavailable", source_commit[160] = "unavailable";
         char expected_effective[80] = "", expected_capsule[80] = "";
         char effective_payload[80] = "unavailable", runtime_capsule[80] = "";
@@ -787,7 +1042,7 @@ void le_feature_components_json(char *out, size_t size,
         char e_capsule[160], capsule_json[192], e_running[160], e_status[80];
         char e_effective_state[32], e_activation[80], e_result[80];
         char e_candidate_kind[80], e_candidate_state[80], e_candidate_hash[160];
-        char expected_filename[160], canonical_path[LE_FEATURE_PATH_MAX];
+        char expected_filename[160], declared_filename[160], canonical_path[LE_FEATURE_PATH_MAX];
         int runtime = 0, availability = 0, have_manifest;
 
         expected_filename[0] = 0;
@@ -796,15 +1051,13 @@ void le_feature_components_json(char *out, size_t size,
                         sizeof(running_hash));
         candidate_identity(i, candidate_kind, sizeof(candidate_kind), candidate_state,
                            sizeof(candidate_state), candidate_hash, sizeof(candidate_hash));
-        have_manifest = feature_manifest(i, path, sizeof(path), json, sizeof(json), &runtime,
+        have_manifest = feature_manifest(i, path, sizeof(path), &json, &runtime,
                                          &availability);
         if (!have_manifest) {
             snprintf(effective_state, sizeof(effective_state), "%s",
-                     availability < 0 ? "unavailable" : "missing");
+                     availability == 2 ? "pending" : availability < 0 ? "unavailable" : "missing");
         } else {
-            /* Release and source are independent observations. */
-            json_file_value(json, "product_release", release, sizeof(release));
-            json_file_value(json, "source_commit", source_commit, sizeof(source_commit));
+            /* Mutable feature manifests are not signed provenance authority. */
             if (runtime) {
                 json_file_value(json, "base_payload_sha256", expected_effective,
                                 sizeof(expected_effective));
@@ -842,7 +1095,11 @@ void le_feature_components_json(char *out, size_t size,
                                   sizeof(expected_filename));
                 copy_hash_json(json, "payload", "sha256", expected_effective,
                                sizeof(expected_effective));
-                if (strcmp(expected_filename, "payload.squashfs"))
+                if (!json_object_value(json, "payload", "filename", declared_filename,
+                                       sizeof(declared_filename)))
+                    expected_effective[0] = 0;
+                snprintf(expected_filename, sizeof(expected_filename), "%s.squashfs", feature_ids[i]);
+                if (strcmp(declared_filename, expected_filename))
                     expected_effective[0] = 0;
                 if (valid_hash(expected_effective)) {
                     if (feature_artifact_path(i, "payload.squashfs", canonical_path,
@@ -858,7 +1115,7 @@ void le_feature_components_json(char *out, size_t size,
         if (path_join(path, sizeof(path), update_root(), "staging/manifest")) {
             char key[128], value[64];
             snprintf(key, sizeof(key), "feature_%s_activation", feature_ids[i]);
-            if (file_value(path, key, value, sizeof(value)) && !strcmp(value, "reboot"))
+            if (control_file_value(path, key, value, sizeof(value)) && !strcmp(value, "reboot"))
                 snprintf(activation, sizeof(activation), "reboot");
         }
         if (transaction)
@@ -897,9 +1154,11 @@ void le_feature_provenance_tick(void)
 {
     char scratch[LE_FEATURE_COMPONENTS_JSON_MAX];
     le_feature_transaction_state transaction;
+    if (manifest_job.active)
+        (void)manifest_job_step();
     if (hash_job.active)
         (void)hash_job_step();
-    if (!hash_job.active) {
+    if (!manifest_job.active && !hash_job.active) {
         le_feature_transaction_state_read(&transaction);
         le_feature_components_json(scratch, sizeof(scratch), &transaction);
     }
@@ -907,6 +1166,9 @@ void le_feature_provenance_tick(void)
 
 void le_feature_provenance_shutdown(void)
 {
+    manifest_job_close();
     hash_job_close();
+    memset(manifest_cache, 0, sizeof(manifest_cache));
+    memset(manifest_data, 0, sizeof(manifest_data));
     memset(hash_cache, 0, sizeof(hash_cache));
 }
