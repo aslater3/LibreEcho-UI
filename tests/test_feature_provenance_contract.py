@@ -43,6 +43,10 @@ assert "512 MiB" in docs
 assert "536870912" in docs
 assert "512 MiB" in openapi
 assert "536870912" in openapi
+assert "262144" in docs and "65536" in docs and "8192 bytes inclusive" in docs
+assert "Mutable installed manifests are not provenance authority" in openapi
+assert "LE_FEATURE_CONTROL_MAX" in formatter
+assert "LE_FEATURE_RECORD_MAX" in formatter
 assert "LE_HASH_PENDING" in formatter
 assert "le_feature_provenance_tick" in Path("src/http_server.c").read_text()
 print("feature provenance contract: ok")

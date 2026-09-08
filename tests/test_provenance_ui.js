@@ -92,13 +92,13 @@ const hashes = {
 };
 const components = ['airplay2', 'tts', 'wakeword', 'stt', 'assistant'].map((feature_id, index) => ({
     feature_id,
-    release: 'radar-puffin-v0.13.11',
+    release: index === 0 ? 'unavailable' : 'radar-puffin-v0.13.11',
     source_commit: hashes.source,
     effective_payload_sha256: hashes.effective,
     runtime_capsule_sha256: index === 0 ? null : hashes.capsule,
     candidate_kind: index === 0 ? 'unavailable' : 'runtime',
     candidate_payload_sha256: index === 0 ? 'unavailable' : hashes.candidate,
-    candidate_status: index === 0 ? 'unavailable' : 'present',
+    candidate_status: index === 0 ? 'missing' : 'present',
     running_daemon_sha256: hashes.running,
     running_daemon_status: index === 0 ? 'not-running' : 'running',
     effective: index === 0 ? 'missing' : 'present',
@@ -116,7 +116,9 @@ assert.strictEqual((html.match(/<summary/g) || []).length, 6, 'every native deta
 assert(html.includes('class="data-table provenance-table"'));
 assert(html.includes('radar-puffin-v0.13.11'));
 assert(html.includes('Installed · Running · Candidate runtime present · Restart required · Installed'));
-assert(html.includes('Payload missing · Not running · No restart pending · Installed'));
+assert(html.includes('Payload missing · Not running · No pending candidate · No restart pending · Installed'));
+assert(html.includes('Not used'));
+assert(html.includes('No pending candidate'));
 assert(html.includes('runtime capsule hash'));
 assert(html.includes('Candidate (runtime) SHA-256'));
 assert(html.includes('Candidate status'));

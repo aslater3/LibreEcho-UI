@@ -185,7 +185,7 @@ def main() -> int:
                 "feature_id": "airplay2",
                 "format": "squashfs-lz4",
                 "payload": {
-                    "filename": "payload.squashfs",
+                    "filename": "airplay2.squashfs",
                     "sha256": legacy_hash,
                     "size": len(legacy_payload),
                 },
@@ -201,7 +201,7 @@ def main() -> int:
                 f"feature_tts_sha256={staged_runtime_hash}\n"
                 "feature_tts_activation=reboot\n", encoding="ascii"
             )
-            (update_root / "feature-commit").write_text("phase=prepared\n", encoding="ascii")
+            (update_root / "feature-commit").write_text("transaction_id=txn-live\nphase=prepared\n", encoding="ascii")
             print("fixture_json_validation: ok (json.dump + python -m json.tool)")
 
             port = free_loopback_port()
@@ -300,7 +300,7 @@ def main() -> int:
             print("POST /api/v1/setup: HTTP 200; setup_completed=true; marker=present")
 
             expected_tts = {
-                "feature_id": "tts", "release": release, "source_commit": source,
+                "feature_id": "tts", "release": "unavailable", "source_commit": "unavailable",
                 "effective_payload_sha256": base_hash, "runtime_capsule_sha256": runtime_hash,
                 "candidate_kind": "runtime", "candidate_payload_sha256": staged_runtime_hash,
                 "candidate_status": "present",
@@ -312,7 +312,7 @@ def main() -> int:
                 "feature_id": "airplay2", "release": "unavailable", "source_commit": "unavailable",
                 "effective_payload_sha256": legacy_hash, "runtime_capsule_sha256": None,
                 "candidate_kind": "unavailable", "candidate_payload_sha256": "unavailable",
-                "candidate_status": "unavailable",
+                "candidate_status": "missing",
                 "running_daemon_sha256": "not-running", "running_daemon_status": "not-running",
                 "effective": "present", "activation": "unavailable", "last_transaction_result": "commit-pending",
             }
@@ -438,7 +438,7 @@ def main() -> int:
                 "product_release": "radar-puffin-v0.13.11",
                 "source_commit": source,
                 "payload": {
-                    "filename": "payload.squashfs",
+                    "filename": "assistant.squashfs",
                     "sha256": "0" * 64,
                     "size": 512 * 1024 * 1024,
                 },
@@ -488,6 +488,29 @@ def main() -> int:
             assert diagnostic_data["release_identity"]["transaction_state"] == "commit"
             assert diagnostic_data["release_identity"]["last_transaction_result"] == "commit-pending"
             print("POST /api/v1/diagnostics/export: HTTP 200; exact feature payload/runtime fields")
+            # With no live/current record, invalid rollback evidence is unknown.
+            # Platform copies pending verbatim; a valid rollback retains prepared.
+            (update_root / "feature-commit").unlink()
+            for record, expected_state, expected_result in (
+                ("", "unknown", "unknown"),
+                ("not a transaction record\n", "unknown", "unknown"),
+                ("transaction_id=txn-failed\nphase=corrupt\n", "unknown", "unknown"),
+                ("schema=2\ntransaction_id=txn-failed\nphase=prepared\n", "rollback", "rolled-back"),
+            ):
+                (update_root / "rolled-back").write_text(record)
+                for endpoint in ("/api/v1/provenance", "/api/v1/system/update", "/api/v1/diagnostics/export"):
+                    exporting = endpoint.endswith("/export")
+                    status, raw, response = http(
+                        base_url, endpoint, "POST" if exporting else "GET",
+                        {} if exporting else None,
+                        {**auth, "X-LibreEcho-CSRF": csrf} if exporting else auth,
+                    )
+                    assert_status(status, raw, 200, "rollback record validation")
+                    data = response["data"]["release_identity"] if exporting else response["data"]
+                    assert data["transaction_state"] == expected_state, data
+                    assert data["last_transaction_result"] == expected_result, data
+                    assert all(item["last_transaction_result"] == expected_result for item in components(data))
+            print("rollback records: malformed/empty remain unknown; copied prepared record reports rollback across all three APIs")
             print("http_smoke: ok")
     finally:
         if server is not None and server.poll() is None:
