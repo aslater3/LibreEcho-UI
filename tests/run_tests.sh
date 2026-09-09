@@ -17,6 +17,7 @@ make build/test-network-health build/test-adapter-client-events build/test-gatew
 ./build/test-factory-reset
 sh tests/test_factory_reset_bluetooth_contract.sh
 sh tests/test_factory_reset_quiesce_contract.sh
+sh tests/test_backup_roundtrip.sh
 make build/test-backend-linux-wifi-emission
 make build/test-auth-sessions
 ./build/test-auth-sessions
@@ -24,6 +25,9 @@ make build/test-auth-transport
 ./build/test-auth-transport
 make build/test-inherited-fds
 ./build/test-inherited-fds
+make build/test-http-worker-registry
+./build/test-http-worker-registry
+python3 tests/test_http_worker_registry_contract.py
 python3 tests/test_pr141_review_contract.py
 sh tests/test_pr137_review_contract.sh
 sh tests/test_pr139_review_contract.sh
@@ -62,6 +66,8 @@ make build/test-sdp-wire-format
 ./build/test-sdp-wire-format
 make build/test-avdtp-wire-format
 ./build/test-avdtp-wire-format
+make build/test-avrcp-wire-format
+./build/test-avrcp-wire-format
 sh tests/test_network_scan_contract.sh
 sh tests/test_setup_account_first.sh
 sh tests/test_setup_optional_adapters.sh
@@ -181,6 +187,7 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
 sh tests/test_timed.sh
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
+sh tests/test_setup_first_run.sh
 AGENT_SOCKET="$PWD/build/test-agent.sock"
 LIBREECHO_AGENT_SOCKET="$AGENT_SOCKET" python3 tests/mock_agent_history.py "$AGENT_SOCKET" >./build/test-agent.log 2>&1 &
 agent_pid=$!

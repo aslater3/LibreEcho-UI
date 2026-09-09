@@ -268,6 +268,13 @@ $(BUILD)/test-inherited-fds: tests/test_inherited_fds.c src/inherited_fds.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
+$(BUILD)/test-http-worker-registry: tests/test_http_worker_registry.c src/http_server.c src/inherited_fds.c src/tls_stub.c src/adapter/voice_stream.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc \
+		tests/test_http_worker_registry.c src/inherited_fds.c src/tls_stub.c \
+		src/adapter/voice_stream.c -o $@
+
 $(BUILD)/test-radiod-json: tests/test_radiod_json.c src/adapter/radiod.c src/json.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
@@ -452,6 +459,18 @@ $(BUILD)/test-sdp-wire-format: tests/test_sdp_wire_format.c \
 		-Wpedantic -Werror -Isrc $^ -lm -o $@
 
 $(BUILD)/test-avdtp-wire-format: tests/test_avdtp_wire_format.c \
+		$(BUILD)/adapter/bt_profile.o $(BUILD)/log.o \
+		$(BUILD)/adapter/bt-sbc/sbc.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_neon.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_armv6.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_sse.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_mmx.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_iwmmxt.o
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -lm -o $@
+
+$(BUILD)/test-avrcp-wire-format: tests/test_avrcp_wire_format.c \
 		$(BUILD)/adapter/bt_profile.o $(BUILD)/log.o \
 		$(BUILD)/adapter/bt-sbc/sbc.o \
 		$(BUILD)/adapter/bt-sbc/sbc_primitives.o \
@@ -708,6 +727,7 @@ clean:
 		$(BUILD)/test-thermal-zone-selection \
 		$(BUILD)/test-light-sensor \
 		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \
+		$(BUILD)/test-http-worker-registry \
 		$(BUILD)/test-wake-decode \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \

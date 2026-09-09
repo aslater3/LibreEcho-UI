@@ -56,6 +56,16 @@ int main(void)
     expect_seconds("set a timer for one hour and ten minutes", 4200);
     expect_seconds("set a timer for one hour and thirty seconds", 3630);
     expect_seconds("set a timer for twenty five minutes", 1500);
+    expect_seconds("set a timer for three and a half minutes", 210);
+    expect_seconds("set a timer for two and a half hours", 9000);
+    expect_seconds("set a timer for one and a half hour", 5400);
+    /* Preserve the equivalent forms with the fraction after the unit. */
+    expect_seconds("set a timer for a minute and a half", 90);
+    expect_seconds("set a timer for two hours and a half", 9000);
+    expect_seconds("set a timer for three minutes and a half", 210);
+    /* An incomplete fraction is ambiguous; ask instead of shortening it. */
+    expect_seconds("set a timer for three and half minutes", 0);
+    expect_seconds("set a timer for half minutes", 0);
     /* "a minute" is a count of one, not a missing number. */
     expect_seconds("set a timer for a minute", 60);
     expect_seconds("set a timer for an hour", 3600);
