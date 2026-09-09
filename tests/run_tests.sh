@@ -24,6 +24,9 @@ make build/test-auth-transport
 ./build/test-auth-transport
 make build/test-inherited-fds
 ./build/test-inherited-fds
+make build/test-http-worker-registry
+./build/test-http-worker-registry
+python3 tests/test_http_worker_registry_contract.py
 python3 tests/test_pr141_review_contract.py
 sh tests/test_pr137_review_contract.sh
 sh tests/test_pr139_review_contract.sh
