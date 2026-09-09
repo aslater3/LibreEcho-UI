@@ -2,6 +2,8 @@
 #define _DEFAULT_SOURCE 1
 #endif
 #include "api.h"
+#include "feature_provenance.h"
+#include "authority_provenance.h"
 #include "backend.h"
 #include "http_server.h"
 #include "tls.h"
@@ -209,6 +211,8 @@ signal(SIGINT,stop);
 signal(SIGTERM,stop);
 signal(SIGPIPE,SIG_IGN);
 i=http_server_run(&o,&api,&running);
+le_feature_provenance_shutdown();
+le_authority_provenance_shutdown();
 le_backend_destroy(b);
 return i?1:0;
 }

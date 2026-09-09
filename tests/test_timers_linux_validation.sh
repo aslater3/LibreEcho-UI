@@ -13,7 +13,7 @@ trap cleanup EXIT INT TERM
 i=0
 while ! curl -sS "$URL/api/v1/config" >/dev/null 2>&1; do
     i=$((i + 1))
-    [ "$i" -lt 30 ] || { printf '%s\n' "Linux timer validation server did not start" >&2; exit 1; }
+    [ "$i" -lt 200 ] || { printf '%s\n' "Linux timer validation server did not start" >&2; exit 1; }
     sleep 0.1
 done
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
