@@ -8,6 +8,26 @@ import subprocess
 import tempfile
 import threading
 import time
+import sys
+
+
+# Real daemons run only inside private runtime, device, network and sysfs trees.
+# A mock audio socket alone cannot isolate buttond's filesystem operations.
+if '--fixture-namespace' not in sys.argv:
+    repository = Path(__file__).resolve().parents[1]
+    command = ['bwrap', '--die-with-parent', '--new-session', '--unshare-all',
+               '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin',
+               '--setenv', 'LC_ALL', 'C', '--setenv', 'TMPDIR', '/tmp',
+               '--ro-bind', '/usr', '/usr']
+    for directory in ('/bin', '/lib', '/lib64'):
+        if Path(directory).is_dir():
+            command += ['--ro-bind', directory, directory]
+    command += ['--ro-bind', str(repository), '/src', '--chdir', '/src',
+                '--dir', '/sys', '--dir', '/data', '--dir', '/run', '--dir', '/etc',
+                '--tmpfs', '/tmp', '--dev', '/dev', '--proc', '/proc',
+                '/usr/bin/python3', '-B', 'tests/test_buttond_led_restart.py',
+                '--fixture-namespace']
+    raise SystemExit(subprocess.run(command, timeout=30).returncode)
 
 
 def call(path, command):

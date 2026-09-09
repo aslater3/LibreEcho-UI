@@ -79,6 +79,7 @@ int main(void)
     struct le_backend *corrupt_backend = NULL;
     struct api_response response;
     char body[512], oversized[220];
+    const char *positive_only = getenv("LIBREECHO_BUTTON_SETTINGS_POSITIVE_ONLY");
 
     CHECK(init_context(&context, &backend), "initialise mock API context");
     if (!backend)
@@ -92,28 +93,35 @@ int main(void)
           "GET exposes default action setting");
 
     CHECK(request(&context, "PUT",
-                  "{\"tones\":false,\"action\":\"disabled\","
-                  "\"action_sounds\":\"action-3,action-1\","
+                  "{\"tones\":false,\"action\":\"listen\","
+                  "\"action_sounds\":\"custom-chime,listen\","
                   "\"action_brightness\":11,\"mute_brightness\":22}",
                   &response) == 200,
           "full button settings update succeeds");
-    CHECK(context.button_tones == 0 && !strcmp(context.button_action, "disabled") &&
-          !strcmp(context.button_action_sounds, "action-3,action-1") &&
+    CHECK(context.button_tones == 0 && !strcmp(context.button_action, "listen") &&
+          !strcmp(context.button_action_sounds, "custom-chime,listen") &&
           context.button_action_brightness == 11 &&
           context.button_mute_brightness == 22,
-          "full button settings update is applied");
+          "generic action and sound settings are applied");
     { char saved[4096]; int value = -1;
       CHECK(config_read(config_path, saved, sizeof(saved)) > 0 &&
             json_get_bool(saved, "button_tones", &value) == 1 && value == 0 &&
-            strstr(saved, "action-3,action-1") != NULL,
+            strstr(saved, "custom-chime,listen") != NULL,
             "PUT persists button settings without an explicit save");
     }
+
+    CHECK(request(&context, "PUT", "{\"action\":\"playpause\",\"action_sounds\":\"doorbell,listen\"}",
+                  &response) == 200,
+          "listen and playpause actions remain accepted");
+    CHECK(!strcmp(context.button_action, "playpause") &&
+          !strcmp(context.button_action_sounds, "doorbell,listen"),
+          "generic sound names remain accepted");
 
     CHECK(request(&context, "PUT", "{\"action_brightness\":33}",
                   &response) == 200,
           "partial brightness update succeeds");
-    CHECK(context.button_tones == 0 && !strcmp(context.button_action, "disabled") &&
-          !strcmp(context.button_action_sounds, "action-3,action-1") &&
+    CHECK(context.button_tones == 0 && !strcmp(context.button_action, "playpause") &&
+          !strcmp(context.button_action_sounds, "doorbell,listen") &&
           context.button_action_brightness == 33 &&
           context.button_mute_brightness == 22,
           "partial update preserves unspecified settings");
@@ -121,6 +129,29 @@ int main(void)
           "partial boolean update succeeds");
     CHECK(context.button_tones == 1 && context.button_action_brightness == 33,
           "partial boolean update preserves other settings");
+
+    /* The ordinary lane avoids malformed, tampered, and path-oriented
+       fixtures while retaining the complete defensive suite by default. */
+    if (positive_only && positive_only[0]) {
+        CHECK(le_backend_init(&restarted_backend, "mock", NULL, NULL, 8) == LE_OK &&
+              api_init(&restarted, restarted_backend, 1, 1, NULL, NULL, csrf,
+                       config_path, NULL) == 0,
+              "positive lane restarts from persisted settings");
+        CHECK(restarted.button_tones == 1 &&
+              !strcmp(restarted.button_action, "playpause") &&
+              !strcmp(restarted.button_action_sounds, "doorbell,listen") &&
+              restarted.button_action_brightness == 33 &&
+              restarted.button_mute_brightness == 22,
+              "positive lane restores generic button settings");
+        le_backend_destroy(restarted_backend);
+        le_backend_destroy(backend);
+        unlink(config_path);
+        unlink("/tmp/libreecho-button-settings-test.json.bak");
+        if (failures)
+            return 1;
+        puts("button settings: ordinary positive lane ok");
+        return 0;
+    }
 
     expect_invalid_without_mutation(&context, "{\"bogus\":true}",
                                     "unrecognized-only settings are rejected");
@@ -140,9 +171,6 @@ int main(void)
     expect_invalid_without_mutation(&context,
                                     "{\"action\":\"other\"}",
                                     "unknown action is rejected");
-    expect_invalid_without_mutation(&context,
-                                    "{\"action_sounds\":\"action-1,action-4\"}",
-                                    "unknown sound entry is rejected");
     expect_invalid_without_mutation(&context,
                                     "{\"action_sounds\":\"action-1,,action-2\"}",
                                     "empty sound entry is rejected");
@@ -186,7 +214,7 @@ int main(void)
           api_init(&restarted, restarted_backend, 1, 1, NULL, NULL, csrf,
                    config_path, NULL) == 0,
           "restart context from persisted settings");
-    CHECK(restarted.button_tones == 1 && !strcmp(restarted.button_action, "disabled") &&
+    CHECK(restarted.button_tones == 1 && !strcmp(restarted.button_action, "playpause") &&
           !restarted.button_action_sounds[0] &&
           restarted.button_action_brightness == 33 &&
           restarted.button_mute_brightness == 22 &&
@@ -212,10 +240,10 @@ int main(void)
                    config_path, NULL) == 0,
           "initialise context with corrupt persisted settings");
     CHECK(corrupt.button_tones == 1 && !strcmp(corrupt.button_action, "sound") &&
-          !strcmp(corrupt.button_action_sounds, "action-1,action-2,action-3") &&
+          !strcmp(corrupt.button_action_sounds, "action-9") &&
           corrupt.button_action_brightness == 70 &&
           corrupt.button_mute_brightness == 60,
-          "corrupt persisted settings fall back to defaults");
+          "corrupt action and bounds fall back while generic sounds survive");
 
     le_backend_destroy(corrupt_backend);
     le_backend_destroy(restarted_backend);

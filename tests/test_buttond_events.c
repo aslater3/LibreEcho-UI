@@ -6,11 +6,14 @@
  * endpoints are small AF_UNIX mock servers.  It does not require /dev/uinput
  * or claim physical evdev evidence.
  */
+#include "buttond_fixture.h"
+#define open buttond_fixture_open
 static char test_config_path[256];
 #define LE_BUTTOND_CONFIG test_config_path
 #define main buttond_program_main
 #include "../src/adapter/buttond.c"
 #undef main
+#undef open
 
 #include <assert.h>
 #include <signal.h>
@@ -214,17 +217,15 @@ int main(void)
     ctx.mute_brightness = 26;
     mute_indicator(&ctx, 1);
     assert(ctx.indicated_mute == -1);
-    assert(ctx.indicator_warned == 1);
     ctx.mute_brightness = 25;
     mute_indicator(&ctx, 1);
     assert(ctx.indicated_mute == 1);
-
-    assert(ctx.indicator_warned == 0);
     nanosleep(&pause, NULL);
     assert(log_contains(audio_log, "\"cmd\":\"set_mute\""));
     assert(log_contains(audio_log, "\"cmd\":\"sample\""));
     assert(log_contains(audio_log, "action-1"));
     assert(log_contains(audio_log, "action-2"));
+    assert(buttond_fixture_opens > 0);
 
 
     puts("button event dispatch: volume, KEY_POWER mute sync, and KEY_HELP rotation: ok");

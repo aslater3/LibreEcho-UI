@@ -37,9 +37,20 @@
 
 #define INPUT_DIR "/dev/input"
 #define MAX_DEVICES 8
+#ifndef LE_BUTTOND_CONFIG
 #define LE_BUTTOND_CONFIG "/data/libreecho/config/web-config.json"
+#endif
 #define CONNECT_TIMEOUT_MS 400
+#define PRIVACY_POLL_MS 100
 #define METER_OWNER "buttons"
+
+#ifndef BUTTOND_PRIVACY_STATE_PATH
+#define BUTTOND_PRIVACY_STATE_PATH "/sys/devices/platform/amz_privacy/privacy_state"
+#endif
+#ifndef BUTTOND_PRIVACY_STATE_FALLBACK_PATH
+#define BUTTOND_PRIVACY_STATE_FALLBACK_PATH "/sys/devices/platform/amz-privacy/privacy_state"
+#endif
+
 
 /* Hold-to-repeat.  gpio-keys does not enable autorepeat by default, so the
    repeat is generated here rather than relying on EV_KEY value 2. */
@@ -78,13 +89,16 @@ struct context {
     size_t device_count;
     int volume;          /* cached; -1 when unknown */
     int muted;           /* cached; -1 when unknown */
+    int privacy_state;   /* last kernel-owned privacy latch state; -1 unknown */
+    int privacy_state_seen;
     unsigned int step;
     unsigned int hold_ms;
     unsigned int brightness;
     int held_key;        /* key code being held, 0 when idle */
     int rescan_requested;
     size_t logged_device_count;  /* last count announced, so a steady state stays quiet */
-    int indicated_mute;          /* mute state the ring is currently showing; -1 unknown */
+    int indicated_mute;
+    int indicator_warned;          /* mute state the ring is currently showing; -1 unknown */
     int audio_poll_warned;       /* so an unreachable audiod is reported once, not every tick */
     int tones;                   /* press cues; read from the web config, on by default */
     char action[24];             /* what the action button does; only "sound" is wired */
@@ -347,71 +361,10 @@ static int refresh_audio(struct context *ctx)
  * and stop only that owner on unmute so we cannot clear someone else's
  * pattern.
  */
-/*
- * The mute button's own lamp. sysfs rather than a GPIO of our own: the
- * amz_privacy driver owns the line, and going through privacy_trigger also
- * engages the hardware privacy circuit rather than only lighting an LED.
- */
-static int privacy_write(const char *leaf, const char *value)
-{
-    static const char *const roots[] = {
-        "/sys/devices/platform/amz_privacy",
-        "/sys/devices/soc/10010000.keypad/amz_privacy",
-    };
-    size_t i;
-
-    for (i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
-        char path[160];
-        int fd;
-
-        snprintf(path, sizeof(path), "%s/%s", roots[i], leaf);
-        fd = open(path, O_WRONLY | O_CLOEXEC);
-        if (fd < 0)
-            continue;
-        if (write(fd, value, strlen(value)) < 0) {
-            le_log_warn("buttond: %s write failed: %s", leaf, strerror(errno));
-            close(fd);
-            return -1;
-        }
-        close(fd);
-        return 0;
-    }
-    return -1;
-}
-
-/*
- * The lamp is a hardware latch. Asserting it is straightforward, but the
- * driver refuses to let privacy_trigger clear it -- "privacy_trigger must not
- * permit software to leave privacy" -- so that no program can silently
- * un-mute a microphone. The latch also survives a reboot, so without a way
- * out the first press lights the lamp permanently.
- *
- * shutdown_dialog_state is the driver's own release path. Using it from here
- * is a deliberate trade and worth naming: it means userspace can leave
- * privacy, which is exactly what that guard exists to prevent. It is
- * defensible on this firmware only because userspace already controls the
- * microphone completely -- the software mute above this line does the same
- * job with no hardware involved -- so the guard was protecting a door that
- * is already open, while making the physical button useless.
- *
- * The clean fix is in the kernel: amz_priv_trigger() is exported for a key
- * handler, so a real press can toggle privacy without granting userspace the
- * same power. Until that is built and shipped, this keeps the button working.
- */
-static void privacy_lamp(int on)
-{
-    if (on) {
-        if (privacy_write("privacy_trigger", "1\n") < 0)
-            le_log_warn("buttond: mute lamp could not be lit");
-        return;
-    }
-    if (privacy_write("shutdown_dialog_state", "1\n") < 0) {
-        le_log_warn("buttond: mute lamp could not be cleared");
-        return;
-    }
-    /* Back to normal operation; leaving it set disables privacy entirely. */
-    (void)privacy_write("shutdown_dialog_state", "0\n");
-}
+/* The mute button's hardware lamp/privacy latch is owned by the kernel key
+ * handler. Userspace only synchronizes audiod and the ring; it must not write
+ * privacy_trigger or shutdown_dialog_state, which would race the kernel
+ * workqueue and could toggle or clear hardware privacy unexpectedly. */
 
 /*
  * Audible feedback for a press. The buttons sit on top of the device, where
@@ -451,8 +404,10 @@ static void refresh_tone_setting(struct context *ctx)
         value >= 0 && value <= 100)
         ctx->action_brightness = (unsigned int)value;
     if (json_get_int(buffer, "button_mute_brightness", &value) > 0 &&
-        value >= 0 && value <= 100)
+        value >= 0 && value <= 100 && ctx->mute_brightness != (unsigned int)value) {
         ctx->mute_brightness = (unsigned int)value;
+        ctx->indicated_mute = -1; /* Reapply changed brightness at this status tick. */
+    }
     (void)json_get_string(buffer, "button_action", ctx->action,
                           sizeof(ctx->action));
     /*
@@ -593,10 +548,11 @@ static void mute_indicator(struct context *ctx, int muted)
     struct le_adapter *adapter;
     char args[96];
 
-    privacy_lamp(muted);
     adapter = le_adapter_connect(ctx->led_sock, CONNECT_TIMEOUT_MS);
     if (!adapter) {
-        le_log_warn("buttond: LED daemon unavailable; mute indicator not shown");
+        if (!ctx->indicator_warned)
+            le_log_warn("buttond: LED daemon unavailable; mute indicator not shown");
+        ctx->indicator_warned = 1;
         return;
     }
     if (muted)
@@ -610,29 +566,107 @@ static void mute_indicator(struct context *ctx, int muted)
     else
         snprintf(args, sizeof(args),
                  "{\"name\":\"stop\",\"owner\":\"mute\"}");
-    /*
-     * The ring is only half the indicator. The mute button has its own lamp,
-     * driven by the amz_privacy GPIO through the driver's privacy_trigger,
-     * and that is the light people actually look at -- it is beside the
-     * button they just pressed. Assert it alongside the ring.
-     *
-     * Entering privacy is all software is permitted to do: the driver
-     * refuses to let userspace leave it ("privacy_trigger must not permit
-     * software to leave privacy"), which is deliberate -- no program should
-     * be able to silently un-mute a microphone. Leaving privacy therefore
-     * needs the kernel to act on the key, so unmute clears the ring here and
-     * the lamp stays until that support exists.
-     */
-    /* Logged because it is otherwise invisible: the indicator failing looks
-       exactly like a muted device with no indicator, which is the confusion
-       this whole feature exists to remove. */
-    if (le_adapter_call(adapter, "pattern", args, NULL, 0) != LE_ADAPTER_OK)
-        le_log_warn("buttond: mute indicator %s rejected by the LED daemon",
-                    muted ? "on" : "off");
-    else
-        le_log_info("buttond: mute indicator %s", muted ? "on" : "off");
+    /* The kernel owns the physical mute lamp; this daemon owns only the
+       software mute state and the ring indicator. */
+    if (le_adapter_call(adapter, "pattern", args, NULL, 0) != LE_ADAPTER_OK) {
+        if (!ctx->indicator_warned)
+            le_log_warn("buttond: mute indicator %s rejected by the LED daemon",
+                        muted ? "on" : "off");
+        ctx->indicator_warned = 1;
+    } else {
+        ctx->indicator_warned = 0;
+        if (ctx->indicated_mute != (muted ? 1 : 0))
+            le_log_info("buttond: mute indicator %s", muted ? "on" : "off");
+        ctx->indicated_mute = muted ? 1 : 0;
+    }
     le_adapter_close(adapter);
-    ctx->indicated_mute = muted ? 1 : 0;
+}
+
+/*
+ * privacy_state is the read-only state exported by the kernel privacy driver.
+ * Try the current 0.14 path first, then the older platform-device spelling;
+ * neither path is writable by buttond.
+ */
+static int read_privacy_state(int *state)
+{
+    static const char *const paths[] = {
+        BUTTOND_PRIVACY_STATE_PATH,
+        BUTTOND_PRIVACY_STATE_FALLBACK_PATH,
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        char buffer[32];
+        char *p;
+        ssize_t n;
+        int fd;
+
+        fd = open(paths[i], O_RDONLY | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        n = read(fd, buffer, sizeof(buffer) - 1);
+        close(fd);
+        if (n <= 0)
+            continue;
+        buffer[n] = '\0';
+        p = buffer;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+            ++p;
+        if (*p != '0' && *p != '1')
+            continue;
+        *state = *p - '0';
+        return 1;
+    }
+    return 0;
+}
+
+static int set_software_mute(struct context *ctx, int muted)
+{
+    char args[48];
+
+    if (ctx->muted < 0 && refresh_audio(ctx) != 0)
+        return -1;
+    if (ctx->muted == muted)
+        return 0;
+    snprintf(args, sizeof(args), "{\"muted\":%s}", muted ? "true" : "false");
+    if (audio_call(ctx, "set_mute", args, NULL, 0) != LE_ADAPTER_OK)
+        return -1;
+    ctx->muted = muted;
+    mute_indicator(ctx, muted);
+    return 0;
+}
+
+/*
+ * Synchronize software mute to kernel privacy transitions. The initial zero
+ * is intentionally non-authoritative: the API may have restored a separate
+ * software mute before buttond started. Once a state has been observed,
+ * changes in either direction are authoritative. An asserted latch is also
+ * enforced while steady, so an API unmute cannot defeat hardware privacy.
+ */
+static int sync_privacy_state(struct context *ctx)
+{
+    int state;
+
+    if (!read_privacy_state(&state))
+        return 0;
+    if (!ctx->privacy_state_seen) {
+        ctx->privacy_state_seen = 1;
+        ctx->privacy_state = state;
+        if (state)
+            return set_software_mute(ctx, 1);
+        return 0;
+    }
+    if (state == ctx->privacy_state) {
+        if (state && ctx->muted != 1)
+            return set_software_mute(ctx, 1);
+        return 0;
+    }
+    if (set_software_mute(ctx, state) != 0)
+        return -1;
+    ctx->privacy_state = state;
+    play_cue(ctx, state ? CUE_LOW_HZ : CUE_MUTE_HZ,
+             state ? CUE_MUTE_HZ : CUE_LOW_HZ, 90U);
+    return 0;
 }
 
 static void show_meter(struct context *ctx, unsigned int value, unsigned int r,
@@ -755,20 +789,16 @@ static void handle_key(struct context *ctx, int code, int value)
      * GPIO that was never missing.
      */
     /*
-     * KEY_HELP is what the vendor calls the action button (0x8a in the
-     * keypad node's kpd-hw-init-map). Nothing emits it on this firmware yet:
-     * the button is behind mediatek,mt8163-keypad, which has no driver here,
-     * and it is not on any of the keypad pins that could be declared as a
-     * gpio-key -- probing those found only floating inputs. Kept so the
-     * behaviour is ready the moment that controller is ported.
+     * The action button, on GPIO36 as KEY_HELP. It reported nothing at all
+     * until the device tree declared that pin: the vendor puts it on the
+     * keypad matrix and mediatek,mt8163-keypad has no driver here.
      */
     case KEY_HELP:
         if (value == 1) {
             /*
              * Three of them, rotating, so repeated presses do not sound like
-             * a stuck machine. Synthesised rather than sampled: an audio file
-             * would have to ship in the image, carry a licence, and survive
-             * the /data contract, for a joke. All three are low and falling,
+             * Bundled PCM rather than synthesised: the files ship in the
+             * image and survive the /data contract. All three are low and falling,
              * longer than any acknowledgement, so none can be mistaken for a
              * volume cue.
              */
@@ -799,8 +829,17 @@ static void handle_key(struct context *ctx, int code, int value)
             action_flourish(ctx);
         }
         return;              /* no autorepeat: once per press */
-    case KEY_POWER:
     case KEY_MUTE:
+    case KEY_POWER:
+        if (value == 1) {
+            int state;
+            (void)refresh_audio(ctx);
+            if (read_privacy_state(&state))
+                (void)sync_privacy_state(ctx);
+            else
+                toggle_mute(ctx);
+        }
+        return;
     case KEY_MICMUTE:
         if (value == 1) {
             (void)refresh_audio(ctx);
@@ -834,6 +873,8 @@ int main(int argc, char **argv)
         ctx.led_sock = LE_ADAPTER_LED_SOCK;
     ctx.volume = -1;
     ctx.muted = -1;
+    ctx.privacy_state = -1;
+    ctx.privacy_state_seen = 0;
     ctx.indicated_mute = -1;
     ctx.audio_poll_warned = 0;
     ctx.tones = 1;
@@ -856,6 +897,7 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
+    refresh_tone_setting(&ctx);
     discover(&ctx);
     if (!ctx.device_count)
         le_log_warn("buttond: no input device reports volume or mute keys yet; "
@@ -864,6 +906,7 @@ int main(int argc, char **argv)
     next_status_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
     write_capability_status(&ctx);
     (void)refresh_audio(&ctx);
+    (void)sync_privacy_state(&ctx);
 
     while (!stop_requested) {
         struct pollfd fds[MAX_DEVICES];
@@ -880,6 +923,9 @@ int main(int argc, char **argv)
                                                ctx.next_repeat_ms,
                                                (int)ctx.device_count,
                                                ctx.held_key);
+        /* Observe a deferred kernel toggle promptly, not at the 5s heartbeat. */
+        if (timeout < 0 || timeout > PRIVACY_POLL_MS)
+            timeout = PRIVACY_POLL_MS;
         ready = poll(fds, (nfds_t)ctx.device_count, timeout);
         if (ready < 0) {
             if (errno == EINTR)
@@ -887,6 +933,7 @@ int main(int argc, char **argv)
             le_log_error("buttond: poll failed: %s", strerror(errno));
             break;
         }
+        (void)sync_privacy_state(&ctx);
         if (monotonic_ms() >= next_status_ms) {
             write_capability_status(&ctx);
             /* The ring must follow the mute state however it changed -- the
@@ -900,9 +947,11 @@ int main(int argc, char **argv)
                 }
             } else {
                 ctx.audio_poll_warned = 0;
-                if (ctx.muted >= 0 && ctx.muted != ctx.indicated_mute)
-                    mute_indicator(&ctx, ctx.muted);
             }
+            (void)sync_privacy_state(&ctx);
+            /* Reassert the persistent underlay after a ledd restart too. */
+            if (ctx.muted >= 0)
+                mute_indicator(&ctx, ctx.muted);
             next_status_ms = monotonic_ms() + RESCAN_INTERVAL_MS;
         }
         if (!ready && buttond_repeat_due(monotonic_ms(),

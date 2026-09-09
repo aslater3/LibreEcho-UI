@@ -144,8 +144,38 @@ $(BUILD)/libreecho-ttsd-wyoming: src/adapter/ttsd.c \
 	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc \
 		-DLE_TTSD_ENGINE_WYOMING $^ $(LDFLAGS) -lpthread -lm -o $@
 
+$(BUILD)/test-button-settings: tests/test_button_settings.c \
+	$(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
+		$^ $(LDFLAGS) -lm -lpthread -o $@
+
+$(BUILD)/test-buttond-privacy: tests/test_buttond_privacy.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c \
+	src/adapter/adapter_client.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		src/adapter/adapter_client.c src/json.c src/log.c -o $@
+
+$(BUILD)/test-buttond-events: tests/test_buttond_events.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c \
+	src/adapter/adapter_client.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		src/adapter/adapter_client.c src/json.c src/log.c -o $@
+
+$(BUILD)/test-action-sample: tests/test_action_sample.c \
+	src/adapter/audiod.c src/adapter/adapter_client.c \
+	src/adapter/adapter_server.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
+
 $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
-		src/adapter/buttond_timing.c
+	src/adapter/buttond_timing.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-watchdog-policy: tests/test_watchdog_policy.c \
@@ -736,6 +766,9 @@ clean:
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
+		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \
+		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-timing \
+		$(BUILD)/test-action-sample \
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-thermal-zone-selection \
 		$(BUILD)/test-light-sensor \

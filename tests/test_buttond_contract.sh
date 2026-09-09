@@ -22,7 +22,14 @@ assert 'json_get_string(buffer, "button_action_sounds", value_text,\n           
 sample = source[source.index('static void play_sample'):source.index('#define CUE_LOW_HZ')]
 assert 'ctx->tones' not in sample
 mute_indicator = source[source.index('static void mute_indicator'):source.index('static void show_meter')]
-assert mute_indicator.index('privacy_lamp(muted)') < mute_indicator.index('adapter = le_adapter_connect')
+assert 'privacy_lamp(' not in source and 'static int privacy_write(' not in source, 'kernel must own the privacy latch'
+assert 'static int read_privacy_state(' in source and 'O_RDONLY | O_CLOEXEC' in mute_indicator
+assert 'static int sync_privacy_state(' in mute_indicator
+assert 'ctx->indicator_warned = 1;' in mute_indicator
+assert 'if (ctx.muted >= 0)\n                mute_indicator(&ctx, ctx.muted);' in source
+restart = Path('tests/test_buttond_led_restart.py').read_text()
+assert "'--unshare-all'" in restart and "'--ro-bind'" in restart
+assert "'--dir', '/sys'" in restart and "'--dir', '/data'" in restart
 PY
 
 test_dir=$(mktemp -d)

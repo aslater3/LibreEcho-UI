@@ -1,11 +1,17 @@
 #define _POSIX_C_SOURCE 200809L
 
 /* Host regression for the kernel-owned privacy latch synchronizer. */
-#define BUTTOND_PRIVACY_STATE_PATH "/tmp/libreecho-buttond-privacy-state-test"
-#define BUTTOND_PRIVACY_STATE_FALLBACK_PATH "/tmp/libreecho-buttond-privacy-state-fallback-test"
+#include "buttond_fixture.h"
+#define open buttond_fixture_open
+static char test_privacy_path[256], test_privacy_fallback_path[256];
+static char test_config_path[256];
+#define BUTTOND_PRIVACY_STATE_PATH test_privacy_path
+#define BUTTOND_PRIVACY_STATE_FALLBACK_PATH test_privacy_fallback_path
+#define LE_BUTTOND_CONFIG test_config_path
 #define main buttond_program_main
 #include "../src/adapter/buttond.c"
 #undef main
+#undef open
 
 #include <assert.h>
 #include <sys/socket.h>
@@ -149,10 +155,12 @@ int main(void)
     pid_t audio_pid, led_pid;
     struct timespec pause = {0, 100000000L};
     int before;
+    FILE *config;
 
-    unlink(BUTTOND_PRIVACY_STATE_PATH);
-    unlink(BUTTOND_PRIVACY_STATE_FALLBACK_PATH);
     assert(mkdtemp(directory) != NULL);
+    snprintf(test_privacy_path, sizeof(test_privacy_path), "%s/privacy", directory);
+    snprintf(test_privacy_fallback_path, sizeof(test_privacy_fallback_path), "%s/privacy-fallback", directory);
+    snprintf(test_config_path, sizeof(test_config_path), "%s/config.json", directory);
     snprintf(audio_socket, sizeof(audio_socket), "%s/audio.sock", directory);
     snprintf(led_socket, sizeof(led_socket), "%s/led.sock", directory);
     snprintf(audio_log, sizeof(audio_log), "%s/audio.log", directory);
@@ -171,6 +179,19 @@ int main(void)
 
     init_context(&ctx, audio_socket);
     ctx.led_sock = led_socket;
+    config = fopen(test_config_path, "w");
+    assert(config != NULL);
+    fputs("{\"button_tones\":false,\"button_action\":\"playpause\","
+          "\"button_action_sounds\":\"custom-chime,listen\","
+          "\"button_action_brightness\":23,\"button_mute_brightness\":25}", config);
+    assert(fclose(config) == 0);
+
+    refresh_tone_setting(&ctx);
+    assert(ctx.tones == 0);
+    assert(!strcmp(ctx.action, "playpause"));
+    assert(!strcmp(ctx.action_sounds, "custom-chime,listen"));
+    assert(ctx.action_brightness == 23 && ctx.mute_brightness == 25);
+
 
     /* KEY_MUTE is reported by the kernel transition, not toggled by buttond. */
     write_state(BUTTOND_PRIVACY_STATE_PATH, 0);
@@ -252,6 +273,7 @@ int main(void)
     sync_privacy_state(&ctx);
     assert(ctx.muted == 1);
 
+    assert(buttond_fixture_opens > 0);
     kill(audio_pid, SIGTERM);
     kill(led_pid, SIGTERM);
     waitpid(audio_pid, NULL, 0);
@@ -261,6 +283,7 @@ int main(void)
     unlink(audio_log);
     unlink(BUTTOND_PRIVACY_STATE_PATH);
     unlink(BUTTOND_PRIVACY_STATE_FALLBACK_PATH);
+    unlink(test_config_path);
     rmdir(directory);
     puts("buttond privacy synchronization: startup, transitions, fallback, and no double-toggle: ok");
     return 0;

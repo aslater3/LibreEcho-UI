@@ -74,14 +74,20 @@ sh tests/test_setup_optional_adapters.sh
 sh tests/test_login_brand_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
-make build/test-audiod-review build/test-led-night-review build/test-wake-led-profile
+make build/libreecho-ledd build/libreecho-buttond
+python3 tests/test_buttond_led_restart.py
+make build/test-action-sample build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing build/test-watchdog-policy
+./build/test-action-sample
 ./build/test-audiod-review
 ./build/test-led-night-review
+./build/test-button-settings
+./build/test-buttond-privacy
+./build/test-buttond-events
+./build/test-buttond-timing
+make build/test-wake-led-profile
 ./build/test-wake-led-profile
 sh tests/test_voice_listening_led_profile.sh
 sh tests/test_startup_animation.sh
-make build/test-buttond-timing build/test-watchdog-policy
-./build/test-buttond-timing
 ./build/test-watchdog-policy
 make build/libreecho-watchdogd
 sh tests/test_watchdogd_recovery.sh
@@ -101,6 +107,7 @@ sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_startup_state_contract.py
 python3 tests/test_wake_word_ui_contract.py
+node tests/test_wifi_security_interaction.js
 sh tests/test_local_llm_ui_contract.sh
 python3 tests/test_home_location_panel_contract.py
 python3 tools/test_virtual_echo.py
@@ -138,6 +145,7 @@ sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
 sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
+sh tests/test_setup_connectivity_contract.sh
 sh tests/test_voice_pipeline_restart_contract.sh
 python3 tests/test_voice_latency_bench.py
 make build/test-voice-pipeline-restart

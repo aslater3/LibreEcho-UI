@@ -1155,7 +1155,7 @@
      "LED and buttons"
     ],
     "summary": "Update button mappings, cues, action, and brightness",
-    "description": "All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Malformed or out-of-range fields return 400.",
+    "description": "At least one recognized button field is required. All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Missing, malformed, or out-of-range settings return 400. Persistence failure returns 503 and preserves prior preferences.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1168,12 +1168,24 @@
        "schema": {
         "type": "object",
         "additionalProperties": false,
+        "minProperties": 1,
+        "anyOf": [
+         {"required": ["short_press"]},
+         {"required": ["long_press"]},
+         {"required": ["tones"]},
+         {"required": ["action"]},
+         {"required": ["action_sounds"]},
+         {"required": ["action_brightness"]},
+         {"required": ["mute_brightness"]}
+        ],
         "properties": {
          "short_press": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 31
          },
          "long_press": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 31
          },
          "tones": {
           "type": "boolean"
@@ -1215,6 +1227,9 @@
       "$ref": "#/components/responses/Error"
      },
      "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -2415,6 +2430,55 @@
     }
    }
   },
+   "/setup/vendor-import-force-next-boot": {
+    "post": {
+     "tags": [
+      "Setup"
+     ],
+     "summary": "Schedule a one-shot unverified owner-local firmware import",
+     "description": "Creates a mode-0600 one-shot marker consumed on the next boot. Hash matching is bypassed only for that boot; safe paths, the complete four-file inventory, bounded sizes, and MT8163 ROM patch routing metadata remain mandatory. The result is reported as forced-unverified.",
+     "parameters": [
+      {
+       "$ref": "#/components/parameters/Csrf"
+      }
+     ],
+     "requestBody": {
+      "required": true,
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "confirm"
+         ],
+         "properties": {
+          "confirm": {
+           "type": "string",
+           "enum": [
+            "force-unverified-owner-local-import"
+           ]
+          }
+         }
+        }
+       }
+      }
+     },
+     "responses": {
+      "200": {
+       "$ref": "#/components/responses/Success"
+      },
+      "400": {
+       "$ref": "#/components/responses/Error"
+      },
+      "501": {
+       "$ref": "#/components/responses/Error"
+      },
+      "503": {
+       "$ref": "#/components/responses/Error"
+      }
+     }
+    }
+   },
   "/setup": {
    "get": {
     "tags": [

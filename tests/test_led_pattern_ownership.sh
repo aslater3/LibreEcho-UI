@@ -3,7 +3,7 @@ set -eu
 
 test_dir=$(mktemp -d)
 socket_path="$test_dir/led.sock"
-log_path=./build/test-led-pattern-ownership.log
+log_path="$test_dir/led.log"
 pid=0
 
 cleanup() {

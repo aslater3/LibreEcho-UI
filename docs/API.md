@@ -1511,8 +1511,11 @@ accepted settings with the corresponding behavior reported by the daemon.
 `action_sounds` is a comma-separated list of installed sound names in rotation
 order. Each name follows the same 1–48-character lowercase-name rule as the
 preview endpoint; an empty string is valid and means no sound is played.
-Malformed fields, unsupported actions, and brightness values outside 0–100
-return the standard 400 error envelope.
+At least one recognized button field is required. The legacy `short_press` and
+`long_press` strings are limited to 31 bytes each. Missing settings, malformed
+fields, unsupported actions, and brightness values outside 0–100 return the
+standard 400 error envelope. If persistence fails, the API returns 503 and the
+previous in-memory preferences remain active.
 
 **Request:**
 ```json

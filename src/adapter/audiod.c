@@ -215,6 +215,8 @@ struct audio_hw {
     /* The running sleep-noise child, so a second start replaces the first
        rather than layering two generators onto the same bus. */
     pid_t noise_pid;
+    /* One sample child at a time; this also lets the reaper clear ownership. */
+    pid_t sample_pid;
     int noise_colour;
     long noise_seconds;
     int noise_level;
@@ -261,6 +263,8 @@ static void reap_children(struct audio_hw *audio)
     for (;;) {
         done = waitpid(-1, NULL, WNOHANG);
         if (done > 0) {
+            if (done == audio->sample_pid)
+                audio->sample_pid = 0;
             if (done == audio->noise_pid)
                 clear_noise_state(audio);
             continue;
@@ -1562,31 +1566,44 @@ static int write_sample_fd(int fd, int sample_fd)
                 do {
                     rc = poll(&pfd, 1, 1000);
                 } while (rc < 0 && errno == EINTR);
-                if (rc <= 0)
-                    break;
+                if (rc <= 0) {
+                    fclose(file);
+                    return -1;
+                }
                 continue;
             }
-            if (n <= 0)
-                break;
+            if (n <= 0) {
+                fclose(file);
+                return -1;
+            }
             sent += (size_t)n;
         }
+    }
+    if (ferror(file)) {
+        fclose(file);
+        return -1;
     }
     fclose(file);
     return 0;
 }
 
-static int start_sample(const struct audio_hw *audio, const char *name)
+static int start_sample(struct audio_hw *audio, const char *name)
 {
-    int fd;
-    int sample_fd;
+    int fd, sample_fd;
     pid_t pid;
 
-    if (!audio->output_available || access(LE_SYSTEM_AUDIO_BUS, F_OK) < 0)
+    if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0)
         return -1;
+    if (audio->sample_pid > 0) {
+        pid_t done = waitpid(audio->sample_pid, NULL, WNOHANG);
+        if (done == 0 || (done < 0 && errno != ECHILD))
+            return -1;
+        audio->sample_pid = 0;
+    }
     sample_fd = sample_open_fd(name);
     if (sample_fd < 0)
         return -1;
-    fd = open(LE_SYSTEM_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         close(sample_fd);
         return -1;
@@ -1602,6 +1619,7 @@ static int start_sample(const struct audio_hw *audio, const char *name)
         close(fd);
         _exit(result < 0 ? 1 : 0);
     }
+    audio->sample_pid = pid;
     close(sample_fd);
     close(fd);
     return 0;
