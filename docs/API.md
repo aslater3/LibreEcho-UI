@@ -1936,3 +1936,123 @@ data: {"refresh":true}
 - Max 12 WiFi scan results
 - Max 128 log entries in memory
 - Max 4 adapter clients per daemon
+
+#### GET /api/v1/provenance
+
+Returns additive build provenance and the bounded, read-only feature component
+observations used by About, System, OTA status, and diagnostic export. The
+`components` array follows the Platform feature manifest and
+transaction journal contract; the UI does not derive a release from the OS
+version, filenames, mutable installed manifests, or a legacy manifest that lacks
+release identity. Missing or malformed values are reported as `"unavailable"`;
+`effective` is `present` only when the bounded hash of the canonical
+`payload.squashfs` (and, for a runtime manifest, `runtime.squashfs`) matches its
+expected metadata. Hashing is performed incrementally by the daemon's existing
+event loop; while an actual artifact is being verified, its observation is
+`pending`, and no manifest hash is reported as verified. `present` is emitted
+only after the actual bytes match metadata. Each artifact is limited to 512 MiB
+(536870912 bytes): an oversized artifact, read error, growth or other
+identity/stat instability is `unavailable`. Feature metadata is bounded to 256
+KiB (262144 bytes) inclusive; signed OTA control input is bounded to 64 KiB
+(65536 bytes) inclusive, and transaction records to 8192 bytes inclusive. A
+missing artifact remains `missing`, while a readable same-identity artifact
+whose bytes do not match remains `mismatch`.
+The settled `effective` value is `missing`, `mismatch`, or `unavailable` for
+the distinct observations above. The
+`candidate_kind`, `candidate_payload_sha256`, and `candidate_status` fields are
+independent staged-asset observations: candidate kind is `runtime` only for a
+`.runtime.squashfs` asset and `replacement` only for a `.payload.squashfs`
+asset, so a full replacement cannot be presented as a runtime capsule. `candidate_status` is `missing` only when no feature candidate is declared; an unreadable or malformed declaration remains `unavailable`.
+`runtime_capsule_sha256` is `null` when no matching runtime capsule hash was
+observed. The array is limited to the five allow-listed feature IDs and the
+encoded component data is bounded to 8192 bytes.
+
+`authority_provenance` is a separate read-only signed-authority observation, also
+included in diagnostic export. The UI asynchronously runs Platform's existing
+`libreecho-feature-transaction provenance` command; it does not introduce a second
+signature verifier or verify signatures in the HTTP request handler. The helper
+verifies committed system authority, retained runtime authority, the installed
+transaction identity, and current canonical bytes before emitting identity.
+
+On success it has `available: true`, schema `libreecho-feature-provenance-v1`,
+`transaction_id`, `installed_sha256`, `manifest_sha256`, `manifest_sig_sha256`, and
+five `features`. Each feature has `feature_id`, `action` (`preserve`, `runtime`, or
+`replace`), `kind` (`base` or `runtime`), signed authorizing `release` and
+`source_commit`, `payload_sha256`, `manifest_sha256`, nullable `runtime_sha256` and
+`runtime_manifest_sha256`, and `daemon_sha256`. The latter measures the mounted
+executable, **not a running process**. A preserved runtime capsule retains its own
+older signed authority. These are authorizing identities, not a claim of the
+original feature build's source; they do not replace the legacy `components`
+identity fields.
+
+Missing, stale, partial, tampered, timed-out, or otherwise unverifiable evidence
+produces `available: false`, the same schema, `reason: "unavailable"`,
+`transaction_id: null`, and `features: []`, with no release/source claims. Relevant
+canonical payload, manifest, mounted daemon, authority/signature, transaction,
+public-key and verifier changes invalidate the observation. Failed verification
+is retried with bounded backoff; the HTTP loop remains serviceable. No OTA state,
+confirmation, settings, or feature data is changed by this read-only path. About
+and System display signed authorizing identity in native expandable details,
+separate from measured component status and running-process hashes.
+
+Host verification after `make`:
+
+```sh
+LIBREECHO_PLATFORM_SRC=/path/to/companion-platform python3 tests/test_authority_provenance_integration.py
+```
+
+The dedicated `Signed provenance integration` workflow pins the companion
+Platform commit and uses fresh ephemeral test keys, not release signing keys.
+Host passes do not claim hardware acceptance or establish target verifier timing.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "os_version": "LibreEcho OS 0.13.11",
+    "source_commit": "public-build-identity",
+    "source_dirty": false,
+    "source_digest": "public-build-digest",
+    "transaction_state": "none",
+    "last_transaction_result": "idle",
+    "authority_provenance": {"available": false, "schema": "libreecho-feature-provenance-v1", "reason": "unavailable", "transaction_id": null, "features": []},
+    "components": [
+      {
+        "feature_id": "tts",
+        "release": "unavailable",
+        "source_commit": "unavailable",
+        "effective_payload_sha256": "unavailable",
+        "runtime_capsule_sha256": null,
+        "candidate_kind": "unavailable",
+        "candidate_payload_sha256": "unavailable",
+        "candidate_status": "unavailable",
+        "running_daemon_sha256": "unavailable",
+        "running_daemon_status": "unavailable",
+        "effective": "missing",
+        "activation": "unavailable",
+        "last_transaction_result": "idle"
+      }
+    ]
+  },
+  "error": null
+}
+```
+
+The same `components`, `transaction_state`, and `last_transaction_result` fields are additive in
+`GET /api/v1/system/update` and in `POST /api/v1/diagnostics/export`. The
+Platform-side mapping is read-only: mutable feature manifests supply only the
+expected artifact hashes and canonical filenames for byte observations. Release
+and source identity are emitted only when a verified committed authority is
+available (`committed-manifest`/`.sig` or the corresponding committed runtime
+authority); this UI does not verify signatures and therefore reports those
+identity fields as `"unavailable"` rather than treating mutable installed
+records as provenance. The UI hashes the canonical filenames `payload.squashfs`
+and (for runtime actions) `runtime.squashfs` directly with bounded reads and a
+keyed stat cache. Candidate metadata comes from `/data/libreecho/update/staging/manifest`;
+its actual bytes are read only from the corresponding safe staged feature path
+and are reported separately as runtime or replacement. The staging manifest also
+supplies reboot activation and signed transaction identity; the feature
+transaction journal supplies the observed result. No Platform fields are
+invented by the UI.
+
+### Wake Word

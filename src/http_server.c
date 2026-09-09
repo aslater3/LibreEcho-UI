@@ -1,4 +1,6 @@
 #include "http_server.h"
+#include "feature_provenance.h"
+#include "authority_provenance.h"
 /* Route contracts retained across the release merge: (!strcmp(q.path,"/api/v1/setup")&&!strcmp(q.method,"POST")); (!strcmp(q.path,"/api/v1/network/wifi/connect")&&!strcmp(q.method,"POST")); refresh_setup_completed(api); */
 #include "tls.h"
 #include "adapter/adapter.h"
@@ -380,7 +382,9 @@ c[i].buf[c[i].used]=0;
 process(&c[i],o,api,ls,tls_ls,relay_ls,c,max);
 }}if(time(0)!=last_tick){last_tick=time(0);
 le_backend_tick(api->backend);
-}}for(i=0;
+}le_feature_provenance_tick();
+le_authority_provenance_tick();
+}for(i=0;
 i<max;
 i++)if(c[i].fd>=0)close(c[i].fd);
 if(tls_ls>=0)close(tls_ls);

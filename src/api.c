@@ -5,6 +5,8 @@
 #include "adapter/timer_schedule.h"
 #include "adapter/wyoming_client.h"
 #include "config_store.h"
+#include "feature_provenance.h"
+#include "authority_provenance.h"
 #include "json.h"
 #include "logd.h"
 #include "log.h"
@@ -117,6 +119,9 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     char escaped_rollback[192],escaped_latest[192],escaped_check_status[128];
     char escaped_check_error[192],escaped_source[128],escaped_channel[64];
     char escaped_reachable[32];
+    char components[LE_FEATURE_COMPONENTS_JSON_MAX],authority[LE_AUTHORITY_PROVENANCE_JSON_MAX];
+    char escaped_transaction_state[80],escaped_last_result[80];
+    le_feature_transaction_state transaction;
     int supported=!strcmp(le_backend_mode(c->backend),"linux")&&
         !access("/usr/local/sbin/libreecho-bootctl",X_OK)&&
         !access("/usr/local/sbin/libreecho-update",X_OK)&&
@@ -195,6 +200,11 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         while(fgets(cap,sizeof(cap),f)){cap[strcspn(cap,"\r\n")]=0;if(!strcmp(cap,"allow-unsigned"))allow_unsigned=1;}
         pclose(f);
     }
+    le_feature_transaction_state_read(&transaction);
+    le_feature_components_json(components,sizeof(components),&transaction);
+    le_authority_provenance_json(authority,sizeof(authority));
+    json_escape(escaped_transaction_state,sizeof(escaped_transaction_state),transaction.state);
+    json_escape(escaped_last_result,sizeof(escaped_last_result),transaction.last_result);
     json_escape(escaped_latest,sizeof(escaped_latest),latest_version);
     json_escape(escaped_check_status,sizeof(escaped_check_status),check_status);
     json_escape(escaped_check_error,sizeof(escaped_check_error),check_error);
@@ -211,14 +221,16 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         "\"automatic_updates\":%s,"
         "\"rollback_available\":%s,\"rollback_version\":\"%s\","
         "\"allow_unsigned\":%s,\"max_upload_bytes\":%zu,"
-        "\"max_upload_ceiling_bytes\":%zu},"
+        "\"max_upload_ceiling_bytes\":%zu,"
+        "\"components\":%s,\"transaction_state\":\"%s\",\"last_transaction_result\":\"%s\",\"authority_provenance\":%s},"
         "\"error\":null}",supported?"true":"false",current,inactive,escaped_state,
         progress,pending?"true":"false",escaped_version,escaped_installed,
         escaped_latest,escaped_channel,escaped_source,escaped_reachable,
         escaped_check_status,escaped_check_error,last_check,last_success,
         automatic?"true":"false",supported?"true":"false",escaped_rollback,
         allow_unsigned?"true":"false",le_update_max_upload_bytes(),
-        (size_t)LE_UPDATE_MAX_BYTES);
+        (size_t)LE_UPDATE_MAX_BYTES,components,escaped_transaction_state,
+        escaped_last_result,authority);
 }
 static const char*agent_socket_path(void){const char*p=getenv("LIBREECHO_AGENT_SOCKET");return p&&*p?p:LE_ADAPTER_AGENT_SOCK;}
 static int agent_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*agent=le_adapter_connect(agent_socket_path(),15000);int rc;if(!agent)return LE_NOT_SUPPORTED;if(!strcmp(command,"respond"))le_adapter_set_io_timeout(agent,120000);rc=le_adapter_call(agent,command,args,output,size);le_adapter_close(agent);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
@@ -1468,9 +1480,17 @@ static int time_status_value(const char*key,char*value,size_t size){FILE*f;char 
 static int time_status_int(const char*key,long*fallback){char value[64],*end;long parsed;if(!time_status_value(key,value,sizeof(value)))return 0;errno=0;parsed=strtol(value,&end,10);if(errno||*end)return 0;*fallback=parsed;return 1;}
 static void diagnostics_json(struct api_context*c,struct api_response*r){int linux=!strcmp(le_backend_mode(c->backend),"linux");const char*logging=linux?(service_ready("/var/run/libreecho-logd.pid",LE_LOGD_SOCK)?"ok":"degraded"):"development";const char*network=linux?(service_ready("/var/run/libreecho-networkd.pid","/run/libreecho/network.sock")?"ok":"degraded"):"development";const char*timekeeping=linux?(service_ready("/var/run/libreecho-timed.pid",NULL)?"ok":"degraded"):"development";const char*audio=linux?(service_ready("/var/run/libreecho-audiod.pid","/run/libreecho/audio.sock")?"ok":"degraded"):"development";const char*microphone=linux?(service_ready("/var/run/libreecho-micd.pid",LE_ADAPTER_MIC_SOCK)?"ok":"degraded"):"development";const char*led=linux?(service_ready("/var/run/libreecho-ledd.pid","/run/libreecho/led.sock")?"ok":"degraded"):"development";const char*bluetooth=linux?(service_ready("/var/run/libreecho-btd.pid","/run/libreecho/bluetooth.sock")?"ok":"degraded"):"development";const char*wifi=linux?(access("/sys/class/net/wlan0",F_OK)==0?"ok":"unavailable"):"development";out(r,200,"{\"ok\":true,\"data\":{\"checks\":[{\"name\":\"configuration\",\"status\":\"ok\"},{\"name\":\"backend\",\"status\":\"ok\"},{\"name\":\"central logging\",\"status\":\"%s\"},{\"name\":\"network adapter\",\"status\":\"%s\"},{\"name\":\"time synchronization\",\"status\":\"%s\"},{\"name\":\"audio adapter\",\"status\":\"%s\"},{\"name\":\"microphone adapter\",\"status\":\"%s\"},{\"name\":\"LED adapter\",\"status\":\"%s\"},{\"name\":\"Bluetooth adapter\",\"status\":\"%s\"},{\"name\":\"wlan0\",\"status\":\"%s\"}]},\"error\":null}",logging,network,timekeeping,audio,microphone,led,bluetooth,wifi);}
 static void provenance_json(struct api_response*r){
-    out(r,200,"{\"ok\":true,\"data\":{\"os_version\":\"%s\",\"source_commit\":\"%s\",\"source_dirty\":%s,\"source_digest\":\"%s\"},\"error\":null}",
+    char components[LE_FEATURE_COMPONENTS_JSON_MAX],authority[LE_AUTHORITY_PROVENANCE_JSON_MAX],state[80],last_result[80];
+    le_feature_transaction_state transaction;
+    le_feature_transaction_state_read(&transaction);
+    le_feature_components_json(components,sizeof(components),&transaction);
+    le_authority_provenance_json(authority,sizeof(authority));
+    json_escape(state,sizeof(state),transaction.state);
+    json_escape(last_result,sizeof(last_result),transaction.last_result);
+    out(r,200,"{\"ok\":true,\"data\":{\"os_version\":\"%s\",\"source_commit\":\"%s\",\"source_dirty\":%s,\"source_digest\":\"%s\",\"components\":%s,\"transaction_state\":\"%s\",\"last_transaction_result\":\"%s\",\"authority_provenance\":%s},\"error\":null}",
         LE_OS_VERSION_STRING,LE_SOURCE_COMMIT,
-        !strcmp(LE_SOURCE_DIRTY,"1")?"true":"false",LE_SOURCE_DIGEST);
+        !strcmp(LE_SOURCE_DIRTY,"1")?"true":"false",LE_SOURCE_DIGEST,
+        components,state,last_result,authority);
 }
 static void system_json(struct api_context*c,struct api_response*r){time_t now=time(0);int valid=now>=1577836800,linux=!strcmp(le_backend_mode(c->backend),"linux");long synchronized=0,rtc_available=0,rtc_persisted=0,last_sync=0;char state[64]="unavailable",source[64],servers[1100]="",escaped_state[128],escaped_source[128],escaped_servers[2200];const char*tz=getenv("TZ");char escaped_tz[128];strcpy(source,valid?"system-clock":"unset");if(linux){time_status_value("state",state,sizeof(state));time_status_value("source",source,sizeof(source));time_status_value("servers",servers,sizeof(servers));time_status_int("synchronized",&synchronized);time_status_int("rtc_available",&rtc_available);time_status_int("rtc_persisted",&rtc_persisted);time_status_int("last_sync_epoch",&last_sync);if(!rtc_available&&access("/sys/class/rtc/rtc0",F_OK)==0)rtc_available=1;}json_escape(escaped_tz,sizeof(escaped_tz),tz&&tz[0]?tz:"UTC");json_escape(escaped_state,sizeof(escaped_state),state);json_escape(escaped_source,sizeof(escaped_source),source);json_escape(escaped_servers,sizeof(escaped_servers),servers);out(r,200,"{\"ok\":true,\"data\":{\"update_channel\":\"stable\",\"ota\":{\"supported\":false,\"design\":\"A/B\",\"current_slot\":\"A\",\"inactive_slot\":\"B\",\"state\":\"idle\",\"progress\":0,\"rollback_available\":false},\"timezone\":\"%s\",\"boot_estimate_seconds\":%d,\"ntp\":%s,\"ntp_state\":\"%s\",\"ntp_servers\":\"%s\",\"last_sync_epoch\":%ld,\"clock_valid\":%s,\"clock_source\":\"%s\",\"rtc_available\":%s,\"rtc_persisted\":%s},\"error\":null}",escaped_tz,c->boot_estimate_seconds,synchronized&&valid?"true":"false",escaped_state,escaped_servers,last_sync,valid?"true":"false",escaped_source,rtc_available?"true":"false",rtc_persisted?"true":"false");}
 #define LE_AUTH_FAILURE_LIMIT 5

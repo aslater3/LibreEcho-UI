@@ -566,58 +566,58 @@
       "$ref": "#/components/responses/Error"
      }
     }
-    }
-    },
-    "/audio/sample": {
-    "post": {
-     "tags": [
-      "Audio"
-     ],
-     "summary": "Preview one bundled action-button sound",
-     "description": "Plays one raw sound from the installed sound directory. Names are lowercase letters, digits, hyphens, or underscores and are limited to 48 characters. Other HTTP methods return 405.",
-     "parameters": [
-      {
-       "$ref": "#/components/parameters/Csrf"
-      }
-     ],
-     "requestBody": {
-      "required": true,
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "required": [
-          "name"
-         ],
-         "properties": {
-          "name": {
-           "type": "string",
-           "minLength": 1,
-           "maxLength": 48,
-           "pattern": "^[a-z0-9_-]+$"
-          }
+   }
+  },
+  "/audio/sample": {
+   "post": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Preview one bundled action-button sound",
+    "description": "Plays one raw sound from the installed sound directory. Names are lowercase letters, digits, hyphens, or underscores and are limited to 48 characters. Other HTTP methods return 405.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "name"
+        ],
+        "properties": {
+         "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 48,
+          "pattern": "^[a-z0-9_-]+$"
          }
         }
        }
       }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
      },
-     "responses": {
-      "200": {
-       "$ref": "#/components/responses/Success"
-      },
-      "400": {
-       "$ref": "#/components/responses/Error"
-      },
-      "405": {
-       "$ref": "#/components/responses/Error"
-      },
-      "501": {
-       "$ref": "#/components/responses/Error"
-      }
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
      }
     }
-    },
-    "/auth": {
+   }
+  },
+  "/auth": {
    "get": {
     "tags": [
      "Authentication"
@@ -1303,66 +1303,135 @@
   },
   "/timers": {
    "get": {
-    "tags": ["Timers"],
+    "tags": [
+     "Timers"
+    ],
     "summary": "List timers and alarms",
     "responses": {
-     "200": {"$ref": "#/components/responses/Success"},
-     "503": {"$ref": "#/components/responses/Error"}
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
     }
    },
    "post": {
-    "tags": ["Timers"],
+    "tags": [
+     "Timers"
+    ],
     "summary": "Create a countdown timer",
-    "security": [{"BearerAuth": []}],
-    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
     "requestBody": {
      "required": true,
      "content": {
       "application/json": {
        "schema": {
         "type": "object",
-        "required": ["seconds"],
+        "required": [
+         "seconds"
+        ],
         "properties": {
-         "seconds": {"type": "integer", "minimum": 1, "maximum": 604800},
-         "label": {"type": "string", "description": "Optional label; its UTF-8 encoding must be no longer than 47 bytes and must not contain control characters."}
+         "seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800
+         },
+         "label": {
+          "type": "string",
+          "description": "Optional label; its UTF-8 encoding must be no longer than 47 bytes and must not contain control characters."
+         }
         }
        }
       }
      }
     },
     "responses": {
-     "201": {"$ref": "#/components/responses/Success"},
-     "400": {"$ref": "#/components/responses/Error"},
-     "409": {"$ref": "#/components/responses/Error"},
-     "503": {"$ref": "#/components/responses/Error"}
+     "201": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
     }
    }
   },
   "/timers/dismiss": {
    "post": {
-    "tags": ["Timers"],
+    "tags": [
+     "Timers"
+    ],
     "summary": "Dismiss ringing timers",
-    "security": [{"BearerAuth": []}],
-    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
     "responses": {
-     "200": {"$ref": "#/components/responses/Success"},
-     "503": {"$ref": "#/components/responses/Error"}
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
     }
    }
   },
   "/timers/{id}": {
    "delete": {
-    "tags": ["Timers"],
+    "tags": [
+     "Timers"
+    ],
     "summary": "Cancel a pending timer; use dismiss for ringing timers",
-    "security": [{"BearerAuth": []}],
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
     "parameters": [
-     {"$ref": "#/components/parameters/Csrf"},
-     {"name": "id", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}}
+     {
+      "$ref": "#/components/parameters/Csrf"
+     },
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "integer",
+       "minimum": 1
+      }
+     }
     ],
     "responses": {
-     "200": {"$ref": "#/components/responses/Success"},
-     "404": {"$ref": "#/components/responses/Error"},
-     "503": {"$ref": "#/components/responses/Error"}
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
     }
    }
   },
@@ -1541,7 +1610,7 @@
      "Diagnostics"
     ],
     "summary": "Prepare redacted diagnostics",
-    "description": "Authenticated action returning a bounded, deterministic-ordered JSON diagnostic bundle. It includes public-safe release identity and available runtime, network, audio, wake-word, Bluetooth, playback, privacy, reset/pstore-summary and bounded log evidence. Wi-Fi credentials, SSID/BSSID, IP/MAC/Bluetooth addresses, owner identifiers, tokens, private paths, media metadata, signing material and raw pstore are omitted or redacted. Missing or malformed subsystem data is represented as unavailable without failing the export.",
+    "description": "Authenticated action returning a bounded, deterministic-ordered JSON diagnostic bundle. It includes public-safe release identity, canonical components and transaction state/result observations, and available runtime, network, audio, wake-word, Bluetooth, playback, privacy, reset/pstore-summary and bounded log evidence. Wi-Fi credentials, SSID/BSSID, IP/MAC/Bluetooth addresses, owner identifiers, tokens, private paths, media metadata, signing material and raw pstore are omitted or redacted. Missing or malformed subsystem data is represented as unavailable without failing the export. data.release_identity.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity.",
     "security": [
      {
       "BearerAuth": []
@@ -1554,7 +1623,42 @@
     ],
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Successful response including separately verified signed authority (or explicitly unavailable authority).",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "required": [
+              "release_identity"
+             ],
+             "properties": {
+              "release_identity": {
+               "type": "object",
+               "required": [
+                "authority_provenance"
+               ],
+               "properties": {
+                "authority_provenance": {
+                 "$ref": "#/components/schemas/AuthorityProvenance"
+                }
+               }
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
      }
     }
    }
@@ -2276,10 +2380,37 @@
      "System"
     ],
     "summary": "Read build and source provenance",
-    "description": "Returns the OS version, source commit, clean/dirty source flag, and content digest embedded at build time.",
+    "description": "Returns the OS version, source commit, clean/dirty source flag, content digest, and canonical bounded `components` observations. Each component reports the allow-listed feature_id, release, source_commit, effective_payload_sha256 (the observed canonical payload hash only when it matches metadata), nullable runtime_capsule_sha256, candidate_kind, candidate_payload_sha256, candidate_status, running_daemon_sha256, running_daemon_status, effective state, activation, and last_transaction_result. Hashing is incremental in the daemon's existing event loop: `pending` means actual-byte verification is still in progress and no manifest hash is trusted; `present` is emitted only after actual bytes match metadata. Each artifact is limited to 512 MiB (536870912 bytes). Feature metadata is limited to 256 KiB (262144 bytes) inclusive, signed OTA control input to 64 KiB (65536 bytes) inclusive, and transaction records to 8192 bytes inclusive. Mutable installed manifests are not provenance authority: release and source identity are emitted only from verified committed authority, and this UI reports them as unavailable because it does not verify signatures. Candidate kind is runtime only for `.runtime.squashfs` and replacement only for `.payload.squashfs`, preventing a full replacement from masquerading as a runtime capsule. `candidate_status` is `missing` only when no feature candidate is declared; unreadable or malformed declarations remain `unavailable`. Top-level transaction_state and last_transaction_result mirror the read-only Platform transaction state. Missing or malformed identity is unavailable/null; releases are never inferred from OS version or filenames. The five-component JSON is bounded to 8192 bytes. authority_provenance is separately obtained asynchronously from the existing Platform signature verifier. Verified results bind current canonical bytes to the signed authorizing release/source; preserved runtime capsules retain their older signed identity. This is not original build identity or proof of a running process. Failure, timeout, or dependency changes clear all verified identity.",
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Build/component observations plus separately verified signed authority.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "required": [
+              "authority_provenance"
+             ],
+             "properties": {
+              "authority_provenance": {
+               "$ref": "#/components/schemas/AuthorityProvenance"
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
      }
     }
    }
@@ -2592,10 +2723,37 @@
      "System"
     ],
     "summary": "Read signed A/B update and source-check state",
-    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, and whether the installed update helper supports unsigned manual uploads. Also reports the two OTA upload sizes: `max_upload_ceiling_bytes` (33554432, i.e. 32 MiB), the fixed limit POST /system/update/upload always refuses above, and `max_upload_bytes`, that ceiling capped by the free space on the filesystem the package is staged to, less a margin for the installer. Clients should read `max_upload_bytes` rather than hard-coding a number; when it is below the ceiling, free space is the binding limit. The size of the image already installed in a slot is not reported.",
+    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, whether the installed update helper supports unsigned manual uploads, and canonical bounded components plus transaction_state and last_transaction_result observations. data.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity.",
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Successful response including separately verified signed authority (or explicitly unavailable authority).",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "required": [
+              "authority_provenance"
+             ],
+             "properties": {
+              "authority_provenance": {
+               "$ref": "#/components/schemas/AuthorityProvenance"
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
      }
     }
    }
@@ -2758,7 +2916,7 @@
      "Assistant"
     ],
     "summary": "Read speech pipeline configuration and endpoint health",
-    "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, persisted listening settings, and the state of the latest bounded voice-pipeline restart. `restart.state` is `ready`, `pending`, or `failed`; `restart.error` is non-empty when the last restart failed. max_utterance_ms is 2000\u201320000, end_silence_ms is 200\u20133000, and vad_floor_rms is 1\u20131024.",
+    "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, persisted listening settings, and the state of the latest bounded voice-pipeline restart. `restart.state` is `ready`, `pending`, or `failed`; `restart.error` is non-empty when the last restart failed. max_utterance_ms is 2000–20000, end_silence_ms is 200–3000, and vad_floor_rms is 1–1024.",
     "responses": {
      "200": {
       "description": "Speech pipeline and persisted listening settings",
@@ -2964,11 +3122,24 @@
       "schema": {
        "type": "object",
        "properties": {
-        "hostname": {"type": "string", "maxLength": 63},
-        "ssh": {"type": "boolean"},
-        "api_lan": {"type": "boolean"},
-        "wifi_mac": {"type": "string", "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"},
-        "bt_mac": {"type": "string", "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"}
+        "hostname": {
+         "type": "string",
+         "maxLength": 63
+        },
+        "ssh": {
+         "type": "boolean"
+        },
+        "api_lan": {
+         "type": "boolean"
+        },
+        "wifi_mac": {
+         "type": "string",
+         "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"
+        },
+        "bt_mac": {
+         "type": "string",
+         "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"
+        }
        },
        "additionalProperties": false
       }
@@ -3293,8 +3464,8 @@
       "maximum": 1024
      }
     }
-    },
-    "VoicePipelineRestart": {
+   },
+   "VoicePipelineRestart": {
     "type": "object",
     "required": [
      "state",
@@ -3313,8 +3484,8 @@
       "type": "string"
      }
     }
-    },
-    "VoicePipelineEnvelope": {
+   },
+   "VoicePipelineEnvelope": {
     "type": "object",
     "required": [
      "ok",
@@ -3341,6 +3512,176 @@
       "$ref": "#/components/schemas/ApiError"
      }
     }
+   },
+   "AuthorityProvenance": {
+    "description": "Read-only signed authorizing authority, not original feature-build provenance. Daemon hashes measure mounted executable bytes, not process liveness. Missing/stale/invalid authority fails closed.",
+    "oneOf": [
+     {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "available",
+       "schema",
+       "transaction_id",
+       "installed_sha256",
+       "manifest_sha256",
+       "manifest_sig_sha256",
+       "features"
+      ],
+      "properties": {
+       "available": {
+        "type": "boolean",
+        "enum": [
+         true
+        ]
+       },
+       "schema": {
+        "type": "string",
+        "enum": [
+         "libreecho-feature-provenance-v1"
+        ]
+       },
+       "transaction_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 127
+       },
+       "installed_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+       },
+       "manifest_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+       },
+       "manifest_sig_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+       },
+       "features": {
+        "type": "array",
+        "minItems": 5,
+        "maxItems": 5,
+        "items": {
+         "type": "object",
+         "additionalProperties": false,
+         "properties": {
+          "feature_id": {
+           "type": "string",
+           "enum": [
+            "airplay2",
+            "tts",
+            "wakeword",
+            "stt",
+            "assistant"
+           ]
+          },
+          "action": {
+           "type": "string",
+           "enum": [
+            "preserve",
+            "runtime",
+            "replace"
+           ]
+          },
+          "kind": {
+           "type": "string",
+           "enum": [
+            "base",
+            "runtime"
+           ]
+          },
+          "release": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 127
+          },
+          "source_commit": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{40}$"
+          },
+          "payload_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$"
+          },
+          "manifest_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$"
+          },
+          "runtime_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$",
+           "nullable": true
+          },
+          "runtime_manifest_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$",
+           "nullable": true
+          },
+          "daemon_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$"
+          }
+         },
+         "required": [
+          "feature_id",
+          "action",
+          "kind",
+          "release",
+          "source_commit",
+          "payload_sha256",
+          "manifest_sha256",
+          "runtime_sha256",
+          "runtime_manifest_sha256",
+          "daemon_sha256"
+         ]
+        }
+       }
+      }
+     },
+     {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "available",
+       "schema",
+       "reason",
+       "transaction_id",
+       "features"
+      ],
+      "properties": {
+       "available": {
+        "type": "boolean",
+        "enum": [
+         false
+        ]
+       },
+       "schema": {
+        "type": "string",
+        "enum": [
+         "libreecho-feature-provenance-v1"
+        ]
+       },
+       "reason": {
+        "type": "string",
+        "enum": [
+         "unavailable"
+        ]
+       },
+       "transaction_id": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+         null
+        ]
+       },
+       "features": {
+        "type": "array",
+        "maxItems": 0
+       }
+      }
+     }
+    ]
    }
   }
  }
