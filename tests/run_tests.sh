@@ -186,6 +186,7 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
 sh tests/test_timed.sh
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
+sh tests/test_setup_first_run.sh
 AGENT_SOCKET="$PWD/build/test-agent.sock"
 LIBREECHO_AGENT_SOCKET="$AGENT_SOCKET" python3 tests/mock_agent_history.py "$AGENT_SOCKET" >./build/test-agent.log 2>&1 &
 agent_pid=$!
