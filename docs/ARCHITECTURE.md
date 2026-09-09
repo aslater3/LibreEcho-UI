@@ -305,7 +305,21 @@ tools/libreecho-backup.sh create /tmp/backup.tar.gz
 tools/libreecho-backup.sh restore /tmp/backup.tar.gz
 ```
 
-**Contents:** Config files, recent logs, web state, manifest with version/timestamp/hostname.
+**Contents:** Active persistent state only: `/data/libreecho/config` and
+`/data/libreecho/secrets`, including accounts and supported daemon stores. The
+version-2 manifest records the bounded scope, required files, private secret
+policy, and exclusions. Factory defaults under `/etc/libreecho`, installed
+feature payloads, OTA/release identity, runtime state, logs, transaction files,
+raw wake PCM, and one-shot platform markers are not backed up.
+
+Restore stages and validates both trees, including numeric ownership. It only
+replaces the live trees after staging succeeds, so ordinary copy or permission
+failures leave existing state untouched. `LIBREECHO_CONFIG_OWNER` and
+`LIBREECHO_SECRETS_OWNER` may supply numeric `uid:gid` values; when set they
+must match the existing tree owner. No account or credential database is read.
+Service recovery treats shipped inactive status `1` (most init scripts) and
+`3` (watchdog/radio) as inactive, stops the watchdog first, and starts only
+the services that were running, in dependency order.
 
 ## Data Flow Examples
 
