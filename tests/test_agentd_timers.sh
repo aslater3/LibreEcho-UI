@@ -60,12 +60,55 @@ printf '{}' > "$dir/agent.json"
 echo $! > "$dir/agentd.pid"
 wait_socket "$agent_sock"
 
-# --- a spoken request creates a real timer --------------------------------
-out=$(call "$agent_sock" respond '{"text":"set a timer for ten minutes"}')
+# --- mixed-number speech creates the full timer ----------------------------
+out=$(call "$agent_sock" respond '{"text":"set a timer for three and a half minutes"}')
 case "$out" in
     *'"ok":true'*) ;;
     *) echo "FAIL: agent rejected the request: $out"; cat "$dir/agentd.log"; exit 1 ;;
 esac
+case "$out" in
+    *'3 minutes and 30 seconds'*) ;;
+    *) echo "FAIL: confirmation did not mention the duration: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.loads(sys.stdin.read())["data"]["timers"]
+assert len(timers) == 1, "expected one mixed timer, got %r" % (timers,)
+left = timers[0]["seconds_remaining"]
+assert 180 < left <= 210, "three and a half minutes should be near 210 seconds, got %d" % left
+' || { echo "FAIL: mixed-minute timer was not 210 seconds: $out"; exit 1; }
+echo "  mixed-minute request uses the full duration: ok"
+
+out=$(call "$agent_sock" respond '{"text":"cancel my timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: mixed-minute timer could not be cancelled: $out"; exit 1 ;;
+esac
+
+out=$(call "$agent_sock" respond '{"text":"set a timer for two and a half hours"}')
+case "$out" in
+    *'2 hours and 30 minutes'*) ;;
+    *) echo "FAIL: hour confirmation did not mention the full duration: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.loads(sys.stdin.read())["data"]["timers"]
+assert len(timers) == 1, "expected one mixed-hour timer, got %r" % (timers,)
+left = timers[0]["seconds_remaining"]
+assert 8880 < left <= 9000, "two and a half hours should be near 9000 seconds, got %d" % left
+' || { echo "FAIL: mixed-hour timer was not 9000 seconds: $out"; exit 1; }
+echo "  mixed-hour request uses the full duration: ok"
+
+out=$(call "$agent_sock" respond '{"text":"cancel my timer"}')
+case "$out" in
+    *'cancelled'*) ;;
+    *) echo "FAIL: mixed-hour timer could not be cancelled: $out"; exit 1 ;;
+esac
+
+# A regular timer remains the baseline for the rest of the integration path.
+out=$(call "$agent_sock" respond '{"text":"set a timer for ten minutes"}')
 case "$out" in
     *'10 minutes'*) ;;
     *) echo "FAIL: confirmation did not mention the duration: $out"; exit 1 ;;

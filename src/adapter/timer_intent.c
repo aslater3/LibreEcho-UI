@@ -112,14 +112,9 @@ static const char *first_cancel_verb(const char *text, size_t *length)
     return verb;
 }
 
-/*
- * Read a count immediately before `unit`. Handles digits, single words, and
- * the two-word forms speech produces ("twenty five"). Returns -1 when there
- * is no number there, which is not the same as zero.
- */
-static int number_before(const char *text, const char *unit)
+/* Read a count immediately before `at`. */
+static int number_before_at(const char *text, const char *at)
 {
-    const char *at = find_word(text, unit);
     const char *cursor;
     char words[3][32];
     int count = 0;
@@ -194,11 +189,71 @@ static int number_before(const char *text, const char *unit)
     return total;
 }
 
+/*
+ * Read a count immediately before `unit`. Handles digits, single words, and
+ * the two-word forms speech produces ("twenty five"). Returns -1 when there
+ * is no number there, which is not the same as zero.
+ */
+static int number_before(const char *text, const char *unit)
+{
+    return number_before_at(text, find_word(text, unit));
+}
+
+/* Return the whole-number part of an exact "N and a half unit" phrase. */
+static int mixed_number_before(const char *text, const char *unit)
+{
+    static const char FRACTION[] = " and a half ";
+    const char *at = find_word(text, unit);
+    size_t fraction_length = sizeof(FRACTION) - 1;
+    const char *fraction;
+
+    if (!at || at < text + fraction_length)
+        return -1;
+    fraction = at - fraction_length;
+    if (strncmp(fraction, FRACTION, fraction_length))
+        return -1;
+    return number_before_at(text, fraction);
+}
+
+static int has_half_quantity(const char *text, const char *unit)
+{
+    char phrase[64];
+
+    if (snprintf(phrase, sizeof(phrase), " half a %s ", unit) <
+            (int)sizeof(phrase) &&
+        strstr(text, phrase))
+        return 1;
+    if (snprintf(phrase, sizeof(phrase), " half an %s ", unit) <
+            (int)sizeof(phrase) &&
+        strstr(text, phrase))
+        return 1;
+    return 0;
+}
+
+static int has_trailing_half(const char *text, const char *unit)
+{
+    char phrase[64];
+
+    if (snprintf(phrase, sizeof(phrase), " %s and a half ", unit) >=
+            (int)sizeof(phrase))
+        return 0;
+    return strstr(text, phrase) != NULL;
+}
+
 static long long unit_seconds(const char *text, const char *singular,
                               const char *plural, long long multiplier,
-                              int *found)
+                              int *found, int *mixed)
 {
-    int count = number_before(text, plural);
+    int count = mixed_number_before(text, plural);
+
+    if (count < 0)
+        count = mixed_number_before(text, singular);
+    if (count >= 0 && multiplier >= 60) {
+        *found = 1;
+        *mixed = 1;
+        return (long long)count * multiplier + multiplier / 2;
+    }
+    count = number_before(text, plural);
 
     if (count < 0)
         count = number_before(text, singular);
@@ -215,29 +270,29 @@ static long long parse_duration(const char *text, int *found)
 {
     long long total = 0;
     int part = 0;
+    int mixed = 0;
 
     *found = 0;
-    total += unit_seconds(text, "hour", "hours", 3600, &part);
+    total += unit_seconds(text, "hour", "hours", 3600, &part, &mixed);
     if (part) *found = 1;
     part = 0;
-    total += unit_seconds(text, "minute", "minutes", 60, &part);
+    total += unit_seconds(text, "minute", "minutes", 60, &part, &mixed);
     if (part) *found = 1;
     part = 0;
-    total += unit_seconds(text, "second", "seconds", 1, &part);
+    total += unit_seconds(text, "second", "seconds", 1, &part, &mixed);
     if (part) *found = 1;
 
     /* "an hour and a half", "half an hour". */
-    if (has_word(text, "half")) {
-        if (has_word(text, "hour") || has_word(text, "hours")) {
-            if (total >= 3600 && has_word(text, "and"))
-                total += 1800;
-            else if (total == 3600)
-                total = 1800;
-            *found = 1;
-        } else if (has_word(text, "minute") || has_word(text, "minutes")) {
-            total += 30;
-            *found = 1;
-        }
+    if (!mixed && (has_half_quantity(text, "hour") ||
+                   has_trailing_half(text, "hour"))) {
+        if (total >= 3600 && has_word(text, "and"))
+            total += 1800;
+        else if (total == 3600)
+            total = 1800;
+        *found = 1;
+    } else if (!mixed && has_half_quantity(text, "minute")) {
+        total += 30;
+        *found = 1;
     }
     return total;
 }
