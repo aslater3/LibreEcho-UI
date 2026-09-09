@@ -62,6 +62,8 @@ make build/test-sdp-wire-format
 ./build/test-sdp-wire-format
 make build/test-avdtp-wire-format
 ./build/test-avdtp-wire-format
+make build/test-avrcp-wire-format
+./build/test-avrcp-wire-format
 sh tests/test_network_scan_contract.sh
 sh tests/test_setup_account_first.sh
 sh tests/test_setup_optional_adapters.sh
