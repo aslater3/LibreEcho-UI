@@ -284,13 +284,16 @@ static long long parse_duration(const char *text, int *found)
 
     /* "an hour and a half", "half an hour". */
     if (!mixed && (has_half_quantity(text, "hour") ||
-                   has_trailing_half(text, "hour"))) {
+                   has_trailing_half(text, "hour") ||
+                   has_trailing_half(text, "hours"))) {
         if (total >= 3600 && has_word(text, "and"))
             total += 1800;
         else if (total == 3600)
             total = 1800;
         *found = 1;
-    } else if (!mixed && has_half_quantity(text, "minute")) {
+    } else if (!mixed && (has_half_quantity(text, "minute") ||
+                          has_trailing_half(text, "minute") ||
+                          has_trailing_half(text, "minutes"))) {
         total += 30;
         *found = 1;
     }

@@ -60,6 +60,41 @@ printf '{}' > "$dir/agent.json"
 echo $! > "$dir/agentd.pid"
 wait_socket "$agent_sock"
 
+# The fraction may follow the unit as well: do not regress these existing
+# phrasings while accepting "N and a half units".
+check_trailing_fraction() {
+    phrase=$1
+    expected=$2
+    spoken=$3
+    out=$(call "$agent_sock" respond "{\"text\":\"set a timer for $phrase\"}")
+    case "$out" in
+        *'"ok":true'*) ;;
+        *) echo "FAIL: trailing-fraction request rejected: $out"; exit 1 ;;
+    esac
+    case "$out" in
+        *"$spoken"*) ;;
+        *) echo "FAIL: trailing-fraction confirmation was shortened: $out"; exit 1 ;;
+    esac
+    out=$(call "$timer_sock" status '{}')
+    printf '%s' "$out" | python3 -c '
+import json, sys
+expected = int(sys.argv[1])
+timers = json.load(sys.stdin)["data"]["timers"]
+assert len(timers) == 1, timers
+left = timers[0]["seconds_remaining"]
+assert expected - 30 < left <= expected, (expected, left)
+' "$expected" || { echo "FAIL: trailing-fraction duration: $out"; exit 1; }
+    out=$(call "$agent_sock" respond '{"text":"cancel my timer"}')
+    case "$out" in
+        *'cancelled'*) ;;
+        *) echo "FAIL: trailing-fraction timer was not cancelled: $out"; exit 1 ;;
+    esac
+    echo "  $phrase uses the full duration: ok"
+}
+check_trailing_fraction 'a minute and a half' 90 '1 minute and 30 seconds'
+check_trailing_fraction 'two hours and a half' 9000 '2 hours and 30 minutes'
+check_trailing_fraction 'three minutes and a half' 210 '3 minutes and 30 seconds'
+
 # --- mixed-number speech creates the full timer ----------------------------
 out=$(call "$agent_sock" respond '{"text":"set a timer for three and a half minutes"}')
 case "$out" in
