@@ -41,7 +41,9 @@ RAM. Wyoming has the smaller C-native implementation boundary needed here.
 The bridge will listen on a configurable TCP port, default `10700`, and
 provide the satellite portion of Wyoming:
 
-- `describe` -> `info` with the local satellite, mic, and speaker formats;
+- `describe` -> `info` with the local satellite, mic, and speaker formats
+  plus the `attribution`/`installed` artifact metadata Home Assistant's
+  Wyoming client requires;
 - `satellite-connected` lifecycle event;
 - local wake detections -> `detection`; Home Assistant then sends
   `run-pipeline` beginning at `asr`;
