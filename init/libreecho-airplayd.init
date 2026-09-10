@@ -70,21 +70,12 @@ mount_led_socket() {
     }
 }
 
-mount_runtime() {
-    [ -f "$PAYLOAD" ] || {
-        echo "libreecho-airplayd: feature payload missing: $PAYLOAD" >&2
-        return 1
-    }
-    mkdir -p "$RUNTIME_ROOT"
-    if grep -q " $RUNTIME_ROOT " /proc/mounts 2>/dev/null; then
-        mount_led_socket
-        return 0
-    fi
-    mount -t squashfs -o loop,ro,nosuid,nodev,noatime "$PAYLOAD" "$RUNTIME_ROOT" || {
-        echo "libreecho-airplayd: feature payload mount failed" >&2
-        return 1
-    }
-
+# Writable runtime support mounts for the isolated glibc root.  The v2
+# feature transaction can pre-mount the payload squashfs (candidate and
+# committed activation); in that case these mounts are still ours to create,
+# because without them D-Bus, Avahi, and NQPTP cannot start and the feature
+# reconcile fails.
+create_support_mounts() {
     # AirPlay's glibc runtime is isolated from the boot image's musl root.
     # Share hardware/network namespaces, but give D-Bus and Avahi writable
     # private runtime directories inside the feature root.
@@ -108,6 +99,29 @@ mount_runtime() {
     # recurse through the feature runtime root.  It carries only the four PCM
     # buses and source-volume state; the feature remains otherwise isolated.
     mount --bind /run/libreecho-audio "$RUNTIME_ROOT/run/libreecho-audio"
+}
+
+mount_runtime() {
+    [ -f "$PAYLOAD" ] || {
+        echo "libreecho-airplayd: feature payload missing: $PAYLOAD" >&2
+        return 1
+    }
+    mkdir -p "$RUNTIME_ROOT"
+    if grep -q " $RUNTIME_ROOT " /proc/mounts 2>/dev/null; then
+        # A pre-mounted payload root (feature transaction activation) has no
+        # writable support mounts below it yet; create them before use.
+        if ! grep -q " $RUNTIME_ROOT/run " /proc/mounts 2>/dev/null; then
+            create_support_mounts
+        fi
+        prepare_avahi_runtime
+        mount_led_socket
+        return 0
+    fi
+    mount -t squashfs -o loop,ro,nosuid,nodev,noatime "$PAYLOAD" "$RUNTIME_ROOT" || {
+        echo "libreecho-airplayd: feature payload mount failed" >&2
+        return 1
+    }
+    create_support_mounts
     prepare_avahi_runtime
     mount_led_socket
 }
