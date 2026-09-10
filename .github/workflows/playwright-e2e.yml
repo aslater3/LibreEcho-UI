@@ -59,7 +59,7 @@ jobs:
             --prefix "$RUNNER_TEMP/libreecho-playwright" \
             --no-save \
             --no-package-lock \
-            playwright@1.55.0
+            playwright@1.63.0
           "$RUNNER_TEMP/libreecho-playwright/node_modules/.bin/playwright" install --with-deps chromium
 
       - name: Run browser E2E checks
