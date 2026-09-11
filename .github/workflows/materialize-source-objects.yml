@@ -1,0 +1,117 @@
+name: Hash-bound source object transport
+on:
+  workflow_call:
+    inputs:
+      base_commit:
+        required: true
+        type: string
+      delta_blobs:
+        required: true
+        type: string
+      delta_sha256:
+        required: true
+        type: string
+      expected_tree:
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  materialize:
+    if: startsWith(github.repository, 'aslater3/LibreEcho') && github.ref == 'refs/heads/fix/014-readiness-materialize'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.base_commit }}
+          persist-credentials: false
+          path: candidate
+      - name: Verify inputs and create immutable objects only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELTA_BLOBS: ${{ inputs.delta_blobs }}
+          DELTA_SHA256: ${{ inputs.delta_sha256 }}
+          EXPECTED_TREE: ${{ inputs.expected_tree }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request
+          root = pathlib.Path('candidate').resolve()
+          repo = os.environ['GITHUB_REPOSITORY']
+          assert repo in ('aslater3/LibreEcho', 'aslater3/LibreEcho-UI', 'aslater3/LibreEcho-Platform')
+          api_root = 'https://api.github.com/repos/' + repo + '/git/'
+          def api(endpoint, data=None):
+              # No ref, commit, tag, release, signing or deployment mutations.
+              assert endpoint.split('/')[0] in ('blobs', 'trees')
+              request = urllib.request.Request(api_root + endpoint,
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'Content-Type': 'application/json',
+                           'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          def git(*args):
+              return subprocess.check_output(['git', *args], cwd=root, timeout=20).decode().strip()
+          packed = b''.join(base64.b64decode(api('blobs/' + sha)['content'])
+                           for sha in os.environ['DELTA_BLOBS'].split(','))
+          assert len(packed) < 100000
+          assert hashlib.sha256(packed).hexdigest() == os.environ['DELTA_SHA256']
+          decoder = lzma.LZMADecompressor(memlimit=128*1024*1024)
+          raw = decoder.decompress(packed, max_length=1000000)
+          assert decoder.eof and not decoder.unused_data
+          spec = json.loads(raw)
+          assert spec['repository'] == repo
+          assert git('rev-parse', 'HEAD') == spec['base_commit']
+          assert git('rev-parse', 'HEAD^{tree}') == spec['base_tree']
+          assert spec['expected_tree'] == os.environ['EXPECTED_TREE']
+          assert 0 < len(spec['changes']) <= 100
+          paths = set()
+          for item in spec['changes']:
+              path = pathlib.PurePosixPath(item['path'])
+              assert not path.is_absolute() and '..' not in path.parts and '.git' not in path.parts
+              assert path.as_posix() not in paths and item['mode'] in ('100644', '100755')
+              paths.add(path.as_posix())
+              target = root / path
+              assert target.resolve().is_relative_to(root) and not target.is_symlink()
+              old = target.read_bytes() if target.exists() else b''
+              assert hashlib.sha256(old).hexdigest() == item['old_sha256']
+              end = 0
+              for begin, stop, text in item['edits']:
+                  assert type(begin) is int and type(stop) is int and end <= begin <= stop <= len(old)
+                  end = stop
+                  assert isinstance(text, str)
+              data = old
+              for begin, stop, text in reversed(item['edits']):
+                  data = data[:begin] + text.encode() + data[stop:]
+              assert len(data) < 2000000
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              target.chmod(int(item['mode'], 8) & 0o777)
+              git('add', '--', path.as_posix())
+          git('diff', '--cached', '--check')
+          assert git('write-tree') == spec['expected_tree']
+          tree = []
+          for item in spec['changes']:
+              path = item['path']
+              data = (root / path).read_bytes()
+              sha = api('blobs', {'content': base64.b64encode(data).decode(), 'encoding': 'base64'})['sha']
+              assert sha == git('rev-parse', ':' + path)
+              tree.append({'path': path, 'mode': item['mode'], 'type': 'blob', 'sha': sha})
+          result = api('trees', {'base_tree': spec['base_tree'], 'tree': tree})
+          assert result['sha'] == spec['expected_tree']
+          receipt = {'repository': repo, 'base_commit': spec['base_commit'],
+                     'base_tree': spec['base_tree'], 'tree': result['sha'],
+                     'delta_sha256': os.environ['DELTA_SHA256'], 'paths': sorted(paths),
+                     'refs_changed': False, 'tests_run_by_helper': False}
+          pathlib.Path('receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(receipt))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: readiness-source-receipt
+          path: receipt.json
+          retention-days: 1
+          if-no-files-found: error
