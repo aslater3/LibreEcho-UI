@@ -1,0 +1,52 @@
+name: Verify pinned ORT wake-link correction
+on:
+  push:
+    branches: ['fix/014-readiness-materialize']
+    paths: ['.github/workflows/fix-wake-link-closure.yml']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: 9463b24677d40126d61b5e04cf98132562bb302d
+          persist-credentials: false
+      - name: Reconstruct the exact locally tested correction
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/aslater3/LibreEcho-UI/git/blobs/de49be117e234ce88fd2ccb0b6c65067fc310177 --jq .content | base64 --decode > tests/test_wake_link_closure.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Makefile')
+          text = p.read_text()
+          old = '\t$(WAKE_ORT_BUILD)/_deps/nsync-build/libnsync_cpp.a \\\n'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, ''))
+          p = Path('tests/test_source_provenance.sh')
+          p.write_text(p.read_text() + '\n# Validate the effective wake link recipe against the supported ORT layout.\npython3 tests/test_wake_link_closure.py\n')
+          PY
+          test "$(git hash-object Makefile)" = c53d3ab8223a58bf6c7f3d30be0b81868e56cd8a
+          test "$(git hash-object tests/test_source_provenance.sh)" = a852cddc5e5fc1ecc95b9d494c129e4313b41121
+          test "$(git hash-object tests/test_wake_link_closure.py)" = de49be117e234ce88fd2ccb0b6c65067fc310177
+          sh tests/test_source_provenance.sh
+          git diff --check
+      - name: Save verified source blobs without moving a source branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          expected = {'Makefile': 'c53d3ab8223a58bf6c7f3d30be0b81868e56cd8a', 'tests/test_source_provenance.sh': 'a852cddc5e5fc1ecc95b9d494c129e4313b41121'}
+          for path, sha in expected.items():
+              request = json.dumps({'content': pathlib.Path(path).read_text(), 'encoding': 'utf-8'})
+              result = subprocess.run(['gh', 'api', '--method', 'POST', 'repos/aslater3/LibreEcho-UI/git/blobs', '--input', '-'], input=request, text=True, capture_output=True, check=True)
+              assert json.loads(result.stdout)['sha'] == sha, path
+              print(path, sha)
+          PY
