@@ -1,0 +1,36 @@
+name: Inspect current 0.14 UI failure
+on:
+  push:
+    branches: ['fix/014-readiness-materialize']
+    paths: ['.github/workflows/read-current-build-failure.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Read completed UI job
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/current-build-evidence"
+          gh api --allow-escape-sequences repos/aslater3/LibreEcho-UI/actions/jobs/103261218282/logs > "$RUNNER_TEMP/current-build-evidence/ui-source-check.log"
+          python3 - <<'PY'
+          import os, pathlib, re
+          lines = pathlib.Path(os.environ['RUNNER_TEMP'], 'current-build-evidence/ui-source-check.log').read_text(encoding='utf-8-sig').splitlines()
+          keep = set(range(max(0, len(lines)-100), len(lines)))
+          for i, line in enumerate(lines):
+              if re.search(r'FAIL:|ERROR:|Traceback|AssertionError|FAILED \(|##\[error\]', line):
+                  keep.update(range(max(0, i-4), min(len(lines), i+12)))
+          for i in sorted(keep)[-160:]:
+              print(f'{i+1}: {lines[i][:800]}')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: current-ui-log
+          path: ${{ runner.temp }}/current-build-evidence/ui-source-check.log
+          if-no-files-found: error
+          retention-days: 3
