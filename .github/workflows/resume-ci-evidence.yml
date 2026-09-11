@@ -1,0 +1,31 @@
+name: Read bounded resume failure evidence
+on:
+  push:
+    branches: ['fix/014-readiness-materialize']
+    paths: ['.github/workflows/resume-ci-evidence.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Read completed source-check job without displaying unbounded source dumps
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --allow-escape-sequences repos/aslater3/LibreEcho-UI/actions/jobs/103249691319/logs > "$RUNNER_TEMP/source-check.log"
+          python3 - <<'PY'
+          import os,pathlib,re
+          lines=pathlib.Path(os.environ['RUNNER_TEMP'],'source-check.log').read_text(encoding='utf-8-sig').splitlines()
+          keep=set(range(max(0,len(lines)-35),len(lines)))
+          for i,line in enumerate(lines):
+              if re.search(r'FAIL:|ERROR:|Traceback|AssertionError|FAILED \(',line):
+                  keep.update(range(max(0,i-3),min(len(lines),i+8)))
+          for i in sorted(keep):
+              line=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',lines[i])
+              print(f'{i+1}: {line[:450]}')
+          PY
