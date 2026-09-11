@@ -70,6 +70,8 @@ make build/test-avrcp-wire-format
 ./build/test-avrcp-wire-format
 sh tests/test_network_scan_contract.sh
 sh tests/test_setup_account_first.sh
+make build/test-setup-workers
+./build/test-setup-workers
 sh tests/test_setup_optional_adapters.sh
 sh tests/test_login_brand_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c

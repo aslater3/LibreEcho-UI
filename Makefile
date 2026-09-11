@@ -809,3 +809,7 @@ clean:
 		$(BUILD)/stt-stream-file-client-arm32 \
 		$(BUILD)/*.wake.arm.o $(BUILD)/wake_engine_onnx.arm.o \
 		$(BUILD)/test_wake_engine.arm.o
+
+# Runs the real HTTP request processor with isolated mock device operations.
+$(BUILD)/test-setup-workers: tests/test_setup_workers.c src/http_server.c src/http_config_worker.inc $(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< $(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS)) $(LDFLAGS) $(WEB_TLS_LIBS) -lm -lpthread -o $@

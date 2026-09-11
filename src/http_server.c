@@ -1,7 +1,8 @@
 #include "http_server.h"
+#include "config_store.h"
+#include "json.h"
 #include "feature_provenance.h"
 #include "authority_provenance.h"
-/* Route contracts retained across the release merge: (!strcmp(q.path,"/api/v1/setup")&&!strcmp(q.method,"POST")); (!strcmp(q.path,"/api/v1/network/wifi/connect")&&!strcmp(q.method,"POST")); refresh_setup_completed(api); */
 #include "tls.h"
 #include "adapter/adapter.h"
 #include "adapter/voice_stream.h"
@@ -52,9 +53,10 @@ extern int setgroups(int,const gid_t*);
 #define LE_MAX_KERNEL_LOG_WORKERS 4
 #define LE_MAX_PCM_STREAM_WORKERS 4
 #define LE_MAX_UPDATE_WORKERS 4
+#define LE_MAX_CONFIG_WORKERS 1
 #define LE_TLS_IDLE_TIMEOUT_MS 60000
-enum child_worker_kind{CHILD_WORKER_ASSISTANT,CHILD_WORKER_TLS_RELAY,CHILD_WORKER_KERNEL_LOG,CHILD_WORKER_PCM_STREAM,CHILD_WORKER_UPDATE,CHILD_WORKER_KIND_COUNT};
-#define LE_MAX_CHILD_WORKERS (LE_MAX_ASSISTANT_WORKERS+LE_MAX_TLS_RELAYS+LE_MAX_KERNEL_LOG_WORKERS+LE_MAX_PCM_STREAM_WORKERS+LE_MAX_UPDATE_WORKERS)
+enum child_worker_kind{CHILD_WORKER_ASSISTANT,CHILD_WORKER_TLS_RELAY,CHILD_WORKER_KERNEL_LOG,CHILD_WORKER_PCM_STREAM,CHILD_WORKER_UPDATE,CHILD_WORKER_CONFIG,CHILD_WORKER_KIND_COUNT};
+#define LE_MAX_CHILD_WORKERS (LE_MAX_ASSISTANT_WORKERS+LE_MAX_TLS_RELAYS+LE_MAX_KERNEL_LOG_WORKERS+LE_MAX_PCM_STREAM_WORKERS+LE_MAX_UPDATE_WORKERS+LE_MAX_CONFIG_WORKERS)
 struct client{int fd;
 int secure_transport;
 size_t used;
@@ -63,7 +65,7 @@ char buf[LE_REQ_MAX+1];
 static volatile sig_atomic_t child_worker_pids[LE_MAX_CHILD_WORKERS];
 static volatile sig_atomic_t child_worker_kinds[LE_MAX_CHILD_WORKERS];
 static volatile sig_atomic_t child_worker_counts[CHILD_WORKER_KIND_COUNT];
-static int child_worker_limit(enum child_worker_kind kind){switch(kind){case CHILD_WORKER_ASSISTANT:return LE_MAX_ASSISTANT_WORKERS;case CHILD_WORKER_TLS_RELAY:return LE_MAX_TLS_RELAYS;case CHILD_WORKER_KERNEL_LOG:return LE_MAX_KERNEL_LOG_WORKERS;case CHILD_WORKER_PCM_STREAM:return LE_MAX_PCM_STREAM_WORKERS;case CHILD_WORKER_UPDATE:return LE_MAX_UPDATE_WORKERS;default:return 0;}}
+static int child_worker_limit(enum child_worker_kind kind){switch(kind){case CHILD_WORKER_ASSISTANT:return LE_MAX_ASSISTANT_WORKERS;case CHILD_WORKER_TLS_RELAY:return LE_MAX_TLS_RELAYS;case CHILD_WORKER_KERNEL_LOG:return LE_MAX_KERNEL_LOG_WORKERS;case CHILD_WORKER_PCM_STREAM:return LE_MAX_PCM_STREAM_WORKERS;case CHILD_WORKER_UPDATE:return LE_MAX_UPDATE_WORKERS;case CHILD_WORKER_CONFIG:return LE_MAX_CONFIG_WORKERS;default:return 0;}}
 static int child_worker_find_slot(enum child_worker_kind kind){int i;if(kind<0||kind>=CHILD_WORKER_KIND_COUNT||child_worker_counts[kind]>=child_worker_limit(kind))return-1;for(i=0;i<LE_MAX_CHILD_WORKERS;i++)if(child_worker_pids[i]<=0)return i;return-1;}
 static int child_worker_begin(enum child_worker_kind kind,sigset_t*previous,int*slot){sigset_t blocked;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,previous)<0)return-1;*slot=child_worker_find_slot(kind);if(*slot<0){if(kind==CHILD_WORKER_TLS_RELAY){static int warned;if(!warned){warned=1;fprintf(stderr,"HTTPS relay budget (%d) exhausted; a connection was dropped\n",LE_MAX_TLS_RELAYS);}}sigprocmask(SIG_SETMASK,previous,NULL);return-1;}return 0;}
 static void child_worker_register(int slot,pid_t pid,enum child_worker_kind kind){child_worker_pids[slot]=pid;child_worker_kinds[slot]=kind;child_worker_counts[kind]++;}
@@ -132,6 +134,7 @@ static const char *update_fetch_path(void){const char *p=getenv("LIBREECHO_UPDAT
 static int run_update_fetch(int fd,const char*action){char success[160];int status,n,channel_action=!strncmp(action,"set-channel-",12);pid_t child=fork();if(child<0){update_error(fd,503,"io_error","The update command could not start");close(fd);return 0;}if(child==0){const char *helper=update_fetch_path();execl(helper,helper,action,(char*)0);_exit(127);}if(waitpid(child,&status,0)<0||!WIFEXITED(status)||WEXITSTATUS(status)!=0){if(channel_action)update_error(fd,503,"io_error","The update channel could not be saved");else update_error(fd,!strcmp(action,"check")?503:400,!strcmp(action,"check")?"update_check_failed":"update_rejected",!strcmp(action,"check")?"The GitHub release check failed":"The signed update failed verification or installation");close(fd);return 0;}if(channel_action){n=snprintf(success,sizeof(success),"{\"ok\":true,\"data\":{\"channel\":\"%s\"},\"error\":null}",action+12);}else{n=snprintf(success,sizeof(success),"{\"ok\":true,\"data\":{\"checked\":%s,\"installed\":%s,\"state\":\"%s\"},\"error\":null}",!strcmp(action,"check")?"true":"false",!strcmp(action,"install")?"true":"false",!strcmp(action,"check")?"checked":"reboot-pending");}response(fd,200,"application/json",success,(size_t)n);close(fd);return 0;}
 static int start_update_fetch(int fd,const char*action){sigset_t previous;pid_t pid;int slot;if(child_worker_begin(CHILD_WORKER_UPDATE,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);(void)run_update_fetch(fd,action);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_UPDATE);sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
 static int start_api_worker(int fd,struct api_context*api,const struct api_request*q){sigset_t previous;pid_t pid;int slot;struct api_response r;if(child_worker_begin(CHILD_WORKER_ASSISTANT,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);le_close_inherited_fds(fd);memset(&r,0,sizeof(r));api_handle(api,q,&r);response(fd,r.status,r.type,r.body,r.length);close(fd);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_ASSISTANT);sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
+#include "http_config_worker.inc"
 static char*header(char*s,const char*name){size_t n=strlen(name);
 char*p=strstr(s,"\r\n");
 while(p&&p[2]&&p[2]!='\r'){p+=2;
@@ -196,7 +199,7 @@ if(cl)content_len=(size_t)strtoul(cl,0,10);
 /* Two size gates: the fixed ceiling, and what the staging filesystem can
    actually hold. Refusing here costs the client one request; refusing after
    the stream costs it the whole upload. */
-if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));{size_t limit=le_update_max_upload_bytes();char detail[128];if(!content_len||content_len>LE_UPDATE_MAX_BYTES){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(content_len>limit){snprintf(detail,sizeof(detail),"Update is larger than the %lu bytes this device can stage",(unsigned long)limit);update_error(c->fd,413,"update_size",detail);goto done;}}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}c->fd=-1;c->used=0;return;}
+if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));{size_t limit=le_update_max_upload_bytes();char detail[128];if(!content_len||content_len>LE_UPDATE_MAX_BYTES){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(content_len>limit){snprintf(detail,sizeof(detail),"Update is larger than the %lu bytes this device can stage",(unsigned long)limit);update_error(c->fd,413,"update_size",detail);goto done;}}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}sync_configuration_worker(api);if(config_worker_pending){update_error(c->fd,409,"busy","Network configuration is in progress; retry when it finishes");goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}c->fd=-1;c->used=0;return;}
 if(content_len>LE_BODY_MAX){response(c->fd,413,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}",118);
 goto done;
 }if(c->used<headers+content_len)return;
@@ -211,6 +214,27 @@ copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));
 copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));
 copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));
 copy_header(q.confirm,sizeof(q.confirm),header(c->buf,"X-LibreEcho-Confirm"));
+sync_configuration_worker(api);
+/* Serialize configuration mutations while setup persists its snapshot. Reads
+   stay responsive; authentication/CSRF checks still precede a busy response. */
+if(config_worker_pending && !strncmp(q.path,"/api/",5) && strcmp(q.method,"GET") && strcmp(q.method,"HEAD")){
+    if(api_request_authorize(api,&q,&r)){
+        const char *message="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"busy\",\"message\":\"Network configuration is in progress; retry when it finishes\"}}";
+        response(c->fd,409,"application/json",message,strlen(message));
+    }else response(c->fd,r.status,r.type,r.body,r.length);
+    goto done;
+}
+if(configuration_worker_request(api,&q)){
+    if(!api_request_authorize(api,&q,&r)){
+        response(c->fd,r.status,r.type,r.body,r.length);goto done;
+    }
+    if(start_configuration_worker(c->fd,api,&q)<0){
+        const char *message="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Network configuration worker could not start\"}}";
+        response(c->fd,503,"application/json",message,strlen(message));goto done;
+    }
+    if(body_len)memset(body,0,body_len);
+    c->fd=-1;c->used=0;return;
+}
 if((!strcmp(q.path,"/api/v1/assistant/respond")&&!strcmp(q.method,"POST"))||(!strcmp(q.path,"/api/v1/assistant/history")&&!strcmp(q.method,"GET"))||(!strcmp(q.path,"/api/v1/assistant/history/clear")&&!strcmp(q.method,"POST"))){if(start_api_worker(c->fd,api,&q)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}",sizeof("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}")-1);goto done;}c->fd=-1;c->used=0;return;}
 if(!strcmp(q.path,"/api/v1/system/update/check")||!strcmp(q.path,"/api/v1/system/update/apply")){const char*action=!strcmp(q.path,"/api/v1/system/update/check")?"check":"install";if(!api_update_fetch_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update command could not start");goto done;}c->fd=-1;c->used=0;return;}
 if(!strcmp(q.path,"/api/v1/system/update/channel")){char channel[16],action[32];if(!api_update_channel_authorize(api,&q,&r,channel,sizeof(channel))){response(c->fd,r.status,r.type,r.body,r.length);goto done;}snprintf(action,sizeof(action),"set-channel-%s",channel);if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update channel could not be changed");goto done;}c->fd=-1;c->used=0;return;}

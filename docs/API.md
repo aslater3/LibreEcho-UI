@@ -123,6 +123,13 @@ adapter returns the valid fallback `wake_word: "LibreEcho"`.
 
 #### POST /api/v1/setup
 
+On the Linux backend, setup and Wi-Fi connection run in a single bounded
+configuration worker. Reads remain available. Concurrent API mutations return
+HTTP 409 (`busy`) until the worker finishes; retry them afterwards. Authentication,
+CSRF and Origin checks still apply. Successful setup becomes visible to the parent
+from the durable completion marker and saved setup fields, without replacing live
+sessions. Mock-backend operations remain synchronous and in-process.
+
 Validates and applies the first-boot hostname, initial volume, Wi-Fi profile,
 wake-word preferences, and privacy choices. Hostname, audio, Wi-Fi, and durable
 configuration failures abort the transaction with stage-specific errors.
