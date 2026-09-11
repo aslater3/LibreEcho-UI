@@ -404,7 +404,6 @@ WAKE_ORT_ARCHIVES = \
 	$(WAKE_ORT_BUILD)/libonnxruntime_lora.a \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx.a \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
-	$(WAKE_ORT_BUILD)/_deps/nsync-build/libnsync_cpp.a \
 	$(WAKE_ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
 	$(WAKE_ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
 	$(RE2_ARCHIVE)
