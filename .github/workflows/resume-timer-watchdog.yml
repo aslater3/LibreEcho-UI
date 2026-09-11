@@ -1,0 +1,67 @@
+name: Verify timer watchdog checkpoint
+on:
+  push:
+    branches: ['fix/014-readiness-materialize']
+    paths: ['.github/workflows/resume-timer-watchdog.yml']
+permissions:
+  contents: write
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: 56a42f1528012b71a85c2d27fddca3e7c8111770
+          persist-credentials: false
+      - name: Reconstruct exact tested source and run recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64,hashlib,json,subprocess
+          p=Path('src/adapter/watchdogd.c');s=p.read_text()
+          s=s.replace('descriptors[MAX_SERVICES] = {','descriptors[] = {')
+          s=s.replace('size_t count = 15, i;','size_t count = sizeof(descriptors) / sizeof(descriptors[0]), i;')
+          old='        /* No control socket; the pidfile is the only signal. */'
+          new='''        /* Timers must recover with their durable schedule after a daemon exit. */
+                  {"timerd", PROBE_SOCKET, "/run/libreecho/timer.sock",
+                   "/etc/init.d/libreecho-timerd.init", 1, NULL},
+          '''+old
+          assert s.count(old)==1;s=s.replace(old,new)
+          s=s.replace('    for (i = 1; i < (size_t)argc; ++i) {','    if (count > MAX_SERVICES) {\n        fprintf(stderr, "service table exceeds watchdog capacity\\n");\n        return 2;\n    }\n\n    for (i = 1; i < (size_t)argc; ++i) {');p.write_text(s)
+          p=Path('tests/test_watchdog_service_table.py');s=p.read_text().replace('descriptors[MAX_SERVICES]','descriptors[]')
+          s=s.replace('    scripts = {','''    maximum = int(re.search(r"#define MAX_SERVICES (\d+)", text).group(1))
+              if len(entries) > maximum or len({e["name"] for e in entries}) != len(entries):
+                  failures.append("service table is oversized or contains duplicate names")
+
+              scripts = {''');p.write_text(s)
+          p=Path('tests/run_tests.sh');s=p.read_text().replace('python3 tests/test_watchdog_service_table.py','python3 tests/test_watchdog_service_table.py\nmake build/libreecho-timerd build/libreecho-watchdogd\npython3 tests/test_watchdog_timer_recovery.py');p.write_text(s)
+          obj=json.loads(subprocess.check_output(['gh','api','repos/aslater3/LibreEcho-UI/git/blobs/3dc594735639410dc92f58267df0b908c5a60f60'],text=True,timeout=30))
+          Path('tests/test_watchdog_timer_recovery.py').write_bytes(base64.b64decode(obj['content']))
+          expected={'src/adapter/watchdogd.c':'35be0a8cf52b3d4a371911a31d5a3ec8f5f324d3','tests/test_watchdog_service_table.py':'83f5367264c5242c6704941ff738df67bd12ed45','tests/run_tests.sh':'f1fbce157793cc6846e7edf1b9d90358275a8bbc','tests/test_watchdog_timer_recovery.py':'3dc594735639410dc92f58267df0b908c5a60f60'}
+          for name,sha in expected.items():
+              b=Path(name).read_bytes();actual=hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest();assert actual==sha,(name,actual,sha)
+          Path('/tmp/timer-checkpoint.json').write_text(json.dumps(expected))
+          PY
+          make -s -j4 SOURCE_COMMIT=56a42f1 SOURCE_DIRTY=1 SOURCE_DIGEST=test build/libreecho-timerd build/libreecho-watchdogd build/test-watchdog-policy
+          python3 tests/test_watchdog_service_table.py
+          timeout 25 python3 tests/test_watchdog_timer_recovery.py
+          ./build/test-watchdog-policy
+          git diff --check
+      - name: Save tested blobs without changing source branch refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64,json,pathlib,subprocess
+          for name,sha in json.loads(pathlib.Path('/tmp/timer-checkpoint.json').read_text()).items():
+              b=pathlib.Path(name).read_bytes()
+              obj=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/aslater3/LibreEcho-UI/git/blobs','--input','-'],input=json.dumps({'content':base64.b64encode(b).decode(),'encoding':'base64'}),text=True,timeout=30))
+              assert obj['sha']==sha
+              print('CHECKPOINT_BLOB '+name+' '+sha)
+          PY
