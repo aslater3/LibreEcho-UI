@@ -370,6 +370,14 @@ static int handle_server_event(struct wyoming_state *state)
     data = event.data_length ? event.data : event.header;
     if (!strcmp(event.type, "describe"))
         return send_info(state);
+    if (!strcmp(event.type, "ping")) {
+        if (event.payload_length != 0)
+            return -1;
+        /* Wyoming's optional ping text is a correlation value. Echoing the
+           already validated, bounded data object preserves it in the pong. */
+        return send_event(state, "pong",
+                          event.data_length ? event.data : NULL, NULL, 0);
+    }
     if (!strcmp(event.type, "run-satellite")) {
         state->server_running = 1;
         return 0;

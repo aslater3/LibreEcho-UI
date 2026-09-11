@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -85,9 +86,15 @@ static int unix_listener(const char *path)
 static int tcp_connect(void)
 {
     struct sockaddr_in address;
+    struct timeval timeout = {2, 0};
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout)) < 0) {
+        close(fd);
+        return -1;
+    }
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -181,6 +188,9 @@ int main(void)
     CHECK(client_fd >= 0);
     CHECK(le_wyoming_read_header(client_fd, &event) == 0);
     CHECK(!strcmp(event.type, "satellite-connected"));
+    /* Home Assistant sends this exact startup sequence, then requires a pong
+       within five seconds to keep the satellite connection alive. */
+    CHECK(le_wyoming_send(client_fd, "run-satellite", NULL, NULL, 0) == 0);
     CHECK(le_wyoming_send(client_fd, "describe", NULL, NULL, 0) == 0);
     CHECK(le_wyoming_read_header(client_fd, &event) == 0);
     CHECK(!strcmp(event.type, "info"));
@@ -206,6 +216,16 @@ int main(void)
         CHECK(found && found < snd);
         CHECK(strstr(snd, "\"installed\":true") != NULL);
     }
+    CHECK(le_wyoming_send(client_fd, "ping", "{\"text\":null}",
+                          NULL, 0) == 0);
+    CHECK(le_wyoming_read_header(client_fd, &event) == 0);
+    CHECK(!strcmp(event.type, "pong"));
+    CHECK(!strcmp(event.data, "{\"text\":null}"));
+    CHECK(le_wyoming_send(client_fd, "ping",
+                          "{\"text\":\"ha-keepalive\"}", NULL, 0) == 0);
+    CHECK(le_wyoming_read_header(client_fd, &event) == 0);
+    CHECK(!strcmp(event.type, "pong"));
+    CHECK(!strcmp(event.data, "{\"text\":\"ha-keepalive\"}"));
     CHECK(le_wyoming_send(client_fd, "run-pipeline",
                           "{\"start_stage\":\"wake\","
                           "\"end_stage\":\"tts\"}", NULL, 0) == 0);
