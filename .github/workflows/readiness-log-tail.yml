@@ -8,7 +8,6 @@ permissions:
   contents: read
 jobs:
   evidence:
-    if: github.repository == 'aslater3/LibreEcho-UI'
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
@@ -18,14 +17,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          gh api --allow-escape-sequences /repos/aslater3/LibreEcho-UI/actions/jobs/103163335808/logs > "$RUNNER_TEMP/full-ui-checks.log"
           python3 - <<'PY'
-          import os, pathlib, re, urllib.request
-          url = 'https://api.github.com/repos/aslater3/LibreEcho-UI/actions/jobs/103163335808/logs'
-          request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
-          with urllib.request.urlopen(request, timeout=30) as response:
-              data = response.read(2_000_000)
-          pathlib.Path(os.environ['RUNNER_TEMP'], 'full-ui-checks.log').write_bytes(data)
-          text = '\n'.join(data.decode('utf-8', errors='replace').splitlines()[-100:])[-16000:]
+          import os, pathlib, re
+          data = pathlib.Path(os.environ['RUNNER_TEMP'], 'full-ui-checks.log').read_text(encoding='utf-8-sig')
+          text = '\n'.join(data.splitlines()[-90:])[-16000:]
           print(re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
