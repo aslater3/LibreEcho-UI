@@ -5,7 +5,10 @@ set -eu
 # opens six or more connections for one page, and a smaller cap closed the
 # extras with no response, which dropped stylesheets over HTTPS.
 grep -q '#define LE_MAX_TLS_RELAYS LE_MAX_CLIENTS' src/http_server.c
-grep -q 'tls_relay_pids' src/http_server.c
+# TLS relays use the shared, bounded child-worker registry after the reaper fix.
+grep -Fq 'case CHILD_WORKER_TLS_RELAY:return LE_MAX_TLS_RELAYS;' src/http_server.c
+grep -Fq 'child_worker_begin(CHILD_WORKER_TLS_RELAY,&previous,&slot)' src/http_server.c
+grep -Fq 'child_worker_register(slot,pid,CHILD_WORKER_TLS_RELAY)' src/http_server.c
 grep -q 'LE_TLS_HANDSHAKE_TIMEOUT_MS' src/tls.c
 grep -q 'poll(&waitfd' src/tls.c
 grep -q 'mbedtls_x509_time_is_past' src/tls.c
