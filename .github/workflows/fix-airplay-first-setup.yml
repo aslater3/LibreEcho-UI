@@ -1,0 +1,74 @@
+name: Verify first-setup AirPlay correction
+on:
+  push:
+    branches: ['fix/014-readiness-materialize']
+    paths: ['.github/workflows/fix-airplay-first-setup.yml']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: d5a63c26b8b4c375680aa3690f1f181f041e9ea1
+          persist-credentials: false
+      - name: Reconstruct exact tested source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          changes = {
+              'src/api.c': [('c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;c->setup_completed=1;', 'c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;c->integrations|=16u;c->setup_completed=1;')],
+              'src/http_config_worker.inc': [
+                  ('int n, local_only, telemetry, sensitivity;', 'int n, local_only, telemetry, sensitivity, integrations;'),
+                  ('        sensitivity < 0 || sensitivity > 100)', '        sensitivity < 0 || sensitivity > 100 ||\n        json_get_int(saved, "integrations", &integrations) != 1 ||\n        integrations < 0 || integrations > 63)'),
+                  ('    api->configured_wake_valid = 1;', '    api->configured_wake_valid = 1;\n    /* Setup enables AirPlay; preserve all unrelated live integration choices. */\n    api->integrations = (api->integrations & ~16u) | ((unsigned)integrations & 16u);'),
+              ],
+              'tests/test_setup_workers.c': [
+                  ('static int airplay_set(struct le_backend *b, int enabled) { (void)b; (void)enabled; return LE_OK; }\nstatic int airplay_state(struct le_backend *b, struct le_airplay_state *a) {\n    (void)b; memset(a, 0, sizeof(*a)); a->available=1; return LE_OK;\n}', 'static int airplay_enabled;\nstatic int airplay_set(struct le_backend *b, int enabled) {\n    (void)b; airplay_enabled=enabled; return LE_OK;\n}\nstatic int airplay_state(struct le_backend *b, struct le_airplay_state *a) {\n    (void)b; memset(a, 0, sizeof(*a)); a->available=1;\n    a->enabled=airplay_enabled; a->nqptp_running=airplay_enabled;\n    a->shairport_running=airplay_enabled; return LE_OK;\n}'),
+                  ('    strcpy(auth,api.auth_token);', '    api.integrations |= 2u; /* An unrelated existing choice must survive setup. */\n    strcpy(auth,api.auth_token);'),
+                  ('    assert(api.configured_wake_sensitivity==67 && !strcmp(api.auth_token,auth));', '    assert(api.configured_wake_sensitivity==67 && !strcmp(api.auth_token,auth));\n    assert(api.integrations==22u); /* Setup-enabled AirPlay is visible in the parent. */'),
+                  ('    assert(strstr(saved,"\\\"privacy_local_only\\\": false") && strstr(saved,"\\\"button_tones\\\": false"));', '    assert(strstr(saved,"\\\"privacy_local_only\\\": false") && strstr(saved,"\\\"button_tones\\\": false"));\n    assert(strstr(saved,"\\\"integrations\\\": 22"));'),
+                  ('    assert(!restarted.privacy_local_only && restarted.privacy_telemetry && !restarted.button_tones);', '    assert(!restarted.privacy_local_only && restarted.privacy_telemetry && !restarted.button_tones);\n    assert(restarted.integrations==22u);'),
+              ],
+          }
+          import subprocess
+          expected = {'src/api.c': '07949396cda00eda9a576cb06fe505c09620832c', 'src/http_config_worker.inc': 'e87de41bad75d323cbb5c8f86d0edfcd651ca281', 'tests/test_setup_workers.c': 'f7375abd1e90675ef006fb1ace7199c61a420078'}
+          for path, replacements in changes.items():
+              p = Path(path); text = p.read_text()
+              for old, new in replacements:
+                  assert text.count(old) == 1, (path, old)
+                  text = text.replace(old, new)
+              p.write_text(text)
+              assert subprocess.check_output(['git', 'hash-object', path], text=True).strip() == expected[path], path
+          PY
+      - name: Exercise setup activation and worker persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_COMMIT="$(git rev-parse HEAD)" SOURCE_DIRTY=1
+          export SOURCE_DIGEST="$(sh tools/source-provenance.sh --field digest)"
+          timeout 120s sh tests/test_airplay_setup_persistence.sh > "$RUNNER_TEMP/airplay-setup.log" 2>&1 || { tail -n 30 "$RUNNER_TEMP/airplay-setup.log"; exit 1; }
+          timeout 60s make build/test-setup-workers
+          timeout 25s ./build/test-setup-workers
+          sh tests/test_airplay_mount_failure.sh
+          python3 tests/test_airplay_premounted_runtime.py
+          tail -n 1 "$RUNNER_TEMP/airplay-setup.log"
+          git diff --check
+      - name: Save verified blobs without moving source branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          expected = {'src/api.c': '07949396cda00eda9a576cb06fe505c09620832c', 'src/http_config_worker.inc': 'e87de41bad75d323cbb5c8f86d0edfcd651ca281', 'tests/test_setup_workers.c': 'f7375abd1e90675ef006fb1ace7199c61a420078'}
+          for path, sha in expected.items():
+              request = json.dumps({'content': pathlib.Path(path).read_text(), 'encoding': 'utf-8'})
+              result = subprocess.run(['gh', 'api', '--method', 'POST', 'repos/aslater3/LibreEcho-UI/git/blobs', '--input', '-'], input=request, text=True, capture_output=True, check=True)
+              assert json.loads(result.stdout)['sha'] == sha, path
+              print(path, sha)
+          PY
