@@ -25,6 +25,7 @@ grep -Fq '"--configfile", ctx->config_path' src/adapter/airplayd.c
 ! grep -Fq '"-v"' src/adapter/airplayd.c
 ! grep -Fq '"-vvv"' src/adapter/airplayd.c
 
-calls=$(grep -c '^[[:space:]]*mount_led_socket$' "$script")
-[ "$calls" -eq 2 ]
+# Fresh, pre-mounted, complete and partial runtime paths are executed by
+# test_airplay_premounted_runtime.py in the same test runner. That test checks
+# the LED bridge is reached, rather than counting duplicate source call sites.
 echo 'AirPlay LED socket isolation bridge: ok'
