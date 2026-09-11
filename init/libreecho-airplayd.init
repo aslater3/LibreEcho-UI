@@ -20,6 +20,7 @@ PAYLOAD=${PAYLOAD:-/data/libreecho/features/airplay2/payload.squashfs}
 RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/airplay2/root}
 CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
 AVAHI_SERVICES_SOURCE=${AVAHI_SERVICES_SOURCE:-/data/libreecho/features/airplay2/avahi-services}
+WYOMING_SERVICE_SOURCE=${WYOMING_SERVICE_SOURCE:-/etc/libreecho/avahi-services/wyoming.service}
 AVAHI_CONFIG_SNAPSHOT=${AVAHI_CONFIG_SNAPSHOT:-/run/libreecho/airplay-avahi-daemon.conf}
 ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 
@@ -29,6 +30,7 @@ ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 # staging; bit 16 is the explicit persistent user-controlled disable.
 # persistent AirPlay disable is represented by clearing bit 16.
 airplay_enabled_at_boot=1
+HOME_ASSISTANT_ENABLED=0
 if [ -r "$CONFIG" ]; then
     integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
     case "$integrations" in
@@ -39,11 +41,17 @@ if [ -r "$CONFIG" ]; then
             else
                 airplay_enabled_at_boot=0
             fi
+            if [ $((integrations & 1)) -ne 0 ]; then
+                HOME_ASSISTANT_ENABLED=1
+            fi
             ;;
     esac
 fi
 if [ "$airplay_enabled_at_boot" -eq 1 ]; then
     ARGS="$ARGS --enable-on-start"
+fi
+if [ "$HOME_ASSISTANT_ENABLED" -eq 1 ]; then
+    ARGS="$ARGS --mdns-on-start"
 fi
 
 mount_led_socket() {
@@ -133,6 +141,13 @@ prepare_avahi_runtime() {
     mkdir -p "$RUNTIME_ROOT/etc/avahi/services"
     if [ -d "$AVAHI_SERVICES_SOURCE" ]; then
         cp -a "$AVAHI_SERVICES_SOURCE/." "$RUNTIME_ROOT/etc/avahi/services/"
+    fi
+    if [ "${HOME_ASSISTANT_ENABLED:-0}" -eq 1 ]; then
+        [ -f "$WYOMING_SERVICE_SOURCE" ] || {
+            echo "libreecho-airplayd: Wyoming mDNS service definition missing" >&2
+            return 1
+        }
+        cp "$WYOMING_SERVICE_SOURCE" "$RUNTIME_ROOT/etc/avahi/services/wyoming.service" || return 1
     fi
 }
 

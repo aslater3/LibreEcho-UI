@@ -346,6 +346,9 @@ static int setup_activate_installed_features(struct api_context *c)
 }
 static int apply_home_assistant_mode(int enabled)
 {
+    static const char *const restart_discovery[] = {
+        "/etc/init.d/libreecho-airplayd.init", "restart", NULL
+    };
     static const char *const stop_local[] = {
         "/etc/init.d/libreecho-agentd.init", "stop", NULL
     };
@@ -377,10 +380,14 @@ static int apply_home_assistant_mode(int enabled)
         if (run_init_command(stop_local[0], stop_local[1]) ||
             run_init_command(stop_stt[0], stop_stt[1]) ||
             run_init_command(stop_tts[0], stop_tts[1]) ||
-            run_init_command(start_wyoming[0], start_wyoming[1]))
+            run_init_command(start_wyoming[0], start_wyoming[1]) ||
+            (access(restart_discovery[0], X_OK) == 0 &&
+             run_init_command(restart_discovery[0], restart_discovery[1])))
             return LE_IO;
     } else {
         if (run_init_command(stop_wyoming[0], stop_wyoming[1]) ||
+            (access(restart_discovery[0], X_OK) == 0 &&
+             run_init_command(restart_discovery[0], restart_discovery[1])) ||
             run_init_command(start_stt[0], start_stt[1]) ||
             run_init_command(start_tts[0], start_tts[1]) ||
             run_init_command(start_local[0], start_local[1]))

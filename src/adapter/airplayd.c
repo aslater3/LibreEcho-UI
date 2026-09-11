@@ -56,6 +56,8 @@ struct airplay_ctx {
     pid_t engine_pid;
     pid_t shairport_pid;
     int enabled;
+    int mdns_required;
+    unsigned mdns_retry_ticks;
     int playing;
     char title[AIRPLAY_METADATA_FIELD_MAX + 1];
     char artist[AIRPLAY_METADATA_FIELD_MAX + 1];
@@ -1067,6 +1069,54 @@ static pid_t spawn_engine(const struct airplay_ctx *ctx)
     _exit(127);
 }
 
+static int mdns_running(const struct airplay_ctx *ctx)
+{
+    return child_alive(ctx->dbus_pid) && child_alive(ctx->avahi_pid);
+}
+
+static void stop_mdns(struct airplay_ctx *ctx)
+{
+    stop_child(&ctx->avahi_pid);
+    stop_child(&ctx->dbus_pid);
+}
+
+static int start_mdns(struct airplay_ctx *ctx)
+{
+    char path[256];
+    int i;
+
+    if (mdns_running(ctx))
+        return 0;
+    stop_mdns(ctx);
+#define MDNS_RUNTIME_ACCESS(relative, mode) \
+    (snprintf(path, sizeof(path), "%s%s", ctx->runtime_root, (relative)), \
+     access(path, (mode)) < 0)
+    if (access(AIRPLAY_CHROOT, X_OK) < 0 ||
+        MDNS_RUNTIME_ACCESS(ctx->dbus_path, X_OK) ||
+        MDNS_RUNTIME_ACCESS(ctx->avahi_path, X_OK)) {
+#undef MDNS_RUNTIME_ACCESS
+        return -1;
+    }
+#undef MDNS_RUNTIME_ACCESS
+    ctx->dbus_pid = spawn_dbus(ctx);
+    if (ctx->dbus_pid < 0)
+        return -1;
+    if (!wait_for_runtime_file(ctx, "/run/dbus/system_bus_socket", 30))
+        goto fail;
+    ctx->avahi_pid = spawn_avahi(ctx);
+    if (ctx->avahi_pid < 0)
+        goto fail;
+    for (i = 0; i < 10 && child_running(&ctx->avahi_pid); ++i)
+        usleep(100000);
+    if (ctx->avahi_pid <= 0 || !child_running(&ctx->dbus_pid))
+        goto fail;
+    ctx->mdns_retry_ticks = 0;
+    return 0;
+fail:
+    stop_mdns(ctx);
+    return -1;
+}
+
 static int set_enabled(struct airplay_ctx *ctx, int enabled)
 {
     int i;
@@ -1083,10 +1133,14 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
         stop_child(&ctx->shairport_pid);
         stop_child(&ctx->audio_pid);
         stop_child(&ctx->nqptp_pid);
-        stop_child(&ctx->avahi_pid);
-        stop_child(&ctx->dbus_pid);
         ctx->enabled = 0;
         metadata_fifo_close(ctx);
+        if (ctx->mdns_required) {
+            if (start_mdns(ctx) < 0)
+                return -1;
+        } else {
+            stop_mdns(ctx);
+        }
         le_log_info("airplayd: AirPlay 2 disabled");
         return 0;
     }
@@ -1107,19 +1161,7 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
         return -1;
     }
 #undef RUNTIME_ACCESS
-    ctx->dbus_pid = spawn_dbus(ctx);
-    if (ctx->dbus_pid < 0)
-        return -1;
-    if (!wait_for_runtime_file(ctx, "/run/dbus/system_bus_socket", 30))
-        goto fail;
-    ctx->avahi_pid = spawn_avahi(ctx);
-    if (ctx->avahi_pid < 0) {
-        stop_child(&ctx->dbus_pid);
-        return -1;
-    }
-    for (i = 0; i < 10 && child_running(&ctx->avahi_pid); ++i)
-        usleep(100000);
-    if (ctx->avahi_pid <= 0)
+    if (start_mdns(ctx) < 0)
         goto fail;
     ctx->nqptp_pid = spawn_nqptp(ctx);
     if (ctx->nqptp_pid < 0)
@@ -1152,22 +1194,29 @@ fail:
     metadata_fifo_close(ctx);
     stop_child(&ctx->audio_pid);
     stop_child(&ctx->nqptp_pid);
-    stop_child(&ctx->avahi_pid);
-    stop_child(&ctx->dbus_pid);
+    if (!ctx->mdns_required)
+        stop_mdns(ctx);
     return -1;
 }
 
 static int refresh_hostname(struct airplay_ctx *ctx)
 {
-    if (!ctx->enabled)
+    int mdns_required;
+    int was_enabled;
+
+    if (!ctx->enabled && !ctx->mdns_required)
         return 0;
+    was_enabled = ctx->enabled;
+    mdns_required = ctx->mdns_required;
+    ctx->mdns_required = 0;
     if (set_enabled(ctx, 0) < 0)
         return -1;
-    if (set_enabled(ctx, 1) < 0) {
+    ctx->mdns_required = mdns_required;
+    if (start_mdns(ctx) < 0 || (was_enabled && set_enabled(ctx, 1) < 0)) {
         /* The integration remains administratively enabled even when this
          * runtime restart fails, so the event loop and later requests retry
          * rather than reporting a disabled stack as refreshed. */
-        ctx->enabled = 1;
+        ctx->enabled = was_enabled;
         return -1;
     }
     le_log_info("airplayd: registration stack restarted after hostname change");
@@ -1260,6 +1309,7 @@ int main(int argc, char **argv)
     struct sigaction action;
     int foreground = 0;
     int enable_on_start = 0;
+    int mdns_on_start = 0;
     int i;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -1286,6 +1336,7 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--foreground")) foreground = 1;
         else if (!strcmp(argv[i], "--enable-on-start")) enable_on_start = 1;
+        else if (!strcmp(argv[i], "--mdns-on-start")) mdns_on_start = 1;
         else if (!strcmp(argv[i], "--socket") && i + 1 < argc) snprintf(ctx.socket_path, sizeof(ctx.socket_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--root") && i + 1 < argc) snprintf(ctx.runtime_root, sizeof(ctx.runtime_root), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--nqptp") && i + 1 < argc) snprintf(ctx.nqptp_path, sizeof(ctx.nqptp_path), "%s", argv[++i]);
@@ -1294,7 +1345,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--engine") && i + 1 < argc) snprintf(ctx.engine_path, sizeof(ctx.engine_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) snprintf(ctx.config_path, sizeof(ctx.config_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--metadata") && i + 1 < argc) snprintf(ctx.metadata_path, sizeof(ctx.metadata_path), "%s", argv[++i]);
-        else { fprintf(stderr, "Usage: %s [--foreground] [--enable-on-start] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--audio PATH] [--engine PATH] [--config PATH] [--metadata PATH]\n", argv[0]); return 1; }
+        else { fprintf(stderr, "Usage: %s [--foreground] [--enable-on-start] [--mdns-on-start] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--audio PATH] [--engine PATH] [--config PATH] [--metadata PATH]\n", argv[0]); return 1; }
     }
     (void)foreground;
     le_log_init("airplayd", argc, argv);
@@ -1319,8 +1370,17 @@ int main(int argc, char **argv)
     } else {
         le_log_info("airplayd: shared audio engine ready");
     }
-    le_log_info("airplayd: starting (socket=%s, enable_on_start=%s)",
-                ctx.socket_path, enable_on_start ? "yes" : "no");
+    ctx.mdns_required = mdns_on_start;
+    le_log_info("airplayd: starting (socket=%s, enable_on_start=%s, mdns_on_start=%s)",
+                ctx.socket_path, enable_on_start ? "yes" : "no",
+                mdns_on_start ? "yes" : "no");
+    if (mdns_on_start && start_mdns(&ctx) < 0) {
+        le_log_warn("airplayd: required mDNS discovery failed at startup");
+        stop_child(&ctx.engine_pid);
+        close(ctx.listener);
+        unlink(ctx.socket_path);
+        return 1;
+    }
     if (enable_on_start) {
         if (set_enabled(&ctx, 1) < 0)
             le_log_warn("airplayd: persisted AirPlay enable failed at startup");
@@ -1340,9 +1400,19 @@ int main(int argc, char **argv)
             stop_child(&ctx.shairport_pid);
             stop_child(&ctx.audio_pid);
             stop_child(&ctx.nqptp_pid);
-            stop_child(&ctx.avahi_pid);
-            stop_child(&ctx.dbus_pid);
+            if (!ctx.mdns_required)
+                stop_mdns(&ctx);
             metadata_fifo_close(&ctx);
+        }
+        if (ctx.mdns_required && !mdns_running(&ctx) && !ctx.enabled) {
+            if (ctx.mdns_retry_ticks > 0) {
+                --ctx.mdns_retry_ticks;
+            } else if (start_mdns(&ctx) < 0) {
+                ctx.mdns_retry_ticks = 20;
+                le_log_warn("airplayd: required mDNS discovery restart failed");
+            } else {
+                le_log_info("airplayd: required mDNS discovery restarted");
+            }
         }
         if (!child_alive(ctx.engine_pid)) {
             ctx.engine_pid = spawn_engine(&ctx);
@@ -1389,6 +1459,7 @@ int main(int argc, char **argv)
             close(client);
         }
     }
+    ctx.mdns_required = 0;
     set_enabled(&ctx, 0);
     stop_child(&ctx.engine_pid);
     close(ctx.listener);
