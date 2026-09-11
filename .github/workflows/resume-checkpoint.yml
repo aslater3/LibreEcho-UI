@@ -1,0 +1,106 @@
+name: Materialize reviewed resume checkpoint
+on:
+  push:
+    branches: ['fix/014-readiness-materialize']
+    paths: ['.github/workflows/resume-checkpoint.yml']
+permissions:
+  contents: write
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: edc2af5dcac89a5b2d962028d7604682515a3098
+          persist-credentials: false
+      - name: Reproduce the locally tested source changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, json, subprocess
+          from pathlib import Path
+          def github(*args, data=None):
+              return json.loads(subprocess.check_output(['gh','api',*args],input=data,text=True,timeout=30))
+          r=Path('.')
+          p=r/'src/http_server.c';s=p.read_text()
+          s='\n'.join(line for line in s.split('\n') if not line.startswith('/* Route contracts retained'))
+          s=s.replace('#include "http_server.h"','#include "http_server.h"\n#include "config_store.h"\n#include "json.h"')
+          s=s.replace('#define LE_MAX_UPDATE_WORKERS 4','#define LE_MAX_UPDATE_WORKERS 4\n#define LE_MAX_CONFIG_WORKERS 1')
+          s=s.replace('CHILD_WORKER_UPDATE,CHILD_WORKER_KIND_COUNT','CHILD_WORKER_UPDATE,CHILD_WORKER_CONFIG,CHILD_WORKER_KIND_COUNT')
+          s=s.replace('+LE_MAX_UPDATE_WORKERS)', '+LE_MAX_UPDATE_WORKERS+LE_MAX_CONFIG_WORKERS)')
+          s=s.replace('case CHILD_WORKER_UPDATE:return LE_MAX_UPDATE_WORKERS;', 'case CHILD_WORKER_UPDATE:return LE_MAX_UPDATE_WORKERS;case CHILD_WORKER_CONFIG:return LE_MAX_CONFIG_WORKERS;')
+          idx=s.index('static int start_api_worker('); end=s.index('\n',idx)
+          s=s[:end]+'\n#include "http_config_worker.inc"'+s[end:]
+          old='copy_header(q.confirm,sizeof(q.confirm),header(c->buf,"X-LibreEcho-Confirm"));'
+          new=old+'''
+          sync_configuration_worker(api);
+          /* Serialize configuration mutations while setup persists its snapshot. Reads
+             stay responsive; authentication/CSRF checks still precede a busy response. */
+          if(config_worker_pending && !strncmp(q.path,"/api/",5) && strcmp(q.method,"GET") && strcmp(q.method,"HEAD")){
+              if(api_request_authorize(api,&q,&r)){
+                  const char *message="{\\"ok\\":false,\\"data\\":null,\\"error\\":{\\"code\\":\\"busy\\",\\"message\\":\\"Network configuration is in progress; retry when it finishes\\"}}";
+                  response(c->fd,409,"application/json",message,strlen(message));
+              }else response(c->fd,r.status,r.type,r.body,r.length);
+              goto done;
+          }
+          if(configuration_worker_request(api,&q)){
+              if(!api_request_authorize(api,&q,&r)){
+                  response(c->fd,r.status,r.type,r.body,r.length);goto done;
+              }
+              if(start_configuration_worker(c->fd,api,&q)<0){
+                  const char *message="{\\"ok\\":false,\\"data\\":null,\\"error\\":{\\"code\\":\\"io_error\\",\\"message\\":\\"Network configuration worker could not start\\"}}";
+                  response(c->fd,503,"application/json",message,strlen(message));goto done;
+              }
+              if(body_len)memset(body,0,body_len);
+              c->fd=-1;c->used=0;return;
+          }'''
+          assert s.count(old)==1;s=s.replace(old,new)
+          old='if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}initial='
+          new='if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}sync_configuration_worker(api);if(config_worker_pending){update_error(c->fd,409,"busy","Network configuration is in progress; retry when it finishes");goto done;}initial='
+          assert s.count(old)==1;s=s.replace(old,new);p.write_text(s)
+          p=r/'src/api.c';s=p.read_text();old='void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;if(!security(c,q,r))return;if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;'
+          new='int api_request_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){return security(c,q,r)&&(!changing(q->method)||!q->body_len||body_ok(q,r));}\nvoid api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;if(!api_request_authorize(c,q,r))return;'
+          assert s.count(old)==1;s=s.replace(old,new).replace('config_write_atomic(path,"schema=1\\n",8)','config_write_atomic(path,"schema=1\\n",sizeof("schema=1\\n")-1)');p.write_text(s)
+          p=r/'src/api.h';s=p.read_text().replace('int api_bootstrap_required(', 'int api_request_authorize(struct api_context*,const struct api_request*,struct api_response*);\nint api_bootstrap_required(');p.write_text(s)
+          p=r/'tests/test_setup_account_first.sh';s=p.read_text();s='\n'.join(line for line in s.split('\n') if not (line.startswith('assert ') and (' in server' in line)));s=s.replace("print('setup account-first", "# HTTP dispatch, state synchronisation and concurrency are exercised by\n# test-setup-workers, not by searching comments for executable fragments.\nprint('setup account-first");p.write_text(s)
+          p=r/'Makefile';s=p.read_text();s+='''\n# Runs the real HTTP request processor with isolated mock device operations.\n$(BUILD)/test-setup-workers: tests/test_setup_workers.c src/http_server.c src/http_config_worker.inc $(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))\n\t$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< $(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS)) $(LDFLAGS) $(WEB_TLS_LIBS) -lm -lpthread -o $@\n''';p.write_text(s)
+          p=r/'tests/run_tests.sh';s=p.read_text().replace('sh tests/test_setup_account_first.sh', 'sh tests/test_setup_account_first.sh\nmake build/test-setup-workers\n./build/test-setup-workers');p.write_text(s)
+          p=r/'docs/API.md';s=p.read_text().replace('#### POST /api/v1/setup\n','''#### POST /api/v1/setup
+
+          On the Linux backend, setup and Wi-Fi connection run in a single bounded
+          configuration worker. Reads remain available. Concurrent API mutations return
+          HTTP 409 (`busy`) until the worker finishes; retry them afterwards. Authentication,
+          CSRF and Origin checks still apply. Successful setup becomes visible to the parent
+          from the durable completion marker and saved setup fields, without replacing live
+          sessions. Mock-backend operations remain synchronous and in-process.
+          ''');p.write_text(s)
+          expected={'src/http_server.c':'dcfd99c18a88534544cb43d7f7bdffb0a366ab6e','src/api.c':'edfeb42240ffb9d9b1313ab704e9c04924bbaeb2','src/api.h':'921ce75439d6f1101a5cd2e1eba0fb76350194ac','Makefile':'9bea8fb922cf10104c0d8fa0daf0dcc673fc648c','tests/test_setup_account_first.sh':'5ecf5c210f8104efc85fd71f00c32193cc701979','tests/run_tests.sh':'48cdc80384fdc64b30d91fa5ce96bbb112eb3448','docs/API.md':'af40f93276194f7f5f7206427d28932ddccd50ee','src/http_config_worker.inc':'cd3aa300b9f20ad4274681cebf3e20bbfbef9e31','tests/test_setup_workers.c':'477c9cfebaa130998ea026a51e56df0e541362e4'}
+          for name in ('src/http_config_worker.inc','tests/test_setup_workers.c'):
+              obj=github('repos/aslater3/LibreEcho-UI/git/blobs/'+expected[name]);Path(name).write_bytes(base64.b64decode(obj['content']))
+          for name,sha in expected.items():
+              b=Path(name).read_bytes();actual=hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
+              assert actual==sha,(name,actual,sha)
+          Path('/tmp/checkpoint-shas.json').write_text(json.dumps(expected))
+          PY
+          timeout 120 make -s -j4 SOURCE_COMMIT=edc2af5 SOURCE_DIRTY=1 SOURCE_DIGEST=test build/test-setup-workers
+          timeout 25 ./build/test-setup-workers
+          sh tests/test_setup_account_first.sh
+          python3 tests/test_http_worker_registry_contract.py
+          git diff --check
+      - name: Save tested blobs without advancing a source branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64,json,pathlib,subprocess
+          for name,sha in json.loads(pathlib.Path('/tmp/checkpoint-shas.json').read_text()).items():
+              b=pathlib.Path(name).read_bytes()
+              result=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/aslater3/LibreEcho-UI/git/blobs','--input','-'],input=json.dumps({'content':base64.b64encode(b).decode(),'encoding':'base64'}),text=True,timeout=30))
+              assert result['sha']==sha
+              print('CHECKPOINT_BLOB '+name+' '+sha)
+          PY
