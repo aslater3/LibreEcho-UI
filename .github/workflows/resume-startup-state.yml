@@ -1,0 +1,65 @@
+name: Verify startup state checkpoint
+on:
+  push:
+    branches: ['fix/014-readiness-materialize']
+    paths: ['.github/workflows/resume-startup-state.yml']
+permissions:
+  contents: write
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: bdaf58ae30669796153e459e84d8b2bba1b83a5d
+          persist-credentials: false
+      - name: Reconstruct exact reviewed changes and execute startup scenarios
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64,hashlib,json,subprocess
+          p=Path('web/js/app.js');s=p.read_text()
+          old='else aboutPage()}catch(e){errorView(e)}applyCssVars(content)'
+          new="else aboutPage()}catch(e){if(document.body.classList.contains('auth-pending'))markStartupUnavailable();errorView(e)}applyCssVars(content)"
+          assert s.count(old)==1;s=s.replace(old,new)
+          old="else{document.body.classList.remove('auth-pending');errorView(error)}});"
+          new="else{markStartupUnavailable();document.body.classList.remove('auth-pending');errorView(error)}});"
+          assert s.count(old)==1;s=s.replace(old,new);p.write_text(s)
+          p=Path('web/index.html');p.write_text(p.read_text().replace('/js/app.js?rev=36','/js/app.js?rev=37'))
+          Path('tests/test_startup_state_contract.py').write_text('''#!/usr/bin/env python3
+          """Run startup behaviour against the scripts actually loaded by index.html."""
+          from pathlib import Path
+          import subprocess
+
+          ROOT = Path(__file__).resolve().parents[1]
+          subprocess.run(["node", "tests/test_startup_state.js"], cwd=ROOT, check=True, timeout=10)
+          ''')
+          obj=json.loads(subprocess.check_output(['gh','api','repos/aslater3/LibreEcho-UI/git/blobs/9b663066c0b0ecae4afb2bcef4be66e9383a3c02'],text=True,timeout=30))
+          Path('tests/test_startup_state.js').write_bytes(base64.b64decode(obj['content']))
+          expected={'web/js/app.js':'5a3c7c607a41baa47093b2ec23cf86070ac9fd88','web/index.html':'d03db2305fcf42485147bc154f4bec9d19d3239e','tests/test_startup_state_contract.py':'81ec047741d4aa9909fce6a870b12b177334df11','tests/test_startup_state.js':'9b663066c0b0ecae4afb2bcef4be66e9383a3c02'}
+          for name,sha in expected.items():
+              b=Path(name).read_bytes();actual=hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest();assert actual==sha,(name,actual,sha)
+          Path('/tmp/startup-checkpoint.json').write_text(json.dumps(expected))
+          PY
+          node --check web/js/app.js
+          python3 tests/test_startup_state_contract.py
+          node tests/test_voice_assistant_ha_mode_ui.js
+          git diff --check
+      - name: Save tested blobs without advancing source refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64,json,pathlib,subprocess
+          for name,sha in json.loads(pathlib.Path('/tmp/startup-checkpoint.json').read_text()).items():
+              b=pathlib.Path(name).read_bytes()
+              obj=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/aslater3/LibreEcho-UI/git/blobs','--input','-'],input=json.dumps({'content':base64.b64encode(b).decode(),'encoding':'base64'}),text=True,timeout=30))
+              assert obj['sha']==sha
+              print('CHECKPOINT_BLOB '+name+' '+sha)
+          PY
