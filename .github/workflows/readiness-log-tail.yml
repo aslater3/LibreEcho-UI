@@ -1,0 +1,28 @@
+name: Read bounded 0.14 failure evidence
+on:
+  push:
+    branches: ['fix/014-readiness-materialize']
+    paths: ['.github/workflows/readiness-log-tail.yml']
+permissions:
+  actions: read
+  contents: read
+jobs:
+  evidence:
+    if: github.repository == 'aslater3/LibreEcho-UI'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Read exact completed source-check job log
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api /repos/aslater3/LibreEcho-UI/actions/jobs/103163335808/logs > "$RUNNER_TEMP/full-ui-checks.log"
+          tail -n 100 "$RUNNER_TEMP/full-ui-checks.log" | tail -c 16000
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: readiness-full-ui-log
+          path: ${{ runner.temp }}/full-ui-checks.log
+          retention-days: 1
+          if-no-files-found: error
