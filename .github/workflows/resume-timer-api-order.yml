@@ -1,0 +1,56 @@
+name: Verify timer API ordering checkpoint
+on:
+  push:
+    branches: ['fix/014-readiness-materialize']
+    paths: ['.github/workflows/resume-timer-api-order.yml']
+permissions:
+  contents: write
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ce268b722e276ea31a5221b3e9a55ea91679685e
+          persist-credentials: false
+      - name: Reconstruct reviewed runner and exercise timer HTTP scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          p=Path('tests/run_tests.sh');s=p.read_text()
+          line='LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh\n'
+          assert s.count(line)==1;s=s.replace(line,'')
+          anchor='LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh\n'
+          assert s.count(anchor)==1;s=s.replace(anchor,'# Timer HTTP cases require this ready, isolated mock server.\n'+line+anchor)
+          b=s.encode();assert hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()=='cdc43915786c32d347080a6fa9f8ab6f46ab8074';p.write_bytes(b)
+          PY
+          make -s -j4 SOURCE_COMMIT=ce268b7 SOURCE_DIRTY=1 SOURCE_DIGEST=test build/libreecho-web
+          dir=$(mktemp -d)
+          ./build/libreecho-web --backend mock --config "$dir/config.json" --mock-config ./config/mock-state.json --web-root ./web --listen 127.0.0.1:18192 --seed 42 --dev-controls >"$dir/server.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$dir"' EXIT
+          ready=0
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:18192/api/v1/status >/dev/null 2>&1; then ready=1; break; fi
+            sleep 0.1
+          done
+          [ "$ready" = 1 ] || { cat "$dir/server.log"; exit 1; }
+          LIBREECHO_TEST_URL=http://127.0.0.1:18192 timeout 30 sh tests/test_timers_api.sh
+          sh -n tests/run_tests.sh
+          git diff --check
+      - name: Save tested runner blob without advancing source refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64,json,pathlib,subprocess
+          b=pathlib.Path('tests/run_tests.sh').read_bytes()
+          obj=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/aslater3/LibreEcho-UI/git/blobs','--input','-'],input=json.dumps({'content':base64.b64encode(b).decode(),'encoding':'base64'}),text=True,timeout=30))
+          assert obj['sha']=='cdc43915786c32d347080a6fa9f8ab6f46ab8074'
+          print('CHECKPOINT_BLOB tests/run_tests.sh '+obj['sha'])
+          PY
