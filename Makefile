@@ -33,7 +33,7 @@ TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adap
 TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
 STTD_SOURCES = src/adapter/sttd.c src/adapter/stt_engine_mock.c src/adapter/adapter_server.c src/log.c
 STTD_SHERPA_CXX_SOURCES = src/adapter/stt_engine_sherpa.cpp
-AGENTD_SOURCES = src/adapter/agentd.c src/adapter/timer_intent.c src/adapter/llm_provider.c \
+AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/timer_intent.c src/adapter/llm_provider.c \
 	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
@@ -190,6 +190,18 @@ $(BUILD)/test-wake-decode: tests/test_wake_decode.c \
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
 		$^ -lpthread -lm -o $@
+
+$(BUILD)/test-wake-health: tests/test_wake_health.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-wake-health-api: tests/test_wake_health_api.c \
+	$(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
+		$^ $(LDFLAGS) -lm -lpthread -o $@
 
 $(BUILD)/test-light-sensor: tests/test_light_sensor.c \
 	src/backend_linux.c src/json.c src/log.c
@@ -392,6 +404,7 @@ WAKE_ORT_ARCHIVES = \
 	$(WAKE_ORT_BUILD)/libonnxruntime_lora.a \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx.a \
 	$(WAKE_ORT_BUILD)/_deps/onnx-build/libonnx_proto.a \
+	$(WAKE_ORT_BUILD)/_deps/nsync-build/libnsync_cpp.a \
 	$(WAKE_ORT_BUILD)/_deps/protobuf-build/libprotobuf-lite.a \
 	$(WAKE_ORT_BUILD)/_deps/flatbuffers-build/libflatbuffers.a \
 	$(RE2_ARCHIVE)
@@ -578,6 +591,10 @@ $(BUILD)/test-agentd: tests/test_agentd.c src/adapter/adapter_client.c \
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_agentd.c \
 		src/adapter/adapter_client.c src/log.c -lpthread -o $@
+
+$(BUILD)/test-stop-intent: tests/test_stop_intent.c src/adapter/stop_intent.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc $^ -o $@
 
 $(BUILD)/test-voice-reply: tests/test_voice_reply.c \
 		src/adapter/voice_reply.c

@@ -96,6 +96,9 @@ python3 tests/test_install_completeness.py
 python3 tests/test_watchdog_build_contract.py
 make build/test-wake-decode
 ./build/test-wake-decode
+make build/test-wake-health build/test-wake-health-api
+./build/test-wake-health
+./build/test-wake-health-api
 sh tests/test_buttond_contract.sh
 sh tests/test_input_capability_state_contract.sh
 sh tests/test_bluetooth_startup_readiness_contract.sh
@@ -118,6 +121,7 @@ node tests/test_kernel_log_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
+node tests/test_voice_assistant_ha_mode_ui.js
 LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
@@ -159,6 +163,7 @@ sh tests/test_radio_icy_metadata.sh
 sh tests/test_airplay_led_bridge.sh
 sh tests/test_airplay_setup_persistence.sh
 sh tests/test_airplay_mount_failure.sh
+python3 tests/test_airplay_premounted_runtime.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
@@ -195,6 +200,9 @@ make build/test-voice-pipeline
 ./build/test-agentd
 ./build/test-voice-reply
 ./build/test-voice-playback
+make build/test-stop-intent
+./build/test-stop-intent
+python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
 make build/test-wyomingd
 ./build/test-wyomingd

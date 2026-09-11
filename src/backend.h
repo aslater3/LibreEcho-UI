@@ -63,7 +63,7 @@ struct le_network_state {
     int signal, rssi_dbm, internet, dhcp, ssh, api_lan;
     int gateway_reachable, liveness_failures;
 };
-struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb; };
+struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb; int health_available, model_loaded, capture_active, capture_age_ms, inference_active, inference_age_ms; unsigned long long processed_frames; };
 struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, rssi_valid, paired, connected; };
 struct le_bluetooth_pairing { char address[18], method[24]; int type; unsigned int value; };
 struct le_bluetooth_state {

@@ -1286,7 +1286,12 @@ value remains useful when the device wall clock is not synchronised.
 
 #### GET /api/v1/diagnostics
 
-Returns diagnostic information.
+Returns diagnostic information. The `wake word` check requires recent capture
+and inference progress, not just a reachable process, loaded model, or positive
+voice activity detection. It reports `degraded` for missing/stale evidence,
+`disabled` when wake is intentionally disabled, and `muted` when microphone
+privacy is enabled. Healthy mock fixtures report `development`, never hardware
+acceptance.
 
 **Response:**
 ```json
@@ -1436,6 +1441,14 @@ action downloads this response as JSON and offers its short `summary` for
 copying into an issue template. No server-side temporary file is created.
 
 ### Wake Word
+
+Read-only health fields: `health_available`, `model_loaded`, `capture_active`,
+`processed_frames`, `capture_age_ms`, `inference_active`, `inference_age_ms`.
+Ages use monotonic time; `-1` means no usable observation. Capture is fresh for
+2,000 ms and inference for 5,000 ms. Silence counts as capture progress; VAD
+indicates speech, not stream liveness. Missing fields from an older daemon are
+unknown, not healthy. A loaded model with stalled capture or inference is
+reported degraded in diagnostics. These fields cannot be changed through PUT.
 
 Returns wake word state. When the wake-word service is absent, this remains a
 successful `200` response with `data.available: false` and
@@ -2059,3 +2072,19 @@ transaction journal supplies the observed result. No Platform fields are
 invented by the UI.
 
 ### Wake Word
+
+### Deterministic local voice stop (0.14 candidate)
+
+Imperative stop/quiet commands bypass model access and sign-in. A ringing timer
+has priority; otherwise device-owned radio, queued speech, and the noise machine
+stop together. Idle/repeated stop is silent and never opens a follow-up turn.
+Negations and unrelated text are not treated as stop commands. Adapter failure
+is reported rather than claiming success. Phone-owned AirPlay/Bluetooth transport
+is not stopped remotely: a deterministic response explains that the sender owns
+it. The assistant feature payload must be rebuilt to deploy this change.
+
+Wake interruption during active playback permits one above-threshold supporting
+frame only when the peak itself has playback activity and VAD. Quiet-room
+corroboration, acceptance threshold, sample attribution and lockout remain in
+force. This policy needs final-image false-activation and interruption acceptance
+on hardware; host decoding tests do not establish acoustic performance.

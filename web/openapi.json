@@ -1474,7 +1474,8 @@
      "200": {
       "$ref": "#/components/responses/Success"
      }
-    }
+    },
+    "description": "The wake word check reports degraded for stale/unknown capture or inference; intentional microphone mute and disabled wake are distinguished. Healthy mocks are development evidence only."
    }
   },
   "/storage/usb": {
@@ -3087,10 +3088,61 @@
      "Wake word"
     ],
     "summary": "Read wake-word state",
-    "description": "Returns available wake-word state. On images without the wake-word service, the 200 response contains data.available=false and data.unavailable=true.",
+    "description": "Returns available wake-word state. On images without the wake-word service, the 200 response contains data.available=false and data.unavailable=true. Available states include read-only WakeHealth fields. A loaded model alone does not prove live capture or inference.",
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Available wake state with health fields, or explicitly unavailable service",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "ok",
+          "data",
+          "error"
+         ],
+         "properties": {
+          "ok": {
+           "type": "boolean",
+           "enum": [
+            true
+           ]
+          },
+          "error": {
+           "nullable": true
+          },
+          "data": {
+           "oneOf": [
+            {
+             "$ref": "#/components/schemas/WakeHealth"
+            },
+            {
+             "type": "object",
+             "required": [
+              "available",
+              "unavailable"
+             ],
+             "properties": {
+              "available": {
+               "type": "boolean",
+               "enum": [
+                false
+               ]
+              },
+              "unavailable": {
+               "type": "boolean",
+               "enum": [
+                true
+               ]
+              }
+             }
+            }
+           ]
+          }
+         }
+        }
+       }
+      }
      },
      "503": {
       "$ref": "#/components/responses/Error"
@@ -3334,6 +3386,45 @@
    }
   },
   "schemas": {
+   "WakeHealth": {
+    "type": "object",
+    "required": [
+     "health_available",
+     "model_loaded",
+     "capture_active",
+     "inference_active",
+     "capture_age_ms",
+     "inference_age_ms",
+     "processed_frames"
+    ],
+    "properties": {
+     "health_available": {
+      "type": "boolean"
+     },
+     "model_loaded": {
+      "type": "boolean"
+     },
+     "capture_active": {
+      "type": "boolean"
+     },
+     "inference_active": {
+      "type": "boolean"
+     },
+     "capture_age_ms": {
+      "type": "integer",
+      "minimum": -1
+     },
+     "inference_age_ms": {
+      "type": "integer",
+      "minimum": -1
+     },
+     "processed_frames": {
+      "type": "integer",
+      "minimum": 0
+     }
+    },
+    "description": "Read-only bounded monotonic capture/inference evidence. Ages -1 are unknown; capture freshness 2000ms, inference freshness 5000ms. Silence is not a stall."
+   },
    "Envelope": {
     "type": "object",
     "required": [

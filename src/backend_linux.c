@@ -5,6 +5,7 @@
 #include "backend_internal.h"
 #include "adapter/adapter.h"
 #include "json.h"
+#include "adapter/wake_health.h"
 #include "log.h"
 #include "version.h"
 #include "factory_reset.h"
@@ -1654,7 +1655,8 @@ static int hostname(struct le_backend *b, const char *name)
 static int wake(struct le_backend *b, struct le_wake_word_state *o)
 {
     char response[LE_ADAPTER_MSG_MAX];
-    int v, rc, found = 0;
+    int v, rc, found = 0, capture, inference;
+    long long frames;
     (void)b;
     rc = adapter_command(LE_ADAPTER_WAKEWORD_SOCK, "status", NULL,
                          response, sizeof(response));
@@ -1668,6 +1670,18 @@ static int wake(struct le_backend *b, struct le_wake_word_state *o)
     if (json_get_int(response, "detected_count", &v) > 0) o->detected_count = v;
     if (json_get_int(response, "cpu_cost", &v) > 0) o->cpu_cost = v;
     if (json_get_int(response, "memory_cost_mb", &v) > 0) o->memory_cost_mb = v;
+    o->capture_age_ms = o->inference_age_ms = -1;
+    if (json_get_bool(response, "model_loaded", &o->model_loaded) == 1 &&
+        json_get_bool(response, "capture_active", &capture) == 1 &&
+        json_get_bool(response, "inference_active", &inference) == 1 &&
+        json_get_int64(response, "processed_frames", &frames) == 1 && frames >= 0 &&
+        json_get_int(response, "capture_age_ms", &o->capture_age_ms) == 1 && o->capture_age_ms >= -1 &&
+        json_get_int(response, "inference_age_ms", &o->inference_age_ms) == 1 && o->inference_age_ms >= -1) {
+        o->health_available = 1;
+        o->processed_frames = (unsigned long long)frames;
+        o->capture_active = capture && frames > 0 && le_wake_recent(o->capture_age_ms, LE_WAKE_CAPTURE_STALE_MS);
+        o->inference_active = inference && o->model_loaded && le_wake_recent(o->inference_age_ms, LE_WAKE_INFERENCE_STALE_MS);
+    }
     return found ? LE_OK : LE_IO;
 }
 
