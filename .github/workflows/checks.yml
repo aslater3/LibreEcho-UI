@@ -1,28 +1,50 @@
 name: LibreEcho UI checks
 
 on:
-  # Push and pull_request triggers were removed on 2026-08-14 to conserve
-  # hosted-runner quota on this private repository. Everyday checks run in the
-  # zero-quota local lane in LibreEcho-Build (ci/local/run-checks.sh), which
-  # executes this same suite. Dispatch remains for on-demand hosted runs.
+  # Keep the older release lines and everyday development in the local lane,
+  # but never treat browser smoke as full source verification for 0.14.
+  pull_request:
+    branches: ['release/0.14.0']
+    paths-ignore: ['**/*.md', 'docs/**']
+  push:
+    branches: ['release/0.14.0']
+    paths-ignore: ['**/*.md', 'docs/**']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ui-checks-${{ github.ref }}
+  group: ui-checks-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   source_checks:
     name: Full source checks
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Check out UI source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
+
+      - name: Retain exact tracked verification inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/ui-source-commit.txt"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/ui-source.tar.gz"
+
+      - name: Upload short-lived verification inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ui-verification-inputs
+          path: |
+            ${{ runner.temp }}/ui-source-commit.txt
+            ${{ runner.temp }}/ui-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Install test dependencies
         shell: bash
@@ -85,6 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           node --check web/js/app.js
+          node --check web/js/integrations-ui.js
           jq -e . web/openapi.json >/dev/null
           make SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" test
           git diff --check
