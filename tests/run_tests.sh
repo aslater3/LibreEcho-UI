@@ -67,6 +67,7 @@ python3 tests/test_wake_word_ui_contract.py
 python3 tools/test_virtual_echo.py
 node tests/test_wifi_security_interaction.js
 node tests/test_timers_ui.js
+node tests/test_voice_assistant_ha_mode_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
