@@ -197,6 +197,7 @@ make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
 make build/test-voice-reply build/test-voice-playback
 make build/test-voice-pipeline
+make build/test-voice-listening-feedback
 ./build/test-voice-stream
 ./build/test-sttd
 ./build/test-llm-provider
@@ -209,6 +210,8 @@ make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
+./build/test-voice-listening-feedback
+python3 tests/test_voice_listening_callers.py
 make build/test-wyomingd
 ./build/test-wyomingd
 python3 tests/test_wyoming_engines.py
