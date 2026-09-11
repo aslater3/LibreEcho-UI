@@ -48,7 +48,7 @@ ENTRY = re.compile(
 
 
 def table_entries(text):
-    start = text.index("static const struct service_desc descriptors[MAX_SERVICES]")
+    start = text.index("static const struct service_desc descriptors[]")
     end = text.index("static struct supervised services", start)
     return [m.groupdict() for m in ENTRY.finditer(text[start:end])]
 
@@ -69,6 +69,10 @@ def main():
     if not entries:
         print("could not parse the service table", file=sys.stderr)
         return 1
+
+    maximum = int(re.search(r"#define MAX_SERVICES (\d+)", text).group(1))
+    if len(entries) > maximum or len({e["name"] for e in entries}) != len(entries):
+        failures.append("service table is oversized or contains duplicate names")
 
     scripts = {
         f[len("libreecho-"):-len(".init")]: os.path.join(INIT, f)

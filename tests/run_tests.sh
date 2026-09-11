@@ -94,6 +94,8 @@ sh tests/test_startup_animation.sh
 make build/libreecho-watchdogd
 sh tests/test_watchdogd_recovery.sh
 python3 tests/test_watchdog_service_table.py
+make build/libreecho-timerd build/libreecho-watchdogd
+python3 tests/test_watchdog_timer_recovery.py
 python3 tests/test_install_completeness.py
 python3 tests/test_watchdog_build_contract.py
 make build/test-wake-decode

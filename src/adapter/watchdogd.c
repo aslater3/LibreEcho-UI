@@ -219,7 +219,7 @@ static void restart_group(struct supervised *services, size_t count,
 
 int main(int argc, char **argv)
 {
-    static const struct service_desc descriptors[MAX_SERVICES] = {
+    static const struct service_desc descriptors[] = {
         /* Socket paths are the defaults the init scripts pass; a source
            contract test keeps this table and init/ from drifting apart. */
         {"networkd", PROBE_SOCKET, "/run/libreecho/network.sock",
@@ -246,6 +246,9 @@ int main(int argc, char **argv)
          "/etc/init.d/libreecho-sttd.init", 1, NULL},
         {"airplayd", PROBE_SOCKET, "/run/libreecho/airplay.sock",
          "/etc/init.d/libreecho-airplayd.init", 1, NULL},
+        /* Timers must recover with their durable schedule after a daemon exit. */
+        {"timerd", PROBE_SOCKET, "/run/libreecho/timer.sock",
+         "/etc/init.d/libreecho-timerd.init", 1, NULL},
         /* No control socket; the pidfile is the only signal. */
         {"buttond", PROBE_PIDFILE, "/var/run/libreecho-buttond.pid",
          "/etc/init.d/libreecho-buttond.init", 1, NULL},
@@ -261,13 +264,18 @@ int main(int argc, char **argv)
     static struct supervised services[MAX_SERVICES];
     static char argbuf[MAX_SERVICES][512];
     static struct service_desc custom_descs[MAX_SERVICES];
-    size_t count = 15, i;
+    size_t count = sizeof(descriptors) / sizeof(descriptors[0]), i;
     int interval = DEFAULT_INTERVAL_S;
     int passes = 0;   /* 0 = run forever */
     int start_delay = 0;
     int pass = 0;
     size_t custom = 0;
     long long now;
+
+    if (count > MAX_SERVICES) {
+        fprintf(stderr, "service table exceeds watchdog capacity\n");
+        return 2;
+    }
 
     for (i = 1; i < (size_t)argc; ++i) {
         if (!strcmp(argv[i], "--interval") && i + 1 < (size_t)argc)
