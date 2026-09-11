@@ -126,7 +126,6 @@ node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
-LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -248,6 +247,8 @@ cleanup(){ if [ "${pid:-0}" -gt 1 ]; then kill "$pid" 2>/dev/null || true; wait 
 trap cleanup EXIT INT TERM
 i=0
 while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-server.log; exit 1; }; sleep 0.1; done
+# Timer HTTP cases require this ready, isolated mock server.
+LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
