@@ -321,6 +321,16 @@ static int send_info(struct wyoming_state *state)
     return send_event(state, "info", info, NULL, 0);
 }
 
+static int request_local_wake_pipeline(struct wyoming_state *state)
+{
+    static const char pipeline[] =
+        "{\"start_stage\":\"asr\",\"end_stage\":\"tts\","
+        "\"restart_on_end\":false,"
+        "\"snd_format\":{\"rate\":48000,\"width\":2,\"channels\":2}}";
+
+    return send_event(state, "run-pipeline", pipeline, NULL, 0);
+}
+
 static int start_stream(struct wyoming_state *state)
 {
     uint64_t first;
@@ -350,7 +360,6 @@ static int stop_stream(struct wyoming_state *state)
     state->streaming = 0;
     le_voice_listening_led_set(0);
     state->detected = 0;
-    state->server_running = 0;
     if (send_event(state, "audio-stop", NULL, NULL, 0) < 0)
         return -1;
     return send_event(state, "streaming-stopped", NULL, NULL, 0);
@@ -458,6 +467,9 @@ static int handle_wake_event(struct wyoming_state *state)
         state->detected = 1;
         if (send_event(state, "detection", data, NULL, 0) < 0)
             return -1;
+        if (request_local_wake_pipeline(state) < 0)
+            return -1;
+        return start_stream(state);
     }
     return 0;
 }
