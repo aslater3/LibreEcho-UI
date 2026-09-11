@@ -178,8 +178,14 @@ async function integrationsPage() {
     <div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${x.enabled?'Enabled':'Not configured'}</span></div>
     ${saveButton('save-int-'+x.id)}`
   )).join('');
+  const homeAssistantEnabled=d.items.some(x=>x.id==='home-assistant'&&x.enabled);
 
-  if(a.unsupported) {
+  if(homeAssistantEnabled) {
+    content.innerHTML=`<div class="integration-grid">
+      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${collapsiblePanel('Managed by Home Assistant',`<div class="assistant-heading"><div><span class="source-pill">Integration</span><h4>Home Assistant</h4><p class="muted">Voice is handled by Home Assistant over the local Wyoming connection. The on-device assistant (Local LLM and ChatGPT) stays stopped while the Home Assistant integration is enabled. Disable it on this page to use the on-device assistant.</p></div><div class="assistant-state"><span class="status-dot ok"></span>Enabled</div></div>`,'assistant-mode')}</section>
+      ${integrations}
+    </div>`;
+  } else if(a.unsupported) {
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${unsupported(a.unsupported)}</section>
       ${integrations}

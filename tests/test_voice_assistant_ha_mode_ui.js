@@ -6,7 +6,7 @@ function classes() { return { add() {}, remove() {}, toggle() {} }; }
 function element(id) {
     return { id, innerHTML: '', textContent: '', value: '', disabled: false,
         classList: classes(), style: {}, dataset: {}, onclick: null,
-        addEventListener() {}, appendChild() {}, querySelectorAll() { return []; },
+        addEventListener() {}, appendChild() {}, querySelectorAll() { return []; }, closest() { return null; },
         focus() {} };
 }
 const elements = new Map();
@@ -42,6 +42,10 @@ globalThis.URL = { createObjectURL: () => 'blob:unused', revokeObjectURL() {} };
 globalThis.setTimeout = () => 0;
 globalThis.clearTimeout = () => {};
 vm.runInThisContext(fs.readFileSync('web/js/app.js', 'utf8'), { filename: 'app.js' });
+// integrations-ui.js loads after app.js in the real page and redefines the
+// Integrations page (including the Voice Assistants card); the test must
+// exercise that effective renderer, not the shadowed copy.
+vm.runInThisContext(fs.readFileSync('web/js/integrations-ui.js', 'utf8'), { filename: 'integrations-ui.js' });
 const integrationsPage = vm.runInThisContext('integrationsPage');
 
 const integrations = enabled => ({ items: [
@@ -60,6 +64,7 @@ async function main() {
     globalThis.api = async path => {
         if (path === '/integrations') return integrations(true);
         if (path === '/assistant') return assistantDown();
+        if (path === '/voice-pipeline') return { mode: 'local', stt: {}, tts: {} };
         throw new Error(`unexpected API path ${path}`);
     };
     await integrationsPage();
@@ -69,7 +74,7 @@ async function main() {
         throw new Error('Home Assistant mode did not explain the Wyoming hand-off');
     if (content.innerHTML.includes('Voice assistant service is unavailable'))
         throw new Error('Home Assistant mode still surfaced the raw unsupported notice');
-    if (content.innerHTML.includes('assistant-auth-start') || content.innerHTML.includes('assistant-enabled'))
+    if (content.innerHTML.includes('use-device-provider') || content.innerHTML.includes('use-local-provider'))
         throw new Error('Home Assistant mode still rendered the local assistant controls');
     if (!content.innerHTML.includes('int-home-assistant'))
         throw new Error('Home Assistant mode removed the integration controls');
@@ -78,20 +83,20 @@ async function main() {
     globalThis.api = async path => {
         if (path === '/integrations') return integrations(false);
         if (path === '/assistant') return assistantStatus;
+        if (path === '/voice-pipeline') return { mode: 'local', stt: {}, tts: {} };
         throw new Error(`unexpected API path ${path}`);
     };
     await integrationsPage();
     if (content.innerHTML.includes('Managed by Home Assistant'))
         throw new Error('local mode rendered the Home Assistant notice');
-    if (!content.innerHTML.includes('Connect ChatGPT'))
-        throw new Error('local mode did not render the assistant controls');
-    if (!content.innerHTML.includes('Local LLM'))
-        throw new Error('local mode did not render the local LLM panel');
+    if (!content.innerHTML.includes('Local LLM') || !content.innerHTML.includes('On Device Voice Assistant'))
+        throw new Error('local mode did not render the assistant provider panels');
 
     // Local mode with the assistant service down keeps the existing notice.
     globalThis.api = async path => {
         if (path === '/integrations') return integrations(false);
         if (path === '/assistant') return assistantDown();
+        if (path === '/voice-pipeline') return { mode: 'local', stt: {}, tts: {} };
         throw new Error(`unexpected API path ${path}`);
     };
     await integrationsPage();
