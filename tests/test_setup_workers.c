@@ -24,9 +24,14 @@ static int delayed_connect(struct le_backend *b, const struct le_wifi_credential
     nanosleep(&pause, NULL);
     return fail_connect ? LE_IO : LE_OK;
 }
-static int airplay_set(struct le_backend *b, int enabled) { (void)b; (void)enabled; return LE_OK; }
+static int airplay_enabled;
+static int airplay_set(struct le_backend *b, int enabled) {
+    (void)b; airplay_enabled=enabled; return LE_OK;
+}
 static int airplay_state(struct le_backend *b, struct le_airplay_state *a) {
-    (void)b; memset(a, 0, sizeof(*a)); a->available=1; return LE_OK;
+    (void)b; memset(a, 0, sizeof(*a)); a->available=1;
+    a->enabled=airplay_enabled; a->nqptp_running=airplay_enabled;
+    a->shairport_running=airplay_enabled; return LE_OK;
 }
 static long millis(void) {
     struct timespec t; assert(clock_gettime(CLOCK_MONOTONIC, &t)==0);
@@ -77,6 +82,7 @@ int main(void) {
     ops=*backend->ops; ops.connect=delayed_connect; ops.airplay=airplay_state; ops.airplay_set=airplay_set;
     backend->ops=&ops; strcpy(backend->mode,"linux");
     assert(api_init(&api,backend,1,0,token,NULL,csrf,cfg,NULL)==0);
+    api.integrations |= 2u; /* An unrelated existing choice must survive setup. */
     strcpy(auth,api.auth_token);
     /* Unauthorized or malformed operations never allocate a worker. */
     expect(dispatch(&api,"POST","/api/v1/setup",body,"",csrf,"http://127.0.0.1"),401,NULL);
@@ -104,14 +110,17 @@ int main(void) {
     expect(request(&api,"GET","/api/v1/config",""),200,"\"setup_completed\":true");
     assert(api.setup_completed && !api.privacy_local_only && api.privacy_telemetry);
     assert(api.configured_wake_sensitivity==67 && !strcmp(api.auth_token,auth));
+    assert(api.integrations==22u); /* Setup-enabled AirPlay is visible in the parent. */
     expect(request(&api,"GET","/",""),200,"LibreEcho Control Centre");
     finish(&api);
     expect(request(&api,"PUT","/api/v1/buttons","{\"tones\":false}"),200,NULL);
     assert(config_read(cfg,saved,sizeof(saved))>0);
     assert(strstr(saved,"\"privacy_local_only\": false") && strstr(saved,"\"button_tones\": false"));
+    assert(strstr(saved,"\"integrations\": 22"));
     assert(api_init(&restarted,backend,1,0,token,NULL,csrf,cfg,NULL)==0);
     assert(refresh_setup_completed(&restarted)==0 && restarted.setup_completed);
     assert(!restarted.privacy_local_only && restarted.privacy_telemetry && !restarted.button_tones);
+    assert(restarted.integrations==22u);
     puts("setup worker: completed state, subsequent writes and restart: ok");
     start=millis();fd=request(&api,"POST","/api/v1/network/wifi/connect","{\"ssid\":\"fixture\",\"security\":\"open\"}");
     assert(millis()-start<250);

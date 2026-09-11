@@ -14,7 +14,7 @@ static int configuration_worker_request(const struct api_context *api,
 static int refresh_setup_completed(struct api_context *api)
 {
     char path[512], marker[32], saved[16384], wake[LE_TEXT];
-    int n, local_only, telemetry, sensitivity;
+    int n, local_only, telemetry, sensitivity, integrations;
     if (api->setup_completed || !api->config_path[0])
         return 0;
     n = snprintf(path, sizeof(path), "%s.setup-complete", api->config_path);
@@ -31,7 +31,9 @@ static int refresh_setup_completed(struct api_context *api)
         json_get_bool(saved, "privacy_telemetry", &telemetry) != 1 ||
         json_get_string(saved, "wake_word", wake, sizeof(wake)) != 1 || !wake[0] ||
         json_get_int(saved, "wake_sensitivity", &sensitivity) != 1 ||
-        sensitivity < 0 || sensitivity > 100)
+        sensitivity < 0 || sensitivity > 100 ||
+        json_get_int(saved, "integrations", &integrations) != 1 ||
+        integrations < 0 || integrations > 63)
         return -1;
     /* Only setup-owned fields are imported. Never replace live authentication,
        sessions, or the entire context with a stale forked copy. */
@@ -40,6 +42,8 @@ static int refresh_setup_completed(struct api_context *api)
     strcpy(api->configured_wake_word, wake);
     api->configured_wake_sensitivity = sensitivity;
     api->configured_wake_valid = 1;
+    /* Setup enables AirPlay; preserve all unrelated live integration choices. */
+    api->integrations = (api->integrations & ~16u) | ((unsigned)integrations & 16u);
     api->setup_completed = 1;
     return 0;
 }
