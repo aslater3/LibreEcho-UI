@@ -36,9 +36,6 @@ void le_voice_listening_led_set(int active)
     struct le_adapter *adapter;
     const char *args;
 
-    if (active)
-        le_voice_listening_chirp();
-
     adapter = le_adapter_connect(LE_ADAPTER_LED_SOCK, 100);
     if (!adapter)
         return;
@@ -61,4 +58,11 @@ void le_voice_listening_led_set(int active)
             adapter, "pattern",
             "{\"name\":\"stop\",\"owner\":\"wakeword\"}", NULL, 0);
     le_adapter_close(adapter);
+}
+
+void le_voice_listening_feedback_set(int active)
+{
+    if (active)
+        le_voice_listening_chirp();
+    le_voice_listening_led_set(active);
 }
