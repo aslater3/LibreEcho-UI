@@ -1797,6 +1797,9 @@ JSON-escaped, including when it contains quotes or backslashes.
 
 Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.
 
+The `home-assistant` toggle also selects the active voice pipeline. Enabling it
+persists `home-assistant` mode; disabling it persists and restores `local` mode.
+
 **Request:**
 ```json
 {
