@@ -2611,7 +2611,7 @@
      "System"
     ],
     "summary": "Report optional feature switches",
-    "description": "Optional features are off by default. `simulation` enables POST /audio/simulate; while it is off that endpoint answers 403 and the web interface hides its Simulation page. `usb_host` reports whether the OTG port is currently in host mode, `usb_role` is the raw role read back from the kernel, and `usb_role_supported` is false on images or hardware without a switchable role.",
+    "description": "Optional features are off by default. `simulation` enables POST /audio/simulate; while it is off that endpoint answers 403 and the web interface hides its Simulation page. `usb_host` reports whether the OTG port is currently in host mode, `usb_role` is the raw role read back from the kernel, and `usb_role_supported` is false on images or hardware without a switchable role. The HTTPS fields report the stored switch (`https`), whether the TLS listener is serving on this boot (`https_active`), and its port, certificate expiry and SHA-256 fingerprint (`https_port`, `https_expires`, `https_fingerprint`).",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -2626,7 +2626,7 @@
      "System"
     ],
     "summary": "Switch an optional feature on or off",
-    "description": "Send `simulation` to change the persisted feature switch. Send `usb_host` to move the OTG port between host mode (reads an attached USB drive) and device mode (serves ADB); the port cannot do both at once. `usb_host` is applied immediately and is deliberately NOT persisted -- every boot pins the port back to device mode so the ADB recovery path can never be left switched off by a stored setting. Returns 501 when the running kernel exposes no switchable USB role. The response is the new feature state.",
+    "description": "Send `simulation` to change the persisted feature switch. Send `usb_host` to move the OTG port between host mode (reads an attached USB drive) and device mode (serves ADB); the port cannot do both at once. `usb_host` is applied immediately and is deliberately NOT persisted -- every boot pins the port back to device mode so the ADB recovery path can never be left switched off by a stored setting. Returns 501 when the running kernel exposes no switchable USB role. Send `https` to enable or disable the HTTPS listener; it binds at startup, so the change is stored and applies after a restart, and disabling it removes the persisted sessions. The response is the new feature state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -2648,6 +2648,11 @@
          "usb_host": {
           "type": "boolean",
           "description": "Switch the OTG port immediately between host/storage mode and device/ADB mode. This live setting is not persisted and resets to device mode on reboot."
+         },
+         "https": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable or disable the HTTPS listener. It binds at startup, so the change is stored and applies after a restart; disabling it also removes the persisted sessions."
          }
         }
        }

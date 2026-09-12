@@ -1163,7 +1163,12 @@ Reports the optional feature switches. They are off by default.
     "simulation": false,
     "usb_host": false,
     "usb_role": "device",
-    "usb_role_supported": true
+    "usb_role_supported": true,
+    "https": false,
+    "https_active": false,
+    "https_port": 8443,
+    "https_expires": "<certificate not-after date; empty until a certificate exists>",
+    "https_fingerprint": "<SHA-256 fingerprint; empty until a certificate exists>"
   },
   "error": null
 }
@@ -1178,6 +1183,8 @@ into the microphone path so wake-word detection, speech-to-text and the
 assistant can be exercised without speaking in the room. It is a testing
 capability rather than something a live device should offer, so while it is off
 the endpoint answers `403` and the web interface hides its Simulation page.
+
+`https` is the persisted HTTPS switch; `https_active` reports whether the TLS listener is serving on this boot, and `https_port`, `https_expires` and `https_fingerprint` describe the listener and the self-signed certificate the device generates and keeps beside its configuration.
 
 #### PUT /api/v1/system/features
 
@@ -1209,6 +1216,14 @@ The switch is written to the kernel's `usb_role` class, not to the MUSB `mode`
 attribute. Writing `mode` blocks until a USB session that cannot occur while the
 port is powered by a host, and takes the ADB gadget down with it; the role
 switch is register writes only and returns immediately.
+
+`https` enables or disables the HTTPS listener:
+
+```json
+{ "https": true }
+```
+
+The listener binds at startup, so the change is stored and applies after a restart; disabling it also removes the persisted sessions.
 
 ### Configuration
 
