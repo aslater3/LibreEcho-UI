@@ -503,7 +503,8 @@ $(BUILD)/test_wake_engine.arm.o: tests/test_wake_engine.cpp
 	@mkdir -p $(BUILD)
 	$(CROSS_COMPILE)g++ $(WAKE_ARM_CXXFLAGS) -c $< -o $@
 
-$(BUILD)/test-wake-engine-arm32: $(BUILD)/wake_engine_onnx.arm.o \
+$(BUILD)/test-wake-engine-arm32: $(BUILD)/wake_engine.wake.arm.o \
+		$(BUILD)/wake_engine_onnx.arm.o \
 		$(BUILD)/test_wake_engine.arm.o
 	$(CROSS_COMPILE)g++ -march=armv7-a -mfpu=neon-vfpv4 \
 		-mfloat-abi=hard -static -static-libstdc++ -static-libgcc \
