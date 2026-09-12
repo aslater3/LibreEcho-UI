@@ -7,12 +7,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -85,9 +87,15 @@ static int unix_listener(const char *path)
 static int tcp_connect(void)
 {
     struct sockaddr_in address;
+    struct timeval timeout = {2, 0};
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout)) < 0) {
+        close(fd);
+        return -1;
+    }
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -138,6 +146,135 @@ static int accept_audio(int listener)
     return fd;
 }
 
+static int read_event(int fd, struct le_wyoming_event *event)
+{
+    unsigned char payload[LE_VOICE_STREAM_MAX_SAMPLES * sizeof(int16_t)];
+
+    CHECK(le_wyoming_read_header(fd, event) == 0);
+    CHECK(event->payload_length <= sizeof(payload));
+    if (event->payload_length)
+        CHECK(le_wyoming_read_payload(fd, payload, sizeof(payload), event) == 0);
+    return 0;
+}
+
+static int send_wake(int fd, uint64_t detection_sample)
+{
+    char line[256];
+    int length = snprintf(line, sizeof(line),
+                          "{\"v\":1,\"event\":\"wake_detected\","
+                          "\"data\":{\"detection_sample\":%llu,"
+                          "\"model\":\"alexa_v0.1\"}}\n",
+                          (unsigned long long)detection_sample);
+
+    CHECK(length > 0 && (size_t)length < sizeof(line));
+    CHECK(write_all(fd, line, (size_t)length) == 0);
+    return 0;
+}
+
+static int expect_local_wake_start(int fd)
+{
+    struct le_wyoming_event event;
+    int found_chunk = 0;
+    int found_started = 0;
+    size_t i;
+
+    CHECK(read_event(fd, &event) == 0);
+    CHECK(!strcmp(event.type, "detection"));
+    CHECK(strstr(event.data, "\"name\":\"Alexa\"") != NULL);
+    CHECK(read_event(fd, &event) == 0);
+    CHECK(!strcmp(event.type, "run-pipeline"));
+    CHECK(strstr(event.data, "\"start_stage\":\"asr\"") != NULL);
+    CHECK(strstr(event.data, "\"end_stage\":\"tts\"") != NULL);
+    CHECK(strstr(event.data, "\"restart_on_end\":false") != NULL);
+    CHECK(strstr(event.data,
+                 "\"snd_format\":{\"rate\":48000,\"width\":2,"
+                 "\"channels\":2}") != NULL);
+    CHECK(read_event(fd, &event) == 0);
+    CHECK(!strcmp(event.type, "audio-start"));
+    for (i = 0; i < 3 * 16000 / LE_VOICE_STREAM_MAX_SAMPLES + 4 &&
+         (!found_chunk || !found_started); ++i) {
+        CHECK(read_event(fd, &event) == 0);
+        if (!strcmp(event.type, "audio-chunk"))
+            found_chunk = 1;
+        else if (!strcmp(event.type, "streaming-started"))
+            found_started = 1;
+        else
+            CHECK(0);
+    }
+    CHECK(found_chunk && found_started);
+    return 0;
+}
+
+static int finish_input_stream(int audio_fd, int client_fd,
+                               uint64_t first_sample)
+{
+    int16_t silence[LE_VOICE_STREAM_MAX_SAMPLES] = {0};
+    struct le_wyoming_event event;
+    int found_audio_stop = 0;
+    int found_streaming_stop = 0;
+    size_t i;
+
+    for (i = 0; i < 18; ++i) {
+        CHECK(le_voice_stream_write_frame(
+                  audio_fd,
+                  first_sample + i * LE_VOICE_STREAM_MAX_SAMPLES,
+                  silence, LE_VOICE_STREAM_MAX_SAMPLES, 0) == 0);
+    }
+    for (i = 0; i < 24 && (!found_audio_stop || !found_streaming_stop); ++i) {
+        CHECK(read_event(client_fd, &event) == 0);
+        if (!strcmp(event.type, "audio-stop"))
+            found_audio_stop = 1;
+        else if (!strcmp(event.type, "streaming-stopped"))
+            found_streaming_stop = 1;
+        else
+            CHECK(!strcmp(event.type, "audio-chunk"));
+    }
+    CHECK(found_audio_stop && found_streaming_stop);
+    return 0;
+}
+
+static int play_tts_response(int client_fd, int bus_reader)
+{
+    const int16_t tts_samples[] = {100, 200, 300, 400};
+    unsigned char played[128];
+    struct le_wyoming_event event;
+    ssize_t played_bytes;
+
+    CHECK(le_wyoming_send(client_fd, "audio-start",
+                          "{\"rate\":22050,\"width\":2,"
+                          "\"channels\":1}", NULL, 0) == 0);
+    CHECK(le_wyoming_send(client_fd, "audio-chunk",
+                          "{\"rate\":22050,\"width\":2,"
+                          "\"channels\":1}", tts_samples,
+                          sizeof(tts_samples)) == 0);
+    CHECK(le_wyoming_send(client_fd, "audio-stop", NULL, NULL, 0) == 0);
+    CHECK(read_event(client_fd, &event) == 0);
+    CHECK(!strcmp(event.type, "played"));
+    played_bytes = read(bus_reader, played, sizeof(played));
+    CHECK(played_bytes > 0 && played_bytes % 4 == 0);
+    return 0;
+}
+
+static int expect_no_event(int fd, int timeout_ms)
+{
+    struct pollfd descriptor = {fd, POLLIN, 0};
+    int result;
+
+    do {
+        result = poll(&descriptor, 1, timeout_ms);
+    } while (result < 0 && errno == EINTR);
+    if (result > 0 && (descriptor.revents & POLLIN)) {
+        struct le_wyoming_event event;
+
+        CHECK(read_event(fd, &event) == 0);
+        fprintf(stderr, "unexpected Wyoming event while pipeline busy: %s\n",
+                event.type);
+        return -1;
+    }
+    CHECK(result == 0);
+    return 0;
+}
+
 int main(void)
 {
     char socket_path[108];
@@ -168,7 +305,7 @@ int main(void)
     child = fork();
     CHECK(child >= 0);
     if (child == 0) {
-        execl("./build/libreecho-wyomingd", "libreecho-wyomingd",
+        execl("./build/libreecho-wyomingd-test", "libreecho-wyomingd-test",
               "--foreground", "--port", "18700", "--wake-socket",
               socket_path, "--audio-bus", bus_path, (char *)NULL);
         _exit(127);
@@ -181,6 +318,9 @@ int main(void)
     CHECK(client_fd >= 0);
     CHECK(le_wyoming_read_header(client_fd, &event) == 0);
     CHECK(!strcmp(event.type, "satellite-connected"));
+    /* Home Assistant sends this exact startup sequence, then requires a pong
+       within five seconds to keep the satellite connection alive. */
+    CHECK(le_wyoming_send(client_fd, "run-satellite", NULL, NULL, 0) == 0);
     CHECK(le_wyoming_send(client_fd, "describe", NULL, NULL, 0) == 0);
     CHECK(le_wyoming_read_header(client_fd, &event) == 0);
     CHECK(!strcmp(event.type, "info"));
@@ -206,72 +346,71 @@ int main(void)
         CHECK(found && found < snd);
         CHECK(strstr(snd, "\"installed\":true") != NULL);
     }
-    CHECK(le_wyoming_send(client_fd, "run-pipeline",
-                          "{\"start_stage\":\"wake\","
-                          "\"end_stage\":\"tts\"}", NULL, 0) == 0);
+    CHECK(le_wyoming_send(client_fd, "ping", "{\"text\":null}",
+                          NULL, 0) == 0);
+    CHECK(le_wyoming_read_header(client_fd, &event) == 0);
+    CHECK(!strcmp(event.type, "pong"));
+    CHECK(!strcmp(event.data, "{\"text\":null}"));
+    CHECK(le_wyoming_send(client_fd, "ping",
+                          "{\"text\":\"ha-keepalive\"}", NULL, 0) == 0);
+    CHECK(le_wyoming_read_header(client_fd, &event) == 0);
+    CHECK(!strcmp(event.type, "pong"));
+    CHECK(!strcmp(event.data, "{\"text\":\"ha-keepalive\"}"));
 
     for (i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i)
         samples[i] = (int16_t)(i & 31);
     CHECK(le_voice_stream_write_frame(audio_fd, 0, samples,
                                       sizeof(samples) / sizeof(samples[0]),
                                       0) == 0);
-    {
-        static const char wake_event[] =
-            "{\"v\":1,\"event\":\"wake_detected\","
-            "\"data\":{\"detection_sample\":0,"
-            "\"model\":\"alexa_v0.1\"}}\n";
-        CHECK(write_all(wake_fd, wake_event, sizeof(wake_event) - 1) == 0);
-    }
-    CHECK(le_wyoming_read_header(client_fd, &event) == 0);
-    CHECK(!strcmp(event.type, "detection"));
-    CHECK(strstr(event.data, "\"name\":\"Alexa\"") != NULL);
-    CHECK(le_wyoming_send(client_fd, "run-pipeline",
-                          "{\"start_stage\":\"asr\","
-                          "\"end_stage\":\"tts\"}", NULL, 0) == 0);
-    CHECK(le_wyoming_read_header(client_fd, &event) == 0);
-    CHECK(!strcmp(event.type, "audio-start"));
-    {
-        unsigned char payload[sizeof(samples)];
-        int found_chunk = !strcmp(event.type, "audio-chunk");
-        int found_started = !strcmp(event.type, "streaming-started");
-        if (found_chunk)
-            CHECK(le_wyoming_read_payload(client_fd, payload, sizeof(payload),
-                                          &event) == 0);
-        for (i = 0; !found_chunk && i < 3; ++i) {
-            CHECK(le_wyoming_read_header(client_fd, &event) == 0);
-            if (!strcmp(event.type, "streaming-started"))
-                found_started = 1;
-            if (!strcmp(event.type, "audio-chunk")) {
-                CHECK(event.payload_length == sizeof(samples));
-                CHECK(le_wyoming_read_payload(client_fd, payload,
-                                              sizeof(payload), &event) == 0);
-                found_chunk = 1;
-            }
-        }
-        CHECK(found_chunk);
-        if (!found_started) {
-            CHECK(le_wyoming_read_header(client_fd, &event) == 0);
-            CHECK(!strcmp(event.type, "streaming-started"));
-        }
-    }
-    {
-        const int16_t tts_samples[] = {100, 200, 300, 400};
-        unsigned char played[128];
-        ssize_t played_bytes;
+    CHECK(send_wake(wake_fd, 0) == 0);
+    CHECK(expect_local_wake_start(client_fd) == 0);
+    CHECK(finish_input_stream(audio_fd, client_fd,
+                              LE_VOICE_STREAM_MAX_SAMPLES) == 0);
 
-        CHECK(le_wyoming_send(client_fd, "audio-start",
-                              "{\"rate\":22050,\"width\":2,"
-                              "\"channels\":1}", NULL, 0) == 0);
-        CHECK(le_wyoming_send(client_fd, "audio-chunk",
-                              "{\"rate\":22050,\"width\":2,"
-                              "\"channels\":1}", tts_samples,
-                              sizeof(tts_samples)) == 0);
-        CHECK(le_wyoming_send(client_fd, "audio-stop", NULL, NULL, 0) == 0);
-        CHECK(le_wyoming_read_header(client_fd, &event) == 0);
-        CHECK(!strcmp(event.type, "played"));
-        played_bytes = read(bus_reader, played, sizeof(played));
-        CHECK(played_bytes > 0 && played_bytes % 4 == 0);
+    /* Input silence ends before Home Assistant finishes the active pipeline.
+       A rapid second local detection must not start a replacement pipeline
+       while the first response is still pending. */
+    CHECK(send_wake(wake_fd, 40000) == 0);
+    CHECK(le_voice_stream_write_frame(audio_fd, 40000, samples,
+                                      sizeof(samples) / sizeof(samples[0]),
+                                      0) == 0);
+    CHECK(expect_no_event(client_fd, 500) == 0);
+    CHECK(play_tts_response(client_fd, bus_reader) == 0);
+
+    /* Completing one pipeline must leave the satellite armed for another
+       local wake without a reconnect or a second RunSatellite command. */
+    for (i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i)
+        samples[i] = (int16_t)(31 - (i & 31));
+    CHECK(le_voice_stream_write_frame(audio_fd, 50000, samples,
+                                      sizeof(samples) / sizeof(samples[0]),
+                                      0) == 0);
+    CHECK(send_wake(wake_fd, 50000) == 0);
+    CHECK(expect_local_wake_start(client_fd) == 0);
+    CHECK(finish_input_stream(audio_fd, client_fd,
+                              50000 + LE_VOICE_STREAM_MAX_SAMPLES) == 0);
+    CHECK(play_tts_response(client_fd, bus_reader) == 0);
+
+    /* A successful HA turn with no TTS audio has no audio-stop/played event.
+       The bounded watchdog must rearm wake detection rather than leaving the
+       satellite locked out forever. */
+    CHECK(le_voice_stream_write_frame(audio_fd, 80000, samples,
+                                      sizeof(samples) / sizeof(samples[0]),
+                                      0) == 0);
+    CHECK(send_wake(wake_fd, 80000) == 0);
+    CHECK(expect_local_wake_start(client_fd) == 0);
+    CHECK(finish_input_stream(audio_fd, client_fd,
+                              80000 + LE_VOICE_STREAM_MAX_SAMPLES) == 0);
+    {
+        struct timespec watchdog_delay = {1, 200000000L};
+        nanosleep(&watchdog_delay, NULL);
     }
+    CHECK(le_voice_stream_write_frame(audio_fd, 90000, samples,
+                                      sizeof(samples) / sizeof(samples[0]),
+                                      0) == 0);
+    CHECK(send_wake(wake_fd, 90000) == 0);
+    CHECK(expect_local_wake_start(client_fd) == 0);
+    CHECK(finish_input_stream(audio_fd, client_fd,
+                              90000 + LE_VOICE_STREAM_MAX_SAMPLES) == 0);
 
     kill(child, SIGTERM);
     waitpid(child, &status, 0);
