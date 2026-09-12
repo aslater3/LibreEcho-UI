@@ -156,7 +156,7 @@ def run_web(root: Path, host: str, port: int, web: Path) -> subprocess.Popen[byt
     if not config_path.exists():
         config_path.write_text("{}\n")
         os.chmod(config_path, 0o600)
-    cmd = ["bwrap", "--die-with-parent", "--new-session", "--ro-bind", "/", "/",
+    cmd = ["bwrap", "--die-with-parent", "--unshare-user-try", "--new-session", "--ro-bind", "/", "/",
            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run",
            "--dir", "/run/libreecho", "--bind", str(runtime), "/run/libreecho",
            "--bind", str(data / "libreecho"), "/tmp/virtual-data",

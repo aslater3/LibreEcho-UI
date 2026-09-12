@@ -1,6 +1,12 @@
 #include "http_server.h"
+#include "config_store.h"
+#include "json.h"
+#include "feature_provenance.h"
+#include "authority_provenance.h"
+#include "tls.h"
 #include "adapter/adapter.h"
 #include "adapter/voice_stream.h"
+#include "inherited_fds.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -28,18 +34,54 @@ extern int setgroups(int,const gid_t*);
 #define LE_REQ_MAX 24576
 #define LE_HEADER_MAX 8192
 #define LE_BODY_MAX 16384
-#define LE_UPDATE_MAX 33554432
+/* The ceiling lives in api.h so the size the API advertises and the size
+   enforced here cannot drift apart. */
 #define LE_UPDATE_PATH "/data/libreecho/update/incoming/manual.tar"
 #define LE_UPDATE_TMP "/data/libreecho/update/incoming/manual.tar.tmp"
 #define LE_UPDATE_LOCK "/data/libreecho/update/incoming/upload.lock"
 #define LE_MAX_ASSISTANT_WORKERS 4
+/*
+ * One relay per in-flight HTTPS connection, so this is the HTTPS equivalent of
+ * LE_MAX_CLIENTS and has to match it. At 4 a browser silently lost assets: it
+ * opens six or more parallel connections for one page, the ones past the
+ * budget were closed without a response, and the page rendered without its
+ * stylesheet. Plain HTTP allowed 16 all along, so HTTPS was arbitrarily worse.
+ * Relays are short-lived and small -- the parent held under 1 MB RSS across
+ * ~280 connections -- so matching the budget costs little.
+ */
+#define LE_MAX_TLS_RELAYS LE_MAX_CLIENTS
+#define LE_MAX_KERNEL_LOG_WORKERS 4
+#define LE_MAX_PCM_STREAM_WORKERS 4
+#define LE_MAX_UPDATE_WORKERS 4
+#define LE_MAX_CONFIG_WORKERS 1
+#define LE_TLS_IDLE_TIMEOUT_MS 60000
+enum child_worker_kind{CHILD_WORKER_ASSISTANT,CHILD_WORKER_TLS_RELAY,CHILD_WORKER_KERNEL_LOG,CHILD_WORKER_PCM_STREAM,CHILD_WORKER_UPDATE,CHILD_WORKER_CONFIG,CHILD_WORKER_KIND_COUNT};
+#define LE_MAX_CHILD_WORKERS (LE_MAX_ASSISTANT_WORKERS+LE_MAX_TLS_RELAYS+LE_MAX_KERNEL_LOG_WORKERS+LE_MAX_PCM_STREAM_WORKERS+LE_MAX_UPDATE_WORKERS+LE_MAX_CONFIG_WORKERS)
 struct client{int fd;
+int secure_transport;
 size_t used;
 char buf[LE_REQ_MAX+1];
 };
-static volatile sig_atomic_t assistant_workers;
-static volatile sig_atomic_t assistant_pids[LE_MAX_ASSISTANT_WORKERS];
-static void reap_assistant_workers(int signo){int i;int status;(void)signo;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]>0&&waitpid((pid_t)assistant_pids[i],&status,WNOHANG)>0){assistant_pids[i]=0;if(assistant_workers>0)assistant_workers--;}}
+static volatile sig_atomic_t child_worker_pids[LE_MAX_CHILD_WORKERS];
+static volatile sig_atomic_t child_worker_kinds[LE_MAX_CHILD_WORKERS];
+static volatile sig_atomic_t child_worker_counts[CHILD_WORKER_KIND_COUNT];
+static int child_worker_limit(enum child_worker_kind kind){switch(kind){case CHILD_WORKER_ASSISTANT:return LE_MAX_ASSISTANT_WORKERS;case CHILD_WORKER_TLS_RELAY:return LE_MAX_TLS_RELAYS;case CHILD_WORKER_KERNEL_LOG:return LE_MAX_KERNEL_LOG_WORKERS;case CHILD_WORKER_PCM_STREAM:return LE_MAX_PCM_STREAM_WORKERS;case CHILD_WORKER_UPDATE:return LE_MAX_UPDATE_WORKERS;case CHILD_WORKER_CONFIG:return LE_MAX_CONFIG_WORKERS;default:return 0;}}
+static int child_worker_find_slot(enum child_worker_kind kind){int i;if(kind<0||kind>=CHILD_WORKER_KIND_COUNT||child_worker_counts[kind]>=child_worker_limit(kind))return-1;for(i=0;i<LE_MAX_CHILD_WORKERS;i++)if(child_worker_pids[i]<=0)return i;return-1;}
+static int child_worker_begin(enum child_worker_kind kind,sigset_t*previous,int*slot){sigset_t blocked;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,previous)<0)return-1;*slot=child_worker_find_slot(kind);if(*slot<0){if(kind==CHILD_WORKER_TLS_RELAY){static int warned;if(!warned){warned=1;fprintf(stderr,"HTTPS relay budget (%d) exhausted; a connection was dropped\n",LE_MAX_TLS_RELAYS);}}sigprocmask(SIG_SETMASK,previous,NULL);return-1;}return 0;}
+static void child_worker_register(int slot,pid_t pid,enum child_worker_kind kind){child_worker_pids[slot]=pid;child_worker_kinds[slot]=kind;child_worker_counts[kind]++;}
+/* A signal handler must not replace the interrupted operation's errno. */
+static void reap_child_workers(int signo){int saved_errno=errno;int i;int status;pid_t waited;(void)signo;for(i=0;i<LE_MAX_CHILD_WORKERS;i++)if(child_worker_pids[i]>0){waited=waitpid((pid_t)child_worker_pids[i],&status,WNOHANG);if(waited==(pid_t)child_worker_pids[i]||(waited<0&&errno==ECHILD)){enum child_worker_kind kind=(enum child_worker_kind)child_worker_kinds[i];child_worker_pids[i]=0;if(kind>=0&&kind<CHILD_WORKER_KIND_COUNT&&child_worker_counts[kind]>0)child_worker_counts[kind]--;}}errno=saved_errno;}
+#ifdef LE_HTTP_SERVER_WORKER_TEST
+#define LE_TEST_WORKER_PCM CHILD_WORKER_PCM_STREAM
+#define LE_TEST_WORKER_UPDATE_FETCH CHILD_WORKER_UPDATE
+#define LE_TEST_WORKER_UPDATE_UPLOAD CHILD_WORKER_UPDATE
+static void le_test_reap_child_workers(void){sigset_t blocked,previous;int saved_errno=errno;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return;reap_child_workers(0);sigprocmask(SIG_SETMASK,&previous,NULL);errno=saved_errno;}
+static int le_test_worker_limit(int kind){return child_worker_limit((enum child_worker_kind)kind);}
+static int le_test_worker_count(int kind){return kind>=0&&kind<CHILD_WORKER_KIND_COUNT?(int)child_worker_counts[kind]:-1;}
+static void le_test_reset_worker_registry(void){int i;for(i=0;i<LE_MAX_CHILD_WORKERS;i++){child_worker_pids[i]=0;child_worker_kinds[i]=0;}for(i=0;i<CHILD_WORKER_KIND_COUNT;i++)child_worker_counts[i]=0;}
+static int le_test_register_worker_pid(pid_t pid,int kind){sigset_t previous;int slot;if(child_worker_begin((enum child_worker_kind)kind,&previous,&slot))return-1;child_worker_register(slot,pid,(enum child_worker_kind)kind);sigprocmask(SIG_SETMASK,&previous,NULL);return 0;}
+static int le_test_spawn_noop_worker(int fd,int kind,int inject_fork_failure){sigset_t previous;pid_t pid;int slot;if(child_worker_begin((enum child_worker_kind)kind,&previous,&slot))return-1;if(inject_fork_failure){errno=EAGAIN;pid=-1;}else pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);if(write(fd,"ok",2)!=2)_exit(1);close(fd);_exit(0);}child_worker_register(slot,pid,(enum child_worker_kind)kind);sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
+#endif
 
 static int close_on_exec(int fd)
 {
@@ -66,14 +108,16 @@ n-=(size_t)w;
 }}
 static void response(int fd,int code,const char*type,const void*body,size_t n){char h[1024];
 const char*reason=code==200?"OK":code==400?"Bad Request":code==403?"Forbidden":code==404?"Not Found":code==405?"Method Not Allowed":code==409?"Conflict":code==413?"Payload Too Large":code==429?"Too Many Requests":code==501?"Not Implemented":code==503?"Service Unavailable":"Error";
-int z=snprintf(h,sizeof(h),"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; script-src 'self'\r\n\r\n",code,reason,type,(unsigned long)n);
+int z=snprintf(h,sizeof(h),"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' https://geocoding-api.open-meteo.com; script-src 'self'\r\n\r\n",code,reason,type,(unsigned long)n);
 send_all(fd,h,(size_t)z);
 if(n)send_all(fd,body,n);
 }
 static int stream_send_all(int fd,const void*body,size_t n){const char*p=body;while(n){ssize_t w=send(fd,p,n,0);if(w<=0)return-1;p+=w;n-=w;}return 0;}
 static int stream_shared_audio(int fd){struct sockaddr_un address;int wake=-1;char request[128],reply[1024],header[512];size_t used=0;ssize_t n;int frame_result;struct le_voice_stream_frame frame;wake=socket(AF_UNIX,SOCK_STREAM,0);if(wake<0)return-2;memset(&address,0,sizeof(address));address.sun_family=AF_UNIX;strncpy(address.sun_path,LE_ADAPTER_WAKEWORD_SOCK,sizeof(address.sun_path)-1);if(connect(wake,(struct sockaddr*)&address,sizeof(address))<0)goto unavailable;n=snprintf(request,sizeof(request),"{\"v\":1,\"id\":1,\"cmd\":\"stream_audio\",\"args\":{}}\n");if(n<0||stream_send_all(wake,request,(size_t)n)<0)goto unavailable;while(used+1<sizeof(reply)){n=read(wake,reply+used,1);if(n<=0)goto unavailable;if(reply[used++]=='\n')break;}reply[used]='\0';if(!strstr(reply,"\"ok\":true"))goto unavailable;signal(SIGPIPE,SIG_IGN);n=snprintf(header,sizeof(header),"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-LibreEcho-Audio: pcm_s16_le;rate=16000;channels=1;selected-channel=shared-wake;calibration=applied\r\nX-Content-Type-Options: nosniff\r\n\r\n");if(n<0||stream_send_all(fd,header,(size_t)n)<0){close(wake);return-1;}while((frame_result=le_voice_stream_read_frame(wake,&frame))>0){size_t bytes=(size_t)frame.sample_count*sizeof(frame.samples[0]);int z=snprintf(header,sizeof(header),"%zx\r\n",bytes);if(z<0||stream_send_all(fd,header,(size_t)z)<0||stream_send_all(fd,frame.samples,bytes)<0||stream_send_all(fd,"\r\n",2)<0){close(wake);return-1;}}if(frame_result==0)(void)stream_send_all(fd,"0\r\n\r\n",5);close(wake);return frame_result<0?-1:0;unavailable:close(wake);return-2;}
 static int stream_microphone(int fd,int selected_channel){struct sockaddr_un address;int microphone=-1;char request[160],reply[LE_ADAPTER_MSG_MAX],buffer[8192],header[512];size_t used=0;ssize_t n;int shared_result=stream_shared_audio(fd);if(shared_result!=-2){close(fd);return 0;}microphone=socket(AF_UNIX,SOCK_STREAM,0);if(microphone<0)goto unavailable;memset(&address,0,sizeof(address));address.sun_family=AF_UNIX;strncpy(address.sun_path,LE_ADAPTER_MIC_SOCK,sizeof(address.sun_path)-1);if(connect(microphone,(struct sockaddr*)&address,sizeof(address))<0)goto unavailable;n=snprintf(request,sizeof(request),"{\"v\":1,\"id\":1,\"cmd\":\"stream_raw\",\"args\":{\"channel\":%d}}\n",selected_channel);if(n<0||stream_send_all(microphone,request,(size_t)n)<0)goto unavailable;while(used+1<sizeof(reply)){n=read(microphone,reply+used,1);if(n<=0)goto unavailable;if(reply[used++]=='\n')break;}reply[used]='\0';if(!strstr(reply,"\"ok\":true"))goto unavailable;signal(SIGPIPE,SIG_IGN);n=snprintf(header,sizeof(header),"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-LibreEcho-Audio: pcm_s24_3le;rate=16000;channels=9;container-bits=24;valid-bits=16;selected-channel=%d;calibration=none\r\nX-Content-Type-Options: nosniff\r\n\r\n",selected_channel);if(n<0||stream_send_all(fd,header,(size_t)n)<0)goto stop;while((n=read(microphone,buffer,sizeof(buffer)))>0){int z=snprintf(header,sizeof(header),"%zx\r\n",(size_t)n);if(z<0||stream_send_all(fd,header,(size_t)z)<0||stream_send_all(fd,buffer,(size_t)n)<0||stream_send_all(fd,"\r\n",2)<0)goto stop;}if(n==0)(void)stream_send_all(fd,"0\r\n\r\n",5);goto stop;unavailable:{const char*message="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"microphone_unavailable\",\"message\":\"Microphone service could not start the stream\"}}";response(fd,503,"application/json",message,strlen(message));}stop:if(microphone>=0)close(microphone);close(fd);return 0;}
-static int start_pcm_stream(int fd,int selected_channel){pid_t pid=fork();if(pid<0)return-1;if(pid==0){(void)stream_microphone(fd,selected_channel);_exit(0);}close(fd);return 0;}
+static int stream_kernel_log(int fd){int probe;FILE*f;char buf[8192],head[512];int z;size_t n;probe=system("dmesg >/dev/null 2>&1");if(probe<0||!WIFEXITED(probe)||WEXITSTATUS(probe)!=0){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log is unavailable\"}}";response(fd,503,"application/json",m,strlen(m));close(fd);return 0;}f=popen("dmesg 2>/dev/null","r");if(!f){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log is unavailable\"}}";response(fd,503,"application/json",m,strlen(m));close(fd);return 0;}signal(SIGPIPE,SIG_IGN);z=snprintf(head,sizeof(head),"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename=\"libreecho-kernel.log\"\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n");if(z<0||stream_send_all(fd,head,(size_t)z)<0){pclose(f);return 0;}while((n=fread(buf,1,sizeof(buf),f))>0){z=snprintf(head,sizeof(head),"%zx\r\n",n);if(z<0||stream_send_all(fd,head,(size_t)z)<0||stream_send_all(fd,buf,n)<0||stream_send_all(fd,"\r\n",2)<0){pclose(f);return 0;}}(void)stream_send_all(fd,"0\r\n\r\n",5);pclose(f);return 0;}
+static int start_kernel_log_stream(int fd,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){sigset_t previous;pid_t pid;int slot;(void)http_listener;(void)https_listener;(void)relay_listener;(void)clients;(void)max;if(child_worker_begin(CHILD_WORKER_KERNEL_LOG,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);le_close_inherited_fds(fd);(void)stream_kernel_log(fd);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_KERNEL_LOG);sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
+static int start_pcm_stream(int fd,int selected_channel){sigset_t previous;pid_t pid;int slot;if(child_worker_begin(CHILD_WORKER_PCM_STREAM,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);le_close_inherited_fds(fd);(void)stream_microphone(fd,selected_channel);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_PCM_STREAM);sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
 static int write_all_file(int fd,const void*body,size_t n){const char*p=body;while(n){ssize_t w=write(fd,p,n);if(w<=0)return-1;p+=w;n-=(size_t)w;}return 0;}
 static void update_error(int fd,int status,const char*code,const char*message){char body[512];int n=snprintf(body,sizeof(body),"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",code,message);response(fd,status,"application/json",body,(size_t)n);}
 /* libreecho-update reports why it refused a package by printing ERROR:<token>
@@ -85,11 +129,12 @@ static void update_error_reason(int fd,int status,const char*code,const char*mes
 /* Read the last ERROR: token from the complete bounded stderr capture. */
 static void update_failure_reason(int f,char*out,size_t cap){char buf[4096],token[64],window[6]={0};ssize_t n;size_t token_len=0,window_len=0,i;int collecting=0;if(cap)out[0]='\0';if(lseek(f,0,SEEK_SET)<0)return;for(;;){n=read(f,buf,sizeof(buf));if(n<=0)break;for(i=0;i<(size_t)n;i++){char c=buf[i];if(collecting){if((c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='_'||c=='-'){if(token_len+1<sizeof(token))token[token_len++]=c;continue;}token[token_len]='\0';if(cap){size_t copy=token_len<cap-1?token_len:cap-1;memcpy(out,token,copy);out[copy]='\0';}collecting=0;token_len=0;}if(window_len<sizeof(window)){window[window_len++]=c;}else{memmove(window,window+1,sizeof(window)-1);window[sizeof(window)-1]=c;}if(window_len==sizeof(window)&&!memcmp(window,"ERROR:",sizeof(window))){collecting=1;token_len=0;window_len=0;}}}if(collecting){token[token_len]='\0';if(cap){size_t copy=token_len<cap-1?token_len:cap-1;memcpy(out,token,copy);out[copy]='\0';}}}
 static int stream_update_upload(int fd,const char*initial,size_t initial_len,size_t content_len,int allow_unsigned){static const char success[]="{\"ok\":true,\"data\":{\"installed\":true,\"state\":\"reboot-pending\"},\"error\":null}";char buffer[16384];size_t received=initial_len;int out=-1,lock=-1,errlog=-1,status,errpipe[2]={-1,-1};size_t captured=0;ssize_t n;pid_t child;char stderr_tail[65536],errpath[]="/data/libreecho/update/incoming/.update-error-XXXXXX";if(mkdir("/data/libreecho",0700)&&errno!=EEXIST)goto io;if(mkdir("/data/libreecho/update",0700)&&errno!=EEXIST)goto io;if(mkdir("/data/libreecho/update/incoming",0700)&&errno!=EEXIST)goto io;lock=open(LE_UPDATE_LOCK,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(lock<0){update_error(fd,409,"update_busy","Another update upload is active");goto done;}close(lock);lock=1;out=open(LE_UPDATE_TMP,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(out<0)goto io;if(initial_len&&write_all_file(out,initial,initial_len))goto io;while(received<content_len){size_t want=content_len-received;if(want>sizeof(buffer))want=sizeof(buffer);n=recv(fd,buffer,want,0);if(n<=0)goto io;if(write_all_file(out,buffer,(size_t)n))goto io;received+=(size_t)n;}if(fsync(out)||close(out)){out=-1;goto io;}out=-1;if(rename(LE_UPDATE_TMP,LE_UPDATE_PATH))goto io;errlog=mkstemp(errpath);if(errlog<0)goto io;unlink(errpath);if(pipe(errpipe)<0)goto io;child=fork();if(child<0)goto io;if(child==0){close(errpipe[0]);if(dup2(errpipe[1],STDERR_FILENO)<0)_exit(127);close(errpipe[1]);if(allow_unsigned)execl("/usr/local/sbin/libreecho-update","libreecho-update","install","--allow-unsigned",LE_UPDATE_PATH,(char*)0);else execl("/usr/local/sbin/libreecho-update","libreecho-update","install",LE_UPDATE_PATH,(char*)0);_exit(127);}close(errpipe[1]);errpipe[1]=-1;fcntl(errpipe[0],F_SETFL,O_NONBLOCK);{int child_reaped=0,pipe_open=1;char errbuf[4096];while(pipe_open||!child_reaped){struct pollfd pfd={errpipe[0],POLLIN|POLLHUP,0};pid_t waited;if(pipe_open){int poll_result=poll(&pfd,1,100);if(poll_result>0&&(pfd.revents&(POLLIN|POLLHUP))){n=read(errpipe[0],errbuf,sizeof(errbuf));if(n>0){size_t count=(size_t)n;if(captured+count<=sizeof(stderr_tail)){memcpy(stderr_tail+captured,errbuf,count);captured+=count;}else{size_t drop=captured+count-sizeof(stderr_tail);if(drop>=captured){size_t keep=sizeof(stderr_tail)<count?sizeof(stderr_tail):count;memcpy(stderr_tail,errbuf+count-keep,keep);captured=keep;}else{memmove(stderr_tail,stderr_tail+drop,captured-drop);memcpy(stderr_tail+captured-drop,errbuf,count);captured=sizeof(stderr_tail);}}}else if(n==0){close(errpipe[0]);errpipe[0]=-1;pipe_open=0;}}}waited=waitpid(child,&status,WNOHANG);if(waited==child)child_reaped=1;else if(waited<0){if(errno==EINTR)continue;child_reaped=1;status=0;}}}if(errpipe[0]>=0)close(errpipe[0]);if(ftruncate(errlog,0)<0||lseek(errlog,0,SEEK_SET)<0||write_all_file(errlog,stderr_tail,captured)<0){close(errlog);errlog=-1;}if(!WIFEXITED(status)||WEXITSTATUS(status)!=0){char reason[64];update_failure_reason(errlog,reason,sizeof(reason));update_error_reason(fd,400,"update_rejected",!strcmp(reason,"manifest_update_channel_mismatch")?"The update targets a different release channel than this device":"The signed update failed verification or installation",reason);goto done;}response(fd,200,"application/json",success,sizeof(success)-1);goto done;io:if(out>=0)close(out);update_error(fd,503,"io_error","The update upload could not be stored");done:if(errlog>=0)close(errlog);unlink(LE_UPDATE_TMP);if(lock==1)unlink(LE_UPDATE_LOCK);close(fd);return 0;}
-static int start_update_upload(int fd,const char*initial,size_t initial_len,size_t content_len,int allow_unsigned){pid_t pid=fork();if(pid<0)return-1;if(pid==0){(void)stream_update_upload(fd,initial,initial_len,content_len,allow_unsigned);_exit(0);}close(fd);return 0;}
+static int start_update_upload(int fd,const char*initial,size_t initial_len,size_t content_len,int allow_unsigned){sigset_t previous;pid_t pid;int slot;if(child_worker_begin(CHILD_WORKER_UPDATE,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);le_close_inherited_fds(fd);(void)stream_update_upload(fd,initial,initial_len,content_len,allow_unsigned);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_UPDATE);sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
 static const char *update_fetch_path(void){const char *p=getenv("LIBREECHO_UPDATE_FETCH");return p&&*p?p:"/usr/local/sbin/libreecho-update-fetch";}
 static int run_update_fetch(int fd,const char*action){char success[160];int status,n,channel_action=!strncmp(action,"set-channel-",12);pid_t child=fork();if(child<0){update_error(fd,503,"io_error","The update command could not start");close(fd);return 0;}if(child==0){const char *helper=update_fetch_path();execl(helper,helper,action,(char*)0);_exit(127);}if(waitpid(child,&status,0)<0||!WIFEXITED(status)||WEXITSTATUS(status)!=0){if(channel_action)update_error(fd,503,"io_error","The update channel could not be saved");else update_error(fd,!strcmp(action,"check")?503:400,!strcmp(action,"check")?"update_check_failed":"update_rejected",!strcmp(action,"check")?"The GitHub release check failed":"The signed update failed verification or installation");close(fd);return 0;}if(channel_action){n=snprintf(success,sizeof(success),"{\"ok\":true,\"data\":{\"channel\":\"%s\"},\"error\":null}",action+12);}else{n=snprintf(success,sizeof(success),"{\"ok\":true,\"data\":{\"checked\":%s,\"installed\":%s,\"state\":\"%s\"},\"error\":null}",!strcmp(action,"check")?"true":"false",!strcmp(action,"install")?"true":"false",!strcmp(action,"check")?"checked":"reboot-pending");}response(fd,200,"application/json",success,(size_t)n);close(fd);return 0;}
-static int start_update_fetch(int fd,const char*action){pid_t pid=fork();if(pid<0)return-1;if(pid==0){(void)run_update_fetch(fd,action);_exit(0);}close(fd);return 0;}
-static int start_api_worker(int fd,struct api_context*api,const struct api_request*q){sigset_t blocked,previous;pid_t pid;int i,slot=-1;struct api_response r;sigemptyset(&blocked);sigaddset(&blocked,SIGCHLD);if(sigprocmask(SIG_BLOCK,&blocked,&previous)<0)return-1;for(i=0;i<LE_MAX_ASSISTANT_WORKERS;i++)if(assistant_pids[i]<=0){slot=i;break;}if(slot<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);memset(&r,0,sizeof(r));api_handle(api,q,&r);if(r.status>=200&&r.status<300&&!strcmp(q->method,"PUT")&&!strcmp(q->path,"/api/v1/network")&&api_persist_configuration(api)){r.status=503;strcpy(r.type,"application/json; charset=utf-8");strcpy(r.body,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Configuration change could not be saved\"}}");r.length=strlen(r.body);}response(fd,r.status,r.type,r.body,r.length);close(fd);_exit(0);}assistant_pids[slot]=pid;assistant_workers++;sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
+static int start_update_fetch(int fd,const char*action){sigset_t previous;pid_t pid;int slot;if(child_worker_begin(CHILD_WORKER_UPDATE,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);le_close_inherited_fds(fd);(void)run_update_fetch(fd,action);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_UPDATE);sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
+static int start_api_worker(int fd,struct api_context*api,const struct api_request*q){sigset_t previous;pid_t pid;int slot;struct api_response r;if(child_worker_begin(CHILD_WORKER_ASSISTANT,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);le_close_inherited_fds(fd);memset(&r,0,sizeof(r));api_handle(api,q,&r);response(fd,r.status,r.type,r.body,r.length);close(fd);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_ASSISTANT);sigprocmask(SIG_SETMASK,&previous,NULL);close(fd);return 0;}
+#include "http_config_worker.inc"
 static char*header(char*s,const char*name){size_t n=strlen(name);
 char*p=strstr(s,"\r\n");
 while(p&&p[2]&&p[2]!='\r'){p+=2;
@@ -124,15 +169,14 @@ f=open(path,O_RDONLY);
 if(f<0||fstat(f,&st)||!S_ISREG(st.st_mode)){if(f>=0)close(f);
 return-1;
 } {char h[1024];
-int z=snprintf(h,sizeof(h),"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; script-src 'self'\r\n\r\n",mime(path),(unsigned long)st.st_size);
+int z=snprintf(h,sizeof(h),"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' https://geocoding-api.open-meteo.com; script-src 'self'\r\n\r\n",mime(path),(unsigned long)st.st_size);
 send_all(fd,h,(size_t)z);
 }while((n=read(f,b,sizeof(b)))>0)send_all(fd,b,(size_t)n);
 close(f);
 return 0;
 }
 static int destructive_path(const char*path){return !strcmp(path,"/api/v1/system/reboot")||!strcmp(path,"/api/v1/system/shutdown")||!strcmp(path,"/api/v1/system/factory-reset");}
-static void refresh_setup_completed(struct api_context*api){char path[448];if(!api||api->setup_completed||!api->config_path[0])return;if(snprintf(path,sizeof(path),"%s.setup-complete",api->config_path)>=(int)sizeof(path))return;if(!access(path,F_OK))api->setup_completed=1;}
-static void process(struct client*c,const struct http_options*o,struct api_context*api){char*end=strstr(c->buf,"\r\n\r\n"),*body,*cl;
+static void process(struct client*c,const struct http_options*o,struct api_context*api,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){char*end=strstr(c->buf,"\r\n\r\n"),*body,*cl,*target_start,*target_end;
 size_t headers,body_len=0,content_len=0;
 const char *page_path;
 struct api_request q;
@@ -143,11 +187,19 @@ headers=(size_t)(end-c->buf)+4;
 if(headers>LE_HEADER_MAX){response(c->fd,413,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"headers_too_large\",\"message\":\"Request headers exceed 8 KiB\"}}",122);
 goto done;
 }memset(&q,0,sizeof(q));
+target_start=strchr(c->buf,' ');
+target_end=target_start?strchr(target_start+1,' '):NULL;
+if(!target_start||!target_end||target_end==target_start+1||(size_t)(target_end-target_start-1)>=sizeof(q.path)){response(c->fd,400,"text/plain","Request target is too long or malformed",strlen("Request target is too long or malformed"));
+goto done;
+}
 if(sscanf(c->buf,"%7s %255s",q.method,q.path)!=2){response(c->fd,400,"text/plain","Bad request",11);
 goto done;
 }cl=header(c->buf,"Content-Length");
 if(cl)content_len=(size_t)strtoul(cl,0,10);
-if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));if(!content_len||content_len>LE_UPDATE_MAX){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}c->fd=-1;c->used=0;return;}
+/* Two size gates: the fixed ceiling, and what the staging filesystem can
+   actually hold. Refusing here costs the client one request; refusing after
+   the stream costs it the whole upload. */
+if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));{size_t limit=le_update_max_upload_bytes();char detail[128];if(!content_len||content_len>LE_UPDATE_MAX_BYTES){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(content_len>limit){snprintf(detail,sizeof(detail),"Update is larger than the %lu bytes this device can stage",(unsigned long)limit);update_error(c->fd,413,"update_size",detail);goto done;}}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}sync_configuration_worker(api);if(config_worker_pending){update_error(c->fd,409,"busy","Network configuration is in progress; retry when it finishes");goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}c->fd=-1;c->used=0;return;}
 if(content_len>LE_BODY_MAX){response(c->fd,413,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}",118);
 goto done;
 }if(c->used<headers+content_len)return;
@@ -156,22 +208,43 @@ body_len=content_len;
 q.body=body;
 q.body_len=body_len;
 body[body_len]=0;
+q.https=c->secure_transport;
 copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));
 copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));
 copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));
 copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));
 copy_header(q.confirm,sizeof(q.confirm),header(c->buf,"X-LibreEcho-Confirm"));
-refresh_setup_completed(api);
-if(!strcmp(q.path,"/api/v1/assistant/respond")&&!strcmp(q.method,"POST")){if(start_api_worker(c->fd,api,&q)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}",125);goto done;}c->fd=-1;c->used=0;return;}
-if((!strcmp(q.path,"/api/v1/setup")&&!strcmp(q.method,"POST"))||(!strcmp(q.path,"/api/v1/network/wifi/connect")&&!strcmp(q.method,"POST"))){if(start_api_worker(c->fd,api,&q)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Network configuration request could not start\"}}",strlen("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Network configuration request could not start\"}}"));goto done;}c->fd=-1;c->used=0;return;}
+sync_configuration_worker(api);
+/* Serialize configuration mutations while setup persists its snapshot. Reads
+   stay responsive; authentication/CSRF checks still precede a busy response. */
+if(config_worker_pending && !strncmp(q.path,"/api/",5) && strcmp(q.method,"GET") && strcmp(q.method,"HEAD")){
+    if(api_request_authorize(api,&q,&r)){
+        const char *message="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"busy\",\"message\":\"Network configuration is in progress; retry when it finishes\"}}";
+        response(c->fd,409,"application/json",message,strlen(message));
+    }else response(c->fd,r.status,r.type,r.body,r.length);
+    goto done;
+}
+if(configuration_worker_request(api,&q)){
+    if(!api_request_authorize(api,&q,&r)){
+        response(c->fd,r.status,r.type,r.body,r.length);goto done;
+    }
+    if(start_configuration_worker(c->fd,api,&q)<0){
+        const char *message="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Network configuration worker could not start\"}}";
+        response(c->fd,503,"application/json",message,strlen(message));goto done;
+    }
+    if(body_len)memset(body,0,body_len);
+    c->fd=-1;c->used=0;return;
+}
+if((!strcmp(q.path,"/api/v1/assistant/respond")&&!strcmp(q.method,"POST"))||(!strcmp(q.path,"/api/v1/assistant/history")&&!strcmp(q.method,"GET"))||(!strcmp(q.path,"/api/v1/assistant/history/clear")&&!strcmp(q.method,"POST"))){if(start_api_worker(c->fd,api,&q)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}",sizeof("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}")-1);goto done;}c->fd=-1;c->used=0;return;}
 if(!strcmp(q.path,"/api/v1/system/update/check")||!strcmp(q.path,"/api/v1/system/update/apply")){const char*action=!strcmp(q.path,"/api/v1/system/update/check")?"check":"install";if(!api_update_fetch_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update command could not start");goto done;}c->fd=-1;c->used=0;return;}
 if(!strcmp(q.path,"/api/v1/system/update/channel")){char channel[16],action[32];if(!api_update_channel_authorize(api,&q,&r,channel,sizeof(channel))){response(c->fd,r.status,r.type,r.body,r.length);goto done;}snprintf(action,sizeof(action),"set-channel-%s",channel);if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update channel could not be changed");goto done;}c->fd=-1;c->used=0;return;}
-if(!strncmp(q.path,"/api/v1/baby-monitor/stream",27)){int card,device,channels,bits,selected_channel;if(!api_baby_monitor_stream_authorize(api,&q,&r,&card,&device,&channels,&bits,&selected_channel)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_pcm_stream(c->fd,selected_channel)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Microphone stream could not start\"}}",118);goto done;}c->fd=-1;c->used=0;return;}if(!strncmp(q.path,"/api/",5)){time_t now=time(0);
+if(!strncmp(q.path,"/api/v1/baby-monitor/stream",27)){int card,device,channels,bits,selected_channel;if(!api_baby_monitor_stream_authorize(api,&q,&r,&card,&device,&channels,&bits,&selected_channel)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_pcm_stream(c->fd,selected_channel)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Microphone stream could not start\"}}",118);goto done;}c->fd=-1;c->used=0;return;}
+if(!strcmp(q.path,"/api/v1/diagnostics/kernel.log")){if(!api_diagnostics_kernel_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_kernel_log_stream(c->fd, http_listener, https_listener, relay_listener, clients, max)<0){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log stream could not start\"}}";response(c->fd,503,"application/json",m,strlen(m));goto done;}c->fd=-1;c->used=0;return;}if(!strncmp(q.path,"/api/",5)){time_t now=time(0);
 if(destructive_path(q.path)&&last_destructive&&now-last_destructive<3){response(c->fd,429,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"rate_limited\",\"message\":\"Wait before another device action\"}}",115);
 goto done;
 }if(destructive_path(q.path))last_destructive=now;
 api_handle(api,&q,&r);
-if(r.status>=200&&r.status<300&&!strcmp(q.method,"PUT")&&(!strcmp(q.path,"/api/v1/audio")||!strcmp(q.path,"/api/v1/led")||!strcmp(q.path,"/api/v1/network")||!strcmp(q.path,"/api/v1/wake-word")||!strcmp(q.path,"/api/v1/buttons")||!strcmp(q.path,"/api/v1/privacy")||!strncmp(q.path,"/api/v1/integrations/",21))&&api_persist_configuration(api)){r.status=503;strcpy(r.type,"application/json; charset=utf-8");strcpy(r.body,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Configuration change could not be saved\"}}");r.length=strlen(r.body);}
+if(r.status>=200&&r.status<300&&!strcmp(q.method,"PUT")&&(!strcmp(q.path,"/api/v1/audio")||!strcmp(q.path,"/api/v1/led")||!strcmp(q.path,"/api/v1/network")||!strcmp(q.path,"/api/v1/wake-word")||!strcmp(q.path,"/api/v1/privacy")||!strncmp(q.path,"/api/v1/integrations/",21))&&api_persist_configuration(api)){r.status=503;strcpy(r.type,"application/json; charset=utf-8");strcpy(r.body,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Configuration change could not be saved\"}}");r.length=strlen(r.body);}
 response(c->fd,r.status,r.type,r.body,r.length);
 if(body_len)memset(body,0,body_len);
 }else if(strcmp(q.method,"GET")&&strcmp(q.method,"HEAD"))response(c->fd,405,"text/plain","Method not allowed",18);
@@ -181,11 +254,83 @@ done:close(c->fd);
 c->fd=-1;
 c->used=0;
 }
-int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
+/*
+ * HTTPS is served by terminating TLS in a short-lived child that relays
+ * plaintext to the ordinary HTTP loop over loopback, rather than by wrapping
+ * the request path in TLS directly. Two request paths (update upload and the
+ * assistant worker) hand their raw fd to a forked child and keep reading it
+ * there; a child cannot continue a TLS session owned by the parent, so
+ * in-line termination would break exactly those two. Relaying keeps every
+ * downstream byte identical and leaves plain HTTP listening, so a TLS
+ * misconfiguration can never lock the device's own UI out.
+ */
+static void tls_relay(int cfd,const struct http_options*o,int relay_port){
+struct le_tls*tls;int up=-1;struct sockaddr_in a;struct pollfd p[2];char buf[4096];long n;
+tls=le_tls_server_open(cfd,o->tls_cert,o->tls_key);
+if(!tls){close(cfd);return;}
+up=socket(AF_INET,SOCK_STREAM,0);
+if(up<0){le_tls_close(tls);close(cfd);return;}
+memset(&a,0,sizeof(a));a.sin_family=AF_INET;a.sin_port=htons((uint16_t)relay_port);
+/* inet_pton, not INADDR_LOOPBACK: the latter is not POSIX and is hidden by
+   _POSIX_C_SOURCE on some platforms, so it built on Linux and failed the
+   native build the e2e harness uses. */
+if(inet_pton(AF_INET,"127.0.0.1",&a.sin_addr)!=1){close(up);le_tls_close(tls);close(cfd);return;}
+if(connect(up,(struct sockaddr*)&a,sizeof(a))){close(up);le_tls_close(tls);close(cfd);return;}
+/*
+ * Pump both directions until either end finishes. Two things this loop has to
+ * get right, both learned the hard way:
+ *
+ *  - Upstream is checked on every pass, even when TLS still holds buffered
+ *    plaintext. Draining the whole request first looks harmless but means a
+ *    server that answers early (a 401/403, or a 413 on an oversized body) has
+ *    its reply sitting unread while we keep pushing at a socket it already
+ *    closed. The write then fails and the reply is lost.
+ *  - A failed upstream write is not the end of the exchange. The response may
+ *    already be in our receive buffer, so drain and forward it before closing,
+ *    or the client sees a bare TLS shutdown and no status at all.
+ */
+int client_done=0,up_writable=1;
+for(;;){
+int pending=le_tls_pending(tls)>0;
+p[0].fd=cfd;p[0].events=POLLIN;p[0].revents=0;
+p[1].fd=up;p[1].events=POLLIN;p[1].revents=0;
+if(poll(p,2,pending?0:LE_TLS_IDLE_TIMEOUT_MS)<0)break;
+if(!pending&&!p[0].revents&&!p[1].revents)break;   /* idle timeout */
+
+/* upstream first: never let a ready response go unread */
+if(p[1].revents&(POLLIN|POLLHUP|POLLERR)){
+n=read(up,buf,sizeof(buf));
+if(n<=0)break;
+if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
+continue;
+}
+
+if(!client_done&&(pending||(p[0].revents&(POLLIN|POLLHUP|POLLERR)))){
+n=le_tls_read_deadline(tls,buf,sizeof(buf),LE_TLS_IDLE_TIMEOUT_MS);
+if(n<=0){client_done=1;shutdown(up,SHUT_WR);continue;}
+if(up_writable&&write_all_file(up,buf,(size_t)n)<0){
+/* stop sending, but keep draining whatever the server already replied */
+up_writable=0;shutdown(up,SHUT_WR);
+}}}
+
+/* final drain: forward any response still buffered upstream */
+for(;;){
+struct pollfd d={up,POLLIN,0};
+if(poll(&d,1,250)<=0)break;
+n=read(up,buf,sizeof(buf));
+if(n<=0)break;
+if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
+}
+close(up);le_tls_close(tls);close(cfd);return;}
+
+/* Keep TLS relays in the same fixed process budget as other forked work. */
+static int spawn_tls_relay(int cfd,const struct http_options*o,int relay_port,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){sigset_t previous;pid_t pid;int i,slot;if(child_worker_begin(CHILD_WORKER_TLS_RELAY,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close(http_listener);close(https_listener);close(relay_listener);for(i=0;i<max;i++)if(clients[i].fd>=0)close(clients[i].fd);tls_relay(cfd,o,relay_port);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_TLS_RELAY);sigprocmask(SIG_SETMASK,&previous,NULL);return 0;}
+
+int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,tls_ls=-1,relay_ls=-1,relay_port=0,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
 struct sockaddr_in a;
 struct client c[LE_MAX_CLIENTS];
-struct pollfd p[LE_MAX_CLIENTS+1];
-time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_assistant_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
+struct pollfd p[LE_MAX_CLIENTS+3];
+time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_child_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
 if(max>LE_MAX_CLIENTS)max=LE_MAX_CLIENTS;
 memset(c,0,sizeof(c));
 for(i=0;
@@ -202,35 +347,72 @@ if(inet_pton(AF_INET,o->listen_host,&a.sin_addr)!=1){close(ls);
 return-1;
 }if(bind(ls,(struct sockaddr*)&a,sizeof(a))||listen(ls,max)){close(ls);
 return-1;
-}if(o->run_user[0]){struct passwd*pw=getpwnam(o->run_user);if(!pw){fprintf(stderr,"Unknown privilege-drop user: %s\n",o->run_user);close(ls);return-1;}if(setgroups(0,0)||setgid(pw->pw_gid)||setuid(pw->pw_uid)){perror("privilege drop");close(ls);return-1;}fprintf(stderr,"Dropped privileges to %s\n",o->run_user);}
+}if(o->tls_port>0){
+struct sockaddr_in ta;int tyes=1;
+tls_ls=socket(AF_INET,SOCK_STREAM,0);
+if(tls_ls>=0&&close_on_exec(tls_ls)<0){close(tls_ls);tls_ls=-1;}
+if(tls_ls>=0){
+setsockopt(tls_ls,SOL_SOCKET,SO_REUSEADDR,&tyes,sizeof(tyes));
+memset(&ta,0,sizeof(ta));ta.sin_family=AF_INET;ta.sin_port=htons((uint16_t)o->tls_port);
+if(inet_pton(AF_INET,o->listen_host,&ta.sin_addr)!=1||bind(tls_ls,(struct sockaddr*)&ta,sizeof(ta))||listen(tls_ls,max)){
+/* HTTPS is best-effort: losing it must never take the HTTP UI down with it */
+fprintf(stderr,"HTTPS listener on port %d unavailable: %s\n",o->tls_port,strerror(errno));
+close(tls_ls);tls_ls=-1;api_set_https_active(api,0);
+}else {
+struct sockaddr_in ra;socklen_t ra_len=sizeof(ra);relay_ls=socket(AF_INET,SOCK_STREAM,0);
+if(relay_ls>=0&&close_on_exec(relay_ls)<0){close(relay_ls);relay_ls=-1;}
+memset(&ra,0,sizeof(ra));ra.sin_family=AF_INET;ra.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+if(relay_ls<0||bind(relay_ls,(struct sockaddr*)&ra,sizeof(ra))||listen(relay_ls,max)||getsockname(relay_ls,(struct sockaddr*)&ra,&ra_len)){
+fprintf(stderr,"HTTPS relay listener unavailable: %s\n",strerror(errno));if(relay_ls>=0)close(relay_ls);relay_ls=-1;close(tls_ls);tls_ls=-1;api_set_https_active(api,0);
+}else {relay_port=(int)ntohs(ra.sin_port);api_set_https_active(api,1);fprintf(stderr,"LibreEcho also listening on https://%s:%d\n",o->listen_host,o->tls_port);}
+}
+}}
+if(o->run_user[0]){struct passwd*pw=getpwnam(o->run_user);if(!pw){fprintf(stderr,"Unknown privilege-drop user: %s\n",o->run_user);if(relay_ls>=0)close(relay_ls);if(tls_ls>=0)close(tls_ls);close(ls);return-1;}if(setgroups(0,0)||setgid(pw->pw_gid)||setuid(pw->pw_uid)){perror("privilege drop");if(relay_ls>=0)close(relay_ls);if(tls_ls>=0)close(tls_ls);close(ls);return-1;}fprintf(stderr,"Dropped privileges to %s\n",o->run_user);}
 fprintf(stderr,"LibreEcho listening on http://%s:%d (%s backend)\n",o->listen_host,o->port,le_backend_mode(api->backend));
 while(*running){p[0].fd=ls;
 p[0].events=POLLIN;
+p[max+1].fd=tls_ls;
+p[max+1].events=POLLIN;
+p[max+2].fd=relay_ls;
+p[max+2].events=POLLIN;
 for(i=0;
 i<max;
 i++){p[i+1].fd=c[i].fd;
 p[i+1].events=POLLIN;
-}if(poll(p,(nfds_t)(max+1),500)<0&&errno!=EINTR)break;
+}if(poll(p,(nfds_t)(max+3),500)<0&&errno!=EINTR)break;
 if(p[0].revents&POLLIN){int fd=accept(ls,0,0);
 if(fd>=0&&close_on_exec(fd)<0){close(fd);fd=-1;}
 if(fd>=0){for(i=0;
 i<max&&c[i].fd>=0;
 i++){/* find free bounded slot */}if(i==max){response(fd,503,"text/plain","Server busy",11);
 close(fd);
-}else c[i].fd=fd;
+}else {c[i].fd=fd;c[i].secure_transport=0;}
+}}if(tls_ls>=0&&(p[max+1].revents&POLLIN)){int tfd=accept(tls_ls,0,0);
+if(tfd>=0&&close_on_exec(tfd)<0){close(tfd);tfd=-1;}
+if(tfd>=0){if(spawn_tls_relay(tfd,o,relay_port,ls,tls_ls,relay_ls,c,max)<0)close(tfd);else close(tfd);}
+}if(relay_ls>=0&&(p[max+2].revents&POLLIN)){int rfd=accept(relay_ls,0,0);
+if(rfd>=0&&close_on_exec(rfd)<0){close(rfd);rfd=-1;}
+if(rfd>=0){for(i=0;i<max&&c[i].fd>=0;i++){}
+if(i==max){response(rfd,503,"text/plain","Server busy",11);close(rfd);}
+else {c[i].fd=rfd;c[i].secure_transport=1;}
 }}for(i=0;
 i<max;
 i++)if(c[i].fd>=0&&(p[i+1].revents&(POLLIN|POLLHUP|POLLERR))){ssize_t n=recv(c[i].fd,c[i].buf+c[i].used,LE_REQ_MAX-c[i].used,0);
 if(n<=0){close(c[i].fd);
 c[i].fd=-1;
+c[i].secure_transport=0;
 }else{c[i].used+=(size_t)n;
 c[i].buf[c[i].used]=0;
-process(&c[i],o,api);
+process(&c[i],o,api,ls,tls_ls,relay_ls,c,max);
 }}if(time(0)!=last_tick){last_tick=time(0);
 le_backend_tick(api->backend);
-}}for(i=0;
+}le_feature_provenance_tick();
+le_authority_provenance_tick();
+}for(i=0;
 i<max;
 i++)if(c[i].fd>=0)close(c[i].fd);
+if(tls_ls>=0)close(tls_ls);
+if(relay_ls>=0)close(relay_ls);
 close(ls);
 return 0;
 }

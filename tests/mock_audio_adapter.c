@@ -67,8 +67,11 @@ static unsigned long long monotonic_milliseconds(void)
 static void write_first_pcm_marker(const char *args)
 {
     const char *path = getenv("LE_TEST_TTS_MARKER");
+    const char *delay_text = getenv("LE_TEST_TTS_MARKER_DELAY_MS");
     const char *key = strstr(args, "\"request_id\":\"");
     char request_id[64];
+    char *end;
+    unsigned long delay_ms;
     size_t length = 0;
     FILE *marker;
 
@@ -83,6 +86,14 @@ static void write_first_pcm_marker(const char *args)
     request_id[length] = '\0';
     if (!length || key[length] != '"')
         return;
+    delay_ms = delay_text ? strtoul(delay_text, &end, 10) : 0;
+    if (delay_text && *delay_text && !*end && delay_ms <= 1000) {
+        struct timespec delay = {
+            (time_t)(delay_ms / 1000),
+            (long)((delay_ms % 1000) * 1000000UL)
+        };
+        nanosleep(&delay, NULL);
+    }
     marker = fopen(path, "w");
     if (!marker)
         return;

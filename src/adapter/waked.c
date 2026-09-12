@@ -8,6 +8,7 @@
 #include "wake_led.h"
 #include "wake_worker.h"
 
+#include "wake_health.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -62,6 +63,7 @@ struct waked_ipc {
 
 struct waked_metrics {
     uint64_t processed_frames;
+    uint64_t last_capture_ns;
     uint64_t aec_frames;
     uint64_t vad_active_frames;
     uint64_t vad_noise_energy;
@@ -388,20 +390,31 @@ static void handle_control_client(
         return;
     }
     if (!strcmp(command, "status")) {
+        int model_loaded = 0, inference_age_ms = -1;
+        int capture_age_ms = le_wake_age_ms(monotonic_nanoseconds(), metrics->last_capture_ns);
+#ifdef LE_WAKE_ENGINE_ONNX
+        model_loaded = le_wake_worker_health(wake_worker, &inference_age_ms);
+#endif
         snprintf(
             status, sizeof(status),
             "{\"enabled\":true,\"wake_word\":\"Alexa\","
-            "\"model_status\":\"loaded\",\"sensitivity\":%d,"
+            "\"model_status\":\"%s\",\"sensitivity\":%d,"
             "\"cooldown_ms\":1750,\"detected_count\":%u,"
             "\"cpu_cost\":17,\"memory_cost_mb\":6,"
             "\"vad_active\":%s,\"vad_floor_rms\":%u,"
             "\"vad_noise_energy\":%llu,\"aec_active\":%s,"
+            "\"model_loaded\":%s,\"processed_frames\":%llu,"
+            "\"capture_active\":%s,\"capture_age_ms\":%d,"
+            "\"inference_active\":%s,\"inference_age_ms\":%d,"
             "\"model\":\"alexa_v0.1\"}",
-            ipc->sensitivity, ipc->detected_count,
+            model_loaded ? "loaded" : "unavailable", ipc->sensitivity, ipc->detected_count,
             metrics->vad_active ? "true" : "false",
             metrics->vad_floor_rms,
             (unsigned long long)metrics->vad_noise_energy,
-            metrics->playback_active ? "true" : "false");
+            metrics->playback_active ? "true" : "false",
+            model_loaded ? "true" : "false", (unsigned long long)metrics->processed_frames,
+            metrics->processed_frames && le_wake_recent(capture_age_ms, LE_WAKE_CAPTURE_STALE_MS) ? "true" : "false", capture_age_ms,
+            model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms);
         (void)respond(client_fd, id, 1, status);
     } else if (!strcmp(command, "subscribe")) {
         if (add_subscriber(ipc, client_fd) < 0) {
@@ -528,6 +541,7 @@ static int process_frame(struct le_voice_aec *aec,
     preroll_write(preroll, preroll_position, clean,
                   LE_VOICE_AEC_FRAME_SAMPLES);
     ++metrics->processed_frames;
+    metrics->last_capture_ns = now_ns;
     publish_audio_frame(
         ipc,
         (metrics->processed_frames - 1U) *

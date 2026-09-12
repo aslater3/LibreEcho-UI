@@ -1,28 +1,50 @@
 name: LibreEcho UI checks
 
 on:
-  # Push and pull_request triggers were removed on 2026-08-14 to conserve
-  # hosted-runner quota on this private repository. Everyday checks run in the
-  # zero-quota local lane in LibreEcho-Build (ci/local/run-checks.sh), which
-  # executes this same suite. Dispatch remains for on-demand hosted runs.
+  # Keep the older release lines and everyday development in the local lane,
+  # but never treat browser smoke as full source verification for 0.14.
+  pull_request:
+    branches: ['release/0.14.0']
+    paths-ignore: ['**/*.md', 'docs/**']
+  push:
+    branches: ['release/0.14.0']
+    paths-ignore: ['**/*.md', 'docs/**']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ui-checks-${{ github.ref }}
+  group: ui-checks-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   source_checks:
     name: Full source checks
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Check out UI source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      - name: Retain exact tracked verification inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/ui-source-commit.txt"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/ui-source.tar.gz"
+
+      - name: Upload short-lived verification inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ui-verification-inputs
+          path: |
+            ${{ runner.temp }}/ui-source-commit.txt
+            ${{ runner.temp }}/ui-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Install test dependencies
         shell: bash
@@ -31,6 +53,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             build-essential bubblewrap jq libspeexdsp-dev nodejs
+
+      - name: Enable user namespaces for virtual service harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
 
       - name: Stage SpeexDSP host dependency
         shell: bash
@@ -41,11 +74,40 @@ jobs:
           cp "$(gcc -print-file-name=libspeexdsp.a)" \
             "$RUNNER_TEMP/speexdsp/lib/libspeexdsp.a"
 
+      - name: Verify button settings persistence regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j2 SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/libreecho-ledd build/libreecho-buttond
+          ./build/test-button-settings
+          ./build/test-buttond-privacy
+          ./build/test-buttond-events
+          sh tests/test_input_capability_state_contract.sh
+          sh tests/test_led_pattern_ownership.sh
+          python3 tests/test_buttond_led_restart.py
+
+      - name: Verify configuration and mock integration before full suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          make clean
+          make -j2 SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" all
+          ./build/libreecho-web --backend mock --config ./build/preflight-config.json --mock-config ./config/mock-state.json --web-root ./web --listen 127.0.0.1:18082 --seed 42 --dev-controls >./build/preflight-server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18082/api/v1/status >/dev/null 2>&1; then break; fi
+            sleep 0.1
+          done
+          LIBREECHO_TEST_CONFIG=./build/preflight-config.json sh tests/test_config.sh
+          sh tests/test_mock_behaviour.sh
+
       - name: Run complete UI test suite
         shell: bash
         run: |
           set -euo pipefail
           node --check web/js/app.js
+          node --check web/js/integrations-ui.js
           jq -e . web/openapi.json >/dev/null
           make SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" test
           git diff --check

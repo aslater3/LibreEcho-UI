@@ -302,13 +302,21 @@ static int play_pcm16(struct wyoming_state *state, const unsigned char *payload,
 
 static int send_info(struct wyoming_state *state)
 {
+    /* Home Assistant rejects an info event if any advertised artifact omits
+       the required attribution or installed metadata (issue #228). */
     static const char info[] =
         "{\"satellite\":{\"name\":\"LibreEcho\",\"area\":\"LibreEcho\","
+        "\"attribution\":{\"name\":\"LibreEcho\","
+        "\"url\":\"https://libreecho.org\"},\"installed\":true,"
         "\"has_vad\":true,\"active_wake_words\":[\"Alexa\"],"
         "\"max_active_wake_words\":1,\"supports_trigger\":true},"
         "\"mic\":[{\"name\":\"libreecho-microphone\","
+        "\"attribution\":{\"name\":\"LibreEcho\","
+        "\"url\":\"https://libreecho.org\"},\"installed\":true,"
         "\"mic_format\":{\"rate\":16000,\"width\":2,\"channels\":1}}],"
         "\"snd\":[{\"name\":\"libreecho-speaker\","
+        "\"attribution\":{\"name\":\"LibreEcho\","
+        "\"url\":\"https://libreecho.org\"},\"installed\":true,"
         "\"snd_format\":{\"rate\":48000,\"width\":2,\"channels\":2}}]}";
     return send_event(state, "info", info, NULL, 0);
 }

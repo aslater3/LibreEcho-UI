@@ -7,6 +7,7 @@ rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
 python3 tests/test_github_link_contract.py
+python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
 make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
 ./build/test-networkd-scan-security
@@ -16,8 +17,28 @@ make build/test-network-health build/test-adapter-client-events build/test-gatew
 ./build/test-factory-reset
 sh tests/test_factory_reset_bluetooth_contract.sh
 sh tests/test_factory_reset_quiesce_contract.sh
+sh tests/test_backup_roundtrip.sh
 make build/test-backend-linux-wifi-emission
+make build/test-auth-sessions
+./build/test-auth-sessions
+make build/test-auth-transport
+./build/test-auth-transport
+make build/test-inherited-fds
+./build/test-inherited-fds
+make build/test-http-worker-registry
+./build/test-http-worker-registry
+python3 tests/test_http_worker_registry_contract.py
+python3 tests/test_pr141_review_contract.py
+sh tests/test_pr137_review_contract.sh
+sh tests/test_pr139_review_contract.sh
+make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
+./build/test-network-health
+./build/test-adapter-client-events
+./build/test-gateway-probe
+make build/test-backend-linux-wifi-emission build/test-thermal-zone-selection build/test-light-sensor
 ./build/test-backend-linux-wifi-emission
+./build/test-thermal-zone-selection
+./build/test-light-sensor
 ./build/test-bt-mgmt-events
 ./build/test-bt-pairing-events
 python3 tests/test_networkd_health_integration.py
@@ -32,22 +53,56 @@ sh tests/test_bluetooth_profile_service_contract.sh
 sh tests/test_bluetooth_device_metadata_contract.sh
 sh tests/test_bluetooth_cache_bust_contract.sh
 sh tests/test_bluetooth_mgmt_observability_contract.sh
+# Compiles btd.c into the test so the real status writer and discovery
+# bookkeeping run. No -Werror here: the daemon source carries two
+# platform-dependent warnings this test must not silence for the main build.
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic \
+    -Isrc -Isrc/adapter tests/test_bluetooth_status_capacity.c \
+    src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c \
+    src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+    -o build/test-bluetooth-status-capacity
+./build/test-bluetooth-status-capacity
 make build/test-sdp-wire-format
 ./build/test-sdp-wire-format
 make build/test-avdtp-wire-format
 ./build/test-avdtp-wire-format
+make build/test-avrcp-wire-format
+./build/test-avrcp-wire-format
 sh tests/test_network_scan_contract.sh
 sh tests/test_setup_account_first.sh
+make build/test-setup-workers
+./build/test-setup-workers
 sh tests/test_setup_optional_adapters.sh
 sh tests/test_login_brand_contract.sh
 grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
-make build/test-audiod-review build/test-led-night-review
+make build/libreecho-ledd build/libreecho-buttond
+python3 tests/test_buttond_led_restart.py
+make build/test-action-sample build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing build/test-watchdog-policy
+./build/test-action-sample
 ./build/test-audiod-review
 ./build/test-led-night-review
-sh tests/test_startup_animation.sh
-make build/test-buttond-timing
+./build/test-button-settings
+./build/test-buttond-privacy
+./build/test-buttond-events
 ./build/test-buttond-timing
+make build/test-wake-led-profile
+./build/test-wake-led-profile
+sh tests/test_voice_listening_led_profile.sh
+sh tests/test_startup_animation.sh
+./build/test-watchdog-policy
+make build/libreecho-watchdogd
+sh tests/test_watchdogd_recovery.sh
+python3 tests/test_watchdog_service_table.py
+make build/libreecho-timerd build/libreecho-watchdogd
+python3 tests/test_watchdog_timer_recovery.py
+python3 tests/test_install_completeness.py
+python3 tests/test_watchdog_build_contract.py
+make build/test-wake-decode
+./build/test-wake-decode
+make build/test-wake-health build/test-wake-health-api
+./build/test-wake-health
+./build/test-wake-health-api
 sh tests/test_buttond_contract.sh
 sh tests/test_input_capability_state_contract.sh
 sh tests/test_bluetooth_startup_readiness_contract.sh
@@ -59,9 +114,18 @@ sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_startup_state_contract.py
 python3 tests/test_wake_word_ui_contract.py
-python3 tools/test_virtual_echo.py
 node tests/test_wifi_security_interaction.js
+sh tests/test_local_llm_ui_contract.sh
+python3 tests/test_home_location_panel_contract.py
+python3 tools/test_virtual_echo.py
+python3 tests/test_now_playing_ui_contract.py
+python3 tests/test_config_persist_contract.py
+python3 tests/test_web_ui_behaviour_contract.py
+node tests/test_kernel_log_ui.js
+node tests/test_led_brightness_gate.js
+sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
+node tests/test_voice_assistant_ha_mode_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -71,17 +135,40 @@ sh tests/test_device_identity.sh
 # sh tests/test_cpu_online_mask.sh
 python3 tests/test_public_source_safety.py
 python3 tests/test_diagnostic_export_contract.py
+python3 tests/test_feature_provenance_contract.py
+node tests/test_provenance_ui.js
+make build/test-authority-provenance
+./build/test-authority-provenance
+# Real signed cross-repository integration runs in provenance-integration.yml
+# with its exact Platform checkout; it is distinct from the mock C reader test.
+make build/test-feature-provenance
+./build/test-feature-provenance
+make build/test-diagnostic-export
+./build/test-diagnostic-export
+make build/libreecho-web
+python3 tests/test_feature_provenance_http.py
 sh tests/test_source_provenance.sh
 sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
 sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
 sh tests/test_setup_connectivity_contract.sh
+sh tests/test_voice_pipeline_restart_contract.sh
+python3 tests/test_voice_latency_bench.py
+make build/test-voice-pipeline-restart
+./build/test-voice-pipeline-restart
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
+make build/libreecho-radiod
+make build/test-radiod-json
+./build/test-radiod-json
+make build/test-radiod-mp3-frames
+./build/test-radiod-mp3-frames
+sh tests/test_radio_icy_metadata.sh
 sh tests/test_airplay_led_bridge.sh
 sh tests/test_airplay_setup_persistence.sh
 sh tests/test_airplay_mount_failure.sh
+python3 tests/test_airplay_premounted_runtime.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
@@ -96,6 +183,13 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_voice_dsp.c src/adapter/voice_dsp.c \
     -o build/test-voice-dsp
 ./build/test-voice-dsp
+# M_PI is not in C99, and glibc hides it under a strict _POSIX_C_SOURCE, so this
+# built only on toolchains whose headers leak it. It failed to compile on glibc
+# and took every test after it down with it.
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_radio_resample.c src/adapter/radio_resample.c \
+    -lm -o build/test-radio-resample
+./build/test-radio-resample
 make build/test-voice-aec build/test-voice-reference
 ./build/test-voice-aec
 ./build/test-voice-reference
@@ -111,6 +205,9 @@ make build/test-voice-pipeline
 ./build/test-agentd
 ./build/test-voice-reply
 ./build/test-voice-playback
+make build/test-stop-intent
+./build/test-stop-intent
+python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
 make build/test-wyomingd
 ./build/test-wyomingd
@@ -122,6 +219,17 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
 ./build/test-ttsd
 sh tests/test_timed.sh
 sh tests/test_timed_timeout.sh
+make build/libreecho-web
+sh tests/test_setup_first_run.sh
+AGENT_SOCKET="$PWD/build/test-agent.sock"
+# Set the parent environment so the web daemon uses this fixture too, rather
+# than the production socket or an inherited socket from another test run.
+LIBREECHO_AGENT_SOCKET="$AGENT_SOCKET"
+export LIBREECHO_AGENT_SOCKET
+python3 tests/mock_agent_history.py "$AGENT_SOCKET" >./build/test-agent.log 2>&1 &
+agent_pid=$!
+i=0
+while [ ! -S "$AGENT_SOCKET" ]; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-agent.log; exit 1; }; sleep 0.1; done
 make build/test-timer-intent
 ./build/test-timer-intent
 make build/test-timer-schedule
@@ -140,16 +248,22 @@ sh tests/test_agentd_startup_readiness_contract.sh
 sh tests/test_agentd_timers.sh
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!
-cleanup(){ if [ "${pid:-0}" -gt 1 ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; }
+cleanup(){ if [ "${pid:-0}" -gt 1 ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; if [ "${agent_pid:-0}" -gt 1 ]; then kill "$agent_pid" 2>/dev/null || true; wait "$agent_pid" 2>/dev/null || true; fi; }
 trap cleanup EXIT INT TERM
 i=0
 while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-server.log; exit 1; }; sleep 0.1; done
-LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
+# Timer HTTP cases require this ready, isolated mock server.
 LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_bluetooth_scan_contract.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_usb_role_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_limits.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_playback_transport_contract.sh
 sh tests/test_memory.sh "$pid"
 kill "$pid"
 wait "$pid" 2>/dev/null || true
@@ -191,6 +305,9 @@ curl -fsS "$URL/api/v1/privacy" | jq -e \
 curl -fsS "$URL/api/v1/integrations" | jq -e \
     '.data.items[] | select(.id == "home-assistant") | .enabled == true' \
     >/dev/null
+curl -fsS "$URL/api/v1/spotify" | jq -e \
+    '.ok and .data.installed == true and .data.enabled == true and .data.status == "ready"' \
+    >/dev/null
 curl -fsS "$URL/api/v1/config" | grep -q '"setup_completed":true'
 curl -fsS "$URL/" | grep -q 'LibreEcho Control Centre'
 echo 'persistence: ok'
@@ -225,7 +342,17 @@ LIBREECHO_VENDOR_FORCE_MARKER=./build/test-vendor-config/vendor-import-force-nex
 LIBREECHO_WLAN0_PATH=./build/test-wlan0 \
 ./build/libreecho-web --backend linux --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" >./build/test-linux.log 2>&1 &
 pid=$!
-sleep 1
+# Restoring enabled integrations can outlast one second when their daemons
+# are absent on the host. Wait for HTTP readiness, keeping failure bounded.
+i=0
+while ! curl --max-time 1 -fsS "$URL/api/v1/config" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if ! kill -0 "$pid" 2>/dev/null || [ "$i" -ge 100 ]; then
+        cat ./build/test-linux.log
+        exit 1
+    fi
+    sleep 0.1
+done
 code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio")
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.available == false and .data.unavailable == true' /tmp/le-linux-audio.out >/dev/null
