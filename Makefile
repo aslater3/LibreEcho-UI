@@ -336,6 +336,12 @@ $(BUILD)/test-radiod-json: tests/test_radiod_json.c src/adapter/radiod.c src/jso
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/json.c -lm -o $@
 
+$(BUILD)/test-radiod-mp3-frames: tests/test_radiod_mp3_frames.c tests/radiod_mp3_fixture.h src/adapter/radiod.c src/json.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $< src/json.c -lm -o $@
+
 $(BUILD)/test-factory-reset: tests/test_factory_reset.c src/factory_reset.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
@@ -789,6 +795,7 @@ clean:
 		$(BUILD)/test-thermal-zone-selection \
 		$(BUILD)/test-light-sensor \
 		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \
+		$(BUILD)/test-radiod-mp3-frames \
 		$(BUILD)/test-http-worker-registry \
 		$(BUILD)/test-wake-decode \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \

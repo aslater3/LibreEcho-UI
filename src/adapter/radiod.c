@@ -639,6 +639,56 @@ static int play_with_reconnect(const char *url, const char *bus_path)
     }
 }
 
+/*
+ * One decode attempt over the fixed input buffer. Returns the number of PCM
+ * samples decoded; zero when the decoder rejected a complete frame (it is
+ * then removed from the buffer); -1 when the buffered bytes are an
+ * incomplete frame and more input is required (nothing is removed); -2 when
+ * no frame can be assembled from what is buffered. Incomplete trailing data
+ * must never be discarded: a server that delivers writes smaller than one
+ * frame would otherwise lose every read before the frame completed and
+ * produce no audio at all.
+ *
+ * The decoder state is snapshotted around the attempt: a failed probe clears
+ * the library's bit reservoir internally, and the frame that finally
+ * completes must still see the reservoir its main_data_begin refers to,
+ * which is what the previous successful decode left behind.
+ */
+static int mp3_take_frame(mp3dec_t *decoder, unsigned char *in, size_t *filled,
+                          size_t capacity, short *pcm,
+                          mp3dec_frame_info_t *info)
+{
+    mp3dec_t snapshot = *decoder;
+    int samples;
+    size_t consumed;
+
+    if (!*filled)
+        return -1;
+    samples = mp3dec_decode_frame(decoder, in, (int)*filled, pcm, info);
+    if (samples > 0) {
+        consumed = (size_t)info->frame_bytes;
+        if (consumed > *filled)
+            consumed = *filled;
+        memmove(in, in + consumed, *filled - consumed);
+        *filled -= consumed;
+        return samples;
+    }
+    consumed = info->frame_bytes > 0 ? (size_t)info->frame_bytes : 0;
+    if (consumed && consumed < *filled) {
+        /* A complete frame the decoder rejected: drop it and carry on. */
+        memmove(in, in + consumed, *filled - consumed);
+        *filled -= consumed;
+        return 0;
+    }
+    /*
+     * Incomplete frame at the head: keep it and ask for more input. The
+     * snapshot is restored so probing cannot damage the reservoir that the
+     * completed frame will need.
+     */
+    *decoder = snapshot;
+    return *filled >= capacity ? -2 : -1;
+}
+
 static int play_stream(const char *url, const char *bus_path, long *played,
                        int *complete)
 {
@@ -697,26 +747,31 @@ static int play_stream(const char *url, const char *bus_path, long *played,
     mp3dec_init(&decoder);
     le_radio_resample_reset(&resampler);
     for (;;) {
-        int samples;
+        int samples = mp3_take_frame(&decoder, in, &filled, sizeof(in), pcm,
+                                     &info);
 
-        if (filled < NET_CHUNK) {
-            int got = icy_read(&stream, in + filled, sizeof(in) - filled);
-
-            if (got <= 0)
-                break;                        /* stream ended */
-            stream.body_read += got;
-            filled += (size_t)got;
-        }
-        samples = mp3dec_decode_frame(&decoder, in, (int)filled, pcm, &info);
-        if (info.frame_bytes <= 0)
-            break;                            /* no sync and no progress */
-        memmove(in, in + info.frame_bytes, filled - (size_t)info.frame_bytes);
-        filled -= (size_t)info.frame_bytes;
         if (samples > 0) {
             if (write_bus(bus, pcm, samples, info.channels, info.hz) < 0)
                 break;                        /* the bus went away */
             if (played)
                 ++*played;
+            continue;
+        }
+        if (samples == -2)
+            break;                            /* no frame and no room to grow */
+        if (samples == 0)
+            continue;                         /* rejected frame dropped */
+        {
+            size_t want = sizeof(in) - filled;
+            int got;
+
+            if (want > NET_CHUNK)
+                want = NET_CHUNK;
+            got = icy_read(&stream, in + filled, want);
+            if (got <= 0)
+                break;                        /* stream ended */
+            stream.body_read += got;
+            filled += (size_t)got;
         }
     }
     /*

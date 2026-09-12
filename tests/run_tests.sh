@@ -162,6 +162,8 @@ sh tests/test_led_visualizer.sh
 make build/libreecho-radiod
 make build/test-radiod-json
 ./build/test-radiod-json
+make build/test-radiod-mp3-frames
+./build/test-radiod-mp3-frames
 sh tests/test_radio_icy_metadata.sh
 sh tests/test_airplay_led_bridge.sh
 sh tests/test_airplay_setup_persistence.sh
