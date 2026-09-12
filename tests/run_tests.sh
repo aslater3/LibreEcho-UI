@@ -220,9 +220,12 @@ sh tests/test_timed_timeout.sh
 make build/libreecho-web
 sh tests/test_setup_first_run.sh
 AGENT_SOCKET="$PWD/build/test-agent.sock"
-LIBREECHO_AGENT_SOCKET="$AGENT_SOCKET" python3 tests/mock_agent_history.py "$AGENT_SOCKET" >./build/test-agent.log 2>&1 &
-agent_pid=$!
+# Set the parent environment so the web daemon uses this fixture too, rather
+# than the production socket or an inherited socket from another test run.
+LIBREECHO_AGENT_SOCKET="$AGENT_SOCKET"
 export LIBREECHO_AGENT_SOCKET
+python3 tests/mock_agent_history.py "$AGENT_SOCKET" >./build/test-agent.log 2>&1 &
+agent_pid=$!
 i=0
 while [ ! -S "$AGENT_SOCKET" ]; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-agent.log; exit 1; }; sleep 0.1; done
 make build/test-timer-intent
@@ -337,7 +340,17 @@ LIBREECHO_VENDOR_FORCE_MARKER=./build/test-vendor-config/vendor-import-force-nex
 LIBREECHO_WLAN0_PATH=./build/test-wlan0 \
 ./build/libreecho-web --backend linux --config "$CFG" --web-root ./web --listen "127.0.0.1:$PORT" >./build/test-linux.log 2>&1 &
 pid=$!
-sleep 1
+# Restoring enabled integrations can outlast one second when their daemons
+# are absent on the host. Wait for HTTP readiness, keeping failure bounded.
+i=0
+while ! curl --max-time 1 -fsS "$URL/api/v1/config" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if ! kill -0 "$pid" 2>/dev/null || [ "$i" -ge 100 ]; then
+        cat ./build/test-linux.log
+        exit 1
+    fi
+    sleep 0.1
+done
 code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio")
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.available == false and .data.unavailable == true' /tmp/le-linux-audio.out >/dev/null
