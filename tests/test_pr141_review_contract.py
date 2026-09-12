@@ -11,7 +11,7 @@ openapi = json.loads(Path("web/openapi.json").read_text(encoding="utf-8"))
 docs = Path("docs/API.md").read_text(encoding="utf-8")
 
 assert '#include "inherited_fds.h"' in http
-assert http.count("le_close_inherited_fds(fd);") >= 3
+assert http.count("le_close_inherited_fds(fd);") >= 5
 assert "start_api_worker(c->fd,api,&q)" in http
 assert "start_pcm_stream(c->fd,selected_channel)" in http
 assert "opendir(\"/proc/self/fd\")" in Path("src/inherited_fds.c").read_text(encoding="utf-8")
@@ -94,7 +94,7 @@ assert "!q->https&&persist_auth_sessions(c)&&c->auth.persisted_session_evicted" 
 assert "evicted session could not be removed" in api
 
 assert '#include "inherited_fds.h"' in http
-assert http.count("le_close_inherited_fds(fd);") >= 3
+assert http.count("le_close_inherited_fds(fd);") >= 5
 assert "opendir(\"/proc/self/fd\")" in Path("src/inherited_fds.c").read_text(encoding="utf-8")
 assert "inherited != keep_fd" in Path("src/inherited_fds.c").read_text(encoding="utf-8")
 assert "target_end-target_start-1" in http
@@ -157,5 +157,43 @@ assert "old_short[sizeof(c->button_short)]" in api
 assert "memcpy(c->button_short,old_short,sizeof(old_short))" in api
 assert "memcpy(c->button_action_sounds,old_sounds,sizeof(old_sounds))" in api
 assert "button_action_sounds" in Path("tests/test_config.sh").read_text(encoding="utf-8")
+
+# Follow-up closure: the update workers close inherited descriptors like the
+# assistant, PCM and kernel-log workers, and every present feature field is
+# validated before the USB role side effect.
+assert "le_close_inherited_fds(fd);(void)stream_update_upload(" in http
+assert "le_close_inherited_fds(fd);(void)run_update_fetch(" in http
+assert "int hv,want_https=json_get_bool" in features
+assert features.index("if(want_host<1&&want_https<1&&want_sim<1)") < features.index("usb_role_write")
+assert "usb_host, simulation or https must be boolean" in features
+
+# The config importer consumes every exported feature and MAC setting.
+assert 'feature_https_field=json_get_bool(j,"feature_https",&feature_https)' in api
+assert 'feature_simulation_field=json_get_bool(j,"feature_simulation",&feature_simulation)' in api
+assert 'mac_wifi_field=json_get_string(j,"mac_wifi",mac_wifi,sizeof(mac_wifi))' in api
+assert 'mac_bt_field=json_get_string(j,"mac_bt",mac_bt,sizeof(mac_bt))' in api
+assert 'c->feature_https=feature_https;' in api
+assert 'snprintf(c->mac_wifi,sizeof(c->mac_wifi),"%s",canon)' in api
+
+# The light sensor retries a miss instead of caching it.
+light_src = Path("src/backend_linux.c").read_text(encoding="utf-8")
+light_start = light_src.index("static const char *light_sensor_dir(void)")
+light_end = light_src.index("static int light_attr(", light_start)
+light_fn = light_src[light_start:light_end]
+assert "static int searched" not in light_fn
+assert "if (found)" in light_fn
+
+# radiod accumulates partial frames instead of discarding them.
+radiod_src = Path("src/adapter/radiod.c").read_text(encoding="utf-8")
+assert "static int mp3_take_frame(" in radiod_src
+assert "Incomplete frame at the head: keep it and ask for more input." in radiod_src
+assert "mp3_take_frame(&decoder, in, &filled, sizeof(in), pcm," in radiod_src
+assert "make build/test-radiod-mp3-frames" in runner
+assert "./build/test-radiod-mp3-frames" in runner
+
+# HTTPS is documented alongside the other system features.
+assert 'https' in openapi["paths"]["/system/features"]["put"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+assert "`https` enables or disables the HTTPS listener" in docs
+assert '"https_active": false' in docs
 
 print("PR 141 transport/auth/USB/radio source contract: ok")
