@@ -45,6 +45,7 @@ struct wyoming_state {
     int server_running;
     int detected;
     int streaming;
+    int pipeline_active;
     uint64_t detection_sample;
     uint64_t stream_samples;
     uint64_t quiet_samples;
@@ -199,6 +200,7 @@ static void close_client(struct wyoming_state *state)
     state->server_running = 0;
     state->detected = 0;
     state->streaming = 0;
+    state->pipeline_active = 0;
 }
 
 static void ring_append(struct wyoming_state *state,
@@ -394,6 +396,11 @@ static int handle_server_event(struct wyoming_state *state)
     if (!strcmp(event.type, "pause-satellite")) {
         (void)stop_stream(state);
         state->server_running = 0;
+        state->pipeline_active = 0;
+        return 0;
+    }
+    if (!strcmp(event.type, "error")) {
+        state->pipeline_active = 0;
         return 0;
     }
     if (!strcmp(event.type, "run-pipeline")) {
@@ -430,10 +437,15 @@ static int handle_server_event(struct wyoming_state *state)
                           channels);
     }
     if (!strcmp(event.type, "audio-stop")) {
+        int result;
+
         if (state->output_fd >= 0)
             close(state->output_fd);
         state->output_fd = -1;
-        return send_event(state, "played", NULL, NULL, 0);
+        result = send_event(state, "played", NULL, NULL, 0);
+        if (result == 0)
+            state->pipeline_active = 0;
+        return result;
     }
     return 0;
 }
@@ -458,7 +470,8 @@ static int handle_wake_event(struct wyoming_state *state)
         return 0;
     if (json_get_string(line, "model", model, sizeof(model)) < 1)
         strcpy(model, "Alexa");
-    if (state->client_fd >= 0 && state->server_running && !state->detected) {
+    if (state->client_fd >= 0 && state->server_running && !state->detected &&
+        !state->pipeline_active) {
         char data[128];
         const char *name = !strcmp(model, "alexa_v0.1") ? "Alexa" : model;
         (void)snprintf(data, sizeof(data), "{\"name\":\"%s\","
@@ -469,7 +482,10 @@ static int handle_wake_event(struct wyoming_state *state)
             return -1;
         if (request_local_wake_pipeline(state) < 0)
             return -1;
-        return start_stream(state);
+        if (start_stream(state) < 0)
+            return -1;
+        state->pipeline_active = 1;
+        return 0;
     }
     return 0;
 }

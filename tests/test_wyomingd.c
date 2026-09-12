@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -253,6 +254,26 @@ static int play_tts_response(int client_fd, int bus_reader)
     return 0;
 }
 
+static int expect_no_event(int fd, int timeout_ms)
+{
+    struct pollfd descriptor = {fd, POLLIN, 0};
+    int result;
+
+    do {
+        result = poll(&descriptor, 1, timeout_ms);
+    } while (result < 0 && errno == EINTR);
+    if (result > 0 && (descriptor.revents & POLLIN)) {
+        struct le_wyoming_event event;
+
+        CHECK(read_event(fd, &event) == 0);
+        fprintf(stderr, "unexpected Wyoming event while pipeline busy: %s\n",
+                event.type);
+        return -1;
+    }
+    CHECK(result == 0);
+    return 0;
+}
+
 int main(void)
 {
     char socket_path[108];
@@ -344,6 +365,15 @@ int main(void)
     CHECK(expect_local_wake_start(client_fd) == 0);
     CHECK(finish_input_stream(audio_fd, client_fd,
                               LE_VOICE_STREAM_MAX_SAMPLES) == 0);
+
+    /* Input silence ends before Home Assistant finishes the active pipeline.
+       A rapid second local detection must not start a replacement pipeline
+       while the first response is still pending. */
+    CHECK(send_wake(wake_fd, 40000) == 0);
+    CHECK(le_voice_stream_write_frame(audio_fd, 40000, samples,
+                                      sizeof(samples) / sizeof(samples[0]),
+                                      0) == 0);
+    CHECK(expect_no_event(client_fd, 500) == 0);
     CHECK(play_tts_response(client_fd, bus_reader) == 0);
 
     /* Completing one pipeline must leave the satellite armed for another
