@@ -272,18 +272,18 @@ private:
 
 }  // namespace
 
-struct le_wake_engine {
-    std::unique_ptr<WakeEngine> implementation;
-};
+/*
+ * Exposed as a backend rather than as le_wake_engine_* directly, so more than
+ * one engine can be built in and chosen by name at startup. The dispatcher in
+ * wake_engine.c owns struct le_wake_engine; this file only owns the WakeEngine
+ * it hands back as an opaque handle.
+ */
+extern "C" {
 
-extern "C" struct le_wake_engine *
-le_wake_engine_create(const char *model_directory, unsigned int threads)
+static void *onnx_create(const char *model_directory, unsigned int threads)
 {
     try {
-        std::unique_ptr<le_wake_engine> engine(new le_wake_engine);
-        engine->implementation.reset(
-            new WakeEngine(model_directory, threads));
-        return engine.release();
+        return new WakeEngine(model_directory, threads);
     } catch (const std::exception &error) {
         std::fprintf(stderr, "wake engine initialization failed: %s\n",
                      error.what());
@@ -291,17 +291,15 @@ le_wake_engine_create(const char *model_directory, unsigned int threads)
     }
 }
 
-extern "C" int le_wake_engine_feed(struct le_wake_engine *engine,
-                                   const int16_t *samples,
-                                   size_t count,
-                                   float *score,
-                                   int *new_score)
+static int onnx_feed(void *impl, const int16_t *samples, size_t count,
+                     float *score, int *new_score)
 {
-    if (!engine || !engine->implementation)
+    WakeEngine *engine = static_cast<WakeEngine *>(impl);
+
+    if (!engine)
         return -1;
     try {
-        return engine->implementation->Feed(
-            samples, count, score, new_score);
+        return engine->Feed(samples, count, score, new_score);
     } catch (const std::exception &error) {
         std::fprintf(stderr, "wake engine inference failed: %s\n",
                      error.what());
@@ -309,14 +307,27 @@ extern "C" int le_wake_engine_feed(struct le_wake_engine *engine,
     }
 }
 
-extern "C" unsigned int le_wake_engine_last_inference_us(
-    const struct le_wake_engine *engine)
+static unsigned int onnx_last_inference_us(const void *impl)
 {
-    return engine && engine->implementation
-        ? engine->implementation->LastInferenceUs() : 0;
+    const WakeEngine *engine = static_cast<const WakeEngine *>(impl);
+
+    return engine ? engine->LastInferenceUs() : 0;
 }
 
-extern "C" void le_wake_engine_destroy(struct le_wake_engine *engine)
+static void onnx_destroy(void *impl)
 {
-    delete engine;
+    delete static_cast<WakeEngine *>(impl);
 }
+
+/*
+ * `extern` is required: a namespace-scope const object has internal linkage in
+ * C++ by default, and extern "C" changes language linkage, not that. Without it
+ * the dispatcher's `extern const ...` declaration would not resolve at link
+ * time.
+ */
+extern const struct le_wake_engine_backend le_wake_engine_onnx_backend;
+const struct le_wake_engine_backend le_wake_engine_onnx_backend = {
+    "onnx", onnx_create, onnx_feed, onnx_last_inference_us, onnx_destroy
+};
+
+}  // extern "C"
