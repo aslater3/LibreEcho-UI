@@ -62,6 +62,7 @@ python3 tests/test_wake_word_ui_contract.py
 python3 tools/test_virtual_echo.py
 node tests/test_wifi_security_interaction.js
 node tests/test_timers_ui.js
+node tests/test_assistant_clock_format_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -96,9 +97,10 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_voice_dsp.c src/adapter/voice_dsp.c \
     -o build/test-voice-dsp
 ./build/test-voice-dsp
-make build/test-voice-aec build/test-voice-reference
+make build/test-voice-aec build/test-voice-reference build/test-spoken-time
 ./build/test-voice-aec
 ./build/test-voice-reference
+./build/test-spoken-time
 make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
 make build/test-voice-reply build/test-voice-playback

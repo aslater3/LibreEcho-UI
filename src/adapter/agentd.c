@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "adapter.h"
+#include "spoken_time.h"
 #include "llm_http.h"
 #include "llm_provider.h"
 #include "llm_store.h"
@@ -58,6 +59,11 @@ struct agent_config {
     char latitude[16];
     char longitude[16];
     char weather_provider[24];
+    /*
+     * The clock the device speaks in, "12" or "24". Stored here with the other
+     * spoken-output settings because agentd is what says the time out loud.
+     */
+    char clock_format[4];
 };
 
 struct agent_state {
@@ -185,6 +191,7 @@ static void config_defaults(struct agent_config *config)
     snprintf(config->prompt, sizeof(config->prompt), "%s",
              le_llm_default_voice_prompt());
     strcpy(config->weather_provider, "open-meteo");
+    strcpy(config->clock_format, LE_CLOCK_FORMAT_DEFAULT);
 }
 
 /*
@@ -267,10 +274,12 @@ static int save_config(const struct agent_state *state)
         "\"prompt\":\"%s\","
         "\"home_location\":\"%s\","
         "\"latitude\":\"%s\",\"longitude\":\"%s\","
-        "\"weather_provider\":\"%s\"}\n",
+        "\"weather_provider\":\"%s\","
+        "\"clock_format\":\"%s\"}\n",
         state->config.enabled ? "true" : "false", state->config.provider,
         model, prompt, location, state->config.latitude,
-        state->config.longitude, state->config.weather_provider);
+        state->config.longitude, state->config.weather_provider,
+        state->config.clock_format);
     return length > 0 && length < (int)sizeof(json)
         ? config_write_atomic(state->config_path, json, (size_t)length)
         : -1;
@@ -301,6 +310,15 @@ static void load_config(struct agent_state *state)
     (void)json_get_string(json, "weather_provider",
                           state->config.weather_provider,
                           sizeof(state->config.weather_provider));
+    (void)json_get_string(json, "clock_format",
+                          state->config.clock_format,
+                          sizeof(state->config.clock_format));
+    /*
+     * A device that never chose gets the 12-hour default; one that did keeps
+     * its choice across the upgrade.
+     */
+    if (!le_clock_format_valid(state->config.clock_format))
+        strcpy(state->config.clock_format, LE_CLOCK_FORMAT_DEFAULT);
     if (!state->config.weather_provider[0])
         strcpy(state->config.weather_provider, "open-meteo");
     if (!state->config.model[0])
@@ -452,6 +470,7 @@ static int command_status(struct agent_state *state, int fd,
             "\"home_location\":\"%s\","
             "\"latitude\":\"%s\",\"longitude\":\"%s\","
             "\"weather_provider\":\"%s\","
+            "\"clock_format\":\"%s\","
             "\"base_url\":\"%s\",\"api_key_configured\":%s,"
             "\"voice_pipeline\":true,\"text_streaming\":true,"
             "\"wake_connected\":%s,\"audio_connected\":%s,"
@@ -476,7 +495,7 @@ static int command_status(struct agent_state *state, int fd,
             auth_state_name(state->auth_state), code, url, error,
             model, prompt, location, state->config.latitude,
             state->config.longitude, state->config.weather_provider,
-            base_url,
+            state->config.clock_format, base_url,
             state->credentials.api_key[0] ? "true" : "false",
             voice_metrics.wake_connected ? "true" : "false",
             voice_metrics.audio_connected ? "true" : "false",
@@ -1052,7 +1071,8 @@ static void build_turn_prompt(struct agent_state *state, char *out,
 
     (void)snprintf(out, size, "%s", state->config.prompt);
     if (localtime_r(&now, &tm))
-        (void)strftime(when, sizeof(when), "%A %e %B, %H:%M", &tm);
+        le_spoken_time(when, sizeof(when), &tm,
+                       le_clock_format_twelve_hour(state->config.clock_format));
     if (when[0])
         (void)snprintf(out + strlen(out), size - strlen(out),
                        " The current local date and time is %s.", when);
@@ -1364,6 +1384,11 @@ static int command_configure(struct agent_state *state, const char *args,
                        "weather_provider must be open-meteo, met-no or off");
     if (parsed > 0)
         strcpy(updated.weather_provider, value);
+    parsed = json_get_string(args, "clock_format", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 && !le_clock_format_valid(value)))
+        return respond(fd, id, 0, "clock_format must be 12 or 24");
+    if (parsed > 0)
+        strcpy(updated.clock_format, value);
     parsed = json_get_string(args, "base_url", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 &&
         (!endpoint_valid(value) || strlen(value) >= sizeof(state->credentials.base_url))))
