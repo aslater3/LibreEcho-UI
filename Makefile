@@ -636,6 +636,7 @@ $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
 $(BUILD)/test-voice-listening-feedback: \
 		tests/test_voice_listening_feedback.c \
 		src/adapter/voice_listening_led.c
+	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
 test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback
