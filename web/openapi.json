@@ -78,7 +78,7 @@
      "Assistant"
     ],
     "summary": "Read voice-assistant state and latency telemetry",
-    "description": "Reports subscription authentication, wake/STT stream health, and measured speech-end-to-first-PCM latency.",
+    "description": "Reports subscription authentication, wake/STT stream health, measured speech-end-to-first-PCM latency, and the configured spoken time format.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -93,7 +93,7 @@
      "Assistant"
     ],
     "summary": "Configure the wake-to-reply assistant",
-    "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, and whether wake-to-reply is enabled. API keys are write-only and never returned.",
+    "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, the spoken time format, and whether wake-to-reply is enabled. API keys are write-only and never returned.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -129,6 +129,15 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 95
+         },
+         "clock_format": {
+          "type": "string",
+          "enum": [
+           "12",
+           "24"
+          ],
+          "default": "12",
+          "description": "Spoken time format: \"12\" reads times as 1:57 PM, \"24\" as 13:57. Applies to ChatGPT and OpenAI-compatible providers."
          },
          "prompt": {
           "type": "string",

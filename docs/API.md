@@ -396,9 +396,10 @@ previous configuration unchanged. The request requires `X-LibreEcho-CSRF`.
 #### GET /api/v1/assistant
 
 Returns assistant configuration, ChatGPT device-login state, pipeline
-connectivity, local STT timing, and first-audio latency telemetry. The latency
-measurement is from the estimated end of speech to the first PCM submitted to
-the announcement bus; the current target is 3000 ms.
+connectivity, local STT timing, and first-audio latency telemetry. The
+returned configuration includes `clock_format`, the format used when the time
+is spoken aloud. The latency measurement is from the estimated end of speech to
+the first PCM submitted to the announcement bus; the current target is 3000 ms.
 
 #### PUT /api/v1/assistant
 
@@ -409,6 +410,7 @@ Updates the provider-neutral assistant configuration:
   "enabled": true,
   "provider": "openai-codex",
   "model": "gpt-5.4",
+  "clock_format": "12",
   "prompt": "Reply in concise, natural spoken English without markdown."
 }
 ```
@@ -416,6 +418,12 @@ Updates the provider-neutral assistant configuration:
 The prompt is sent as the response provider's instruction text. Keep it
 voice-safe: concise prose, no markdown, URLs, citations, emoji, or claims that
 an external action succeeded without tool confirmation.
+
+`clock_format` selects how the assistant says times aloud, for both providers:
+`"12"` reads "1:57 PM" and `"24"` reads "13:57". The default is `"12"`; a
+device that has never stored a choice receives it, while an explicit `"12"` or
+`"24"` is kept. Any other value is rejected with HTTP 400 and the previous
+configuration is left unchanged.
 
 #### POST /api/v1/assistant/auth/start
 
