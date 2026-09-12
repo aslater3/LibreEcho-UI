@@ -166,6 +166,7 @@ make build/test-radiod-mp3-frames
 ./build/test-radiod-mp3-frames
 sh tests/test_radio_icy_metadata.sh
 sh tests/test_airplay_led_bridge.sh
+sh tests/test_home_assistant_discovery.sh
 sh tests/test_airplay_setup_persistence.sh
 sh tests/test_airplay_mount_failure.sh
 python3 tests/test_airplay_premounted_runtime.py
