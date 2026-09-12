@@ -45,6 +45,7 @@ struct wyoming_state {
     int server_running;
     int detected;
     int streaming;
+    int pipeline_active;
     uint64_t detection_sample;
     uint64_t stream_samples;
     uint64_t quiet_samples;
@@ -199,6 +200,7 @@ static void close_client(struct wyoming_state *state)
     state->server_running = 0;
     state->detected = 0;
     state->streaming = 0;
+    state->pipeline_active = 0;
 }
 
 static void ring_append(struct wyoming_state *state,
@@ -321,6 +323,16 @@ static int send_info(struct wyoming_state *state)
     return send_event(state, "info", info, NULL, 0);
 }
 
+static int request_local_wake_pipeline(struct wyoming_state *state)
+{
+    static const char pipeline[] =
+        "{\"start_stage\":\"asr\",\"end_stage\":\"tts\","
+        "\"restart_on_end\":false,"
+        "\"snd_format\":{\"rate\":48000,\"width\":2,\"channels\":2}}";
+
+    return send_event(state, "run-pipeline", pipeline, NULL, 0);
+}
+
 static int start_stream(struct wyoming_state *state)
 {
     uint64_t first;
@@ -350,7 +362,6 @@ static int stop_stream(struct wyoming_state *state)
     state->streaming = 0;
     le_voice_listening_led_set(0);
     state->detected = 0;
-    state->server_running = 0;
     if (send_event(state, "audio-stop", NULL, NULL, 0) < 0)
         return -1;
     return send_event(state, "streaming-stopped", NULL, NULL, 0);
@@ -370,6 +381,14 @@ static int handle_server_event(struct wyoming_state *state)
     data = event.data_length ? event.data : event.header;
     if (!strcmp(event.type, "describe"))
         return send_info(state);
+    if (!strcmp(event.type, "ping")) {
+        if (event.payload_length != 0)
+            return -1;
+        /* Wyoming's optional ping text is a correlation value. Echoing the
+           already validated, bounded data object preserves it in the pong. */
+        return send_event(state, "pong",
+                          event.data_length ? event.data : NULL, NULL, 0);
+    }
     if (!strcmp(event.type, "run-satellite")) {
         state->server_running = 1;
         return 0;
@@ -377,6 +396,11 @@ static int handle_server_event(struct wyoming_state *state)
     if (!strcmp(event.type, "pause-satellite")) {
         (void)stop_stream(state);
         state->server_running = 0;
+        state->pipeline_active = 0;
+        return 0;
+    }
+    if (!strcmp(event.type, "error")) {
+        state->pipeline_active = 0;
         return 0;
     }
     if (!strcmp(event.type, "run-pipeline")) {
@@ -413,10 +437,15 @@ static int handle_server_event(struct wyoming_state *state)
                           channels);
     }
     if (!strcmp(event.type, "audio-stop")) {
+        int result;
+
         if (state->output_fd >= 0)
             close(state->output_fd);
         state->output_fd = -1;
-        return send_event(state, "played", NULL, NULL, 0);
+        result = send_event(state, "played", NULL, NULL, 0);
+        if (result == 0)
+            state->pipeline_active = 0;
+        return result;
     }
     return 0;
 }
@@ -441,7 +470,8 @@ static int handle_wake_event(struct wyoming_state *state)
         return 0;
     if (json_get_string(line, "model", model, sizeof(model)) < 1)
         strcpy(model, "Alexa");
-    if (state->client_fd >= 0 && state->server_running && !state->detected) {
+    if (state->client_fd >= 0 && state->server_running && !state->detected &&
+        !state->pipeline_active) {
         char data[128];
         const char *name = !strcmp(model, "alexa_v0.1") ? "Alexa" : model;
         (void)snprintf(data, sizeof(data), "{\"name\":\"%s\","
@@ -450,6 +480,12 @@ static int handle_wake_event(struct wyoming_state *state)
         state->detected = 1;
         if (send_event(state, "detection", data, NULL, 0) < 0)
             return -1;
+        if (request_local_wake_pipeline(state) < 0)
+            return -1;
+        if (start_stream(state) < 0)
+            return -1;
+        state->pipeline_active = 1;
+        return 0;
     }
     return 0;
 }
