@@ -1926,6 +1926,7 @@
      "Integrations"
     ],
     "summary": "Enable or disable an integration",
+    "description": "The home-assistant integration also selects the voice pipeline: enabling it persists Home Assistant mode, while disabling it persists and restores local mode.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"

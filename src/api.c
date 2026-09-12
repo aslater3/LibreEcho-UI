@@ -2186,15 +2186,22 @@ static void after_integration_change(struct api_context *c,
                                      struct api_response *r)
 {
     int enabled;
+    int home_assistant_change = 0;
     int rc;
 
     if (strcmp(q->method, "PUT") ||
         strncmp(q->path, "/api/v1/integrations/", 21) ||
         r->status != 200)
         return;
+    if (strstr(q->path, "home-assistant") &&
+        json_get_bool(q->body, "enabled", &enabled) == 1) {
+        ensure_voice_pipeline_config(c);
+        snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
+                 "%s", enabled ? "home-assistant" : "local");
+        home_assistant_change = 1;
+    }
     rc = persist_configuration(c);
-    if (!rc && strstr(q->path, "home-assistant") &&
-        json_get_bool(q->body, "enabled", &enabled) == 1)
+    if (!rc && home_assistant_change)
         rc = apply_home_assistant_mode(enabled);
     if (rc)
         err(r, 503, rc, "Integration configuration could not be applied");
