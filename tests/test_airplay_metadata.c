@@ -15,6 +15,12 @@ static void init_ctx(struct airplay_ctx *ctx)
     memset(ctx, 0, sizeof(*ctx));
     ctx->listener = -1;
     ctx->metadata_fd = -1;
+    ctx->dbus_pid = -1;
+    ctx->avahi_pid = -1;
+    ctx->nqptp_pid = -1;
+    ctx->audio_pid = -1;
+    ctx->engine_pid = -1;
+    ctx->shairport_pid = -1;
 }
 
 static void feed_fragmented(struct airplay_ctx *ctx, const char *text,
@@ -281,6 +287,74 @@ static void test_hostname_refresh_failure_remains_retryable(void)
     assert(ctx.enabled == 1);
 }
 
+static pid_t spawn_idle_child(void)
+{
+    pid_t pid = fork();
+
+    assert(pid >= 0);
+    if (pid == 0) {
+        for (;;)
+            pause();
+    }
+    return pid;
+}
+
+static void test_disabling_airplay_preserves_required_mdns(void)
+{
+    struct airplay_ctx ctx;
+    char message[] = "{\"v\":1,\"id\":20,\"cmd\":\"status\",\"args\":{}}";
+    char response[1024];
+    int length;
+
+    init_ctx(&ctx);
+    ctx.enabled = 1;
+    ctx.mdns_required = 1;
+    ctx.dbus_pid = spawn_idle_child();
+    ctx.avahi_pid = spawn_idle_child();
+
+    assert(set_enabled(&ctx, 0) == 0);
+    assert(ctx.enabled == 0);
+    assert(ctx.dbus_pid > 0);
+    assert(ctx.avahi_pid > 0);
+    assert(kill(ctx.dbus_pid, 0) == 0);
+    assert(kill(ctx.avahi_pid, 0) == 0);
+    length = request(&ctx, message, response, sizeof(response));
+    assert(length > 0);
+    assert(strstr(response, "\"enabled\":false"));
+    assert(strstr(response, "\"dbus_running\":true"));
+    assert(strstr(response, "\"avahi_running\":true"));
+
+    stop_child(&ctx.avahi_pid);
+    stop_child(&ctx.dbus_pid);
+}
+
+static void test_hostname_refresh_restarts_mdns_when_airplay_is_disabled(void)
+{
+    struct airplay_ctx ctx;
+    char message[] = "{\"v\":1,\"id\":21,\"cmd\":\"refresh_hostname\",\"args\":{}}";
+    char response[512];
+    int old_dbus;
+    int old_avahi;
+    int length;
+
+    init_ctx(&ctx);
+    ctx.enabled = 0;
+    ctx.mdns_required = 1;
+    ctx.dbus_pid = spawn_idle_child();
+    ctx.avahi_pid = spawn_idle_child();
+    old_dbus = ctx.dbus_pid;
+    old_avahi = ctx.avahi_pid;
+
+    length = request(&ctx, message, response, sizeof(response));
+    assert(length > 0);
+    assert(strstr(response, "\"id\":21"));
+    assert(strstr(response, "\"ok\":false"));
+    assert(ctx.dbus_pid == -1);
+    assert(ctx.avahi_pid == -1);
+    assert(kill(old_dbus, 0) < 0 && errno == ESRCH);
+    assert(kill(old_avahi, 0) < 0 && errno == ESRCH);
+}
+
 int main(void)
 {
     test_fragmented_base64_and_json();
@@ -292,6 +366,8 @@ int main(void)
     test_fifo_is_nonblocking();
     test_hostname_refresh_is_noop_while_disabled();
     test_hostname_refresh_failure_remains_retryable();
+    test_disabling_airplay_preserves_required_mdns();
+    test_hostname_refresh_restarts_mdns_when_airplay_is_disabled();
     puts("AirPlay metadata ingestion: ok");
     return 0;
 }
