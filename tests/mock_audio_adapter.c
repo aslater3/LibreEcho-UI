@@ -143,16 +143,26 @@ int main(int argc, char **argv)
                     response, sizeof(response), id,
                     "{\"speaking\":true}");
             } else if (!strcmp(command, "stop_speech")) {
+                const char *fail_marker =
+                    getenv("LE_TEST_FAIL_STOP_SPEECH");
                 FILE *capture = fopen(argv[2], "a");
 
                 if (capture) {
                     fprintf(capture, "command stop_speech\n");
                     fclose(capture);
                 }
-                speaking = 0;
-                length = le_adapter_respond_ok(
-                    response, sizeof(response), id,
-                    "{\"stopped\":true}");
+                if (fail_marker && access(fail_marker, F_OK) == 0) {
+                    /* The adapter is alive but the stop fails. The caller
+                       must not report success; speaking stays on, because
+                       nothing actually stopped. */
+                    length = le_adapter_respond_err(
+                        response, sizeof(response), id, "stop failed");
+                } else {
+                    speaking = 0;
+                    length = le_adapter_respond_ok(
+                        response, sizeof(response), id,
+                        "{\"stopped\":true}");
+                }
             } else if (!strcmp(command, "status")) {
                 length = le_adapter_respond_ok(
                     response, sizeof(response), id,

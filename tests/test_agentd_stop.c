@@ -107,6 +107,7 @@ int main(void)
     char audio_capture[256] = "";
     char radio_socket[256] = "";
     char first_pcm_path[256] = "";
+    char stop_fail_marker[256] = "";
     char response[LE_ADAPTER_MSG_MAX];
     struct agent_state state;
     struct timespec delay = {0, 10000000L};
@@ -128,6 +129,9 @@ int main(void)
     snprintf(first_pcm_path, sizeof(first_pcm_path),
              "%s/first-pcm", directory);
     CHECK(setenv("LE_TEST_TTS_HOLD_SPEAKING", "1", 1) == 0);
+    snprintf(stop_fail_marker, sizeof(stop_fail_marker),
+             "%s/fail-stop-speech", directory);
+    CHECK(setenv("LE_TEST_FAIL_STOP_SPEECH", stop_fail_marker, 1) == 0);
     audio_child = fork();
     CHECK(audio_child >= 0);
     if (audio_child == 0) {
@@ -200,6 +204,26 @@ int main(void)
 
     printf("agentd: spoken stop handled in %llums; worker kept speaking: ok\n",
            monotonic_ms() - stop_started);
+
+    /*
+     * A failed stop command: the audio service answers an error. The handler
+     * must not report a silent success -- it logs the failure and speaks a
+     * short apology, and it must still return promptly. A successful stop
+     * earlier in this test must not have produced that apology.
+     */
+    CHECK(!file_contains(audio_capture, "couldn't stop"));
+    {
+        FILE *marker = fopen(stop_fail_marker, "w");
+
+        CHECK(marker != NULL);
+        fclose(marker);
+    }
+    stop_started = monotonic_ms();
+    CHECK(handle_stop_intent(&state, "stop") == 1);
+    CHECK(monotonic_ms() - stop_started < 5000);
+    CHECK(wait_for_contains(audio_capture, "couldn't stop", 5000));
+    unlink(stop_fail_marker);
+    printf("agentd: failed stop reports and speaks a failure: ok\n");
 
 cleanup:
     if (playback_started) {

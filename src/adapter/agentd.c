@@ -1209,6 +1209,7 @@ static int handle_stop_intent(struct agent_state *state, const char *transcript)
     char response[LE_ADAPTER_MSG_MAX];
     char document[768];
     FILE *status;
+    int failed = 0;
 
     if (!le_stop_intent_matches(transcript))
         return 0;
@@ -1248,12 +1249,14 @@ static int handle_stop_intent(struct agent_state *state, const char *transcript)
         (void)play_sentence(state, le_stop_external_speech());
         return 1;
     }
-    if (plan.stop_radio)
-        (void)adapter_call(state->radio_socket, 1000, "stop", NULL,
-                           response, sizeof(response));
-    if (plan.stop_noise)
-        (void)adapter_call(state->audio_socket, 1000, "noise_stop", NULL,
-                           response, sizeof(response));
+    if (plan.stop_radio &&
+        adapter_call(state->radio_socket, 1000, "stop", NULL,
+                     response, sizeof(response)) != LE_ADAPTER_OK)
+        failed = 1;
+    if (plan.stop_noise &&
+        adapter_call(state->audio_socket, 1000, "noise_stop", NULL,
+                     response, sizeof(response)) != LE_ADAPTER_OK)
+        failed = 1;
     if (plan.stop_speech) {
         /*
          * Per-turn cancellation, not the playback lifecycle destructor: the
@@ -1264,13 +1267,28 @@ static int handle_stop_intent(struct agent_state *state, const char *transcript)
          * delay the stop by up to its 30-second status loop.
          */
         le_voice_playback_cancel_turn(&state->playback);
-        (void)adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
-                           response, sizeof(response));
+        if (adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
+                         response, sizeof(response)) != LE_ADAPTER_OK)
+            failed = 1;
     }
     /* Silence is the confirmation, and it is also what keeps a follow-up
        listen from arming and starting the loop over again. */
     le_log_info("agentd: stop handled radio=%d speech=%d noise=%d",
                 plan.stop_radio, plan.stop_speech, plan.stop_noise);
+    if (failed) {
+        le_log_warn("agentd: stop request could not be applied to every "
+                    "source");
+        /*
+         * Best-effort spoken feedback, bounded by the adapter timeout. A plain
+         * speak rather than play_sentence(): the playback machinery may be the
+         * piece that just failed, and a failed stop must still say something.
+         */
+        (void)adapter_call(
+            state->audio_socket, 1000, "speak",
+            "{\"text\":\"Sorry, I couldn't stop that.\","
+            "\"request_id\":\"stop-failed\"}",
+            response, sizeof(response));
+    }
     return 1;
 }
 
