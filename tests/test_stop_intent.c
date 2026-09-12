@@ -180,6 +180,26 @@ int main(void)
     /* "turn it off" alone is as likely to mean the lights, so it must not hit. */
     assert(!le_stop_intent_matches("turn it off"));
 
+    /*
+     * Only imperative commands count. The broad words inside ordinary
+     * sentences are almost never a request, and a wrong match silences
+     * whatever the person was enjoying: these all reached the model before.
+     */
+    assert(!le_stop_intent_matches("when will the rain stop?"));
+    assert(!le_stop_intent_matches("play quiet music"));
+    assert(!le_stop_intent_matches("who recorded the sound of silence?"));
+    assert(!le_stop_intent_matches("i like silence in the morning"));
+    assert(!le_stop_intent_matches("the stop sign is red"));
+    assert(!le_stop_intent_matches("will it rain tomorrow?"));
+
+    /* Politeness does not hide a real command. */
+    assert(le_stop_intent_matches("please stop"));
+    assert(le_stop_intent_matches("can you stop the radio"));
+    assert(le_stop_intent_matches("could you please be quiet"));
+    assert(le_stop_intent_matches("just stop"));
+    assert(le_stop_intent_matches("make it stop"));
+    assert(le_stop_intent_matches("make it quiet please"));
+
     puts("stop_intent: phrases, sources, timer priority, phone sources and safety ok");
     return 0;
 }

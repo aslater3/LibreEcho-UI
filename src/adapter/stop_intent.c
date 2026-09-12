@@ -69,9 +69,46 @@ static int has_phrase(const char *text, const char *phrase)
     return strstr(text, phrase) != NULL;
 }
 
+/* True when `word` is the first word of `text` (still space-delimited). */
+static int starts_with_word(const char *text, const char *word)
+{
+    size_t length = strlen(word);
+
+    return strncmp(text + 1, word, length) == 0 && text[1 + length] == ' ';
+}
+
+/*
+ * Politeness and wake-word noise must not hide the command word: "can you
+ * stop" is as much a stop request as "stop". Only whole words are skipped,
+ * so "because" is not "be".
+ */
+static const char *after_lead_words(const char *text)
+{
+    static const char *const leads[] = {
+        "please", "hey", "libreecho", "ok", "okay", "can", "could",
+        "would", "will", "you", "be", "just",
+    };
+    const char *next;
+    size_t i;
+
+    for (;;) {
+        next = NULL;
+        for (i = 0; i < sizeof(leads) / sizeof(leads[0]); ++i) {
+            if (starts_with_word(text, leads[i])) {
+                next = text + 1 + strlen(leads[i]);
+                break;
+            }
+        }
+        if (!next)
+            return text;
+        text = next;
+    }
+}
+
 int le_stop_intent_matches(const char *transcript)
 {
     char text[256];
+    const char *command;
 
     if (!transcript || !transcript[0])
         return 0;
@@ -86,8 +123,25 @@ int le_stop_intent_matches(const char *transcript)
         has_word(text, "never"))
         return 0;
 
-    if (has_word(text, "stop") || has_word(text, "quiet") ||
-        has_word(text, "silence") || has_phrase(text, " shut up "))
+    /*
+     * The broad words only count in imperative position: "stop", "quiet" and
+     * "silence" inside an ordinary sentence are almost never a request --
+     * "when will the rain stop?", "play quiet music" and "The Sound of
+     * Silence" all reached the model before this, and a wrong match silences
+     * whatever the person was enjoying. Leading politeness is skipped first,
+     * so "can you stop" and "please be quiet" still count.
+     */
+    command = after_lead_words(text);
+    if (starts_with_word(command, "stop") ||
+        starts_with_word(command, "quiet") ||
+        starts_with_word(command, "silence"))
+        return 1;
+    if (has_phrase(text, " shut up "))
+        return 1;
+    /* "make it stop" / "make it quiet" are imperatives the word-order rule
+       above cannot see. */
+    if (has_phrase(text, " make it stop ") ||
+        has_phrase(text, " make it quiet "))
         return 1;
 
     /*
