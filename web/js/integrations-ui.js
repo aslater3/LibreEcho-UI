@@ -67,6 +67,7 @@ function localAssistantBody(a,selected,pipeline) {
       ${field('Endpoint URL',a.base_url||'','local-base-url','url','placeholder="http://198.51.100.10:8000/v1"')}
       <label class="field"><span>API key (optional)</span><input id="local-api-key" type="password" autocomplete="off" placeholder="${a.api_key_configured?'Configured; leave blank to keep it':'Leave blank when the endpoint does not require one'}"></label>
       ${field('Model',a.model||'','local-model')}
+      ${clockFormatField(a.clock_format,'local-clock-format')}
       ${field('Whisper Wyoming endpoint',stt.wyoming_uri||'','stt-wyoming-uri','text','placeholder="tcp://198.51.100.10:10300"')}
       ${field('Whisper model',stt.model||'whisper-small','stt-model')}
       ${field('Piper Wyoming endpoint',tts.wyoming_uri||'','tts-wyoming-uri','text','placeholder="tcp://198.51.100.10:10200"')}
@@ -107,7 +108,7 @@ function deviceAssistantBody(a,selected) {
     <div>
       ${field('Provider',a.provider_name||a.provider,'assistant-provider','text','disabled')}
       ${field('Model',a.model||'','assistant-model')}
-      ${clockFormatField(a.clock_format)}
+      ${clockFormatField(a.clock_format,'assistant-clock-format')}
       <label class="field"><span>Voice response prompt</span><textarea id="assistant-prompt" rows="8">${esc(a.prompt||'')}</textarea></label>
       ${saveButton('save-assistant')}
     </div>
@@ -126,9 +127,10 @@ function deviceAssistantBody(a,selected) {
 // The assistant reads the time out loud, so this picks how it says it rather
 // than how anything is displayed. Anything the daemon has not set yet means a
 // device on the old build, which spoke 24-hour; show 12, the new default.
-function clockFormatField(value) {
+// Both provider bodies render it, so each passes its own element id.
+function clockFormatField(value,id) {
   const twelve = value !== '24';
-  return `<label class="field"><span>Spoken time format</span><select id="assistant-clock-format">`+
+  return `<label class="field"><span>Spoken time format</span><select id="${id}">`+
     `<option value="12" ${twelve?'selected':''}>12-hour (2:30 PM)</option>`+
     `<option value="24" ${twelve?'':'selected'}>24-hour (14:30)</option>`+
     `</select></label>`;
@@ -234,7 +236,7 @@ async function integrationsPage() {
     bindProviderToggle('#use-local-provider','openai-compatible',pipeline);
     bindProviderToggle('#use-device-provider','openai-codex',pipeline);
 
-    bindDirty(['#local-base-url','#local-model','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
+    bindDirty(['#local-base-url','#local-model','#local-clock-format','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
     $('#save-local-assistant').onclick=async()=>{
       if(state.busy)return;
       setBusy(true);
@@ -254,6 +256,7 @@ async function integrationsPage() {
           enabled:localEnabled,
           base_url:$('#local-base-url').value.trim(),
           model:$('#local-model').value.trim(),
+          clock_format:$('#local-clock-format').value,
           prompt:$('#local-prompt').value.trim()
         };
         const key=$('#local-api-key').value;
