@@ -753,12 +753,16 @@ static const char *light_sensor_dir(void)
         LE_LIGHT_SYSFS_ROOT "/1-0039",
     };
     static const char *found;
-    static int searched;
     size_t i;
 
-    if (searched)
+    /*
+     * Only a successful discovery is cached: the TSL2540 driver can create
+     * its sysfs node after the first probe, and a cached miss would keep
+     * /light reporting the sensor unavailable until the daemon restarted
+     * while /status (read_light_level) probes afresh on every call.
+     */
+    if (found)
         return found;
-    searched = 1;
     for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
         char probe[128];
 
