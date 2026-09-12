@@ -163,6 +163,10 @@ $(BUILD)/test-light-sensor: tests/test_light_sensor.c \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/json.c src/log.c -o $@
 
+$(BUILD)/test-wake-health: tests/test_wake_health.c src/json.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
 $(BUILD)/test-network-health: tests/test_network_health.c \
 	src/adapter/network_health.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
@@ -641,6 +645,7 @@ clean:
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-thermal-zone-selection \
 		$(BUILD)/test-light-sensor \
+		$(BUILD)/test-wake-health \
 		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \
 		$(BUILD)/test-wake-decode \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \

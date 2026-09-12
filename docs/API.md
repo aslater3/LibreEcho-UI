@@ -1286,11 +1286,28 @@ successful `200` response with `data.available: false` and
     "detected_count": 5,
     "cpu_cost_percent": 15,
     "memory_cost_mb": 50,
+    "model_loaded": true,
+    "vad_active": false,
+    "capture_active": true,
+    "processed_frames": 302400000,
     "local_processing": true
   },
   "error": null
 }
 ```
+
+`model_loaded` is true only while the wake-word service reports its model
+loaded. `processed_frames` is the service's 64-bit count of processed 10 ms
+microphone frames since it started; it passes the 32-bit signed range after
+about 249 days of uptime and is reported in full, never wrapped or truncated.
+
+`vad_active` describes whether the current 10 ms frame contains voice activity,
+so it is normally `false` in a quiet room and is not a capture-health signal.
+`capture_active` is capture health derived from successive samples of
+`processed_frames`: it is `false` only after the counter fails to advance
+across a one-second window while the model is loaded — the stalled
+microphone-processing failure that also makes the logs-page **wake word**
+diagnostic read `degraded`.
 
 #### PUT /api/v1/wake-word
 

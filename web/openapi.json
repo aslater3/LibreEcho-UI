@@ -2739,10 +2739,17 @@
      "Wake word"
     ],
     "summary": "Read wake-word state",
-    "description": "Returns available wake-word state. On images without the wake-word service, the 200 response contains data.available=false and data.unavailable=true.",
+    "description": "Returns available wake-word state. On images without the wake-word service, the 200 response contains data.available=false and data.unavailable=true. model_loaded is true only while the wake-word daemon reports its model loaded. vad_active describes the current 10 ms frame, so it is normally false in a quiet room and is not a capture-health signal. capture_active is capture health derived from successive processed_frames samples: false once the counter stops advancing across a stale window while the model is loaded. processed_frames is the 64-bit count of 10 ms frames processed since the daemon started; it passes the 32-bit signed range after about 249 days and is reported in full.",
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Wake-word state, or the available:false shape when the wake-word service is absent",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/WakeWordEnvelope"
+        }
+       }
+      }
      },
      "503": {
       "$ref": "#/components/responses/Error"
@@ -3208,6 +3215,83 @@
        },
        "restart": {
         "$ref": "#/components/schemas/VoicePipelineRestart"
+       }
+      }
+     },
+     "error": {
+      "nullable": true,
+      "$ref": "#/components/schemas/ApiError"
+     }
+    }
+   },
+    "WakeWordEnvelope": {
+    "type": "object",
+    "required": [
+     "ok",
+     "data",
+     "error"
+    ],
+    "properties": {
+     "ok": {
+      "type": "boolean"
+     },
+     "data": {
+      "type": "object",
+      "properties": {
+       "available": {
+        "type": "boolean",
+        "description": "false when the wake-word service is absent; the state fields are omitted in that case"
+       },
+       "unavailable": {
+        "type": "boolean"
+       },
+       "message": {
+        "type": "string"
+       },
+       "enabled": {
+        "type": "boolean"
+       },
+       "wake_word": {
+        "type": "string"
+       },
+       "sensitivity": {
+        "type": "integer"
+       },
+       "cooldown_ms": {
+        "type": "integer"
+       },
+       "model_status": {
+        "type": "string"
+       },
+       "detected_count": {
+        "type": "integer"
+       },
+       "cpu_cost_percent": {
+        "type": "integer"
+       },
+       "memory_cost_mb": {
+        "type": "integer"
+       },
+       "model_loaded": {
+        "type": "boolean",
+        "description": "true only while the wake-word daemon reports its model loaded"
+       },
+       "vad_active": {
+        "type": "boolean",
+        "description": "whether the current 10 ms frame contains voice activity; normally false in a quiet room and not a capture-health signal"
+       },
+       "capture_active": {
+        "type": "boolean",
+        "description": "capture health derived from successive processed_frames samples; false once the counter fails to advance across a one-second window while the model is loaded, which also degrades the wake word diagnostics check"
+       },
+       "processed_frames": {
+        "type": "integer",
+        "format": "int64",
+        "minimum": 0,
+        "description": "64-bit count of 10 ms microphone frames processed since the wake-word daemon started; passes the 32-bit signed range after about 249 days of uptime and is reported in full"
+       },
+       "local_processing": {
+        "type": "boolean"
        }
       }
      },

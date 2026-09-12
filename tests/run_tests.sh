@@ -6,6 +6,8 @@ CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
+make build/test-wake-health
+./build/test-wake-health
 python3 tests/test_github_link_contract.py
 python3 tests/test_about_supported_devices.py
 make build/test-auth-sessions
@@ -248,6 +250,15 @@ sleep 1
 code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio")
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.available == false and .data.unavailable == true' /tmp/le-linux-audio.out >/dev/null
+# waked is not running in this image, so the wake-word capture-health check
+# must say degraded rather than read green, and the wake-word endpoint must
+# answer with its honest available:false shape. (The frozen-counter half of
+# the check is exercised in tests/test_wake_health.c.)
+curl -fsS "$URL/api/v1/diagnostics" | jq -e \
+    '.ok and (.data.checks[] | select(.name == "wake word") | .status == "degraded")' >/dev/null
+curl -fsS "$URL/api/v1/wake-word" | jq -e \
+    '.ok and .data.available == false and .data.unavailable == true' >/dev/null
+echo 'linux wake-word health: degraded when waked is absent'
 code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/config/export")
 [ "$code" = 200 ]
 jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null

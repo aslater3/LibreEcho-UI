@@ -1,5 +1,6 @@
 #include "json.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -194,6 +195,21 @@ int json_get_int(const char *s, const char *k, int *out)
     v = strtol(p, &e, 10);
     if (e == p) return -1;
     *out = (int)v; return 1;
+}
+
+/* Unsigned 64-bit variant: waked's processed_frames counter advances once
+   per 10 ms of capture and passes INT_MAX after ~249 days, so callers that
+   want the live value cannot go through json_get_int's int cast. A sign or
+   an overflow is malformed, not a wrap. */
+int json_get_u64(const char *s, const char *k, unsigned long long *out)
+{
+    char *e; unsigned long long v; const char *p = find_key(s, k);
+    if (!p) return 0;
+    if (*p < '0' || *p > '9') return -1;
+    errno = 0;
+    v = strtoull(p, &e, 10);
+    if (e == p || errno == ERANGE) return -1;
+    *out = v; return 1;
 }
 
 int json_get_bool(const char *s, const char *k, int *out)

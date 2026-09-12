@@ -60,7 +60,12 @@ struct le_network_state {
     int signal, rssi_dbm, internet, dhcp, ssh, api_lan;
     int gateway_reachable, liveness_failures;
 };
-struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb, model_loaded, capture_active, processed_frames; };
+/* Raw wake-word adapter state. vad_active is frame content -- false in any
+   quiet room -- not capture liveness, and processed_frames is waked's 10 ms
+   frame counter, which must stay 64-bit. Capture health is derived from
+   successive samples of that counter (wake_health.h); it is not a field the
+   adapter can report from one status read. */
+struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb, model_loaded, vad_active; unsigned long long processed_frames; };
 struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, rssi_valid, paired, connected; };
 struct le_bluetooth_pairing { char address[18], method[24]; int type; unsigned int value; };
 struct le_bluetooth_state {

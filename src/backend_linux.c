@@ -1585,6 +1585,7 @@ static int wake(struct le_backend *b, struct le_wake_word_state *o)
 {
     char response[LE_ADAPTER_MSG_MAX];
     int v, rc, found = 0;
+    unsigned long long frames;
     (void)b;
     rc = adapter_command(LE_ADAPTER_WAKEWORD_SOCK, "status", NULL,
                          response, sizeof(response));
@@ -1593,14 +1594,17 @@ static int wake(struct le_backend *b, struct le_wake_word_state *o)
     if (json_get_bool(response, "enabled", &v) > 0) { o->enabled = v; found = 1; }
     if (json_get_string(response, "wake_word", o->wake_word, sizeof(o->wake_word)) > 0) found = 1;
     if (json_get_string(response, "model_status", o->model_status, sizeof(o->model_status)) > 0) found = 1;
-    /* Capture-health signals the logs-page diagnostic reads: whether the
-       model is actually loaded, whether the mic stream is producing voice
-       activity, and the live processed-frame counter. A "loaded" model
+    /* Capture-health signals the logs-page diagnostic reads. A "loaded" model
        with a dead capture stream is the post-playback failure a bare
-       liveness probe misses. */
+       liveness probe misses, so the model flag and the frame counter are
+       kept as raw facts for the successive-sample check in api.c. */
     o->model_loaded = o->model_status[0] && !strcmp(o->model_status, "loaded");
-    if (json_get_bool(response, "vad_active", &v) > 0) o->capture_active = v;
-    if (json_get_int(response, "processed_frames", &v) > 0) o->processed_frames = v;
+    /* vad_active is frame content -- false in any quiet room while capture
+       runs -- so it stays its own field and is never read as liveness. */
+    if (json_get_bool(response, "vad_active", &v) > 0) o->vad_active = v;
+    /* One frame per 10 ms: this passes INT_MAX after ~249 days of uptime and
+       json_get_int would report a wrapped %d, so it is parsed 64-bit. */
+    if (json_get_u64(response, "processed_frames", &frames) > 0) o->processed_frames = frames;
     if (json_get_int(response, "sensitivity", &v) > 0) { o->sensitivity = v; found = 1; }
     if (json_get_int(response, "cooldown_ms", &v) > 0) o->cooldown_ms = v;
     if (json_get_int(response, "detected_count", &v) > 0) o->detected_count = v;

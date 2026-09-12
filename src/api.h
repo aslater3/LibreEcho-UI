@@ -3,6 +3,7 @@
 #include "backend.h"
 #include "auth.h"
 #include "event_bus.h"
+#include "wake_health.h"
 #include <stddef.h>
 struct api_request{char method[8],path[256],host[256],origin[256],authorization[256],csrf[96],confirm[96];const char*body;size_t body_len;int https;};
 struct api_response{int status;char type[64];char body[32768];size_t length;};
@@ -23,7 +24,8 @@ char mac_wifi[24],mac_bt[24];char sessions_path[384];int https_active;struct le_
 /* The station the transport control would start again. It is deliberately not
    persisted: after a reboot nothing is playing and nothing was interrupted, so
    offering to resume something would be a guess. */
-char radio_last_word[32];char logs[LE_MAX_LOGS][256];size_t log_count,log_next;};
+char radio_last_word[32];/* Successive-sample wake-word capture health: one reading of waked's frame counter cannot show a stall, so the previous reading is retained across requests and a frozen counter is caught (wake_health.h). */
+struct le_wake_sample wake_capture;char logs[LE_MAX_LOGS][256];size_t log_count,log_next;};
 int api_bootstrap_required(const struct api_context*);
 void api_set_https_active(struct api_context*,int);
 int api_init(struct api_context*,struct le_backend*,int,int,const char*,const char*,const char*,const char*,const char*);int api_apply_persisted_configuration(struct api_context*,char*,size_t);int api_persist_configuration(struct api_context*);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
