@@ -126,28 +126,31 @@ mount_runtime() {
 }
 
 prepare_avahi_runtime() {
-    [ -d "$RUNTIME_ROOT/etc/avahi/services" ] && return 0
-    mkdir -p "$(dirname "$AVAHI_CONFIG_SNAPSHOT")"
-    if [ -f "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" ]; then
-        cp "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" "$AVAHI_CONFIG_SNAPSHOT" || return 1
-    fi
-    mount -t tmpfs -o mode=0755,size=128k libreecho-airplay-avahi "$RUNTIME_ROOT/etc/avahi" || {
-        echo "libreecho-airplayd: could not create writable Avahi config root" >&2
-        return 1
-    }
-    if [ -f "$AVAHI_CONFIG_SNAPSHOT" ]; then
-        cp "$AVAHI_CONFIG_SNAPSHOT" "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" || return 1
+    if [ ! -d "$RUNTIME_ROOT/etc/avahi/services" ]; then
+        mkdir -p "$(dirname "$AVAHI_CONFIG_SNAPSHOT")"
+        if [ -f "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" ]; then
+            cp "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" "$AVAHI_CONFIG_SNAPSHOT" || return 1
+        fi
+        mount -t tmpfs -o mode=0755,size=128k libreecho-airplay-avahi "$RUNTIME_ROOT/etc/avahi" || {
+            echo "libreecho-airplayd: could not create writable Avahi config root" >&2
+            return 1
+        }
+        if [ -f "$AVAHI_CONFIG_SNAPSHOT" ]; then
+            cp "$AVAHI_CONFIG_SNAPSHOT" "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" || return 1
+        fi
     fi
     mkdir -p "$RUNTIME_ROOT/etc/avahi/services"
     if [ -d "$AVAHI_SERVICES_SOURCE" ]; then
         cp -a "$AVAHI_SERVICES_SOURCE/." "$RUNTIME_ROOT/etc/avahi/services/"
     fi
     if [ "${HOME_ASSISTANT_ENABLED:-0}" -eq 1 ]; then
-        [ -f "$WYOMING_SERVICE_SOURCE" ] || {
-            echo "libreecho-airplayd: Wyoming mDNS service definition missing" >&2
-            return 1
-        }
-        cp "$WYOMING_SERVICE_SOURCE" "$RUNTIME_ROOT/etc/avahi/services/wyoming.service" || return 1
+        if [ -f "$WYOMING_SERVICE_SOURCE" ] && [ ! -L "$WYOMING_SERVICE_SOURCE" ]; then
+            cp "$WYOMING_SERVICE_SOURCE" "$RUNTIME_ROOT/etc/avahi/services/wyoming.service" || return 1
+        else
+            echo "libreecho-airplayd: Wyoming mDNS service definition unavailable" >&2
+        fi
+    else
+        rm -f "$RUNTIME_ROOT/etc/avahi/services/wyoming.service"
     fi
 }
 

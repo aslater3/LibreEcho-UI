@@ -1108,7 +1108,7 @@ static int start_mdns(struct airplay_ctx *ctx)
         goto fail;
     for (i = 0; i < 10 && child_running(&ctx->avahi_pid); ++i)
         usleep(100000);
-    if (ctx->avahi_pid <= 0 || !child_running(&ctx->dbus_pid))
+    if (!child_running(&ctx->avahi_pid) || !child_running(&ctx->dbus_pid))
         goto fail;
     ctx->mdns_retry_ticks = 0;
     return 0;
@@ -1137,7 +1137,7 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
         metadata_fifo_close(ctx);
         if (ctx->mdns_required) {
             if (start_mdns(ctx) < 0)
-                return -1;
+                le_log_warn("airplayd: AirPlay disabled; required mDNS restart deferred");
         } else {
             stop_mdns(ctx);
         }
@@ -1378,13 +1378,8 @@ int main(int argc, char **argv)
     le_log_info("airplayd: starting (socket=%s, enable_on_start=%s, mdns_on_start=%s)",
                 ctx.socket_path, enable_on_start ? "yes" : "no",
                 mdns_on_start ? "yes" : "no");
-    if (mdns_on_start && start_mdns(&ctx) < 0) {
-        le_log_warn("airplayd: required mDNS discovery failed at startup");
-        stop_child(&ctx.engine_pid);
-        close(ctx.listener);
-        unlink(ctx.socket_path);
-        return 1;
-    }
+    if (mdns_on_start && start_mdns(&ctx) < 0)
+        le_log_warn("airplayd: required mDNS discovery unavailable; retrying");
     if (enable_on_start) {
         if (set_enabled(&ctx, 1) < 0)
             le_log_warn("airplayd: persisted AirPlay enable failed at startup");
