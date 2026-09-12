@@ -68,7 +68,7 @@ LOGD_OBJECTS = $(LOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 comma := ,
 GC_LDFLAGS ?= $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections)
 
-.PHONY: all adapters clean release provenance test install test-wyoming-protocol test-wyomingd
+.PHONY: all adapters clean release provenance test install test-wyoming-protocol test-wyomingd test-voice-listening-feedback
 all: CPPFLAGS += -DLE_DEV_CONTROLS=1
 all: $(TARGET) $(LOGD_TARGET) adapters
 
@@ -632,6 +632,16 @@ $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/backend.c src/json.c -o $@
+
+$(BUILD)/test-voice-listening-feedback: \
+		tests/test_voice_listening_feedback.c \
+		src/adapter/voice_listening_led.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback
+	./$(BUILD)/test-voice-listening-feedback
+	python3 tests/test_voice_listening_callers.py
 
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \

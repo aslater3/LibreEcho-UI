@@ -68,8 +68,10 @@ name/area `LibreEcho`; the port can be overridden in the init environment.
 
 Selecting Home Assistant mode immediately stops local STT, local assistant
 dispatch, and local TTS, and starts the Wyoming bridge. On reboot the same
-choice is applied by init. It does not disable `waked`, `micd`, `audiod`, or
-AEC. The existing local ChatGPT mode remains separate and mutually exclusive.
+choice is applied by init. The Home Assistant wake path uses the visual ring
+without an audible local chirp; the local assistant path retains the chirp.
+It does not disable `waked`, `micd`, `audiod`, or AEC. The existing local ChatGPT
+mode remains separate and mutually exclusive.
 
 ## Compatibility references
 
