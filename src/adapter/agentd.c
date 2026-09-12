@@ -410,7 +410,16 @@ static int play_sentence(void *context, const char *text)
     if (access(state->tts_socket, F_OK) != 0)
         return 0;
     for (attempt = 0; attempt < 600 && running; ++attempt) {
-        FILE *marker = fopen(state->tts_first_pcm_file, "r");
+        FILE *marker;
+        /*
+         * A spoken stop cancels the turn: leave the status poll at once
+         * instead of waiting out the remaining checks. Without this the
+         * worker would sit here until ttsd reports idle, which is exactly the
+         * delay a cancel exists to avoid.
+         */
+        if (le_voice_playback_turn_cancelled(&state->playback))
+            return 0;
+        marker = fopen(state->tts_first_pcm_file, "r");
 
         if (marker) {
             char marker_id[64];
@@ -1246,7 +1255,15 @@ static int handle_stop_intent(struct agent_state *state, const char *transcript)
         (void)adapter_call(state->audio_socket, 1000, "noise_stop", NULL,
                            response, sizeof(response));
     if (plan.stop_speech) {
-        le_voice_playback_stop(&state->playback);
+        /*
+         * Per-turn cancellation, not the playback lifecycle destructor: the
+         * worker must survive a spoken stop, or every later response fails
+         * le_voice_playback_begin_turn() until agentd restarts. Cancel first
+         * and stop_speech immediately after -- the sentence in flight only
+         * learns the service stopped by polling, so waiting for it here would
+         * delay the stop by up to its 30-second status loop.
+         */
+        le_voice_playback_cancel_turn(&state->playback);
         (void)adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
                            response, sizeof(response));
     }

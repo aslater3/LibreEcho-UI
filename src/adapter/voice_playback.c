@@ -24,14 +24,21 @@ static void *worker(void *opaque)
         playback->read_index =
             (playback->read_index + 1) % LE_VOICE_PLAYBACK_QUEUE;
         --playback->count;
-        playback->playing = 1;
-        pthread_mutex_unlock(&playback->mutex);
-        result = playback->play
-            ? playback->play(playback->context, text) : -1;
-        pthread_mutex_lock(&playback->mutex);
-        playback->playing = 0;
-        if (result != 0)
-            playback->failed = 1;
+        /*
+         * A cancelled turn is not spoken. The sentence in flight is abandoned
+         * by its callback and anything still queued behind it is dropped here,
+         * so a stop is not followed by the rest of the reply.
+         */
+        if (!playback->cancelled) {
+            playback->playing = 1;
+            pthread_mutex_unlock(&playback->mutex);
+            result = playback->play
+                ? playback->play(playback->context, text) : -1;
+            pthread_mutex_lock(&playback->mutex);
+            playback->playing = 0;
+            if (result != 0)
+                playback->failed = 1;
+        }
         if (playback->count == 0)
             pthread_cond_broadcast(&playback->idle);
     }
@@ -108,10 +115,47 @@ int le_voice_playback_begin_turn(struct le_voice_playback *playback)
     if (playback->running && playback->count == 0 &&
         !playback->playing) {
         playback->failed = 0;
+        playback->cancelled = 0;
         result = 0;
     }
     pthread_mutex_unlock(&playback->mutex);
     return result;
+}
+
+void le_voice_playback_cancel_turn(struct le_voice_playback *playback)
+{
+    if (!playback)
+        return;
+    pthread_mutex_lock(&playback->mutex);
+    playback->cancelled = 1;
+    /*
+     * The sentence in flight is left to its callback, which checks
+     * le_voice_playback_turn_cancelled() between status polls; the rest of
+     * this turn's queue is dropped here so it cannot follow the stop.
+     */
+    playback->count = 0;
+    playback->read_index = 0;
+    playback->write_index = 0;
+    pthread_cond_broadcast(&playback->idle);
+    pthread_mutex_unlock(&playback->mutex);
+}
+
+int le_voice_playback_turn_cancelled(struct le_voice_playback *playback)
+{
+    int cancelled;
+
+    if (!playback)
+        return 0;
+    pthread_mutex_lock(&playback->mutex);
+    /*
+     * Only a sentence that is still in flight observes cancellation: once the
+     * worker's callback has returned there is nothing left to stop, and
+     * standalone speech made after the stop (the phone-source explanation)
+     * must not be swallowed by the completed cancellation.
+     */
+    cancelled = playback->cancelled && playback->playing;
+    pthread_mutex_unlock(&playback->mutex);
+    return cancelled;
 }
 
 static void deadline_after(struct timespec *deadline,

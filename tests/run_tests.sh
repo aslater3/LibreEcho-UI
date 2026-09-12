@@ -137,7 +137,7 @@ make build/test-voice-aec build/test-voice-reference build/test-stop-intent
 ./build/test-stop-intent
 make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
-make build/test-voice-reply build/test-voice-playback
+make build/test-voice-reply build/test-voice-playback build/test-agentd-stop
 make build/test-voice-pipeline
 ./build/test-voice-stream
 ./build/test-sttd
@@ -145,6 +145,7 @@ make build/test-voice-pipeline
 ./build/test-llm-http
 ./build/test-llm-store
 ./build/test-agentd
+./build/test-agentd-stop
 ./build/test-voice-reply
 ./build/test-voice-playback
 ./build/test-voice-pipeline

@@ -94,11 +94,21 @@ static void write_first_pcm_marker(const char *args)
 int main(int argc, char **argv)
 {
     int listener;
+    int holding;
+    int speaking = 0;
 
     if (argc != 3)
         return 2;
     signal(SIGINT, stop_handler);
     signal(SIGTERM, stop_handler);
+    /*
+     * With LE_TEST_TTS_HOLD_SPEAKING set, a "speak" leaves the engine in its
+     * speaking state until "stop_speech" arrives, the way a real TTS engine
+     * behaves: status keeps reporting speaking:true while audio is playing.
+     * The stop-path test needs that state to exist when its stop transcript
+     * arrives. Without the variable nothing changes.
+     */
+    holding = getenv("LE_TEST_TTS_HOLD_SPEAKING") != NULL;
     listener = le_adapter_listen(argv[1]);
     if (listener < 0)
         return 1;
@@ -126,14 +136,29 @@ int main(int argc, char **argv)
                     fprintf(capture, "%s\n", args);
                     fclose(capture);
                 }
+                if (holding)
+                    speaking = 1;
                 write_first_pcm_marker(args);
                 length = le_adapter_respond_ok(
                     response, sizeof(response), id,
                     "{\"speaking\":true}");
+            } else if (!strcmp(command, "stop_speech")) {
+                FILE *capture = fopen(argv[2], "a");
+
+                if (capture) {
+                    fprintf(capture, "command stop_speech\n");
+                    fclose(capture);
+                }
+                speaking = 0;
+                length = le_adapter_respond_ok(
+                    response, sizeof(response), id,
+                    "{\"stopped\":true}");
             } else if (!strcmp(command, "status")) {
                 length = le_adapter_respond_ok(
                     response, sizeof(response), id,
-                    "{\"speaking\":false,\"engine\":\"mock\"}");
+                    holding && speaking
+                        ? "{\"speaking\":true,\"engine\":\"mock\"}"
+                        : "{\"speaking\":false,\"engine\":\"mock\"}");
             } else {
                 length = le_adapter_respond_err(
                     response, sizeof(response), id, "unsupported");

@@ -457,6 +457,17 @@ $(BUILD)/test-agentd: tests/test_agentd.c src/adapter/adapter_client.c \
 		-Wpedantic -Werror -Isrc tests/test_agentd.c \
 		src/adapter/adapter_client.c src/log.c -lpthread -o $@
 
+# The spoken-stop path runs against the real stop handler, playback worker and
+# play callback: agentd.c is compiled into the test with its main renamed, and
+# the mock audio adapter stands in for a speaking TTS engine over a real
+# socket.
+$(BUILD)/test-agentd-stop: tests/test_agentd_stop.c $(AGENTD_SOURCES) \
+		$(BUILD)/mock-audio-adapter
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_agentd_stop.c \
+		$(filter-out src/adapter/agentd.c,$(AGENTD_SOURCES)) \
+		-lpthread -o $@
+
 $(BUILD)/test-voice-reply: tests/test_voice_reply.c \
 		src/adapter/voice_reply.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -656,6 +667,7 @@ clean:
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \
 		$(BUILD)/test-agentd \
+		$(BUILD)/test-agentd-stop \
 		$(BUILD)/test-voice-reply \
 		$(BUILD)/test-voice-playback \
 		$(BUILD)/test-voice-pipeline-restart \
