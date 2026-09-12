@@ -1,0 +1,70 @@
+name: One-shot 0.14 test contract repair
+
+on:
+  push:
+    branches: ['fix/forward-port-01314']
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out release candidate branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: fix/forward-port-01314
+          fetch-depth: 0
+
+      - name: Repair stale installed-version contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/test_api.sh')
+          text = path.read_text()
+          old_call = 'curl -fsS "$URL/api/v1/system/update" | jq -e \\\n'
+          new_call = 'curl -fsS "$URL/api/v1/system/update" | jq -e --arg version "$OS_VERSION" \\\n'
+          old_expect = '     .data.installed_version == "" and .data.latest_version == "" and\n'
+          new_expect = '     .data.installed_version == ("LibreEcho OS " + $version) and .data.latest_version == "" and\n'
+
+          if text.count(old_call) != 1:
+              raise SystemExit(f'expected exactly one update-status jq call, found {text.count(old_call)}')
+          if text.count(old_expect) != 1:
+              raise SystemExit(f'expected exactly one stale installed-version assertion, found {text.count(old_expect)}')
+
+          path.write_text(text.replace(old_call, new_call, 1).replace(old_expect, new_expect, 1))
+          PY
+          sh -n tests/test_api.sh
+          grep -F 'jq -e --arg version "$OS_VERSION"' tests/test_api.sh
+          grep -F '.data.installed_version == ("LibreEcho OS " + $version)' tests/test_api.sh
+          git diff --check
+
+      - name: Commit repair and remove one-shot helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/one-shot-release-fix.yml
+          git add tests/test_api.sh
+          git config user.name 'LibreEcho release automation'
+          git config user.email '34077387+aslater3@users.noreply.github.com'
+          git commit -m 'test: align update status with reported OS version' -m 'The update API intentionally falls back to the compiled LibreEcho OS version when no OTA version record exists. The 0.14 aggregate API test still expected the pre-#41 empty value. Assert the running 0.14 version instead, preserving all surrounding API coverage.'
+          git push origin HEAD:fix/forward-port-01314
+
+      - name: Dispatch full UI verification on repaired head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/checks.yml/dispatches" \
+            -d '{"ref":"fix/forward-port-01314"}'
