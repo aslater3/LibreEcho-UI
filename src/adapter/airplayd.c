@@ -1209,6 +1209,10 @@ static int refresh_hostname(struct airplay_ctx *ctx)
     was_enabled = ctx->enabled;
     mdns_required = ctx->mdns_required;
     ctx->mdns_required = 0;
+    /* set_enabled(0) is intentionally idempotent.  Stop the discovery pair
+     * explicitly so a refresh also works in the HA-only state where AirPlay
+     * is already disabled. */
+    stop_mdns(ctx);
     if (set_enabled(ctx, 0) < 0)
         return -1;
     ctx->mdns_required = mdns_required;
