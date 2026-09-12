@@ -33,7 +33,7 @@ TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adap
 TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
 STTD_SOURCES = src/adapter/sttd.c src/adapter/stt_engine_mock.c src/adapter/adapter_server.c src/log.c
 STTD_SHERPA_CXX_SOURCES = src/adapter/stt_engine_sherpa.cpp
-AGENTD_SOURCES = src/adapter/agentd.c src/adapter/timer_intent.c src/adapter/llm_provider.c \
+AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/timer_intent.c src/adapter/llm_provider.c \
 	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
@@ -46,7 +46,7 @@ WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/diagnostic_export.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/diagnostic_export.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -144,8 +144,38 @@ $(BUILD)/libreecho-ttsd-wyoming: src/adapter/ttsd.c \
 	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc \
 		-DLE_TTSD_ENGINE_WYOMING $^ $(LDFLAGS) -lpthread -lm -o $@
 
+$(BUILD)/test-button-settings: tests/test_button_settings.c \
+	$(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
+		$^ $(LDFLAGS) -lm -lpthread -o $@
+
+$(BUILD)/test-buttond-privacy: tests/test_buttond_privacy.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c \
+	src/adapter/adapter_client.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		src/adapter/adapter_client.c src/json.c src/log.c -o $@
+
+$(BUILD)/test-buttond-events: tests/test_buttond_events.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c \
+	src/adapter/adapter_client.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		src/adapter/adapter_client.c src/json.c src/log.c -o $@
+
+$(BUILD)/test-action-sample: tests/test_action_sample.c \
+	src/adapter/audiod.c src/adapter/adapter_client.c \
+	src/adapter/adapter_server.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
+
 $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
-		src/adapter/buttond_timing.c
+	src/adapter/buttond_timing.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-watchdog-policy: tests/test_watchdog_policy.c \
@@ -160,6 +190,18 @@ $(BUILD)/test-wake-decode: tests/test_wake_decode.c \
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
 		$^ -lpthread -lm -o $@
+
+$(BUILD)/test-wake-health: tests/test_wake_health.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-wake-health-api: tests/test_wake_health_api.c \
+	$(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
+		$^ $(LDFLAGS) -lm -lpthread -o $@
 
 $(BUILD)/test-light-sensor: tests/test_light_sensor.c \
 	src/backend_linux.c src/json.c src/log.c
@@ -267,6 +309,26 @@ $(BUILD)/test-auth-transport: tests/test_auth_transport.c $(WEB_TEST_OBJECTS)
 $(BUILD)/test-inherited-fds: tests/test_inherited_fds.c src/inherited_fds.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-http-worker-registry: tests/test_http_worker_registry.c src/http_server.c src/inherited_fds.c src/tls_stub.c src/adapter/voice_stream.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc \
+		tests/test_http_worker_registry.c src/inherited_fds.c src/tls_stub.c \
+		src/adapter/voice_stream.c -o $@
+
+$(BUILD)/test-authority-provenance: tests/test_authority_provenance.c src/authority_provenance.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-feature-provenance: tests/test_feature_provenance.c src/feature_provenance.c src/json.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-diagnostic-export: tests/test_diagnostic_export.c src/json.c src/feature_provenance.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc $^ -o $@
 
 $(BUILD)/test-radiod-json: tests/test_radiod_json.c src/adapter/radiod.c src/json.c
 	@mkdir -p $(BUILD)
@@ -463,6 +525,18 @@ $(BUILD)/test-avdtp-wire-format: tests/test_avdtp_wire_format.c \
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -lm -o $@
 
+$(BUILD)/test-avrcp-wire-format: tests/test_avrcp_wire_format.c \
+		$(BUILD)/adapter/bt_profile.o $(BUILD)/log.o \
+		$(BUILD)/adapter/bt-sbc/sbc.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_neon.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_armv6.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_sse.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_mmx.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_iwmmxt.o
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -lm -o $@
+
 $(BUILD)/test-voice-reference: tests/test_voice_reference.c src/adapter/voice_reference.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
@@ -516,6 +590,10 @@ $(BUILD)/test-agentd: tests/test_agentd.c src/adapter/adapter_client.c \
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_agentd.c \
 		src/adapter/adapter_client.c src/log.c -lpthread -o $@
+
+$(BUILD)/test-stop-intent: tests/test_stop_intent.c src/adapter/stop_intent.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc $^ -o $@
 
 $(BUILD)/test-voice-reply: tests/test_voice_reply.c \
 		src/adapter/voice_reply.c
@@ -704,10 +782,14 @@ clean:
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
+		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \
+		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-timing \
+		$(BUILD)/test-action-sample \
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-thermal-zone-selection \
 		$(BUILD)/test-light-sensor \
 		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \
+		$(BUILD)/test-http-worker-registry \
 		$(BUILD)/test-wake-decode \
 		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
@@ -726,3 +808,7 @@ clean:
 		$(BUILD)/stt-stream-file-client-arm32 \
 		$(BUILD)/*.wake.arm.o $(BUILD)/wake_engine_onnx.arm.o \
 		$(BUILD)/test_wake_engine.arm.o
+
+# Runs the real HTTP request processor with isolated mock device operations.
+$(BUILD)/test-setup-workers: tests/test_setup_workers.c src/http_server.c src/http_config_worker.inc $(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< $(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS)) $(LDFLAGS) $(WEB_TLS_LIBS) -lm -lpthread -o $@

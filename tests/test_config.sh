@@ -3,6 +3,11 @@ set -eu
 URL=${LIBREECHO_TEST_URL:-http://127.0.0.1:18082}
 CFG=${LIBREECHO_TEST_CONFIG:-./build/test-suite-config.json}
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
+# This check runs both before setup and after setup has enabled AirPlay.
+# Preserve existing integration bits while enabling Home Assistant (1) and
+# Spotify (32) below; unrelated configuration writes must not reset them.
+initial_integrations=$(curl -fsS "$URL/api/v1/config/export" | jq -er '.data.integrations')
+expected_integrations=$((initial_integrations | 1 | 32))
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume":37}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/led" -H "$CSRF" -H 'Content-Type: application/json' --data '{"r":12,"g":34,"b":56,"brightness":43,"visualizer_enabled":false}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/network" -H "$CSRF" -H 'Content-Type: application/json' --data '{"hostname":"persistent-echo","ssh":true,"api_lan":true}' >/dev/null
@@ -15,7 +20,7 @@ curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: appli
 curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/integrations/spotify" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 grep -q '"volume": 37' "$CFG"
-jq -e '
+jq -e --argjson integrations "$expected_integrations" '
   .hostname_persisted == true and .hostname == "persistent-echo" and
   .led_r == 12 and .led_g == 34 and .led_b == 56 and
   .led_brightness == 43 and .led_visualizer_enabled == false and
@@ -23,7 +28,7 @@ jq -e '
   .button_short == "Play / pause" and .button_long == "Reboot device" and
   .button_tones == false and .button_action == "sound" and
   .button_action_brightness == 33 and .button_mute_brightness == 44 and
-  .privacy_log_hours == 168 and .integrations == 37 and
+  .privacy_log_hours == 168 and .integrations == $integrations and
   .privacy_local_only == false and
   .voice_pipeline_mode == "custom" and
   .stt_wyoming_uri == "tcp://198.51.100.10:10300" and

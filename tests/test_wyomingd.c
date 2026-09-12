@@ -2,6 +2,7 @@
 
 #include "adapter/voice_stream.h"
 #include "adapter/wyoming_protocol.h"
+#include "json.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -184,6 +185,27 @@ int main(void)
     CHECK(le_wyoming_read_header(client_fd, &event) == 0);
     CHECK(!strcmp(event.type, "info"));
     CHECK(strstr(event.data, "active_wake_words") != NULL);
+    CHECK(json_valid_object(event.data, strlen(event.data)));
+    {
+        static const char attribution[] =
+            "\"attribution\":{\"name\":\"LibreEcho\","
+            "\"url\":\"https://libreecho.org\"}";
+        const char *satellite = strstr(event.data, "\"satellite\"");
+        const char *mic = strstr(event.data, "\"mic\"");
+        const char *snd = strstr(event.data, "\"snd\"");
+        const char *found;
+        CHECK(satellite && mic && snd && satellite < mic && mic < snd);
+        found = strstr(satellite, attribution);
+        CHECK(found && found < mic);
+        found = strstr(mic, attribution);
+        CHECK(found && found < snd);
+        CHECK(strstr(snd, attribution) != NULL);
+        found = strstr(satellite, "\"installed\":true");
+        CHECK(found && found < mic);
+        found = strstr(mic, "\"installed\":true");
+        CHECK(found && found < snd);
+        CHECK(strstr(snd, "\"installed\":true") != NULL);
+    }
     CHECK(le_wyoming_send(client_fd, "run-pipeline",
                           "{\"start_stage\":\"wake\","
                           "\"end_stage\":\"tts\"}", NULL, 0) == 0);

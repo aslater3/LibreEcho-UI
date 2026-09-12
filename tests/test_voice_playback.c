@@ -33,6 +33,27 @@ static int play(void *context, const char *text)
     return 0;
 }
 
+struct cancellation_output {
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    int started, release;
+    struct output output;
+};
+
+static int cancellable_play(void *context, const char *text)
+{
+    struct cancellation_output *output = context;
+    pthread_mutex_lock(&output->mutex);
+    if (!output->started) {
+        output->started = 1;
+        pthread_cond_broadcast(&output->changed);
+        while (!output->release)
+            pthread_cond_wait(&output->changed, &output->mutex);
+    }
+    pthread_mutex_unlock(&output->mutex);
+    return play(&output->output, text);
+}
+
 int main(void)
 {
     struct le_voice_playback playback;
@@ -47,6 +68,42 @@ int main(void)
     CHECK(!strcmp(output.values[0], "First sentence."));
     CHECK(!strcmp(output.values[1], "Second sentence."));
     le_voice_playback_stop(&playback);
-    puts("voice playback: ordered asynchronous sentence queue: ok");
+    {
+        struct cancellation_output gate;
+        struct timespec deadline;
+        memset(&gate, 0, sizeof(gate));
+        CHECK(pthread_mutex_init(&gate.mutex, NULL) == 0);
+        CHECK(pthread_cond_init(&gate.changed, NULL) == 0);
+        CHECK(le_voice_playback_start(&playback, cancellable_play, &gate) == 0);
+        CHECK(le_voice_playback_enqueue(&playback, "Current.") == 0);
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += 3;
+        pthread_mutex_lock(&gate.mutex);
+        while (!gate.started)
+            CHECK(pthread_cond_timedwait(&gate.changed, &gate.mutex, &deadline) == 0);
+        pthread_mutex_unlock(&gate.mutex);
+        CHECK(le_voice_playback_enqueue(&playback, "Must not play.") == 0);
+        CHECK(le_voice_playback_pending(&playback));
+        le_voice_playback_cancel(&playback);
+        CHECK(le_voice_playback_cancelled(&playback));
+        CHECK(le_voice_playback_begin_turn(&playback) != 0);
+        CHECK(le_voice_playback_enqueue(&playback, "Old turn.") != 0);
+        pthread_mutex_lock(&gate.mutex);
+        gate.release = 1;
+        pthread_cond_broadcast(&gate.changed);
+        pthread_mutex_unlock(&gate.mutex);
+        CHECK(le_voice_playback_wait_idle(&playback, 3000) == 0);
+        CHECK(gate.output.count == 1);
+        CHECK(le_voice_playback_begin_turn(&playback) == 0);
+        CHECK(!le_voice_playback_cancelled(&playback));
+        CHECK(le_voice_playback_enqueue(&playback, "Next turn.") == 0);
+        CHECK(le_voice_playback_wait_idle(&playback, 3000) == 0);
+        CHECK(gate.output.count == 2);
+        CHECK(!strcmp(gate.output.values[1], "Next turn."));
+        le_voice_playback_stop(&playback);
+        pthread_cond_destroy(&gate.changed);
+        pthread_mutex_destroy(&gate.mutex);
+    }
+    puts("voice playback: ordered queue, cancellation and subsequent turn: ok");
     return 0;
 }

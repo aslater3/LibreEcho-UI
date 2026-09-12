@@ -7,6 +7,7 @@
 #include "voice_pipeline.h"
 #include "voice_playback.h"
 #include "timer_intent.h"
+#include "stop_intent.h"
 #include "voice_reply.h"
 #include "../config_store.h"
 #include "../json.h"
@@ -35,6 +36,8 @@
 #define DEFAULT_CURL "/usr/local/libexec/libreecho-curl"
 #define DEFAULT_MODEL "gpt-5.4"
 #define DEFAULT_AUDIO_SOCKET LE_ADAPTER_AUDIO_SOCK
+#define DEFAULT_RADIO_SOCKET LE_ADAPTER_RADIO_SOCK
+#define DEFAULT_MEDIA_STATUS "/run/libreecho-audio/status.json"
 #define DEFAULT_TIMER_SOCKET "/run/libreecho/timer.sock"
 #define DEFAULT_TTS_SOCKET LE_ADAPTER_TTS_SOCK
 #define DEFAULT_WAKE_SOCKET LE_ADAPTER_WAKEWORD_SOCK
@@ -85,6 +88,8 @@ struct agent_state {
     char audio_socket[256];
     char tts_socket[256];
     char timer_socket[256];
+    char radio_socket[256];
+    char media_status[256];
     char wake_socket[256];
     char stt_socket[256];
     char tts_first_pcm_file[384];
@@ -374,7 +379,7 @@ static int adapter_call(const char *socket_path, int timeout_ms,
     return result;
 }
 
-static int play_sentence(void *context, const char *text)
+static int play_sentence_internal(void *context, const char *text, int queued)
 {
     struct agent_state *state = context;
     char escaped[LE_VOICE_REPLY_SEGMENT_MAX * 2U];
@@ -382,9 +387,11 @@ static int play_sentence(void *context, const char *text)
     char request_id[sizeof(state->turn_request_id)];
     char response[LE_ADAPTER_MSG_MAX];
     struct timespec delay = {0, 50000000L};
-    int length;
+    int length, speaking;
     unsigned int attempt;
 
+    if (queued && le_voice_playback_cancelled(&state->playback))
+        return 0;
     if (escape_json(escaped, sizeof(escaped), text) < 0)
         return -1;
     pthread_mutex_lock(&state->metrics_mutex);
@@ -411,9 +418,17 @@ static int play_sentence(void *context, const char *text)
      * dequeuing another sentence. During in-process synthesis the status call
      * times out; this keeps the provider stream unblocked in its own thread.
      */
+    /* Cancellation can race the initial speak request. Check again after
+       acknowledgement, so a late speak cannot restart a cancelled turn. */
+    if (queued && le_voice_playback_cancelled(&state->playback))
+        return adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
+                            response, sizeof(response));
     if (access(state->tts_socket, F_OK) != 0)
         return 0;
     for (attempt = 0; attempt < 600 && running; ++attempt) {
+        if (queued && le_voice_playback_cancelled(&state->playback))
+            return adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
+                                response, sizeof(response));
         FILE *marker = fopen(state->tts_first_pcm_file, "r");
 
         if (marker) {
@@ -460,7 +475,7 @@ static int play_sentence(void *context, const char *text)
         }
         if (adapter_call(state->tts_socket, 250, "status", NULL,
                          response, sizeof(response)) == LE_ADAPTER_OK &&
-            strstr(response, "\"speaking\":false"))
+            json_get_bool(response, "speaking", &speaking) == 1 && !speaking)
             return 0;
         nanosleep(&delay, NULL);
     }
@@ -984,6 +999,16 @@ static int response_event(void *context, const char *data)
 
 /* --------------------------- Timer requests ----------------------------- */
 
+static int play_sentence(void *context, const char *text)
+{
+    return play_sentence_internal(context, text, 0);
+}
+
+static int play_queued_sentence(void *context, const char *text)
+{
+    return play_sentence_internal(context, text, 1);
+}
+
 /*
  * Timers are handled here rather than by the language model, which can
  * describe a timer but cannot start one. Matching locally also means the
@@ -1006,8 +1031,11 @@ static int handle_timer_intent(struct agent_state *state,
     int remaining = 0;
     int timer_id = 0;
 
-    if (le_timer_intent_parse(transcript, &intent) == LE_TIMER_INTENT_NONE)
+    if (le_timer_intent_parse(transcript, &intent) == LE_TIMER_INTENT_NONE &&
+        !le_stop_intent_matches(transcript))
         return 0;
+    if (le_stop_intent_matches(transcript))
+        intent.kind = LE_TIMER_INTENT_DISMISS;
 
     if (adapter_call(state->timer_socket, 1000, "status", "{}", response,
                      sizeof(response)) != LE_ADAPTER_OK) {
@@ -1019,6 +1047,8 @@ static int handle_timer_intent(struct agent_state *state,
 
     switch (intent.kind) {
     case LE_TIMER_INTENT_DISMISS:
+        if (!le_stop_intent_matches(transcript))
+            return 0;
         /* "Stop" means a dozen things. It only means the timer while one is
            actually ringing; otherwise this is not our request to answer. */
         if (ringing <= 0)
@@ -1475,6 +1505,65 @@ static int response_asks_question(const char *text)
     return length && text[length - 1] == '?';
 }
 
+/* Local stop is handled before authentication and never opens a follow-up.
+ * Adapted from the behaviour proposed in #192, retaining the speech worker. */
+static int playback_status(const char *socket, const char *key, int *known)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int value = 0;
+    if (adapter_call(socket, 250, "status", NULL, response, sizeof(response)) ==
+            LE_ADAPTER_OK && json_get_bool(response, key, &value) == 1)
+        ++*known;
+    return value;
+}
+
+static int handle_stop_intent(struct agent_state *state, const char *text,
+                             char *spoken, size_t spoken_size)
+{
+    char response[LE_ADAPTER_MSG_MAX], media[768], source[32];
+    int known = 0, radio, speech, noise, external = 0, failed = 0;
+    if (!le_stop_intent_matches(text))
+        return 0;
+    spoken[0] = '\0';
+    state->follow_up_armed = 0;
+    state->follow_up_depth = 0;
+    state->previous_voice_user[0] = '\0';
+    state->previous_voice_reply[0] = '\0';
+    radio = playback_status(state->radio_socket, "playing", &known);
+    speech = playback_status(state->tts_socket, "speaking", &known);
+    noise = playback_status(state->audio_socket, "noise_active", &known);
+    speech |= le_voice_playback_pending(&state->playback);
+    if (config_read(state->media_status, media, sizeof(media)) > 0 &&
+        json_get_string_top_level(media, "active", source, sizeof(source)) == 1)
+        external = !strcmp(source, "airplay2") || !strcmp(source, "bluetooth");
+    le_voice_playback_cancel(&state->playback);
+    if (radio && adapter_call(state->radio_socket, 1000, "stop", NULL,
+                              response, sizeof(response)) != LE_ADAPTER_OK)
+        failed = 1;
+    if (noise && adapter_call(state->audio_socket, 1000, "noise_stop", NULL,
+                              response, sizeof(response)) != LE_ADAPTER_OK)
+        failed = 1;
+    if (speech && adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
+                               response, sizeof(response)) != LE_ADAPTER_OK)
+        failed = 1;
+    if (failed || (!known && !external)) {
+        snprintf(spoken, spoken_size, "Playback control is unavailable.");
+        le_log_warn("agentd: local stop could not be confirmed");
+        return -1;
+    }
+    if (external) {
+        snprintf(spoken, spoken_size,
+                 "Phone playback must be stopped on your phone.");
+        (void)play_sentence(state, spoken);
+    }
+    /* An idle/repeated stop is still consumed, not sent to the model. */
+    state->follow_up_armed = 0;
+    state->follow_up_depth = 0;
+    state->previous_voice_user[0] = '\0';
+    state->previous_voice_reply[0] = '\0';
+    return 1;
+}
+
 static int command_respond(struct agent_state *state, const char *args,
                            int fd, unsigned long id)
 {
@@ -1502,6 +1591,20 @@ static int command_respond(struct agent_state *state, const char *args,
         return length > 0 && length < (int)sizeof(payload)
             ? respond(fd, id, 1, payload)
             : respond(fd, id, 0, "response text is too large");
+    }
+    {
+        int stopped = handle_stop_intent(state, transcript, full_text, sizeof(full_text));
+        if (stopped < 0)
+            return respond(fd, id, 0, full_text);
+        if (stopped > 0) {
+            if (escape_json(escaped, sizeof(escaped), full_text) < 0)
+                return respond(fd, id, 0, "response text is too large");
+            length = snprintf(payload, sizeof(payload),
+                     "{\"queued\":true,\"text\":\"%s\",\"first_text_ms\":0}", escaped);
+            return length > 0 && length < (int)sizeof(payload)
+                ? respond(fd, id, 1, payload)
+                : respond(fd, id, 0, "response text is too large");
+        }
     }
     if (generate_response(
             state, transcript, 0, full_text, sizeof(full_text),
@@ -1545,6 +1648,17 @@ static void voice_transcript(
         state->follow_up_depth = 0;
         pthread_mutex_unlock(&state->control_mutex);
         return;
+    }
+    {
+        int stopped = handle_stop_intent(state, text, reply, sizeof(reply));
+        if (stopped) {
+            state->follow_up_armed = 0;
+            state->follow_up_depth = 0;
+            if (stopped < 0)
+                (void)play_sentence(state, reply);
+            pthread_mutex_unlock(&state->control_mutex);
+            return;
+        }
     }
     if (state->config.enabled &&
         state->auth_state == AUTH_SIGNED_IN) {
@@ -1897,6 +2011,8 @@ int main(int argc, char **argv)
     strcpy(state.curl_path, DEFAULT_CURL);
     strcpy(state.audio_socket, DEFAULT_AUDIO_SOCKET);
     strcpy(state.timer_socket, DEFAULT_TIMER_SOCKET);
+    strcpy(state.radio_socket, DEFAULT_RADIO_SOCKET);
+    strcpy(state.media_status, DEFAULT_MEDIA_STATUS);
     strcpy(state.tts_socket, DEFAULT_TTS_SOCKET);
     strcpy(state.wake_socket, DEFAULT_WAKE_SOCKET);
     strcpy(state.stt_socket, DEFAULT_STT_SOCKET);
@@ -1920,6 +2036,13 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--audio-socket") && value) {
             snprintf(state.audio_socket, sizeof(state.audio_socket),
                      "%s", argv[++i]);
+        } else if ((!strcmp(argv[i], "--radio-socket") ||
+                    !strcmp(argv[i], "--media-status")) && value) {
+            char *target = !strcmp(argv[i], "--radio-socket")
+                ? state.radio_socket : state.media_status;
+            if (strlen(value) >= sizeof(state.radio_socket))
+                return 2;
+            strcpy(target, argv[++i]);
         } else if (!strcmp(argv[i], "--timer-socket") && value) {
             snprintf(state.timer_socket, sizeof(state.timer_socket),
                      "%s", argv[++i]);
@@ -1942,7 +2065,8 @@ int main(int argc, char **argv)
                     "[--credentials PATH] [--curl PATH] "
                     "[--audio-socket PATH] [--tts-socket PATH] "
                     "[--wake-socket PATH] [--stt-socket PATH] "
-                    "[--timer-socket PATH] "
+                    "[--timer-socket PATH] [--radio-socket PATH] "
+                    "[--media-status PATH] "
                     "[--tts-first-pcm-file PATH]\n",
                     argv[0]);
             return 2;
@@ -2023,7 +2147,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (le_voice_playback_start(
-            &state.playback, play_sentence, &state) < 0)
+            &state.playback, play_queued_sentence, &state) < 0)
         goto fail_mutex;
     listener = le_adapter_listen(state.socket_path);
     if (listener < 0) {
