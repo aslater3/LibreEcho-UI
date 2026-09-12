@@ -19,6 +19,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_PORT 10700
@@ -34,6 +35,9 @@
 #define QUIET_AFTER_SAMPLES (AUDIO_RATE * 8 / 10)
 #define MIN_STREAM_SAMPLES (AUDIO_RATE / 2)
 #define MAX_STREAM_SAMPLES (AUDIO_RATE * 8)
+#ifndef LE_WYOMING_PIPELINE_WATCHDOG_SECONDS
+#define LE_WYOMING_PIPELINE_WATCHDOG_SECONDS 120
+#endif
 
 static volatile sig_atomic_t running = 1;
 
@@ -46,6 +50,7 @@ struct wyoming_state {
     int detected;
     int streaming;
     int pipeline_active;
+    struct timespec pipeline_last_activity;
     uint64_t detection_sample;
     uint64_t stream_samples;
     uint64_t quiet_samples;
@@ -187,6 +192,26 @@ static int send_event(struct wyoming_state *state, const char *type,
     return le_wyoming_send(state->client_fd, type, data, payload, length);
 }
 
+static void pipeline_touch(struct wyoming_state *state)
+{
+    if (clock_gettime(CLOCK_MONOTONIC, &state->pipeline_last_activity) < 0)
+        state->pipeline_last_activity.tv_sec = 0;
+}
+
+static int pipeline_watchdog_expired(const struct wyoming_state *state)
+{
+    struct timespec now;
+    time_t seconds;
+
+    if (!state->pipeline_active)
+        return 0;
+    if (state->pipeline_last_activity.tv_sec == 0 ||
+        clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return 1;
+    seconds = now.tv_sec - state->pipeline_last_activity.tv_sec;
+    return seconds >= LE_WYOMING_PIPELINE_WATCHDOG_SECONDS;
+}
+
 static void close_client(struct wyoming_state *state)
 {
     if (state->streaming)
@@ -201,6 +226,8 @@ static void close_client(struct wyoming_state *state)
     state->detected = 0;
     state->streaming = 0;
     state->pipeline_active = 0;
+    state->pipeline_last_activity.tv_sec = 0;
+    state->pipeline_last_activity.tv_nsec = 0;
 }
 
 static void ring_append(struct wyoming_state *state,
@@ -362,6 +389,7 @@ static int stop_stream(struct wyoming_state *state)
     state->streaming = 0;
     le_voice_listening_led_set(0);
     state->detected = 0;
+    pipeline_touch(state);
     if (send_event(state, "audio-stop", NULL, NULL, 0) < 0)
         return -1;
     return send_event(state, "streaming-stopped", NULL, NULL, 0);
@@ -397,10 +425,12 @@ static int handle_server_event(struct wyoming_state *state)
         (void)stop_stream(state);
         state->server_running = 0;
         state->pipeline_active = 0;
+        state->pipeline_last_activity.tv_sec = 0;
         return 0;
     }
     if (!strcmp(event.type, "error")) {
         state->pipeline_active = 0;
+        state->pipeline_last_activity.tv_sec = 0;
         return 0;
     }
     if (!strcmp(event.type, "run-pipeline")) {
@@ -422,6 +452,7 @@ static int handle_server_event(struct wyoming_state *state)
         if (state->output_fd >= 0)
             close(state->output_fd);
         state->output_fd = -1;
+        pipeline_touch(state);
         return open_audio_bus(state);
     }
     if (!strcmp(event.type, "audio-chunk")) {
@@ -433,6 +464,7 @@ static int handle_server_event(struct wyoming_state *state)
             json_get_int(data, "channels", &channels) != 1 ||
             width != 2 || state->output_fd < 0)
             return -1;
+        pipeline_touch(state);
         return play_pcm16(state, payload, event.payload_length, rate,
                           channels);
     }
@@ -443,8 +475,10 @@ static int handle_server_event(struct wyoming_state *state)
             close(state->output_fd);
         state->output_fd = -1;
         result = send_event(state, "played", NULL, NULL, 0);
-        if (result == 0)
+        if (result == 0) {
             state->pipeline_active = 0;
+            state->pipeline_last_activity.tv_sec = 0;
+        }
         return result;
     }
     return 0;
@@ -485,6 +519,7 @@ static int handle_wake_event(struct wyoming_state *state)
         if (start_stream(state) < 0)
             return -1;
         state->pipeline_active = 1;
+        pipeline_touch(state);
         return 0;
     }
     return 0;
@@ -500,6 +535,7 @@ static int handle_audio_frame(struct wyoming_state *state)
     ring_append(state, &frame);
     if (!state->streaming || state->client_fd < 0)
         return 0;
+    pipeline_touch(state);
     if (send_event(state, "audio-chunk",
                    "{\"rate\":16000,\"width\":2,\"channels\":1}",
                    frame.samples, frame.sample_count * sizeof(int16_t)) < 0)
@@ -513,6 +549,20 @@ static int handle_audio_frame(struct wyoming_state *state)
     if (state->stream_samples >= MAX_STREAM_SAMPLES ||
         state->quiet_samples >= QUIET_AFTER_SAMPLES)
         return stop_stream(state);
+    return 0;
+}
+
+static int pipeline_watchdog(struct wyoming_state *state)
+{
+    if (!pipeline_watchdog_expired(state))
+        return 0;
+    le_log_warn("wyomingd: local pipeline watchdog expired; rearming wake detection");
+    if (state->streaming && stop_stream(state) < 0)
+        return -1;
+    state->pipeline_active = 0;
+    state->detected = 0;
+    state->pipeline_last_activity.tv_sec = 0;
+    state->pipeline_last_activity.tv_nsec = 0;
     return 0;
 }
 
@@ -573,6 +623,8 @@ int main(int argc, char **argv)
         nfds_t count = 1;
         int result;
 
+        if (pipeline_watchdog(&state) < 0)
+            break;
         if (state.wake_fd < 0)
             state.wake_fd = connect_wake(state.wake_socket, "subscribe");
         if (state.audio_fd < 0)

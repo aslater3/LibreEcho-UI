@@ -191,7 +191,8 @@ static int expect_local_wake_start(int fd)
                  "\"channels\":2}") != NULL);
     CHECK(read_event(fd, &event) == 0);
     CHECK(!strcmp(event.type, "audio-start"));
-    for (i = 0; i < 4 && (!found_chunk || !found_started); ++i) {
+    for (i = 0; i < 3 * 16000 / LE_VOICE_STREAM_MAX_SAMPLES + 4 &&
+         (!found_chunk || !found_started); ++i) {
         CHECK(read_event(fd, &event) == 0);
         if (!strcmp(event.type, "audio-chunk"))
             found_chunk = 1;
@@ -304,7 +305,7 @@ int main(void)
     child = fork();
     CHECK(child >= 0);
     if (child == 0) {
-        execl("./build/libreecho-wyomingd", "libreecho-wyomingd",
+        execl("./build/libreecho-wyomingd-test", "libreecho-wyomingd-test",
               "--foreground", "--port", "18700", "--wake-socket",
               socket_path, "--audio-bus", bus_path, (char *)NULL);
         _exit(127);
@@ -388,6 +389,28 @@ int main(void)
     CHECK(finish_input_stream(audio_fd, client_fd,
                               50000 + LE_VOICE_STREAM_MAX_SAMPLES) == 0);
     CHECK(play_tts_response(client_fd, bus_reader) == 0);
+
+    /* A successful HA turn with no TTS audio has no audio-stop/played event.
+       The bounded watchdog must rearm wake detection rather than leaving the
+       satellite locked out forever. */
+    CHECK(le_voice_stream_write_frame(audio_fd, 80000, samples,
+                                      sizeof(samples) / sizeof(samples[0]),
+                                      0) == 0);
+    CHECK(send_wake(wake_fd, 80000) == 0);
+    CHECK(expect_local_wake_start(client_fd) == 0);
+    CHECK(finish_input_stream(audio_fd, client_fd,
+                              80000 + LE_VOICE_STREAM_MAX_SAMPLES) == 0);
+    {
+        struct timespec watchdog_delay = {1, 200000000L};
+        nanosleep(&watchdog_delay, NULL);
+    }
+    CHECK(le_voice_stream_write_frame(audio_fd, 90000, samples,
+                                      sizeof(samples) / sizeof(samples[0]),
+                                      0) == 0);
+    CHECK(send_wake(wake_fd, 90000) == 0);
+    CHECK(expect_local_wake_start(client_fd) == 0);
+    CHECK(finish_input_stream(audio_fd, client_fd,
+                              90000 + LE_VOICE_STREAM_MAX_SAMPLES) == 0);
 
     kill(child, SIGTERM);
     waitpid(child, &status, 0);

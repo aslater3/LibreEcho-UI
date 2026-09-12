@@ -130,6 +130,11 @@ $(BUILD)/libreecho-agentd: $(AGENTD_OBJECTS)
 $(BUILD)/libreecho-wyomingd: $(WYOMINGD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(WYOMINGD_OBJECTS) $(LDFLAGS) -lm -o $@
 
+$(BUILD)/libreecho-wyomingd-test: $(WYOMINGD_SOURCES)
+	@mkdir -p $(BUILD)
+	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CFLAGS) -DLE_WYOMING_PIPELINE_WATCHDOG_SECONDS=1 -Isrc \
+		$^ $(LDFLAGS) -lm -o $@
+
 $(BUILD)/libreecho-sttd-wyoming: src/adapter/sttd.c \
 		src/adapter/stt_engine_wyoming.c src/adapter/wyoming_client.c \
 		src/adapter/wyoming_protocol.c src/adapter/adapter_server.c \
@@ -353,7 +358,7 @@ $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 test-wyoming-protocol: $(BUILD)/test-wyoming-protocol
 	./$(BUILD)/test-wyoming-protocol
 
-$(BUILD)/test-wyomingd: tests/test_wyomingd.c $(BUILD)/libreecho-wyomingd
+$(BUILD)/test-wyomingd: tests/test_wyomingd.c $(BUILD)/libreecho-wyomingd-test
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc tests/test_wyomingd.c \
 		src/adapter/voice_stream.c src/adapter/wyoming_protocol.c src/json.c \
 		-o $@
