@@ -429,8 +429,9 @@ static int handle_server_event(struct wyoming_state *state)
         return 0;
     }
     if (!strcmp(event.type, "error")) {
-        state->pipeline_active = 0;
-        state->pipeline_last_activity.tv_sec = 0;
+        /* Errors are not correlated with a turn on the Wyoming wire. Keep the
+           overlap lock and let the bounded watchdog recover it. */
+        pipeline_touch(state);
         return 0;
     }
     if (!strcmp(event.type, "run-pipeline")) {
@@ -471,8 +472,9 @@ static int handle_server_event(struct wyoming_state *state)
     if (!strcmp(event.type, "audio-stop")) {
         int result;
 
-        if (state->output_fd >= 0)
-            close(state->output_fd);
+        if (state->output_fd < 0)
+            return 0;
+        close(state->output_fd);
         state->output_fd = -1;
         result = send_event(state, "played", NULL, NULL, 0);
         if (result == 0) {
@@ -512,12 +514,18 @@ static int handle_wake_event(struct wyoming_state *state)
                        "\"timestamp\":0}", name);
         state->detection_sample = (uint64_t)sample;
         state->detected = 1;
-        if (send_event(state, "detection", data, NULL, 0) < 0)
+        if (send_event(state, "detection", data, NULL, 0) < 0) {
+            state->detected = 0;
             return -1;
-        if (request_local_wake_pipeline(state) < 0)
+        }
+        if (request_local_wake_pipeline(state) < 0) {
+            state->detected = 0;
             return -1;
-        if (start_stream(state) < 0)
+        }
+        if (start_stream(state) < 0) {
+            state->detected = 0;
             return -1;
+        }
         state->pipeline_active = 1;
         pipeline_touch(state);
         return 0;
