@@ -305,6 +305,35 @@ async function main() {
           globalThis.updateSizeText(null, cap).indexOf('ceiling') === -1,
           globalThis.updateSizeText(null, cap));
 
+    /* ---- Logs page re-samples wake capture health ---- */
+    console.log('-- logs page resamples wake capture health --');
+    {
+        const oldQ = document.querySelector;
+        const oldApi = globalThis.api;
+        let diagCalls = 0;
+        const holder = { innerHTML: '' };
+        document.querySelector = sel => sel === '#diag-panel' ? holder : stub();
+        globalThis.api = async path => {
+            if (path === '/logs') return { entries: [], source: 'harness', capacity: 8 };
+            if (path === '/diagnostics') {
+                diagCalls += 1;
+                return diagCalls === 1
+                    ? { checks: [{ name: 'wake word', status: 'ok' }] }
+                    : { checks: [{ name: 'wake word', status: 'degraded' }] };
+            }
+            throw new Error('unexpected path ' + path);
+        };
+        state.page = 'Logs';
+        await globalThis.logsPage();
+        for (let flush = 0; flush < 6; flush += 1) await Promise.resolve();
+        check('logs page re-samples diagnostics without a manual refresh',
+              diagCalls === 2, diagCalls);
+        check('the re-sampled verdict is rendered',
+              /degraded/.test(holder.innerHTML), holder.innerHTML.slice(0, 240));
+        document.querySelector = oldQ;
+        globalThis.api = oldApi;
+    }
+
     console.log(failures ? 'web ui behaviour: ' + failures + ' FAILED' : 'web ui behaviour: ok');
     process.exit(failures ? 1 : 0);
 }
