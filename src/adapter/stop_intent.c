@@ -32,6 +32,15 @@ static void normalise(const char *in, char *out, size_t size)
             /* A contraction is one word: "don't" must not split into "don t",
                or the negation check below silently stops matching it. */
             continue;
+        } else if (ch == 0xE2 && (unsigned char)in[1] == 0x80 &&
+                   (unsigned char)in[2] == 0x99) {
+            /* The typographic apostrophe (U+2019) is the same contraction in
+               a different costume. Read as punctuation it turns "don’t stop"
+               into "don t stop": the negation stops matching while "stop"
+               still does, so the device silences the music for the opposite
+               request. */
+            in += 2;
+            continue;
         } else if (!last_space) {
             out[n++] = ' ';
             last_space = 1;

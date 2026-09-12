@@ -303,11 +303,17 @@ do it.
 The successful response is the same document as `GET /api/v1/playback`, read
 after the action, so a client can re-render from it without a second request.
 
-This is the only transport in the product. `agentd` has no radio path, so
-"stop" spoken over the music does not reach radiod, and the physical buttons
-do not either: `buttond` handles volume up, volume down and microphone mute
-only, so the `Play / pause` short-press action stored by `PUT /api/v1/buttons`
-is a saved preference that nothing acts on yet.
+Over HTTP, this endpoint is the only way to change playback. Speaking "stop"
+is a second path that never leaves the device: `agentd` recognises the request
+in the transcript before the language model sees it and stops what the device
+itself drives — internet radio, its own speech and the noise machine — so a
+spoken stop does reach radiod. A negated request ("don't stop") is left alone,
+and a source owned by a phone (AirPlay, Bluetooth) cannot be stopped by the
+device, so the assistant says so instead of silently ignoring the request.
+
+The physical buttons still do not reach playback: `buttond` handles volume up,
+volume down and microphone mute only, so the `Play / pause` short-press action
+stored by `PUT /api/v1/buttons` is a saved preference that nothing acts on yet.
 
 #### GET /api/v1/audio
 
@@ -1677,9 +1683,9 @@ Starts the station whose `word` matches, by its stored URL.
 The successful response has the same shape as `GET`, so `playing` and
 `playing_url` come back with it.
 
-The assistant does not reach this endpoint. `agentd` has no radio path at all,
-so a spoken request for a station cannot start one; playback is started over the
-API today.
+The assistant cannot start radio: `agentd` reaches radiod only to stop what is
+already playing (see the playback section), so a spoken request for a station
+cannot start one; playback is started over the API today.
 
 #### POST /api/v1/integrations/radio/stop
 
@@ -1688,8 +1694,9 @@ not an error, so this is safe to send unconditionally as cleanup. Answers `501`
 when the image has no stream player and `503` when the stop failed. The
 successful response has the same shape as `GET`.
 
-This is the only way to stop the radio today, for the same reason: `agentd` has
-no radio path, so "stop" spoken over the music does not reach radiod.
+This is the programmatic way to stop the radio. A spoken "stop" also reaches
+radiod: `agentd` recognises the request locally and stops the radio, its own
+speech and the noise machine (see the playback section).
 
 #### PUT /api/v1/integrations/radio
 

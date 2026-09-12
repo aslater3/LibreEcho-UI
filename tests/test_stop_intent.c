@@ -160,6 +160,19 @@ int main(void)
     assert(!le_stop_intent_matches("don't stop"));
     assert(!le_stop_intent_matches("do not stop the music"));
     assert(!le_stop_intent_matches("never stop"));
+    /*
+     * The same negations with the typographic apostrophe (U+2019) that
+     * recognisers emit just as often as the ASCII one. Treated as
+     * punctuation it becomes "don t stop": the negation stops matching while
+     * "stop" still does, so the device silences the music for the opposite
+     * request -- the most annoying possible false hit.
+     */
+    assert(!le_stop_intent_matches("don’t stop"));
+    assert(!le_stop_intent_matches("Don’t stop!"));
+    assert(!le_stop_intent_matches("please don’t stop the song"));
+    assert(!le_stop_intent_matches("don’t turn the music off"));
+    /* A curly apostrophe elsewhere must not stop a real request matching. */
+    assert(le_stop_intent_matches("stop, it’s too loud"));
     assert(!le_stop_intent_matches(""));
     assert(!le_stop_intent_matches(NULL));
     assert(!le_stop_intent_matches("what time is it"));
