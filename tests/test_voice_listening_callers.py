@@ -2,36 +2,23 @@
 """Keep Wyoming visual-only while the local pipeline retains its wake chirp."""
 
 from pathlib import Path
-import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def function(source: Path, name: str) -> str:
-    text = source.read_text(encoding="utf-8")
-    match = re.search(
-        rf"static [^\n]*\b{name}\(.*?^}}\n",
-        text,
-        re.DOTALL | re.MULTILINE,
-    )
-    if not match:
-        raise SystemExit(f"{name} not found in {source}")
-    return match.group(0)
-
-
 def main() -> None:
-    wyoming_start = function(ROOT / "src/adapter/wyomingd.c", "start_stream")
-    local_start = function(
-        ROOT / "src/adapter/voice_pipeline.c", "start_recognition"
-    )
+    wyoming = (ROOT / "src/adapter/wyomingd.c").read_text(encoding="utf-8")
+    local = (ROOT / "src/adapter/voice_pipeline.c").read_text(encoding="utf-8")
 
-    if "le_voice_listening_led_set(1)" not in wyoming_start:
-        raise SystemExit("Wyoming capture must start with visual-only feedback")
-    if "le_voice_listening_feedback_set" in wyoming_start:
-        raise SystemExit("Wyoming capture must not request the wake chirp")
-    if "le_voice_listening_feedback_set(1)" not in local_start:
+    if "le_voice_listening_feedback_set" in wyoming:
+        raise SystemExit("Wyoming must not request audible wake feedback")
+    if "le_voice_listening_led_set(1)" not in wyoming:
+        raise SystemExit("Wyoming capture must retain visual-only feedback")
+    if "le_voice_listening_feedback_set(1)" not in local:
         raise SystemExit("local capture must retain audible wake feedback")
+    if "le_voice_listening_feedback_set(0)" not in local:
+        raise SystemExit("local capture must clear audible wake feedback")
 
     print("voice listening callers: Wyoming silent, local chirped: ok")
 

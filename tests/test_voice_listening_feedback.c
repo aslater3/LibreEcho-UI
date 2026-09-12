@@ -21,6 +21,7 @@ struct le_adapter {
 
 static struct le_adapter audio_adapter = {1};
 static struct le_adapter led_adapter = {0};
+static int audio_available = 1;
 static int audio_calls;
 static int led_calls;
 static char led_args[2][256];
@@ -29,7 +30,7 @@ struct le_adapter *le_adapter_connect(const char *path, int timeout_ms)
 {
     (void)timeout_ms;
     if (!strcmp(path, LE_ADAPTER_AUDIO_SOCK))
-        return &audio_adapter;
+        return audio_available ? &audio_adapter : NULL;
     if (!strcmp(path, LE_ADAPTER_LED_SOCK))
         return &led_adapter;
     return NULL;
@@ -77,6 +78,14 @@ int main(void)
     CHECK(audio_calls == 1);
     CHECK(led_calls == 1);
     CHECK(strstr(led_args[0], "\"name\":\"pulse\"") != NULL);
+
+    audio_available = 0;
+    reset_calls();
+    le_voice_listening_feedback_set(1);
+    CHECK(audio_calls == 0);
+    CHECK(led_calls == 1);
+    CHECK(strstr(led_args[0], "\"name\":\"pulse\"") != NULL);
+    audio_available = 1;
 
     reset_calls();
     le_voice_listening_feedback_set(0);
