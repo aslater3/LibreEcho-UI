@@ -20,11 +20,11 @@ curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: appli
 curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 curl -fsS "$URL/api/v1/voice-pipeline" |
     jq -e '.ok and .data.mode == "home-assistant"' >/dev/null
-jq -e '.voice_pipeline_mode == "home-assistant"' "$CFG" >/dev/null
+jq -e '.voice_pipeline_mode == "home-assistant" and .voice_pipeline_previous_mode == "custom"' "$CFG" >/dev/null
 curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":false}' >/dev/null
 curl -fsS "$URL/api/v1/voice-pipeline" |
-    jq -e '.ok and .data.mode == "local"' >/dev/null
-jq -e '.voice_pipeline_mode == "local"' "$CFG" >/dev/null
+    jq -e '.ok and .data.mode == "custom"' >/dev/null
+jq -e '.voice_pipeline_mode == "custom"' "$CFG" >/dev/null
 curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/integrations/spotify" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 grep -q '"volume": 37' "$CFG"

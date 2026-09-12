@@ -583,6 +583,13 @@ static void ensure_voice_pipeline_config(struct api_context *c)
         (!strcmp(value, "local") || !strcmp(value, "custom") ||
          !strcmp(value, "home-assistant")))
         strcpy(c->voice_pipeline_mode, value);
+    if (json_get_string(saved, "voice_pipeline_previous_mode",
+                        value, sizeof(value)) == 1 &&
+        (!strcmp(value, "local") || !strcmp(value, "custom")) &&
+        strlen(value) < sizeof(c->voice_pipeline_previous_mode)) {
+        strcpy(c->voice_pipeline_previous_mode, value);
+        c->voice_pipeline_previous_valid = 1;
+    }
     if (json_get_string(saved, "stt_wyoming_uri",
                         value, sizeof(value)) == 1 &&
         (!value[0] || le_wyoming_uri_valid(value)))
@@ -698,15 +705,17 @@ static void voice_pipeline_json(struct api_context *c,
 {
     char stt_uri[640], stt_model[256], tts_uri[640], tts_voice[256];
     int custom;
+    int network_pipeline;
     int stt_reachable;
     int tts_reachable;
     const char *restart_state;
 
     ensure_voice_pipeline_config(c);
     custom = !strcmp(c->voice_pipeline_mode, "custom");
-    stt_reachable = custom &&
+    network_pipeline = custom || !strcmp(c->voice_pipeline_mode, "home-assistant");
+    stt_reachable = network_pipeline &&
         pipeline_endpoint_reachable(c, c->stt_wyoming_uri);
-    tts_reachable = custom &&
+    tts_reachable = network_pipeline &&
         pipeline_endpoint_reachable(c, c->tts_wyoming_uri);
     restart_state = voice_pipeline_restart_state();
 
@@ -825,6 +834,8 @@ static int voice_pipeline_update(struct api_context *c, const char *json)
     snprintf(c->tts_wyoming_voice, sizeof(c->tts_wyoming_voice),
              "%s", tts_voice);
     if (!strcmp(mode, "custom"))
+        c->privacy_local_only = 0;
+    else if (!strcmp(mode, "home-assistant"))
         c->privacy_local_only = 0;
     return LE_OK;
 }
@@ -1332,7 +1343,7 @@ static int persist_configuration(struct api_context*c)
 {
     char config[8192];
     char mode[48], stt_uri[640], stt_model[256];
-    char tts_uri[640], tts_voice[256];
+    char tts_uri[640], tts_voice[256], previous_mode[48];
     size_t length;
     int rc;
 
@@ -1348,15 +1359,17 @@ static int persist_configuration(struct api_context*c)
     json_escape(stt_model, sizeof(stt_model), c->stt_wyoming_model);
     json_escape(tts_uri, sizeof(tts_uri), c->tts_wyoming_uri);
     json_escape(tts_voice, sizeof(tts_voice), c->tts_wyoming_voice);
+    json_escape(previous_mode, sizeof(previous_mode), c->voice_pipeline_previous_mode);
     --length;
     if (snprintf(
             config + length, sizeof(config) - length,
             ",\n  \"voice_pipeline_mode\": \"%s\","
+            "\n  \"voice_pipeline_previous_mode\": \"%s\","
             "\n  \"stt_wyoming_uri\": \"%s\","
             "\n  \"stt_wyoming_model\": \"%s\","
             "\n  \"tts_wyoming_uri\": \"%s\","
             "\n  \"tts_wyoming_voice\": \"%s\"\n}",
-            mode, stt_uri, stt_model, tts_uri, tts_voice) >=
+            mode, previous_mode, stt_uri, stt_model, tts_uri, tts_voice) >=
         (int)(sizeof(config) - length))
         return LE_IO;
     if (!c->config_path[0])
@@ -2141,7 +2154,7 @@ static int handle_privacy(struct api_context *c,
     }
     parsed=json_get_bool(q->body,"local_only",&value);
     if(parsed<0){err(r,400,LE_INVALID,"local_only must be a boolean");return 1;}
-    if(parsed>0&&value&&!strcmp(c->voice_pipeline_mode,"custom")){err(r,409,LE_BUSY,"Disable the network voice pipeline before requiring local processing");return 1;}
+    if(parsed>0&&value&&(!strcmp(c->voice_pipeline_mode,"custom")||!strcmp(c->voice_pipeline_mode,"home-assistant"))){err(r,409,LE_BUSY,"Disable the network voice pipeline before requiring local processing");return 1;}
     parsed=json_get_bool(q->body,"diagnostic_telemetry",&value);
     if(parsed<0){err(r,400,LE_INVALID,"diagnostic_telemetry must be a boolean");return 1;}
     if(parsed>0)c->privacy_telemetry=value;
@@ -2185,6 +2198,10 @@ static void after_integration_change(struct api_context *c,
                                      const struct api_request *q,
                                      struct api_response *r)
 {
+    char old_mode[sizeof(c->voice_pipeline_mode)];
+    char old_previous[sizeof(c->voice_pipeline_previous_mode)];
+    int old_previous_valid;
+    unsigned old_integrations;
     int enabled;
     int home_assistant_change = 0;
     int rc;
@@ -2193,18 +2210,95 @@ static void after_integration_change(struct api_context *c,
         strncmp(q->path, "/api/v1/integrations/", 21) ||
         r->status != 200)
         return;
-    if (strstr(q->path, "home-assistant") &&
-        json_get_bool(q->body, "enabled", &enabled) == 1) {
-        ensure_voice_pipeline_config(c);
-        snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
-                 "%s", enabled ? "home-assistant" : "local");
+    if (!strstr(q->path, "home-assistant") ||
+        json_get_bool(q->body, "enabled", &enabled) != 1)
+        return;
+
+    ensure_voice_pipeline_config(c);
+    snprintf(old_mode, sizeof(old_mode), "%s", c->voice_pipeline_mode);
+    snprintf(old_previous, sizeof(old_previous), "%s",
+             c->voice_pipeline_previous_mode);
+    old_previous_valid = c->voice_pipeline_previous_valid;
+    old_integrations = enabled ? c->integrations & ~1u : c->integrations | 1u;
+    if (enabled ? strcmp(c->voice_pipeline_mode, "home-assistant") != 0
+                : !strcmp(c->voice_pipeline_mode, "home-assistant")) {
         home_assistant_change = 1;
+        if (enabled) {
+            if (strcmp(c->voice_pipeline_mode, "home-assistant")) {
+                snprintf(c->voice_pipeline_previous_mode,
+                         sizeof(c->voice_pipeline_previous_mode), "%s",
+                         c->voice_pipeline_mode);
+                c->voice_pipeline_previous_valid =
+                    !strcmp(c->voice_pipeline_mode, "local") ||
+                    !strcmp(c->voice_pipeline_mode, "custom");
+                snprintf(c->voice_pipeline_mode,
+                         sizeof(c->voice_pipeline_mode), "%s",
+                         "home-assistant");
+            }
+        } else if (!strcmp(c->voice_pipeline_mode, "home-assistant")) {
+            if (c->voice_pipeline_previous_valid)
+                snprintf(c->voice_pipeline_mode,
+                         sizeof(c->voice_pipeline_mode), "%s",
+                         c->voice_pipeline_previous_mode);
+            else
+                snprintf(c->voice_pipeline_mode,
+                         sizeof(c->voice_pipeline_mode), "%s", "local");
+            c->voice_pipeline_previous_valid = 0;
+        }
+    }
+    if (home_assistant_change && voice_pipeline_restart_pending()) {
+        c->integrations = old_integrations;
+        snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
+                 "%s", old_mode);
+        snprintf(c->voice_pipeline_previous_mode,
+                 sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
+        c->voice_pipeline_previous_valid = old_previous_valid;
+        err(r, 409, LE_BUSY, "A voice pipeline restart is already in progress");
+        return;
+    }
+    if (home_assistant_change && !strcmp(le_backend_mode(c->backend), "linux") &&
+        enabled && access(LE_INIT_WYOMINGD, X_OK) < 0) {
+        c->integrations = old_integrations;
+        snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
+                 "%s", old_mode);
+        snprintf(c->voice_pipeline_previous_mode,
+                 sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
+        c->voice_pipeline_previous_valid = old_previous_valid;
+        err(r, 501, LE_NOT_SUPPORTED,
+            "Home Assistant voice pipeline is not installed");
+        return;
     }
     rc = persist_configuration(c);
-    if (!rc && home_assistant_change)
-        rc = apply_home_assistant_mode(enabled);
-    if (rc)
-        err(r, 503, rc, "Integration configuration could not be applied");
+    if (rc) {
+        c->integrations = old_integrations;
+        snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
+                 "%s", old_mode);
+        snprintf(c->voice_pipeline_previous_mode,
+                 sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
+        c->voice_pipeline_previous_valid = old_previous_valid;
+        err(r, 503, rc, "Integration configuration could not be saved");
+        return;
+    }
+    if (home_assistant_change) {
+        rc = !strcmp(le_backend_mode(c->backend), "mock")
+            ? LE_OK : apply_voice_pipeline_mode(c->voice_pipeline_mode);
+        if (rc == LE_BUSY) {
+            voice_pipeline_json(c, r);
+            r->status = 202;
+            return;
+        }
+        if (rc) {
+            c->integrations = old_integrations;
+            snprintf(c->voice_pipeline_mode,
+                     sizeof(c->voice_pipeline_mode), "%s", old_mode);
+            snprintf(c->voice_pipeline_previous_mode,
+                     sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
+            c->voice_pipeline_previous_valid = old_previous_valid;
+            (void)persist_configuration(c);
+            err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc,
+                "Integration configuration could not be applied");
+        }
+    }
 }
 #define api_handle_inner(c,q,r) do { \
     if (!handle_voice_pipeline((c),(q),(r)) && \
