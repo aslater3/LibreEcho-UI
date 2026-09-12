@@ -2069,9 +2069,14 @@ static int handle_voice_pipeline(struct api_context *c,
                                  struct api_response *r)
 {
     int rc;
+    unsigned old_integrations;
+    char old_mode[sizeof(c->voice_pipeline_mode)];
 
     if (strcmp(q->path, "/api/v1/voice-pipeline"))
         return 0;
+    ensure_voice_pipeline_config(c);
+    old_integrations = c->integrations;
+    snprintf(old_mode, sizeof(old_mode), "%s", c->voice_pipeline_mode);
     if (!strcmp(q->method, "GET")) {
         voice_pipeline_json(c, r);
         return 1;
@@ -2096,9 +2101,19 @@ static int handle_voice_pipeline(struct api_context *c,
             "Voice pipeline mode, endpoints, model, or voice is invalid");
         return 1;
     }
+    if (!strcmp(c->voice_pipeline_mode, "home-assistant"))
+        c->integrations |= 1u;
+    else
+        c->integrations &= ~1u;
     rc = persist_configuration(c);
-    if (!rc)
-        rc = apply_voice_pipeline_mode(c->voice_pipeline_mode);
+    if (rc) {
+        c->integrations = old_integrations;
+        snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
+                 "%s", old_mode);
+        err(r, 503, rc, "Voice pipeline configuration could not be saved");
+        return 1;
+    }
+    rc = apply_voice_pipeline_mode(c->voice_pipeline_mode);
     if (rc == LE_BUSY) {
         if (voice_pipeline_restart_pending()) {
             voice_pipeline_json(c, r);
@@ -2116,6 +2131,10 @@ static int handle_voice_pipeline(struct api_context *c,
         }
     }
     if (rc) {
+        c->integrations = old_integrations;
+        snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
+                 "%s", old_mode);
+        (void)persist_configuration(c);
         err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc,
             "Voice pipeline configuration could not be applied");
         return 1;
