@@ -24,4 +24,13 @@ assert "test-voice-listening-feedback:" in makefile
 assert "./$(BUILD)/test-voice-listening-feedback" in makefile
 assert "python3 tests/test_voice_listening_callers.py" in makefile
 
+# `make test` starts with `make clean`, so the newly introduced binary must be
+# removed there too; otherwise a reused workspace re-runs a stale executable
+# after only a header/compiler-flag change.
+clean_recipe = makefile.split("\nclean:\n", 1)[1].split("\n\n", 1)[0]
+assert "$(BUILD)/test-voice-listening-feedback" in clean_recipe
+# The clean recipe must still remove the sibling voice regressions it already owned.
+assert "$(BUILD)/test-voice-playback" in clean_recipe
+
 print("PR 244 aggregate runner feedback wiring: ok")
+print("PR 244 clean-build hygiene for the feedback binary: ok")

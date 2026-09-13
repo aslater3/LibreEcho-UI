@@ -818,6 +818,7 @@ clean:
 		$(BUILD)/test-agentd \
 		$(BUILD)/test-voice-reply \
 		$(BUILD)/test-voice-playback \
+		$(BUILD)/test-voice-listening-feedback \
 		$(BUILD)/test-voice-pipeline-restart \
 		$(BUILD)/libreecho-sttd-sherpa-arm32 \
 		$(BUILD)/sttd.arm.o $(BUILD)/stt_engine_sherpa.arm.o \
