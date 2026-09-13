@@ -78,7 +78,7 @@
      "Assistant"
     ],
     "summary": "Read voice-assistant state and latency telemetry",
-    "description": "Reports subscription authentication, wake/STT stream health, and measured speech-end-to-first-PCM latency.",
+    "description": "Reports subscription authentication, wake/STT stream health, measured speech-end-to-first-PCM latency, and the configured spoken time format.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -93,7 +93,7 @@
      "Assistant"
     ],
     "summary": "Configure the wake-to-reply assistant",
-    "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, and whether wake-to-reply is enabled. API keys are write-only and never returned.",
+    "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, the spoken time format, and whether wake-to-reply is enabled. API keys are write-only and never returned.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -129,6 +129,15 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 95
+         },
+         "clock_format": {
+          "type": "string",
+          "enum": [
+           "12",
+           "24"
+          ],
+          "default": "12",
+          "description": "Spoken time format: \"12\" reads times as 1:57 PM, \"24\" as 13:57. Applies to ChatGPT and OpenAI-compatible providers."
          },
          "prompt": {
           "type": "string",
@@ -1926,7 +1935,7 @@
      "Integrations"
     ],
     "summary": "Enable or disable an integration",
-    "description": "The `home-assistant` toggle and the voice-pipeline mode are two signals for the same Wyoming daemon. Disabling it stops the daemon and, when the persisted pipeline mode is `home-assistant`, switches that mode to `local`, so the controller no longer advertises a `_wyoming._tcp` service for a stopped daemon. Enabling it starts the daemon and leaves the configured pipeline mode untouched.",
+    "description": "The home-assistant integration also selects the voice pipeline: enabling it persists Home Assistant mode, while disabling it persists and restores the previously saved pipeline mode (the mode that was active when Home Assistant was enabled), falling back to local when none was recorded. On images with the Linux backend the pipeline transition is asynchronous, so a normal success may be 202 with a pending voice-pipeline document instead of 200. Enabling Home Assistant clears local-only processing in the same transition because microphone audio leaves the device.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1947,10 +1956,29 @@
      "200": {
       "$ref": "#/components/responses/Success"
      },
+     "202": {
+      "description": "The Home Assistant pipeline transition was accepted and is still running. The body is the ordinary voice-pipeline document, whose restart.state is pending.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VoicePipelineEnvelope"
+        }
+       }
+      }
+     },
      "404": {
       "$ref": "#/components/responses/Error"
      },
      "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -3660,6 +3688,24 @@
      "data": {
       "type": "object",
       "properties": {
+       "mode": {
+        "type": "string",
+        "enum": [
+         "local",
+         "custom",
+         "home-assistant"
+        ],
+        "description": "Active voice pipeline."
+       },
+       "home_assistant": {
+        "type": "object",
+        "description": "Readiness of the Home Assistant Wyoming satellite (libreecho-wyomingd). Only meaningful when mode is home-assistant; the saved custom stt/tts endpoints are not probed in this mode.",
+        "properties": {
+         "ready": {
+          "type": "boolean"
+         }
+        }
+       },
        "listening": {
         "$ref": "#/components/schemas/ListeningSettings"
        },

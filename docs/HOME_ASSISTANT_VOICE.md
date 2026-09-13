@@ -45,12 +45,19 @@ provide the satellite portion of Wyoming:
   plus the `attribution`/`installed` artifact metadata Home Assistant's
   Wyoming client requires;
 - `satellite-connected` lifecycle event;
-- local wake detections -> `detection`; Home Assistant then sends
-  `run-pipeline` beginning at `asr`;
+- local wake detections -> `detection`, then the bridge emits its own
+  `run-pipeline` (starting at `asr`) and begins streaming immediately, so a
+  wake still runs when Home Assistant does not answer; a `run-pipeline`
+  received from Home Assistant is still accepted;
 - indexed post-AEC mono PCM -> `audio-start`, `audio-chunk`, `audio-stop`;
 - incoming `audio-start`/`audio-chunk`/`audio-stop` -> the local 48 kHz stereo
   speaker bus, with bounded format conversion;
 - `run-satellite`, `pause-satellite`, and `run-pipeline` control events;
+- a bounded pipeline watchdog: a turn that stalls with no pipeline activity
+  is retired by closing the Wyoming session, because the protocol carries no
+  turn token that could distinguish that turn's delayed
+  `audio-start`/`audio-stop` from the next turn's. Home Assistant cancels the
+  stalled pipeline, reconnects, and re-sends `run-satellite`;
 - local-socket reconnect and one-connection-at-a-time behavior with bounded
   buffers.
 
@@ -68,8 +75,10 @@ name/area `LibreEcho`; the port can be overridden in the init environment.
 
 Selecting Home Assistant mode immediately stops local STT, local assistant
 dispatch, and local TTS, and starts the Wyoming bridge. On reboot the same
-choice is applied by init. It does not disable `waked`, `micd`, `audiod`, or
-AEC. The existing local ChatGPT mode remains separate and mutually exclusive.
+choice is applied by init. The Home Assistant wake path uses the visual ring
+without an audible local chirp; the local assistant path retains the chirp.
+It does not disable `waked`, `micd`, `audiod`, or AEC. The existing local ChatGPT
+mode remains separate and mutually exclusive.
 
 ## Compatibility references
 

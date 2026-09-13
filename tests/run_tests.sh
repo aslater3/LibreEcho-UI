@@ -9,6 +9,8 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/con
 python3 tests/test_github_link_contract.py
 python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
+python3 tests/test_pr244_review_contract.py
+python3 tests/test_pr245_review_contract.py
 make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
 ./build/test-networkd-scan-security
 ./build/test-network-health
@@ -126,6 +128,7 @@ node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
+node tests/test_assistant_clock_format_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -194,13 +197,15 @@ cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic
     -Isrc -Isrc/adapter tests/test_radio_resample.c src/adapter/radio_resample.c \
     -lm -o build/test-radio-resample
 ./build/test-radio-resample
-make build/test-voice-aec build/test-voice-reference
+make build/test-voice-aec build/test-voice-reference build/test-spoken-time
 ./build/test-voice-aec
 ./build/test-voice-reference
+./build/test-spoken-time
 make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
 make build/test-voice-reply build/test-voice-playback
 make build/test-voice-pipeline
+make build/test-voice-listening-feedback
 ./build/test-voice-stream
 ./build/test-sttd
 ./build/test-llm-provider
@@ -209,10 +214,16 @@ make build/test-voice-pipeline
 ./build/test-agentd
 ./build/test-voice-reply
 ./build/test-voice-playback
+# The silent-wake feedback regressions exist in the test-voice-listening-feedback
+# recipe, but the aggregate suite must actually execute them; a build-only line
+# let `make test` pass even when the Home Assistant path chirped again.
+./build/test-voice-listening-feedback
+python3 tests/test_voice_listening_callers.py
 make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
+sh tests/test_wyomingd_test_recipe.sh
 make build/test-wyomingd
 ./build/test-wyomingd
 python3 tests/test_wyoming_engines.py
@@ -263,6 +274,10 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
+LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_voice_pipeline_ha_transitions.sh
+# Starts its own isolated mock server with the readiness overrides, so it does
+# not depend on the shared server above.
+sh tests/test_voice_pipeline_ha_readiness.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_bluetooth_scan_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_usb_role_contract.sh

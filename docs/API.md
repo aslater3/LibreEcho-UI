@@ -610,9 +610,10 @@ rejected with `501` when its Wyoming service is not installed.
 #### GET /api/v1/assistant
 
 Returns assistant configuration, ChatGPT device-login state, pipeline
-connectivity, local STT timing, and first-audio latency telemetry. The latency
-measurement is from the estimated end of speech to the first PCM submitted to
-the announcement bus; the current target is 3000 ms.
+connectivity, local STT timing, and first-audio latency telemetry. The
+returned configuration includes `clock_format`, the format used when the time
+is spoken aloud. The latency measurement is from the estimated end of speech to
+the first PCM submitted to the announcement bus; the current target is 3000 ms.
 
 #### GET /api/v1/assistant/history
 
@@ -660,6 +661,7 @@ Updates the provider-neutral assistant configuration:
   "enabled": true,
   "provider": "openai-codex",
   "model": "gpt-5.4",
+  "clock_format": "12",
   "prompt": "Reply in concise, natural spoken English without markdown."
 }
 ```
@@ -667,6 +669,12 @@ Updates the provider-neutral assistant configuration:
 The prompt is sent as the response provider's instruction text. Keep it
 voice-safe: concise prose, no markdown, URLs, citations, emoji, or claims that
 an external action succeeded without tool confirmation.
+
+`clock_format` selects how the assistant says times aloud, for both providers:
+`"12"` reads "1:57 PM" and `"24"` reads "13:57". The default is `"12"`; a
+device that has never stored a choice receives it, while an explicit `"12"` or
+`"24"` is kept. Any other value is rejected with HTTP 400 and the previous
+configuration is left unchanged.
 
 #### POST /api/v1/assistant/auth/start
 
@@ -1806,6 +1814,24 @@ JSON-escaped, including when it contains quotes or backslashes.
 
 Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.
 
+The `home-assistant` toggle also selects the active voice pipeline. Enabling it
+persists `home-assistant` mode, records the previous pipeline so a later disable
+restores it, and clears local-only processing in the same transition (microphone
+audio leaves the device). Disabling it persists and restores the saved pipeline,
+or `local` when none was recorded.
+
+Because the pipeline transition restarts daemons, the response is asynchronous
+on the Linux backend:
+
+- **200** — the toggle and any pipeline change were applied; the body is the
+  integration list.
+- **202** — the Home Assistant pipeline transition was accepted and is still
+  running. The body is the voice-pipeline document (`/api/v1/voice-pipeline`
+  shape) whose `restart.state` is `pending`.
+- **409** — a voice pipeline restart is already in progress.
+- **501** — the Home Assistant voice pipeline is not installed on this image.
+- **503** — the integration change could not be saved or applied.
+
 **Request:**
 ```json
 {
@@ -1815,14 +1841,7 @@ Update integration toggles. The `rest` integration is the canonical LAN REST API
 
 (Use query parameter or path to specify integration: `?integration=home-assistant`)
 
-The `home-assistant` toggle and the voice-pipeline mode are two signals for the
-same Wyoming daemon. Disabling the integration stops that daemon and, when the
-persisted `voice_pipeline_mode` is `home-assistant`, switches it to `local`, so
-the AirPlay controller stops advertising a `_wyoming._tcp` service for a stopped
-daemon. Enabling the integration starts the daemon and leaves the configured
-pipeline mode untouched.
-
-**Response:**
+**Response (200):**
 ```json
 {
   "ok": true,
@@ -1833,6 +1852,21 @@ pipeline mode untouched.
       { "id": "rest", "name": "Local REST API", "enabled": true, "forced": false },
       { "id": "bluetooth", "name": "Bluetooth audio", "enabled": false }
     ]
+  },
+  "error": null
+}
+```
+
+**Response (202, pending pipeline transition):**
+```json
+{
+  "ok": true,
+  "data": {
+    "mode": "home-assistant",
+    "home_assistant": { "ready": true },
+    "stt": { "engine": "sherpa", "reachable": false },
+    "tts": { "engine": "sherpa", "reachable": false },
+    "restart": { "state": "pending", "error": "" }
   },
   "error": null
 }

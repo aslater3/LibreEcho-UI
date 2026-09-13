@@ -38,6 +38,7 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/time
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 	src/adapter/voice_listening_led.c \
+	src/adapter/spoken_time.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c \
 	src/config_store.c src/json.c src/log.c
 WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
@@ -68,7 +69,7 @@ LOGD_OBJECTS = $(LOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 comma := ,
 GC_LDFLAGS ?= $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections)
 
-.PHONY: all adapters clean release provenance test install test-wyoming-protocol test-wyomingd
+.PHONY: all adapters clean release provenance test install test-wyoming-protocol test-wyomingd test-voice-listening-feedback
 all: CPPFLAGS += -DLE_DEV_CONTROLS=1
 all: $(TARGET) $(LOGD_TARGET) adapters
 
@@ -129,6 +130,11 @@ $(BUILD)/libreecho-agentd: $(AGENTD_OBJECTS)
 
 $(BUILD)/libreecho-wyomingd: $(WYOMINGD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(WYOMINGD_OBJECTS) $(LDFLAGS) -lm -o $@
+
+$(BUILD)/libreecho-wyomingd-test: $(WYOMINGD_SOURCES)
+	@mkdir -p $(BUILD)
+	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -DLE_WYOMING_PIPELINE_WATCHDOG_SECONDS=1 -Isrc \
+		$^ $(LDFLAGS) -lm -o $@
 
 $(BUILD)/libreecho-sttd-wyoming: src/adapter/sttd.c \
 		src/adapter/stt_engine_wyoming.c src/adapter/wyoming_client.c \
@@ -353,7 +359,7 @@ $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 test-wyoming-protocol: $(BUILD)/test-wyoming-protocol
 	./$(BUILD)/test-wyoming-protocol
 
-$(BUILD)/test-wyomingd: tests/test_wyomingd.c $(BUILD)/libreecho-wyomingd
+$(BUILD)/test-wyomingd: tests/test_wyomingd.c $(BUILD)/libreecho-wyomingd-test
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc tests/test_wyomingd.c \
 		src/adapter/voice_stream.c src/adapter/wyoming_protocol.c src/json.c \
 		-o $@
@@ -548,6 +554,10 @@ $(BUILD)/test-voice-reference: tests/test_voice_reference.c src/adapter/voice_re
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
 		$^ $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
+$(BUILD)/test-spoken-time: tests/test_spoken_time.c src/adapter/spoken_time.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -o $@
+
 $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
 		src/adapter/adapter_client.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -640,6 +650,16 @@ $(BUILD)/test-home-assistant-discovery: tests/test_home_assistant_discovery_life
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c \
 		src/adapter/wyoming_client.c -o $@
+
+$(BUILD)/test-voice-listening-feedback: \
+		tests/test_voice_listening_feedback.c \
+		src/adapter/voice_listening_led.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback
+	./$(BUILD)/test-voice-listening-feedback
+	python3 tests/test_voice_listening_callers.py
 
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
@@ -802,22 +822,26 @@ clean:
 		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-timing \
 		$(BUILD)/test-action-sample \
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
+		$(BUILD)/test-backend-linux-timers $(BUILD)/test-factory-reset \
 		$(BUILD)/test-thermal-zone-selection \
 		$(BUILD)/test-light-sensor \
 		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \
 		$(BUILD)/test-radiod-mp3-frames \
 		$(BUILD)/test-http-worker-registry \
 		$(BUILD)/test-wake-decode \
-		$(BUILD)/test-wake-led $(BUILD)/test-voice-stream \
+		$(BUILD)/test-wake-led $(BUILD)/test-spoken-time \
+		$(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
 		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
+		$(BUILD)/libreecho-wyomingd-test \
 		$(BUILD)/test-audiod-review $(BUILD)/test-led-night-review \
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \
 		$(BUILD)/test-agentd \
 		$(BUILD)/test-voice-reply \
 		$(BUILD)/test-voice-playback \
+		$(BUILD)/test-voice-listening-feedback \
 		$(BUILD)/test-voice-pipeline-restart \
 		$(BUILD)/test-home-assistant-discovery \
 		$(BUILD)/libreecho-sttd-sherpa-arm32 \
