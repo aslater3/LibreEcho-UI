@@ -223,6 +223,26 @@ int main(void)
         return 1;
     }
 
+    /* The documented voice-pipeline route must synchronize discovery: a
+     * Home Assistant voice-pipeline restart both starts Wyoming and refreshes
+     * the controller advertisement. */
+    rewrite_all(1);
+    reset_log();
+    if (voice_pipeline_restart("home-assistant") != LE_OK) {
+        fprintf(stderr, "home-assistant voice pipeline restart must succeed\n");
+        return 1;
+    }
+    expect_invoked("libreecho-ha-wyomingd.init", "start");
+    expect_invoked("libreecho-ha-airplayd.init", "restart");
+
+    rewrite_all(1);
+    reset_log();
+    if (voice_pipeline_restart("local") != LE_OK) {
+        fprintf(stderr, "local voice pipeline restart must succeed\n");
+        return 1;
+    }
+    expect_invoked("libreecho-ha-airplayd.init", "restart");
+
     reset_log();
     for (size_t i = 0; i < sizeof(all_paths) / sizeof(all_paths[0]); ++i)
         unlink(all_paths[i]);

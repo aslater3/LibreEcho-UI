@@ -30,6 +30,15 @@ ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 # integrations mask.  AirPlay/mDNS is enabled by default after payload
 # staging; bit 16 is the explicit persistent user-controlled disable.
 # persistent AirPlay disable is represented by clearing bit 16.
+# The voice-pipeline route persists its own mode. A Home Assistant voice
+# pipeline needs the Wyoming service advertised even when the Home Assistant
+# integrations bit is not also set, so discovery follows both signals.
+home_assistant_voice_mode() {
+    [ -r "$CONFIG" ] || return 1
+    mode=$(sed -n 's/.*"voice_pipeline_mode"[[:space:]]*:[[:space:]]*"\([a-z][a-z-]*\)".*/\1/p' "$CONFIG" | sed -n '1p')
+    [ "$mode" = "home-assistant" ]
+}
+
 airplay_enabled_at_boot=1
 HOME_ASSISTANT_ENABLED=0
 if [ -r "$CONFIG" ]; then
@@ -47,6 +56,9 @@ if [ -r "$CONFIG" ]; then
             fi
             ;;
     esac
+fi
+if [ "$HOME_ASSISTANT_ENABLED" -eq 0 ] && home_assistant_voice_mode; then
+    HOME_ASSISTANT_ENABLED=1
 fi
 if [ "$airplay_enabled_at_boot" -eq 1 ]; then
     ARGS="$ARGS --enable-on-start"

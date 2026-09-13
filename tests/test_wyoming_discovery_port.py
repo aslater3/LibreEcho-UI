@@ -121,5 +121,37 @@ class WyomingDiscoveryPort(unittest.TestCase):
         self.assertIsNone(body)
 
 
+class HomeAssistantVoiceMode(unittest.TestCase):
+    """The persisted voice-pipeline mode is a second discovery signal."""
+
+    def run_mode(self, config):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'web-config.json'
+            if config is not None:
+                path.write_text(config)
+            program = extract(SCRIPT.read_text(), ['home_assistant_voice_mode'])
+            program += '\nhome_assistant_voice_mode\n'
+            env = dict(os.environ, CONFIG=str(path))
+            return subprocess.run(['sh', '-c', program], env=env,
+                                  capture_output=True, text=True, timeout=5)
+
+    def test_home_assistant_mode_is_detected(self):
+        for config in ('{"voice_pipeline_mode": "home-assistant"}',
+                       '{"integrations": 4, "voice_pipeline_mode": "home-assistant"}'):
+            with self.subTest(config=config):
+                self.assertEqual(self.run_mode(config).returncode, 0)
+
+    def test_other_modes_are_not_detected(self):
+        for config in ('{"voice_pipeline_mode": "local"}',
+                       '{"voice_pipeline_mode": "custom"}',
+                       '{"integrations": 1}',
+                       '{}'):
+            with self.subTest(config=config):
+                self.assertNotEqual(self.run_mode(config).returncode, 0)
+
+    def test_missing_config_is_not_detected(self):
+        self.assertNotEqual(self.run_mode(None).returncode, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

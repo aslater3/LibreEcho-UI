@@ -359,6 +359,16 @@ static int setup_activate_installed_features(struct api_context *c)
 #ifndef LE_INIT_AIRPLAYD
 #define LE_INIT_AIRPLAYD  "/etc/init.d/libreecho-airplayd.init"
 #endif
+/* The AirPlay controller is the only process that publishes this image's mDNS
+ * records, so a discovery change is applied by restarting it. The refresh is
+ * best-effort: its failure must never fail or roll back the caller's
+ * configuration transition. */
+static int refresh_home_assistant_discovery(void)
+{
+    if (access(LE_INIT_AIRPLAYD, X_OK) < 0)
+        return LE_IO;
+    return run_init_command(LE_INIT_AIRPLAYD, "restart");
+}
 /* Set when Home Assistant is enabled but the AirPlay controller (the only
  * mDNS responder on the image) could not refresh the Wyoming advertisement.
  * The pipeline transition still succeeds; this lets the caller report the
@@ -366,9 +376,6 @@ static int setup_activate_installed_features(struct api_context *c)
 static int home_assistant_discovery_unavailable;
 static int apply_home_assistant_mode(int enabled)
 {
-    static const char *const restart_discovery[] = {
-        LE_INIT_AIRPLAYD, "restart", NULL
-    };
     static const char *const stop_local[] = {
         LE_INIT_AGENTD, "stop", NULL
     };
@@ -393,6 +400,8 @@ static int apply_home_assistant_mode(int enabled)
     static const char *const start_wyoming[] = {
         LE_INIT_WYOMINGD, "start", NULL
     };
+    int refresh;
+
     if (access(LE_INIT_WYOMINGD, X_OK) < 0)
         return LE_OK;
 
@@ -414,16 +423,12 @@ static int apply_home_assistant_mode(int enabled)
      * its start path requires the optional AirPlay squashfs payload and exits
      * nonzero when that payload is absent. The discovery refresh is therefore
      * attempted only after the requested pipeline state is restored. Its
-     * failure never rolls back or fails that pipeline transition; it is
-     * recorded so the caller can report the missing Wyoming advertisement. */
-    if (access(LE_INIT_AIRPLAYD, X_OK) == 0) {
-        int refresh = run_init_command(restart_discovery[0], restart_discovery[1]);
-
-        if (enabled && refresh != LE_OK)
-            home_assistant_discovery_unavailable = 1;
-    } else if (enabled) {
+     * failure never rolls back or fails that pipeline transition; when Home
+     * Assistant was enabled it is recorded so the caller can report the missing
+     * Wyoming advertisement. */
+    refresh = refresh_home_assistant_discovery();
+    if (enabled && refresh != LE_OK)
         home_assistant_discovery_unavailable = 1;
-    }
     return LE_OK;
 }
 static int valid_pipeline_token(const char *value)
@@ -524,6 +529,9 @@ static int voice_pipeline_restart(const char *mode)
             return LE_NOT_SUPPORTED;
         if (run_init_command(LE_INIT_WYOMINGD, "start"))
             failed = 1;
+        /* The voice-pipeline route is a second way to select Home Assistant
+         * voice; keep the advertised discovery in step with it. */
+        (void)refresh_home_assistant_discovery();
         return failed ? LE_IO : LE_OK;
     }
     if (run_init_command(LE_INIT_STTD, "start"))
@@ -532,6 +540,7 @@ static int voice_pipeline_restart(const char *mode)
         failed = 1;
     if (run_init_command(LE_INIT_AGENTD, "start"))
         failed = 1;
+    (void)refresh_home_assistant_discovery();
     return failed ? LE_IO : LE_OK;
 }
 
