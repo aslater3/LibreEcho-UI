@@ -344,55 +344,73 @@ static int setup_activate_installed_features(struct api_context *c)
     }
     return LE_IO;
 }
+#ifndef LE_INIT_AGENTD
+#define LE_INIT_AGENTD    "/etc/init.d/libreecho-agentd.init"
+#endif
+#ifndef LE_INIT_STTD
+#define LE_INIT_STTD      "/etc/init.d/libreecho-sttd.init"
+#endif
+#ifndef LE_INIT_TTSD
+#define LE_INIT_TTSD      "/etc/init.d/libreecho-ttsd.init"
+#endif
+#ifndef LE_INIT_WYOMINGD
+#define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
+#endif
+#ifndef LE_INIT_AIRPLAYD
+#define LE_INIT_AIRPLAYD  "/etc/init.d/libreecho-airplayd.init"
+#endif
 static int apply_home_assistant_mode(int enabled)
 {
     static const char *const restart_discovery[] = {
-        "/etc/init.d/libreecho-airplayd.init", "restart", NULL
+        LE_INIT_AIRPLAYD, "restart", NULL
     };
     static const char *const stop_local[] = {
-        "/etc/init.d/libreecho-agentd.init", "stop", NULL
+        LE_INIT_AGENTD, "stop", NULL
     };
     static const char *const start_local[] = {
-        "/etc/init.d/libreecho-agentd.init", "start", NULL
+        LE_INIT_AGENTD, "start", NULL
     };
     static const char *const stop_stt[] = {
-        "/etc/init.d/libreecho-sttd.init", "stop", NULL
+        LE_INIT_STTD, "stop", NULL
     };
     static const char *const start_stt[] = {
-        "/etc/init.d/libreecho-sttd.init", "start", NULL
+        LE_INIT_STTD, "start", NULL
     };
     static const char *const stop_tts[] = {
-        "/etc/init.d/libreecho-ttsd.init", "stop", NULL
+        LE_INIT_TTSD, "stop", NULL
     };
     static const char *const start_tts[] = {
-        "/etc/init.d/libreecho-ttsd.init", "start", NULL
+        LE_INIT_TTSD, "start", NULL
     };
     static const char *const stop_wyoming[] = {
-        "/etc/init.d/libreecho-wyomingd.init", "stop", NULL
+        LE_INIT_WYOMINGD, "stop", NULL
     };
     static const char *const start_wyoming[] = {
-        "/etc/init.d/libreecho-wyomingd.init", "start", NULL
+        LE_INIT_WYOMINGD, "start", NULL
     };
-    if (access("/etc/init.d/libreecho-wyomingd.init", X_OK) < 0)
+    if (access(LE_INIT_WYOMINGD, X_OK) < 0)
         return LE_OK;
 
     if (enabled) {
         if (run_init_command(stop_local[0], stop_local[1]) ||
             run_init_command(stop_stt[0], stop_stt[1]) ||
             run_init_command(stop_tts[0], stop_tts[1]) ||
-            run_init_command(start_wyoming[0], start_wyoming[1]) ||
-            (access(restart_discovery[0], X_OK) == 0 &&
-             run_init_command(restart_discovery[0], restart_discovery[1])))
+            run_init_command(start_wyoming[0], start_wyoming[1]))
             return LE_IO;
     } else {
         if (run_init_command(stop_wyoming[0], stop_wyoming[1]) ||
-            (access(restart_discovery[0], X_OK) == 0 &&
-             run_init_command(restart_discovery[0], restart_discovery[1])) ||
             run_init_command(start_stt[0], start_stt[1]) ||
             run_init_command(start_tts[0], start_tts[1]) ||
             run_init_command(start_local[0], start_local[1]))
             return LE_IO;
     }
+    /* The AirPlay mDNS controller init script is installed on every system, but
+     * its start path requires the optional AirPlay squashfs payload and exits
+     * nonzero when that payload is absent. The discovery refresh is therefore
+     * attempted only after the requested pipeline state is restored, and its
+     * failure never rolls back or fails that pipeline transition. */
+    if (access(LE_INIT_AIRPLAYD, X_OK) == 0)
+        (void)run_init_command(restart_discovery[0], restart_discovery[1]);
     return LE_OK;
 }
 static int valid_pipeline_token(const char *value)
@@ -408,18 +426,6 @@ static int valid_pipeline_token(const char *value)
     }
     return 1;
 }
-#ifndef LE_INIT_AGENTD
-#define LE_INIT_AGENTD    "/etc/init.d/libreecho-agentd.init"
-#endif
-#ifndef LE_INIT_STTD
-#define LE_INIT_STTD      "/etc/init.d/libreecho-sttd.init"
-#endif
-#ifndef LE_INIT_TTSD
-#define LE_INIT_TTSD      "/etc/init.d/libreecho-ttsd.init"
-#endif
-#ifndef LE_INIT_WYOMINGD
-#define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
-#endif
 
 /* Only one pipeline restart may be outstanding. The child is deliberately
  * retained as a direct child so the parent can reap it and report failures;

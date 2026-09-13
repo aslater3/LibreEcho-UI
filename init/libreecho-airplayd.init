@@ -21,6 +21,7 @@ RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/airplay2/root}
 CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
 AVAHI_SERVICES_SOURCE=${AVAHI_SERVICES_SOURCE:-/data/libreecho/features/airplay2/avahi-services}
 WYOMING_SERVICE_SOURCE=${WYOMING_SERVICE_SOURCE:-/etc/libreecho/avahi-services/wyoming.service}
+WYOMING_DEFAULTS=${WYOMING_DEFAULTS:-/etc/default/libreecho-wyomingd}
 AVAHI_CONFIG_SNAPSHOT=${AVAHI_CONFIG_SNAPSHOT:-/run/libreecho/airplay-avahi-daemon.conf}
 ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 
@@ -125,6 +126,22 @@ mount_runtime() {
     mount_led_socket
 }
 
+# The Wyoming daemon applies a PORT override from the shared defaults file, so
+# the advertised mDNS port must be derived from that same effective value
+# instead of the built-in default. Sourcing runs in a subshell so the defaults
+# file cannot leak unrelated variables (DAEMON, ARGS, ...) into this script.
+wyoming_service_port() {
+    port=10700
+    if [ -r "$WYOMING_DEFAULTS" ]; then
+        configured=$( . "$WYOMING_DEFAULTS" >/dev/null 2>&1; printf '%s' "${PORT:-}" )
+        case "$configured" in
+            ''|*[!0-9]*) ;;
+            *) port=$configured ;;
+        esac
+    fi
+    printf '%s\n' "$port"
+}
+
 prepare_avahi_runtime() {
     if [ ! -d "$RUNTIME_ROOT/etc/avahi/services" ]; then
         mkdir -p "$(dirname "$AVAHI_CONFIG_SNAPSHOT")"
@@ -145,7 +162,9 @@ prepare_avahi_runtime() {
     fi
     if [ "${HOME_ASSISTANT_ENABLED:-0}" -eq 1 ]; then
         if [ -f "$WYOMING_SERVICE_SOURCE" ] && [ ! -L "$WYOMING_SERVICE_SOURCE" ]; then
-            cp "$WYOMING_SERVICE_SOURCE" "$RUNTIME_ROOT/etc/avahi/services/wyoming.service" || return 1
+            port=$(wyoming_service_port)
+            sed "s#<port>[0-9][0-9]*</port>#<port>$port</port>#" \
+                "$WYOMING_SERVICE_SOURCE" >"$RUNTIME_ROOT/etc/avahi/services/wyoming.service" || return 1
         else
             echo "libreecho-airplayd: Wyoming mDNS service definition unavailable" >&2
         fi

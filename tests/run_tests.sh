@@ -157,6 +157,8 @@ sh tests/test_voice_pipeline_restart_contract.sh
 python3 tests/test_voice_latency_bench.py
 make build/test-voice-pipeline-restart
 ./build/test-voice-pipeline-restart
+make build/test-home-assistant-discovery
+./build/test-home-assistant-discovery
 sh tests/test_wake_led.sh
 sh tests/test_led_visualizer.sh
 make build/libreecho-radiod
@@ -170,6 +172,7 @@ sh tests/test_home_assistant_discovery.sh
 sh tests/test_airplay_setup_persistence.sh
 sh tests/test_airplay_mount_failure.sh
 python3 tests/test_airplay_premounted_runtime.py
+python3 tests/test_wyoming_discovery_port.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
