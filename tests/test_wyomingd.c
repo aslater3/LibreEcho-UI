@@ -275,6 +275,24 @@ static int expect_no_event(int fd, int timeout_ms)
     return 0;
 }
 
+static int expect_session_closed(int fd)
+{
+    struct pollfd descriptor = {fd, POLLIN, 0};
+    unsigned char drain[256];
+    ssize_t count;
+    int result;
+    int drains = 0;
+
+    do {
+        result = poll(&descriptor, 1, 2000);
+    } while (result < 0 && errno == EINTR);
+    CHECK(result > 0);
+    while ((count = read(fd, drain, sizeof(drain))) > 0 && drains++ < 16)
+        ;
+    CHECK(count == 0);
+    return 0;
+}
+
 int main(void)
 {
     char socket_path[108];
@@ -284,6 +302,7 @@ int main(void)
     int audio_listener;
     int audio_fd;
     int client_fd;
+    int stale_client_fd;
     int bus_reader;
     int status;
     pid_t child;
@@ -291,6 +310,7 @@ int main(void)
     int16_t samples[1280];
     size_t i;
 
+    signal(SIGPIPE, SIG_IGN);
     snprintf(socket_path, sizeof(socket_path),
              "/tmp/libreecho-wyoming-test-%ld.sock", (long)getpid());
     snprintf(bus_path, sizeof(bus_path),
@@ -392,7 +412,10 @@ int main(void)
 
     /* A successful HA turn with no TTS audio has no audio-stop/played event.
        The bounded watchdog must rearm wake detection rather than leaving the
-       satellite locked out forever. */
+       satellite locked out forever. Wyoming carries no turn token, so the
+       stalled session is retired instead of being rearmed: its delayed
+       audio-stop could otherwise be taken as the next turn's and clear the
+       next turn's overlap lock. */
     CHECK(le_voice_stream_write_frame(audio_fd, 80000, samples,
                                       sizeof(samples) / sizeof(samples[0]),
                                       0) == 0);
@@ -401,9 +424,23 @@ int main(void)
     CHECK(finish_input_stream(audio_fd, client_fd,
                               80000 + LE_VOICE_STREAM_MAX_SAMPLES) == 0);
     {
-        struct timespec watchdog_delay = {1, 200000000L};
+        struct timespec watchdog_delay = {2, 0};
         nanosleep(&watchdog_delay, NULL);
     }
+    /* The stalled session is closed by the daemon, not left armed. */
+    CHECK(expect_session_closed(client_fd) == 0);
+    stale_client_fd = client_fd;
+
+    /* Home Assistant reconnects and re-sends RunSatellite, exactly as its
+       Wyoming satellite client does after a disconnect. */
+    client_fd = tcp_connect();
+    CHECK(client_fd >= 0);
+    CHECK(le_wyoming_read_header(client_fd, &event) == 0);
+    CHECK(!strcmp(event.type, "satellite-connected"));
+    CHECK(le_wyoming_send(client_fd, "run-satellite", NULL, NULL, 0) == 0);
+
+    /* A fresh session must rearm local wake detection and hold its own turn's
+       overlap lock until that turn's own audio-stop arrives. */
     CHECK(le_voice_stream_write_frame(audio_fd, 90000, samples,
                                       sizeof(samples) / sizeof(samples[0]),
                                       0) == 0);
@@ -411,10 +448,21 @@ int main(void)
     CHECK(expect_local_wake_start(client_fd) == 0);
     CHECK(finish_input_stream(audio_fd, client_fd,
                               90000 + LE_VOICE_STREAM_MAX_SAMPLES) == 0);
+    /* The retired session cannot deliver the stalled turn's late response and
+       cannot retire the new turn: a second local wake stays refused until the
+       new turn's own audio-stop. */
+    (void)le_wyoming_send(stale_client_fd, "audio-start",
+                          "{\"rate\":22050,\"width\":2,\"channels\":1}",
+                          NULL, 0);
+    (void)le_wyoming_send(stale_client_fd, "audio-stop", NULL, NULL, 0);
+    CHECK(send_wake(wake_fd, 100000) == 0);
+    CHECK(expect_no_event(client_fd, 500) == 0);
+    CHECK(play_tts_response(client_fd, bus_reader) == 0);
 
     kill(child, SIGTERM);
     waitpid(child, &status, 0);
     close(client_fd);
+    close(stale_client_fd);
     close(bus_reader);
     close(wake_fd);
     close(audio_fd);

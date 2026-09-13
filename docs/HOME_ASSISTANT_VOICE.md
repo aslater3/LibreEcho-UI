@@ -53,6 +53,11 @@ provide the satellite portion of Wyoming:
 - incoming `audio-start`/`audio-chunk`/`audio-stop` -> the local 48 kHz stereo
   speaker bus, with bounded format conversion;
 - `run-satellite`, `pause-satellite`, and `run-pipeline` control events;
+- a bounded pipeline watchdog: a turn that stalls with no pipeline activity
+  is retired by closing the Wyoming session, because the protocol carries no
+  turn token that could distinguish that turn's delayed
+  `audio-start`/`audio-stop` from the next turn's. Home Assistant cancels the
+  stalled pipeline, reconnects, and re-sends `run-satellite`;
 - local-socket reconnect and one-connection-at-a-time behavior with bounded
   buffers.
 

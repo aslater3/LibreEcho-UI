@@ -209,6 +209,8 @@ static int pipeline_watchdog_expired(const struct wyoming_state *state)
         clock_gettime(CLOCK_MONOTONIC, &now) < 0)
         return 1;
     seconds = now.tv_sec - state->pipeline_last_activity.tv_sec;
+    if (now.tv_nsec < state->pipeline_last_activity.tv_nsec)
+        --seconds;
     return seconds >= LE_WYOMING_PIPELINE_WATCHDOG_SECONDS;
 }
 
@@ -564,13 +566,14 @@ static int pipeline_watchdog(struct wyoming_state *state)
 {
     if (!pipeline_watchdog_expired(state))
         return 0;
-    le_log_warn("wyomingd: local pipeline watchdog expired; rearming wake detection");
-    if (state->streaming && stop_stream(state) < 0)
-        return -1;
-    state->pipeline_active = 0;
-    state->detected = 0;
-    state->pipeline_last_activity.tv_sec = 0;
-    state->pipeline_last_activity.tv_nsec = 0;
+    /* Wyoming carries no turn token, so a stalled turn cannot be correlated
+       with a later one on the same session: once wake detection is rearmed,
+       that turn's delayed audio-start/audio-stop is accepted as the new
+       turn's and its audio-stop clears the new turn's overlap lock. Retire
+       the session instead of only the lock; Home Assistant cancels the
+       stalled pipeline, reconnects, and re-sends RunSatellite. */
+    le_log_warn("wyomingd: local pipeline watchdog expired; retiring the stalled Home Assistant session");
+    close_client(state);
     return 0;
 }
 
