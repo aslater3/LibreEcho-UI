@@ -243,6 +243,37 @@ int main(void)
     }
     expect_invoked("libreecho-ha-airplayd.init", "restart");
 
+    /* The pipeline mode and the Home Assistant integration bit are two signals
+     * for the same Wyoming daemon: this route starts or stops it, and the
+     * airplayd init script advertises the mDNS service from the bit. Keep them
+     * synchronized, or a switch that stops the daemon would leave a stale
+     * Wyoming advertisement pointing at a closed port. */
+    {
+        struct api_context context;
+
+        memset(&context, 0, sizeof(context));
+        if (voice_pipeline_update(&context, "{\"mode\":\"home-assistant\"}") != LE_OK ||
+            (context.integrations & 1u) == 0) {
+            fprintf(stderr, "home-assistant mode must set the HA integration bit\n");
+            return 1;
+        }
+        if (voice_pipeline_update(&context, "{\"mode\":\"local\"}") != LE_OK ||
+            (context.integrations & 1u) != 0) {
+            fprintf(stderr, "a local pipeline must clear the HA integration bit\n");
+            return 1;
+        }
+        context.integrations |= 1u;
+        if (voice_pipeline_update(&context,
+                "{\"mode\":\"custom\",\"stt_wyoming_uri\":\"tcp://127.0.0.1:10300\","
+                "\"stt_model\":\"whisper-small\","
+                "\"tts_wyoming_uri\":\"tcp://127.0.0.1:10200\","
+                "\"tts_voice\":\"en_GB-alan-medium\"}") != LE_OK ||
+            (context.integrations & 1u) != 0) {
+            fprintf(stderr, "a custom pipeline must clear the HA integration bit\n");
+            return 1;
+        }
+    }
+
     reset_log();
     for (size_t i = 0; i < sizeof(all_paths) / sizeof(all_paths[0]); ++i)
         unlink(all_paths[i]);

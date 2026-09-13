@@ -634,11 +634,12 @@ $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
 		-Isrc -Isrc/adapter $< src/backend.c src/json.c -o $@
 
 $(BUILD)/test-home-assistant-discovery: tests/test_home_assistant_discovery_lifecycle.c \
-	src/api.c src/backend.c src/json.c
+	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/backend.c src/json.c -o $@
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c \
+		src/adapter/wyoming_client.c -o $@
 
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \

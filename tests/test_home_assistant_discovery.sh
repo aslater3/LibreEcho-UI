@@ -32,5 +32,13 @@ grep -Fq 'home_assistant_discovery_unavailable' src/api.c
 # The documented voice-pipeline route selects Home Assistant voice too, so it
 # must also synchronize the advertisement.
 grep -Fq 'home_assistant_voice_mode' "$SCRIPT"
+# The pipeline mode and the Home Assistant integration bit are two signals for
+# the same Wyoming daemon, so they must stay synchronized: selecting or leaving
+# a non-Home-Assistant engine clears the bit the controller advertises from,
+# and disabling the integration clears a persisted Home Assistant pipeline mode
+# instead of leaving the advertisement pointing at a stopped daemon.
+grep -Fq 'c->integrations &= ~1u;' src/api.c
+grep -Fq 'c->integrations&=~1u;' src/api.c
+grep -Fq 'if(!strcmp(c->voice_pipeline_mode,"home-assistant"))snprintf(c->voice_pipeline_mode' src/api.c
 
 printf '%s\n' 'Home Assistant Wyoming discovery lifecycle: ok'

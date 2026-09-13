@@ -1926,6 +1926,7 @@
      "Integrations"
     ],
     "summary": "Enable or disable an integration",
+    "description": "The `home-assistant` toggle and the voice-pipeline mode are two signals for the same Wyoming daemon. Disabling it stops the daemon and, when the persisted pipeline mode is `home-assistant`, switches that mode to `local`, so the controller no longer advertises a `_wyoming._tcp` service for a stopped daemon. Enabling it starts the daemon and leaves the configured pipeline mode untouched.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -3005,7 +3006,7 @@
      "Assistant"
     ],
     "summary": "Configure and activate the speech pipeline",
-    "description": "Persists and applies local, custom, or Home Assistant mode. Custom mode uses remote Wyoming Whisper and Piper services while wake-word detection remains on-device. When daemon init scripts are present, activation is bounded to one restart job: the successful response is 202 with `restart.state: pending`; concurrent updates return 409 until it completes. Poll GET /api/v1/voice-pipeline for `restart.state` and `restart.error`; asynchronous restart failures are reported as 503 on the next PUT and remain visible in GET state.",
+    "description": "Persists and applies local, custom, or Home Assistant mode. Custom mode uses remote Wyoming Whisper and Piper services while wake-word detection remains on-device. Selecting local or custom stops the Wyoming daemon and clears the Home Assistant integration toggle, so the advertised `_wyoming._tcp` service can never point at a stopped daemon; selecting Home Assistant sets that toggle. When daemon init scripts are present, activation is bounded to one restart job: the successful response is 202 with `restart.state: pending`; concurrent updates return 409 until it completes. Poll GET /api/v1/voice-pipeline for `restart.state` and `restart.error`; asynchronous restart failures are reported as 503 on the next PUT and remain visible in GET state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
