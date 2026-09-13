@@ -210,6 +210,7 @@ make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
+sh tests/test_wyomingd_test_recipe.sh
 make build/test-wyomingd
 ./build/test-wyomingd
 python3 tests/test_wyoming_engines.py
