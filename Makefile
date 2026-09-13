@@ -132,7 +132,7 @@ $(BUILD)/libreecho-wyomingd: $(WYOMINGD_OBJECTS)
 
 $(BUILD)/libreecho-wyomingd-test: $(WYOMINGD_SOURCES)
 	@mkdir -p $(BUILD)
-	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CFLAGS) -DLE_WYOMING_PIPELINE_WATCHDOG_SECONDS=1 -Isrc \
+	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -DLE_WYOMING_PIPELINE_WATCHDOG_SECONDS=1 -Isrc \
 		$^ $(LDFLAGS) -lm -o $@
 
 $(BUILD)/libreecho-sttd-wyoming: src/adapter/sttd.c \
@@ -807,6 +807,7 @@ clean:
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
 		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
+		$(BUILD)/libreecho-wyomingd-test \
 		$(BUILD)/test-audiod-review $(BUILD)/test-led-night-review \
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \
