@@ -413,10 +413,20 @@ static int valid_pipeline_token(const char *value)
 #ifndef LE_INIT_WYOMINGD
 #define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
 #endif
-/* Home Assistant mode is served by libreecho-wyomingd; its pidfile is the
-   readiness signal surfaced for the Wyoming satellite. */
+/* Home Assistant mode is served by libreecho-wyomingd; its pidfile is one
+   readiness signal for the Wyoming satellite. The wake socket, the waked
+   daemon behind it, and the listening Wyoming port are the rest. */
 #ifndef LE_WYOMINGD_PIDFILE
 #define LE_WYOMINGD_PIDFILE "/var/run/libreecho-wyomingd.pid"
+#endif
+#ifndef LE_WAKED_PIDFILE
+#define LE_WAKED_PIDFILE "/var/run/libreecho-waked.pid"
+#endif
+#ifndef LE_WAKEWORD_SOCK
+#define LE_WAKEWORD_SOCK "/run/libreecho/wakeword.sock"
+#endif
+#ifndef LE_WYOMING_PORT
+#define LE_WYOMING_PORT 10700
 #endif
 
 /* Only one pipeline restart may be outstanding. The child is deliberately
@@ -706,6 +716,7 @@ static const char *audio_retention_state(const struct api_context *c,
 }
 
 static int service_ready(const char *pidfile, const char *socket_path);
+static int wyoming_satellite_ready(void);
 
 static void voice_pipeline_json(struct api_context *c,
                                 struct api_response *r)
@@ -732,8 +743,7 @@ static void voice_pipeline_json(struct api_context *c,
         pipeline_endpoint_reachable(c, c->stt_wyoming_uri);
     tts_reachable = custom &&
         pipeline_endpoint_reachable(c, c->tts_wyoming_uri);
-    satellite_ready = home_assistant &&
-        service_ready(LE_WYOMINGD_PIDFILE, NULL);
+    satellite_ready = home_assistant && wyoming_satellite_ready();
     restart_state = voice_pipeline_restart_state();
 
     json_escape(stt_uri, sizeof(stt_uri), c->stt_wyoming_uri);
@@ -1514,6 +1524,56 @@ static int read_central_logs(char lines[LE_MAX_LOGS][LE_LOGD_MSG_MAX],size_t*cou
 static void logs_json(struct api_context*c,struct api_response*r){char central[LE_MAX_LOGS][LE_LOGD_MSG_MAX],message[256],escaped[512],level[16],service[32];size_t central_count=0,first,i,n=0;int timestamp,boot_seconds;int from_central=read_central_logs(central,&central_count);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"entries\":[");if(from_central){for(i=0;i<central_count&&n<sizeof(r->body)-500;i++){timestamp=0;boot_seconds=0;level[0]=0;service[0]=0;message[0]=0;json_get_int(central[i],"ts",&timestamp);json_get_int(central[i],"boot_seconds",&boot_seconds);json_get_string(central[i],"level",level,sizeof(level));json_get_string(central[i],"service",service,sizeof(service));json_get_string(central[i],"msg",message,sizeof(message));if(service[0]&&strncmp(message,service,strlen(service))){char prefixed[256];snprintf(prefixed,sizeof(prefixed),"%s: %s",service,message);strncpy(message,prefixed,sizeof(message)-1);message[sizeof(message)-1]=0;}json_escape(escaped,sizeof(escaped),message);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s{\"timestamp\":%d,\"boot_seconds\":%d,\"level\":\"%s\",\"message\":\"%s\"}",i?",":"",timestamp,boot_seconds,level[0]?level:"INFO",escaped);}}else{first=c->log_next-c->log_count;for(i=0;i<c->log_count&&n<sizeof(r->body)-500;i++)n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s%s",i?",":"",c->logs[(first+i)%LE_MAX_LOGS]);}n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"],\"source\":\"%s\",\"bounded\":true,\"capacity\":%d},\"error\":null}",from_central?"central-file":"web-memory",LE_MAX_LOGS);r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
 static void logs_stream_json(struct api_context*c,struct api_response*r){const char*prefix="event: logs\ndata: ",*suffix="\n\n";size_t prefix_len=strlen(prefix),suffix_len=strlen(suffix),n;logs_json(c,r);if(r->status!=200)return;if(r->length>sizeof(r->body)-prefix_len-suffix_len-1){err(r,503,LE_IO,"Log stream is too large");return;}n=r->length;memmove(r->body+prefix_len,r->body,n);memcpy(r->body,prefix,prefix_len);memcpy(r->body+prefix_len+n,suffix,suffix_len);r->length=prefix_len+n+suffix_len;r->body[r->length]=0;strcpy(r->type,"text/event-stream; charset=utf-8");}
 static int service_ready(const char*pidfile,const char*socket_path){FILE*f;long pid=0;int pid_ok=0,socket_ok=0;if(pidfile){f=fopen(pidfile,"r");if(f){if(fscanf(f,"%ld",&pid)==1&&pid>1)pid_ok=kill((pid_t)pid,0)==0;fclose(f);}}if(socket_path)socket_ok=access(socket_path,F_OK)==0;return pid_ok&&(!socket_path||socket_ok);}
+/*
+ * The Wyoming readiness inputs are overridable so a host test can point the
+ * predicate at synthetic pidfiles, socket and listening port. The defaults are
+ * the shipped device paths; every override is opt-in and empty values fall back
+ * to the shipped default.
+ */
+static const char *wyomingd_pidfile_path(void){const char*p=getenv("LIBREECHO_WYOMINGD_PIDFILE");return p&&*p?p:LE_WYOMINGD_PIDFILE;}
+static const char *waked_pidfile_path(void){const char*p=getenv("LIBREECHO_WAKED_PIDFILE");return p&&*p?p:LE_WAKED_PIDFILE;}
+static const char *wakeword_socket_path(void){const char*p=getenv("LIBREECHO_WAKEWORD_SOCK");return p&&*p?p:LE_WAKEWORD_SOCK;}
+static const char *proc_net_tcp_path(void){const char*p=getenv("LIBREECHO_PROC_NET_TCP");return p&&*p?p:"/proc/net/tcp";}
+static int wyoming_listen_port(void){const char*p=getenv("LIBREECHO_WYOMING_PORT");long port=0;char*end;if(!p||!*p)return LE_WYOMING_PORT;errno=0;port=strtol(p,&end,10);if(errno||*end||port<=0||port>65535)return LE_WYOMING_PORT;return (int)port;}
+
+/*
+ * A Wyoming satellite is usable only when its own daemon, the wake-word socket,
+ * and the waked daemon behind that socket are live and it is accepting on the
+ * Wyoming port. This mirrors the init readiness predicate in
+ * init/libreecho-web.init (wyoming_service_ready), so GET /api/v1/voice-pipeline
+ * never reports home_assistant.ready while a Home Assistant client cannot
+ * connect to the satellite.
+ */
+static int wyoming_satellite_listening(int port)
+{
+    FILE *f;
+    char line[256];
+
+    f = fopen(proc_net_tcp_path(), "r");
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned local_addr = 0;
+        unsigned listen_port = 0;
+        unsigned state = 0;
+
+        if (sscanf(line, " %*u: %x:%x %*x:%*x %x", &local_addr, &listen_port,
+                   &state) == 3 &&
+            listen_port == (unsigned)port && state == 0x0A) {
+            fclose(f);
+            return 1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+static int wyoming_satellite_ready(void)
+{
+    return service_ready(wyomingd_pidfile_path(), NULL) &&
+        service_ready(waked_pidfile_path(), wakeword_socket_path()) &&
+        wyoming_satellite_listening(wyoming_listen_port());
+}
 static const char*time_status_path(void){const char*p=getenv("LIBREECHO_TIME_STATUS");return p&&*p?p:"/run/libreecho/time.status";}
 static int time_status_value(const char*key,char*value,size_t size){FILE*f;char line[1200],*equals;size_t key_len=strlen(key);if(!size)return 0;value[0]=0;f=fopen(time_status_path(),"r");if(!f)return 0;while(fgets(line,sizeof(line),f)){equals=strchr(line,'=');if(!equals)continue;if((size_t)(equals-line)!=key_len||strncmp(line,key,key_len))continue;equals++;equals[strcspn(equals,"\r\n")]=0;strncpy(value,equals,size-1);value[size-1]=0;fclose(f);return 1;}fclose(f);return 0;}
 static int time_status_int(const char*key,long*fallback){char value[64],*end;long parsed;if(!time_status_value(key,value,sizeof(value)))return 0;errno=0;parsed=strtol(value,&end,10);if(errno||*end)return 0;*fallback=parsed;return 1;}

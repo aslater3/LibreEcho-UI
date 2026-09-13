@@ -1926,7 +1926,7 @@
      "Integrations"
     ],
     "summary": "Enable or disable an integration",
-    "description": "The home-assistant integration also selects the voice pipeline: enabling it persists Home Assistant mode, while disabling it persists and restores local mode. On images with the Linux backend the pipeline transition is asynchronous, so a normal success may be 202 with a pending voice-pipeline document instead of 200. Enabling Home Assistant clears local-only processing in the same transition because microphone audio leaves the device.",
+    "description": "The home-assistant integration also selects the voice pipeline: enabling it persists Home Assistant mode, while disabling it persists and restores the previously saved pipeline mode (the mode that was active when Home Assistant was enabled), falling back to local when none was recorded. On images with the Linux backend the pipeline transition is asynchronous, so a normal success may be 202 with a pending voice-pipeline document instead of 200. Enabling Home Assistant clears local-only processing in the same transition because microphone audio leaves the device.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"

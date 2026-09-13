@@ -261,6 +261,9 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_voice_pipeline_ha_transitions.sh
+# Starts its own isolated mock server with the readiness overrides, so it does
+# not depend on the shared server above.
+sh tests/test_voice_pipeline_ha_readiness.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_bluetooth_scan_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_usb_role_contract.sh
