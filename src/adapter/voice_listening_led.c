@@ -43,7 +43,7 @@ void le_voice_listening_led_set(int active)
     if (!adapter)
         return;
     args = active
-        ? "{\"name\":\"pulse\",\"r\":255,\"g\":0,\"b\":0,\"brightness\":70,\"repeats\":0,\"owner\":\"voice-listening\"}"
+        ? "{\"name\":\"pulse\",\"r\":255,\"g\":0,\"b\":0,\"brightness\":70,\"repeats\":0,\"profile\":\"listening\",\"owner\":\"voice-listening\"}"
         : "{\"name\":\"stop\",\"owner\":\"voice-listening\"}";
     (void)le_adapter_call(adapter, "pattern", args, NULL, 0);
     /*

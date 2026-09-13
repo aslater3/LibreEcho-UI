@@ -10,6 +10,10 @@ api=Path('src/api.c').read_text()
 stt=Path('src/adapter/stt_engine_wyoming.c').read_text()
 openapi=json.loads(Path('web/openapi.json').read_text())
 assert 'config_number stt_max_utterance_ms 6000' in init
+# Both defaults were retuned once the device was measured: end-of-speech never
+# fired at a floor of 45, so every turn ran to max_utterance_ms and the reply
+# was delayed by the full cap. 16 is above this hardware's idle noise and 1000ms
+# ends a natural pause without clipping the speaker.
 assert 'export LE_STT_END_SILENCE_MS=$(config_number stt_end_silence_ms 1000)' in init
 assert 'export LE_STT_VAD_FLOOR_RMS=$(config_number stt_vad_floor_rms 16)' in init
 assert 'config_read(c->config_path, saved' in api

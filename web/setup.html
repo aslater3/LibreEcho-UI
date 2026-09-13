@@ -81,7 +81,7 @@
         <div class="form-card">
           <label><span>Hostname</span><input id="setup-hostname" maxlength="63" pattern="[A-Za-z0-9][A-Za-z0-9-]{0,62}" required><small>Letters, numbers and hyphens; used at <strong id="hostname-preview">libreecho.local</strong>.</small></label>
           <label class="range-label"><span>Initial volume <output id="volume-output">64%</output></span><input id="setup-volume" type="range" min="0" max="100" value="64"></label>
-          <label><span>Wake word</span><select id="setup-wake"><option>LibreEcho</option><option>Computer</option><option>Echo</option></select></label>
+          <label><span>Wake word</span><select id="setup-wake"><option>Alexa</option></select><small>This image currently includes the Alexa wake model.</small></label>
           <label class="range-label"><span>Wake-word sensitivity <output id="sensitivity-output">68%</output></span><input id="setup-sensitivity" type="range" min="0" max="100" value="68"></label>
         </div>
       </section>
@@ -110,8 +110,11 @@
         <span class="eyebrow">Setup complete</span>
         <h1>LibreEcho is joining your network.</h1>
         <p class="lead">The setup access point can now close. Reconnect your phone or computer to your normal Wi-Fi, then open the address below.</p>
-        <a id="control-centre-link" class="device-address" href="/">http://libreecho.local</a>
-        <p class="muted">If the name does not resolve, find LibreEcho’s address in your router or reopen this page after reconnecting.</p>
+        <div class="address-list">
+          <a id="lan-link" class="device-address primary-address" href="/">LAN address will appear after the device joins Wi-Fi</a>
+          <a id="mdns-link" class="device-address" href="/">mDNS address will appear after setup</a>
+        </div>
+        <p id="mdns-warning" class="notice unsupported">The .local name is an mDNS alternative. It depends on AirPlay 2/Avahi being enabled on LibreEcho and supported by your client; the LAN IP above remains the reliable link when mDNS is disabled or unavailable.</p>
       </section>
 
       <footer class="setup-actions" id="setup-actions">

@@ -2,7 +2,7 @@
 'use strict';
 const fs = require('fs');
 const vm = require('vm');
-function classes() { return { add() {}, remove() {}, toggle() {} }; }
+function classes() { return { add() {}, remove() {}, toggle() {}, contains() { return false; } }; }
 function element(id) {
     return { id, innerHTML: '', textContent: '', value: '', disabled: false,
         classList: classes(), style: {}, dataset: {}, onclick: null,

@@ -17,6 +17,19 @@ CA_BUNDLE=${CA_BUNDLE:-$RUNTIME_ROOT/usr/local/share/libreecho/cacert.pem}
 PIDFILE=${PIDFILE:-/var/run/libreecho-agentd.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-agentd.log}
 SOCKET=${SOCKET:-/run/libreecho/agent.sock}
+WAKE_SOCKET=${WAKE_SOCKET:-/run/libreecho/wakeword.sock}
+STT_SOCKET=${STT_SOCKET:-/run/libreecho/stt.sock}
+AUDIO_SOCKET=${AUDIO_SOCKET:-/run/libreecho/audio.sock}
+TTS_SOCKET=${TTS_SOCKET:-/run/libreecho/tts.sock}
+AGENT_DEPENDENCY_TIMEOUT_SECONDS=${AGENT_DEPENDENCY_TIMEOUT_SECONDS:-90}
+AGENT_DEPENDENCY_POLL_SECONDS=${AGENT_DEPENDENCY_POLL_SECONDS:-1}
+FEATURE_POLICY_FILE=${FEATURE_POLICY_FILE:-/etc/libreecho/feature-policy}
+case "$AGENT_DEPENDENCY_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*) AGENT_DEPENDENCY_TIMEOUT_SECONDS=90 ;;
+esac
+case "$AGENT_DEPENDENCY_POLL_SECONDS" in
+    ''|*[!0-9]*|0) AGENT_DEPENDENCY_POLL_SECONDS=1 ;;
+esac
 
 mount_runtime() {
     [ -f "$PAYLOAD" ] || {
@@ -80,14 +93,56 @@ terminate() {
     kill -KILL "$target" 2>/dev/null || true
 }
 
-wait_for_socket() {
-    path=$1
-    count=0
-    while [ ! -S "$path" ] && [ "$count" -lt 100 ]; do
-        sleep 0.1
-        count=$((count + 1))
+dependency_sockets_ready() {
+    if [ "$(feature_policy)" != redistributable ] && [ ! -S "$WAKE_SOCKET" ]; then
+        return 1
+    fi
+    [ -S "$STT_SOCKET" ] &&
+        [ -S "$AUDIO_SOCKET" ] &&
+        [ -S "$TTS_SOCKET" ]
+}
+
+feature_policy() {
+    sed -n '1p' "$FEATURE_POLICY_FILE" 2>/dev/null
+}
+
+missing_dependency_sockets() {
+    missing=
+    for dependency in \
+        "stt:$STT_SOCKET" \
+        "audio:$AUDIO_SOCKET" \
+        "tts:$TTS_SOCKET"; do
+        name=${dependency%%:*}
+        path=${dependency#*:}
+        if [ ! -S "$path" ]; then
+            if [ -n "$missing" ]; then
+                missing="$missing,$name"
+            else
+                missing=$name
+            fi
+        fi
     done
-    [ -S "$path" ]
+    if [ "$(feature_policy)" != redistributable ] && [ ! -S "$WAKE_SOCKET" ]; then
+        if [ -n "$missing" ]; then missing="wakeword,$missing"; else missing=wakeword; fi
+    fi
+    printf '%s\n' "$missing"
+}
+
+wait_for_dependency_sockets() {
+    elapsed=0
+    while ! dependency_sockets_ready; do
+        if [ "$elapsed" -ge "$AGENT_DEPENDENCY_TIMEOUT_SECONDS" ]; then
+            echo "libreecho-agentd: dependencies not ready after ${AGENT_DEPENDENCY_TIMEOUT_SECONDS}s: $(missing_dependency_sockets)" >&2
+            return 1
+        fi
+        remaining=$((AGENT_DEPENDENCY_TIMEOUT_SECONDS - elapsed))
+        poll_seconds=$AGENT_DEPENDENCY_POLL_SECONDS
+        if [ "$poll_seconds" -gt "$remaining" ]; then
+            poll_seconds=$remaining
+        fi
+        sleep "$poll_seconds"
+        elapsed=$((elapsed + poll_seconds))
+    done
 }
 
 start_service() {
@@ -98,10 +153,10 @@ start_service() {
         unmount_runtime
         return 1
     }
-    wait_for_socket /run/libreecho/wakeword.sock || return 1
-    wait_for_socket /run/libreecho/stt.sock || return 1
-    wait_for_socket /run/libreecho/audio.sock || return 1
-    wait_for_socket /run/libreecho/tts.sock || return 1
+    wait_for_dependency_sockets || {
+        unmount_runtime
+        return 1
+    }
     mkdir -p /data/libreecho/config /data/libreecho/secrets \
         "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
     chmod 0700 /data/libreecho/secrets

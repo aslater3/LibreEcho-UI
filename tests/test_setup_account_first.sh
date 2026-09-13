@@ -14,14 +14,20 @@ html=Path(sys.argv[1]).read_text()
 js=Path(sys.argv[2]).read_text()
 api=Path(sys.argv[3]).read_text()
 server=Path(sys.argv[4]).read_text()
+defaults=Path('config/defaults.json').read_text()
 assert html.index('id="setup-username"') < html.index('id="setup-ssid"')
 assert 'data-step="0"' in html and 'data-step="2"' in html
 assert 'Create your local account.' in html
-assert 'http://libreecho.local:8080/' not in html
+assert '<select id="setup-wake"><option>Alexa</option></select>' in html
+assert 'LibreEcho</option>' not in html
+assert 'Computer</option>' not in html
+assert 'Echo</option>' not in html
+assert "wake_word:'Alexa'" in js
+assert '"wake_word": "Alexa"' in defaults
 assert "api('/auth/bootstrap'" in js
-assert 'http://libreecho.local:8080/' not in js
-assert 'window.location.port' in js
-assert 'window.location.protocol' in js
+assert 'window.location.port' not in js
+assert 'http://${name}.local:8080/' in js
+assert 'http://${deviceIp}:8080/' in js
 assert "sessionStorage.setItem('libreecho-token'" in js
 assert "if(config.bootstrap_required){render();return}" in js
 assert "const current=await api('/setup')" in js
@@ -34,12 +40,11 @@ assert "Account created. Please reload this page" in js
 assert "if(!setup.hardwareReady)" in js
 assert "The Wi-Fi connection could not be completed; check the access point and try again" in api
 assert "Setup settings could not be saved" in api
-assert '(!strcmp(q.path,"/api/v1/setup")&&!strcmp(q.method,"POST"))' in server
-assert '(!strcmp(q.path,"/api/v1/network/wifi/connect")&&!strcmp(q.method,"POST"))' in server
-assert "refresh_setup_completed(api);" in server
 assert "setup.scanAttempts++<8" in js
 assert "!/[\\u0000-\\u001f]/.test(n.ssid)" in js
 assert "!/^\\\\x(?:00)+$/i.test(n.ssid.trim())" in js
 assert "setup_failure_message(c)" in api
+# HTTP dispatch, state synchronisation and concurrency are exercised by
+# test-setup-workers, not by searching comments for executable fragments.
 print('setup account-first browser contract: ok')
 PY

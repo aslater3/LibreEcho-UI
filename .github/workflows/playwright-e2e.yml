@@ -3,8 +3,13 @@ name: LibreEcho browser E2E
 on:
   pull_request:
     paths:
+      - 'Makefile'
       - 'web/**'
+      - 'src/main.c'
       - 'src/http_server.c'
+      - 'src/http_server.h'
+      - 'src/tls.c'
+      - 'src/tls.h'
       - 'src/api.c'
       - 'src/auth.c'
       - 'src/backend*.c'
@@ -15,8 +20,13 @@ on:
     branches:
       - main
     paths:
+      - 'Makefile'
       - 'web/**'
+      - 'src/main.c'
       - 'src/http_server.c'
+      - 'src/http_server.h'
+      - 'src/tls.c'
+      - 'src/tls.h'
       - 'src/api.c'
       - 'src/auth.c'
       - 'src/backend*.c'
@@ -48,7 +58,30 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends build-essential jq
+          sudo apt-get install --yes --no-install-recommends build-essential jq cmake ninja-build
+
+      - name: Build pinned mbedTLS runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/mbedtls-src"
+          prefix="$RUNNER_TEMP/mbedtls"
+          git clone \
+            --depth 1 \
+            --branch mbedtls-3.6.4 \
+            --recurse-submodules \
+            --shallow-submodules \
+            https://github.com/Mbed-TLS/mbedtls.git \
+            "$src"
+          cmake -S "$src" -B "$src/build" -G Ninja \
+            -DENABLE_PROGRAMS=OFF \
+            -DENABLE_TESTING=OFF \
+            -DUSE_SHARED_MBEDTLS_LIBRARY=OFF \
+            -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$prefix"
+          cmake --build "$src/build"
+          cmake --install "$src/build"
 
       - name: Install pinned Playwright runtime
         shell: bash
@@ -66,6 +99,10 @@ jobs:
         shell: bash
         env:
           NODE_PATH: ${{ runner.temp }}/libreecho-playwright/node_modules
+          CPPFLAGS: -I${{ runner.temp }}/mbedtls/include
+          LDFLAGS: -L${{ runner.temp }}/mbedtls/lib
+          WEB_TLS_LIBS: -lmbedtls -lmbedx509 -lmbedcrypto
+          RADIOD_TLS_LIBS: -lmbedtls -lmbedx509 -lmbedcrypto
         run: |
           set -euo pipefail
           sh tests/e2e/run.sh

@@ -450,23 +450,25 @@ void json_escape(char *out, size_t z, const char *in)
 {
     static const char hex[] = "0123456789abcdef";
     size_t n = 0;
-    /* Reserve room for the longest single escape (\\uXXXX = 6 bytes). Control
-       characters must be escaped, not dropped: silently deleting newlines
-       turned a multi-line log into one unreadable line, and passing a raw
-       newline through would have produced invalid JSON. */
-    /* Check the width of the current escape rather than reserving six bytes
-       for every input character; quotes and named controls need only two. */
     while (*in) {
         unsigned char c = (unsigned char)*in;
-        size_t width = (c == 34 || c == 92 || c == 10 || c == 13 || c == 9) ? 2 : (c < 32 ? 6 : 1);
-        if (n + width + 1 > z) break;
-        in++;
-        if (c == '"' || c == '\\') { out[n++] = '\\'; out[n++] = (char)c; }
-        else if (c == '\n') { out[n++] = '\\'; out[n++] = 'n'; }
-        else if (c == '\r') { out[n++] = '\\'; out[n++] = 'r'; }
-        else if (c == '\t') { out[n++] = '\\'; out[n++] = 't'; }
-        else if (c >= 32) out[n++] = (char)c;
-        else {
+        size_t width = (c == 34 || c == 92 || c == 10 || c == 13 || c == 9)
+            ? 2 : (c < 32 ? 6 : 1);
+        if (n + width + 1 > z)
+            break;
+        ++in;
+        if (c == 34 || c == 92) {
+            out[n++] = '\\';
+            out[n++] = (char)c;
+        } else if (c == 10) {
+            out[n++] = '\\'; out[n++] = 'n';
+        } else if (c == 13) {
+            out[n++] = '\\'; out[n++] = 'r';
+        } else if (c == 9) {
+            out[n++] = '\\'; out[n++] = 't';
+        } else if (c >= 32) {
+            out[n++] = (char)c;
+        } else {
             out[n++] = '\\'; out[n++] = 'u'; out[n++] = '0'; out[n++] = '0';
             out[n++] = hex[c >> 4]; out[n++] = hex[c & 15];
         }
