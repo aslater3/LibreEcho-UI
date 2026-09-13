@@ -45,8 +45,10 @@ provide the satellite portion of Wyoming:
   plus the `attribution`/`installed` artifact metadata Home Assistant's
   Wyoming client requires;
 - `satellite-connected` lifecycle event;
-- local wake detections -> `detection`; Home Assistant then sends
-  `run-pipeline` beginning at `asr`;
+- local wake detections -> `detection`, then the bridge emits its own
+  `run-pipeline` (starting at `asr`) and begins streaming immediately, so a
+  wake still runs when Home Assistant does not answer; a `run-pipeline`
+  received from Home Assistant is still accepted;
 - indexed post-AEC mono PCM -> `audio-start`, `audio-chunk`, `audio-stop`;
 - incoming `audio-start`/`audio-chunk`/`audio-stop` -> the local 48 kHz stereo
   speaker bus, with bounded format conversion;
