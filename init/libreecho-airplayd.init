@@ -126,19 +126,29 @@ mount_runtime() {
     mount_led_socket
 }
 
-# The Wyoming daemon applies a PORT override from the shared defaults file, so
-# the advertised mDNS port must be derived from that same effective value
-# instead of the built-in default. Sourcing runs in a subshell so the defaults
-# file cannot leak unrelated variables (DAEMON, ARGS, ...) into this script.
+# The advertised mDNS port must match the port the Wyoming daemon actually
+# listens on. That daemon takes its full argument string from the shared
+# defaults file when ARGS is overridden (it passes ARGS verbatim) and only
+# falls back to `--port $PORT` otherwise, so an explicit --port in ARGS wins
+# over PORT, which in turn wins over the built-in default. Sourcing runs in a
+# subshell so the defaults file cannot leak unrelated variables into this
+# script.
 wyoming_service_port() {
     port=10700
     if [ -r "$WYOMING_DEFAULTS" ]; then
-        configured=$( . "$WYOMING_DEFAULTS" >/dev/null 2>&1; printf '%s' "${PORT:-}" )
-        case "$configured" in
-            ''|*[!0-9]*) ;;
-            *) port=$configured ;;
-        esac
+        port=$( . "$WYOMING_DEFAULTS" >/dev/null 2>&1
+                from_args=$(printf '%s\n' "${ARGS:-}" |
+                    sed -n 's/.*--port[[:space:]=]\{1,\}\([0-9][0-9]*\).*/\1/p' |
+                    sed -n '1p')
+                if [ -n "$from_args" ]; then
+                    printf '%s' "$from_args"
+                else
+                    printf '%s' "${PORT:-10700}"
+                fi )
     fi
+    case "$port" in
+        ''|*[!0-9]*) port=10700 ;;
+    esac
     printf '%s\n' "$port"
 }
 

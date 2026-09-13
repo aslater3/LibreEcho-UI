@@ -87,6 +87,33 @@ class WyomingDiscoveryPort(unittest.TestCase):
         self.assertIsNotNone(body)
         self.assertIn('<port>10700</port>', body)
 
+    def test_args_port_override_is_advertised(self):
+        proc, body = self.run_case(
+            defaults='ARGS="--foreground --port 20000 --wake-socket /run/x"\n')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIsNotNone(body)
+        self.assertIn('<port>20000</port>', body)
+
+    def test_args_equals_port_override_is_advertised(self):
+        proc, body = self.run_case(defaults='ARGS="--foreground --port=21000"\n')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIsNotNone(body)
+        self.assertIn('<port>21000</port>', body)
+
+    def test_args_port_wins_over_port_variable(self):
+        proc, body = self.run_case(
+            defaults='PORT=20000\nARGS="--foreground --port 30000"\n')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIsNotNone(body)
+        self.assertIn('<port>30000</port>', body)
+
+    def test_args_without_port_falls_back_to_default(self):
+        proc, body = self.run_case(
+            defaults='ARGS="--foreground --wake-socket /run/port.sock"\n')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIsNotNone(body)
+        self.assertIn('<port>10700</port>', body)
+
     def test_disabled_home_assistant_removes_service(self):
         proc, body = self.run_case(defaults='PORT=12345\n', enabled='0',
                                    preexisting=True)

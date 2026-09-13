@@ -19,6 +19,9 @@ grep -Fq 'WYOMING_SERVICE_SOURCE=${WYOMING_SERVICE_SOURCE:-/etc/libreecho/avahi-
 grep -Fq 'WYOMING_DEFAULTS=${WYOMING_DEFAULTS:-/etc/default/libreecho-wyomingd}' "$SCRIPT"
 grep -Fq 'port=$(wyoming_service_port)' "$SCRIPT"
 grep -Fq 'sed "s#<port>[0-9][0-9]*</port>#<port>$port</port>#' "$SCRIPT"
+# The advertised port must follow an explicit --port in the ARGS override too,
+# which the daemon passes verbatim in preference to PORT.
+grep -Fq -- '--port[[:space:]=]' "$SCRIPT"
 # Discovery refresh must be an independent step, not a link in the pipeline
 # `||` chain that the AirPlay controller's optional-payload failure can break.
 grep -Fq '#define LE_INIT_AIRPLAYD  "/etc/init.d/libreecho-airplayd.init"' src/api.c
