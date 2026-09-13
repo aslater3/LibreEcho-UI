@@ -504,6 +504,12 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc)
             state.port = atoi(argv[++i]);
+        else if (!strncmp(argv[i], "--port=", 7))
+            /* The airplayd init script derives the advertised mDNS port from
+             * the argument string and accepts the --port=N form. Accepting it
+             * here too keeps the daemon and the advertisement in step instead
+             * of exiting at startup while Avahi still advertises the service. */
+            state.port = atoi(argv[i] + 7);
         else if (!strcmp(argv[i], "--wake-socket") && i + 1 < argc)
             strncpy(state.wake_socket, argv[++i], sizeof(state.wake_socket) - 1);
         else if (!strcmp(argv[i], "--audio-bus") && i + 1 < argc)

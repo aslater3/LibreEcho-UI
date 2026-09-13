@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -276,9 +277,41 @@ int main(void)
     kill(child, SIGTERM);
     waitpid(child, &status, 0);
     close(client_fd);
-    close(bus_reader);
+
+    /* A review finding showed the airplayd init script derives the advertised
+     * mDNS port from the ARGS override and accepts the --port=N form, while
+     * the daemon accepted only the separate "--port N" form and exited on the
+     * equals form, so Avahi advertised a service whose daemon never started.
+     * The daemon must serve the same syntax. */
+    {
+        struct timeval timeout = { 5, 0 };
+        /* Without a deadline a daemon that rejected the option would leave
+         * accept() blocked forever instead of failing the check. */
+        CHECK(setsockopt(wake_listener, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                         sizeof(timeout)) == 0);
+    }
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        execl("./build/libreecho-wyomingd", "libreecho-wyomingd",
+              "--foreground", "--port=18700", "--wake-socket",
+              socket_path, "--audio-bus", bus_path, (char *)NULL);
+        _exit(127);
+    }
+    wake_fd = accept_wake(wake_listener);
+    CHECK(wake_fd >= 0);
+    audio_fd = accept_audio(audio_listener);
+    CHECK(audio_fd >= 0);
+    client_fd = tcp_connect();
+    CHECK(client_fd >= 0);
+    CHECK(le_wyoming_read_header(client_fd, &event) == 0);
+    CHECK(!strcmp(event.type, "satellite-connected"));
+    kill(child, SIGTERM);
+    waitpid(child, &status, 0);
+    close(client_fd);
     close(wake_fd);
     close(audio_fd);
+    close(bus_reader);
     close(wake_listener);
     if (audio_listener != wake_listener)
         close(audio_listener);
