@@ -359,6 +359,11 @@ static int setup_activate_installed_features(struct api_context *c)
 #ifndef LE_INIT_AIRPLAYD
 #define LE_INIT_AIRPLAYD  "/etc/init.d/libreecho-airplayd.init"
 #endif
+/* Set when Home Assistant is enabled but the AirPlay controller (the only
+ * mDNS responder on the image) could not refresh the Wyoming advertisement.
+ * The pipeline transition still succeeds; this lets the caller report the
+ * unavailable discovery instead of discarding the controller result. */
+static int home_assistant_discovery_unavailable;
 static int apply_home_assistant_mode(int enabled)
 {
     static const char *const restart_discovery[] = {
@@ -391,6 +396,7 @@ static int apply_home_assistant_mode(int enabled)
     if (access(LE_INIT_WYOMINGD, X_OK) < 0)
         return LE_OK;
 
+    home_assistant_discovery_unavailable = 0;
     if (enabled) {
         if (run_init_command(stop_local[0], stop_local[1]) ||
             run_init_command(stop_stt[0], stop_stt[1]) ||
@@ -407,10 +413,17 @@ static int apply_home_assistant_mode(int enabled)
     /* The AirPlay mDNS controller init script is installed on every system, but
      * its start path requires the optional AirPlay squashfs payload and exits
      * nonzero when that payload is absent. The discovery refresh is therefore
-     * attempted only after the requested pipeline state is restored, and its
-     * failure never rolls back or fails that pipeline transition. */
-    if (access(LE_INIT_AIRPLAYD, X_OK) == 0)
-        (void)run_init_command(restart_discovery[0], restart_discovery[1]);
+     * attempted only after the requested pipeline state is restored. Its
+     * failure never rolls back or fails that pipeline transition; it is
+     * recorded so the caller can report the missing Wyoming advertisement. */
+    if (access(LE_INIT_AIRPLAYD, X_OK) == 0) {
+        int refresh = run_init_command(restart_discovery[0], restart_discovery[1]);
+
+        if (enabled && refresh != LE_OK)
+            home_assistant_discovery_unavailable = 1;
+    } else if (enabled) {
+        home_assistant_discovery_unavailable = 1;
+    }
     return LE_OK;
 }
 static int valid_pipeline_token(const char *value)
@@ -2207,8 +2220,16 @@ static void after_integration_change(struct api_context *c,
         return;
     rc = persist_configuration(c);
     if (!rc && strstr(q->path, "home-assistant") &&
-        json_get_bool(q->body, "enabled", &enabled) == 1)
+        json_get_bool(q->body, "enabled", &enabled) == 1) {
         rc = apply_home_assistant_mode(enabled);
+        /* The pipeline transition succeeded but the Wyoming advertisement
+         * could not be refreshed (no AirPlay payload, so no mDNS responder).
+         * Report it rather than failing a transition that is in effect. */
+        if (!rc && home_assistant_discovery_unavailable)
+            api_log(c, "warn",
+                "Home Assistant discovery is unavailable: the AirPlay mDNS "
+                "controller could not advertise the Wyoming service");
+    }
     if (rc)
         err(r, 503, rc, "Integration configuration could not be applied");
 }

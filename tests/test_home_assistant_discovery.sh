@@ -27,5 +27,8 @@ grep -Fq -- '--port[[:space:]=]' "$SCRIPT"
 grep -Fq '#define LE_INIT_AIRPLAYD  "/etc/init.d/libreecho-airplayd.init"' src/api.c
 grep -Fq 'LE_INIT_AIRPLAYD, "restart", NULL' src/api.c
 grep -Fq 'if (access(LE_INIT_AIRPLAYD, X_OK) == 0)' src/api.c
+# The controller result must be recorded and reported when the Wyoming
+# advertisement cannot be refreshed, without failing the pipeline transition.
+grep -Fq 'home_assistant_discovery_unavailable' src/api.c
 
 printf '%s\n' 'Home Assistant Wyoming discovery lifecycle: ok'

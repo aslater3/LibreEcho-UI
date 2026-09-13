@@ -150,9 +150,14 @@ int main(void)
         fprintf(stderr, "disable ran %d commands, expected 5\n", log_count());
         return 1;
     }
+    if (home_assistant_discovery_unavailable) {
+        fprintf(stderr, "disabling must not report an unavailable discovery\n");
+        return 1;
+    }
 
     /* Enable with the optional AirPlay payload absent: the local pipeline is
-     * stopped, Wyoming is started, and the transition still succeeds. */
+     * stopped, Wyoming is started, and the transition still succeeds. The
+     * failed controller refresh must be reported, not silently discarded. */
     reset_log();
     rc = apply_home_assistant_mode(1);
     if (rc != LE_OK) {
@@ -168,9 +173,24 @@ int main(void)
         fprintf(stderr, "enable ran %d commands, expected 5\n", log_count());
         return 1;
     }
+    if (!home_assistant_discovery_unavailable) {
+        fprintf(stderr, "a failed controller refresh must be reported as unavailable\n");
+        return 1;
+    }
+
+    /* Enable with a healthy controller: the advertisement refresh succeeds and
+     * nothing is reported as unavailable. */
+    rewrite_all(0);
+    reset_log();
+    rc = apply_home_assistant_mode(1);
+    if (rc != LE_OK || home_assistant_discovery_unavailable) {
+        fprintf(stderr, "enable with a healthy controller must report discovery available\n");
+        return 1;
+    }
 
     /* When the controller is not installed the refresh is skipped entirely
-     * and the pipeline transition is still success. */
+     * and the pipeline transition is still success. Disabling needs no
+     * advertisement, so it is not reported; enabling cannot advertise. */
     unlink(LE_INIT_AIRPLAYD);
     reset_log();
     rc = apply_home_assistant_mode(0);
@@ -183,6 +203,14 @@ int main(void)
     expect_invoked("libreecho-ha-ttsd.init", "start");
     if (log_count() != 4) {
         fprintf(stderr, "skipped refresh ran %d commands, expected 4\n", log_count());
+        return 1;
+    }
+    if (home_assistant_discovery_unavailable) {
+        fprintf(stderr, "disabling without a controller must not report unavailable discovery\n");
+        return 1;
+    }
+    if (apply_home_assistant_mode(1) != LE_OK || !home_assistant_discovery_unavailable) {
+        fprintf(stderr, "enabling without a controller must report unavailable discovery\n");
         return 1;
     }
 
