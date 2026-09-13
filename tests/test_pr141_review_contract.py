@@ -163,9 +163,11 @@ assert "button_action_sounds" in Path("tests/test_config.sh").read_text(encoding
 # validated before the USB role side effect.
 assert "le_close_inherited_fds(fd);(void)stream_update_upload(" in http
 assert "le_close_inherited_fds(fd);(void)run_update_fetch(" in http
-assert "int hv,want_https=json_get_bool" in features
-assert features.index("if(want_host<1&&want_https<1&&want_sim<1)") < features.index("usb_role_write")
-assert "usb_host, simulation or https must be boolean" in features
+for key, variable in (("usb_host", "host"), ("https", "hv"), ("simulation", "sim"), ("acoustic_events", "av")):
+    assert f'json_get_top_level_bool(q->body,q->body_len,"{key}",&{variable})' in features
+assert features.index("want_host<0||want_https<0||want_sim<0||want_aed<0") < features.index("usb_role_write")
+assert features.index("want_host<1&&want_https<1&&want_sim<1&&want_aed<1") < features.index("usb_role_write")
+assert "simulation, https or acoustic_events must be boolean" in features
 
 # The config importer consumes every exported feature and MAC setting.
 assert 'feature_https_field=json_get_bool(j,"feature_https",&feature_https)' in api
