@@ -39,6 +39,9 @@ grep -Fq 'home_assistant_voice_mode' "$SCRIPT"
 # instead of leaving the advertisement pointing at a stopped daemon.
 grep -Fq 'c->integrations &= ~1u;' src/api.c
 grep -Fq 'c->integrations&=~1u;' src/api.c
-grep -Fq 'if(!strcmp(c->voice_pipeline_mode,"home-assistant"))snprintf(c->voice_pipeline_mode' src/api.c
+# Restoration belongs to the post-handler lifecycle, not an inline reset
+# that would destroy the previous custom/local selection before it runs.
+grep -Fq 'after_integration_change' src/api.c
+grep -Fq 'voice_pipeline_previous_mode' src/api.c
 
 printf '%s\n' 'Home Assistant Wyoming discovery lifecycle: ok'
