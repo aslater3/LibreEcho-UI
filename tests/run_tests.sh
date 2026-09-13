@@ -9,6 +9,7 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/con
 python3 tests/test_github_link_contract.py
 python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
+python3 tests/test_pr244_review_contract.py
 python3 tests/test_pr245_review_contract.py
 make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
 ./build/test-networkd-scan-security
@@ -198,6 +199,7 @@ make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
 make build/test-voice-reply build/test-voice-playback
 make build/test-voice-pipeline
+make build/test-voice-listening-feedback
 ./build/test-voice-stream
 ./build/test-sttd
 ./build/test-llm-provider
@@ -206,6 +208,11 @@ make build/test-voice-pipeline
 ./build/test-agentd
 ./build/test-voice-reply
 ./build/test-voice-playback
+# The silent-wake feedback regressions exist in the test-voice-listening-feedback
+# recipe, but the aggregate suite must actually execute them; a build-only line
+# let `make test` pass even when the Home Assistant path chirped again.
+./build/test-voice-listening-feedback
+python3 tests/test_voice_listening_callers.py
 make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
