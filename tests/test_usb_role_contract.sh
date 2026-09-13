@@ -108,7 +108,7 @@ schema = spec['paths']['/system/features']['put']['requestBody']['content']['app
 assert schema['minProperties'] == 1
 assert schema['properties']['usb_host']['type'] == 'boolean'
 assert schema['properties']['https']['type'] == 'boolean'
-assert schema['properties']['https']['default'] is False
+assert 'default' not in schema['properties']['https']  # omitted PUT fields remain unchanged
 assert 'not persisted' in schema['properties']['usb_host']['description']
 PY
 # Boot always returns the port to device so ADB cannot be left switched off.
