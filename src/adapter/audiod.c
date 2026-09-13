@@ -215,6 +215,8 @@ struct audio_hw {
     /* The running sleep-noise child, so a second start replaces the first
        rather than layering two generators onto the same bus. */
     pid_t noise_pid;
+    /* One sample child at a time; this also lets the reaper clear ownership. */
+    pid_t sample_pid;
     int noise_colour;
     long noise_seconds;
     int noise_level;
@@ -261,6 +263,8 @@ static void reap_children(struct audio_hw *audio)
     for (;;) {
         done = waitpid(-1, NULL, WNOHANG);
         if (done > 0) {
+            if (done == audio->sample_pid)
+                audio->sample_pid = 0;
             if (done == audio->noise_pid)
                 clear_noise_state(audio);
             continue;
@@ -1479,7 +1483,9 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
     return 0;
 }
 
+#ifndef LE_SOUND_DIR
 #define LE_SOUND_DIR "/usr/local/share/libreecho/sounds"
+#endif
 
 /*
  * Play a bundled sound. The files are raw mono S16LE at the bus rate, so this
@@ -1506,18 +1512,38 @@ static int sample_name_ok(const char *name)
     return 1;
 }
 
-static int write_sample_fd(int fd, const char *name)
+static int sample_open_fd(const char *name)
 {
     char path[224];
+    struct stat status;
+    int fd;
+    int length;
+
+    length = snprintf(path, sizeof(path), "%s/%s.raw", LE_SOUND_DIR, name);
+    if (length < 0 || (size_t)length >= sizeof(path))
+        return -1;
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size <= 0 ||
+        (status.st_size % (off_t)sizeof(int16_t)) != 0) {
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int write_sample_fd(int fd, int sample_fd)
+{
     unsigned char out[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS * sizeof(int16_t)];
     int16_t in[LE_TONE_CHUNK_FRAMES];
-    FILE *file;
+    FILE *file = fdopen(sample_fd, "rb");
     size_t frames;
 
-    snprintf(path, sizeof(path), "%s/%s.raw", LE_SOUND_DIR, name);
-    file = fopen(path, "rbe");
-    if (!file)
+    if (!file) {
+        close(sample_fd);
         return -1;
+    }
     while ((frames = fread(in, sizeof(int16_t), LE_TONE_CHUNK_FRAMES, file)) > 0) {
         int16_t *samples = (int16_t *)out;
         size_t bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t);
@@ -1540,39 +1566,61 @@ static int write_sample_fd(int fd, const char *name)
                 do {
                     rc = poll(&pfd, 1, 1000);
                 } while (rc < 0 && errno == EINTR);
-                if (rc <= 0)
-                    break;
+                if (rc <= 0) {
+                    fclose(file);
+                    return -1;
+                }
                 continue;
             }
-            if (n <= 0)
-                break;
+            if (n <= 0) {
+                fclose(file);
+                return -1;
+            }
             sent += (size_t)n;
         }
+    }
+    if (ferror(file)) {
+        fclose(file);
+        return -1;
     }
     fclose(file);
     return 0;
 }
 
-static int start_sample(const struct audio_hw *audio, const char *name)
+static int start_sample(struct audio_hw *audio, const char *name)
 {
-    int fd;
+    int fd, sample_fd;
     pid_t pid;
 
-    if (!audio->output_available || access(LE_SYSTEM_AUDIO_BUS, F_OK) < 0)
+    if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0)
         return -1;
-    fd = open(LE_SYSTEM_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0)
+    if (audio->sample_pid > 0) {
+        pid_t done = waitpid(audio->sample_pid, NULL, WNOHANG);
+        if (done == 0 || (done < 0 && errno != ECHILD))
+            return -1;
+        audio->sample_pid = 0;
+    }
+    sample_fd = sample_open_fd(name);
+    if (sample_fd < 0)
         return -1;
+    fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        close(sample_fd);
+        return -1;
+    }
     pid = fork();
     if (pid < 0) {
+        close(sample_fd);
         close(fd);
         return -1;
     }
     if (pid == 0) {
-        int result = write_sample_fd(fd, name);
+        int result = write_sample_fd(fd, sample_fd);
         close(fd);
         _exit(result < 0 ? 1 : 0);
     }
+    audio->sample_pid = pid;
+    close(sample_fd);
     close(fd);
     return 0;
 }

@@ -46,7 +46,10 @@ struct le_led_state {
     uint8_t visualizer_levels[LE_LED_PIXELS];
     struct le_led_pixel pixels[LE_LED_PIXELS];
 };
-struct le_wifi_network { char ssid[LE_TEXT], security[16]; int signal; };
+struct le_wifi_network {
+    char ssid[LE_TEXT], security[32], capabilities[128], band[16];
+    int signal, rssi_dbm, frequency_mhz, channel, wpa2_attempt;
+};
 struct le_wifi_scan { struct le_wifi_network networks[LE_MAX_WIFI]; size_t count; };
 struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };
 struct le_network_state {
@@ -60,7 +63,7 @@ struct le_network_state {
     int signal, rssi_dbm, internet, dhcp, ssh, api_lan;
     int gateway_reachable, liveness_failures;
 };
-struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb; };
+struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb; int health_available, model_loaded, capture_active, capture_age_ms, inference_active, inference_age_ms; unsigned long long processed_frames; };
 struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, rssi_valid, paired, connected; };
 struct le_bluetooth_pairing { char address[18], method[24]; int type; unsigned int value; };
 struct le_bluetooth_state {
@@ -98,7 +101,20 @@ struct le_playback_state {
     int metadata_available;
     char title[LE_MEDIA_TEXT+1], artist[LE_MEDIA_TEXT+1], album[LE_MEDIA_TEXT+1];
 };
+/* One entry from the timer daemon's schedule. */
+struct le_timer_entry {
+    unsigned id;
+    char kind[16];
+    char state[16];
+    long seconds_remaining;
+    char label[48];
+};
+struct le_timer_list {
+    struct le_timer_entry items[16];
+    int count, ringing, missed, available;
+};
 struct le_backend;
+struct le_timer_list;
 
 int le_backend_init(struct le_backend **out, const char *mode, const char *mock_path, const char *config_path, unsigned seed);
 void le_backend_destroy(struct le_backend *b);
@@ -113,6 +129,7 @@ int le_get_bluetooth_state(struct le_backend*,struct le_bluetooth_state*); int l
 int le_bluetooth_scan(struct le_backend*,int); int le_bluetooth_pair(struct le_backend*,const char*,int,int); int le_bluetooth_unpair(struct le_backend*,const char*,int); int le_bluetooth_disconnect(struct le_backend*,const char*,int); int le_bluetooth_pairing_response(struct le_backend*,const char*,int,const char*,unsigned int,const char*); int le_bluetooth_set_discoverable(struct le_backend*,int); int le_bluetooth_set_connectable(struct le_backend*,int); int le_bluetooth_set_pairing_mode(struct le_backend*,int);
 int le_get_airplay_state(struct le_backend*,struct le_airplay_state*); int le_set_airplay_enabled(struct le_backend*,int);
 int le_get_playback_state(struct le_backend*,struct le_playback_state*);
+int le_get_timers(struct le_backend*,struct le_timer_list*); int le_add_timer(struct le_backend*,int,const char*,unsigned*); int le_cancel_timer(struct le_backend*,unsigned); int le_dismiss_timers(struct le_backend*,int*);
 int le_reboot(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);
 int le_backend_tick(struct le_backend*); int le_backend_mock_control(struct le_backend*,const char*,const char*);
 

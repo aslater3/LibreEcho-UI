@@ -59,6 +59,9 @@ int le_wake_worker_submit(
 int le_wake_worker_set_threshold(
     struct le_wake_worker *worker, float accept_threshold);
 
+/* Safe live observation; ages are monotonic and -1 until inference advances. */
+int le_wake_worker_health(struct le_wake_worker *worker, int *inference_age_ms);
+
 void le_wake_worker_stop(
     struct le_wake_worker *worker,
     struct le_wake_worker_metrics *metrics);

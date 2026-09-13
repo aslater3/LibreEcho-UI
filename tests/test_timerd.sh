@@ -105,7 +105,8 @@ echo "  timer survives a restart: ok"
 
 # --- a due timer rings on the audio daemon --------------------------------
 : > "$bus"
-out=$(call add '{"seconds":1,"label":"short"}')
+out=$(call add '{"seconds":600,"label":"shared"}')
+out=$(call add '{"seconds":1,"label":"shared"}')
 short_id=$(printf '%s' "$out" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
 sleep 3
 if [ "$(wc -c < "$bus")" -ne 48000 ]; then
@@ -118,6 +119,22 @@ echo "  due timer rings: ok"
 out=$(call status '{}')
 case "$out" in *'"state":"ringing"'*) ;; *) echo "FAIL: not reported ringing: $out"; exit 1 ;; esac
 echo "  ringing state reported: ok"
+
+# Label cancellation operates on pending timers only; a ringing entry with the
+# same label must not make the pending timer look ambiguous.
+out=$(call cancel '{"label":"shared"}')
+case "$out" in
+    *'"ok":true'*) ;;
+    *) echo "FAIL: pending label cancellation was blocked by ringing sibling: $out"; exit 1 ;;
+esac
+out=$(call status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+items = json.loads(sys.stdin.read())["data"]["timers"]
+shared = [timer for timer in items if timer["label"] == "shared"]
+assert len(shared) == 1 and shared[0]["state"] == "ringing", shared
+' || { echo "FAIL: pending shared label was not cancelled: $out"; exit 1; }
+echo "  label cancellation ignores ringing siblings: ok"
 
 # --- it keeps ringing rather than chirping once ---------------------------
 before=$(stat -c %Y "$bus")
@@ -193,10 +210,49 @@ case "$out" in
 esac
 echo "  next reports the soonest timer: ok"
 
+# A label-targeted cancellation removes only the requested timer.
+out=$(call cancel '{"label":"two"}')
+case "$out" in
+    *'"ok":true'*) ;;
+    *) echo "FAIL: label cancellation rejected: $out"; exit 1 ;;
+esac
+out=$(call status '{}')
+case "$out" in
+    *'"label":"two"'*)
+        echo "FAIL: label cancellation removed the wrong timer: $out"; exit 1 ;;
+    *'"label":"one"'*) ;;
+    *) echo "FAIL: label cancellation removed the requested timer: $out"; exit 1 ;;
+esac
+echo "  label cancellation targets one timer: ok"
+
+# A present malformed id is a protocol error, not permission to fall through
+# to a valid label selector.
+out=$(call cancel '{"id":"bad","label":"one"}')
+case "$out" in
+    *'"ok":false'*) ;;
+    *) echo "FAIL: malformed cancel id accepted: $out"; exit 1 ;;
+esac
+out=$(call status '{}')
+case "$out" in
+    *'"label":"one"'*) ;;
+    *) echo "FAIL: malformed cancel id changed the labelled timer: $out"; exit 1 ;;
+esac
+out=$(call cancel '{"id":1.5,"label":"one"}')
+case "$out" in
+    *'"ok":false'*) ;;
+    *) echo "FAIL: fractional cancel id accepted: $out"; exit 1 ;;
+esac
+out=$(call status '{}')
+case "$out" in
+    *'"label":"one"'*) ;;
+    *) echo "FAIL: fractional cancel id changed the labelled timer: $out"; exit 1 ;;
+esac
+echo "  malformed cancel id refused without label fallback: ok"
+
 out=$(call cancel_all '{}')
 case "$out" in
-    *'"cancelled":2'*) ;;
-    *) echo "FAIL: cancel_all did not cancel both: $out"; exit 1 ;;
+    *'"cancelled":1'*) ;;
+    *) echo "FAIL: cancel_all did not cancel the remaining timer: $out"; exit 1 ;;
 esac
 out=$(call status '{}')
 case "$out" in

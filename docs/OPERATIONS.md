@@ -184,23 +184,38 @@ Automatic when file exceeds 512KB:
 # On target device
 tools/libreecho-backup.sh create /tmp/backup.tar.gz
 
-# Contents:
-# - /etc/libreecho/ (all config)
-# - /var/log/libreecho/ (recent logs)
-# - Web daemon state
+# The archive contains active /data/libreecho/config and /data/libreecho/secrets
+# only. It does not contain the /etc/libreecho factory seed, logs, installed
+# features, OTA/release identity, runtime state, transaction files, or raw wake
+# audio. Credentials are included as private files and the archive must be
+# protected or encrypted out-of-band.
 ```
 
 ### Restore Backup
 
 ```sh
-# Stops all services, restores, restarts
+# Stops available persistent-state writers, stages and validates both active
+# trees, replaces them only after staging succeeds, and restarts only services
+# that were running. Required state is validated before the prompt. Init status
+# 1 (most scripts) and 3 (watchdog/radio) both mean inactive.
 tools/libreecho-backup.sh restore /tmp/backup.tar.gz
-
-# Restore only config
-tar -xzf /tmp/backup.tar.gz -C /tmp/restore
-cp /tmp/restore/config/* /etc/libreecho/
-killall -HUP libreecho-web
 ```
+
+The restore preserves the existing numeric owner of each active tree. A
+supported non-root consumer can set `LIBREECHO_CONFIG_OWNER` and/or
+`LIBREECHO_SECRETS_OWNER` to an explicit numeric `uid:gid`; the value must
+match the existing tree owner. The tool does not read host account or
+credential databases. Copy, permission, ownership, or sync failures are
+reported and never printed as a successful restore. Replacement errors attempt
+rollback; if recovery cannot put an original tree back, retain its
+`*.restore-backup.*` directory for manual recovery before restarting services.
+This is not a power-loss-atomic transaction across the two trees. Both target
+directories must already exist with the intended owner; restore after a fresh
+image reinstall remains a separate acceptance check.
+
+Creation uses file copies, not an atomic snapshot, and does not stop services.
+Quiesce persistent-state writers before creating a backup that must be
+consistent across config, accounts, and secrets.
 
 ### List Backup Contents
 

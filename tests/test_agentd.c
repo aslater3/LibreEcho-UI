@@ -147,6 +147,8 @@ int main(void)
     CHECK(unsetenv("LE_TEST_CURL_MODE") == 0);
     CHECK(setenv("LE_AGENT_AUTH_POLL_MIN_SECONDS", "0", 1) == 0);
     CHECK(setenv("LE_TEST_TTS_MARKER", first_pcm_path, 1) == 0);
+    /* Force the marker after response generation creates the history record. */
+    CHECK(setenv("LE_TEST_TTS_MARKER_DELAY_MS", "200", 1) == 0);
     audio_child = fork();
     CHECK(audio_child >= 0);
     if (audio_child == 0) {
@@ -274,19 +276,27 @@ int main(void)
     CHECK(strstr(response, "\"stt_total_ms\":") != NULL);
     CHECK(stat(history_path, &status) == 0);
     CHECK((status.st_mode & 0777) == 0600);
-    {
+    for (i = 0; i < 500; ++i) {
         FILE *history = fopen(history_path, "r");
-        size_t length;
+        size_t length = 0;
 
-        CHECK(history != NULL);
-        length = fread(persisted_history, 1,
-                       sizeof(persisted_history) - 1, history);
-        CHECK(ferror(history) == 0);
-        CHECK(fclose(history) == 0);
-        CHECK(length > 0 && length < sizeof(persisted_history) - 1);
-        persisted_history[length] = '\0';
-        CHECK(strstr(persisted_history, "\"request_id\":\"") != NULL);
+        if (history) {
+            int read_error;
+
+            length = fread(persisted_history, 1,
+                           sizeof(persisted_history) - 1, history);
+            read_error = ferror(history);
+            if (fclose(history) == 0 && !read_error &&
+                length > 0 && length < sizeof(persisted_history) - 1) {
+                persisted_history[length] = '\0';
+                if (strstr(persisted_history, "\"request_id\":\"") != NULL &&
+                    strstr(persisted_history, "\"first_pcm_ms\":0") == NULL)
+                    break;
+            }
+        }
+        nanosleep(&delay, NULL);
     }
+    CHECK(i < 500);
     CHECK(count_occurrences(response, "\"at_ms\":") == 2);
     CHECK(count_occurrences(response, "\"stt_audio_ms\":") == 2);
     CHECK(strstr(response, "\"follow_up\":true") != NULL);
@@ -317,11 +327,19 @@ int main(void)
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"turns\":[]") == NULL);
     CHECK(strstr(response, "\"stt_total_ms\":") != NULL);
+    CHECK(strstr(response, "\"first_pcm_ms\":0") == NULL);
     CHECK(count_occurrences(response, "\"at_ms\":") == 2);
     CHECK(count_occurrences(response, "\"stt_audio_ms\":") == 2);
     CHECK(strstr(response, "\"follow_up\":true") != NULL);
     CHECK(strstr(response, "\"follow_up\":false") != NULL);
     CHECK(write_history_fixture(history_path) == 0);
+    CHECK(rename(history_path, history_backup_path) == 0);
+    {
+        FILE *history = fopen(history_path, "w");
+        CHECK(history != NULL);
+        CHECK(fputs("{corrupt", history) >= 0);
+        CHECK(fclose(history) == 0);
+    }
     kill(child, SIGTERM);
     CHECK(waitpid(child, NULL, 0) == child);
     child = -1;
@@ -346,6 +364,7 @@ int main(void)
     CHECK(access(socket_path, F_OK) == 0);
     CHECK(call(socket_path, "history", NULL,
                response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"history_generation\":1") != NULL);
     CHECK(count_occurrences(response, "\"at_ms\":") == 12);
     CHECK(count_occurrences(response, "\"stt_audio_ms\":") == 12);
     CHECK(strstr(response, "\"at_ms\":1011") != NULL);

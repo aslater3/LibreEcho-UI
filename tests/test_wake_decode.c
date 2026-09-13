@@ -100,7 +100,8 @@ static void on_wake_event(const struct le_wake_event *event, void *opaque)
  * without sleeping. Sequences stay within the 8-block queue so nothing is
  * dropped.
  */
-static void run_sequence(const float *scores, const int *vad_active,
+static void run_sequence_mode(const float *scores, const int *vad_active,
+                         const int *playback_active,
                          size_t count,
                          struct capture *capture,
                          struct le_wake_worker_metrics *metrics)
@@ -127,11 +128,18 @@ static void run_sequence(const float *scores, const int *vad_active,
         observation.detection_sample = (uint64_t)(i + 1) * BLOCK_SAMPLES;
         observation.vad_score = 1.0f;
         observation.vad_active = vad_active[i];
-        observation.playback_active = 0;
+        observation.playback_active = playback_active ? playback_active[i] : 0;
         assert(le_wake_worker_submit(&worker, block, BLOCK_SAMPLES,
                                      &observation) == 0);
     }
     le_wake_worker_stop(&worker, metrics);
+}
+
+static void run_sequence(const float *scores, const int *vad_active,
+                         size_t count, struct capture *capture,
+                         struct le_wake_worker_metrics *metrics)
+{
+    run_sequence_mode(scores, vad_active, NULL, count, capture, metrics);
 }
 
 static int close_to(float actual, float expected)
@@ -143,6 +151,26 @@ int main(void)
 {
     struct le_wake_worker_metrics metrics;
     struct capture capture;
+
+    /* Playback belongs to the peak observation, not a later frame. */
+    {
+        static const float scores[] = {0.05f, 0.70f, 0.05f, 0.05f};
+        static const float low[] = {0.05f, 0.40f, 0.05f, 0.05f};
+        static const int voiced[] = {1, 1, 1, 1};
+        static const int unvoiced_peak[] = {1, 0, 1, 1};
+        static const int playback[] = {1, 1, 1, 1};
+        static const int late_playback[] = {0, 0, 1, 1};
+        run_sequence_mode(scores, voiced, playback, 4, &capture, &metrics);
+        assert(capture.count == 1);
+        assert(capture.events[0].playback_active);
+        assert(capture.events[0].detection_sample == 2U * BLOCK_SAMPLES);
+        run_sequence_mode(low, voiced, playback, 4, &capture, &metrics);
+        assert(capture.count == 0);
+        run_sequence_mode(scores, unvoiced_peak, playback, 4, &capture, &metrics);
+        assert(capture.count == 0);
+        run_sequence_mode(scores, voiced, late_playback, 4, &capture, &metrics);
+        assert(capture.count == 0);
+    }
 
     /*
      * The sequence measured on hardware. The 0.554 clears the 0.533 accept

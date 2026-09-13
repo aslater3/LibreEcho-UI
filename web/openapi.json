@@ -78,7 +78,7 @@
      "Assistant"
     ],
     "summary": "Read voice-assistant state and latency telemetry",
-    "description": "Reports subscription authentication, wake/STT stream health, and measured speech-end-to-first-PCM latency.",
+    "description": "Reports subscription authentication, wake/STT stream health, measured speech-end-to-first-PCM latency, and the configured spoken time format.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -93,7 +93,7 @@
      "Assistant"
     ],
     "summary": "Configure the wake-to-reply assistant",
-    "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, and whether wake-to-reply is enabled. API keys are write-only and never returned.",
+    "description": "Configures ChatGPT or an OpenAI-compatible local endpoint, model, voice-safe instruction prompt, the spoken time format, and whether wake-to-reply is enabled. API keys are write-only and never returned.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -129,6 +129,15 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 95
+         },
+         "clock_format": {
+          "type": "string",
+          "enum": [
+           "12",
+           "24"
+          ],
+          "default": "12",
+          "description": "Spoken time format: \"12\" reads times as 1:57 PM, \"24\" as 13:57. Applies to ChatGPT and OpenAI-compatible providers."
          },
          "prompt": {
           "type": "string",
@@ -566,58 +575,58 @@
       "$ref": "#/components/responses/Error"
      }
     }
-    }
-    },
-    "/audio/sample": {
-    "post": {
-     "tags": [
-      "Audio"
-     ],
-     "summary": "Preview one bundled action-button sound",
-     "description": "Plays one raw sound from the installed sound directory. Names are lowercase letters, digits, hyphens, or underscores and are limited to 48 characters. Other HTTP methods return 405.",
-     "parameters": [
-      {
-       "$ref": "#/components/parameters/Csrf"
-      }
-     ],
-     "requestBody": {
-      "required": true,
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "required": [
-          "name"
-         ],
-         "properties": {
-          "name": {
-           "type": "string",
-           "minLength": 1,
-           "maxLength": 48,
-           "pattern": "^[a-z0-9_-]+$"
-          }
+   }
+  },
+  "/audio/sample": {
+   "post": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Preview one bundled action-button sound",
+    "description": "Plays one raw sound from the installed sound directory. Names are lowercase letters, digits, hyphens, or underscores and are limited to 48 characters. Other HTTP methods return 405.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "name"
+        ],
+        "properties": {
+         "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 48,
+          "pattern": "^[a-z0-9_-]+$"
          }
         }
        }
       }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
      },
-     "responses": {
-      "200": {
-       "$ref": "#/components/responses/Success"
-      },
-      "400": {
-       "$ref": "#/components/responses/Error"
-      },
-      "405": {
-       "$ref": "#/components/responses/Error"
-      },
-      "501": {
-       "$ref": "#/components/responses/Error"
-      }
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
      }
     }
-    },
-    "/auth": {
+   }
+  },
+  "/auth": {
    "get": {
     "tags": [
      "Authentication"
@@ -1155,7 +1164,7 @@
      "LED and buttons"
     ],
     "summary": "Update button mappings, cues, action, and brightness",
-    "description": "All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Malformed or out-of-range fields return 400.",
+    "description": "At least one recognized button field is required. All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Missing, malformed, or out-of-range settings return 400. Persistence failure returns 503 and preserves prior preferences.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1168,12 +1177,24 @@
        "schema": {
         "type": "object",
         "additionalProperties": false,
+        "minProperties": 1,
+        "anyOf": [
+         {"required": ["short_press"]},
+         {"required": ["long_press"]},
+         {"required": ["tones"]},
+         {"required": ["action"]},
+         {"required": ["action_sounds"]},
+         {"required": ["action_brightness"]},
+         {"required": ["mute_brightness"]}
+        ],
         "properties": {
          "short_press": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 31
          },
          "long_press": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 31
          },
          "tones": {
           "type": "boolean"
@@ -1215,6 +1236,9 @@
       "$ref": "#/components/responses/Error"
      },
      "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -1301,6 +1325,140 @@
     }
    }
   },
+  "/timers": {
+   "get": {
+    "tags": [
+     "Timers"
+    ],
+    "summary": "List timers and alarms",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "tags": [
+     "Timers"
+    ],
+    "summary": "Create a countdown timer",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "seconds"
+        ],
+        "properties": {
+         "seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800
+         },
+         "label": {
+          "type": "string",
+          "description": "Optional label; its UTF-8 encoding must be no longer than 47 bytes and must not contain control characters."
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/timers/dismiss": {
+   "post": {
+    "tags": [
+     "Timers"
+    ],
+    "summary": "Dismiss ringing timers",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/timers/{id}": {
+   "delete": {
+    "tags": [
+     "Timers"
+    ],
+    "summary": "Cancel a pending timer; use dismiss for ringing timers",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     },
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "integer",
+       "minimum": 1
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/device": {
    "get": {
     "tags": [
@@ -1325,7 +1483,8 @@
      "200": {
       "$ref": "#/components/responses/Success"
      }
-    }
+    },
+    "description": "The wake word check reports degraded for stale/unknown capture or inference; intentional microphone mute and disabled wake are distinguished. Healthy mocks are development evidence only."
    }
   },
   "/storage/usb": {
@@ -1476,7 +1635,7 @@
      "Diagnostics"
     ],
     "summary": "Prepare redacted diagnostics",
-    "description": "Authenticated action returning a bounded, deterministic-ordered JSON diagnostic bundle. It includes public-safe release identity and available runtime, network, audio, wake-word, Bluetooth, playback, privacy, reset/pstore-summary and bounded log evidence. Wi-Fi credentials, SSID/BSSID, IP/MAC/Bluetooth addresses, owner identifiers, tokens, private paths, media metadata, signing material and raw pstore are omitted or redacted. Missing or malformed subsystem data is represented as unavailable without failing the export.",
+    "description": "Authenticated action returning a bounded, deterministic-ordered JSON diagnostic bundle. It includes public-safe release identity, canonical components and transaction state/result observations, and available runtime, network, audio, wake-word, Bluetooth, playback, privacy, reset/pstore-summary and bounded log evidence. Wi-Fi credentials, SSID/BSSID, IP/MAC/Bluetooth addresses, owner identifiers, tokens, private paths, media metadata, signing material and raw pstore are omitted or redacted. Missing or malformed subsystem data is represented as unavailable without failing the export. data.release_identity.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity.",
     "security": [
      {
       "BearerAuth": []
@@ -1489,7 +1648,42 @@
     ],
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Successful response including separately verified signed authority (or explicitly unavailable authority).",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "required": [
+              "release_identity"
+             ],
+             "properties": {
+              "release_identity": {
+               "type": "object",
+               "required": [
+                "authority_provenance"
+               ],
+               "properties": {
+                "authority_provenance": {
+                 "$ref": "#/components/schemas/AuthorityProvenance"
+                }
+               }
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
      }
     }
    }
@@ -1741,6 +1935,7 @@
      "Integrations"
     ],
     "summary": "Enable or disable an integration",
+    "description": "The home-assistant integration also selects the voice pipeline: enabling it persists Home Assistant mode, while disabling it persists and restores the previously saved pipeline mode (the mode that was active when Home Assistant was enabled), falling back to local when none was recorded. On images with the Linux backend the pipeline transition is asynchronous, so a normal success may be 202 with a pending voice-pipeline document instead of 200. Enabling Home Assistant clears local-only processing in the same transition because microphone audio leaves the device.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1761,10 +1956,29 @@
      "200": {
       "$ref": "#/components/responses/Success"
      },
+     "202": {
+      "description": "The Home Assistant pipeline transition was accepted and is still running. The body is the ordinary voice-pipeline document, whose restart.state is pending.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VoicePipelineEnvelope"
+        }
+       }
+      }
+     },
      "404": {
       "$ref": "#/components/responses/Error"
      },
      "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -2075,9 +2289,11 @@
     "tags": [
      "Network"
     ],
-    "summary": "Scan Wi-Fi networks",
+    "summary": "Scan Wi-Fi networks with radio metadata and security capabilities",
+    "description": "Returns distinct SSIDs ordered with 5 GHz preferred, then descending signal strength and a stable SSID tie-breaker. Each result preserves frequency_mhz, channel, band, RSSI in rssi_dbm, advertised security capabilities, and whether an explicit WPA2 attempt is appropriate. WPA3/SAE-advertised networks remain visible; the response is bounded to the first 12 distinct results for the fixed adapter message size.",
     "responses": {
      "200": {
+      "description": "Each network includes frequency_mhz, channel, band, rssi_dbm, capabilities, and wpa2_attempt; security distinguishes wpa3-transition from wpa3-only.",
       "$ref": "#/components/responses/Success"
      },
      "501": {
@@ -2209,21 +2425,97 @@
      "System"
     ],
     "summary": "Read build and source provenance",
-    "description": "Returns the OS version, source commit, clean/dirty source flag, and content digest embedded at build time.",
+    "description": "Returns the OS version, source commit, clean/dirty source flag, content digest, and canonical bounded `components` observations. Each component reports the allow-listed feature_id, release, source_commit, effective_payload_sha256 (the observed canonical payload hash only when it matches metadata), nullable runtime_capsule_sha256, candidate_kind, candidate_payload_sha256, candidate_status, running_daemon_sha256, running_daemon_status, effective state, activation, and last_transaction_result. Hashing is incremental in the daemon's existing event loop: `pending` means actual-byte verification is still in progress and no manifest hash is trusted; `present` is emitted only after actual bytes match metadata. Each artifact is limited to 512 MiB (536870912 bytes). Feature metadata is limited to 256 KiB (262144 bytes) inclusive, signed OTA control input to 64 KiB (65536 bytes) inclusive, and transaction records to 8192 bytes inclusive. Mutable installed manifests are not provenance authority: release and source identity are emitted only from verified committed authority, and this UI reports them as unavailable because it does not verify signatures. Candidate kind is runtime only for `.runtime.squashfs` and replacement only for `.payload.squashfs`, preventing a full replacement from masquerading as a runtime capsule. `candidate_status` is `missing` only when no feature candidate is declared; unreadable or malformed declarations remain `unavailable`. Top-level transaction_state and last_transaction_result mirror the read-only Platform transaction state. Missing or malformed identity is unavailable/null; releases are never inferred from OS version or filenames. The five-component JSON is bounded to 8192 bytes. authority_provenance is separately obtained asynchronously from the existing Platform signature verifier. Verified results bind current canonical bytes to the signed authorizing release/source; preserved runtime capsules retain their older signed identity. This is not original build identity or proof of a running process. Failure, timeout, or dependency changes clear all verified identity.",
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Build/component observations plus separately verified signed authority.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "required": [
+              "authority_provenance"
+             ],
+             "properties": {
+              "authority_provenance": {
+               "$ref": "#/components/schemas/AuthorityProvenance"
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
      }
     }
    }
   },
+   "/setup/vendor-import-force-next-boot": {
+    "post": {
+     "tags": [
+      "Setup"
+     ],
+     "summary": "Schedule a one-shot unverified owner-local firmware import",
+     "description": "Creates a mode-0600 one-shot marker consumed on the next boot. Hash matching is bypassed only for that boot; safe paths, the complete four-file inventory, bounded sizes, and MT8163 ROM patch routing metadata remain mandatory. The result is reported as forced-unverified.",
+     "parameters": [
+      {
+       "$ref": "#/components/parameters/Csrf"
+      }
+     ],
+     "requestBody": {
+      "required": true,
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "confirm"
+         ],
+         "properties": {
+          "confirm": {
+           "type": "string",
+           "enum": [
+            "force-unverified-owner-local-import"
+           ]
+          }
+         }
+        }
+       }
+      }
+     },
+     "responses": {
+      "200": {
+       "$ref": "#/components/responses/Success"
+      },
+      "400": {
+       "$ref": "#/components/responses/Error"
+      },
+      "501": {
+       "$ref": "#/components/responses/Error"
+      },
+      "503": {
+       "$ref": "#/components/responses/Error"
+      }
+     }
+    }
+   },
   "/setup": {
    "get": {
     "tags": [
      "Setup"
     ],
     "summary": "Read first-boot setup state",
-    "description": "Returns safe initial values and whether first-boot setup is complete. Wi-Fi credentials are never returned.",
+    "description": "Returns safe initial values, boot-time owner-local firmware import state, live wlan0 registration, and whether first-boot setup is complete. Wi-Fi credentials are never returned.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -2235,7 +2527,7 @@
      "Setup"
     ],
     "summary": "Complete first-boot AP-mode setup",
-    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. This one-time operation is rejected after setup completes.",
+    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. Hostname, audio, Wi-Fi and persistence failures return stage-specific errors. After the settings and Wi-Fi commit, the daemon synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features` helper and waits for `/run/libreecho/startup-ready` before completing setup. Reconciliation or readiness failure returns 503 and leaves setup incomplete; if and only if the optional wake adapter reports not-supported, setup continues and persists wake_word and wake_sensitivity for later restore. This one-time operation is rejected after setup completes.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -2317,6 +2609,7 @@
      "System"
     ],
     "summary": "Factory-reset device",
+    "description": "Permanently removes every file and nested directory below the product image's /data/libreecho/config and /data/libreecho/secrets directories, including accounts, setup completion, Wi-Fi profiles and PSKs, assistant credentials, timers, and all mutable user configuration. The reset synchronizes both persistent directories and reboots. Installed feature payloads, OTA artifacts, and release identity outside those directories are preserved. Unprivileged Linux deployments return 501 without deleting state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -2330,6 +2623,12 @@
       "$ref": "#/components/responses/Success"
      },
      "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -2430,6 +2729,12 @@
      },
      "403": {
       "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }
@@ -2453,6 +2758,12 @@
       "$ref": "#/components/responses/Success"
      },
      "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -2519,10 +2830,37 @@
      "System"
     ],
     "summary": "Read signed A/B update and source-check state",
-    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, and whether the installed update helper supports unsigned manual uploads. Also reports the two OTA upload sizes: `max_upload_ceiling_bytes` (33554432, i.e. 32 MiB), the fixed limit POST /system/update/upload always refuses above, and `max_upload_bytes`, that ceiling capped by the free space on the filesystem the package is staged to, less a margin for the installer. Clients should read `max_upload_bytes` rather than hard-coding a number; when it is below the ceiling, free space is the binding limit. The size of the image already installed in a slot is not reported.",
+    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, whether the installed update helper supports unsigned manual uploads, and canonical bounded components plus transaction_state and last_transaction_result observations. data.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity.",
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Successful response including separately verified signed authority (or explicitly unavailable authority).",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "required": [
+              "authority_provenance"
+             ],
+             "properties": {
+              "authority_provenance": {
+               "$ref": "#/components/schemas/AuthorityProvenance"
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
      }
     }
    }
@@ -2685,7 +3023,7 @@
      "Assistant"
     ],
     "summary": "Read speech pipeline configuration and endpoint health",
-    "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, persisted listening settings, and the state of the latest bounded voice-pipeline restart. `restart.state` is `ready`, `pending`, or `failed`; `restart.error` is non-empty when the last restart failed. max_utterance_ms is 2000\u201320000, end_silence_ms is 200\u20133000, and vad_floor_rms is 1\u20131024.",
+    "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, persisted listening settings, and the state of the latest bounded voice-pipeline restart. `restart.state` is `ready`, `pending`, or `failed`; `restart.error` is non-empty when the last restart failed. max_utterance_ms is 2000–20000, end_silence_ms is 200–3000, and vad_floor_rms is 1–1024.",
     "responses": {
      "200": {
       "description": "Speech pipeline and persisted listening settings",
@@ -2792,10 +3130,61 @@
      "Wake word"
     ],
     "summary": "Read wake-word state",
-    "description": "Returns available wake-word state. On images without the wake-word service, the 200 response contains data.available=false and data.unavailable=true.",
+    "description": "Returns available wake-word state. On images without the wake-word service, the 200 response contains data.available=false and data.unavailable=true. Available states include read-only WakeHealth fields. A loaded model alone does not prove live capture or inference.",
     "responses": {
      "200": {
-      "$ref": "#/components/responses/Success"
+      "description": "Available wake state with health fields, or explicitly unavailable service",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "ok",
+          "data",
+          "error"
+         ],
+         "properties": {
+          "ok": {
+           "type": "boolean",
+           "enum": [
+            true
+           ]
+          },
+          "error": {
+           "nullable": true
+          },
+          "data": {
+           "oneOf": [
+            {
+             "$ref": "#/components/schemas/WakeHealth"
+            },
+            {
+             "type": "object",
+             "required": [
+              "available",
+              "unavailable"
+             ],
+             "properties": {
+              "available": {
+               "type": "boolean",
+               "enum": [
+                false
+               ]
+              },
+              "unavailable": {
+               "type": "boolean",
+               "enum": [
+                true
+               ]
+              }
+             }
+            }
+           ]
+          }
+         }
+        }
+       }
+      }
      },
      "503": {
       "$ref": "#/components/responses/Error"
@@ -2891,11 +3280,24 @@
       "schema": {
        "type": "object",
        "properties": {
-        "hostname": {"type": "string", "maxLength": 63},
-        "ssh": {"type": "boolean"},
-        "api_lan": {"type": "boolean"},
-        "wifi_mac": {"type": "string", "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"},
-        "bt_mac": {"type": "string", "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"}
+        "hostname": {
+         "type": "string",
+         "maxLength": 63
+        },
+        "ssh": {
+         "type": "boolean"
+        },
+        "api_lan": {
+         "type": "boolean"
+        },
+        "wifi_mac": {
+         "type": "string",
+         "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"
+        },
+        "bt_mac": {
+         "type": "string",
+         "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"
+        }
        },
        "additionalProperties": false
       }
@@ -2904,7 +3306,7 @@
    },
    "WifiConnect": {
     "required": true,
-    "description": "Wi-Fi credentials. `security` accepts exactly `open`, `wpa2`, or `wpa3`; when omitted it defaults to `wpa2`.",
+    "description": "Wi-Fi credentials. `security` accepts exactly `open` or `wpa2`; when omitted it defaults to `wpa2`. WPA3/SAE is not supported by the shipped MT8163 WEXT path.",
     "content": {
      "application/json": {
       "schema": {
@@ -2952,8 +3354,7 @@
           "security": {
            "type": "string",
            "enum": [
-            "wpa2",
-            "wpa3"
+            "wpa2"
            ],
            "default": "wpa2"
           }
@@ -3052,6 +3453,45 @@
    }
   },
   "schemas": {
+   "WakeHealth": {
+    "type": "object",
+    "required": [
+     "health_available",
+     "model_loaded",
+     "capture_active",
+     "inference_active",
+     "capture_age_ms",
+     "inference_age_ms",
+     "processed_frames"
+    ],
+    "properties": {
+     "health_available": {
+      "type": "boolean"
+     },
+     "model_loaded": {
+      "type": "boolean"
+     },
+     "capture_active": {
+      "type": "boolean"
+     },
+     "inference_active": {
+      "type": "boolean"
+     },
+     "capture_age_ms": {
+      "type": "integer",
+      "minimum": -1
+     },
+     "inference_age_ms": {
+      "type": "integer",
+      "minimum": -1
+     },
+     "processed_frames": {
+      "type": "integer",
+      "minimum": 0
+     }
+    },
+    "description": "Read-only bounded monotonic capture/inference evidence. Ages -1 are unknown; capture freshness 2000ms, inference freshness 5000ms. Silence is not a stall."
+   },
    "Envelope": {
     "type": "object",
     "required": [
@@ -3339,8 +3779,8 @@
       "maximum": 1024
      }
     }
-    },
-    "VoicePipelineRestart": {
+   },
+   "VoicePipelineRestart": {
     "type": "object",
     "required": [
      "state",
@@ -3359,8 +3799,8 @@
       "type": "string"
      }
     }
-    },
-    "VoicePipelineEnvelope": {
+   },
+   "VoicePipelineEnvelope": {
     "type": "object",
     "required": [
      "ok",
@@ -3374,6 +3814,24 @@
      "data": {
       "type": "object",
       "properties": {
+       "mode": {
+        "type": "string",
+        "enum": [
+         "local",
+         "custom",
+         "home-assistant"
+        ],
+        "description": "Active voice pipeline."
+       },
+       "home_assistant": {
+        "type": "object",
+        "description": "Readiness of the Home Assistant Wyoming satellite (libreecho-wyomingd). Only meaningful when mode is home-assistant; the saved custom stt/tts endpoints are not probed in this mode.",
+        "properties": {
+         "ready": {
+          "type": "boolean"
+         }
+        }
+       },
        "listening": {
         "$ref": "#/components/schemas/ListeningSettings"
        },
@@ -3386,6 +3844,176 @@
       "$ref": "#/components/schemas/NullableApiError"
      }
     }
+   },
+   "AuthorityProvenance": {
+    "description": "Read-only signed authorizing authority, not original feature-build provenance. Daemon hashes measure mounted executable bytes, not process liveness. Missing/stale/invalid authority fails closed.",
+    "oneOf": [
+     {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "available",
+       "schema",
+       "transaction_id",
+       "installed_sha256",
+       "manifest_sha256",
+       "manifest_sig_sha256",
+       "features"
+      ],
+      "properties": {
+       "available": {
+        "type": "boolean",
+        "enum": [
+         true
+        ]
+       },
+       "schema": {
+        "type": "string",
+        "enum": [
+         "libreecho-feature-provenance-v1"
+        ]
+       },
+       "transaction_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 127
+       },
+       "installed_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+       },
+       "manifest_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+       },
+       "manifest_sig_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+       },
+       "features": {
+        "type": "array",
+        "minItems": 5,
+        "maxItems": 5,
+        "items": {
+         "type": "object",
+         "additionalProperties": false,
+         "properties": {
+          "feature_id": {
+           "type": "string",
+           "enum": [
+            "airplay2",
+            "tts",
+            "wakeword",
+            "stt",
+            "assistant"
+           ]
+          },
+          "action": {
+           "type": "string",
+           "enum": [
+            "preserve",
+            "runtime",
+            "replace"
+           ]
+          },
+          "kind": {
+           "type": "string",
+           "enum": [
+            "base",
+            "runtime"
+           ]
+          },
+          "release": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 127
+          },
+          "source_commit": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{40}$"
+          },
+          "payload_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$"
+          },
+          "manifest_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$"
+          },
+          "runtime_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$",
+           "nullable": true
+          },
+          "runtime_manifest_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$",
+           "nullable": true
+          },
+          "daemon_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$"
+          }
+         },
+         "required": [
+          "feature_id",
+          "action",
+          "kind",
+          "release",
+          "source_commit",
+          "payload_sha256",
+          "manifest_sha256",
+          "runtime_sha256",
+          "runtime_manifest_sha256",
+          "daemon_sha256"
+         ]
+        }
+       }
+      }
+     },
+     {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "available",
+       "schema",
+       "reason",
+       "transaction_id",
+       "features"
+      ],
+      "properties": {
+       "available": {
+        "type": "boolean",
+        "enum": [
+         false
+        ]
+       },
+       "schema": {
+        "type": "string",
+        "enum": [
+         "libreecho-feature-provenance-v1"
+        ]
+       },
+       "reason": {
+        "type": "string",
+        "enum": [
+         "unavailable"
+        ]
+       },
+       "transaction_id": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+         null
+        ]
+       },
+       "features": {
+        "type": "array",
+        "maxItems": 0
+       }
+      }
+     }
+    ]
    }
   }
  }

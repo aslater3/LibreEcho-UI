@@ -398,7 +398,92 @@ int main(void)
               "SDP-server service-attr ends with null continuation");
     }
 
-    /* --- 3d. Every serialized service class is directly searchable --- */
+    /* --- 3d. Device ID/PnP record carries all standard identity attributes --- */
+    {
+        static const uint8_t pnp_attributes[] = {
+            0x35, 0x3b,             /* AttributeList DES, 59 bytes */
+            0x09, 0x00, 0x00,       /* ServiceRecordHandle */
+            0x0a, 0x00, 0x01, 0x00, 0x04,
+            0x09, 0x00, 0x01,       /* ServiceClassIDList */
+            0x35, 0x03, 0x19, 0x12, 0x00,
+            0x09, 0x00, 0x05,       /* BrowseGroupList */
+            0x35, 0x03, 0x19, 0x10, 0x02,
+            0x09, 0x02, 0x00,       /* Specification ID = 1.3 */
+            0x09, 0x01, 0x03,
+            0x09, 0x02, 0x01,       /* Lab126 USB Vendor ID */
+            0x09, 0x19, 0x49,
+            0x09, 0x02, 0x02,       /* Echo model 7232 product ID */
+            0x09, 0x72, 0x32,
+            0x09, 0x02, 0x03,       /* Device version 1.0 */
+            0x09, 0x01, 0x00,
+            0x09, 0x02, 0x04,       /* Primary record = true */
+            0x28, 0x01,
+            0x09, 0x02, 0x05,       /* Vendor ID source = USB-IF */
+            0x09, 0x00, 0x02,
+        };
+        size_t len = build_search_attr(request, 0x010d, 0x1200);
+
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check(n > 0 && response[0] == SDP_PDU_SERVICE_SEARCH_ATTR_RSP,
+              "PnP search-attr returns a success response");
+        check(n > 0 && contains_bytes(response, (size_t)n, pnp_attributes,
+                                      sizeof(pnp_attributes)),
+              "PnP search-attr returns the complete Device ID attribute set");
+    }
+
+    {
+        size_t offset = 5;
+        uint16_t tid = 0x010e;
+        size_t len;
+        static const uint8_t expected_attributes[] = {
+            0x35, 0x3b,
+            0x09, 0x00, 0x00, 0x0a, 0x00, 0x01, 0x00, 0x04,
+            0x09, 0x00, 0x01, 0x35, 0x03, 0x19, 0x12, 0x00,
+            0x09, 0x00, 0x05, 0x35, 0x03, 0x19, 0x10, 0x02,
+            0x09, 0x02, 0x00, 0x09, 0x01, 0x03,
+            0x09, 0x02, 0x01, 0x09, 0x19, 0x49,
+            0x09, 0x02, 0x02, 0x09, 0x72, 0x32,
+            0x09, 0x02, 0x03, 0x09, 0x01, 0x00,
+            0x09, 0x02, 0x04, 0x28, 0x01,
+            0x09, 0x02, 0x05, 0x09, 0x00, 0x02,
+        };
+
+        request[0] = SDP_PDU_SERVICE_ATTR_REQ;
+        request[1] = (uint8_t)(tid >> 8);
+        request[2] = (uint8_t)tid;
+        request[offset++] = 0x00;
+        request[offset++] = 0x01;
+        request[offset++] = 0x00;
+        request[offset++] = 0x04; /* PnP record handle */
+        request[offset++] = 0xff;
+        request[offset++] = 0xff;
+        request[offset++] = 0x35;
+        request[offset++] = 0x05;
+        request[offset++] = 0x0a;
+        request[offset++] = 0x00;
+        request[offset++] = 0x00;
+        request[offset++] = 0xff;
+        request[offset++] = 0xff;
+        request[offset++] = 0x00;
+        len = offset;
+        request[3] = (uint8_t)((len - 5) >> 8);
+        request[4] = (uint8_t)(len - 5);
+
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check(n == 7 + sizeof(expected_attributes) + 1,
+              "PnP service-attr returns the complete record");
+        check(n == 7 + sizeof(expected_attributes) + 1 &&
+                  memcmp(response + 7, expected_attributes,
+                         sizeof(expected_attributes)) == 0,
+              "PnP service-attr uses the required Device ID wire encoding");
+        check(n == 7 + sizeof(expected_attributes) + 1 &&
+                  response[n - 1] == 0x00,
+              "PnP service-attr ends with null continuation");
+    }
+
+    /* --- 3e. Every serialized service class is directly searchable --- */
     {
         size_t offset = 5;
         uint16_t tid = 0x0109;

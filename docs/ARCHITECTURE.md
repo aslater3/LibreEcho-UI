@@ -93,6 +93,10 @@ libreecho-web --backend linux \
 **Key responsibilities:**
 - Serve static files (HTML/CSS/JS) from `--web-root`
 - Route `/api/v1/*` requests to backend
+- Report boot-time owner-local firmware import state and live `wlan0`
+  registration during setup
+- Schedule the explicitly confirmed, one-shot, unverified vendor-import retry
+  marker without rebooting the device
 - Manage central config (`/etc/libreecho/config.json`)
 - Coordinate with companion daemons via adapter protocol
 - Log to central logd
@@ -301,7 +305,21 @@ tools/libreecho-backup.sh create /tmp/backup.tar.gz
 tools/libreecho-backup.sh restore /tmp/backup.tar.gz
 ```
 
-**Contents:** Config files, recent logs, web state, manifest with version/timestamp/hostname.
+**Contents:** Active persistent state only: `/data/libreecho/config` and
+`/data/libreecho/secrets`, including accounts and supported daemon stores. The
+version-2 manifest records the bounded scope, required files, private secret
+policy, and exclusions. Factory defaults under `/etc/libreecho`, installed
+feature payloads, OTA/release identity, runtime state, logs, transaction files,
+raw wake PCM, and one-shot platform markers are not backed up.
+
+Restore stages and validates both trees, including numeric ownership. It only
+replaces the live trees after staging succeeds, so ordinary copy or permission
+failures leave existing state untouched. `LIBREECHO_CONFIG_OWNER` and
+`LIBREECHO_SECRETS_OWNER` may supply numeric `uid:gid` values; when set they
+must match the existing tree owner. No account or credential database is read.
+Service recovery treats shipped inactive status `1` (most init scripts) and
+`3` (watchdog/radio) as inactive, stops the watchdog first, and starts only
+the services that were running, in dependency order.
 
 ## Data Flow Examples
 
@@ -399,6 +417,7 @@ Browser: displays scan results
 └── led-state.json           # Per-boot LED daemon working state
 
 /run/libreecho/
+├── vendor-import.status       # Platform-owned boot import result (0600)
 ├── network.sock             # networkd adapter socket
 ├── audio.sock               # audiod adapter socket
 ├── wakeword.sock            # wake events and indexed post-AEC PCM
@@ -426,6 +445,13 @@ Browser: displays scan results
 ├── js/app.js
 └── openapi.json
 ```
+
+The setup API reads `/run/libreecho/vendor-import.status` with `O_NOFOLLOW`
+and checks `/sys/class/net/wlan0` independently. A `ready` import is therefore
+not presented as usable Wi-Fi unless the kernel interface is registered. The
+CSRF-protected compatibility action atomically writes the exact one-shot marker
+`/data/libreecho/config/vendor-import-force-next-boot`; Platform consumes it on
+the next boot and labels that import `forced-unverified`.
 
 ## Process Dependencies
 

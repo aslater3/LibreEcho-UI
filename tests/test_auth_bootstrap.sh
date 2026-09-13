@@ -4,7 +4,7 @@ URL=${LIBREECHO_TEST_URL:-http://127.0.0.1:18083}
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 config=$(curl -fsS "$URL/api/v1/config")
 printf '%s' "$config" | jq -e '.data.authentication == "bootstrap-required" and .data.bootstrap_required == true' >/dev/null
-curl -fsS "$URL/" | grep -q 'Create your first local account'
+curl -fsS "$URL/" | grep -q 'Create your local account'
 # Deep-linking to an SPA route while bootstrap is required must serve the setup
 # page, not the app shell (whose API calls would then 401 with "setup is
 # required"). Regression for the real-URL pathname routing change: the bootstrap
@@ -27,6 +27,10 @@ printf '%s' "$session" | jq -e '.data.username == "admin" and (.data.token | tes
 token=$(printf '%s' "$session" | jq -r '.data.token')
 config=$(curl -fsS "$URL/api/v1/config")
 printf '%s' "$config" | jq -e '.data.authentication == "users" and .data.bootstrap_required == false' >/dev/null
+setup='{"hostname":"bootstrap-echo","ssid":"LibreNet-IoT","security":"wpa2","password":"test-password-123","volume":52,"wake_word":"LibreEcho","wake_sensitivity":72,"local_only":true,"diagnostic_telemetry":false}'
+curl -fsS -X POST "$URL/api/v1/setup" -H "Authorization: Bearer $token" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "$setup" |
+    jq -e '.ok and .data.completed == true' >/dev/null
 curl -fsS "$URL/api/v1/auth/users" -H "Authorization: Bearer $token" | jq -e '.data.users == [{"username":"admin"}]' >/dev/null
 curl -fsS -X POST "$URL/api/v1/auth/users" -H "Authorization: Bearer $token" -H "$CSRF" \
     -H 'Content-Type: application/json' \

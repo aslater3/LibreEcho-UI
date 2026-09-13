@@ -15,7 +15,11 @@ struct le_adapter {
     int fd;
     unsigned long next_id;
     int io_timeout_ms;
+    char input[LE_ADAPTER_MSG_MAX];
+    size_t input_used;
 };
+
+#define LE_ADAPTER_MAX_SKIPPED_EVENTS 16
 
 static const char *skip_ws(const char *p)
 {
@@ -293,35 +297,41 @@ static int write_all(struct le_adapter *a, const char *buf, size_t size)
 
 static int read_line(struct le_adapter *a, char *buf, size_t size)
 {
-    size_t used = 0;
-
     if (!buf || size < 2)
         return LE_ADAPTER_ERR_PROTO;
     for (;;) {
-        ssize_t n;
-        size_t i;
-        int rc = wait_for_fd(a->fd, POLLIN, a->io_timeout_ms);
-        if (rc)
-            return rc;
-        do {
-            n = read(a->fd, buf + used, size - used - 1);
-        } while (n < 0 && errno == EINTR);
-        if (n == 0)
-            return LE_ADAPTER_ERR_IO;
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                continue;
-            return LE_ADAPTER_ERR_IO;
+        char *newline = memchr(a->input, '\n', a->input_used);
+        if (newline) {
+            size_t line_size = (size_t)(newline - a->input);
+            size_t remaining = a->input_used - line_size - 1;
+            if (line_size >= size)
+                return LE_ADAPTER_ERR_PROTO;
+            memcpy(buf, a->input, line_size);
+            buf[line_size] = '\0';
+            memmove(a->input, newline + 1, remaining);
+            a->input_used = remaining;
+            return LE_ADAPTER_OK;
         }
-        used += (size_t)n;
-        for (i = used - (size_t)n; i < used; ++i) {
-            if (buf[i] == '\n') {
-                buf[i] = '\0';
-                return LE_ADAPTER_OK;
-            }
-        }
-        if (used >= size - 1)
+        if (a->input_used >= sizeof(a->input))
             return LE_ADAPTER_ERR_PROTO;
+        {
+            ssize_t n;
+            int rc = wait_for_fd(a->fd, POLLIN, a->io_timeout_ms);
+            if (rc)
+                return rc;
+            do {
+                n = read(a->fd, a->input + a->input_used,
+                         sizeof(a->input) - a->input_used);
+            } while (n < 0 && errno == EINTR);
+            if (n == 0)
+                return LE_ADAPTER_ERR_IO;
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    continue;
+                return LE_ADAPTER_ERR_IO;
+            }
+            a->input_used += (size_t)n;
+        }
     }
 }
 
@@ -402,6 +412,7 @@ struct le_adapter *le_adapter_connect(const char *sock_path, int timeout_ms)
     a->fd = fd;
     a->next_id = 1;
     a->io_timeout_ms = 5000;
+    a->input_used = 0;
     le_log_debug("adapter: connected to %s (fd=%d)", sock_path, fd);
     return a;
 }
@@ -436,6 +447,7 @@ int le_adapter_call(struct le_adapter *a, const char *cmd,
     int ok;
     int n;
     int rc;
+    int skipped_events = 0;
 
     if (out && out_size)
         out[0] = '\0';
@@ -477,22 +489,35 @@ int le_adapter_call(struct le_adapter *a, const char *cmd,
         le_log_debug("adapter: write failed for cmd=\"%s\" (rc=%d)", cmd, rc);
         return rc;
     }
-    rc = read_line(a, response, sizeof(response));
-    if (rc != LE_ADAPTER_OK) {
-        le_log_debug("adapter: read failed for cmd=\"%s\" (rc=%d)", cmd, rc);
-        return rc;
-    }
+    for (;;) {
+        rc = read_line(a, response, sizeof(response));
+        if (rc != LE_ADAPTER_OK) {
+            le_log_debug("adapter: read failed for cmd=\"%s\" (rc=%d)", cmd, rc);
+            return rc;
+        }
 
-    value = find_key(response, "v");
-    if (parse_ulong_value(value, &response_id) < 0 ||
-        response_id != LE_ADAPTER_PROTO_VERSION)
-        return LE_ADAPTER_ERR_PROTO;
-    value = find_key(response, "id");
-    if (parse_ulong_value(value, &response_id) < 0 || response_id != id)
-        return LE_ADAPTER_ERR_PROTO;
-    value = find_key(response, "ok");
-    if (parse_bool_value(value, &ok) < 0)
-        return LE_ADAPTER_ERR_PROTO;
+        value = find_key(response, "v");
+        if (parse_ulong_value(value, &response_id) < 0 ||
+            response_id != LE_ADAPTER_PROTO_VERSION)
+            return LE_ADAPTER_ERR_PROTO;
+        value = find_key(response, "id");
+        if (!value) {
+            value = find_key(response, "event");
+            if (!value || json_read_string(value, error_text,
+                                           sizeof(error_text), NULL) < 0 ||
+                ++skipped_events > LE_ADAPTER_MAX_SKIPPED_EVENTS)
+                return LE_ADAPTER_ERR_PROTO;
+            le_log_debug("adapter: skipping event=\"%s\" while waiting for id=%lu",
+                         error_text, id);
+            continue;
+        }
+        if (parse_ulong_value(value, &response_id) < 0 || response_id != id)
+            return LE_ADAPTER_ERR_PROTO;
+        value = find_key(response, "ok");
+        if (parse_bool_value(value, &ok) < 0)
+            return LE_ADAPTER_ERR_PROTO;
+        break;
+    }
     if (!ok) {
         value = find_key(response, "error");
         if (json_read_string(value, error_text, sizeof(error_text), NULL) < 0)

@@ -17,9 +17,37 @@ assert 'NL80211_CMD_SCAN_ABORTED' in source
 assert 'nl80211_wait_for_scan_event(fd, buffer, NL80211_BUFFER_SIZE,' in source
 assert 'NL80211_SCAN_FRESH_WAIT_MS' not in source
 assert 'TRIGGER_SCAN is only an acknowledgement' not in source
-assert 'NL80211_BSS_INFORMATION_ELEMENTS' in source
+assert 'struct scan_result' in source
+assert 'static int bogus_ssid(const char *ssid)' in source
+assert 'if (bogus_ssid(ssid))' in source
+assert 'struct pending_association' in source
+assert 'static void check_association(' in source
+assert '(void)wpa_ok(ctx, "REMOVE_NETWORK all"' not in source
+assert 'Wi-Fi association did not complete' in source
+finish_association = source[source.index('static void finish_association'):source.index('static void check_association')]
+finish_dhcp = source[source.index('static void finish_dhcp'):source.index('static int start_dhcp')]
+assert 'remove_network_profile(ctx, previous)' not in finish_association
+assert 'remove_network_profile(ctx, previous)' in finish_dhcp
+assert 'else if (!network_success)' in finish_dhcp
+assert 'restore_previous_network(ctx);' in finish_dhcp
+assert "while (command_length && command[command_length - 1] == '\\n')" in source
+assert 'execl("/bin/udhcpc"' in source
+assert '"-s", "/etc/udhcpc.script"' in source
+assert 'execl("/sbin/udhcpc"' not in source
+assert 'LIST_NETWORKS' in source
+assert 'DISABLE_NETWORK all' in source
+assert 'previous_network_id' in source
 assert 'static int normalize_rssi_dbm(int rssi_dbm)' in source
 assert 'ctx->state.rssi_dbm = normalize_rssi_dbm((int)strtol(value, NULL, 10));' in source
 assert 'level = normalize_rssi_dbm((int)statistics.qual.level);' in source
+assert 'static int serialize_scan_results(' in source
+assert 'static int scan_result_better(' in source
+assert 'SCAN_OUTPUT_MAX 12' in source
+assert 'NL80211_BSS_FREQUENCY' in source
+assert 'NL80211_BSS_SIGNAL_UNSPEC' in source
+assert 'SIOCGIWFREQ' in source
+assert 'signal_percent' in source
+assert 'nl80211_append_bss(bss, &results[result_count])' in source
+assert 'return serialize_scan_results(results, result_count, data, data_size);' in source
 print('network scan EOPNOTSUPP/nl80211 and signed RSSI contract: ok')
 PY

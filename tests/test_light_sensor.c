@@ -50,6 +50,22 @@ int main(void)
 {
     struct le_light_state reading;
 
+    /*
+     * The TSL2540 sysfs node can appear after the first query. A miss must
+     * not be cached: with a cached miss /light would keep reporting the
+     * sensor unavailable until the daemon restarted while /status probes
+     * afresh on every call, and the two endpoints would contradict.
+     */
+    cleanup_fixture();
+    memset(&reading, 0, sizeof(reading));
+    if (light(NULL, &reading) != LE_OK || reading.available) {
+        fprintf(stderr,
+                "expected unavailable before the sysfs node exists "
+                "(available=%d)\n", reading.available);
+        return 1;
+    }
+
+    /* The node appears late; the next query must discover it. */
     if (mkdir(LE_LIGHT_SYSFS_ROOT, 0700) != 0 ||
         mkdir(fixture_root, 0700) != 0) {
         perror("mkdir light fixture");
@@ -85,6 +101,7 @@ int main(void)
         return 1;
     }
 
-    puts("light sensor: zero-lux reading and detected I2C bus PASS");
+    puts("light sensor: late sysfs appearance retried; zero-lux reading and "
+         "detected I2C bus PASS");
     return 0;
 }

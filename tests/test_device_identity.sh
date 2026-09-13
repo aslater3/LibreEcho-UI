@@ -6,7 +6,7 @@ CFG=./build/test-identity-config.json
 rm -rf "$ROOT"
 mkdir -p "$ROOT"
 printf '%s\n' 'console=tty0 androidboot.serialno=TESTDEVICE1234 root=/dev/ram' >"$ROOT/cmdline"
-printf '{}\n' >"$CFG"
+printf '{"integrations":0}\n' >"$CFG"
 LIBREECHO_CMDLINE_PATH="$ROOT/cmdline" \
 ./build/libreecho-web --backend linux --config "$CFG" --web-root ./web \
     --listen "127.0.0.1:$PORT" >./build/test-identity.log 2>&1 &

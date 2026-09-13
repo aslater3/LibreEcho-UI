@@ -11,7 +11,9 @@ CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_tok
 # The feature report always carries the USB role fields, whatever the hardware.
 curl -fsS "$URL/api/v1/system/features" | jq -e \
     'has("data") and (.data|has("simulation") and has("usb_host")
-     and has("usb_role") and has("usb_role_supported"))' >/dev/null
+     and has("usb_role") and has("usb_role_supported")
+     and has("https") and has("https_active") and has("https_port")
+     and has("https_expires") and has("https_fingerprint"))' >/dev/null
 
 # A host with no switchable role must say so rather than pretend it switched.
 supported=$(curl -fsS "$URL/api/v1/system/features" | jq -r '.data.usb_role_supported')
@@ -35,6 +37,13 @@ curl -fsS -X PUT "$URL/api/v1/system/features" -H "$CSRF" -H 'Content-Type: appl
 code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$URL/api/v1/system/features" \
     -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 400 ] || { echo "empty feature PUT should be 400, got $code" >&2; exit 1; }
+
+# A malformed sibling field must be rejected before the USB role moves: the
+# whole request is validated first, so neither the role nor simulation change.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$URL/api/v1/system/features" \
+    -H "$CSRF" -H 'Content-Type: application/json' --data '{"usb_host":true,"https":"false"}')
+[ "$code" = 400 ] || { echo "malformed https sibling should be 400, got $code" >&2; exit 1; }
+curl -fsS "$URL/api/v1/system/features" | jq -e '.data.simulation == false and .data.usb_host == false' >/dev/null
 
 # The kernel log endpoint answers, or says why. /dev/kmsg is not readable in
 # every test sandbox, so both outcomes are legitimate; a 500 or a hang is not.
@@ -98,6 +107,8 @@ with open('web/openapi.json', encoding='utf-8') as stream:
 schema = spec['paths']['/system/features']['put']['requestBody']['content']['application/json']['schema']
 assert schema['minProperties'] == 1
 assert schema['properties']['usb_host']['type'] == 'boolean'
+assert schema['properties']['https']['type'] == 'boolean'
+assert schema['properties']['https']['default'] is False
 assert 'not persisted' in schema['properties']['usb_host']['description']
 PY
 # Boot always returns the port to device so ADB cannot be left switched off.

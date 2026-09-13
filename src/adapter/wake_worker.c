@@ -3,6 +3,8 @@
 #include "wake_worker.h"
 
 #include "wake_engine.h"
+#include "wake_health.h"
+#include <time.h>
 
 #include <pthread.h>
 #include <stdint.h>
@@ -62,6 +64,8 @@ struct wake_worker_impl {
     size_t queued;
     int stopping;
     int thread_started;
+    int inference_failed;
+    uint64_t last_inference_ns;
 
     int16_t accumulating[WAKE_BLOCK_SAMPLES];
     size_t accumulated;
@@ -73,6 +77,27 @@ struct wake_worker_impl {
     le_wake_event_callback callback;
     void *callback_opaque;
 };
+
+static uint64_t wake_now_ns(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+}
+
+int le_wake_worker_health(struct le_wake_worker *worker, int *inference_age_ms)
+{
+    struct wake_worker_impl *impl;
+    int loaded;
+    *inference_age_ms = -1;
+    if (!worker || !worker->implementation) return 0;
+    impl = worker->implementation;
+    pthread_mutex_lock(&impl->mutex);
+    loaded = impl->thread_started && !impl->inference_failed && !impl->stopping;
+    *inference_age_ms = le_wake_age_ms(wake_now_ns(), impl->last_inference_ns);
+    pthread_mutex_unlock(&impl->mutex);
+    return loaded;
+}
 
 static void merge_observation(
     struct le_wake_observation *destination,
@@ -132,8 +157,11 @@ static void decode_score(struct wake_worker_impl *worker,
      *
      * Taking the peak of the three lets the corroboration come from either
      * side of it, which is what "two of the last three" was meant to mean. A
-     * lone spike is still rejected, because a single frame over the support
-     * line is still support of one. The cost is 80 ms of latency on the
+     * lone idle spike is still rejected. During playback, an above-threshold
+     * VAD-positive peak can have only one supporting frame after echo
+     * cancellation; the playback observation must belong to the peak itself,
+     * not a later frame. Hardware false-activation acceptance remains required.
+     * The cost is 80 ms of latency on the
      * detection, one frame, since the peak is confirmed only once the frame
      * after it has been scored.
      */
@@ -145,7 +173,7 @@ static void decode_score(struct wake_worker_impl *worker,
     if (decoder->observations[peak].detection_sample <
             decoder->lockout_until_sample ||
         !decoder->observations[peak].vad_active ||
-        decoder->scores[peak] < accept_threshold || support < 2)
+        decoder->scores[peak] < accept_threshold || support < (decoder->observations[peak].playback_active ? 1U : 2U))
         return;
 
     ++worker->metrics.events;
@@ -192,8 +220,14 @@ static void *wake_thread(void *opaque)
                 worker->engine, block.samples, WAKE_BLOCK_SAMPLES,
                 &score, &new_score) < 0 || !new_score) {
             worker->metrics.failed = 1;
+            pthread_mutex_lock(&worker->mutex);
+            worker->inference_failed = 1;
+            pthread_mutex_unlock(&worker->mutex);
             break;
         }
+        pthread_mutex_lock(&worker->mutex);
+        worker->last_inference_ns = wake_now_ns();
+        pthread_mutex_unlock(&worker->mutex);
         inference_us =
             le_wake_engine_last_inference_us(worker->engine);
         if (inference_us > worker->metrics.max_inference_us)

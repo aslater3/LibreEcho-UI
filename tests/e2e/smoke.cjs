@@ -100,45 +100,129 @@ async function checkAudioMutation(page) {
   assert.equal(await persisted.inputValue(), '63', 'saved volume should survive navigation and re-render');
 }
 
-/*
- * Simulation is off by default, so the sweep above never reaches it. Turn it on
- * and render the history table from a device-shaped row: agentd records timings
- * only -- no phrase, no wake result -- and a renderer that assumes the fields a
- * locally-run simulation leaves behind throws on the first device row, which
- * takes the whole page down.
- */
-async function checkSimulationHistory(context, page) {
-  const config = await context.request.get(`${baseURL}/api/v1/config`);
-  const csrf = (await config.json()).data.csrf_token;
-  const response = await context.request.put(`${baseURL}/api/v1/system/features`, {
-    headers: { 'X-LibreEcho-CSRF': csrf },
-    data: { simulation: true }
+async function setupReadinessSuite(browser) {
+  const context = await browser.newContext({ baseURL });
+  await context.addInitScript(() => {
+    sessionStorage.setItem('libreecho-token', 'setup-e2e-token');
   });
-  assert.ok(response.ok(), `enabling the simulation feature should succeed (${response.status()})`);
-
-  await page.evaluate(() => {
-    localStorage.removeItem('libreecho-simulation-history');
-    localStorage.setItem('libreecho-simulation-device-history', JSON.stringify([
-      { at: Date.now(), source: 'device', follow_up: false,
-        audio_ms: 1870, processing_ms: 2024, queue_to_first_audio_ms: 2313 }
-    ]));
+  const page = await context.newPage();
+  let setupReads = 0;
+  let scans = 0;
+  const envelope = data => ({ ok: true, data, error: null });
+  await page.route('**/api/v1/config', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify(envelope({ csrf_token: 'c'.repeat(64), bootstrap_required: false }))
+  }));
+  await page.route('**/api/v1/setup', route => {
+    setupReads += 1;
+    const ready = setupReads > 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(envelope({
+        completed: false, backend: 'linux', hostname: 'libreecho', volume: 52,
+        wake_word: 'LibreEcho', wake_sensitivity: 68, local_only: true,
+        diagnostic_telemetry: false, network_state: 'unavailable', ssid: '',
+        wlan0_registered: ready,
+        vendor_firmware: { state: 'ready', verification: 'hash-pinned',
+          source_layout: 'etc/firmware', error: 'none', force_next_boot: false }
+      }))
+    });
   });
-  await page.goto('/', { waitUntil: 'domcontentloaded' });
-  await waitForPage(page, 'Overview');
-  await selectPage(page, 'Simulation');
-
-  const rows = await page.locator('#sim-history table.sim-table tbody tr').count();
-  assert.equal(rows, 1, 'a cached device turn should render as one history row');
-  const text = await page.locator('#sim-history').innerText();
-  assert.match(text, /spoken turn/, 'a device row should say the phrase was not recorded');
-
-  /* Leave the feature as it was found. It is persisted server-side, and the
-     radio suite asserts the menu hides Simulation when it is off. */
-  await context.request.put(`${baseURL}/api/v1/system/features`, {
-    headers: { 'X-LibreEcho-CSRF': csrf },
-    data: { simulation: false }
+  await page.route('**/api/v1/network/wifi/scan', route => {
+    scans += 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(envelope({ networks: [
+        { ssid: 'Readiness5', security: 'wpa2', signal: 40 },
+        { ssid: 'Readiness24', security: 'wpa2', signal: 95 },
+        { ssid: 'ReadinessWeak', security: 'wpa2', signal: 20 }
+      ] }))
+    });
   });
-  await page.evaluate(() => localStorage.removeItem('libreecho-simulation-device-history'));
+
+  await page.goto('/setup.html', { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => typeof setup !== 'undefined' && setup.step === 1);
+  assert.equal(await page.locator('#setup-wake').inputValue(), 'Alexa',
+    'unsupported setup fallback must normalize to the bundled wake model');
+  assert.equal(await page.evaluate(() => setup.data.wake_word), 'Alexa',
+    'normalized wake model must remain valid for setup submission');
+  await page.evaluate(() => { setup.step = 2; render(); });
+  await page.getByText('Readiness5', { exact: true }).waitFor({
+    state: 'visible', timeout: 4000
+  });
+  assert.deepEqual(await page.locator('.wifi-option strong').allTextContents(), [
+    'Readiness5', 'Readiness24', 'ReadinessWeak'
+  ], 'scan results should preserve the backend preferred-band order');
+  assert.ok(setupReads >= 2, 'scan retry should refresh setup readiness');
+  assert.equal(scans, 1, 'scan should start once wlan0 becomes ready');
+  await context.close();
+}
+
+async function checkFactoryResetFailure(page, status, message) {
+  await page.route('**/api/v1/system/factory-reset', route => route.fulfill({
+    status,
+    contentType: 'application/json',
+    body: JSON.stringify({ ok: false, data: null,
+      error: { code: 7, message } })
+  }));
+  await selectPage(page, 'Device');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#power-reset').click();
+  await page.waitForFunction(expected =>
+    (document.querySelector('#toast')?.textContent || '').includes(expected),
+    message, { timeout: 5000 });
+  assert.match(await page.locator('#toast').innerText(), new RegExp(message, 'i'));
+  assert.equal(await page.locator('dialog.reboot-dialog').count(), 0,
+    'failed factory reset must not enter the reboot wait loop');
+  await page.unroute('**/api/v1/system/factory-reset');
+}
+
+async function authenticatedStartupSuite(browser) {
+  for (const accepted of [true, false]) {
+    const context = await browser.newContext({ baseURL });
+    await context.addInitScript(() => sessionStorage.setItem('libreecho-token', 'startup-test-token'));
+    const page = await context.newPage();
+    await page.route('**/login', route => route.fulfill({ contentType: 'text/html', body: '<main>Sign in</main>' }));
+    await page.route('**/api/v1/config', async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.data.authentication = 'users';
+      body.data.bootstrap_required = false;
+      await route.fulfill({ response, json: body });
+    });
+    let releaseAuth;
+    const authGate = new Promise(resolve => { releaseAuth = resolve; });
+    let authStarted;
+    const started = new Promise(resolve => { authStarted = resolve; });
+    await page.route('**/api/v1/auth', async route => {
+      authStarted();
+      await authGate;
+      await route.fulfill({ status: accepted ? 200 : 401,
+        json: accepted ? { ok: true, data: { username: 'fixture' }, error: null }
+          : { ok: false, data: null, error: { message: 'Session expired' } } });
+    });
+    try {
+      await page.goto('/', { waitUntil: 'domcontentloaded' });
+      await Promise.race([started, new Promise((_, reject) => setTimeout(() => reject(new Error('Auth request not started')), 5000))]);
+      assert.equal(await page.locator('.app-shell').isVisible(), false,
+        'application must remain hidden while authentication is pending');
+      releaseAuth();
+      if (accepted) {
+        await waitForPage(page, 'Overview');
+        await page.locator('.app-shell').waitFor({ state: 'visible', timeout: 5000 });
+        assert.equal(await page.locator('body').evaluate(body => body.classList.contains('auth-pending')), false);
+        await selectPage(page, 'Device');
+      } else {
+        await page.waitForFunction(() => location.pathname === '/login', null, { timeout: 5000 });
+        await page.getByText('Sign in', { exact: true }).waitFor({ state: 'visible', timeout: 5000 });
+        assert.equal(await page.locator('.app-shell').isVisible(), false,
+          'rejected authentication must not reveal the application');
+      }
+    } finally {
+      releaseAuth();
+      await context.close();
+    }
+  }
 }
 
 async function desktopSuite(browser) {
@@ -150,6 +234,10 @@ async function desktopSuite(browser) {
   assert.ok(response && response.ok(), 'dashboard document should load successfully');
   await waitForPage(page, 'Overview');
   await page.waitForFunction(() => document.querySelector('#backend-badge')?.textContent.includes('mock'), null, { timeout: 7000 });
+  assert.equal(await page.locator('#cpu-dashboard .cpu-core').count(), 4);
+  assert.equal(await page.locator('#cpu-dashboard .cpu-core-grid').evaluate(grid =>
+    getComputedStyle(grid).gridTemplateColumns.split(' ').length), 4,
+  'desktop CPU dashboard should retain four columns');
   assert.doesNotMatch(await page.locator('#device-online').innerText(), /Connecting/i);
 
   await checkPwa(context, page);
@@ -160,9 +248,9 @@ async function desktopSuite(browser) {
   ];
   for (const destination of destinations) await selectPage(page, destination);
 
-  await checkSimulationHistory(context, page);
-
   await checkAudioMutation(page);
+  await checkFactoryResetFailure(page, 503, 'Device action failed');
+  await checkFactoryResetFailure(page, 501, 'Device action is not available');
   assert.deepEqual(failures, [], `browser failures:\n${failures.join('\n')}`);
 
   await context.close();
@@ -181,6 +269,30 @@ async function mobileSuite(browser) {
   const response = await page.goto('/', { waitUntil: 'domcontentloaded' });
   assert.ok(response && response.ok(), 'mobile dashboard document should load successfully');
   await waitForPage(page, 'Overview');
+
+  for (const width of [390, 375]) {
+    await page.setViewportSize({ width, height: 844 });
+    const cpuLayout = await page.locator('#cpu-dashboard').evaluate(panel => {
+      const panelBox = panel.getBoundingClientRect();
+      const grid = panel.querySelector('.cpu-core-grid');
+      return {
+        panelClientWidth: panel.clientWidth,
+        panelScrollWidth: panel.scrollWidth,
+        gridClientWidth: grid.clientWidth,
+        gridScrollWidth: grid.scrollWidth,
+        cardsInside: [...grid.children].every(card => {
+          const box = card.getBoundingClientRect();
+          return box.left >= panelBox.left - 1 && box.right <= panelBox.right + 1;
+        })
+      };
+    });
+    assert.ok(cpuLayout.panelScrollWidth <= cpuLayout.panelClientWidth + 1,
+      `${width}px CPU panel overflows by ${cpuLayout.panelScrollWidth - cpuLayout.panelClientWidth}px`);
+    assert.ok(cpuLayout.gridScrollWidth <= cpuLayout.gridClientWidth + 1,
+      `${width}px CPU grid overflows by ${cpuLayout.gridScrollWidth - cpuLayout.gridClientWidth}px`);
+    assert.equal(cpuLayout.cardsInside, true,
+      `every CPU card should remain inside its panel at ${width}px`);
+  }
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   assert.ok(overflow <= 1, `mobile layout overflows viewport by ${overflow}px`);
@@ -206,6 +318,8 @@ async function mobileSuite(browser) {
 (async () => {
   const browser = await chromium.launch({ headless: true });
   try {
+    await setupReadinessSuite(browser);
+    await authenticatedStartupSuite(browser);
     await desktopSuite(browser);
     await mobileSuite(browser);
   } finally {

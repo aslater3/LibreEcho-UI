@@ -91,6 +91,87 @@ for a dark room. `bus` reports the actual detected I²C device, such as
 
 ### System Status
 
+#### GET /api/v1/setup
+
+Returns first-boot setup defaults and the connectivity prerequisites needed by
+the setup page. The response remains available during a degraded Linux boot
+when audio, network, or wake-word companion services are unavailable.
+
+`vendor_firmware.state`, `verification`, `source_layout`, and `error` mirror
+the bounded boot-time vendor-import status. `force_next_boot` reports whether
+the one-shot compatibility marker is pending, and `wlan0_registered` reports
+whether the kernel currently exposes the Wi-Fi interface. A degraded wake-word
+adapter returns the valid fallback `wake_word: "LibreEcho"`.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "wake_word": "Alexa",
+    "vendor_firmware": {
+      "state": "ready",
+      "verification": "hash-pinned",
+      "source_layout": "etc/firmware",
+      "error": "none",
+      "force_next_boot": false
+    },
+    "wlan0_registered": true
+  },
+  "error": null
+}
+```
+
+#### POST /api/v1/setup
+
+On the Linux backend, setup and Wi-Fi connection run in a single bounded
+configuration worker. Reads remain available. Concurrent API mutations return
+HTTP 409 (`busy`) until the worker finishes; retry them afterwards. Authentication,
+CSRF and Origin checks still apply. Successful setup becomes visible to the parent
+from the durable completion marker and saved setup fields, without replacing live
+sessions. Mock-backend operations remain synchronous and in-process.
+
+Validates and applies the first-boot hostname, initial volume, Wi-Fi profile,
+wake-word preferences, and privacy choices. Hostname, audio, Wi-Fi, and durable
+configuration failures abort the transaction with stage-specific errors.
+
+Wake-word support is optional: if its companion service returns
+`LE_NOT_SUPPORTED`, setup continues, the submitted `wake_word` and
+`wake_sensitivity` are still written to the canonical configuration, and the
+boot-time restore retries them when the service becomes available. Other
+wake-word errors abort setup. The bundled image currently exposes `Alexa` as
+the supported first-run wake model. After settings and Wi-Fi are committed,
+setup synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features`
+helper and waits for `/run/libreecho/startup-ready`. A reconciliation or
+readiness failure returns `503` and leaves the setup-completion marker unwritten,
+so setup remains retryable. Wi-Fi credentials are passed to the network
+adapter for association but are never returned by the API or written to the
+web configuration. The successful response includes the best-known `ip`; the
+completion page uses the device's HTTP port `8080` for both the primary `<ip>`
+LAN link and the separate `<hostname>.local` mDNS alternative. It must not copy
+a host-side ADB forwarding port or reverse-proxy port from the setup page's
+visible origin into normal user-facing device links. The `.local` name depends
+on AirPlay 2/Avahi and client mDNS support, so the IP link remains available
+when that service is disabled or unavailable.
+
+#### POST /api/v1/setup/vendor-import-force-next-boot
+
+Schedules one forced, owner-local firmware import for the next boot. This
+endpoint creates only the mode-`0600` one-shot marker; it does not reboot the
+device. The import remains structurally checked but is reported as
+`forced-unverified`, never hash-pinned.
+
+The request requires normal authentication, `X-LibreEcho-CSRF`, and this exact
+confirmation body:
+
+```json
+{ "confirm": "force-unverified-owner-local-import" }
+```
+
+A successful response reports `force_next_boot: true`,
+`reboot_required: true`, and `verification: "forced-unverified"`. An absent or
+incorrect confirmation returns `400`; non-Linux backends return `501`; and a
+marker write failure returns `503`.
+
 #### GET /api/v1/status
 
 Returns system health and telemetry. `light_lux` is the current ambient-light
@@ -418,6 +499,51 @@ Use `POST /api/v1/audio/announce/stop` with `{}` to interrupt the active
 announcement. State-changing API calls require the normal CSRF header and,
 when configured, local API authentication.
 
+### Timers and alarms
+
+#### GET /api/v1/timers
+
+Returns the bounded timer schedule. Each entry has an `id`, `kind` (`countdown`
+or `alarm`), `state` (`pending` or `ringing`), `seconds_remaining`, and an
+optional `label`. The response also includes `ringing`, `missed`, and
+`available`. When `timerd` is absent, this GET still returns HTTP 200 with
+`available: false`, an empty `timers` array, and zero `ringing`/`missed`
+counts. Timer writes return the standard 503 unavailable response instead.
+
+#### POST /api/v1/timers
+
+Creates a countdown and requires `X-LibreEcho-CSRF`.
+
+```json
+{ "seconds": 600, "label": "pasta" }
+```
+
+`seconds` is required and must be 1–604800. `label` is optional, but if
+present must be a valid JSON string whose UTF-8 encoding is no longer than 47
+bytes; oversized, malformed, or control-character labels return HTTP 400 rather
+than being truncated or changed. Leading whitespace is preserved when the
+schedule is persisted and restored. Success returns
+HTTP 201 with `{ "id": number }`. The fixed schedule holds at most 16 active
+entries; a valid request when it is full returns HTTP 409 with error code
+`busy`.
+
+#### POST /api/v1/timers/dismiss
+
+Dismisses all currently ringing timers, leaves pending timers untouched, and
+returns `{ "dismissed": number }`. Requires `X-LibreEcho-CSRF`.
+
+#### DELETE /api/v1/timers/{id}
+
+Cancels one pending timer by numeric ID. Ringing timers are not cancelled by
+this route; use `/timers/dismiss` to silence them. The entire path component
+must be a nonzero decimal integer; malformed, ringing, out-of-range, missing,
+or already-cancelled IDs return HTTP 404 without removing another timer.
+Requires `X-LibreEcho-CSRF`.
+
+The timer page refreshes its status while open so countdowns and ringing state
+remain current. Timer state is persisted atomically with a restrictive
+permissions policy and is restored after the wall clock becomes valid.
+
 ### Voice assistant
 
 The voice assistant uses local wake-word detection, post-AEC microphone audio,
@@ -475,9 +601,10 @@ rejected with `501` when its Wyoming service is not installed.
 #### GET /api/v1/assistant
 
 Returns assistant configuration, ChatGPT device-login state, pipeline
-connectivity, local STT timing, and first-audio latency telemetry. The latency
-measurement is from the estimated end of speech to the first PCM submitted to
-the announcement bus; the current target is 3000 ms.
+connectivity, local STT timing, and first-audio latency telemetry. The
+returned configuration includes `clock_format`, the format used when the time
+is spoken aloud. The latency measurement is from the estimated end of speech to
+the first PCM submitted to the announcement bus; the current target is 3000 ms.
 
 #### GET /api/v1/assistant/history
 
@@ -525,6 +652,7 @@ Updates the provider-neutral assistant configuration:
   "enabled": true,
   "provider": "openai-codex",
   "model": "gpt-5.4",
+  "clock_format": "12",
   "prompt": "Reply in concise, natural spoken English without markdown."
 }
 ```
@@ -532,6 +660,12 @@ Updates the provider-neutral assistant configuration:
 The prompt is sent as the response provider's instruction text. Keep it
 voice-safe: concise prose, no markdown, URLs, citations, emoji, or claims that
 an external action succeeded without tool confirmation.
+
+`clock_format` selects how the assistant says times aloud, for both providers:
+`"12"` reads "1:57 PM" and `"24"` reads "13:57". The default is `"12"`; a
+device that has never stored a choice receives it, while an explicit `"12"` or
+`"24"` is kept. Any other value is rejected with HTTP 400 and the previous
+configuration is left unchanged.
 
 #### POST /api/v1/assistant/auth/start
 
@@ -812,7 +946,16 @@ unset.
 
 #### GET /api/v1/network/wifi/scan
 
-Scan for WiFi networks.
+Scan for WiFi networks. Results are ordered with 5 GHz networks first, then by
+signal strength (strongest first), with SSID as a stable tie-breaker. The
+response is bounded to the first 12 distinct results for the fixed adapter
+message size. Every result retains frequency_mhz, channel, band, rssi_dbm, and
+advertised security capabilities. WPA3/SAE advertisements remain visible.
+
+`security` is `open`, `wpa2`, `wpa3-transition` (WPA2-PSK and WPA3-SAE),
+`wpa3-only`, or `wpa`. `wpa2_attempt` is true only when the advertisement
+includes a WPA2/PSK path that the shipped client can explicitly try. A
+`wpa3-only` network remains visible but does not receive a WPA2 button.
 
 **Response:**
 ```json
@@ -820,8 +963,18 @@ Scan for WiFi networks.
   "ok": true,
   "data": {
     "networks": [
-      { "ssid": "MyNetwork", "security": "wpa2", "signal": 75 },
-      { "ssid": "OtherNetwork", "security": "wpa2", "signal": 45 }
+      {
+        "ssid": "MyNetwork", "security": "wpa3-transition",
+        "capabilities": "WPA2-PSK, WPA3-SAE", "signal": 75,
+        "rssi_dbm": -54, "frequency_mhz": 5180, "channel": 36,
+        "band": "5 GHz", "wpa2_attempt": true
+      },
+      {
+        "ssid": "WPA3Only", "security": "wpa3-only",
+        "capabilities": "WPA3-SAE", "signal": 45,
+        "rssi_dbm": -68, "frequency_mhz": 2412, "channel": 1,
+        "band": "2.4 GHz", "wpa2_attempt": false
+      }
     ]
   },
   "error": null
@@ -830,8 +983,12 @@ Scan for WiFi networks.
 
 #### POST /api/v1/network/wifi/connect
 
-Connect to a WiFi network. The `security` field accepts exactly `open`, `wpa2`,
-or `wpa3`; if omitted, it defaults to `wpa2` for backward compatibility.
+Connect to a WiFi network. The `security` field accepts exactly `open` or `wpa2`;
+if omitted, it defaults to `wpa2` for backward compatibility. For a scan result
+with `wpa2_attempt: true`, the UI's explicit **Try WPA2** action submits
+`security: "wpa2"`. This is a bounded compatibility attempt only: the client
+does not claim WPA3/SAE support, and the response/error reports the actual
+association result.
 Malformed or unsupported security values are rejected with HTTP 400 before any
 adapter request is made.
 
@@ -844,9 +1001,8 @@ adapter request is made.
 }
 ```
 
-For an open network, use `"security": "open"` and omit `password`. WPA3 uses
-`"security": "wpa3"`. The endpoint never silently converts an invalid security
-value to an open or WPA2 network.
+For an open network, use `"security": "open"` and omit `password`. The endpoint
+never silently converts an invalid security value to an open or WPA2 network.
 
 **Response:**
 ```json
@@ -927,7 +1083,16 @@ Shutdown device. Requires confirmation.
 
 #### POST /api/v1/system/factory-reset
 
-Factory reset device. Requires confirmation.
+Permanently removes every file and nested directory below the product image's
+`/data/libreecho/config` and `/data/libreecho/secrets` directories, including
+device-local accounts, setup completion, Wi-Fi profiles/PSKs, assistant
+credentials, timers, and all mutable user configuration. The reset synchronizes
+both persistent directories and reboots. Installed feature payloads, OTA
+artifacts, and release identity outside those directories are preserved.
+The operation requires `X-LibreEcho-Confirm: confirm-device-action`; missing
+directories are accepted, while any unexpected deletion or durability failure
+aborts the reboot and returns HTTP 503. Unprivileged Linux deployments and
+backends without destructive-action support return HTTP 501.
 
 #### PUT /api/v1/system/update/channel
 
@@ -1009,9 +1174,9 @@ Reports the optional feature switches. They are off by default.
     "usb_role_supported": true,
     "https": false,
     "https_active": false,
-    "https_port": 0,
-    "https_expires": "",
-    "https_fingerprint": "",
+    "https_port": 8443,
+    "https_expires": "<certificate not-after date; empty until a certificate exists>",
+    "https_fingerprint": "<SHA-256 fingerprint; empty until a certificate exists>",
     "acoustic_events": false,
     "acoustic_events_available": false
   },
@@ -1038,6 +1203,8 @@ into the microphone path so wake-word detection, speech-to-text and the
 assistant can be exercised without speaking in the room. It is a testing
 capability rather than something a live device should offer, so while it is off
 the endpoint answers `403` and the web interface hides its Simulation page.
+
+`https` is the persisted HTTPS switch; `https_active` reports whether the TLS listener is serving on this boot, and `https_port`, `https_expires` and `https_fingerprint` describe the listener and the self-signed certificate the device generates and keeps beside its configuration.
 
 #### PUT /api/v1/system/features
 
@@ -1087,6 +1254,14 @@ The switch is written to the kernel's `usb_role` class, not to the MUSB `mode`
 attribute. Writing `mode` blocks until a USB session that cannot occur while the
 port is powered by a host, and takes the ADB gadget down with it; the role
 switch is register writes only and returns immediately.
+
+`https` enables or disables the HTTPS listener:
+
+```json
+{ "https": true }
+```
+
+The listener binds at startup, so the change is stored and applies after a restart; disabling it also removes the persisted sessions.
 
 ### Configuration
 
@@ -1171,7 +1346,12 @@ value remains useful when the device wall clock is not synchronised.
 
 #### GET /api/v1/diagnostics
 
-Returns diagnostic information.
+Returns diagnostic information. The `wake word` check requires recent capture
+and inference progress, not just a reachable process, loaded model, or positive
+voice activity detection. It reports `degraded` for missing/stale evidence,
+`disabled` when wake is intentionally disabled, and `muted` when microphone
+privacy is enabled. Healthy mock fixtures report `development`, never hardware
+acceptance.
 
 **Response:**
 ```json
@@ -1322,6 +1502,14 @@ copying into an issue template. No server-side temporary file is created.
 
 ### Wake Word
 
+Read-only health fields: `health_available`, `model_loaded`, `capture_active`,
+`processed_frames`, `capture_age_ms`, `inference_active`, `inference_age_ms`.
+Ages use monotonic time; `-1` means no usable observation. Capture is fresh for
+2,000 ms and inference for 5,000 ms. Silence counts as capture progress; VAD
+indicates speech, not stream liveness. Missing fields from an older daemon are
+unknown, not healthy. A loaded model with stalled capture or inference is
+reported degraded in diagnostics. These fields cannot be changed through PUT.
+
 Returns wake word state. When the wake-word service is absent, this remains a
 successful `200` response with `data.available: false` and
 `data.unavailable: true`.
@@ -1396,8 +1584,11 @@ accepted settings with the corresponding behavior reported by the daemon.
 `action_sounds` is a comma-separated list of installed sound names in rotation
 order. Each name follows the same 1–48-character lowercase-name rule as the
 preview endpoint; an empty string is valid and means no sound is played.
-Malformed fields, unsupported actions, and brightness values outside 0–100
-return the standard 400 error envelope.
+At least one recognized button field is required. The legacy `short_press` and
+`long_press` strings are limited to 31 bytes each. Missing settings, malformed
+fields, unsupported actions, and brightness values outside 0–100 return the
+standard 400 error envelope. If persistence fails, the API returns 503 and the
+previous in-memory preferences remain active.
 
 **Request:**
 ```json
@@ -1644,6 +1835,24 @@ JSON-escaped, including when it contains quotes or backslashes.
 
 Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.
 
+The `home-assistant` toggle also selects the active voice pipeline. Enabling it
+persists `home-assistant` mode, records the previous pipeline so a later disable
+restores it, and clears local-only processing in the same transition (microphone
+audio leaves the device). Disabling it persists and restores the saved pipeline,
+or `local` when none was recorded.
+
+Because the pipeline transition restarts daemons, the response is asynchronous
+on the Linux backend:
+
+- **200** — the toggle and any pipeline change were applied; the body is the
+  integration list.
+- **202** — the Home Assistant pipeline transition was accepted and is still
+  running. The body is the voice-pipeline document (`/api/v1/voice-pipeline`
+  shape) whose `restart.state` is `pending`.
+- **409** — a voice pipeline restart is already in progress.
+- **501** — the Home Assistant voice pipeline is not installed on this image.
+- **503** — the integration change could not be saved or applied.
+
 **Request:**
 ```json
 {
@@ -1653,7 +1862,7 @@ Update integration toggles. The `rest` integration is the canonical LAN REST API
 
 (Use query parameter or path to specify integration: `?integration=home-assistant`)
 
-**Response:**
+**Response (200):**
 ```json
 {
   "ok": true,
@@ -1664,6 +1873,21 @@ Update integration toggles. The `rest` integration is the canonical LAN REST API
       { "id": "rest", "name": "Local REST API", "enabled": true, "forced": false },
       { "id": "bluetooth", "name": "Bluetooth audio", "enabled": false }
     ]
+  },
+  "error": null
+}
+```
+
+**Response (202, pending pipeline transition):**
+```json
+{
+  "ok": true,
+  "data": {
+    "mode": "home-assistant",
+    "home_assistant": { "ready": true },
+    "stt": { "engine": "sherpa", "reachable": false },
+    "tts": { "engine": "sherpa", "reachable": false },
+    "restart": { "state": "pending", "error": "" }
   },
   "error": null
 }
@@ -1821,3 +2045,139 @@ data: {"refresh":true}
 - Max 12 WiFi scan results
 - Max 128 log entries in memory
 - Max 4 adapter clients per daemon
+
+#### GET /api/v1/provenance
+
+Returns additive build provenance and the bounded, read-only feature component
+observations used by About, System, OTA status, and diagnostic export. The
+`components` array follows the Platform feature manifest and
+transaction journal contract; the UI does not derive a release from the OS
+version, filenames, mutable installed manifests, or a legacy manifest that lacks
+release identity. Missing or malformed values are reported as `"unavailable"`;
+`effective` is `present` only when the bounded hash of the canonical
+`payload.squashfs` (and, for a runtime manifest, `runtime.squashfs`) matches its
+expected metadata. Hashing is performed incrementally by the daemon's existing
+event loop; while an actual artifact is being verified, its observation is
+`pending`, and no manifest hash is reported as verified. `present` is emitted
+only after the actual bytes match metadata. Each artifact is limited to 512 MiB
+(536870912 bytes): an oversized artifact, read error, growth or other
+identity/stat instability is `unavailable`. Feature metadata is bounded to 256
+KiB (262144 bytes) inclusive; signed OTA control input is bounded to 64 KiB
+(65536 bytes) inclusive, and transaction records to 8192 bytes inclusive. A
+missing artifact remains `missing`, while a readable same-identity artifact
+whose bytes do not match remains `mismatch`.
+The settled `effective` value is `missing`, `mismatch`, or `unavailable` for
+the distinct observations above. The
+`candidate_kind`, `candidate_payload_sha256`, and `candidate_status` fields are
+independent staged-asset observations: candidate kind is `runtime` only for a
+`.runtime.squashfs` asset and `replacement` only for a `.payload.squashfs`
+asset, so a full replacement cannot be presented as a runtime capsule. `candidate_status` is `missing` only when no feature candidate is declared; an unreadable or malformed declaration remains `unavailable`.
+`runtime_capsule_sha256` is `null` when no matching runtime capsule hash was
+observed. The array is limited to the five allow-listed feature IDs and the
+encoded component data is bounded to 8192 bytes.
+
+`authority_provenance` is a separate read-only signed-authority observation, also
+included in diagnostic export. The UI asynchronously runs Platform's existing
+`libreecho-feature-transaction provenance` command; it does not introduce a second
+signature verifier or verify signatures in the HTTP request handler. The helper
+verifies committed system authority, retained runtime authority, the installed
+transaction identity, and current canonical bytes before emitting identity.
+
+On success it has `available: true`, schema `libreecho-feature-provenance-v1`,
+`transaction_id`, `installed_sha256`, `manifest_sha256`, `manifest_sig_sha256`, and
+five `features`. Each feature has `feature_id`, `action` (`preserve`, `runtime`, or
+`replace`), `kind` (`base` or `runtime`), signed authorizing `release` and
+`source_commit`, `payload_sha256`, `manifest_sha256`, nullable `runtime_sha256` and
+`runtime_manifest_sha256`, and `daemon_sha256`. The latter measures the mounted
+executable, **not a running process**. A preserved runtime capsule retains its own
+older signed authority. These are authorizing identities, not a claim of the
+original feature build's source; they do not replace the legacy `components`
+identity fields.
+
+Missing, stale, partial, tampered, timed-out, or otherwise unverifiable evidence
+produces `available: false`, the same schema, `reason: "unavailable"`,
+`transaction_id: null`, and `features: []`, with no release/source claims. Relevant
+canonical payload, manifest, mounted daemon, authority/signature, transaction,
+public-key and verifier changes invalidate the observation. Failed verification
+is retried with bounded backoff; the HTTP loop remains serviceable. No OTA state,
+confirmation, settings, or feature data is changed by this read-only path. About
+and System display signed authorizing identity in native expandable details,
+separate from measured component status and running-process hashes.
+
+Host verification after `make`:
+
+```sh
+LIBREECHO_PLATFORM_SRC=/path/to/companion-platform python3 tests/test_authority_provenance_integration.py
+```
+
+The dedicated `Signed provenance integration` workflow pins the companion
+Platform commit and uses fresh ephemeral test keys, not release signing keys.
+Host passes do not claim hardware acceptance or establish target verifier timing.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "os_version": "LibreEcho OS 0.13.11",
+    "source_commit": "public-build-identity",
+    "source_dirty": false,
+    "source_digest": "public-build-digest",
+    "transaction_state": "none",
+    "last_transaction_result": "idle",
+    "authority_provenance": {"available": false, "schema": "libreecho-feature-provenance-v1", "reason": "unavailable", "transaction_id": null, "features": []},
+    "components": [
+      {
+        "feature_id": "tts",
+        "release": "unavailable",
+        "source_commit": "unavailable",
+        "effective_payload_sha256": "unavailable",
+        "runtime_capsule_sha256": null,
+        "candidate_kind": "unavailable",
+        "candidate_payload_sha256": "unavailable",
+        "candidate_status": "unavailable",
+        "running_daemon_sha256": "unavailable",
+        "running_daemon_status": "unavailable",
+        "effective": "missing",
+        "activation": "unavailable",
+        "last_transaction_result": "idle"
+      }
+    ]
+  },
+  "error": null
+}
+```
+
+The same `components`, `transaction_state`, and `last_transaction_result` fields are additive in
+`GET /api/v1/system/update` and in `POST /api/v1/diagnostics/export`. The
+Platform-side mapping is read-only: mutable feature manifests supply only the
+expected artifact hashes and canonical filenames for byte observations. Release
+and source identity are emitted only when a verified committed authority is
+available (`committed-manifest`/`.sig` or the corresponding committed runtime
+authority); this UI does not verify signatures and therefore reports those
+identity fields as `"unavailable"` rather than treating mutable installed
+records as provenance. The UI hashes the canonical filenames `payload.squashfs`
+and (for runtime actions) `runtime.squashfs` directly with bounded reads and a
+keyed stat cache. Candidate metadata comes from `/data/libreecho/update/staging/manifest`;
+its actual bytes are read only from the corresponding safe staged feature path
+and are reported separately as runtime or replacement. The staging manifest also
+supplies reboot activation and signed transaction identity; the feature
+transaction journal supplies the observed result. No Platform fields are
+invented by the UI.
+
+### Wake Word
+
+### Deterministic local voice stop (0.14 candidate)
+
+Imperative stop/quiet commands bypass model access and sign-in. A ringing timer
+has priority; otherwise device-owned radio, queued speech, and the noise machine
+stop together. Idle/repeated stop is silent and never opens a follow-up turn.
+Negations and unrelated text are not treated as stop commands. Adapter failure
+is reported rather than claiming success. Phone-owned AirPlay/Bluetooth transport
+is not stopped remotely: a deterministic response explains that the sender owns
+it. The assistant feature payload must be rebuilt to deploy this change.
+
+Wake interruption during active playback permits one above-threshold supporting
+frame only when the peak itself has playback activity and VAD. Quiet-room
+corroboration, acceptance threshold, sample attribution and lockout remain in
+force. This policy needs final-image false-activation and interruption acceptance
+on hardware; host decoding tests do not establish acoustic performance.

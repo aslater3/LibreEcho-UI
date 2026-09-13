@@ -34,7 +34,7 @@ def main() -> None:
     api_required = (
         "valid_wifi_security",
         "security_result<0",
-        "security must be open, wpa2, or wpa3",
+        "security must be open or wpa2",
         "if(security_result==0)strcpy(w.security,\"wpa2\")",
     )
     missing = [fragment for fragment in api_required if fragment not in api]

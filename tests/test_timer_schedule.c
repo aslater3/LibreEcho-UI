@@ -164,6 +164,8 @@ int main(void)
         assert(le_timer_add_countdown(&set, 600, NULL, 0, &pending) ==
                LE_TIMER_OK);
         assert(step(&set, 1000, SYNCED_EPOCH) == 1);
+        assert(le_timer_cancel(&set, ringing) == LE_TIMER_ERR_NOT_FOUND);
+        assert(le_timer_ringing_count(&set) == 1);
 
         /* Dismiss is for what is ringing. It must not silently cancel a timer
            that has not gone off -- "stop" during a ring means stop the noise,

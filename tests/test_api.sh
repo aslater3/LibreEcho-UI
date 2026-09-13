@@ -24,6 +24,8 @@ code=$(curl -sS -o /tmp/le-history-method.out -w '%{http_code}' -X POST "$URL/ap
 clear_code=$(curl -fsS -o /tmp/le-history-clear.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history/clear" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$clear_code" = 200 ]
 curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and .data.history_generation == 2 and (.data.turns | length == 0)' >/dev/null
+code=$(curl -sS -o /tmp/le-usb-nul.out -w '%{http_code}' "$URL/api/v1/storage/usb?path=Music%00/Other")
+[ "$code" = 400 ]
 curl -sS -X POST "$URL/api/v1/assistant/respond" -H "$CSRF" -H 'Content-Type: application/json' --data '{"text":"slow test"}' >/tmp/le-assistant-respond.out &
 respond_pid=$!
 timeout 1 curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and (.data.turns | length == 0)' >/dev/null
@@ -48,6 +50,41 @@ code=$(curl -sS -o /tmp/le-malformed-wifi-security.out -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     --data '{"ssid":"LibreNet-IoT","password":"top-secret","security":"open\\nrest"}')
 [ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-features.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"https":"false","simulation":true}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" | jq -e '.ok and .data.simulation == false' >/dev/null
+code=$(curl -sS -o /tmp/le-malformed-usb-feature.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/system/features" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"usb_host":"false","simulation":true}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/system/features" | jq -e '.ok and .data.simulation == false' >/dev/null
+code=$(curl -sS -o /tmp/le-malformed-mac-type.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/network" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"ssh":true,"wifi_mac":123}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.ssh == false' >/dev/null
+mac64=$(python3 -c 'print("a" * 64)')
+code=$(curl -sS -o /tmp/le-malformed-mac-length.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/network" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data "{\"wifi_mac\":\"$mac64\"}")
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-radio-enabled.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/integrations/radio" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"station_count":1,"station_0_word":"test","station_0_name":"Test","station_0_url":"https://example.com/test","station_0_enabled":"yes"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-malformed-radio-name.out -w '%{http_code}' \
+    -X PUT "$URL/api/v1/integrations/radio" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"station_count":1,"station_0_word":"test","station_0_name":123,"station_0_url":"http://example.com/test"}')
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/integrations/radio" | jq -e '.ok and (.data.stations | length) == 0' >/dev/null
 ! grep -q 'top-secret' "$CFG"
 curl -fsS "$URL/openapi.json" | grep -Eq '"openapi"[[:space:]]*:[[:space:]]*"3.0.3"'
 features=$(curl -fsS "$URL/api/v1/system/features")
@@ -261,14 +298,14 @@ expect "$(curl -fsS "$URL/api/v1/system")" '"ntp":false'
 expect "$(curl -fsS "$URL/api/v1/system")" '"clock_valid":true'
 expect "$(curl -fsS "$URL/api/v1/system")" '"ntp_state":"unavailable"'
 expect "$(curl -fsS "$URL/api/v1/system")" '"rtc_available":false'
-curl -fsS "$URL/api/v1/system/update" | jq -e \
+curl -fsS "$URL/api/v1/system/update" | jq -e --arg version "$OS_VERSION" \
     '.ok and .data.supported == false and
      .data.current_slot == "-" and .data.inactive_slot == "-" and
      .data.pending_reboot == false and
      .data.max_upload_ceiling_bytes == 33554432 and
      .data.max_upload_bytes <= .data.max_upload_ceiling_bytes and
      .data.max_upload_bytes >= 0 and
-     .data.installed_version == "" and .data.latest_version == "" and
+     .data.installed_version == ("LibreEcho OS " + $version) and .data.latest_version == "" and
      .data.channel == "stable" and .data.source == "github-releases" and
      .data.source_reachable == "unknown" and
      .data.check_status == "not-checked" and .data.check_error == "" and

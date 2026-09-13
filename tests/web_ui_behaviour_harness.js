@@ -220,6 +220,61 @@ async function main() {
     check('a failing turn still propagates', threw);
     check('a failing turn still stops the radio', d.playing === false && posted(d, '/integrations/radio/stop'), d.calls);
 
+    /* ---- Radio playback must use the persisted complete row -------------- */
+    const oldRadioQuerySelector = document.querySelector;
+    const oldRadioQuerySelectorAll = document.querySelectorAll;
+    const oldRadioApi = globalThis.api;
+    const radioHandlers = {};
+    const radioCount = { textContent: '' };
+    const radioNow = { textContent: '', set hidden(_) {} };
+    const radioStop = { hidden: true };
+    const radioAdd = {};
+    const radioSave = { disabled: true };
+    const radioToast = {
+        textContent: '',
+        classList: { toggle() {}, add() {}, remove() {} }
+    };
+    const radioInputs = {
+        '.radio-word': { value: 'groove' },
+        '.radio-name': { value: 'Groove Salad' },
+        '.radio-url': { value: 'http://example/changed' },
+        '.radio-enabled': { checked: true },
+        '.radio-row-error': { textContent: '', hidden: true }
+    };
+    const radioRow = {
+        classList: { toggle() {} },
+        querySelector: selector => radioInputs[selector]
+    };
+    const radioPlay = {
+        closest: selector => selector === '.radio-play' ? radioPlay
+            : selector === '[data-radio-row]' ? radioRow : null
+    };
+    const radioList = {
+        querySelectorAll: selector => selector === '[data-radio-row]' ? [radioRow] : [],
+        addEventListener: (type, handler) => { radioHandlers[type] = handler; }
+    };
+    document.querySelector = selector => ({
+        '#radio-list': radioList, '#save-radio': radioSave,
+        '#radio-count': radioCount, '#radio-now': radioNow,
+        '#radio-stop': radioStop, '#radio-add': radioAdd,
+        '#toast': radioToast
+    }[selector] || stub());
+    document.querySelectorAll = () => [];
+    let radioPlayed = false;
+    globalThis.api = async () => { radioPlayed = true; return {}; };
+    globalThis.bindRadio({
+        stations: [{ word: 'groove', name: 'Groove Salad',
+            url: 'http://example/original', enabled: true }],
+        max_stations: 32, playback_supported: true
+    });
+    await radioHandlers.click({ target: radioPlay });
+    check('edited radio row cannot play persisted station',
+          radioPlayed === false && /Save the station/.test(radioToast.textContent),
+          { played: radioPlayed, toast: radioToast.textContent });
+    document.querySelector = oldRadioQuerySelector;
+    document.querySelectorAll = oldRadioQuerySelectorAll;
+    globalThis.api = oldRadioApi;
+
     /* ---- Action sound preview must preserve unsaved form state ---- */
     const oldQuerySelector = document.querySelector;
     const oldQuerySelectorAll = document.querySelectorAll;
