@@ -18,6 +18,14 @@ jq -e '.button_short == "Play / pause" and .button_long == "Reboot device" and .
 curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"local_only":true,"diagnostic_telemetry":false,"crash_reports":false,"audio_retention":"none","log_retention_hours":168}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: application/json' --data '{"mode":"custom","stt_wyoming_uri":"tcp://198.51.100.10:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://198.51.100.10:10200","tts_voice":"en_GB-alan-medium"}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
+curl -fsS "$URL/api/v1/voice-pipeline" |
+    jq -e '.ok and .data.mode == "home-assistant"' >/dev/null
+jq -e '.voice_pipeline_mode == "home-assistant" and .voice_pipeline_previous_mode == "custom"' "$CFG" >/dev/null
+curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":false}' >/dev/null
+curl -fsS "$URL/api/v1/voice-pipeline" |
+    jq -e '.ok and .data.mode == "custom"' >/dev/null
+jq -e '.voice_pipeline_mode == "custom"' "$CFG" >/dev/null
+curl -fsS -X PUT "$URL/api/v1/integrations/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 curl -fsS -X PUT "$URL/api/v1/integrations/spotify" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' >/dev/null
 grep -q '"volume": 37' "$CFG"
 jq -e --argjson integrations "$expected_integrations" '
@@ -30,7 +38,7 @@ jq -e --argjson integrations "$expected_integrations" '
   .button_action_brightness == 33 and .button_mute_brightness == 44 and
   .privacy_log_hours == 168 and .integrations == $integrations and
   .privacy_local_only == false and
-  .voice_pipeline_mode == "custom" and
+  .voice_pipeline_mode == "home-assistant" and
   .stt_wyoming_uri == "tcp://198.51.100.10:10300" and
   .stt_wyoming_model == "whisper-small" and
   .tts_wyoming_uri == "tcp://198.51.100.10:10200" and

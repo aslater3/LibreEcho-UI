@@ -10,6 +10,7 @@ python3 tests/test_github_link_contract.py
 python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
 python3 tests/test_pr244_review_contract.py
+python3 tests/test_pr245_review_contract.py
 make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
 ./build/test-networkd-scan-security
 ./build/test-network-health
@@ -216,6 +217,7 @@ make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
+sh tests/test_wyomingd_test_recipe.sh
 make build/test-wyomingd
 ./build/test-wyomingd
 python3 tests/test_wyoming_engines.py
@@ -266,6 +268,10 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
+LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_voice_pipeline_ha_transitions.sh
+# Starts its own isolated mock server with the readiness overrides, so it does
+# not depend on the shared server above.
+sh tests/test_voice_pipeline_ha_readiness.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_bluetooth_scan_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_usb_role_contract.sh
