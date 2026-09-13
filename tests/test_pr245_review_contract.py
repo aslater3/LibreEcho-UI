@@ -72,6 +72,37 @@ assert "restores the saved pipeline" in docs, (
     "API guide must describe restoring the saved mode"
 )
 
+# --- finding 6 (DISPROVED): non-Home-Assistant toggles are already persisted -
+# The finding claims the non-Home-Assistant early return skips the only
+# persist_configuration() call, so those toggles revert after a restart. That is
+# false: the shared HTTP server persists every successful PUT to
+# /api/v1/integrations/* itself, after api_handle() returns. Writing again inside
+# after_integration_change would be a second atomic write per request and could
+# replace the just-saved configuration's backup, so the guard must stay.
+http = Path("src/http_server.c").read_text(encoding="utf-8")
+assert "api_persist_configuration(api)" in http, (
+    "the shared HTTP server must persist successful integration PUTs"
+)
+assert '!strncmp(q.path,"/api/v1/integrations/",21)' in http, (
+    "the shared persistence must cover every integration id, not only Home Assistant"
+)
+after = api.index("static void after_integration_change")
+after_body = api[after:]
+guard = after_body.index('strstr(q->path, "home-assistant")')
+first_persist = after_body.index("persist_configuration(c)")
+assert guard < first_persist, (
+    "the non-Home-Assistant guard must return before any persistence write in "
+    "after_integration_change; the shared HTTP server owns that write"
+)
+assert "the toggle silently reverts" not in after_body
+
+# --- finding 7: the wake-word path must be a socket, not any file -----------
+# init/libreecho-web.init uses `-S`; a stale regular file must not report ready.
+assert "S_ISSOCK(st.st_mode)" in api, (
+    "the readiness predicate must require a socket at the wake-word path"
+)
+assert "access(socket_path,F_OK)" not in api
+
 # The behavioral regression that exercises the live mock server; make sure it
 # stays wired into the aggregate runner.
 assert "tests/test_voice_pipeline_ha_transitions.sh" in runner

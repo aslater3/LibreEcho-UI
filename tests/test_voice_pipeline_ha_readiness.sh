@@ -191,6 +191,16 @@ sock_pid=$(start_socket "$LIBREECHO_WAKEWORD_SOCK")
 wait_for_path "$LIBREECHO_WAKEWORD_SOCK" -S || fail "wake-word socket did not reappear"
 check "restored wake-word socket reports ready again" "$(ready_of "$URL")" '{"ready":true}'
 
+# 2b. a stale regular file at the socket path is not a usable socket.
+stop "$sock_pid"
+rm -f "$LIBREECHO_WAKEWORD_SOCK"
+printf 'stale\n' > "$LIBREECHO_WAKEWORD_SOCK"
+check "regular file at the wake-word path reports not ready" "$(ready_of "$URL")" '{"ready":false}'
+rm -f "$LIBREECHO_WAKEWORD_SOCK"
+sock_pid=$(start_socket "$LIBREECHO_WAKEWORD_SOCK")
+wait_for_path "$LIBREECHO_WAKEWORD_SOCK" -S || fail "wake-word socket did not reappear after the regular-file case"
+check "socket restored after the regular-file case reports ready again" "$(ready_of "$URL")" '{"ready":true}'
+
 # 3. the waked daemon behind the socket is required.
 kill "$waked_pid" 2>/dev/null || true
 wait "$waked_pid" 2>/dev/null || true

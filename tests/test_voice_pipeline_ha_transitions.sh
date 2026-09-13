@@ -65,6 +65,22 @@ curl -fsS "$URL/api/v1/voice-pipeline" | jq -e \
      .data.stt.reachable == false and .data.tts.reachable == false' >/dev/null
 put /api/v1/integrations/home-assistant '{"enabled":false}' >/dev/null
 
+
+# --- 4. Non-Home-Assistant integration toggles are persisted (finding disproved)
+# The review claimed PUT /api/v1/integrations/<id> only mutates memory for every
+# id other than home-assistant, so the toggle reverts on restart. It does not:
+# the shared HTTP server persists every successful integration PUT through
+# api_persist_configuration() after the handler runs (src/http_server.c), so the
+# stored mask changes here too. This pins that behaviour so a second write is
+# never added inside after_integration_change (which would double-write and can
+# replace the saved configuration's backup).
+put /api/v1/integrations/mqtt '{"enabled":true}' >/dev/null
+jq -e '(.integrations % 4) >= 2' "$CFG" >/dev/null
+curl -fsS "$URL/api/v1/integrations" |
+    jq -e '([.data.items[] | select(.id == "mqtt") | .enabled] | .[0]) == true' >/dev/null
+put /api/v1/integrations/mqtt '{"enabled":false}' >/dev/null
+jq -e '(.integrations % 4) < 2' "$CFG" >/dev/null
+
 # Restore the mode this test found so later API tests start from the same state.
 put /api/v1/voice-pipeline "{\"mode\":\"$initial_mode\"}" >/dev/null
 
