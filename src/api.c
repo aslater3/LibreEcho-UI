@@ -413,6 +413,11 @@ static int valid_pipeline_token(const char *value)
 #ifndef LE_INIT_WYOMINGD
 #define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
 #endif
+/* Home Assistant mode is served by libreecho-wyomingd; its pidfile is the
+   readiness signal surfaced for the Wyoming satellite. */
+#ifndef LE_WYOMINGD_PIDFILE
+#define LE_WYOMINGD_PIDFILE "/var/run/libreecho-wyomingd.pid"
+#endif
 
 /* Only one pipeline restart may be outstanding. The child is deliberately
  * retained as a direct child so the parent can reap it and report failures;
@@ -700,23 +705,35 @@ static const char *audio_retention_state(const struct api_context *c,
     *effective="remote"; *error=""; return "ready";
 }
 
+static int service_ready(const char *pidfile, const char *socket_path);
+
 static void voice_pipeline_json(struct api_context *c,
                                 struct api_response *r)
 {
     char stt_uri[640], stt_model[256], tts_uri[640], tts_voice[256];
     int custom;
-    int network_pipeline;
+    int home_assistant;
     int stt_reachable;
     int tts_reachable;
+    int satellite_ready;
     const char *restart_state;
 
     ensure_voice_pipeline_config(c);
     custom = !strcmp(c->voice_pipeline_mode, "custom");
-    network_pipeline = custom || !strcmp(c->voice_pipeline_mode, "home-assistant");
-    stt_reachable = network_pipeline &&
+    home_assistant = !strcmp(c->voice_pipeline_mode, "home-assistant");
+    /* The saved stt/tts endpoints belong to the custom pipeline. Probe them
+       only in custom mode: in Home Assistant mode libreecho-wyomingd is the
+       active Wyoming server and the local daemons are stopped, so probing the
+       dormant custom addresses reported unrelated custom-service health and
+       added two connection waits without checking the service that actually
+       serves the device. Surface the Wyoming satellite's own readiness
+       instead. */
+    stt_reachable = custom &&
         pipeline_endpoint_reachable(c, c->stt_wyoming_uri);
-    tts_reachable = network_pipeline &&
+    tts_reachable = custom &&
         pipeline_endpoint_reachable(c, c->tts_wyoming_uri);
+    satellite_ready = home_assistant &&
+        service_ready(LE_WYOMINGD_PIDFILE, NULL);
     restart_state = voice_pipeline_restart_state();
 
     json_escape(stt_uri, sizeof(stt_uri), c->stt_wyoming_uri);
@@ -725,6 +742,7 @@ static void voice_pipeline_json(struct api_context *c,
     json_escape(tts_voice, sizeof(tts_voice), c->tts_wyoming_voice);
     out(r, 200,
         "{\"ok\":true,\"data\":{\"mode\":\"%s\","
+        "\"home_assistant\":{\"ready\":%s},"
         "\"stt\":{\"engine\":\"%s\",\"wyoming_uri\":\"%s\","
         "\"model\":\"%s\",\"configured\":%s,\"reachable\":%s},"
         "\"tts\":{\"engine\":\"%s\",\"wyoming_uri\":\"%s\","
@@ -738,7 +756,8 @@ static void voice_pipeline_json(struct api_context *c,
         "\"listening\":{\"max_utterance_ms\":%d,"
         "\"end_silence_ms\":%d,\"vad_floor_rms\":%d},"
         "\"restart\":{\"state\":\"%s\",\"error\":\"%s\"}},\"error\":null}",
-        c->voice_pipeline_mode, custom ? "wyoming" : "sherpa",
+        c->voice_pipeline_mode, satellite_ready ? "true" : "false",
+        custom ? "wyoming" : "sherpa",
         stt_uri, stt_model, c->stt_wyoming_uri[0] ? "true" : "false",
         stt_reachable ? "true" : "false",
         custom ? "wyoming" : "sherpa", tts_uri, tts_voice,
@@ -2071,12 +2090,19 @@ static int handle_voice_pipeline(struct api_context *c,
     int rc;
     unsigned old_integrations;
     char old_mode[sizeof(c->voice_pipeline_mode)];
+    char old_previous[sizeof(c->voice_pipeline_previous_mode)];
+    int old_previous_valid;
+    int old_local_only;
 
     if (strcmp(q->path, "/api/v1/voice-pipeline"))
         return 0;
     ensure_voice_pipeline_config(c);
     old_integrations = c->integrations;
     snprintf(old_mode, sizeof(old_mode), "%s", c->voice_pipeline_mode);
+    snprintf(old_previous, sizeof(old_previous), "%s",
+             c->voice_pipeline_previous_mode);
+    old_previous_valid = c->voice_pipeline_previous_valid;
+    old_local_only = c->privacy_local_only;
     if (!strcmp(q->method, "GET")) {
         voice_pipeline_json(c, r);
         return 1;
@@ -2101,6 +2127,17 @@ static int handle_voice_pipeline(struct api_context *c,
             "Voice pipeline mode, endpoints, model, or voice is invalid");
         return 1;
     }
+    if (!strcmp(c->voice_pipeline_mode, "home-assistant") &&
+        strcmp(old_mode, "home-assistant")) {
+        /* A direct selection of Home Assistant must remember the previous
+           pipeline in the same way the integration toggle does, otherwise a
+           later disable restores local instead of the custom pipeline the
+           owner was using. */
+        snprintf(c->voice_pipeline_previous_mode,
+                 sizeof(c->voice_pipeline_previous_mode), "%s", old_mode);
+        c->voice_pipeline_previous_valid =
+            !strcmp(old_mode, "local") || !strcmp(old_mode, "custom");
+    }
     if (!strcmp(c->voice_pipeline_mode, "home-assistant"))
         c->integrations |= 1u;
     else
@@ -2110,10 +2147,19 @@ static int handle_voice_pipeline(struct api_context *c,
         c->integrations = old_integrations;
         snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
                  "%s", old_mode);
+        snprintf(c->voice_pipeline_previous_mode,
+                 sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
+        c->voice_pipeline_previous_valid = old_previous_valid;
+        c->privacy_local_only = old_local_only;
         err(r, 503, rc, "Voice pipeline configuration could not be saved");
         return 1;
     }
-    rc = apply_voice_pipeline_mode(c->voice_pipeline_mode);
+    /* The mock backend has no daemons to restart, so a pipeline transition is a
+       no-op there. Select it the same way the integration toggle does, so a
+       direct home-assistant selection records its previous mode and reports
+       success instead of failing the capability check the toggle bypasses. */
+    rc = !strcmp(le_backend_mode(c->backend), "mock")
+        ? LE_OK : apply_voice_pipeline_mode(c->voice_pipeline_mode);
     if (rc == LE_BUSY) {
         if (voice_pipeline_restart_pending()) {
             voice_pipeline_json(c, r);
@@ -2134,6 +2180,10 @@ static int handle_voice_pipeline(struct api_context *c,
         c->integrations = old_integrations;
         snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
                  "%s", old_mode);
+        snprintf(c->voice_pipeline_previous_mode,
+                 sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
+        c->voice_pipeline_previous_valid = old_previous_valid;
+        c->privacy_local_only = old_local_only;
         (void)persist_configuration(c);
         err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc,
             "Voice pipeline configuration could not be applied");
@@ -2220,6 +2270,7 @@ static void after_integration_change(struct api_context *c,
     char old_mode[sizeof(c->voice_pipeline_mode)];
     char old_previous[sizeof(c->voice_pipeline_previous_mode)];
     int old_previous_valid;
+    int old_local_only;
     unsigned old_integrations;
     int enabled;
     int home_assistant_change = 0;
@@ -2238,6 +2289,7 @@ static void after_integration_change(struct api_context *c,
     snprintf(old_previous, sizeof(old_previous), "%s",
              c->voice_pipeline_previous_mode);
     old_previous_valid = c->voice_pipeline_previous_valid;
+    old_local_only = c->privacy_local_only;
     old_integrations = enabled ? c->integrations & ~1u : c->integrations | 1u;
     if (enabled ? strcmp(c->voice_pipeline_mode, "home-assistant") != 0
                 : !strcmp(c->voice_pipeline_mode, "home-assistant")) {
@@ -2253,6 +2305,13 @@ static void after_integration_change(struct api_context *c,
                 snprintf(c->voice_pipeline_mode,
                          sizeof(c->voice_pipeline_mode), "%s",
                          "home-assistant");
+                /* Activating Home Assistant sends microphone audio to the
+                   network, so the persisted local-only requirement must be
+                   cleared in the same transactional transition. The privacy
+                   endpoint already rejects creating this state directly;
+                   leaving the flag set would persist a self-contradictory
+                   configuration that the API cannot author. */
+                c->privacy_local_only = 0;
             }
         } else if (!strcmp(c->voice_pipeline_mode, "home-assistant")) {
             if (c->voice_pipeline_previous_valid)
@@ -2272,6 +2331,7 @@ static void after_integration_change(struct api_context *c,
         snprintf(c->voice_pipeline_previous_mode,
                  sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
         c->voice_pipeline_previous_valid = old_previous_valid;
+        c->privacy_local_only = old_local_only;
         err(r, 409, LE_BUSY, "A voice pipeline restart is already in progress");
         return;
     }
@@ -2283,6 +2343,7 @@ static void after_integration_change(struct api_context *c,
         snprintf(c->voice_pipeline_previous_mode,
                  sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
         c->voice_pipeline_previous_valid = old_previous_valid;
+        c->privacy_local_only = old_local_only;
         err(r, 501, LE_NOT_SUPPORTED,
             "Home Assistant voice pipeline is not installed");
         return;
@@ -2295,6 +2356,7 @@ static void after_integration_change(struct api_context *c,
         snprintf(c->voice_pipeline_previous_mode,
                  sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
         c->voice_pipeline_previous_valid = old_previous_valid;
+        c->privacy_local_only = old_local_only;
         err(r, 503, rc, "Integration configuration could not be saved");
         return;
     }
@@ -2313,6 +2375,7 @@ static void after_integration_change(struct api_context *c,
             snprintf(c->voice_pipeline_previous_mode,
                      sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
             c->voice_pipeline_previous_valid = old_previous_valid;
+            c->privacy_local_only = old_local_only;
             (void)persist_configuration(c);
             err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc,
                 "Integration configuration could not be applied");

@@ -9,6 +9,7 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/con
 python3 tests/test_github_link_contract.py
 python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
+python3 tests/test_pr245_review_contract.py
 make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
 ./build/test-networkd-scan-security
 ./build/test-network-health
@@ -259,6 +260,7 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
+LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_voice_pipeline_ha_transitions.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_bluetooth_scan_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_usb_role_contract.sh

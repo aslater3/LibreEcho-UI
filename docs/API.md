@@ -1798,7 +1798,22 @@ JSON-escaped, including when it contains quotes or backslashes.
 Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.
 
 The `home-assistant` toggle also selects the active voice pipeline. Enabling it
-persists `home-assistant` mode; disabling it persists and restores `local` mode.
+persists `home-assistant` mode, records the previous pipeline so a later disable
+restores it, and clears local-only processing in the same transition (microphone
+audio leaves the device). Disabling it persists and restores the saved pipeline,
+or `local` when none was recorded.
+
+Because the pipeline transition restarts daemons, the response is asynchronous
+on the Linux backend:
+
+- **200** — the toggle and any pipeline change were applied; the body is the
+  integration list.
+- **202** — the Home Assistant pipeline transition was accepted and is still
+  running. The body is the voice-pipeline document (`/api/v1/voice-pipeline`
+  shape) whose `restart.state` is `pending`.
+- **409** — a voice pipeline restart is already in progress.
+- **501** — the Home Assistant voice pipeline is not installed on this image.
+- **503** — the integration change could not be saved or applied.
 
 **Request:**
 ```json
@@ -1809,7 +1824,7 @@ persists `home-assistant` mode; disabling it persists and restores `local` mode.
 
 (Use query parameter or path to specify integration: `?integration=home-assistant`)
 
-**Response:**
+**Response (200):**
 ```json
 {
   "ok": true,
@@ -1820,6 +1835,21 @@ persists `home-assistant` mode; disabling it persists and restores `local` mode.
       { "id": "rest", "name": "Local REST API", "enabled": true, "forced": false },
       { "id": "bluetooth", "name": "Bluetooth audio", "enabled": false }
     ]
+  },
+  "error": null
+}
+```
+
+**Response (202, pending pipeline transition):**
+```json
+{
+  "ok": true,
+  "data": {
+    "mode": "home-assistant",
+    "home_assistant": { "ready": true },
+    "stt": { "engine": "sherpa", "reachable": false },
+    "tts": { "engine": "sherpa", "reachable": false },
+    "restart": { "state": "pending", "error": "" }
   },
   "error": null
 }
