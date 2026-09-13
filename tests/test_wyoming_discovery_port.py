@@ -149,6 +149,34 @@ class HomeAssistantVoiceMode(unittest.TestCase):
             with self.subTest(config=config):
                 self.assertNotEqual(self.run_mode(config).returncode, 0)
 
+    def test_effective_discovery_follows_explicit_voice_mode(self):
+        import json
+        source = SCRIPT.read_text()
+        # Execute the actual configuration-selection block, stopping before
+        # any mount or service operation can run.
+        program = source[source.index('home_assistant_voice_mode() {'):
+                         source.index('mount_led_socket() {')]
+        program += '\nprintf "%s" "$HOME_ASSISTANT_ENABLED"\n'
+        cases = [
+            ({'integrations': 1, 'voice_pipeline_mode': 'local'}, '0'),
+            ({'integrations': 1, 'voice_pipeline_mode': 'custom'}, '0'),
+            ({'integrations': 0, 'voice_pipeline_mode': 'home-assistant'}, '1'),
+            ({'integrations': 1, 'voice_pipeline_mode': 'home-assistant'}, '1'),
+            ({'integrations': 1}, '1'),
+            ({'integrations': 0}, '0'),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'config.json'
+            for config, expected in cases:
+                with self.subTest(config=config):
+                    path.write_text(json.dumps(config))
+                    result = subprocess.run(
+                        ['sh', '-c', program],
+                        env=dict(os.environ, CONFIG=str(path), ARGS=''),
+                        capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, expected)
+
     def test_missing_config_is_not_detected(self):
         self.assertNotEqual(self.run_mode(None).returncode, 0)
 
