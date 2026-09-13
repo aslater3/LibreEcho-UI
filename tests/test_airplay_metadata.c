@@ -10,17 +10,55 @@
 #include "../src/adapter/airplayd.c"
 #undef main
 
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <time.h>
+
+/* The shared supervisor is an external dependency. This fake answers one
+ * readiness probe at a time and lets the tests assert both the ready and the
+ * degraded answer without any Avahi or D-Bus binary on the host. */
+static pid_t spawn_status_supervisor(const char *path, const char *status)
+{
+    pid_t pid = fork();
+    struct timespec delay = { 0, 50000000L };
+    struct sockaddr_un address;
+    char message[16];
+    int fd;
+
+    if (pid != 0) {
+        nanosleep(&delay, NULL);
+        return pid;
+    }
+    fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, path, strlen(path) + 1);
+    unlink(path);
+    if (fd < 0 || bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        listen(fd, 1) < 0)
+        _exit(1);
+    for (;;) {
+        int client = accept(fd, NULL, NULL);
+        if (client < 0)
+            _exit(1);
+        if (read(client, message, sizeof(message)) > 0)
+            (void)write(client, status, strlen(status));
+        close(client);
+    }
+}
+
 static void init_ctx(struct airplay_ctx *ctx)
 {
     memset(ctx, 0, sizeof(*ctx));
     ctx->listener = -1;
     ctx->metadata_fd = -1;
-    ctx->dbus_pid = -1;
-    ctx->avahi_pid = -1;
     ctx->nqptp_pid = -1;
     ctx->audio_pid = -1;
     ctx->engine_pid = -1;
     ctx->shairport_pid = -1;
+    snprintf(ctx->mdns_socket, sizeof(ctx->mdns_socket), "%s",
+             "/tmp/libreecho-airplay-mdns-test.sock");
+    unlink(ctx->mdns_socket);
 }
 
 static void feed_fragmented(struct airplay_ctx *ctx, const char *text,
@@ -287,19 +325,35 @@ static void test_hostname_refresh_failure_remains_retryable(void)
     assert(ctx.enabled == 1);
 }
 
-static pid_t spawn_idle_child(void)
+/* The controller no longer owns the discovery stack, so a hostname refresh is
+ * an external-dependency check: it must not restart the AirPlay children and
+ * it must report the shared supervisor's readiness. */
+static void test_hostname_refresh_follows_shared_supervisor(void)
 {
-    pid_t pid = fork();
+    struct airplay_ctx ctx;
+    char message[] = "{\"v\":1,\"id\":22,\"cmd\":\"refresh_hostname\",\"args\":{}}";
+    char response[512];
+    pid_t supervisor;
+    int length;
 
-    assert(pid >= 0);
-    if (pid == 0) {
-        for (;;)
-            pause();
-    }
-    return pid;
+    init_ctx(&ctx);
+    ctx.enabled = 1;
+    ctx.shairport_pid = spawn_status_supervisor(ctx.mdns_socket, "running\n");
+    supervisor = ctx.shairport_pid;
+    assert(mdns_ready(&ctx) == 1);
+    length = request(&ctx, message, response, sizeof(response));
+    assert(length > 0);
+    assert(strstr(response, "\"id\":22"));
+    assert(strstr(response, "\"ok\":true"));
+    /* Discovery is external: the AirPlay children keep running. */
+    assert(kill(ctx.shairport_pid, 0) == 0);
+    assert(ctx.enabled == 1);
+    kill(supervisor, SIGKILL);
+    waitpid(supervisor, NULL, 0);
+    ctx.shairport_pid = -1;
 }
 
-static void test_disabling_airplay_preserves_required_mdns(void)
+static void test_disabling_airplay_leaves_shared_mdns_alone(void)
 {
     struct airplay_ctx ctx;
     char message[] = "{\"v\":1,\"id\":20,\"cmd\":\"status\",\"args\":{}}";
@@ -308,51 +362,45 @@ static void test_disabling_airplay_preserves_required_mdns(void)
 
     init_ctx(&ctx);
     ctx.enabled = 1;
-    ctx.mdns_required = 1;
-    ctx.dbus_pid = spawn_idle_child();
-    ctx.avahi_pid = spawn_idle_child();
-
     assert(set_enabled(&ctx, 0) == 0);
     assert(ctx.enabled == 0);
-    assert(ctx.dbus_pid > 0);
-    assert(ctx.avahi_pid > 0);
-    assert(kill(ctx.dbus_pid, 0) == 0);
-    assert(kill(ctx.avahi_pid, 0) == 0);
     length = request(&ctx, message, response, sizeof(response));
     assert(length > 0);
     assert(strstr(response, "\"enabled\":false"));
-    assert(strstr(response, "\"dbus_running\":true"));
-    assert(strstr(response, "\"avahi_running\":true"));
-
-    stop_child(&ctx.avahi_pid);
-    stop_child(&ctx.dbus_pid);
+    /* An absent shared supervisor is reported, never spawned or stopped here. */
+    assert(strstr(response, "\"mdns_running\":false"));
 }
 
-static void test_hostname_refresh_restarts_mdns_when_airplay_is_disabled(void)
+static void test_ready_shared_supervisor_is_reported(void)
 {
     struct airplay_ctx ctx;
-    char message[] = "{\"v\":1,\"id\":21,\"cmd\":\"refresh_hostname\",\"args\":{}}";
-    char response[512];
-    int old_dbus;
-    int old_avahi;
+    char message[] = "{\"v\":1,\"id\":23,\"cmd\":\"status\",\"args\":{}}";
+    char response[1024];
+    pid_t supervisor;
     int length;
 
     init_ctx(&ctx);
-    ctx.enabled = 0;
-    ctx.mdns_required = 1;
-    ctx.dbus_pid = spawn_idle_child();
-    ctx.avahi_pid = spawn_idle_child();
-    old_dbus = ctx.dbus_pid;
-    old_avahi = ctx.avahi_pid;
-
+    supervisor = spawn_status_supervisor(ctx.mdns_socket, "running\n");
+    assert(mdns_ready(&ctx) == 1);
     length = request(&ctx, message, response, sizeof(response));
     assert(length > 0);
-    assert(strstr(response, "\"id\":21"));
-    assert(strstr(response, "\"ok\":false"));
-    assert(ctx.dbus_pid == -1);
-    assert(ctx.avahi_pid == -1);
-    assert(kill(old_dbus, 0) < 0 && errno == ESRCH);
-    assert(kill(old_avahi, 0) < 0 && errno == ESRCH);
+    assert(strstr(response, "\"mdns_running\":true"));
+    kill(supervisor, SIGKILL);
+    waitpid(supervisor, NULL, 0);
+}
+
+static void test_degraded_shared_supervisor_is_not_ready(void)
+{
+    struct airplay_ctx ctx;
+    pid_t supervisor;
+
+    init_ctx(&ctx);
+    supervisor = spawn_status_supervisor(ctx.mdns_socket, "degraded\n");
+    assert(mdns_ready(&ctx) == 0);
+    kill(supervisor, SIGKILL);
+    waitpid(supervisor, NULL, 0);
+    /* No supervisor at all is equally not ready, and is never fatal. */
+    assert(mdns_ready(&ctx) == 0);
 }
 
 int main(void)
@@ -366,8 +414,10 @@ int main(void)
     test_fifo_is_nonblocking();
     test_hostname_refresh_is_noop_while_disabled();
     test_hostname_refresh_failure_remains_retryable();
-    test_disabling_airplay_preserves_required_mdns();
-    test_hostname_refresh_restarts_mdns_when_airplay_is_disabled();
-    puts("AirPlay metadata ingestion: ok");
+    test_hostname_refresh_follows_shared_supervisor();
+    test_disabling_airplay_leaves_shared_mdns_alone();
+    test_ready_shared_supervisor_is_reported();
+    test_degraded_shared_supervisor_is_not_ready();
+    puts("airplay discovery is an external shared mDNS dependency: ok");
     return 0;
 }

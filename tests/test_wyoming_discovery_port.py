@@ -1,11 +1,16 @@
-"""Exercise the shipped Avahi service rendering with no host mounts.
+"""Exercise the shipped Wyoming mDNS record rendering with no host mounts.
 
-A review finding showed config/wyoming.service always advertised port 10700,
-even though libreecho-wyomingd honours a PORT override from
-/etc/default/libreecho-wyomingd. This runs the real prepare_avahi_runtime()
+Two review findings are covered here. The first: config/wyoming.service always
+advertised port 10700, even though libreecho-wyomingd honours a PORT override
+from /etc/default/libreecho-wyomingd. This runs the real render_wyoming_service()
 and wyoming_service_port() helpers extracted from the shipped init script and
 asserts the generated runtime service uses the effective Wyoming port.
+
+The second: discovery is owned by the shared libreecho-mdnsd supervisor, so the
+record is rendered by that service. The extracted helpers come from the file
+that owns them.
 """
+import json
 import os
 from pathlib import Path
 import re
@@ -14,7 +19,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = Path(os.environ.get('SCRIPT', ROOT / 'init/libreecho-airplayd.init'))
+SCRIPT = Path(os.environ.get('SCRIPT', ROOT / 'init/libreecho-mdnsd.init'))
 SERVICE_TEMPLATE = ROOT / 'config/wyoming.service'
 
 
@@ -43,13 +48,12 @@ class WyomingDiscoveryPort(unittest.TestCase):
             if defaults is not None:
                 defaults_path.write_text(defaults)
             program = extract(SCRIPT.read_text(),
-                              ['wyoming_service_port', 'prepare_avahi_runtime'])
-            program += '\nprepare_avahi_runtime\n'
+                              ['wyoming_service_port', 'render_wyoming_service'])
+            program += '\nrender_wyoming_service\n'
             env = dict(os.environ,
-                       RUNTIME_ROOT=str(runtime),
+                       ROOT=str(runtime),
                        WYOMING_SERVICE_SOURCE=str(source),
                        WYOMING_DEFAULTS=str(defaults_path),
-                       AVAHI_SERVICES_SOURCE=str(root / 'absent'),
                        HOME_ASSISTANT_ENABLED=enabled)
             proc = subprocess.run(['sh', '-c', program], env=env,
                                   capture_output=True, text=True, timeout=5)
@@ -120,6 +124,20 @@ class WyomingDiscoveryPort(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIsNone(body)
 
+    def test_unreadable_template_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / 'runtime'
+            (runtime / 'etc/avahi/services').mkdir(parents=True)
+            program = extract(SCRIPT.read_text(), ['render_wyoming_service'])
+            program += '\nrender_wyoming_service\n'
+            env = dict(os.environ, ROOT=str(runtime),
+                       WYOMING_SERVICE_SOURCE=str(Path(tmp) / 'absent'),
+                       HOME_ASSISTANT_ENABLED='1')
+            proc = subprocess.run(['sh', '-c', program], env=env,
+                                  capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertFalse((runtime / 'etc/avahi/services/wyoming.service').exists())
+
 
 class HomeAssistantVoiceMode(unittest.TestCase):
     """The persisted voice-pipeline mode is a second discovery signal."""
@@ -150,13 +168,9 @@ class HomeAssistantVoiceMode(unittest.TestCase):
                 self.assertNotEqual(self.run_mode(config).returncode, 0)
 
     def test_effective_discovery_follows_explicit_voice_mode(self):
-        import json
         source = SCRIPT.read_text()
-        # Execute the actual configuration-selection block, stopping before
-        # any mount or service operation can run.
-        program = source[source.index('home_assistant_voice_mode() {'):
-                         source.index('mount_led_socket() {')]
-        program += '\nprintf "%s" "$HOME_ASSISTANT_ENABLED"\n'
+        program = extract(source, ['home_assistant_voice_mode', 'resolve_discovery'])
+        program += '\nresolve_discovery\nprintf "%s" "$HOME_ASSISTANT_ENABLED"\n'
         cases = [
             ({'integrations': 1, 'voice_pipeline_mode': 'local'}, '0'),
             ({'integrations': 1, 'voice_pipeline_mode': 'custom'}, '0'),

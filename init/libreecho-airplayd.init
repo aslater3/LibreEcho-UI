@@ -20,26 +20,24 @@ PAYLOAD=${PAYLOAD:-/data/libreecho/features/airplay2/payload.squashfs}
 RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/airplay2/root}
 CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
 AVAHI_SERVICES_SOURCE=${AVAHI_SERVICES_SOURCE:-/data/libreecho/features/airplay2/avahi-services}
-WYOMING_SERVICE_SOURCE=${WYOMING_SERVICE_SOURCE:-/etc/libreecho/avahi-services/wyoming.service}
-WYOMING_DEFAULTS=${WYOMING_DEFAULTS:-/etc/default/libreecho-wyomingd}
-AVAHI_CONFIG_SNAPSHOT=${AVAHI_CONFIG_SNAPSHOT:-/run/libreecho/airplay-avahi-daemon.conf}
+# Discovery is an external dependency: the shared libreecho-mdnsd supervisor
+# owns D-Bus, Avahi and every published record. This wrapper never starts,
+# stops or mounts a responder of its own; it only stages its AirPlay service
+# definitions where that supervisor reads them and reports its readiness.
+MDNS_INIT=${MDNS_INIT:-/etc/init.d/libreecho-mdnsd.init}
+MDNS_SOCKET=${MDNS_SOCKET:-/run/libreecho/mdns.sock}
+MDNS_SERVICES_DIR=${MDNS_SERVICES_DIR:-/usr/local/lib/libreecho-mdns/root/etc/avahi/services}
 ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 
 # The controller is always started, but the AirPlay children follow the
 # persisted integration toggle.  Bit 16 is the AirPlay 2 flag in the shared
-# integrations mask.  AirPlay/mDNS is enabled by default after payload
-# staging; bit 16 is the explicit persistent user-controlled disable.
-# persistent AirPlay disable is represented by clearing bit 16.
-# The voice-pipeline route persists its own mode. An explicit mode governs
-# Wyoming discovery; only legacy configs without a mode use the integration bit.
-home_assistant_voice_mode() {
-    [ -r "$CONFIG" ] || return 1
-    mode=$(sed -n 's/.*"voice_pipeline_mode"[[:space:]]*:[[:space:]]*"\([a-z][a-z-]*\)".*/\1/p' "$CONFIG" | sed -n '1p')
-    [ "$mode" = "home-assistant" ]
-}
-
+# integrations mask.  AirPlay is enabled by default after payload staging;
+# clearing bit 16 is the explicit persistent AirPlay disable.
+# Wyoming discovery is not decided here. The shared libreecho-mdnsd supervisor
+# reads the persisted pipeline mode and the Home Assistant integration bit
+# itself, so this wrapper neither stages a Wyoming record nor touches a
+# responder.
 airplay_enabled_at_boot=1
-HOME_ASSISTANT_ENABLED=0
 if [ -r "$CONFIG" ]; then
     integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
     case "$integrations" in
@@ -50,24 +48,11 @@ if [ -r "$CONFIG" ]; then
             else
                 airplay_enabled_at_boot=0
             fi
-            if [ $((integrations & 1)) -ne 0 ]; then
-                HOME_ASSISTANT_ENABLED=1
-            fi
             ;;
     esac
 fi
-# An explicit pipeline mode controls Wyoming orchestration. Do not let a
-# retained integration bit advertise a server stopped by local/custom mode.
-# Keep the integration-bit fallback for legacy configs without a saved mode.
-home_assistant_voice_mode && HOME_ASSISTANT_ENABLED=1
-case "${mode:-}" in
-    local|custom) HOME_ASSISTANT_ENABLED=0 ;;
-esac
 if [ "$airplay_enabled_at_boot" -eq 1 ]; then
     ARGS="$ARGS --enable-on-start"
-fi
-if [ "$HOME_ASSISTANT_ENABLED" -eq 1 ]; then
-    ARGS="$ARGS --mdns-on-start"
 fi
 
 mount_led_socket() {
@@ -106,8 +91,7 @@ mount_support() {
 
 create_support_mounts() {
     mkdir -p "$RUNTIME_ROOT/dev" "$RUNTIME_ROOT/proc" "$RUNTIME_ROOT/sys" \
-        "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/var" \
-        "$RUNTIME_ROOT/etc/avahi" "$RUNTIME_ROOT/etc/dbus-1/system.d" || return 1
+        "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/var" || return 1
     mount_support "$RUNTIME_ROOT/dev" --bind /dev || return 1
     # The /dev bind hides the payload's directory. Keep NQPTP's POSIX shared
     # memory private, and preserve the separate bounded audio-bus bridge.
@@ -117,9 +101,9 @@ create_support_mounts() {
     mount_support "$RUNTIME_ROOT/run" -t tmpfs -o mode=0755,size=1m libreecho-airplay-run || return 1
     mount_support "$RUNTIME_ROOT/var" -t tmpfs -o mode=0755,size=1m libreecho-airplay-var || return 1
     mount_support "$RUNTIME_ROOT/dev/shm" -t tmpfs -o mode=1777,size=64k libreecho-airplay-shm || return 1
-    mkdir -p "$RUNTIME_ROOT/run/dbus" "$RUNTIME_ROOT/var/run" \
-        "$RUNTIME_ROOT/run/avahi-daemon" "$RUNTIME_ROOT/var/run/avahi-daemon" \
-        "$RUNTIME_ROOT/var/lib/avahi" "$RUNTIME_ROOT/run/libreecho" \
+    # No D-Bus or Avahi runtime: the shared mDNS supervisor owns the responder,
+    # so the chroot needs only this device's own control sockets.
+    mkdir -p "$RUNTIME_ROOT/var/run" "$RUNTIME_ROOT/run/libreecho" \
         "$RUNTIME_ROOT/run/libreecho-audio" /run/libreecho-audio || return 1
     mount_support "$RUNTIME_ROOT/run/libreecho-audio" --bind /run/libreecho-audio || return 1
 }
@@ -137,72 +121,35 @@ mount_runtime() {
         }
     fi
     create_support_mounts || return 1
-    prepare_avahi_runtime || return 1
+    stage_airplay_services
     mount_led_socket
 }
 
-# The advertised mDNS port must match the port the Wyoming daemon actually
-# listens on. That daemon takes its full argument string from the shared
-# defaults file when ARGS is overridden (it passes ARGS verbatim) and only
-# falls back to `--port $PORT` otherwise, so an explicit --port in ARGS wins
-# over PORT, which in turn wins over the built-in default. Sourcing runs in a
-# subshell so the defaults file cannot leak unrelated variables into this
-# script.
-wyoming_service_port() {
-    port=10700
-    if [ -r "$WYOMING_DEFAULTS" ]; then
-        port=$( . "$WYOMING_DEFAULTS" >/dev/null 2>&1
-                from_args=$(printf '%s\n' "${ARGS:-}" |
-                    sed -n 's/.*--port[[:space:]=]\{1,\}\([0-9][0-9]*\).*/\1/p' |
-                    sed -n '1p')
-                if [ -n "$from_args" ]; then
-                    printf '%s' "$from_args"
-                else
-                    printf '%s' "${PORT:-10700}"
-                fi )
+# AirPlay service definitions are published by the shared supervisor, which
+# reads them from its own runtime root. Staging is best-effort by design: a
+# missing supervisor directory means AirPlay is not advertised, and that must
+# degrade discovery rather than refuse to start audio.
+stage_airplay_services() {
+    [ -d "$AVAHI_SERVICES_SOURCE" ] || return 0
+    if mkdir -p "$MDNS_SERVICES_DIR" &&
+        cp -a "$AVAHI_SERVICES_SOURCE/." "$MDNS_SERVICES_DIR/"; then
+        return 0
     fi
-    case "$port" in
-        ''|*[!0-9]*) port=10700 ;;
-    esac
-    printf '%s\n' "$port"
+    echo "libreecho-airplayd: AirPlay service definitions were not staged into $MDNS_SERVICES_DIR" >&2
+    return 0
 }
 
-prepare_avahi_runtime() {
-    if [ ! -d "$RUNTIME_ROOT/etc/avahi/services" ]; then
-        mkdir -p "$(dirname "$AVAHI_CONFIG_SNAPSHOT")"
-        if [ -f "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" ]; then
-            cp "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" "$AVAHI_CONFIG_SNAPSHOT" || return 1
-        fi
-        mount -t tmpfs -o mode=0755,size=128k libreecho-airplay-avahi "$RUNTIME_ROOT/etc/avahi" || {
-            echo "libreecho-airplayd: could not create writable Avahi config root" >&2
-            return 1
-        }
-        if [ -f "$AVAHI_CONFIG_SNAPSHOT" ]; then
-            cp "$AVAHI_CONFIG_SNAPSHOT" "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" || return 1
-        fi
-    fi
-    mkdir -p "$RUNTIME_ROOT/etc/avahi/services"
-    if [ -d "$AVAHI_SERVICES_SOURCE" ]; then
-        cp -a "$AVAHI_SERVICES_SOURCE/." "$RUNTIME_ROOT/etc/avahi/services/"
-    fi
-    if [ "${HOME_ASSISTANT_ENABLED:-0}" -eq 1 ]; then
-        if [ -f "$WYOMING_SERVICE_SOURCE" ] && [ ! -L "$WYOMING_SERVICE_SOURCE" ]; then
-            port=$(wyoming_service_port)
-            sed "s#<port>[0-9][0-9]*</port>#<port>$port</port>#" \
-                "$WYOMING_SERVICE_SOURCE" >"$RUNTIME_ROOT/etc/avahi/services/wyoming.service" || return 1
-        else
-            echo "libreecho-airplayd: Wyoming mDNS service definition unavailable" >&2
-        fi
-    else
-        rm -f "$RUNTIME_ROOT/etc/avahi/services/wyoming.service"
-    fi
+# Readiness of the shared responder. It is an external dependency: a stopped or
+# absent supervisor degrades discovery and is never started, stopped or mounted
+# from this wrapper.
+mdns_status() {
+    [ -x "$MDNS_INIT" ] || return 1
+    "$MDNS_INIT" status >/dev/null 2>&1
 }
 
 unmount_runtime() {
     umount "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
     rm -f "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
-    umount "$RUNTIME_ROOT/etc/avahi" 2>/dev/null || true
-    rm -f "$AVAHI_CONFIG_SNAPSHOT" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run/libreecho-audio" 2>/dev/null || true
     umount "$RUNTIME_ROOT/var" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run" 2>/dev/null || true
@@ -271,6 +218,12 @@ trim_log() {
 start_service() {
     if is_running; then echo "libreecho-airplayd already running"; return 0; fi
     mount_runtime || return 1
+    # Discoverability is a shared, external service. A missing supervisor is
+    # reported and does not stop AirPlay audio: the controller's status reports
+    # the same dependency, and the supervisor is never started from here.
+    if ! mdns_status; then
+        echo "libreecho-airplayd: shared mDNS supervisor is not ready; AirPlay is not discoverable" >&2
+    fi
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
     trim_log
     if command -v start-stop-daemon >/dev/null 2>&1; then

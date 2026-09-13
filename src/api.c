@@ -356,23 +356,31 @@ static int setup_activate_installed_features(struct api_context *c)
 #ifndef LE_INIT_WYOMINGD
 #define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
 #endif
-#ifndef LE_INIT_AIRPLAYD
-#define LE_INIT_AIRPLAYD  "/etc/init.d/libreecho-airplayd.init"
+#ifndef LE_INIT_MDNSD
+#define LE_INIT_MDNSD     "/etc/init.d/libreecho-mdnsd.init"
 #endif
-/* The AirPlay controller is the only process that publishes this image's mDNS
- * records, so a discovery change is applied by restarting it. The refresh is
- * best-effort: its failure must never fail or roll back the caller's
- * configuration transition. */
+/* Discovery is owned by the shared libreecho-mdnsd supervisor, not by the
+ * AirPlay controller. A Home Assistant discovery change therefore restarts the
+ * responder service; restarting AirPlay would drop an active audio session
+ * every time the pipeline mode changed. The supervisor renders its records from
+ * the persisted pipeline mode and integration bit, so one restart is the whole
+ * refresh. The refresh stays best-effort: its failure must never fail or roll
+ * back the caller's configuration transition. */
 static int refresh_home_assistant_discovery(void)
 {
-    if (access(LE_INIT_AIRPLAYD, X_OK) < 0)
+    if (access(LE_INIT_MDNSD, X_OK) < 0)
         return LE_IO;
-    return run_init_command(LE_INIT_AIRPLAYD, "restart");
+    /* Probe before acting. The supervisor is the only responder on the image,
+     * so a healthy one already advertises the new state and a restart would
+     * only drop every record while it comes back. */
+    if (run_init_command(LE_INIT_MDNSD, "status") == LE_OK)
+        return LE_OK;
+    return run_init_command(LE_INIT_MDNSD, "start");
 }
-/* Set when Home Assistant is enabled but the AirPlay controller (the only
- * mDNS responder on the image) could not refresh the Wyoming advertisement.
- * The pipeline transition still succeeds; this lets the caller report the
- * unavailable discovery instead of discarding the controller result. */
+/* Set when Home Assistant is enabled but the shared mDNS supervisor could not
+ * refresh the Wyoming advertisement. The pipeline transition still succeeds;
+ * this lets the caller report the unavailable discovery instead of discarding
+ * the controller result. */
 static int home_assistant_discovery_unavailable;
 static int apply_home_assistant_mode(int enabled)
 {
@@ -419,11 +427,11 @@ static int apply_home_assistant_mode(int enabled)
             run_init_command(start_local[0], start_local[1]))
             return LE_IO;
     }
-    /* The AirPlay mDNS controller init script is installed on every system, but
-     * its start path requires the optional AirPlay squashfs payload and exits
-     * nonzero when that payload is absent. The discovery refresh is therefore
-     * attempted only after the requested pipeline state is restored. Its
-     * failure never rolls back or fails that pipeline transition; when Home
+    /* The shared mDNS supervisor init script is installed on every system, but
+     * its start path depends on root-owned private runtime directories and can
+     * exit nonzero when they cannot be prepared. The discovery refresh is
+     * therefore attempted only after the requested pipeline state is restored.
+     * Its failure never rolls back or fails that pipeline transition; when Home
      * Assistant was enabled it is recorded so the caller can report the missing
      * Wyoming advertisement. */
     refresh = refresh_home_assistant_discovery();
@@ -903,10 +911,9 @@ static int voice_pipeline_update(struct api_context *c, const char *json)
              "%s", mode);
     /* The selected mode and the Home Assistant integration bit are two signals
      * for the same Wyoming daemon: this route starts or stops it, and the
-     * AirPlay controller's init script advertises the mDNS service from the
-     * integration bit. Keep them in step, so a pipeline switch that stops the
-     * daemon can never leave a stale Wyoming advertisement pointing at a
-     * closed port. */
+     * shared mDNS supervisor advertises the mDNS service from the integration
+     * bit. Keep them in step, so a pipeline switch that stops the daemon can
+     * never leave a stale Wyoming advertisement pointing at a closed port. */
     if (!strcmp(mode, "home-assistant"))
         c->integrations |= 1u;
     else

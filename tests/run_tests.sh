@@ -225,6 +225,7 @@ make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
+make test-mdns
 sh tests/test_wyomingd_test_recipe.sh
 make build/test-wyomingd
 ./build/test-wyomingd

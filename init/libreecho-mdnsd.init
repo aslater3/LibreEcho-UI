@@ -1,0 +1,361 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          libreecho-mdnsd
+# Required-Start:    $local_fs
+# Required-Stop:     $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: LibreEcho shared mDNS discovery supervisor
+### END INIT INFO
+
+# Shared mDNS responder for the whole image.
+#
+# The supervisor starts D-Bus and Avahi once, inside a private runtime root, so
+# no other daemon has to start its own responder. Every action takes a private
+# lock and fails closed: a half-started or half-stopped supervisor is worse
+# than a service that refuses to start, because it either leaves a stale DNS-SD
+# record or a socket that other services have already been told to use.
+#
+# The runtime and socket directories are created owner-owned and not writable
+# by group or other, and every action refuses to run unless it is the account
+# that owns the socket.
+
+[ -r /etc/default/libreecho-mdnsd ] && . /etc/default/libreecho-mdnsd
+
+DAEMON=${DAEMON:-/usr/local/sbin/libreecho-mdnsd}
+PIDFILE=${PIDFILE:-/var/run/libreecho-mdnsd.pid}
+LOGFILE=${LOGFILE:-/var/log/libreecho-mdnsd.log}
+LOG_MAX_BYTES=${LOG_MAX_BYTES:-1048576}
+LOG_KEEP_BYTES=${LOG_KEEP_BYTES:-131072}
+ROOT=${ROOT:-/usr/local/lib/libreecho-mdns/root}
+SOCKET=${SOCKET:-/run/libreecho/mdns.sock}
+SOCKET_DIR=${SOCKET_DIR:-$(dirname "$SOCKET")}
+LOCKDIR=${LOCKDIR:-/run/libreecho-mdnsd.lock}
+MDNSD_OWNER_UID=${MDNSD_OWNER_UID:-0}
+CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
+WYOMING_SERVICE_SOURCE=${WYOMING_SERVICE_SOURCE:-/etc/libreecho/avahi-services/wyoming.service}
+WYOMING_DEFAULTS=${WYOMING_DEFAULTS:-/etc/default/libreecho-wyomingd}
+ARGS=${ARGS:---foreground --root $ROOT --socket $SOCKET}
+
+# The voice-pipeline mode is the explicit signal and always wins; only legacy
+# configs without a mode fall back to the Home Assistant integration bit. A
+# retained bit must never advertise a Wyoming server that local/custom mode
+# has stopped.
+home_assistant_voice_mode() {
+    [ -r "$CONFIG" ] || return 1
+    mode=$(sed -n 's/.*"voice_pipeline_mode"[[:space:]]*:[[:space:]]*"\([a-z][a-z-]*\)".*/\1/p' "$CONFIG" | sed -n '1p')
+    [ "$mode" = "home-assistant" ]
+}
+
+resolve_discovery() {
+    HOME_ASSISTANT_ENABLED=0
+    if [ -r "$CONFIG" ]; then
+        integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
+        case "$integrations" in
+            ''|*[!0-9]*) ;;
+            *) if [ $((integrations & 1)) -ne 0 ]; then HOME_ASSISTANT_ENABLED=1; fi ;;
+        esac
+    fi
+    home_assistant_voice_mode && HOME_ASSISTANT_ENABLED=1
+    case "${mode:-}" in
+        local|custom) HOME_ASSISTANT_ENABLED=0 ;;
+    esac
+    return 0
+}
+
+# The advertised mDNS port must match the port the Wyoming daemon actually
+# listens on. That daemon takes its full argument string from the shared
+# defaults file when ARGS is overridden and only falls back to `--port $PORT`
+# otherwise, so an explicit --port in ARGS wins over PORT, which in turn wins
+# over the built-in default. Sourcing runs in a subshell so the defaults file
+# cannot leak unrelated variables into this script.
+wyoming_service_port() {
+    port=10700
+    if [ -r "$WYOMING_DEFAULTS" ]; then
+        port=$( . "$WYOMING_DEFAULTS" >/dev/null 2>&1
+                from_args=$(printf '%s\n' "${ARGS:-}" |
+                    sed -n 's/.*--port[[:space:]=]\{1,\}\([0-9][0-9]*\).*/\1/p' |
+                    sed -n '1p')
+                if [ -n "$from_args" ]; then
+                    printf '%s' "$from_args"
+                else
+                    printf '%s' "${PORT:-10700}"
+                fi )
+    fi
+    case "$port" in
+        ''|*[!0-9]*) port=10700 ;;
+    esac
+    printf '%s\n' "$port"
+}
+
+# Avahi reads this directory from the supervisor's runtime root. The record is
+# rendered from the effective Wyoming port rather than copied verbatim, and it
+# is withdrawn, not left stale, whenever Home Assistant voice is not selected.
+render_wyoming_service() {
+    services=${SERVICES_DIR:-$ROOT/etc/avahi/services}
+    if [ "${HOME_ASSISTANT_ENABLED:-0}" -ne 1 ]; then
+        rm -f "$services/wyoming.service"
+        return 0
+    fi
+    if [ ! -f "$WYOMING_SERVICE_SOURCE" ] || [ -L "$WYOMING_SERVICE_SOURCE" ]; then
+        echo "libreecho-mdnsd: Wyoming service definition unavailable" >&2
+        return 1
+    fi
+    port=$(wyoming_service_port)
+    sed "s#<port>[0-9][0-9]*</port>#<port>$port</port>#" \
+        "$WYOMING_SERVICE_SOURCE" >"$services/wyoming.service" || return 1
+    return 0
+}
+
+# A directory the supervisor's own account owns that no other account can
+# write. Anything else is refused instead of silently shared.
+private_dir() {
+    target=$1
+    wanted=$2
+    [ -L "$target" ] && return 1
+    if [ ! -d "$target" ]; then
+        mkdir -p "$target" || return 1
+        chmod "$wanted" "$target" 2>/dev/null || return 1
+    fi
+    [ -L "$target" ] && return 1
+    owner=$(stat -c %u "$target" 2>/dev/null)
+    [ "$owner" = "$MDNSD_OWNER_UID" ] || return 1
+    mode=$(stat -c %a "$target" 2>/dev/null)
+    case "$mode" in
+        700|755) ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# Readiness is proven by a socket that only the service account can replace.
+socket_private() {
+    [ -S "$SOCKET" ] || return 1
+    owner=$(stat -c %u "$SOCKET" 2>/dev/null)
+    [ "$owner" = "$MDNSD_OWNER_UID" ] || return 1
+    mode=$(stat -c %a "$SOCKET" 2>/dev/null)
+    case "$mode" in
+        600|700) ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# One lifecycle operation at a time. The lock is a private directory, so it
+# works without flock, and a lock left by a dead operation is reclaimed once.
+acquire_lock() {
+    [ -L "$LOCKDIR" ] && return 1
+    if ! mkdir "$LOCKDIR" 2>/dev/null; then
+        holder=$(sed -n '1p' "$LOCKDIR/pid" 2>/dev/null)
+        case "$holder" in
+            ''|*[!0-9]*) holder= ;;
+        esac
+        if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+            return 1
+        fi
+        rm -f "$LOCKDIR/pid" 2>/dev/null
+        rmdir "$LOCKDIR" 2>/dev/null || return 1
+        mkdir "$LOCKDIR" 2>/dev/null || return 1
+    fi
+    printf '%s\n' "$$" >"$LOCKDIR/pid"
+    return 0
+}
+
+release_lock() {
+    [ "$(sed -n '1p' "$LOCKDIR/pid" 2>/dev/null)" = "$$" ] || return 0
+    rm -f "$LOCKDIR/pid" 2>/dev/null
+    rmdir "$LOCKDIR" 2>/dev/null
+    return 0
+}
+
+# Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life,
+# and matching on the executable means this wrapper can never terminate an
+# unrelated process on a device that is shared with other daemons.
+running_pids() {
+    for entry in /proc/[0-9]*; do
+        candidate=${entry#/proc/}
+        [ "$candidate" = "$$" ] && continue
+        [ -r "$entry/cmdline" ] || continue
+        argv0=$(tr '\0' '\n' < "$entry/cmdline" 2>/dev/null | sed -n '1p')
+        [ "$argv0" = "$DAEMON" ] && printf '%s\n' "$candidate"
+    done
+}
+
+pidfile_pid() {
+    [ -s "$PIDFILE" ] || return 1
+    pid=$(sed -n '1p' "$PIDFILE")
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    printf '%s\n' "$pid"
+}
+
+is_running() {
+    pidfile_pid >/dev/null && return 0
+    [ -n "$(running_pids)" ]
+}
+
+# Sends TERM, waits up to $2 seconds (default 5), then KILL.
+terminate() {
+    target=$1
+    limit=${2:-5}
+    kill "$target" 2>/dev/null || true
+    count=0
+    while kill -0 "$target" 2>/dev/null && [ "$count" -lt "$limit" ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    kill -KILL "$target" 2>/dev/null || true
+}
+
+trim_log() {
+    [ -f "$LOGFILE" ] || return 0
+    size=$(wc -c <"$LOGFILE" 2>/dev/null || printf '0')
+    case "$size" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$size" -le "$LOG_MAX_BYTES" ] && return 0
+    tail -c "$LOG_KEEP_BYTES" "$LOGFILE" >"$LOGFILE.trim" || {
+        rm -f "$LOGFILE.trim"
+        return 0
+    }
+    chmod 0644 "$LOGFILE.trim"
+    mv "$LOGFILE.trim" "$LOGFILE"
+}
+
+launch_supervisor() {
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS \
+            </dev/null >>"$LOGFILE" 2>&1
+        return $?
+    fi
+    # setsid detaches the child from this shell's process group. Without it the
+    # supervisor dies with the shell that started it, and a later start would
+    # create a second D-Bus/Avahi pair inside the same root.
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+    else
+        "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+    fi
+    return 0
+}
+
+start_service() {
+    if is_running; then echo "libreecho-mdnsd already running"; return 0; fi
+    acquire_lock || {
+        echo "libreecho-mdnsd: another lifecycle operation holds the lock" >&2
+        return 1
+    }
+    trap 'release_lock' EXIT INT TERM HUP
+    if [ ! -x "$DAEMON" ]; then
+        echo "libreecho-mdnsd: supervisor not installed: $DAEMON" >&2
+        release_lock
+        return 1
+    fi
+    if [ "$(id -u)" != "$MDNSD_OWNER_UID" ]; then
+        echo "libreecho-mdnsd: refusing to run as a different account than the socket owner" >&2
+        release_lock
+        return 1
+    fi
+    # A shared or uncreatable runtime is a hard failure: the supervisor would
+    # publish records from a directory another account can rewrite.
+    private_dir "$SOCKET_DIR" 700 || {
+        echo "libreecho-mdnsd: socket directory is not private: $SOCKET_DIR" >&2
+        release_lock
+        return 1
+    }
+    private_dir "$ROOT" 700 || {
+        echo "libreecho-mdnsd: runtime root is not private: $ROOT" >&2
+        release_lock
+        return 1
+    }
+    private_dir "$ROOT/run" 700 || {
+        echo "libreecho-mdnsd: runtime lock directory is not private" >&2
+        release_lock
+        return 1
+    }
+    private_dir "$ROOT/etc/avahi/services" 755 || {
+        echo "libreecho-mdnsd: service directory is not private" >&2
+        release_lock
+        return 1
+    }
+    resolve_discovery
+    render_wyoming_service || {
+        echo "libreecho-mdnsd: could not stage the Wyoming record" >&2
+        release_lock
+        return 1
+    }
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")"
+    trim_log
+    # A socket left by a previous crash is not a live supervisor.
+    rm -f "$SOCKET"
+    launch_supervisor || {
+        echo "libreecho-mdnsd: could not launch the supervisor" >&2
+        release_lock
+        return 1
+    }
+    started=
+    count=0
+    while [ "$count" -lt 40 ]; do
+        started=$(running_pids | sort -n | sed -n '1p')
+        if [ -n "$started" ] && socket_private; then
+            break
+        fi
+        sleep 0.05
+        count=$((count + 1))
+    done
+    if [ -z "$started" ] || ! socket_private; then
+        echo "libreecho-mdnsd: supervisor did not become ready" >&2
+        for stray in $(running_pids); do
+            terminate "$stray" 5
+        done
+        rm -f "$PIDFILE" "$SOCKET"
+        release_lock
+        return 1
+    fi
+    printf '%s\n' "$started" >"$PIDFILE"
+    release_lock
+    return 0
+}
+
+stop_service() {
+    acquire_lock || {
+        echo "libreecho-mdnsd: another lifecycle operation holds the lock" >&2
+        return 1
+    }
+    trap 'release_lock' EXIT INT TERM HUP
+    targets=$(running_pids)
+    pid=$(pidfile_pid) && targets=$(printf '%s\n%s\n' "$targets" "$pid")
+    failed=0
+    for target in $targets; do
+        terminate "$target" 5
+        if kill -0 "$target" 2>/dev/null; then
+            failed=1
+        fi
+    done
+    rm -f "$PIDFILE"
+    if [ "$failed" -ne 0 ]; then
+        echo "libreecho-mdnsd: a supervisor process did not stop" >&2
+        release_lock
+        return 1
+    fi
+    # The socket belongs to the supervisor; leaving it behind would let a later
+    # start inherit a path nothing is listening on.
+    rm -f "$SOCKET"
+    release_lock
+    return 0
+}
+
+status_service() {
+    if is_running && socket_private; then
+        echo "running"
+        return 0
+    fi
+    echo "stopped"
+    return 1
+}
+
+case "${1:-}" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart) stop_service && start_service ;;
+    status) status_service ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 2 ;;
+esac

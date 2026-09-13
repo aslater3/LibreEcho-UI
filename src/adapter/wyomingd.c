@@ -4,6 +4,7 @@
 #include "voice_stream.h"
 #include "voice_listening_led.h"
 #include "wyoming_protocol.h"
+#include "mdns_client.h"
 #include "../json.h"
 #include "../log.h"
 
@@ -577,10 +578,54 @@ static int pipeline_watchdog(struct wyoming_state *state)
     return 0;
 }
 
+/* Closing the lease socket is the withdrawal: the supervisor treats owner EOF
+   as loss of the record and removes it. Funnelling every exit path through one
+   helper means a lease can never outlive the listener that owns it. */
+static void mdns_lease_close(int *fd)
+{
+    if (fd && *fd >= 0) {
+        close(*fd);
+        *fd = -1;
+    }
+}
+
+/* Run one bounded registration step. Discovery is optional: an absent, slow or
+ * rejecting supervisor must only mean "not advertised", never a listener
+ * failure, and the retry is rate-limited so a missing supervisor cannot spin. */
+static void mdns_maintain(const char *socket, int port, int *fd, int *pending,
+                          time_t *retry, time_t *deadline)
+{
+    struct timespec now;
+
+    if (!socket || clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return;
+    if (*fd >= 0) {
+        int received = le_mdns_receive(*fd);
+        if (received == 1) {
+            *pending = 0;
+            return;
+        }
+        /* A rejected or lost lease, and one the supervisor never confirms
+           within the deadline, are both "not registered locally". */
+        if (received < 0 || (*pending && now.tv_sec >= *deadline)) {
+            mdns_lease_close(fd);
+            *pending = 0;
+            *retry = now.tv_sec + 2;
+        }
+        return;
+    }
+    if (now.tv_sec < *retry)
+        return;
+    *fd = le_mdns_connect(socket, (unsigned int)port);
+    *pending = *fd >= 0;
+    *deadline = now.tv_sec + 2;
+    *retry = now.tv_sec + 2;
+}
+
 static void usage(const char *program)
 {
     fprintf(stderr, "usage: %s [--port N] [--wake-socket PATH] "
-            "[--audio-bus PATH] [--foreground]\n", program);
+            "[--audio-bus PATH] [--mdns-socket PATH] [--foreground]\n", program);
 }
 
 int main(int argc, char **argv)
@@ -588,6 +633,9 @@ int main(int argc, char **argv)
     struct wyoming_state state;
     struct sigaction action;
     int listen_fd;
+    int mdns_fd = -1, mdns_pending = 0;
+    const char *mdns_socket = NULL;
+    time_t mdns_retry = 0, mdns_deadline = 0;
     int i;
 
     memset(&state, 0, sizeof(state));
@@ -611,6 +659,8 @@ int main(int argc, char **argv)
             strncpy(state.wake_socket, argv[++i], sizeof(state.wake_socket) - 1);
         else if (!strcmp(argv[i], "--audio-bus") && i + 1 < argc)
             strncpy(state.audio_bus, argv[++i], sizeof(state.audio_bus) - 1);
+        else if (!strcmp(argv[i], "--mdns-socket") && i + 1 < argc)
+            mdns_socket = argv[++i];
         else if (!strcmp(argv[i], "--foreground"))
             continue;
         else {
@@ -635,11 +685,15 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     le_log_info("wyomingd: listening on TCP port %d", state.port);
+    /* The listener is up before any lease is taken: the supervisor must never
+       advertise a port that nothing is accepting on. */
     while (running) {
         struct pollfd descriptors[4];
         nfds_t count = 1;
         int result;
 
+        mdns_maintain(mdns_socket, state.port, &mdns_fd, &mdns_pending,
+                      &mdns_retry, &mdns_deadline);
         if (pipeline_watchdog(&state) < 0)
             break;
         if (state.wake_fd < 0)
@@ -698,6 +752,10 @@ int main(int argc, char **argv)
         close(state.wake_fd);
     if (state.audio_fd >= 0)
         close(state.audio_fd);
+    /* Withdraw the discovery lease before the listener disappears: the
+       supervisor drops the record on owner EOF, so a stopped daemon is never
+       left advertised. */
+    mdns_lease_close(&mdns_fd);
     close(listen_fd);
     return EXIT_SUCCESS;
 }
