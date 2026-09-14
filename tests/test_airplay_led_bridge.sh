@@ -24,7 +24,7 @@ if grep -Eq 'dbus-daemon|avahi-daemon|run/avahi-daemon|var/lib/avahi|libreecho-a
 fi
 grep -Fq 'stage_airplay_services' "$script"
 grep -Fq 'MDNS_SERVICES_DIR' "$script"
-grep -Fq '\"--configfile\", ctx->config_path' src/adapter/airplayd.c
+grep -Fq '"--configfile", ctx->config_path' src/adapter/airplayd.c
 ! grep -Fq '"-v"' src/adapter/airplayd.c
 ! grep -Fq '"-vvv"' src/adapter/airplayd.c
 
