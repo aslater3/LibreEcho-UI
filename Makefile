@@ -15,7 +15,7 @@ CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
-ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-watchdogd $(BUILD)/libreecho-timerd $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming
+ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-watchdogd $(BUILD)/libreecho-timerd $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming $(BUILD)/libreecho-mdnsd
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
@@ -27,7 +27,7 @@ WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/ad
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
 RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
 BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
-AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
+AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/mdns_client.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TIMERD_SOURCES = src/adapter/timerd.c src/adapter/timer_schedule.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
 TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
@@ -41,7 +41,7 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/time
 	src/adapter/spoken_time.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c \
 	src/config_store.c src/json.c src/log.c
-WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/wyoming_protocol.c \
+WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/mdns_client.c src/adapter/wyoming_protocol.c \
 	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
@@ -127,6 +127,23 @@ $(BUILD)/libreecho-sttd: $(STTD_OBJECTS)
 $(BUILD)/libreecho-agentd: $(AGENTD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AGENTD_OBJECTS) $(LDFLAGS) \
 		-lpthread -o $@
+
+# The shared supervisor ships in the image like the other daemons, so it is
+# built with the same language level, warnings and feature macros rather than a
+# one-off command line.
+$(BUILD)/libreecho-mdnsd: src/adapter/mdnsd.c src/adapter/mdns_lease.c src/adapter/mdns_lease.h
+	@mkdir -p $(BUILD)
+	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc -Isrc/adapter \
+		src/adapter/mdnsd.c src/adapter/mdns_lease.c $(LDFLAGS) -o $@
+
+.PHONY: test-mdns
+test-mdns:
+	mkdir -p $(BUILD)
+	$(CC) -std=c99 -Wall -Wextra -Werror -Isrc/adapter tests/test_mdns_lease.c src/adapter/mdns_lease.c -o $(BUILD)/test-mdns-lease
+	./$(BUILD)/test-mdns-lease
+	python3 tests/test_mdns_supervisor.py
+	python3 tests/test_mdns_client.py
+	python3 tests/test_mdns_wyoming.py
 
 $(BUILD)/libreecho-wyomingd: $(WYOMINGD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(WYOMINGD_OBJECTS) $(LDFLAGS) -lm -o $@
@@ -643,6 +660,14 @@ $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/backend.c src/json.c -o $@
 
+$(BUILD)/test-home-assistant-discovery: tests/test_home_assistant_discovery_lifecycle.c \
+	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c \
+		src/adapter/wyoming_client.c -o $@
+
 $(BUILD)/test-voice-listening-feedback: \
 		tests/test_voice_listening_feedback.c \
 		src/adapter/voice_listening_led.c
@@ -794,8 +819,10 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -d $(DESTDIR)$(PREFIX)/share/libreecho/sounds
 	install -m 0644 sounds/*.raw $(DESTDIR)$(PREFIX)/share/libreecho/sounds/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
-	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-watchdogd.init init/libreecho-timerd.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init $(DESTDIR)/etc/init.d/
+	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-watchdogd.init init/libreecho-timerd.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init init/libreecho-mdnsd.init $(DESTDIR)/etc/init.d/
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
+	install -d $(DESTDIR)/etc/libreecho/avahi-services
+	install -m 0644 config/wyoming.service $(DESTDIR)/etc/libreecho/avahi-services/wyoming.service
 
 clean:
 	rm -f $(shell find $(BUILD) -name '*.d' 2>/dev/null)
@@ -833,6 +860,7 @@ clean:
 		$(BUILD)/test-voice-playback \
 		$(BUILD)/test-voice-listening-feedback \
 		$(BUILD)/test-voice-pipeline-restart \
+		$(BUILD)/test-home-assistant-discovery \
 		$(BUILD)/libreecho-sttd-sherpa-arm32 \
 		$(BUILD)/sttd.arm.o $(BUILD)/stt_engine_sherpa.arm.o \
 		$(BUILD)/test-wake-engine-arm32 $(BUILD)/wake-adapter-client-arm32 \

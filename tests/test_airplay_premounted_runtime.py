@@ -52,7 +52,7 @@ done
             for name, body in scripts.items():
                 p=bindir/name;p.write_text(body);p.chmod(0o755)
             source=SCRIPT.read_text()
-            names=['mount_support','create_support_mounts','mount_runtime','prepare_avahi_runtime']
+            names=['mount_support','create_support_mounts','mount_runtime','stage_airplay_services']
             helpers=[]
             for name in names:
                 found=re.search(r'^'+name+r'\(\) \{\n.*?^\}',source,re.M|re.S)

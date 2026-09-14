@@ -590,6 +590,15 @@ are writable here and are validated before any setting is committed:
 Malformed or out-of-range listening fields return HTTP 400 and leave the
 previous configuration unchanged. The request requires `X-LibreEcho-CSRF`.
 
+The mode and the Home Assistant integration toggle are two signals for the same
+Wyoming daemon: this route starts or stops it, and the AirPlay controller's init
+script advertises the `_wyoming._tcp` service from the integration bit. Selecting
+`home-assistant` sets that bit; selecting `local` or `custom` clears it, so a
+pipeline switch that stops the daemon also withdraws the advertisement instead
+of leaving Home Assistant pointed at a closed port. Disabling the
+`home-assistant` integration switches a persisted `home-assistant` mode to
+`local` for the same reason.
+
 When the image has voice-daemon init scripts, activation runs as one bounded
 restart job without blocking the HTTP loop. The accepted response is `202` and
 contains `restart.state: "pending"`; a second update while it is pending gets

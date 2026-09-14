@@ -344,35 +344,76 @@ static int setup_activate_installed_features(struct api_context *c)
     }
     return LE_IO;
 }
+#ifndef LE_INIT_AGENTD
+#define LE_INIT_AGENTD    "/etc/init.d/libreecho-agentd.init"
+#endif
+#ifndef LE_INIT_STTD
+#define LE_INIT_STTD      "/etc/init.d/libreecho-sttd.init"
+#endif
+#ifndef LE_INIT_TTSD
+#define LE_INIT_TTSD      "/etc/init.d/libreecho-ttsd.init"
+#endif
+#ifndef LE_INIT_WYOMINGD
+#define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
+#endif
+#ifndef LE_INIT_MDNSD
+#define LE_INIT_MDNSD     "/etc/init.d/libreecho-mdnsd.init"
+#endif
+/* Discovery is owned by the shared libreecho-mdnsd supervisor, not by the
+ * AirPlay controller. A Home Assistant discovery change therefore restarts the
+ * responder service; restarting AirPlay would drop an active audio session
+ * every time the pipeline mode changed. The supervisor renders its records from
+ * the persisted pipeline mode and integration bit, so one restart is the whole
+ * refresh. The refresh stays best-effort: its failure must never fail or roll
+ * back the caller's configuration transition. */
+static int refresh_home_assistant_discovery(void)
+{
+    if (access(LE_INIT_MDNSD, X_OK) < 0)
+        return LE_IO;
+    /* Probe before acting. The supervisor is the only responder on the image,
+     * so a healthy one already advertises the new state and a restart would
+     * only drop every record while it comes back. */
+    if (run_init_command(LE_INIT_MDNSD, "status") == LE_OK)
+        return LE_OK;
+    return run_init_command(LE_INIT_MDNSD, "start");
+}
+/* Set when Home Assistant is enabled but the shared mDNS supervisor could not
+ * refresh the Wyoming advertisement. The pipeline transition still succeeds;
+ * this lets the caller report the unavailable discovery instead of discarding
+ * the controller result. */
+static int home_assistant_discovery_unavailable;
 static int apply_home_assistant_mode(int enabled)
 {
     static const char *const stop_local[] = {
-        "/etc/init.d/libreecho-agentd.init", "stop", NULL
+        LE_INIT_AGENTD, "stop", NULL
     };
     static const char *const start_local[] = {
-        "/etc/init.d/libreecho-agentd.init", "start", NULL
+        LE_INIT_AGENTD, "start", NULL
     };
     static const char *const stop_stt[] = {
-        "/etc/init.d/libreecho-sttd.init", "stop", NULL
+        LE_INIT_STTD, "stop", NULL
     };
     static const char *const start_stt[] = {
-        "/etc/init.d/libreecho-sttd.init", "start", NULL
+        LE_INIT_STTD, "start", NULL
     };
     static const char *const stop_tts[] = {
-        "/etc/init.d/libreecho-ttsd.init", "stop", NULL
+        LE_INIT_TTSD, "stop", NULL
     };
     static const char *const start_tts[] = {
-        "/etc/init.d/libreecho-ttsd.init", "start", NULL
+        LE_INIT_TTSD, "start", NULL
     };
     static const char *const stop_wyoming[] = {
-        "/etc/init.d/libreecho-wyomingd.init", "stop", NULL
+        LE_INIT_WYOMINGD, "stop", NULL
     };
     static const char *const start_wyoming[] = {
-        "/etc/init.d/libreecho-wyomingd.init", "start", NULL
+        LE_INIT_WYOMINGD, "start", NULL
     };
-    if (access("/etc/init.d/libreecho-wyomingd.init", X_OK) < 0)
+    int refresh;
+
+    if (access(LE_INIT_WYOMINGD, X_OK) < 0)
         return LE_OK;
 
+    home_assistant_discovery_unavailable = 0;
     if (enabled) {
         if (run_init_command(stop_local[0], stop_local[1]) ||
             run_init_command(stop_stt[0], stop_stt[1]) ||
@@ -386,6 +427,16 @@ static int apply_home_assistant_mode(int enabled)
             run_init_command(start_local[0], start_local[1]))
             return LE_IO;
     }
+    /* The shared mDNS supervisor init script is installed on every system, but
+     * its start path depends on root-owned private runtime directories and can
+     * exit nonzero when they cannot be prepared. The discovery refresh is
+     * therefore attempted only after the requested pipeline state is restored.
+     * Its failure never rolls back or fails that pipeline transition; when Home
+     * Assistant was enabled it is recorded so the caller can report the missing
+     * Wyoming advertisement. */
+    refresh = refresh_home_assistant_discovery();
+    if (enabled && refresh != LE_OK)
+        home_assistant_discovery_unavailable = 1;
     return LE_OK;
 }
 static int valid_pipeline_token(const char *value)
@@ -513,6 +564,9 @@ static int voice_pipeline_restart(const char *mode)
             return LE_NOT_SUPPORTED;
         if (run_init_command(LE_INIT_WYOMINGD, "start"))
             failed = 1;
+        /* The voice-pipeline route is a second way to select Home Assistant
+         * voice; keep the advertised discovery in step with it. */
+        (void)refresh_home_assistant_discovery();
         return failed ? LE_IO : LE_OK;
     }
     if (run_init_command(LE_INIT_STTD, "start"))
@@ -521,6 +575,7 @@ static int voice_pipeline_restart(const char *mode)
         failed = 1;
     if (run_init_command(LE_INIT_AGENTD, "start"))
         failed = 1;
+    (void)refresh_home_assistant_discovery();
     return failed ? LE_IO : LE_OK;
 }
 
@@ -854,6 +909,15 @@ static int voice_pipeline_update(struct api_context *c, const char *json)
     c->stt_vad_floor_rms = vad_floor;
     snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
              "%s", mode);
+    /* The selected mode and the Home Assistant integration bit are two signals
+     * for the same Wyoming daemon: this route starts or stops it, and the
+     * shared mDNS supervisor advertises the mDNS service from the integration
+     * bit. Keep them in step, so a pipeline switch that stops the daemon can
+     * never leave a stale Wyoming advertisement pointing at a closed port. */
+    if (!strcmp(mode, "home-assistant"))
+        c->integrations |= 1u;
+    else
+        c->integrations &= ~1u;
     snprintf(c->stt_wyoming_uri, sizeof(c->stt_wyoming_uri),
              "%s", stt_uri);
     snprintf(c->stt_wyoming_model, sizeof(c->stt_wyoming_model),

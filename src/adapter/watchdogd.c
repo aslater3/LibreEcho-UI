@@ -244,6 +244,8 @@ int main(int argc, char **argv)
         /* Streaming recognition owns the request loop until the turn ends. */
         {"sttd", PROBE_PIDFILE, "/var/run/libreecho-sttd.pid",
          "/etc/init.d/libreecho-sttd.init", 1, NULL},
+        {"mdnsd", PROBE_SOCKET, "/run/libreecho/mdns.sock",
+         "/etc/init.d/libreecho-mdnsd.init", 1, NULL},
         {"airplayd", PROBE_SOCKET, "/run/libreecho/airplay.sock",
          "/etc/init.d/libreecho-airplayd.init", 1, NULL},
         /* Timers must recover with their durable schedule after a daemon exit. */
