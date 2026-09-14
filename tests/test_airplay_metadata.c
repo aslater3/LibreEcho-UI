@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 
 #define main airplayd_program_main
 #include "../src/adapter/airplayd.c"
