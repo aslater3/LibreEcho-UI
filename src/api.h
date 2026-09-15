@@ -5,7 +5,25 @@
 #include "event_bus.h"
 #include <stddef.h>
 struct api_request{char method[8],path[256],host[256],origin[256],authorization[256],csrf[96],confirm[96];const char*body;size_t body_len;int https;};
-struct api_response{int status;char type[64];char body[32768];size_t length;};
+/*
+ * /api/v1/logs renders at most LE_MAX_LOGS entries. Each rendered entry is
+ * bounded by api.c's 512-byte escaped message, 16-byte level and fixed JSON
+ * fields; 640 bytes is deliberately above that maximum. The old 32 KiB body
+ * could therefore be exhausted before the serializer appended its trailer,
+ * while snprintf() advanced the logical offset by the untruncated length.
+ *
+ * Keep a compile-time capacity contract instead of relying on an arbitrary
+ * near-end guard: every currently renderable bounded log set plus generous
+ * envelope headroom must fit, so neither /logs nor /logs/stream can advance
+ * beyond the response object even with all 128 entries at their maximum.
+ */
+#define LE_API_RESPONSE_BYTES 131072u
+#define LE_LOG_RESPONSE_ENTRY_WORST_CASE 640u
+#define LE_LOG_RESPONSE_ENVELOPE_BYTES 4096u
+#if LE_API_RESPONSE_BYTES < (LE_MAX_LOGS * LE_LOG_RESPONSE_ENTRY_WORST_CASE + LE_LOG_RESPONSE_ENVELOPE_BYTES)
+#error "API response buffer is too small for the bounded log response"
+#endif
+struct api_response{int status;char type[64];char body[LE_API_RESPONSE_BYTES];size_t length;};
 #define LE_MAX_RADIO_STATIONS 32
 /* The OTA upload ceiling, and where an uploaded package is staged on its way
    to the installer. Shared so the size the API advertises and the size the
