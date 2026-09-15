@@ -12,6 +12,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -71,6 +72,50 @@ static int alive(pid_t *pid)
     if (result == *pid || (result < 0 && errno == ECHILD)) *pid = 0;
     return 0;
 }
+static int dbus_socket_ready(const char *root)
+{
+    char path[512];
+    struct stat st;
+
+    if (snprintf(path, sizeof(path), "%s/run/dbus/system_bus_socket", root) >=
+        (int)sizeof(path))
+        return 0;
+    return lstat(path, &st) == 0 && S_ISSOCK(st.st_mode);
+}
+static int runtime_ready(const char *root, pid_t *bus, pid_t *avahi)
+{
+    return alive(bus) && alive(avahi) && dbus_socket_ready(root);
+}
+static int status_client(const char *socket_path)
+{
+    struct sockaddr_un address;
+    struct timeval timeout = { 2, 0 };
+    char reply[32];
+    ssize_t n;
+    int fd;
+
+    if (!socket_path || strlen(socket_path) >= sizeof(address.sun_path))
+        return 2;
+    fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, socket_path, strlen(socket_path) + 1);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        send(fd, "STATUS/1\n", 9, MSG_NOSIGNAL) != 9) {
+        close(fd);
+        return 1;
+    }
+    n = recv(fd, reply, sizeof(reply) - 1, 0);
+    close(fd);
+    if (n <= 0 || n >= (ssize_t)sizeof(reply))
+        return 1;
+    reply[n] = 0;
+    return strcmp(reply, "running\n") ? 1 : 0;
+}
 static int peer_owner(int fd)
 {
     struct ucred cred;
@@ -108,14 +153,17 @@ int main(int argc, char **argv)
     struct pollfd fds[CLIENTS + 1];
     long deadlines[CLIENTS] = {0}, retry = 0, bus_started = 0;
     pid_t bus = 0, avahi = 0;
-    int lock_fd, dir_fd, server, i, result = 0;
+    int lock_fd, dir_fd, server, i, result = 0, status_only = 0;
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--root") && i + 1 < argc) root = argv[++i];
         else if (!strcmp(argv[i], "--socket") && i + 1 < argc) socket_path = argv[++i];
         else if (!strcmp(argv[i], "--foreground")) continue;
+        else if (!strcmp(argv[i], "--status")) status_only = 1;
         else return 2;
     }
     if (strlen(socket_path) >= sizeof(address.sun_path) || strlen(root) > 400) return 2;
+    if (status_only)
+        return status_client(socket_path);
     (void)snprintf(path, sizeof(path), "%s/run/mdns.lock", root);
     lock_fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB) < 0) return 1;
@@ -140,7 +188,8 @@ int main(int argc, char **argv)
         if (!alive(&bus)) {
             retire(&avahi);
             if (now >= retry) { bus = spawn(root, 1); bus_started = now; retry = now + 2000; }
-        } else if (!alive(&avahi) && now - bus_started >= 100 && now >= retry) {
+        } else if (!alive(&avahi) && dbus_socket_ready(root) &&
+                   now - bus_started >= 100 && now >= retry) {
             avahi = spawn(root, 0); retry = now + 2000;
         }
         if (poll(fds, CLIENTS + 1, 100) < 0 && errno != EINTR) { result = 1; break; }
@@ -165,7 +214,8 @@ int main(int argc, char **argv)
                     unsigned long port = 0;
                     message[n] = 0;
                     if (!strcmp(message, "STATUS/1\n")) {
-                        const char *status = bus > 0 && avahi > 0 ? "running\n" : "degraded\n";
+                        const char *status = runtime_ready(root, &bus, &avahi)
+                            ? "running\n" : "degraded\n";
                         (void)send(fds[i].fd, status, strlen(status), MSG_NOSIGNAL);
                         close_client = 1;
                     } else {

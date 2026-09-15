@@ -2,9 +2,10 @@
 # Executes the shipped /etc/init.d lifecycle wrapper against the real
 # libreecho-mdnsd supervisor.
 #
-# The chroot child is a stub, so this test proves lifecycle, locking,
-# ownership and fail-closed behavior only. It is not evidence that Avahi
-# published a record on a device.
+# The chroot children are stubs: D-Bus exposes the same Unix socket the real
+# packaged runtime creates and Avahi stays alive. This proves lifecycle,
+# locking, machine-id preparation and readiness semantics without claiming
+# that DNS-SD was published on a device.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -26,6 +27,40 @@ fi
 
 cat >"$TMP/chroot" <<'EOF'
 #!/bin/sh
+root=$2
+program=$3
+if [ "$program" = /usr/bin/dbus-daemon ]; then
+    exec python3 - "$root/run/dbus/system_bus_socket" <<'PY'
+import os
+import signal
+import socket
+import sys
+import time
+
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+server.listen(1)
+
+def stop(*_args):
+    server.close()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+while True:
+    time.sleep(0.05)
+PY
+fi
 trap 'exit 0' TERM INT
 trap : HUP
 while :; do sleep 0.05; done
@@ -46,7 +81,9 @@ LOCKDIR=$TMP/lifecycle.lock
 CONFIG=$TMP/web-config.json
 DEFAULTS=$TMP/libreecho-wyomingd
 WYOMING_SOURCE=$TMP/wyoming.service
+UUID_SOURCE=$TMP/random-uuid
 cp "$ROOT/config/wyoming.service" "$WYOMING_SOURCE"
+printf '%s\n' '01234567-89ab-cdef-0123-456789abcdef' >"$UUID_SOURCE"
 
 # The wrapper requires the socket and runtime directories to be owned by the
 # account it runs as. Production uses root (the default); the host test uses
@@ -56,7 +93,7 @@ OWNER_UID=$(id -u)
 init() {
     DAEMON="$1" \
     PIDFILE="$PIDFILE" LOGFILE="$LOGFILE" ROOT="$PAYLOAD" SOCKET="$SOCKET" \
-    LOCKDIR="$LOCKDIR" CONFIG="$CONFIG" \
+    LOCKDIR="$LOCKDIR" CONFIG="$CONFIG" MACHINE_ID_SOURCE="$UUID_SOURCE" \
     WYOMING_SERVICE_SOURCE="$WYOMING_SOURCE" WYOMING_DEFAULTS="$DEFAULTS" \
     MDNSD_OWNER_UID="$OWNER_UID" \
     sh "$SCRIPT" "$2"
@@ -71,7 +108,8 @@ cleanup() {
     if [ "$launched" -eq 1 ]; then
         DAEMON="$TMP/mdnsd" PIDFILE="$PIDFILE" LOGFILE="$LOGFILE" \
         ROOT="$PAYLOAD" SOCKET="$SOCKET" LOCKDIR="$LOCKDIR" \
-        MDNSD_OWNER_UID="$OWNER_UID" sh "$SCRIPT" stop >/dev/null 2>&1 || true
+        MACHINE_ID_SOURCE="$UUID_SOURCE" MDNSD_OWNER_UID="$OWNER_UID" \
+        sh "$SCRIPT" stop >/dev/null 2>&1 || true
     fi
     rm -rf "$TMP"
 }
@@ -99,14 +137,14 @@ mkdir -p "$TMP/shared/etc/avahi/services"
 chmod 0777 "$TMP/shared"
 if DAEMON="$TMP/mdnsd" PIDFILE="$PIDFILE" LOGFILE="$LOGFILE" \
    ROOT="$TMP/shared" SOCKET="$SOCKET" LOCKDIR="$LOCKDIR" \
-   MDNSD_OWNER_UID="$OWNER_UID" sh "$SCRIPT" start; then
+   MACHINE_ID_SOURCE="$UUID_SOURCE" MDNSD_OWNER_UID="$OWNER_UID" sh "$SCRIPT" start; then
     echo "start with a world-writable runtime root must fail" >&2
     exit 1
 fi
 rm -rf "$TMP/shared"
 
-# 4. A normal start renders the Wyoming record, owns a private socket and
-#    reports running.
+# 4. A normal start creates the D-Bus machine id, waits for the real child
+#    readiness contract, renders the Wyoming record and reports running.
 printf '%s\n' '{"integrations": 1}' >"$CONFIG"
 printf '%s\n' 'PORT=12345' >"$DEFAULTS"
 if ! init "$TMP/mdnsd" start; then
@@ -117,6 +155,13 @@ fi
 launched=1
 alive || { echo "supervisor not running after start" >&2; exit 1; }
 [ -S "$SOCKET" ] || { echo "supervisor socket missing" >&2; exit 1; }
+[ -S "$PAYLOAD/run/dbus/system_bus_socket" ] || { echo "D-Bus socket missing" >&2; exit 1; }
+MACHINE_ID=$PAYLOAD/var/lib/dbus/machine-id
+[ -f "$MACHINE_ID" ] || { echo "D-Bus machine id missing" >&2; exit 1; }
+[ "$(sed -n '1p' "$MACHINE_ID")" = 0123456789abcdef0123456789abcdef ] || {
+    echo "D-Bus machine id was not derived from the runtime UUID" >&2
+    exit 1
+}
 [ "$(stat -c %u "$SOCKET")" = "$OWNER_UID" ] || { echo "socket not owned by the service account" >&2; exit 1; }
 case "$(stat -c %a "$SOCKET")" in
     600|700) ;;
@@ -132,13 +177,22 @@ first=$(sed -n '1p' "$PIDFILE")
 init "$TMP/mdnsd" start >/dev/null
 [ "$(sed -n '1p' "$PIDFILE")" = "$first" ]
 
-# 6. Disabling Home Assistant removes the record without touching the socket.
+# 6. Disabling Home Assistant removes the record without touching readiness.
 printf '%s\n' '{"integrations": 0}' >"$CONFIG"
 init "$TMP/mdnsd" restart >/dev/null
 [ -S "$SOCKET" ] || { echo "restart lost the socket" >&2; exit 1; }
+[ -S "$PAYLOAD/run/dbus/system_bus_socket" ] || { echo "restart lost the D-Bus socket" >&2; exit 1; }
 [ ! -e "$service" ] || { echo "Wyoming record survived a disable" >&2; exit 1; }
 
-# 7. Stop terminates only this supervisor and clears its runtime files.
+# 7. Status must fail if the D-Bus readiness socket disappears even while the
+#    supervisor process and its control socket are still alive.
+rm -f "$PAYLOAD/run/dbus/system_bus_socket"
+if init "$TMP/mdnsd" status; then
+    echo "status reported running without the D-Bus socket" >&2
+    exit 1
+fi
+
+# 8. Stop terminates only this supervisor and clears its runtime files.
 if ! init "$TMP/mdnsd" stop; then
     echo "stop failed" >&2
     exit 1

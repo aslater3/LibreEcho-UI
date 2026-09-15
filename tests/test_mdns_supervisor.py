@@ -12,6 +12,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 class Supervisor(unittest.TestCase):
+    def test_init_lifecycle_readiness_contract(self):
+        """Keep the shipped wrapper regression on the aggregate test path."""
+        result = subprocess.run(
+            ['sh', str(ROOT / 'tests/test_mdns_init_lifecycle.sh')],
+            cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_lease_eof_and_single_supervisor(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
