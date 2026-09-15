@@ -20,14 +20,23 @@ PAYLOAD=${PAYLOAD:-/data/libreecho/features/airplay2/payload.squashfs}
 RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/airplay2/root}
 CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
 AVAHI_SERVICES_SOURCE=${AVAHI_SERVICES_SOURCE:-/data/libreecho/features/airplay2/avahi-services}
-AVAHI_CONFIG_SNAPSHOT=${AVAHI_CONFIG_SNAPSHOT:-/run/libreecho/airplay-avahi-daemon.conf}
+# Discovery is an external dependency: the shared libreecho-mdnsd supervisor
+# owns D-Bus, Avahi and every published record. This wrapper never starts,
+# stops or mounts a responder of its own; it only stages its AirPlay service
+# definitions where that supervisor reads them and reports its readiness.
+MDNS_INIT=${MDNS_INIT:-/etc/init.d/libreecho-mdnsd.init}
+MDNS_SOCKET=${MDNS_SOCKET:-/run/libreecho/mdns.sock}
+MDNS_SERVICES_DIR=${MDNS_SERVICES_DIR:-/usr/local/lib/libreecho-mdns/root/etc/avahi/services}
 ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 
 # The controller is always started, but the AirPlay children follow the
 # persisted integration toggle.  Bit 16 is the AirPlay 2 flag in the shared
-# integrations mask.  AirPlay/mDNS is enabled by default after payload
-# staging; bit 16 is the explicit persistent user-controlled disable.
-# persistent AirPlay disable is represented by clearing bit 16.
+# integrations mask.  AirPlay is enabled by default after payload staging;
+# clearing bit 16 is the explicit persistent AirPlay disable.
+# Wyoming discovery is not decided here. The shared libreecho-mdnsd supervisor
+# reads the persisted pipeline mode and the Home Assistant integration bit
+# itself, so this wrapper neither stages a Wyoming record nor touches a
+# responder.
 airplay_enabled_at_boot=1
 if [ -r "$CONFIG" ]; then
     integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
@@ -70,72 +79,77 @@ mount_led_socket() {
     }
 }
 
+# A feature transaction may have mounted the payload already. Writable
+# support mounts are still ours, and each must be idempotent independently:
+# /run being present does not prove a previous attempt finished /var or shm.
+mount_support() {
+    target=$1
+    shift
+    grep -q " $target " /proc/mounts 2>/dev/null && return 0
+    mount "$@" "$target"
+}
+
+create_support_mounts() {
+    mkdir -p "$RUNTIME_ROOT/dev" "$RUNTIME_ROOT/proc" "$RUNTIME_ROOT/sys" \
+        "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/var" || return 1
+    mount_support "$RUNTIME_ROOT/dev" --bind /dev || return 1
+    # The /dev bind hides the payload's directory. Keep NQPTP's POSIX shared
+    # memory private, and preserve the separate bounded audio-bus bridge.
+    mkdir -p "$RUNTIME_ROOT/dev/shm" || return 1
+    mount_support "$RUNTIME_ROOT/proc" -t proc proc || return 1
+    mount_support "$RUNTIME_ROOT/sys" --bind /sys || return 1
+    mount_support "$RUNTIME_ROOT/run" -t tmpfs -o mode=0755,size=1m libreecho-airplay-run || return 1
+    mount_support "$RUNTIME_ROOT/var" -t tmpfs -o mode=0755,size=1m libreecho-airplay-var || return 1
+    mount_support "$RUNTIME_ROOT/dev/shm" -t tmpfs -o mode=1777,size=64k libreecho-airplay-shm || return 1
+    # No D-Bus or Avahi runtime: the shared mDNS supervisor owns the responder,
+    # so the chroot needs only this device's own control sockets.
+    mkdir -p "$RUNTIME_ROOT/var/run" "$RUNTIME_ROOT/run/libreecho" \
+        "$RUNTIME_ROOT/run/libreecho-audio" /run/libreecho-audio || return 1
+    mount_support "$RUNTIME_ROOT/run/libreecho-audio" --bind /run/libreecho-audio || return 1
+}
+
 mount_runtime() {
     [ -f "$PAYLOAD" ] || {
         echo "libreecho-airplayd: feature payload missing: $PAYLOAD" >&2
         return 1
     }
-    mkdir -p "$RUNTIME_ROOT"
-    if grep -q " $RUNTIME_ROOT " /proc/mounts 2>/dev/null; then
-        mount_led_socket
-        return 0
+    mkdir -p "$RUNTIME_ROOT" || return 1
+    if ! grep -q " $RUNTIME_ROOT " /proc/mounts 2>/dev/null; then
+        mount -t squashfs -o loop,ro,nosuid,nodev,noatime "$PAYLOAD" "$RUNTIME_ROOT" || {
+            echo "libreecho-airplayd: feature payload mount failed" >&2
+            return 1
+        }
     fi
-    mount -t squashfs -o loop,ro,nosuid,nodev,noatime "$PAYLOAD" "$RUNTIME_ROOT" || {
-        echo "libreecho-airplayd: feature payload mount failed" >&2
-        return 1
-    }
-
-    # AirPlay's glibc runtime is isolated from the boot image's musl root.
-    # Share hardware/network namespaces, but give D-Bus and Avahi writable
-    # private runtime directories inside the feature root.
-    mkdir -p "$RUNTIME_ROOT/dev" "$RUNTIME_ROOT/proc" "$RUNTIME_ROOT/sys" \
-        "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/var" \
-        "$RUNTIME_ROOT/etc/avahi" "$RUNTIME_ROOT/etc/dbus-1/system.d"
-    mount --bind /dev "$RUNTIME_ROOT/dev"
-    # The /dev bind hides the payload's directory, so create the mount point
-    # after the bind and give NQPTP a private POSIX shared-memory namespace.
-    mkdir -p "$RUNTIME_ROOT/dev/shm"
-    mount -t proc proc "$RUNTIME_ROOT/proc"
-    mount --bind /sys "$RUNTIME_ROOT/sys"
-    mount -t tmpfs -o mode=0755,size=1m libreecho-airplay-run "$RUNTIME_ROOT/run"
-    mount -t tmpfs -o mode=0755,size=1m libreecho-airplay-var "$RUNTIME_ROOT/var"
-    mount -t tmpfs -o mode=1777,size=64k libreecho-airplay-shm "$RUNTIME_ROOT/dev/shm"
-    mkdir -p "$RUNTIME_ROOT/run/dbus" "$RUNTIME_ROOT/var/run" \
-        "$RUNTIME_ROOT/run/avahi-daemon" "$RUNTIME_ROOT/var/run/avahi-daemon" \
-        "$RUNTIME_ROOT/var/lib/avahi" "$RUNTIME_ROOT/run/libreecho" \
-        "$RUNTIME_ROOT/run/libreecho-audio" /run/libreecho-audio
-    # The shared directory is outside /run/libreecho so this bind cannot
-    # recurse through the feature runtime root.  It carries only the four PCM
-    # buses and source-volume state; the feature remains otherwise isolated.
-    mount --bind /run/libreecho-audio "$RUNTIME_ROOT/run/libreecho-audio"
-    prepare_avahi_runtime
+    create_support_mounts || return 1
+    stage_airplay_services
     mount_led_socket
 }
 
-prepare_avahi_runtime() {
-    [ -d "$RUNTIME_ROOT/etc/avahi/services" ] && return 0
-    mkdir -p "$(dirname "$AVAHI_CONFIG_SNAPSHOT")"
-    if [ -f "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" ]; then
-        cp "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" "$AVAHI_CONFIG_SNAPSHOT" || return 1
+# AirPlay service definitions are published by the shared supervisor, which
+# reads them from its own runtime root. Staging is best-effort by design: a
+# missing supervisor directory means AirPlay is not advertised, and that must
+# degrade discovery rather than refuse to start audio.
+stage_airplay_services() {
+    [ -d "$AVAHI_SERVICES_SOURCE" ] || return 0
+    if mkdir -p "$MDNS_SERVICES_DIR" &&
+        cp -a "$AVAHI_SERVICES_SOURCE/." "$MDNS_SERVICES_DIR/"; then
+        return 0
     fi
-    mount -t tmpfs -o mode=0755,size=128k libreecho-airplay-avahi "$RUNTIME_ROOT/etc/avahi" || {
-        echo "libreecho-airplayd: could not create writable Avahi config root" >&2
-        return 1
-    }
-    if [ -f "$AVAHI_CONFIG_SNAPSHOT" ]; then
-        cp "$AVAHI_CONFIG_SNAPSHOT" "$RUNTIME_ROOT/etc/avahi/avahi-daemon.conf" || return 1
-    fi
-    mkdir -p "$RUNTIME_ROOT/etc/avahi/services"
-    if [ -d "$AVAHI_SERVICES_SOURCE" ]; then
-        cp -a "$AVAHI_SERVICES_SOURCE/." "$RUNTIME_ROOT/etc/avahi/services/"
-    fi
+    echo "libreecho-airplayd: AirPlay service definitions were not staged into $MDNS_SERVICES_DIR" >&2
+    return 0
+}
+
+# Readiness of the shared responder. It is an external dependency: a stopped or
+# absent supervisor degrades discovery and is never started, stopped or mounted
+# from this wrapper.
+mdns_status() {
+    [ -x "$MDNS_INIT" ] || return 1
+    "$MDNS_INIT" status >/dev/null 2>&1
 }
 
 unmount_runtime() {
     umount "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
     rm -f "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
-    umount "$RUNTIME_ROOT/etc/avahi" 2>/dev/null || true
-    rm -f "$AVAHI_CONFIG_SNAPSHOT" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run/libreecho-audio" 2>/dev/null || true
     umount "$RUNTIME_ROOT/var" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run" 2>/dev/null || true
@@ -204,6 +218,12 @@ trim_log() {
 start_service() {
     if is_running; then echo "libreecho-airplayd already running"; return 0; fi
     mount_runtime || return 1
+    # Discoverability is a shared, external service. A missing supervisor is
+    # reported and does not stop AirPlay audio: the controller's status reports
+    # the same dependency, and the supervisor is never started from here.
+    if ! mdns_status; then
+        echo "libreecho-airplayd: shared mDNS supervisor is not ready; AirPlay is not discoverable" >&2
+    fi
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
     trim_log
     if command -v start-stop-daemon >/dev/null 2>&1; then

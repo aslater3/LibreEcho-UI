@@ -4,6 +4,7 @@
 #include "voice_stream.h"
 #include "voice_listening_led.h"
 #include "wyoming_protocol.h"
+#include "mdns_client.h"
 #include "../json.h"
 #include "../log.h"
 
@@ -19,6 +20,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_PORT 10700
@@ -34,6 +36,9 @@
 #define QUIET_AFTER_SAMPLES (AUDIO_RATE * 8 / 10)
 #define MIN_STREAM_SAMPLES (AUDIO_RATE / 2)
 #define MAX_STREAM_SAMPLES (AUDIO_RATE * 8)
+#ifndef LE_WYOMING_PIPELINE_WATCHDOG_SECONDS
+#define LE_WYOMING_PIPELINE_WATCHDOG_SECONDS 120
+#endif
 
 static volatile sig_atomic_t running = 1;
 
@@ -45,6 +50,8 @@ struct wyoming_state {
     int server_running;
     int detected;
     int streaming;
+    int pipeline_active;
+    struct timespec pipeline_last_activity;
     uint64_t detection_sample;
     uint64_t stream_samples;
     uint64_t quiet_samples;
@@ -186,6 +193,28 @@ static int send_event(struct wyoming_state *state, const char *type,
     return le_wyoming_send(state->client_fd, type, data, payload, length);
 }
 
+static void pipeline_touch(struct wyoming_state *state)
+{
+    if (clock_gettime(CLOCK_MONOTONIC, &state->pipeline_last_activity) < 0)
+        state->pipeline_last_activity.tv_sec = 0;
+}
+
+static int pipeline_watchdog_expired(const struct wyoming_state *state)
+{
+    struct timespec now;
+    time_t seconds;
+
+    if (!state->pipeline_active)
+        return 0;
+    if (state->pipeline_last_activity.tv_sec == 0 ||
+        clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return 1;
+    seconds = now.tv_sec - state->pipeline_last_activity.tv_sec;
+    if (now.tv_nsec < state->pipeline_last_activity.tv_nsec)
+        --seconds;
+    return seconds >= LE_WYOMING_PIPELINE_WATCHDOG_SECONDS;
+}
+
 static void close_client(struct wyoming_state *state)
 {
     if (state->streaming)
@@ -199,6 +228,9 @@ static void close_client(struct wyoming_state *state)
     state->server_running = 0;
     state->detected = 0;
     state->streaming = 0;
+    state->pipeline_active = 0;
+    state->pipeline_last_activity.tv_sec = 0;
+    state->pipeline_last_activity.tv_nsec = 0;
 }
 
 static void ring_append(struct wyoming_state *state,
@@ -302,15 +334,33 @@ static int play_pcm16(struct wyoming_state *state, const unsigned char *payload,
 
 static int send_info(struct wyoming_state *state)
 {
+    /* Home Assistant rejects an info event if any advertised artifact omits
+       the required attribution or installed metadata (issue #228). */
     static const char info[] =
         "{\"satellite\":{\"name\":\"LibreEcho\",\"area\":\"LibreEcho\","
+        "\"attribution\":{\"name\":\"LibreEcho\","
+        "\"url\":\"https://libreecho.org\"},\"installed\":true,"
         "\"has_vad\":true,\"active_wake_words\":[\"Alexa\"],"
         "\"max_active_wake_words\":1,\"supports_trigger\":true},"
         "\"mic\":[{\"name\":\"libreecho-microphone\","
+        "\"attribution\":{\"name\":\"LibreEcho\","
+        "\"url\":\"https://libreecho.org\"},\"installed\":true,"
         "\"mic_format\":{\"rate\":16000,\"width\":2,\"channels\":1}}],"
         "\"snd\":[{\"name\":\"libreecho-speaker\","
+        "\"attribution\":{\"name\":\"LibreEcho\","
+        "\"url\":\"https://libreecho.org\"},\"installed\":true,"
         "\"snd_format\":{\"rate\":48000,\"width\":2,\"channels\":2}}]}";
     return send_event(state, "info", info, NULL, 0);
+}
+
+static int request_local_wake_pipeline(struct wyoming_state *state)
+{
+    static const char pipeline[] =
+        "{\"start_stage\":\"asr\",\"end_stage\":\"tts\","
+        "\"restart_on_end\":false,"
+        "\"snd_format\":{\"rate\":48000,\"width\":2,\"channels\":2}}";
+
+    return send_event(state, "run-pipeline", pipeline, NULL, 0);
 }
 
 static int start_stream(struct wyoming_state *state)
@@ -342,7 +392,7 @@ static int stop_stream(struct wyoming_state *state)
     state->streaming = 0;
     le_voice_listening_led_set(0);
     state->detected = 0;
-    state->server_running = 0;
+    pipeline_touch(state);
     if (send_event(state, "audio-stop", NULL, NULL, 0) < 0)
         return -1;
     return send_event(state, "streaming-stopped", NULL, NULL, 0);
@@ -362,6 +412,14 @@ static int handle_server_event(struct wyoming_state *state)
     data = event.data_length ? event.data : event.header;
     if (!strcmp(event.type, "describe"))
         return send_info(state);
+    if (!strcmp(event.type, "ping")) {
+        if (event.payload_length != 0)
+            return -1;
+        /* Wyoming's optional ping text is a correlation value. Echoing the
+           already validated, bounded data object preserves it in the pong. */
+        return send_event(state, "pong",
+                          event.data_length ? event.data : NULL, NULL, 0);
+    }
     if (!strcmp(event.type, "run-satellite")) {
         state->server_running = 1;
         return 0;
@@ -369,6 +427,14 @@ static int handle_server_event(struct wyoming_state *state)
     if (!strcmp(event.type, "pause-satellite")) {
         (void)stop_stream(state);
         state->server_running = 0;
+        state->pipeline_active = 0;
+        state->pipeline_last_activity.tv_sec = 0;
+        return 0;
+    }
+    if (!strcmp(event.type, "error")) {
+        /* Errors are not correlated with a turn on the Wyoming wire. Keep the
+           overlap lock and let the bounded watchdog recover it. */
+        pipeline_touch(state);
         return 0;
     }
     if (!strcmp(event.type, "run-pipeline")) {
@@ -390,6 +456,7 @@ static int handle_server_event(struct wyoming_state *state)
         if (state->output_fd >= 0)
             close(state->output_fd);
         state->output_fd = -1;
+        pipeline_touch(state);
         return open_audio_bus(state);
     }
     if (!strcmp(event.type, "audio-chunk")) {
@@ -401,14 +468,23 @@ static int handle_server_event(struct wyoming_state *state)
             json_get_int(data, "channels", &channels) != 1 ||
             width != 2 || state->output_fd < 0)
             return -1;
+        pipeline_touch(state);
         return play_pcm16(state, payload, event.payload_length, rate,
                           channels);
     }
     if (!strcmp(event.type, "audio-stop")) {
-        if (state->output_fd >= 0)
-            close(state->output_fd);
+        int result;
+
+        if (state->output_fd < 0)
+            return 0;
+        close(state->output_fd);
         state->output_fd = -1;
-        return send_event(state, "played", NULL, NULL, 0);
+        result = send_event(state, "played", NULL, NULL, 0);
+        if (result == 0) {
+            state->pipeline_active = 0;
+            state->pipeline_last_activity.tv_sec = 0;
+        }
+        return result;
     }
     return 0;
 }
@@ -433,15 +509,29 @@ static int handle_wake_event(struct wyoming_state *state)
         return 0;
     if (json_get_string(line, "model", model, sizeof(model)) < 1)
         strcpy(model, "Alexa");
-    if (state->client_fd >= 0 && state->server_running && !state->detected) {
+    if (state->client_fd >= 0 && state->server_running && !state->detected &&
+        !state->pipeline_active) {
         char data[128];
         const char *name = !strcmp(model, "alexa_v0.1") ? "Alexa" : model;
         (void)snprintf(data, sizeof(data), "{\"name\":\"%s\","
                        "\"timestamp\":0}", name);
         state->detection_sample = (uint64_t)sample;
         state->detected = 1;
-        if (send_event(state, "detection", data, NULL, 0) < 0)
+        if (send_event(state, "detection", data, NULL, 0) < 0) {
+            state->detected = 0;
             return -1;
+        }
+        if (request_local_wake_pipeline(state) < 0) {
+            state->detected = 0;
+            return -1;
+        }
+        if (start_stream(state) < 0) {
+            state->detected = 0;
+            return -1;
+        }
+        state->pipeline_active = 1;
+        pipeline_touch(state);
+        return 0;
     }
     return 0;
 }
@@ -456,6 +546,7 @@ static int handle_audio_frame(struct wyoming_state *state)
     ring_append(state, &frame);
     if (!state->streaming || state->client_fd < 0)
         return 0;
+    pipeline_touch(state);
     if (send_event(state, "audio-chunk",
                    "{\"rate\":16000,\"width\":2,\"channels\":1}",
                    frame.samples, frame.sample_count * sizeof(int16_t)) < 0)
@@ -472,10 +563,69 @@ static int handle_audio_frame(struct wyoming_state *state)
     return 0;
 }
 
+static int pipeline_watchdog(struct wyoming_state *state)
+{
+    if (!pipeline_watchdog_expired(state))
+        return 0;
+    /* Wyoming carries no turn token, so a stalled turn cannot be correlated
+       with a later one on the same session: once wake detection is rearmed,
+       that turn's delayed audio-start/audio-stop is accepted as the new
+       turn's and its audio-stop clears the new turn's overlap lock. Retire
+       the session instead of only the lock; Home Assistant cancels the
+       stalled pipeline, reconnects, and re-sends RunSatellite. */
+    le_log_warn("wyomingd: local pipeline watchdog expired; retiring the stalled Home Assistant session");
+    close_client(state);
+    return 0;
+}
+
+/* Closing the lease socket is the withdrawal: the supervisor treats owner EOF
+   as loss of the record and removes it. Funnelling every exit path through one
+   helper means a lease can never outlive the listener that owns it. */
+static void mdns_lease_close(int *fd)
+{
+    if (fd && *fd >= 0) {
+        close(*fd);
+        *fd = -1;
+    }
+}
+
+/* Run one bounded registration step. Discovery is optional: an absent, slow or
+ * rejecting supervisor must only mean "not advertised", never a listener
+ * failure, and the retry is rate-limited so a missing supervisor cannot spin. */
+static void mdns_maintain(const char *socket, int port, int *fd, int *pending,
+                          time_t *retry, time_t *deadline)
+{
+    struct timespec now;
+
+    if (!socket || clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return;
+    if (*fd >= 0) {
+        int received = le_mdns_receive(*fd);
+        if (received == 1) {
+            *pending = 0;
+            return;
+        }
+        /* A rejected or lost lease, and one the supervisor never confirms
+           within the deadline, are both "not registered locally". */
+        if (received < 0 || (*pending && now.tv_sec >= *deadline)) {
+            mdns_lease_close(fd);
+            *pending = 0;
+            *retry = now.tv_sec + 2;
+        }
+        return;
+    }
+    if (now.tv_sec < *retry)
+        return;
+    *fd = le_mdns_connect(socket, (unsigned int)port);
+    *pending = *fd >= 0;
+    *deadline = now.tv_sec + 2;
+    *retry = now.tv_sec + 2;
+}
+
 static void usage(const char *program)
 {
     fprintf(stderr, "usage: %s [--port N] [--wake-socket PATH] "
-            "[--audio-bus PATH] [--foreground]\n", program);
+            "[--audio-bus PATH] [--mdns-socket PATH] [--foreground]\n", program);
 }
 
 int main(int argc, char **argv)
@@ -483,6 +633,9 @@ int main(int argc, char **argv)
     struct wyoming_state state;
     struct sigaction action;
     int listen_fd;
+    int mdns_fd = -1, mdns_pending = 0;
+    const char *mdns_socket = NULL;
+    time_t mdns_retry = 0, mdns_deadline = 0;
     int i;
 
     memset(&state, 0, sizeof(state));
@@ -496,10 +649,18 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc)
             state.port = atoi(argv[++i]);
+        else if (!strncmp(argv[i], "--port=", 7))
+            /* The airplayd init script derives the advertised mDNS port from
+             * the argument string and accepts the --port=N form. Accepting it
+             * here too keeps the daemon and the advertisement in step instead
+             * of exiting at startup while Avahi still advertises the service. */
+            state.port = atoi(argv[i] + 7);
         else if (!strcmp(argv[i], "--wake-socket") && i + 1 < argc)
             strncpy(state.wake_socket, argv[++i], sizeof(state.wake_socket) - 1);
         else if (!strcmp(argv[i], "--audio-bus") && i + 1 < argc)
             strncpy(state.audio_bus, argv[++i], sizeof(state.audio_bus) - 1);
+        else if (!strcmp(argv[i], "--mdns-socket") && i + 1 < argc)
+            mdns_socket = argv[++i];
         else if (!strcmp(argv[i], "--foreground"))
             continue;
         else {
@@ -524,11 +685,17 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     le_log_info("wyomingd: listening on TCP port %d", state.port);
+    /* The listener is up before any lease is taken: the supervisor must never
+       advertise a port that nothing is accepting on. */
     while (running) {
         struct pollfd descriptors[4];
         nfds_t count = 1;
         int result;
 
+        mdns_maintain(mdns_socket, state.port, &mdns_fd, &mdns_pending,
+                      &mdns_retry, &mdns_deadline);
+        if (pipeline_watchdog(&state) < 0)
+            break;
         if (state.wake_fd < 0)
             state.wake_fd = connect_wake(state.wake_socket, "subscribe");
         if (state.audio_fd < 0)
@@ -585,6 +752,10 @@ int main(int argc, char **argv)
         close(state.wake_fd);
     if (state.audio_fd >= 0)
         close(state.audio_fd);
+    /* Withdraw the discovery lease before the listener disappears: the
+       supervisor drops the record on owner EOF, so a stopped daemon is never
+       left advertised. */
+    mdns_lease_close(&mdns_fd);
     close(listen_fd);
     return EXIT_SUCCESS;
 }

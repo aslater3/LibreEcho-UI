@@ -67,6 +67,7 @@ function localAssistantBody(a,selected,pipeline) {
       ${field('Endpoint URL',a.base_url||'','local-base-url','url','placeholder="http://198.51.100.10:8000/v1"')}
       <label class="field"><span>API key (optional)</span><input id="local-api-key" type="password" autocomplete="off" placeholder="${a.api_key_configured?'Configured; leave blank to keep it':'Leave blank when the endpoint does not require one'}"></label>
       ${field('Model',a.model||'','local-model')}
+      ${clockFormatField(a.clock_format,'local-clock-format')}
       ${field('Whisper Wyoming endpoint',stt.wyoming_uri||'','stt-wyoming-uri','text','placeholder="tcp://198.51.100.10:10300"')}
       ${field('Whisper model',stt.model||'whisper-small','stt-model')}
       ${field('Piper Wyoming endpoint',tts.wyoming_uri||'','tts-wyoming-uri','text','placeholder="tcp://198.51.100.10:10200"')}
@@ -107,6 +108,7 @@ function deviceAssistantBody(a,selected) {
     <div>
       ${field('Provider',a.provider_name||a.provider,'assistant-provider','text','disabled')}
       ${field('Model',a.model||'','assistant-model')}
+      ${clockFormatField(a.clock_format,'assistant-clock-format')}
       <label class="field"><span>Voice response prompt</span><textarea id="assistant-prompt" rows="8">${esc(a.prompt||'')}</textarea></label>
       ${saveButton('save-assistant')}
     </div>
@@ -120,6 +122,18 @@ function deviceAssistantBody(a,selected) {
       ${signedIn?`<label class="field"><span>Test prompt</span><input id="assistant-test-text" value="Say hello in one short sentence."></label>${action('Speak test response','assistant-test')}`:''}
     </div>
   </div>`;
+}
+
+// The assistant reads the time out loud, so this picks how it says it rather
+// than how anything is displayed. Anything the daemon has not set yet means a
+// device on the old build, which spoke 24-hour; show 12, the new default.
+// Both provider bodies render it, so each passes its own element id.
+function clockFormatField(value,id) {
+  const twelve = value !== '24';
+  return `<label class="field"><span>Spoken time format</span><select id="${id}">`+
+    `<option value="12" ${twelve?'selected':''}>12-hour (2:30 PM)</option>`+
+    `<option value="24" ${twelve?'':'selected'}>24-hour (14:30)</option>`+
+    `</select></label>`;
 }
 
 async function setAssistantProvider(provider,enabled,pipeline) {
@@ -166,20 +180,86 @@ function bindProviderToggle(id,provider,pipeline) {
   input.onchange=()=>setAssistantProvider(provider,input.checked,pipeline);
 }
 
+/*
+ * app.js owns the existing Home location & weather card and its provider
+ * helpers. integrations-ui.js replaces app.js's Integrations renderer, so it
+ * must render and bind that existing card itself rather than silently hiding
+ * the released configuration surface.
+ */
+function bindHomeLocation(a) {
+  if(a.unsupported||!$('#wx-provider'))return;
+  const original={
+    location:String(a.home_location||'').trim(),
+    latitude:String(a.latitude||'').trim(),
+    longitude:String(a.longitude||'').trim()
+  };
+  $('#wx-location').value=original.location;
+  $('#wx-lat').value=original.latitude;
+  $('#wx-lon').value=original.longitude;
+  bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+  $('#save-wx').onclick=()=>{
+    const provider=wxId($('#wx-provider').value);
+    const location=$('#wx-location').value.trim();
+    const latitude=$('#wx-lat').value.trim();
+    const longitude=$('#wx-lon').value.trim();
+    const haveLatitude=latitude.length>0;
+    const haveLongitude=longitude.length>0;
+    const lat=haveLatitude?Number(latitude):null;
+    const lon=haveLongitude?Number(longitude):null;
+    const originalLat=original.latitude?Number(original.latitude):null;
+    const originalLon=original.longitude?Number(original.longitude):null;
+    let problem='';
+
+    if(haveLatitude!==haveLongitude) {
+      problem='Enter both latitude and longitude, or leave both unchanged.';
+    } else if(haveLatitude&&(!Number.isFinite(lat)||!Number.isFinite(lon)||
+              lat<-90||lat>90||lon<-180||lon>180)) {
+      problem='Latitude must be -90 to 90 and longitude must be -180 to 180.';
+    } else if(location&&!haveLatitude&&provider!=='off') {
+      problem='This place needs coordinates before weather can be enabled.';
+    } else if(original.location&&location!==original.location&&haveLatitude&&
+              lat===originalLat&&lon===originalLon) {
+      problem='The place changed but the coordinates did not. Update both coordinates before saving.';
+    } else if(!location&&!haveLatitude&&
+              (original.location||original.latitude||original.longitude)) {
+      problem='This image cannot clear old coordinates safely. Select Off or replace them with the new location.';
+    }
+    if(problem){toast(problem,true);return;}
+    mutate('/assistant',{
+      weather_provider:provider,
+      home_location:location,
+      latitude,
+      longitude
+    },'Home location saved');
+  };
+}
+
 async function integrationsPage() {
   const [d,a,pipeline]=await Promise.all([
     api('/integrations'),
     api('/assistant').catch(error=>({unsupported:error.message})),
     api('/voice-pipeline').catch(()=>({mode:'local',stt:{},tts:{}}))
   ]);
+  /*
+   * integrationBlurb/integrationStatus come from app.js, which loads first.
+   * An integration the image was built without reports installed:false; it is
+   * listed so the absence is visible, but renders no toggle or save button --
+   * enabling it could only ever fail. The handler loop below skips those rows.
+   */
   const integrations=d.items.map(x=>collapsiblePanel(x.name,
-    `<p class="muted">${x.id==='rest'?'Versioned local device API.':'Optional local integration; no cloud connection required.'}</p>
-    ${toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
-    <div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${x.enabled?'Enabled':'Not configured'}</span></div>
-    ${saveButton('save-int-'+x.id)}`
+    `<p class="muted">${integrationBlurb(x)}</p>
+    ${x.installed===false?'':toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
+    <div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${integrationStatus(x)}</span></div>
+    ${x.installed===false?'':saveButton('save-int-'+x.id)}`
   )).join('');
 
-  if(a.unsupported) {
+  const homeAssistantEnabled=d.items.some(x=>x.id==='home-assistant'&&x.enabled);
+  if(homeAssistantEnabled) {
+    content.innerHTML=`<div class="integration-grid">
+      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${collapsiblePanel('Managed by Home Assistant',`<div class="assistant-heading"><div><span class="source-pill">Integration</span><h4>Home Assistant</h4><p class="muted">Voice is handled by Home Assistant over the local Wyoming connection. The on-device assistant (Local LLM and ChatGPT) stays stopped while the Home Assistant integration is enabled. Disable it on this page to use the on-device assistant.</p></div><div class="assistant-state"><span class="status-dot ok"></span>Enabled</div></div>`,'assistant-mode')}</section>
+      ${integrations}
+    </div>`;
+  } else if(a.unsupported) {
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${unsupported(a.unsupported)}</section>
       ${integrations}
@@ -201,7 +281,13 @@ async function integrationsPage() {
       toggleId:'use-local-provider',
       enabled:localEnabled,
       body:localAssistantBody(a,localSelected,pipeline),
-      open:localSelected
+      /*
+       * Collapsed even when this is the selected provider. Opening on
+       * selection meant the page arrived expanded on every load for anyone
+       * actually using it -- the same "stop expanding panels" complaint that
+       * closed Home location, the voice assistant and Internet radio.
+       */
+      open:false
     });
     const devicePanel=assistantProviderPanel({
       title:'On Device Voice Assistant',
@@ -212,17 +298,19 @@ async function integrationsPage() {
       toggleId:'use-device-provider',
       enabled:deviceEnabled,
       body:deviceAssistantBody(a,deviceSelected),
-      open:deviceSelected
+      open:false
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}</section>
+      ${weatherCard(a)}
       ${integrations}
     </div>`;
 
     bindProviderToggle('#use-local-provider','openai-compatible',pipeline);
     bindProviderToggle('#use-device-provider','openai-codex',pipeline);
+    bindHomeLocation(a);
 
-    bindDirty(['#local-base-url','#local-model','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
+    bindDirty(['#local-base-url','#local-model','#local-clock-format','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
     $('#save-local-assistant').onclick=async()=>{
       if(state.busy)return;
       setBusy(true);
@@ -242,6 +330,7 @@ async function integrationsPage() {
           enabled:localEnabled,
           base_url:$('#local-base-url').value.trim(),
           model:$('#local-model').value.trim(),
+          clock_format:$('#local-clock-format').value,
           prompt:$('#local-prompt').value.trim()
         };
         const key=$('#local-api-key').value;
@@ -258,11 +347,12 @@ async function integrationsPage() {
     if($('#local-test'))$('#local-test').onclick=()=>post('/assistant/respond',{text:$('#local-test-text').value},'Test response queued');
 
     if(deviceSelected) {
-      bindDirty(['#assistant-model','#assistant-prompt'],'#save-assistant');
+      bindDirty(['#assistant-model','#assistant-clock-format','#assistant-prompt'],'#save-assistant');
       $('#save-assistant').onclick=()=>mutate('/assistant',{
         provider:'openai-codex',
         enabled:deviceEnabled,
         model:$('#assistant-model').value.trim(),
+        clock_format:$('#assistant-clock-format').value,
         prompt:$('#assistant-prompt').value.trim()
       },'On Device Voice Assistant settings saved');
       if($('#assistant-auth-start'))$('#assistant-auth-start').onclick=()=>assistantAction('/assistant/auth/start','ChatGPT device sign-in started');
@@ -282,7 +372,9 @@ async function integrationsPage() {
   }
 
   d.items.forEach(x=>{
+    const save=$('#save-int-'+x.id);
+    if(!save)return;                       /* not installed: nothing rendered to bind */
     bindDirty(['#int-'+x.id],'#save-int-'+x.id);
-    $('#save-int-'+x.id).onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
+    save.onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
   });
 }
