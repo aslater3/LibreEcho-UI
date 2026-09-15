@@ -5,7 +5,18 @@
 #include "event_bus.h"
 #include <stddef.h>
 struct api_request{char method[8],path[256],host[256],origin[256],authorization[256],csrf[96],confirm[96];const char*body;size_t body_len;int https;};
-struct api_response{int status;char type[64];char body[32768];size_t length;};
+/*
+ * /api/v1/logs can render LE_MAX_LOGS entries. Each entry is read through a
+ * 256-byte message buffer and JSON escaping can double that text, so the old
+ * 32 KiB response was smaller than the endpoint's own bounded worst case.
+ * logs_json() advances by snprintf's required length; with an undersized body
+ * a truncated write could therefore advance the offset beyond the array before
+ * the closing JSON was appended. Keep the response larger than the complete
+ * bounded representation, including SSE framing, rather than relying on an
+ * approximate per-entry reserve.
+ */
+#define LE_API_RESPONSE_BODY_BYTES 131072u
+struct api_response{int status;char type[64];char body[LE_API_RESPONSE_BODY_BYTES];size_t length;};
 #define LE_MAX_RADIO_STATIONS 32
 /* The OTA upload ceiling, and where an uploaded package is staged on its way
    to the installer. Shared so the size the API advertises and the size the
