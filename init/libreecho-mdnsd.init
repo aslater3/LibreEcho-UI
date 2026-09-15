@@ -15,10 +15,6 @@
 # lock and fails closed: a half-started or half-stopped supervisor is worse
 # than a service that refuses to start, because it either leaves a stale DNS-SD
 # record or a socket that other services have already been told to use.
-#
-# The runtime and socket directories are created owner-owned and not writable
-# by group or other, and every action refuses to run unless it is the account
-# that owns the socket.
 
 [ -r /etc/default/libreecho-mdnsd ] && . /etc/default/libreecho-mdnsd
 
@@ -30,17 +26,19 @@ LOG_KEEP_BYTES=${LOG_KEEP_BYTES:-131072}
 ROOT=${ROOT:-/usr/local/lib/libreecho-mdns/root}
 SOCKET=${SOCKET:-/run/libreecho/mdns.sock}
 SOCKET_DIR=${SOCKET_DIR:-$(dirname "$SOCKET")}
+STATE_ROOT=${STATE_ROOT:-/run/libreecho/mdns}
+BUS_DIR=${BUS_DIR:-$STATE_ROOT/dbus}
+CHROOT_BUS_DIR=${CHROOT_BUS_DIR:-$ROOT/run/dbus}
+CHROOT_AVAHI_RUN=${CHROOT_AVAHI_RUN:-$ROOT/run/avahi-daemon}
 LOCKDIR=${LOCKDIR:-/run/libreecho-mdnsd.lock}
 MDNSD_OWNER_UID=${MDNSD_OWNER_UID:-0}
 CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
 WYOMING_SERVICE_SOURCE=${WYOMING_SERVICE_SOURCE:-/etc/libreecho/avahi-services/wyoming.service}
 WYOMING_DEFAULTS=${WYOMING_DEFAULTS:-/etc/default/libreecho-wyomingd}
+MOUNT=${MOUNT:-mount}
+UMOUNT=${UMOUNT:-umount}
 ARGS=${ARGS:---foreground --root $ROOT --socket $SOCKET}
 
-# The voice-pipeline mode is the explicit signal and always wins; only legacy
-# configs without a mode fall back to the Home Assistant integration bit. A
-# retained bit must never advertise a Wyoming server that local/custom mode
-# has stopped.
 home_assistant_voice_mode() {
     [ -r "$CONFIG" ] || return 1
     mode=$(sed -n 's/.*"voice_pipeline_mode"[[:space:]]*:[[:space:]]*"\([a-z][a-z-]*\)".*/\1/p' "$CONFIG" | sed -n '1p')
@@ -49,6 +47,7 @@ home_assistant_voice_mode() {
 
 resolve_discovery() {
     HOME_ASSISTANT_ENABLED=0
+    mode=
     if [ -r "$CONFIG" ]; then
         integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
         case "$integrations" in
@@ -63,12 +62,6 @@ resolve_discovery() {
     return 0
 }
 
-# The advertised mDNS port must match the port the Wyoming daemon actually
-# listens on. That daemon takes its full argument string from the shared
-# defaults file when ARGS is overridden and only falls back to `--port $PORT`
-# otherwise, so an explicit --port in ARGS wins over PORT, which in turn wins
-# over the built-in default. Sourcing runs in a subshell so the defaults file
-# cannot leak unrelated variables into this script.
 wyoming_service_port() {
     port=10700
     if [ -r "$WYOMING_DEFAULTS" ]; then
@@ -88,9 +81,6 @@ wyoming_service_port() {
     printf '%s\n' "$port"
 }
 
-# Avahi reads this directory from the supervisor's runtime root. The record is
-# rendered from the effective Wyoming port rather than copied verbatim, and it
-# is withdrawn, not left stale, whenever Home Assistant voice is not selected.
 render_wyoming_service() {
     services=${SERVICES_DIR:-$ROOT/etc/avahi/services}
     if [ "${HOME_ASSISTANT_ENABLED:-0}" -ne 1 ]; then
@@ -107,8 +97,6 @@ render_wyoming_service() {
     return 0
 }
 
-# A directory the supervisor's own account owns that no other account can
-# write. Anything else is refused instead of silently shared.
 private_dir() {
     target=$1
     wanted=$2
@@ -128,7 +116,6 @@ private_dir() {
     return 0
 }
 
-# Readiness is proven by a socket that only the service account can replace.
 socket_private() {
     [ -S "$SOCKET" ] || return 1
     owner=$(stat -c %u "$SOCKET" 2>/dev/null)
@@ -141,8 +128,42 @@ socket_private() {
     return 0
 }
 
-# One lifecycle operation at a time. The lock is a private directory, so it
-# works without flock, and a lock left by a dead operation is reclaimed once.
+mount_present() {
+    target=$1
+    awk -v target="$target" '$2 == target { found=1 } END { exit found ? 0 : 1 }' \
+        /proc/mounts >/dev/null 2>&1
+}
+
+prepare_runtime_bus() {
+    # dbus-daemon is executed inside ROOT with the stock system configuration,
+    # where its socket is /run/dbus/system_bus_socket.  The OTA health contract
+    # observes that same socket at STATE_ROOT/dbus.  The old wrapper created
+    # ROOT/run only, so dbus-daemon had no /run/dbus parent and exited before
+    # Avahi could start.  Bind the contract-owned host directory into the
+    # chroot so both paths name the same inode and fail closed if that cannot be
+    # established.
+    private_dir "$STATE_ROOT" 700 || return 1
+    private_dir "$BUS_DIR" 700 || return 1
+    private_dir "$CHROOT_BUS_DIR" 700 || return 1
+    private_dir "$CHROOT_AVAHI_RUN" 755 || return 1
+    if mount_present "$CHROOT_BUS_DIR"; then
+        return 0
+    fi
+    "$MOUNT" --bind "$BUS_DIR" "$CHROOT_BUS_DIR" >/dev/null 2>&1 || return 1
+    mount_present "$CHROOT_BUS_DIR" || {
+        "$UMOUNT" "$CHROOT_BUS_DIR" >/dev/null 2>&1 || true
+        return 1
+    }
+    return 0
+}
+
+release_runtime_bus() {
+    if mount_present "$CHROOT_BUS_DIR"; then
+        "$UMOUNT" "$CHROOT_BUS_DIR" >/dev/null 2>&1 || return 1
+    fi
+    return 0
+}
+
 acquire_lock() {
     [ -L "$LOCKDIR" ] && return 1
     if ! mkdir "$LOCKDIR" 2>/dev/null; then
@@ -168,9 +189,6 @@ release_lock() {
     return 0
 }
 
-# Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life,
-# and matching on the executable means this wrapper can never terminate an
-# unrelated process on a device that is shared with other daemons.
 running_pids() {
     for entry in /proc/[0-9]*; do
         candidate=${entry#/proc/}
@@ -194,7 +212,6 @@ is_running() {
     [ -n "$(running_pids)" ]
 }
 
-# Sends TERM, waits up to $2 seconds (default 5), then KILL.
 terminate() {
     target=$1
     limit=${2:-5}
@@ -226,9 +243,6 @@ launch_supervisor() {
             </dev/null >>"$LOGFILE" 2>&1
         return $?
     fi
-    # setsid detaches the child from this shell's process group. Without it the
-    # supervisor dies with the shell that started it, and a later start would
-    # create a second D-Bus/Avahi pair inside the same root.
     if command -v setsid >/dev/null 2>&1; then
         setsid "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
     else
@@ -254,8 +268,6 @@ start_service() {
         release_lock
         return 1
     fi
-    # A shared or uncreatable runtime is a hard failure: the supervisor would
-    # publish records from a directory another account can rewrite.
     private_dir "$SOCKET_DIR" 700 || {
         echo "libreecho-mdnsd: socket directory is not private: $SOCKET_DIR" >&2
         release_lock
@@ -276,18 +288,24 @@ start_service() {
         release_lock
         return 1
     }
+    prepare_runtime_bus || {
+        echo "libreecho-mdnsd: shared D-Bus runtime could not be prepared" >&2
+        release_lock
+        return 1
+    }
     resolve_discovery
     render_wyoming_service || {
         echo "libreecho-mdnsd: could not stage the Wyoming record" >&2
+        release_runtime_bus || true
         release_lock
         return 1
     }
     mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")"
     trim_log
-    # A socket left by a previous crash is not a live supervisor.
-    rm -f "$SOCKET"
+    rm -f "$SOCKET" "$BUS_DIR/system_bus_socket"
     launch_supervisor || {
         echo "libreecho-mdnsd: could not launch the supervisor" >&2
+        release_runtime_bus || true
         release_lock
         return 1
     }
@@ -307,6 +325,7 @@ start_service() {
             terminate "$stray" 5
         done
         rm -f "$PIDFILE" "$SOCKET"
+        release_runtime_bus || true
         release_lock
         return 1
     fi
@@ -330,15 +349,13 @@ stop_service() {
             failed=1
         fi
     done
-    rm -f "$PIDFILE"
+    rm -f "$PIDFILE" "$SOCKET"
+    release_runtime_bus || failed=1
     if [ "$failed" -ne 0 ]; then
-        echo "libreecho-mdnsd: a supervisor process did not stop" >&2
+        echo "libreecho-mdnsd: a supervisor process did not stop cleanly" >&2
         release_lock
         return 1
     fi
-    # The socket belongs to the supervisor; leaving it behind would let a later
-    # start inherit a path nothing is listening on.
-    rm -f "$SOCKET"
     release_lock
     return 0
 }
