@@ -14,6 +14,7 @@
 #include "wake_diagnostic.h"
 #include "logd.h"
 #include "log.h"
+#include "service_env.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -245,20 +246,20 @@ static void agent_result(struct api_response*r,const char*command,const char*arg
 static int wifi_scan_json(struct api_response*r,const struct le_wifi_scan*s){size_t i,n=0;char ssid[LE_TEXT*2],security[64],capabilities[256],band[64];int written;if(!r||!s)return -1;written=snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"networks\":[");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;for(i=0;i<s->count&&i<LE_MAX_WIFI;i++){json_escape(ssid,sizeof(ssid),s->networks[i].ssid);json_escape(security,sizeof(security),s->networks[i].security);json_escape(capabilities,sizeof(capabilities),s->networks[i].capabilities[0]?s->networks[i].capabilities:"unknown");json_escape(band,sizeof(band),s->networks[i].band[0]?s->networks[i].band:"unknown");written=snprintf(r->body+n,sizeof(r->body)-n,"%s{\"ssid\":\"%s\",\"security\":\"%s\",\"capabilities\":\"%s\",\"signal\":%d,\"rssi_dbm\":%d,\"frequency_mhz\":%d,\"channel\":%d,\"band\":\"%s\",\"wpa2_attempt\":%s}",i?",":"",ssid,security,capabilities,s->networks[i].signal,s->networks[i].rssi_dbm,s->networks[i].frequency_mhz,s->networks[i].channel,band,s->networks[i].wpa2_attempt?"true":"false");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;}written=snprintf(r->body+n,sizeof(r->body)-n,"]},\"error\":null}");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n+(size_t)written;return 0;}
 static int persist_configuration(struct api_context*);
 static void radio_load(struct api_context*);
+/*
+ * Service control crosses a boundary: the caller's own ARGS/DAEMON/PIDFILE/
+ * LOGFILE must not reach another service's init script, which resolves its
+ * settings with `${VAR:-default}` and would otherwise run this daemon's
+ * command line. See src/service_env.c.
+ */
 static int run_init_command(const char *path, const char *arg)
 {
-    pid_t child = fork();
-    int status;
-    if (child < 0)
-        return LE_IO;
-    if (child == 0) {
-        execl(path, path, arg, (char *)NULL);
-        _exit(127);
-    }
-    if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) ||
-        WEXITSTATUS(status) != 0)
-        return LE_IO;
-    return LE_OK;
+    const char *argv[3];
+
+    argv[0] = path;
+    argv[1] = arg;
+    argv[2] = NULL;
+    return le_service_command(path, argv) ? LE_IO : LE_OK;
 }
 static int setup_startup_ready_valid(const char *path)
 {

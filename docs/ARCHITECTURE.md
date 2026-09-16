@@ -473,3 +473,26 @@ libreecho-web       (needs all above for full functionality)
 btd → airplayd → ttsd → agentd → web
 
 **Shutdown order:** reverse startup order.
+
+## Service Control Boundary
+
+Services are controlled by running another daemon's init script
+(`/etc/init.d/libreecho-<service>.init`): the Web daemon starts and stops the
+voice pipeline, factory reset stops and restarts the Bluetooth, timer and
+assistant services, and `libreecho-watchdogd` restarts a service that stopped
+answering.
+
+Each of those callers carries its own generic `ARGS`, `DAEMON`, `PIDFILE` and
+`LOGFILE`, and every init script resolves its settings with
+`VAR=${VAR:-default}`. An inherited value therefore wins inside the child
+script, which is how a voice-pipeline change used to start
+`libreecho-sttd`/`libreecho-ttsd`/`libreecho-agentd` and `libreecho-wyomingd`
+with the Web daemon's own command line — usage on stderr, exit, and an API
+that reported "Voice assistant service is unavailable".
+
+`src/service_env.c` is that boundary: the four caller-identity names are
+removed in the forked child immediately before `exec`, so each script resolves
+its own defaults and its own root-owned `/etc/default/libreecho-<service>`
+file. Unrelated variables, including the service-scoped `LE_*` settings a
+script may read, are left alone. A service's own configuration is never the
+caller's command line.
