@@ -33,6 +33,7 @@
 
 #define INPUT_MAX LE_ADAPTER_MSG_MAX
 #define AIRPLAY_METADATA_FIFO "/run/libreecho-audio/airplay.metadata"
+#define LE_MDNS_BUS_SOCKET "/usr/local/lib/libreecho-mdns/root/run/dbus/system_bus_socket"
 #define AIRPLAY_METADATA_ITEM_MAX 8192
 #define AIRPLAY_METADATA_FIELD_MAX 192
 #define AIRPLAY_METADATA_AP2_PLIST_MAX 16384
@@ -1047,7 +1048,10 @@ static pid_t spawn_engine(const struct airplay_ctx *ctx)
  * audio down and two responders can never race for the same records. */
 static int mdns_ready(const struct airplay_ctx *ctx)
 {
-    return le_mdns_status(ctx->mdns_socket) == 1;
+    struct stat state;
+    if (le_mdns_status(ctx->mdns_socket) == 1)
+        return 1;
+    return lstat(LE_MDNS_BUS_SOCKET, &state) == 0 && S_ISSOCK(state.st_mode);
 }
 
 static int set_enabled(struct airplay_ctx *ctx, int enabled)

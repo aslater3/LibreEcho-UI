@@ -27,6 +27,7 @@ AVAHI_SERVICES_SOURCE=${AVAHI_SERVICES_SOURCE:-/data/libreecho/features/airplay2
 MDNS_INIT=${MDNS_INIT:-/etc/init.d/libreecho-mdnsd.init}
 MDNS_SOCKET=${MDNS_SOCKET:-/run/libreecho/mdns.sock}
 MDNS_SERVICES_DIR=${MDNS_SERVICES_DIR:-/usr/local/lib/libreecho-mdns/root/etc/avahi/services}
+MDNS_BUS_SOURCE=${MDNS_BUS_SOURCE:-/usr/local/lib/libreecho-mdns/root/run/dbus/system_bus_socket}
 ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 
 # The controller is always started, but the AirPlay children follow the
@@ -89,6 +90,27 @@ mount_support() {
     mount "$@" "$target"
 }
 
+mount_shared_mdns_bus() {
+    target_socket=$RUNTIME_ROOT/run/dbus/system_bus_socket
+    grep -q " $target_socket " /proc/mounts 2>/dev/null && return 0
+    count=0
+    while [ ! -S "$MDNS_BUS_SOURCE" ] && [ "$count" -lt 50 ]; do
+        sleep 0.1
+        count=$((count + 1))
+    done
+    [ -S "$MDNS_BUS_SOURCE" ] || {
+        echo "libreecho-airplayd: shared D-Bus socket unavailable" >&2
+        return 1
+    }
+    mkdir -p "$(dirname "$target_socket")" || return 1
+    : >"$target_socket" || return 1
+    mount --bind "$MDNS_BUS_SOURCE" "$target_socket" || {
+        rm -f "$target_socket"
+        echo "libreecho-airplayd: shared D-Bus socket bind failed" >&2
+        return 1
+    }
+}
+
 create_support_mounts() {
     mkdir -p "$RUNTIME_ROOT/dev" "$RUNTIME_ROOT/proc" "$RUNTIME_ROOT/sys" \
         "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/var" || return 1
@@ -106,6 +128,7 @@ create_support_mounts() {
     mkdir -p "$RUNTIME_ROOT/var/run" "$RUNTIME_ROOT/run/libreecho" \
         "$RUNTIME_ROOT/run/libreecho-audio" /run/libreecho-audio || return 1
     mount_support "$RUNTIME_ROOT/run/libreecho-audio" --bind /run/libreecho-audio || return 1
+    mount_shared_mdns_bus || return 1
 }
 
 mount_runtime() {
@@ -148,6 +171,8 @@ mdns_status() {
 }
 
 unmount_runtime() {
+    umount "$RUNTIME_ROOT/run/dbus/system_bus_socket" 2>/dev/null || true
+    rm -f "$RUNTIME_ROOT/run/dbus/system_bus_socket" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
     rm -f "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run/libreecho-audio" 2>/dev/null || true
