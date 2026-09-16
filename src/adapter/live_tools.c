@@ -383,6 +383,26 @@ static int tool_device_weather(const struct le_live_tool_environment *environmen
                          "Weather is not available on this device yet.");
 }
 
+/*
+ * The WebSocket protocol hands over a natural-language request rather than a
+ * tool name, so this is the single entry the transport emits. It answers
+ * honestly: routing a spoken request onto the device's tools needs a request
+ * parser this release does not have, and a message the model reads out loud
+ * must not claim an action that did not happen.
+ */
+static int tool_voice_request(const struct le_live_tool_environment *environment,
+                              const char *arguments, char *result, size_t size)
+{
+    char request[LE_LIVE_ARGUMENT_MAX];
+
+    (void)environment;
+    if (json_get_string(arguments, "request", request, sizeof(request)) < 1 ||
+        !request[0])
+        return respond_error(result, size, "That request was empty.");
+    return respond_error(result, size,
+                         "I cannot do that on the device yet.");
+}
+
 struct le_live_tool_entry {
     const char *name;
     int (*run)(const struct le_live_tool_environment *environment,
@@ -399,7 +419,8 @@ static const struct le_live_tool_entry tool_table[] = {
     {"radio.play", tool_radio_play},
     {"device.time", tool_device_time},
     {"device.volume", tool_device_volume},
-    {"device.weather", tool_device_weather}
+    {"device.weather", tool_device_weather},
+    {"voice.request", tool_voice_request}
 };
 
 #define TOOL_TABLE_COUNT (sizeof(tool_table) / sizeof(tool_table[0]))

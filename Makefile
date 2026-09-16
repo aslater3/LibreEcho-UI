@@ -48,6 +48,7 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 	src/adapter/live_ring.c src/adapter/live_transport_mock.c \
 	src/adapter/live_transport_realtime.c src/adapter/live_audio_out.c \
 	src/adapter/live_tools.c src/adapter/radio_resample.c \
+	src/adapter/live_b64.c src/adapter/ws_client.c \
 	src/adapter/llm_store.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
@@ -155,8 +156,9 @@ test-mdns:
 $(BUILD)/libreecho-wyomingd: $(WYOMINGD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(WYOMINGD_OBJECTS) $(LDFLAGS) -lm -o $@
 
-$(BUILD)/libreecho-lived: $(LIVED_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LIVED_OBJECTS) $(LDFLAGS) -o $@
+$(BUILD)/libreecho-lived: $(LIVED_OBJECTS) $(TLS_SOURCES:src/%.c=$(BUILD)/%.o)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LIVED_OBJECTS) \
+		$(TLS_SOURCES:src/%.c=$(BUILD)/%.o) $(LDFLAGS) $(WEB_TLS_LIBS) -o $@
 
 LIVE_TEST_CFLAGS = $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc -Isrc/adapter
 

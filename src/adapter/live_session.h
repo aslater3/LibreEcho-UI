@@ -107,6 +107,9 @@ struct le_live_session_config {
     const char *model;
     const char *voice;
     const char *credentials_path;
+    /* Forwarded to the transport: see le_live_transport_config. */
+    const char *url;
+    int allow_unverified_tls;
     const char *mock_scenario;
 };
 

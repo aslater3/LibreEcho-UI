@@ -89,6 +89,19 @@ struct le_live_transport_config {
     /* Path to the shared credential file (openai-codex.json). */
     const char *credentials_path;
     /*
+     * WebSocket endpoint. Defaults to the subscription path
+     * (wss://chatgpt.com/v1/realtime?intent=quicksilver). Plain ws:// is
+     * accepted only for loopback, so a test server can be driven without
+     * putting the account token on an unencrypted link.
+     */
+    const char *url;
+    /*
+     * This image ships no CA bundle, so a TLS peer cannot be authenticated.
+     * Sending the ChatGPT token over an unauthenticated channel is refused
+     * unless an operator sets this explicitly.
+     */
+    int allow_unverified_tls;
+    /*
      * Scenario selector for the mock transport; ignored by real transports.
      * Kept in the shared config so the daemon needs one configuration path.
      */

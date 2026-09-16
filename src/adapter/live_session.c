@@ -471,6 +471,9 @@ int le_live_session_wake(struct le_live_session *session,
     transport_config.model = session->config.model;
     transport_config.voice = session->config.voice;
     transport_config.credentials_path = session->config.credentials_path;
+    transport_config.url = session->config.url;
+    transport_config.allow_unverified_tls =
+        session->config.allow_unverified_tls;
     transport_config.mock_scenario = session->config.mock_scenario;
 
     preroll_samples = (uint64_t)session->config.wake_preroll_ms *

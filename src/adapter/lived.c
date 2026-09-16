@@ -678,7 +678,8 @@ static void usage(const char *program)
             "[--conversation-timeout-ms N] [--max-session-ms N] "
             "[--wake-preroll-ms N] [--barge-in-rms N] [--barge-in-factor N] "
             "[--model NAME] [--voice NAME] [--credentials PATH] "
-            "[--transport realtime|mock] [--mock-scenario NAME] [--enable]\n",
+            "[--transport realtime|mock] [--live-url URL] "
+            "[--live-allow-unverified-tls] [--mock-scenario NAME] [--enable]\n",
             program);
 }
 
@@ -770,6 +771,10 @@ int main(int argc, char **argv)
                 fprintf(stderr, "lived: unknown transport '%s'\n", name);
                 return 2;
             }
+        } else if (!strcmp(option, "--live-url") && value) {
+            state.config.url = NEXT();
+        } else if (!strcmp(option, "--live-allow-unverified-tls")) {
+            state.config.allow_unverified_tls = 1;
         } else if (!strcmp(option, "--mock-scenario") && value) {
             state.config.mock_scenario = NEXT();
         } else {
