@@ -40,6 +40,7 @@
 #define LE_ADAPTER_RADIO_SOCK     "/run/libreecho/radio.sock"
 #define LE_ADAPTER_STT_SOCK       "/run/libreecho/stt.sock"
 #define LE_ADAPTER_AGENT_SOCK     "/run/libreecho/agent.sock"
+#define LE_ADAPTER_LIVE_SOCK      "/run/libreecho/live.sock"
 
 /* Result codes shared between client and daemon sides. */
 enum le_adapter_result {

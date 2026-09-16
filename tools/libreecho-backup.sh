@@ -20,7 +20,7 @@ SECRETS_OWNER=${LIBREECHO_SECRETS_OWNER:-}
 
 # Stop the supervisor before its writers; resume in reverse dependency order.
 # Missing image services are allowed. Installed but inactive services stay off.
-SERVICE_NAMES="libreecho-watchdogd libreecho-web libreecho-agentd libreecho-waked libreecho-airplayd libreecho-ttsd libreecho-sttd libreecho-btd libreecho-radiod libreecho-timerd libreecho-buttond libreecho-ledd libreecho-micd libreecho-audiod libreecho-networkd libreecho-timed"
+SERVICE_NAMES="libreecho-watchdogd libreecho-web libreecho-agentd libreecho-waked libreecho-lived libreecho-airplayd libreecho-ttsd libreecho-sttd libreecho-btd libreecho-radiod libreecho-timerd libreecho-buttond libreecho-ledd libreecho-micd libreecho-audiod libreecho-networkd libreecho-timed"
 STOPPED_SERVICES=
 
 usage() {

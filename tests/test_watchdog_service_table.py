@@ -38,6 +38,11 @@ NOT_SUPERVISED = {
     "web",
     # The watchdog does not supervise itself; something else would have to.
     "watchdogd",
+    # GPT-Live is installed but not enabled: the control-centre mode selector
+    # that would start it is not wired yet, and the OpenAI transport is not
+    # implemented, so there is nothing for the watchdog to keep alive. It joins
+    # the supervised table in the same change that makes the mode selectable.
+    "lived",
 }
 
 ENTRY = re.compile(

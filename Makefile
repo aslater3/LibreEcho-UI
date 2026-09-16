@@ -15,7 +15,7 @@ CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
-ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-watchdogd $(BUILD)/libreecho-timerd $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming $(BUILD)/libreecho-mdnsd
+ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-watchdogd $(BUILD)/libreecho-timerd $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-lived $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming $(BUILD)/libreecho-mdnsd
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
@@ -44,6 +44,12 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/time
 WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/mdns_client.c src/adapter/wyoming_protocol.c \
 	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
+LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
+	src/adapter/live_ring.c src/adapter/live_transport_mock.c \
+	src/adapter/live_transport_realtime.c src/adapter/live_audio_out.c \
+	src/adapter/live_tools.c src/adapter/radio_resample.c \
+	src/adapter/llm_store.c \
+	src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
@@ -65,6 +71,7 @@ TTSD_OBJECTS = $(TTSD_SOURCES:src/%.c=$(BUILD)/%.o)
 STTD_OBJECTS = $(STTD_SOURCES:src/%.c=$(BUILD)/%.o)
 AGENTD_OBJECTS = $(AGENTD_SOURCES:src/%.c=$(BUILD)/%.o)
 WYOMINGD_OBJECTS = $(WYOMINGD_SOURCES:src/%.c=$(BUILD)/%.o)
+LIVED_OBJECTS = $(LIVED_SOURCES:src/%.c=$(BUILD)/%.o)
 LOGD_OBJECTS = $(LOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 comma := ,
 GC_LDFLAGS ?= $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections)
@@ -147,6 +154,44 @@ test-mdns:
 
 $(BUILD)/libreecho-wyomingd: $(WYOMINGD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(WYOMINGD_OBJECTS) $(LDFLAGS) -lm -o $@
+
+$(BUILD)/libreecho-lived: $(LIVED_OBJECTS)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LIVED_OBJECTS) $(LDFLAGS) -o $@
+
+LIVE_TEST_CFLAGS = $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -Isrc -Isrc/adapter
+
+$(BUILD)/test-live-ring: tests/test_live_ring.c src/adapter/live_ring.c
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
+
+$(BUILD)/test-live-session: tests/test_live_session.c src/adapter/live_session.c \
+		src/adapter/live_ring.c src/adapter/live_transport_mock.c
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
+
+$(BUILD)/test-live-tools: tests/test_live_tools.c src/adapter/live_tools.c \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
+$(BUILD)/test-live-audio-out: tests/test_live_audio_out.c \
+		src/adapter/live_audio_out.c src/adapter/radio_resample.c
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
+
+
+$(BUILD)/test-lived: tests/test_lived.c $(BUILD)/libreecho-lived
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) tests/test_lived.c -o $@
+
+test-lived: $(BUILD)/test-live-ring $(BUILD)/test-live-session \
+		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
+		$(BUILD)/test-lived
+	./$(BUILD)/test-live-ring
+	./$(BUILD)/test-live-session
+	./$(BUILD)/test-live-tools
+	./$(BUILD)/test-live-audio-out
+	./$(BUILD)/test-lived
 
 $(BUILD)/libreecho-wyomingd-test: $(WYOMINGD_SOURCES)
 	@mkdir -p $(BUILD)
@@ -819,7 +864,7 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -d $(DESTDIR)$(PREFIX)/share/libreecho/sounds
 	install -m 0644 sounds/*.raw $(DESTDIR)$(PREFIX)/share/libreecho/sounds/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
-	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-watchdogd.init init/libreecho-timerd.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init init/libreecho-mdnsd.init $(DESTDIR)/etc/init.d/
+	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-watchdogd.init init/libreecho-timerd.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init init/libreecho-mdnsd.init init/libreecho-lived.init $(DESTDIR)/etc/init.d/
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
 	install -d $(DESTDIR)/etc/libreecho/avahi-services
 	install -m 0644 config/wyoming.service $(DESTDIR)/etc/libreecho/avahi-services/wyoming.service
@@ -856,6 +901,9 @@ clean:
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \
 		$(BUILD)/test-agentd \
+		$(BUILD)/test-live-ring $(BUILD)/test-live-session \
+		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
+		$(BUILD)/test-lived \
 		$(BUILD)/test-voice-reply \
 		$(BUILD)/test-voice-playback \
 		$(BUILD)/test-voice-listening-feedback \
