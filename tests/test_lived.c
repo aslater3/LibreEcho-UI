@@ -377,7 +377,11 @@ static int test_real_transport_fails_closed(void)
     CHECK(control_call(control_socket, "status", "{}", status,
                        sizeof(status)) == 0);
     CHECK(strstr(status, "\"transport\":\"realtime\"") != NULL);
-    CHECK(strstr(status, "WebRTC") != NULL || strstr(status, "sign in") != NULL);
+    /* The reason depends on credential state: no credentials is the
+       actionable one, and a signed-in device gets the missing-transport
+       one instead. */
+    CHECK(strstr(status, "sign in") != NULL ||
+          strstr(status, "WebSocket") != NULL);
     CHECK(strstr(status, "\"sessions_failed\":") != NULL);
     CHECK(strstr(status, "\"sessions_started\":0") == NULL);
 

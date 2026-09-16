@@ -54,51 +54,43 @@ yet, so that stays a separate change.)
 ## The transport question, answered
 
 The plan's preferred transport was a plain TLS WebSocket reusing the existing
-ChatGPT/Codex OAuth account. It is not available. Evidence from the shipped
-Codex client (`codex-cli 0.154.0`, inspected on the development host):
+ChatGPT/Codex OAuth account. **That transport exists** and is what the
+implementation targets; the full wire format is in
+`docs/GPT_LIVE_TRANSPORT.md`.
+
+The subscription path is a WebSocket at
 
 ```
-codex-api/src/endpoint/realtime_call.rs
-codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
-codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
-core/src/realtime_conversation/sideband.rs
-core/src/realtime_conversation/existing_call.rs
-
-struct variant ThreadRealtimeStartTransport::Webrtc with 1 element
-struct variant ThreadRealtimeStartTransport::ExistingCall with 1 element
-"realtime call request SDP: "
-"realtime sideband websocket connect failed; retrying: "
-gpt-live-1-codex
+wss://<host>/v1/realtime?intent=quicksilver&model=gpt-live-1-codex
 ```
 
-A realtime call is created over HTTPS against
+authenticated with the same ChatGPT bearer and account id the Responses path
+already uses. Audio is base64 PCM inside JSON text frames, 24 kHz mono outbound
+from the server, with no media plane to negotiate. Delegation is
+client-managed: `delegation.created` in, `delegation.context.append` out.
+
+WebRTC is a *different*, third transport in the same client
+(`ThreadRealtimeStartTransport::Webrtc`, used by the Codex desktop voice path)
+and is not required here. An earlier revision of this document claimed it was,
+on the strength of the binary's string table, where `Webrtc` and `ExistingCall`
+appear and `Websocket` is easy to miss; the correction is recorded in
+`docs/GPT_LIVE_TRANSPORT.md` because the cost difference is the whole feature.
+
+What remains is a WebSocket client over the repository's existing TLS
+(`src/tls.c`) plus base64, not an embedded WebRTC stack.
+
+Until that lands, `libreecho-lived` **fails closed**. With no implemented
+transport it refuses to open a session and reports why, rather than pretending
+to talk. On the current device, which has no ChatGPT credentials, that is:
 
 ```
-POST https://chatgpt.com/backend-api/realtime/calls     Content-Type: application/sdp
+"GPT-Live unavailable: sign in to ChatGPT again."
 ```
 
-with the ChatGPT bearer and account header, and the answer carries a call id in
-the `Location` header. Media then flows over **WebRTC** (SDP, ICE/STUN, DTLS,
-SRTP, Opus) and a **sideband WebSocket** carries control events. The sideband is
-worthless without the WebRTC call it belongs to.
-
-The standalone realtime WebSocket is API-key authenticated only, so it is not a
-way to reuse a ChatGPT subscription. That leaves three options, in cost order:
-
-1. API-key WebSocket — cheapest, but it silently replaces the subscription
-   requirement the design was built around, so it is a product decision, not an
-   implementation detail.
-2. A small ARM32 WebRTC stack (`libdatachannel`, `libsrtp`, `usrsctp`) — a real
-   dependency on a 491 MB ARMv7 musl device; out of scope for this change.
-3. Something smaller that has not been found yet.
-
-Until one of those is chosen, `libreecho-lived` **fails closed**. With no
-implemented transport it refuses to open a session and reports why, rather than
-pretending to talk:
+Once the device is signed in, the same path reports the missing transport:
 
 ```
-"GPT-Live unavailable: sign in to ChatGPT again."        (no credentials)
-"GPT-Live needs a WebRTC transport, which this build does not include yet."
+"GPT-Live needs a WebSocket transport, which this build does not include yet."
 ```
 
 ## What is implemented
@@ -116,7 +108,7 @@ pretending to talk:
 | Exactly-once delegation (bounded id→result cache) | done |
 | Bounded status/metrics over `/run/libreecho/live.sock` | done |
 | Mock transport covering timeout, disconnect, duplicate, refusal, error | done |
-| Realtime transport | **not implemented** (see above) |
+| Realtime WebSocket transport | **not implemented** (spec in `docs/GPT_LIVE_TRANSPORT.md`) |
 | Web control-centre mode selector, voice picker, status panel | not done |
 | Home Assistant `homeassistant.conversation` tool | not done |
 | LED patterns for Live states | not done |

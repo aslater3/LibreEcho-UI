@@ -788,6 +788,12 @@ int main(int argc, char **argv)
     le_live_tools_init(&state.tools);
     le_live_session_init(&state.session, &state.ring, &state.config,
                          &lived_session_ops, &state);
+    /*
+     * Publish the transport to the session before the first wake so the status
+     * socket can report what the transport is and why it is unusable - the
+     * answer a user needs before anything wakes, not only after a failed one.
+     */
+    state.session.transport.ops = state.config.transport_ops;
     snprintf(state.mock_scenario, sizeof(state.mock_scenario), "%s",
              state.config.mock_scenario ? state.config.mock_scenario
                                         : "session");
