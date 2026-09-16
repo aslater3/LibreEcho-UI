@@ -31,10 +31,14 @@ fi
 grep -Fq 'MDNS_INIT=${MDNS_INIT:-/etc/init.d/libreecho-mdnsd.init}' "$SCRIPT"
 grep -Fq 'MDNS_SOCKET=${MDNS_SOCKET:-/run/libreecho/mdns.sock}' "$SCRIPT"
 grep -Fq 'MDNS_SERVICES_DIR=${MDNS_SERVICES_DIR:-/usr/local/lib/libreecho-mdns/root/etc/avahi/services}' "$SCRIPT"
+grep -Fq 'MDNS_BUS_SOURCE=${MDNS_BUS_SOURCE:-/usr/local/lib/libreecho-mdns/root/run/dbus/system_bus_socket}' "$SCRIPT"
+grep -Fq 'mount_shared_mdns_bus()' "$SCRIPT"
+grep -Fq 'mount --bind "$MDNS_BUS_SOURCE" "$target_socket"' "$SCRIPT"
 grep -Fq 'mdns_status()' "$SCRIPT"
 grep -Fq -e '"$MDNS_INIT" status' "$SCRIPT"
 grep -Fq 'le_mdns_status(' "$SOURCE"
-grep -Fq '"mdns_running":%s' "$SOURCE"
+grep -Fq 'LE_MDNS_BUS_SOCKET' "$SOURCE"
+grep -Fq 'mdns_running' "$SOURCE"
 
 # AirPlay audio and Shairport lifecycle is unchanged and still owned here.
 grep -Fq 'shairport_path' "$SOURCE"

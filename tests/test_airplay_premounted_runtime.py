@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -25,6 +26,9 @@ class RuntimeMounts(unittest.TestCase):
             led_log.touch()
             bindir = root / 'bin'
             bindir.mkdir()
+            bus_path = root / 'mdns-system-bus'
+            bus = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            bus.bind(str(bus_path))
             # All mount operations are simulated, but successive attempts see
             # the actual state left by the preceding successful operations.
             scripts = {
@@ -52,7 +56,7 @@ done
             for name, body in scripts.items():
                 p=bindir/name;p.write_text(body);p.chmod(0o755)
             source=SCRIPT.read_text()
-            names=['mount_support','create_support_mounts','mount_runtime','stage_airplay_services']
+            names=['mount_support','mount_shared_mdns_bus','create_support_mounts','mount_runtime','stage_airplay_services']
             helpers=[]
             for name in names:
                 found=re.search(r'^'+name+r'\(\) \{\n.*?^\}',source,re.M|re.S)
@@ -61,6 +65,7 @@ done
                      RUNTIME_ROOT=str(runtime),PAYLOAD=str(payload),
                      MOUNT_LOG=str(log),MOUNT_STATE=str(state),
                      LED_LOG=str(led_log),
+                     MDNS_BUS_SOURCE=str(bus_path),
                      FAIL_TARGET=str(runtime)+fail if fail else '-',
                      AVAHI_CONFIG_SNAPSHOT=str(root/'avahi.conf'),
                      AVAHI_SERVICES_SOURCE=str(root/'absent'))
@@ -72,18 +77,19 @@ mount_led_socket() { printf '%s\\n' led-bridge >> "$LED_LOG"; }
 mount_runtime
 '''
             proc=subprocess.run(['sh','-c',program],env=env,capture_output=True,text=True,timeout=5)
+            bus.close()
             return proc.returncode,log.read_text(),str(runtime),led_log.read_text().splitlines()
 
     def test_bare_transaction_mount_gets_writable_support(self):
         rc,log,root,led=self.run_case([''])
         self.assertEqual(rc,0)
-        for suffix in ['/dev','/proc','/sys','/run','/var','/dev/shm','/run/libreecho-audio']:
+        for suffix in ['/dev','/proc','/sys','/run','/var','/dev/shm','/run/libreecho-audio','/run/dbus/system_bus_socket']:
             self.assertIn(root+suffix+'\n',log)
         self.assertNotIn('-t squashfs',log)
         self.assertEqual(led, ['led-bridge'])
 
     def test_complete_runtime_is_idempotent(self):
-        rc,log,_,led=self.run_case(['','/dev','/proc','/sys','/run','/var','/dev/shm','/run/libreecho-audio'])
+        rc,log,_,led=self.run_case(['','/dev','/proc','/sys','/run','/var','/dev/shm','/run/libreecho-audio','/run/dbus/system_bus_socket'])
         self.assertEqual(rc,0);self.assertEqual(log,'')
         self.assertEqual(led, ['led-bridge'])
 
@@ -95,7 +101,7 @@ mount_runtime
         self.assertEqual(led, ['led-bridge'])
 
     def test_support_failure_is_propagated(self):
-        for suffix in ['/dev','/proc','/sys','/run','/var','/dev/shm','/run/libreecho-audio']:
+        for suffix in ['/dev','/proc','/sys','/run','/var','/dev/shm','/run/libreecho-audio','/run/dbus/system_bus_socket']:
             with self.subTest(suffix=suffix):
                 rc,_,_,led=self.run_case([''],suffix)
                 self.assertNotEqual(rc,0)
