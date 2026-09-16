@@ -117,6 +117,7 @@ sh tests/test_microphone_fanout_contract.sh
 sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
 python3 tests/test_startup_state_contract.py
+node tests/test_sidebar_status_startup.js
 python3 tests/test_wake_word_ui_contract.py
 node tests/test_wifi_security_interaction.js
 sh tests/test_local_llm_ui_contract.sh
