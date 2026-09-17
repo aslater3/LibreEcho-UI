@@ -15,6 +15,7 @@
 #include "logd.h"
 #include "log.h"
 #include "service_env.h"
+#include "update_identity.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -120,6 +121,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     char state[64]="idle",progress_text[16]="0",version[96]="";
     char installed_version[96]="",rollback_version[96]="",latest_version[96]="";
     char check_status[64]="not-checked",check_error[96]="";
+    char resolved_tag[LE_UPDATE_TAG_SIZE]="",ota_sha[LE_UPDATE_SHA_SIZE]="";
     char source[64]="github-releases",channel[32]="stable",reachable[16]="unknown";
     char automatic_text[16]="0";
     char last_check_text[24]="0",last_success_text[24]="0";
@@ -127,6 +129,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     char escaped_rollback[192],escaped_latest[192],escaped_check_status[128];
     char escaped_check_error[192],escaped_source[128],escaped_channel[64];
     char escaped_reachable[32];
+    char escaped_resolved_tag[192],escaped_ota_sha[160];
     char components[LE_FEATURE_COMPONENTS_JSON_MAX],authority[LE_AUTHORITY_PROVENANCE_JSON_MAX];
     char escaped_transaction_state[80],escaped_last_result[80];
     le_feature_transaction_state transaction;
@@ -149,22 +152,27 @@ static void update_status_json(struct api_context*c,struct api_response*r)
                       installed_version,sizeof(installed_version));
         key_from_file("/data/libreecho/update/rolled-back","version",
                       rollback_version,sizeof(rollback_version));
-        key_from_file("/data/libreecho/update/check-status","status",
-                      check_status,sizeof(check_status));
-        key_from_file("/data/libreecho/update/check-status","error",
-                      check_error,sizeof(check_error));
-        key_from_file("/data/libreecho/update/check-status","source",
-                      source,sizeof(source));
-        key_from_file("/data/libreecho/update/check-status","channel",
-                      channel,sizeof(channel));
-        key_from_file("/data/libreecho/update/check-status","source_reachable",
-                      reachable,sizeof(reachable));
-        key_from_file("/data/libreecho/update/check-status","latest_version",
-                      latest_version,sizeof(latest_version));
-        key_from_file("/data/libreecho/update/check-status","last_check_epoch",
-                      last_check_text,sizeof(last_check_text));
-        key_from_file("/data/libreecho/update/check-status","last_success_epoch",
-                      last_success_text,sizeof(last_success_text));
+        /* Every field of the check record is read in one pass over one opened
+           snapshot. The check writer commits a new record with an atomic rename
+           while GETs stay serviceable, so separate reads could describe two
+           checks at once -- an old status or version beside the next check's
+           identity. */
+        {
+            struct le_update_field check_fields[]={
+                {"status",check_status,sizeof(check_status)},
+                {"error",check_error,sizeof(check_error)},
+                {"source",source,sizeof(source)},
+                {"channel",channel,sizeof(channel)},
+                {"source_reachable",reachable,sizeof(reachable)},
+                {"latest_version",latest_version,sizeof(latest_version)},
+                {LE_UPDATE_TAG_KEY,resolved_tag,sizeof(resolved_tag)},
+                {LE_UPDATE_SHA_KEY,ota_sha,sizeof(ota_sha)},
+                {"last_check_epoch",last_check_text,sizeof(last_check_text)},
+                {"last_success_epoch",last_success_text,sizeof(last_success_text)}
+            };
+            update_record_read("/data/libreecho/update/check-status",check_fields,
+                               sizeof(check_fields)/sizeof(check_fields[0]));
+        }
         key_from_file("/data/libreecho/update/automatic-updates","enabled",
                       automatic_text,sizeof(automatic_text));
         automatic=!strcmp(automatic_text,"1");
@@ -214,6 +222,8 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     json_escape(escaped_transaction_state,sizeof(escaped_transaction_state),transaction.state);
     json_escape(escaped_last_result,sizeof(escaped_last_result),transaction.last_result);
     json_escape(escaped_latest,sizeof(escaped_latest),latest_version);
+    json_escape(escaped_resolved_tag,sizeof(escaped_resolved_tag),resolved_tag);
+    json_escape(escaped_ota_sha,sizeof(escaped_ota_sha),ota_sha);
     json_escape(escaped_check_status,sizeof(escaped_check_status),check_status);
     json_escape(escaped_check_error,sizeof(escaped_check_error),check_error);
     json_escape(escaped_source,sizeof(escaped_source),source);
@@ -223,6 +233,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         "\"inactive_slot\":\"%s\",\"state\":\"%s\",\"progress\":%d,"
         "\"pending_reboot\":%s,\"pending_version\":\"%s\","
         "\"installed_version\":\"%s\",\"latest_version\":\"%s\","
+        "\"resolved_release_tag\":\"%s\",\"ota_sha256\":\"%s\","
         "\"channel\":\"%s\",\"source\":\"%s\",\"source_reachable\":\"%s\","
         "\"check_status\":\"%s\",\"check_error\":\"%s\","
         "\"last_check_epoch\":%ld,\"last_success_epoch\":%ld,"
@@ -233,7 +244,8 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         "\"components\":%s,\"transaction_state\":\"%s\",\"last_transaction_result\":\"%s\",\"authority_provenance\":%s},"
         "\"error\":null}",supported?"true":"false",current,inactive,escaped_state,
         progress,pending?"true":"false",escaped_version,escaped_installed,
-        escaped_latest,escaped_channel,escaped_source,escaped_reachable,
+        escaped_latest,escaped_resolved_tag,escaped_ota_sha,
+        escaped_channel,escaped_source,escaped_reachable,
         escaped_check_status,escaped_check_error,last_check,last_success,
         automatic?"true":"false",supported?"true":"false",escaped_rollback,
         allow_unsigned?"true":"false",le_update_max_upload_bytes(),

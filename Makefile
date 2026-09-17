@@ -54,7 +54,7 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/diagnostic_export.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/update_identity.c src/diagnostic_export.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -440,6 +440,14 @@ $(BUILD)/test-radiod-mp3-frames: tests/test_radiod_mp3_frames.c tests/radiod_mp3
 $(BUILD)/test-factory-reset: tests/test_factory_reset.c src/factory_reset.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-update-identity: tests/test_update_identity.c src/update_identity.c
+	@mkdir -p $(BUILD)
+	# --wrap lets the torn-read fixture stand at the reader's own open of the
+	# record: the test counts every open the reader makes and commits the next
+	# check record there, as the update helper's atomic rename would.
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc \
+		-Wl,--wrap=fopen $^ -o $@
 
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
@@ -922,6 +930,7 @@ clean:
 		$(BUILD)/test-action-sample \
 		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test-backend-linux-timers $(BUILD)/test-factory-reset \
+		$(BUILD)/test-update-identity \
 		$(BUILD)/test-thermal-zone-selection \
 		$(BUILD)/test-light-sensor \
 		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \

@@ -321,7 +321,15 @@ curl -fsS "$URL/api/v1/system/update" | jq -e --arg version "$OS_VERSION" \
      .data.check_status == "not-checked" and .data.check_error == "" and
      .data.last_check_epoch == 0 and .data.last_success_epoch == 0 and
      .data.automatic_updates == false and
-     .data.rollback_version == ""' \
+     # The resolved candidate identity is additive: the keys are always present,
+     # as strings, and a device with no finished check reports them empty, never
+     # stale. Every field of this envelope is read from one snapshot of the check
+     # record, so a check that lands mid-read cannot mix fields of two different
+     # checks (tests/test_update_identity.c drives that torn-read regression).
+     .data.rollback_version == "" and
+     (.data.resolved_release_tag | type == "string") and
+     (.data.ota_sha256 | type == "string") and
+     .data.resolved_release_tag == "" and .data.ota_sha256 == ""' \
     >/dev/null
 for endpoint in check apply; do
     code=$(curl -sS -o "/tmp/le-update-$endpoint.out" -w '%{http_code}' \
