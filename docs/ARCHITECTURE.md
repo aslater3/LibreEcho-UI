@@ -311,7 +311,8 @@ tools/libreecho-backup.sh restore /tmp/backup.tar.gz
 version-2 manifest records the bounded scope, required files, private secret
 policy, and exclusions. Factory defaults under `/etc/libreecho`, installed
 feature payloads, OTA/release identity, runtime state, logs, transaction files,
-raw wake PCM, and one-shot platform markers are not backed up.
+raw wake PCM, and one-shot platform markers are not backed up. Symlinked state
+is refused in both directions rather than archived or restored.
 
 Restore stages and validates both trees, including numeric ownership. It only
 replaces the live trees after staging succeeds, so ordinary copy or permission

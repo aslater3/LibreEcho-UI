@@ -4,7 +4,8 @@
 # The factory image under /etc/libreecho is a seed, not live state.  This tool
 # deliberately scopes itself to the consumer-owned /data/libreecho config and
 # secrets directories.  Feature payloads, OTA state, release identity, logs,
-# and runtime state are outside this backup contract.
+# runtime state, transaction files, one-shot markers, and symlinked state are
+# outside this backup contract: they are never captured and never restored.
 
 set -eu
 umask 077
@@ -50,10 +51,29 @@ require_active_state() {
     [ -d "$DATA_ROOT" ] || fail "active data root is unavailable: $DATA_ROOT"
     [ -d "$CONFIG_DIR" ] || fail "active config directory is unavailable: $CONFIG_DIR"
     [ -d "$SECRETS_DIR" ] || fail "active secrets directory is unavailable: $SECRETS_DIR"
-    [ -f "$CONFIG_DIR/web-config.json" ] || fail "required active config is unavailable"
-    [ -f "$CONFIG_DIR/users" ] || fail "required account state is unavailable"
-    [ -r "$CONFIG_DIR/web-config.json" ] || fail "required active config is unreadable"
-    [ -r "$CONFIG_DIR/users" ] || fail "required account state is unreadable"
+    [ -f "$CONFIG_DIR/web-config.json" ] || fail "required active config is unavailable: $CONFIG_DIR/web-config.json"
+    [ -f "$CONFIG_DIR/users" ] || fail "required account state is unavailable: $CONFIG_DIR/users"
+    [ -r "$CONFIG_DIR/web-config.json" ] || fail "required active config is unreadable: $CONFIG_DIR/web-config.json"
+    [ -r "$CONFIG_DIR/users" ] || fail "required account state is unreadable: $CONFIG_DIR/users"
+}
+
+# Persistent state is plain files and directories. A symlink in the tree is
+# either a broken backup or an attempt to make restored state point somewhere
+# else, and the daemons read these paths as root, so create and restore both
+# refuse it rather than reproduce it. `cp -R` and `tar` preserve links, and the
+# ownership pass has no type filter, so a link would otherwise be copied,
+# chowned through its target, and followed by the next reader.
+refuse_symlinks() {
+    root=$1
+    [ -d "$root" ] || return 1
+    # Fail closed: a scan that could not complete is not a "no links" result.
+    links=$(find "$root" -type l -print) || return 1
+    [ -z "$links" ] || {
+        printf 'Error: symbolic link in persistent state: %s\n' \
+            "$(printf '%s\n' "$links" | sed -n '1p')" >&2
+        return 1
+    }
+    return 0
 }
 
 copy_tree() {
@@ -121,8 +141,12 @@ apply_owner() {
 prune_excluded_files() {
     root=$1
     # Transaction files are not committed consumer state.  Raw PCM is a
-    # diagnostic artifact and may contain private microphone audio.
-    find "$root" -type f \( -name '*.tmp' -o -name '*.new' -o -name 'wake-dump.raw' -o -name 'vendor-import-force-next-boot' \) -exec rm -f {} + || return 1
+    # diagnostic artifact and may contain private microphone audio, and
+    # wake-dump-seconds is the one-shot request that produces it: waked clears
+    # that file as it reads it and exits when the dump ends, taking the wake
+    # word with it for that boot. Restoring an already-consumed request would
+    # replay a diagnostic outage, so neither file belongs in a backup.
+    find "$root" -type f \( -name '*.tmp' -o -name '*.new' -o -name 'wake-dump.raw' -o -name 'wake-dump-seconds' -o -name 'vendor-import-force-next-boot' \) -exec rm -f {} + || return 1
 }
 
 write_manifest() {
@@ -138,7 +162,7 @@ write_manifest() {
   "components": ["config", "secrets"],
   "required": ["config/web-config.json", "config/users"],
   "secret_policy": "included-with-private-permissions; protect or encrypt archive out-of-band",
-  "excluded": ["factory-seed:/etc/libreecho", "features:/data/libreecho/features", "ota:/data/libreecho/update", "runtime:/run/libreecho", "logs", "config-transaction-files", "config/wake-dump.raw", "config/vendor-import-force-next-boot", "release-identity"]
+  "excluded": ["factory-seed:/etc/libreecho", "payloads:/data/libreecho/features", "ota:/data/libreecho/update", "release-identity:/data/libreecho/data-manifest.json", "runtime-guard:/data/libreecho/network-recovery-reboot.guard", "runtime:/run/libreecho", "logs:/var/log/libreecho", "config-transaction-files:config/*.tmp", "config/wake-dump.raw", "config/wake-dump-seconds", "config/vendor-import-force-next-boot", "symlinked-state"]
 }
 EOF
 }
@@ -152,6 +176,10 @@ create_backup() {
     mkdir -p "$tmpdir/persistent/config" "$tmpdir/persistent/secrets"
     copy_tree "$CONFIG_DIR" "$tmpdir/persistent/config"
     copy_tree "$SECRETS_DIR" "$tmpdir/persistent/secrets"
+    refuse_symlinks "$tmpdir/persistent/config" ||
+        fail "active config contains a symbolic link and cannot be archived"
+    refuse_symlinks "$tmpdir/persistent/secrets" ||
+        fail "active secrets contain a symbolic link and cannot be archived"
     prune_excluded_files "$tmpdir/persistent/config"
     prune_excluded_files "$tmpdir/persistent/secrets"
     secure_tree "$tmpdir/persistent"
@@ -321,6 +349,8 @@ restore_backup() {
     trap 'cleanup_dir "$tmpdir"' EXIT HUP INT TERM
     tar -xzf "$backup" -C "$tmpdir"
     validate_archive "$tmpdir"
+    refuse_symlinks "$tmpdir/persistent" ||
+        fail "backup contains a symbolic link in persistent state; nothing was changed"
 
     printf 'Restore active persistent state from %s? (y/N) ' "$backup"
     reply=
@@ -358,6 +388,8 @@ list_backup() {
     trap 'cleanup_dir "$tmpdir"' EXIT HUP INT TERM
     tar -xzf "$backup" -C "$tmpdir"
     validate_archive "$tmpdir"
+    refuse_symlinks "$tmpdir/persistent" ||
+        fail "backup contains a symbolic link in persistent state and was not listed"
     printf 'Backup: %s\nManifest:\n' "$backup"
     cat "$tmpdir/manifest.json"
     printf '%s\n' 'Contents:'

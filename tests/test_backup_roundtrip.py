@@ -76,7 +76,8 @@ class BackupRoundTrip(unittest.TestCase):
             'secrets/openai-codex.json': 'synthetic-noncredential\n',
         }
         self.excluded = ['config/wake-dump.raw', 'config/web-config.json.tmp',
-                         'config/users.new', 'config/vendor-import-force-next-boot']
+                         'config/users.new', 'config/vendor-import-force-next-boot',
+                         'config/wake-dump-seconds']
         for relative, value in self.files.items():
             write(DATA / relative, value)
         for relative in self.excluded:
@@ -191,6 +192,27 @@ class BackupRoundTrip(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait(timeout=3)
+
+    def test_diagnostics_never_expose_captured_bytes(self):
+        # The archive legitimately contains credentials and account state, so no
+        # operation may echo those bytes back into its output or the manifest.
+        secret = 'fixture-credential-' + secrets.token_hex(16)
+        account = 'fixture-account-' + secrets.token_hex(16)
+        write(DATA / 'secrets/openai-codex.json', secret + '\n')
+        write(DATA / 'config/users', account + '\n')
+        results = {'create': self.call('create'), 'list': self.call('list'),
+                   'restore': self.call('restore')}
+        for name, result in results.items():
+            with self.subTest(action=name):
+                for value in [secret, account]:
+                    self.assertNotIn(value, result.stdout)
+                    self.assertNotIn(value, result.stderr)
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            manifest_file = archive.extractfile('manifest.json')
+            assert manifest_file is not None
+            manifest = json.dumps(json.load(manifest_file))
+        self.assertNotIn(secret, manifest)
+        self.assertNotIn(account, manifest)
 
     def test_missing_required_state_is_not_a_complete_backup(self):
         for relative in ['config/web-config.json', 'config/users', 'secrets']:
@@ -332,6 +354,46 @@ class BackupRoundTrip(unittest.TestCase):
         self.inject('sync', 'exit 7\n')
         self.call('restore', success=False)
         self.assertEqual(self.actions('start'), [])
+
+    def hostile_archive(self):
+        """A structurally valid archive that also plants a symlink."""
+        stage = Path('/out/hostile-stage')
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True)
+        for relative in ['config/web-config.json', 'config/users',
+                         'secrets/openai-codex.json']:
+            write(stage / 'persistent' / relative, self.files[relative])
+        # Points back at the factory seed: restored state must never be a
+        # reference to another tree, however valid its target looks.
+        os.symlink('/etc/libreecho/web-config.json',
+                   stage / 'persistent/config/escape-link')
+        write(stage / 'manifest.json', '{"version":2}\n')
+        hostile = Path('/out/hostile-backup.tar.gz')
+        with tarfile.open(hostile, 'w:gz') as archive:
+            for member in sorted(stage.rglob('*')):
+                archive.add(member, arcname=str(member.relative_to(stage)))
+        return hostile
+
+    def test_symlinked_state_is_refused_in_both_directions(self):
+        # A symlink in the live trees must not become a backup...
+        os.symlink('/etc/libreecho/web-config.json', DATA / 'config/live-link')
+        result = self.call('create', success=False)
+        self.assertIn('symbolic link', result.stderr)
+        self.assertFalse(ARCHIVE.exists())
+        (DATA / 'config/live-link').unlink()
+
+        # ...and a symlink planted in an archive must not reach live state.
+        self.call('create')
+        result = self.call('restore', path=self.hostile_archive(), success=False)
+        self.assertIn('symbolic link', result.stderr)
+        self.assertEqual(self.actions('stop'), [],
+                         'services were stopped for an archive refused up front')
+        for relative, value in self.files.items():
+            self.assertEqual((DATA / relative).read_text(), value,
+                             'live state changed: ' + relative)
+        self.assertFalse((DATA / 'config/escape-link').exists())
+        self.assertIn('symbolic link', self.call(
+            'list', path=self.hostile_archive(), success=False).stderr)
 
     def test_service_restart_failure_is_not_success(self):
         self.call('create')

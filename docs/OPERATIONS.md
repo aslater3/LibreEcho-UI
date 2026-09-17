@@ -186,9 +186,10 @@ tools/libreecho-backup.sh create /tmp/backup.tar.gz
 
 # The archive contains active /data/libreecho/config and /data/libreecho/secrets
 # only. It does not contain the /etc/libreecho factory seed, logs, installed
-# features, OTA/release identity, runtime state, transaction files, or raw wake
-# audio. Credentials are included as private files and the archive must be
-# protected or encrypted out-of-band.
+# features, OTA/release identity, runtime state, transaction files, one-shot
+# diagnostic requests, symlinked state, or raw wake audio. Credentials are
+# included as private files and the archive must be protected or encrypted
+# out-of-band.
 ```
 
 ### Restore Backup
@@ -212,6 +213,10 @@ rollback; if recovery cannot put an original tree back, retain its
 This is not a power-loss-atomic transaction across the two trees. Both target
 directories must already exist with the intended owner; restore after a fresh
 image reinstall remains a separate acceptance check.
+
+Symlinked state is refused in both directions: creation fails instead of
+archiving a link, and an archive whose trees contain a link is rejected before
+the restore prompt, leaving live state unchanged.
 
 Creation uses file copies, not an atomic snapshot, and does not stop services.
 Quiesce persistent-state writers before creating a backup that must be
