@@ -122,6 +122,7 @@ python3 tests/test_wake_word_ui_contract.py
 node tests/test_wifi_security_interaction.js
 sh tests/test_local_llm_ui_contract.sh
 python3 tests/test_home_location_panel_contract.py
+python3 tests/test_weather_provider_contract.py
 python3 tools/test_virtual_echo.py
 python3 tests/test_now_playing_ui_contract.py
 python3 tests/test_config_persist_contract.py

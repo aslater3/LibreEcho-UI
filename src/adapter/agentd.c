@@ -1406,19 +1406,32 @@ static int fetch_open_meteo(struct agent_state *state, char *out, size_t size)
     struct le_llm_http_response *response;
     int outcome = 0;
     double temperature = 0.0, wind = 0.0, coded = 0.0;
+    const char *model;
 
     request = calloc(1, sizeof(*request));
     response = calloc(1, sizeof(*response));
     if (!request || !response)
         goto done;
+    /*
+     * The UK Met Office models are served from this same keyless endpoint, so
+     * a UK owner can be answered from the Met Office without an account, a
+     * key or a second transport.  ukmo_seamless is deliberate rather than the
+     * 2 km UK model alone: the 2 km model has no data outside its UK domain
+     * and answers HTTP 400 there, while the seamless blend falls back to the
+     * global UKMO model elsewhere, so a location that leaves the UK keeps
+     * working instead of losing its weather.
+     */
+    model = !strcmp(state->config.weather_provider, "ukmo")
+        ? "&models=ukmo_seamless" : "";
     (void)snprintf(request->method, sizeof(request->method), "GET");
     if (snprintf(request->url, sizeof(request->url),
                  "https://api.open-meteo.com/v1/forecast"
                  "?latitude=%s&longitude=%s"
                  "&current=temperature_2m,weather_code,wind_speed_10m"
-                 "&temperature_unit=fahrenheit&wind_speed_unit=mph",
+                 "&temperature_unit=fahrenheit&wind_speed_unit=mph%s",
                  state->config.latitude,
-                 state->config.longitude) >= (int)sizeof(request->url))
+                 state->config.longitude,
+                 model) >= (int)sizeof(request->url))
         goto done;
     if (le_llm_http_execute(state->curl_path, request, NULL, NULL,
                             response) < 0 || response->status != 200)
@@ -1910,9 +1923,10 @@ static int command_configure(struct agent_state *state, const char *args,
         strcpy(updated.longitude, value);
     parsed = json_get_string(args, "weather_provider", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && strcmp(value, "open-meteo") &&
-                       strcmp(value, "met-no") && strcmp(value, "off")))
+                       strcmp(value, "ukmo") && strcmp(value, "met-no") &&
+                       strcmp(value, "off")))
         return respond(fd, id, 0,
-                       "weather_provider must be open-meteo, met-no or off");
+                       "weather_provider must be open-meteo, ukmo, met-no or off");
     if (parsed > 0)
         strcpy(updated.weather_provider, value);
     parsed = json_get_string(args, "clock_format", value, sizeof(value));

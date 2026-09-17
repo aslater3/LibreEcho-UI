@@ -676,6 +676,25 @@ device that has never stored a choice receives it, while an explicit `"12"` or
 `"24"` is kept. Any other value is rejected with HTTP 400 and the previous
 configuration is left unchanged.
 
+`home_location`, `latitude` and `longitude` place the device for weather and
+local answers: the place name is what the assistant says back, the coordinates
+are what the providers query. Each field is applied only when it carries a
+value, so an empty coordinate leaves the previous one in place rather than
+clearing it — a place has to be replaced, not blanked.
+
+`weather_provider` selects where that reading comes from:
+
+| Value | Source |
+|---|---|
+| `"open-meteo"` | Open-Meteo best-match model (the default) |
+| `"ukmo"` | UK Met Office UKMO models served through Open-Meteo — keyless, and the blend falls back to the global UKMO model outside the UK domain of the 2 km model |
+| `"met-no"` | MET Norway, compact forecast |
+| `"off"` | no weather lookup; the assistant declines weather questions |
+
+Any other value is rejected with HTTP 400 and the previous configuration is
+left unchanged. All four sources are keyless: no account, API key or
+attribution-bearing credential is stored on the device.
+
 #### POST /api/v1/assistant/auth/start
 
 Starts ChatGPT subscription device login. The response contains a
