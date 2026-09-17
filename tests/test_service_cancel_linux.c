@@ -16,6 +16,10 @@
  * fix from turning into "any signal ends supervision work", which would
  * abandon a healthy recovery instead of finishing it.
  *
+ * The group case is the one that keeps the stop from ending at the leader: a
+ * recovery shell can exit on the signal while the child it started ignores it,
+ * so the shell being reaped is not the recovery being gone.
+ *
  * The flag handed to the helper is the same shape as watchdogd's: it is set
  * while the caller wants the work to continue, and the handler that delivers
  * the stop request clears it. SIGALRM stands in for the SIGTERM the daemon
@@ -211,6 +215,54 @@ static void test_interruption_alone_does_not_cancel(void)
     assert_no_child_left();
 }
 
+/* The leader is not the group. A recovery shell that does not trap a signal
+   exits on the SIGTERM while the work it started ignores the same signal, so
+   the shell is reaped while the group is still running. A stop that returns
+   on the leader's exit leaves that work reparented and alive -- exactly the
+   state the caller stopped it for -- so the group is waited on and killed
+   even though the leader is already gone. */
+static void test_stop_ends_the_group_after_the_leader_exits(void)
+{
+    char path[] = "/tmp/libreecho-cancel-group.XXXXXX";
+    char script[512];
+    char line[64];
+    double elapsed;
+    FILE *file;
+    long pid;
+    int fd;
+
+    fd = mkstemp(path);
+    assert(fd >= 0);
+    close(fd);
+    unlink(path);
+    /* The background child ignores SIGTERM and records itself once it is
+       visible in /proc, so an empty file means the case never happened rather
+       than that nothing was left behind. The shell traps the signal with an
+       exit, so its own death is not the group's death. */
+    snprintf(script, sizeof(script),
+             "sh -c 'trap \"\" TERM; while :; do sleep 0.3; done' & child=$!; "
+             "[ -d \"/proc/$child\" ] && echo $child > %s; "
+             "trap 'exit 0' TERM; wait",
+             path);
+    arm_alarm(1, 1);
+    assert(run_script(script, &running, &elapsed) == -1);
+    alarm(0);
+    assert(interrupts >= 1);
+    /* The leader went at the stop request and the group was not waited out:
+       SIGTERM grace for the group, then SIGKILL. */
+    assert(elapsed < 4.0);
+
+    file = fopen(path, "r");
+    assert(file != NULL);
+    assert(fgets(line, sizeof(line), file) != NULL);
+    fclose(file);
+    pid = strtol(line, NULL, 10);
+    assert(pid > 1);
+    assert(!alive((pid_t)pid));
+    unlink(path);
+    assert_no_child_left();
+}
+
 /* A caller that has already been asked to stop starts nothing: the recovery
    would be work it is quiescing, forked only to be killed again. */
 static void test_stop_before_the_fork_starts_nothing(void)
@@ -246,6 +298,7 @@ int main(void)
     test_stop_kills_a_recovery_that_ignores_it();
     test_stop_ends_the_work_the_recovery_started();
     test_interruption_alone_does_not_cancel();
+    test_stop_ends_the_group_after_the_leader_exits();
     test_stop_before_the_fork_starts_nothing();
     test_wait_semantics_are_unchanged();
     puts("service command cancellation: stop ends the recovery "

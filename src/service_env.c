@@ -86,6 +86,15 @@ int le_service_command(const char *path, const char *const *argv)
  * first, then SIGKILL for a recovery that ignores it, and the child is reaped
  * on every path: a stop that left a zombie behind would still answer kill -0
  * and the caller would read its own stop as incomplete.
+ *
+ * The group, not the leader, is the unit that is cancelled. A recovery shell
+ * exits on the SIGTERM it is not trapping while a child it started ignores it,
+ * so reaping the leader says nothing about the work: the leader can be gone
+ * with the group still running, and returning there leaves the recovery --
+ * reparented and alive -- doing the very thing the caller stopped it for. The
+ * wait therefore covers the leader and the group separately: the leader is
+ * reaped so no zombie is left, and the group is then waited on until it is
+ * empty, with SIGKILL for whatever is still in it when the grace period ends.
  */
 int le_service_command_cancellable(const char *path, const char *const *argv,
                                    const volatile sig_atomic_t *running)
@@ -94,6 +103,7 @@ int le_service_command_cancellable(const char *path, const char *const *argv,
     pid_t child;
     int status;
     int polls;
+    int reaped = 0;
 
     if (!path || !path[0] || !argv)
         return -1;
@@ -128,14 +138,38 @@ int le_service_command_cancellable(const char *path, const char *const *argv,
        created. */
     (void)kill(-child, SIGTERM);
     (void)kill(child, SIGTERM);
-    for (polls = 0; polls < 10; ++polls) {
+    /* The leader first: a stop that leaves a zombie behind would still answer
+       kill -0 and the caller would read its own stop as incomplete. */
+    for (polls = 0; polls < 10 && !reaped; ++polls) {
         if (waitpid(child, &status, WNOHANG) == child)
-            return -1;
-        nanosleep(&tick, NULL);
+            reaped = 1;
+        else
+            (void)nanosleep(&tick, NULL);
     }
-    (void)kill(-child, SIGKILL);
-    (void)kill(child, SIGKILL);
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR)
-        continue;
+    if (!reaped) {
+        (void)kill(-child, SIGKILL);
+        (void)kill(child, SIGKILL);
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+            continue;
+        reaped = 1;
+    }
+    /* Then the group, which can outlive its leader: the shell that held the
+       init script is reaped and the child it started -- ignoring SIGTERM --
+       is still in the group. Wait for the group to empty, then SIGKILL what
+       is left. The leader being gone is not the recovery being gone. */
+    for (polls = 0; polls < 10; ++polls) {
+        if (kill(-child, 0) < 0 && errno == ESRCH)
+            break;
+        (void)nanosleep(&tick, NULL);
+    }
+    if (kill(-child, 0) == 0 || errno != ESRCH) {
+        (void)kill(-child, SIGKILL);
+        (void)kill(child, SIGKILL);
+        for (polls = 0; polls < 10; ++polls) {
+            if (kill(-child, 0) < 0 && errno == ESRCH)
+                break;
+            (void)nanosleep(&tick, NULL);
+        }
+    }
     return -1;
 }
