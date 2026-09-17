@@ -1399,11 +1399,13 @@ function bindWeatherLookup(a){
  };
  ['#wx-location','#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=warn});
  warn();
- const fill=(latitude,longitude,place,message)=>{
+ const fill=(latitude,longitude,place,message,mine)=>{
+  if(mine!==seq)return;
   $('#wx-lat').value=(+latitude).toFixed(4);
   $('#wx-lon').value=(+longitude).toFixed(4);
   if(place)$('#wx-location').value=place;
-  $('#save-wx').disabled=false;
+  /* These coordinates are this place's, so the pending state is over. */
+  setPending(false);
   note.textContent=message;
   warn();
  };
@@ -1419,23 +1421,25 @@ function bindWeatherLookup(a){
   * would repeat falls back to its coordinates rather than showing two identical
   * buttons for different locations.
   */
- const offer=(hits,prefix)=>{
+ const offer=(hits,prefix,mine)=>{
+  if(mine!==seq)return false;
   const labels=hits.map(describe),repeated=labels.map(l=>labels.filter(x=>x===l).length>1);
   note.innerHTML=esc(prefix)+' <strong>Choose the place:</strong> '+hits.map((h,i)=>
    `<button class="secondary-btn wx-candidate" data-index="${i}">${esc(repeated[i]
      ? labels[i]+` ${(+h.latitude).toFixed(2)}, ${(+h.longitude).toFixed(2)}` : labels[i])}</button>`).join(' ');
   /*
-   * A choice is pending, and the coordinates still on screen belong to the
-   * previous place, so Save stays disabled until one is picked: otherwise the
-   * new name would be stored against the old coordinates. Editing any field
-   * re-enables it through bindDirty.
+   * A choice is still pending: the coordinates on screen belong to whatever was
+   * looked up before, so Save stays shut until one of these is picked -- and
+   * stays shut through an edit, because bindDirty would otherwise re-enable it
+   * and the name could be stored against those coordinates.
    */
-  $('#save-wx').disabled=true;
+  setPending(true);
   $$('.wx-candidate').forEach(button=>button.onclick=()=>{
    const hit=hits[+button.dataset.index]; if(!hit)return;
    fill(hit.latitude,hit.longitude,
-        [hit.name,hit.admin1].filter(Boolean).join(', '),'Found '+describe(hit));
+        [hit.name,hit.admin1].filter(Boolean).join(', '),'Found '+describe(hit),mine);
   });
+  return true;
  };
  /*
   * A UK postcode is the input this geocoder cannot answer: it resolves place
@@ -1451,9 +1455,18 @@ function bindWeatherLookup(a){
     as well as the button's state. */
  const save=$('#save-wx');
  const setPending=pending=>{if(!save)return;if(pending){save.dataset.lookupPending='1';save.disabled=true}else delete save.dataset.lookupPending};
+ /* Every lookup takes a number, and only the newest may write anything: a slow
+    request that lands after a newer one has to be dropped rather than overwrite
+    the newer result. */
+ let seq=0;
+ /* A card that has just been bound is not mid-lookup, and a request still in
+    flight from a previous binding must not write into this one. */
+ seq++;setPending(false);
  $('#wx-lookup').onclick=async()=>{
   const place=$('#wx-location').value.trim();
   if(!place){note.textContent='Enter a place first';return}
+  const mine=++seq;
+  let offered=false;
   setPending(true);
   note.textContent='Looking up…';
   try{
@@ -1466,7 +1479,7 @@ function bindWeatherLookup(a){
      if(Number.isFinite(+p.latitude)&&Number.isFinite(+p.longitude)){
       fill(p.latitude,p.longitude,
            [p.postcode,p.admin_district||p.region||p.country].filter(Boolean).join(', '),
-           `Found ${[p.postcode,p.admin_district||p.country||''].filter(Boolean).join(', ')} — now set the place name if you want something shorter`);
+           `Found ${[p.postcode,p.admin_district||p.country||''].filter(Boolean).join(', ')} — now set the place name if you want something shorter`,mine);
       return;
      }
     }
@@ -1498,13 +1511,13 @@ function bindWeatherLookup(a){
       : 'No match for that place. Check the spelling, or enter a town or city name (a UK postcode works too).';
     return;
    }
-   if(dropped){offer(hits,`Nothing matched "${place}". Closest name matches:`);return}
-   if(hits.length>1){offer(hits,`${hits.length} places match "${place}".`);return}
+   if(dropped){offered=offer(hits,`Nothing matched "${place}". Closest name matches:`,mine);return}
+   if(hits.length>1){offered=offer(hits,`${hits.length} places match "${place}".`,mine);return}
    const h=hits[0];
    fill(h.latitude,h.longitude,[h.name,h.admin1].filter(Boolean).join(', '),
-        `Found ${describe(h)}`);
-  }catch(e){ note.textContent='Lookup failed: '+e.message; }
-  finally{ setPending(false); }
+        `Found ${describe(h)}`,mine);
+  }catch(e){ if(mine===seq)note.textContent='Lookup failed: '+e.message; }
+  finally{ if(mine===seq&&!offered)setPending(false); }
  };
 }
 function bindWeather(a){

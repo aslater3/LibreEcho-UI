@@ -208,6 +208,55 @@ const el = id => elements.get(id);
     globalThis.mutate = realMutate;
   }
 
+  /*
+   * Two lookups in a row: the older response must not overwrite the newer one
+   * when it lands late, and only the newest may touch the fields.
+   */
+  {
+    const realFetch = globalThis.fetch;
+    let releaseSlow = null;
+    const slow = new Promise(resolve => { releaseSlow = resolve; });
+    globalThis.fetch = url => String(url).includes('name=Slowplace')
+      ? slow.then(()=>({ok:true,status:200,json:async()=>({results:[
+          {name:'Slowplace',admin1:'Slowshire',country_code:'GB',
+           latitude:1.0,longitude:2.0}]})}))
+      : Promise.resolve({ok:true,status:200,json:async()=>({results:[
+          {name:'Fastplace',admin1:'Fastshire',country_code:'GB',
+           latitude:53.9,longitude:-2.9}]})});
+    el('#wx-location').value = 'Slowplace';
+    const slowLookup = el('#wx-lookup').onclick();
+    el('#wx-location').value = 'Fastplace';
+    await el('#wx-lookup').onclick();
+    assert.equal(el('#wx-lat').value,'53.9000','the newer lookup did not fill');
+    releaseSlow();
+    await slowLookup;
+    assert.equal(el('#wx-lat').value,'53.9000',
+                 'a superseded lookup overwrote the newer result');
+    globalThis.fetch = realFetch;
+  }
+
+  /*
+   * Once candidates are on offer the card stays pending through an edit:
+   * bindDirty re-enables Save, and the coordinates on screen are the previous
+   * lookup's, so saving would pair them with the edited name.
+   */
+  {
+    const realFetch = globalThis.fetch, realMutate = globalThis.mutate;
+    let mutated = null;
+    globalThis.mutate = (path, body) => { mutated = {path, body}; };
+    el('#wx-location').value = 'Preston';
+    await el('#wx-lookup').onclick();
+    assert(/2 places match/.test(el('#wx-lookup-note').innerHTML),
+           'the ambiguous case did not offer candidates');
+    el('#save-wx').disabled = false;            /* what bindDirty does */
+    el('#wx-location').value = 'Preston, edited';
+    document.querySelector('#save-wx').onclick();
+    assert(mutated === null,
+           'an edited name was saved against an earlier lookup\'s coordinates');
+    globalThis.mutate = realMutate;
+    globalThis.fetch = realFetch;
+  }
+
   /* The advisory has to be wired too: it is how a missing coordinate shows. */
   el('#wx-location').value = 'Somewhere without coordinates';
   el('#wx-lat').value = '';

@@ -18,6 +18,9 @@ assert "function lookupPending(" in app and "if(lookupPending())" in app, (
     "a lookup in flight must block saving on the fallback path too")
 assert "if(lookupPending())" in source, (
     "a lookup in flight must block saving here as well")
+assert "mine!==seq" in app, (
+    "a superseded lookup must not write into the fields")
+assert "const mine=++seq;" in app, "the lookup sequence is not tracked"
 assert "weather_provider:provider" in source
 assert "home_location:location" in source
 assert "haveLatitude!==haveLongitude" in source
