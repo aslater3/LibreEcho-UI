@@ -1617,14 +1617,36 @@ record. `volume_capable`, `hardware_mute`, and `action_capable` reflect the
 keys found on the currently discovered evdev devices; `stale` is true when the
 status record is missing, disconnected, or older than 15 seconds.
 
-`privacy_latch` reports the kernel's privacy latch, which is what lights the lamp
-in the mute button: `true` when it is engaged, `false` when it is released, and
-`null` when there is no fresh reading — absence of a reading is not evidence that
-the latch is released. It is the only truthful source for that lamp's state: a
-software mute (`microphone_muted` on `/audio`) lights the light ring and leaves
-the lamp dark, because the lamp is wired to the latch rather than to the audio
-path. `hardware_mute` above is a capability ("this device has a mute button"),
-not a state. Software cannot assert or release the latch; the button does.
+`privacy_latch` reports the kernel's privacy latch, which lights the lamp in the
+mute button: `true` when it is engaged, `false` when it is released, and `null`
+when there is no fresh reading — absence of a reading is not evidence that the
+latch is released. Software cannot assert or release that latch, and while it is
+engaged the button owns the lamp. `hardware_mute` above is a capability ("this
+device has a mute button"), not a state. On an image without the mute-lamp
+control the latch is the only source for the lamp's state: a software mute
+(`microphone_muted` on `/audio`) lights the light ring and leaves the lamp dark,
+because the lamp is wired to the latch rather than to the audio path. Where
+`lamp_control` below is `true`, a software mute lights that lamp as well, which
+is what that field reports.
+`lamp_control` reports whether software can light the lamp in the mute button at
+all: `true` when the kernel exposes the mute-lamp control and last accepted a
+write, `false` when the kernel refuses the write outright (a board whose hardware
+latch owns the line) or software cannot write the attribute at all (an image that
+predates the control, or a driver that has not bound yet), and `null` when there
+is no fresh reading or nothing has tested the control yet — a daemon that has not
+tried to write it has not learned that software cannot. Only a definite kernel
+refusal settles the question: a missing attribute, or any failure that may pass,
+is probed again, so a driver that binds later turns the field `true` without
+restarting the daemon. A write the kernel defers while the button's latch is
+engaged is not a refusal either: the request is recorded and applied when the
+line is free, so the field keeps the answer it already had — `null` while nothing
+has tested the control, and `true` where a write has already been accepted, since
+a deferral does not unlearn proven support — rather than becoming `false`. It is
+what the UI uses to describe the lamp: with the control, a software mute lights
+it, and without it the lamp can only follow the button.
+Both fields describe the lamp indication; neither reports that software engaged
+the hardware privacy latch, which only the button can do.
+
 `available_sounds` lists the installed raw sounds that can be previewed, and
 `action_sounds` is the comma-separated rotation list in play order. Sound names
 are lowercase letters, digits, hyphens, or underscores and are at most 48

@@ -400,27 +400,57 @@ function bindNoise(n){
  const stop=$('#noise-stop');if(stop){stop.disabled=!n.active;stop.onclick=()=>del('/audio/noise','Sleep sounds stopped')}
  const start=$('#noise-start');if(start)start.onclick=()=>post('/audio/noise',{colour:$('#noise-colour').value,level:Math.max(1,+$('#noise-level').value),minutes:+$('#noise-minutes').value},'Sleep sounds playing')}
 /*
- * The mute button's lamp is wired to the kernel's hardware privacy latch, not to
- * the audio path, so a software mute lights the ring and leaves the lamp dark --
- * which is exactly how a muted device gets mistaken for a working one. Say which
- * of the two is in force rather than letting the dark lamp imply the other.
+ * The mute button's lamp is wired to the kernel's hardware privacy latch. An
+ * image whose kernel also exposes the mute_lamp control lets software light it
+ * directly; one without it lights the ring from a software mute and leaves the
+ * lamp dark -- which is exactly how a muted device gets mistaken for a working
+ * one. Say which of the two is in force rather than letting either state imply
+ * the other. `lamp_control` says whether software can light the lamp at all, and
  * `privacy_latch` is null when the daemon has no fresh reading: absence of a
  * reading is not evidence that the latch is released.
  */
 function muteLampNote(a,b){
+ /* Whether software can light the lamp at all decides how to describe it: an
+    image with the kernel's mute_lamp control lights it from a software mute, and
+    one without it can only follow the button. */
+ const soft=!!(b&&b.lamp_control===true),off=!!(b&&b.lamp_control===false),muted=!!(a&&a.microphone_muted);
  const text=(()=>{
+  /*
+   * The latch comes first and outranks the software mute: while it is engaged
+   * the button owns the lamp and software cannot put it out, so promising that
+   * unmuting lights or puts out the lamp would give the wrong instruction for
+   * the one path the user cannot drive from the page.
+   */
+  if(b&&b.privacy_latch===true)return 'The mute button\'s lamp is lit: its hardware privacy latch is engaged and the microphones are cut in hardware. Press the button to release it — software cannot.';
+  if(soft&&muted)return 'Muted: the ring is red and the mute button\'s lamp is lit — this image lights that lamp from the software mute. The lamp is an indication, not the button\'s hardware privacy latch: software cannot assert or release that latch, so press the button for it. Unmuting puts this lamp out unless the button\'s latch has taken it over.';
   if(!b||b.privacy_latch===undefined||b.privacy_latch===null){
-   if(a&&a.microphone_muted)return 'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — it follows the button\'s hardware privacy latch.';
-   return '';
+   if(!muted)return '';
+   /* The latch has not been read. An absent control still means the lamp follows
+      the button; an unreported one means neither fact is known, so neither is
+      claimed -- null is not "software cannot", it is "not answered". */
+   return off?'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — software cannot light it here, so it follows the button\'s hardware privacy latch, which has no fresh reading right now.':'Software mute: the microphones are muted and the ring is red. This image has not reported whether software can light the mute button\'s lamp, so neither is claimed; the ring shows the mute either way.';
   }
-  if(b.privacy_latch)return 'The mute button\'s lamp is lit: its hardware privacy latch is engaged and the microphones are cut in hardware. Press the button to release it — software cannot.';
-  if(a&&a.microphone_muted)return 'Software mute only: the ring is red and the mute button\'s lamp stays dark, because that lamp is wired to the button\'s privacy latch. Use the button if you want the hardware cut.';
-  return '';
+  if(!muted)return '';
+  return off?'Software mute only: the ring is red and the mute button\'s lamp stays dark, because that lamp is wired to the button\'s privacy latch. Use the button if you want the hardware cut.':'Software mute: the ring is red and the microphones are muted. This image has not reported whether software can light the mute button\'s lamp, so neither is claimed; the ring shows the mute either way.';
  })();
  /* Always rendered, empty when there is nothing to say: the button is on the
     device, so the note is re-read in place while either of these pages is open,
     and an element that was never drawn could not come back. */
  return `<p class="muted" id="mute-lamp-note">${esc(text)}</p>`;
+}
+/*
+ * The LED & Buttons page's standing copy about the lamp, which has to make the
+ * same distinction the note does: with the kernel's mute-lamp control a software
+ * mute does switch the lamp, and saying software cannot switch it would be the
+ * same silent mismatch in the other direction.
+ */
+function muteLampHardwareNote(b){
+ if(b&&b.lamp_control===true)return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and a software mute does light it — this image has the kernel control for it. That lamp is an indication: the button\'s hardware privacy latch is a separate mechanism that software cannot assert or release, and muting from this page does not engage it.';
+ if(b&&b.lamp_control===false)return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and software cannot switch it — it is wired to the button\'s privacy latch, so muting from this page lights the ring and leaves the lamp dark.';
+ /* Neither is known yet, so neither is claimed: /buttons reports null until a
+    write has tested the control, and telling the user software cannot switch the
+    lamp would be a fact the daemon has not learned. */
+ return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it. This image has not reported whether software can switch that lamp, so neither is claimed here: muting from this page lights the red ring, and whether the lamp in the mute button follows it has not been reported.';
 }
 /*
  * The lamp changes under the page when someone presses the mute button, and the
@@ -434,10 +464,14 @@ function muteLampNote(a,b){
 async function refreshMuteLamp(){
  const page=state.page,generation=state.renderGeneration;
  const note=$('#mute-lamp-note');if(!note)return;
+ /* Both pages that draw the note need the software mute state as well as the
+    lamp capabilities: the buttons record alone cannot say which mute path is in
+    force. */
+ const needsAudio=page==='Audio'||page==='LED & Buttons';
  let buttons=null,audio=null;
  try{
   buttons=await api('/buttons');
-  if(page==='Audio')audio=await api('/audio');
+  if(needsAudio)audio=await api('/audio');
  }catch(e){}
  /*
   * render() clears state.timer and re-arms it for whatever page is showing, so
@@ -446,9 +480,9 @@ async function refreshMuteLamp(){
   * refresh untracked.
   */
  if(state.page!==page||state.renderGeneration!==generation)return;
- /* Every response the note needs has to have arrived: on the Audio page a
-    failed /audio must not replace a real warning with an empty note. */
- if(buttons&&(page!=='Audio'||audio)){
+ /* Every response the note needs has to have arrived: a failed /audio must not
+    replace a real warning with an empty note. */
+ if(buttons&&(!needsAudio||audio)){
   const current=$('#mute-lamp-note');
   if(current)current.outerHTML=muteLampNote(audio,buttons);
  }
@@ -1354,7 +1388,7 @@ function bindActionSounds(){
 function actionSoundSelection(){
  return $$('#content input[data-sound]').filter(x=>x.checked).map(x=>x.dataset.sound).join(',');
 }
-async function ledPage(){const [l,b]=await Promise.all([api('/led'),api('/buttons')]);const hex='#'+[l.colour.r,l.colour.g,l.colour.b].map(n=>n.toString(16).padStart(2,'0')).join('');const names={listening:'Listening',thinking:'Thinking',error:'Error',dnd:'Do not disturb',night:'Night'};const n=l.night||{enabled:false,active:false,start_minute:1320,end_minute:420};const hhmm=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');const mins=t=>{const p=String(t||'').split(':');return p.length===2?(+p[0])*60+(+p[1]):NaN};const profiles=Object.entries(l.profiles||{}).map(([k,v])=>{const colour=typeof v==='string'?v:'#'+[v.r,v.g,v.b].map(n=>Number(n).toString(16).padStart(2,'0')).join('');const brightness=typeof v==='object'&&v?Number(v.brightness??l.brightness):l.brightness;return `<div class="led-profile"><label class="field"><span>${names[k]||k}</span><input id="led-profile-${k}" data-profile="${k}" type="color" value="${colour}"></label><div class="swatch-row"><code id="led-profile-hex-${k}">${esc(colour)}</code></div>${range('Brightness',brightness,`led-profile-brightness-${k}`)}<button class="secondary-btn profile-save" data-profile="${k}">Save ${names[k]||k}</button></div>`}).join('');content.innerHTML=`<div class="settings-grid">${panel('Light ring',`<label class="field"><span>Current colour</span><input id="led-colour" type="color" value="${hex}"></label>`+range('Brightness',l.brightness,'led-brightness')+toggle('Music visualizer',l.visualizer_enabled!==false,'led-visualizer')+`<p class="muted">Show reactive equalizer animations on the ring while music is playing.</p>`+ledRing(l)+`<div class="led-preview" data-led="${rgb(l.colour)}"><i></i><span>Live preview</span></div><div class="button-row">${saveButton('save-led')}${action('Run LED test','led-test')}</div>`)}${panel('State themes',`<p class="muted">Choose the ring colour and brightness used while LibreEcho is listening, thinking, reporting an error, or in do-not-disturb mode.</p><div class="led-profiles">${profiles}</div>`)}${panel('Night mode',`<p class="muted">Between these times the ring is capped to the night brightness. Colours are kept, so the device still shows what it is doing -- just dimly. Times are the device's local time.</p>${toggle('Enable night mode',n.enabled,'night-enabled')}<div class="settings-grid">${field('Starts','','night-start','time')}${field('Ends','','night-end','time')}</div><div class="status-line"><span class="status-dot ${n.active?'ok':''}"></span><span>${n.active?'Night mode is active now':'Not active right now'}</span></div>${saveButton('save-night')}`)}${panel('Buttons',select('Short press',b.short_press,'short-action',['Start listening','Play / pause','Run automation','Disabled'])+select('Long press',b.long_press,'long-action',['Open pairing mode','Toggle privacy mode','Reboot device'])+toggle('Hardware mute button present',b.hardware_mute,'hw-mute',true)+select('Action button',{sound:'Play a sound',listen:'Start listening',playpause:'Play / pause',disabled:'Do nothing'}[b.action||'sound'],'action-behaviour',['Play a sound','Start listening','Play / pause','Do nothing'])+range('Action flash brightness',b.action_brightness??70,'action-brightness')+range('Mute ring brightness',b.mute_brightness??60,'mute-brightness')+`<p class="muted">Only <strong>Play a sound</strong> is wired up so far; the others are placeholders and will say so in the log if chosen. The flash is on the light ring &mdash; the action button has no lamp of its own. Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and software cannot switch it — it is wired to the button's privacy latch, so muting from this page lights the ring and leaves the lamp dark.</p>`+muteLampNote(null,b)+toggle('Press tones',b.tones!==false,'button-tones')+`<p class="muted">A short rising or falling pair when a button is pressed. The buttons are on top of the device where the ring cannot be seen, so the tone is how you know a press registered &mdash; rising for volume up and for leaving mute, falling for the opposite.</p>`+saveButton('save-buttons'),'wide')}${actionSoundPanel(b)}</div>`;bindRange();if($('#night-start')){$('#night-start').value=hhmm(n.start_minute);$('#night-end').value=hhmm(n.end_minute);bindDirty(['#night-enabled','#night-start','#night-end'],'#save-night');$('#save-night').onclick=()=>{const s2=mins($('#night-start').value),e2=mins($('#night-end').value);if(!Number.isFinite(s2)||!Number.isFinite(e2)){toast('Enter both times as HH:MM',true);return}mutate('/led/night',{enabled:$('#night-enabled').checked,start_minute:s2,end_minute:e2},'Night mode saved')}}
+async function ledPage(){const [l,b,a]=await Promise.all([api('/led'),api('/buttons'),api('/audio').catch(()=>({}))]);const hex='#'+[l.colour.r,l.colour.g,l.colour.b].map(n=>n.toString(16).padStart(2,'0')).join('');const names={listening:'Listening',thinking:'Thinking',error:'Error',dnd:'Do not disturb',night:'Night'};const n=l.night||{enabled:false,active:false,start_minute:1320,end_minute:420};const hhmm=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');const mins=t=>{const p=String(t||'').split(':');return p.length===2?(+p[0])*60+(+p[1]):NaN};const profiles=Object.entries(l.profiles||{}).map(([k,v])=>{const colour=typeof v==='string'?v:'#'+[v.r,v.g,v.b].map(n=>Number(n).toString(16).padStart(2,'0')).join('');const brightness=typeof v==='object'&&v?Number(v.brightness??l.brightness):l.brightness;return `<div class="led-profile"><label class="field"><span>${names[k]||k}</span><input id="led-profile-${k}" data-profile="${k}" type="color" value="${colour}"></label><div class="swatch-row"><code id="led-profile-hex-${k}">${esc(colour)}</code></div>${range('Brightness',brightness,`led-profile-brightness-${k}`)}<button class="secondary-btn profile-save" data-profile="${k}">Save ${names[k]||k}</button></div>`}).join('');content.innerHTML=`<div class="settings-grid">${panel('Light ring',`<label class="field"><span>Current colour</span><input id="led-colour" type="color" value="${hex}"></label>`+range('Brightness',l.brightness,'led-brightness')+toggle('Music visualizer',l.visualizer_enabled!==false,'led-visualizer')+`<p class="muted">Show reactive equalizer animations on the ring while music is playing.</p>`+ledRing(l)+`<div class="led-preview" data-led="${rgb(l.colour)}"><i></i><span>Live preview</span></div><div class="button-row">${saveButton('save-led')}${action('Run LED test','led-test')}</div>`)}${panel('State themes',`<p class="muted">Choose the ring colour and brightness used while LibreEcho is listening, thinking, reporting an error, or in do-not-disturb mode.</p><div class="led-profiles">${profiles}</div>`)}${panel('Night mode',`<p class="muted">Between these times the ring is capped to the night brightness. Colours are kept, so the device still shows what it is doing -- just dimly. Times are the device's local time.</p>${toggle('Enable night mode',n.enabled,'night-enabled')}<div class="settings-grid">${field('Starts','','night-start','time')}${field('Ends','','night-end','time')}</div><div class="status-line"><span class="status-dot ${n.active?'ok':''}"></span><span>${n.active?'Night mode is active now':'Not active right now'}</span></div>${saveButton('save-night')}`)}${panel('Buttons',select('Short press',b.short_press,'short-action',['Start listening','Play / pause','Run automation','Disabled'])+select('Long press',b.long_press,'long-action',['Open pairing mode','Toggle privacy mode','Reboot device'])+toggle('Hardware mute button present',b.hardware_mute,'hw-mute',true)+select('Action button',{sound:'Play a sound',listen:'Start listening',playpause:'Play / pause',disabled:'Do nothing'}[b.action||'sound'],'action-behaviour',['Play a sound','Start listening','Play / pause','Do nothing'])+range('Action flash brightness',b.action_brightness??70,'action-brightness')+range('Mute ring brightness',b.mute_brightness??60,'mute-brightness')+`<p class="muted">Only <strong>Play a sound</strong> is wired up so far; the others are placeholders and will say so in the log if chosen. The flash is on the light ring &mdash; the action button has no lamp of its own. ${muteLampHardwareNote(b)}</p>`+muteLampNote(a,b)+toggle('Press tones',b.tones!==false,'button-tones')+`<p class="muted">A short rising or falling pair when a button is pressed. The buttons are on top of the device where the ring cannot be seen, so the tone is how you know a press registered &mdash; rising for volume up and for leaving mute, falling for the opposite.</p>`+saveButton('save-buttons'),'wide')}${actionSoundPanel(b)}</div>`;bindRange();if($('#night-start')){$('#night-start').value=hhmm(n.start_minute);$('#night-end').value=hhmm(n.end_minute);bindDirty(['#night-enabled','#night-start','#night-end'],'#save-night');$('#save-night').onclick=()=>{const s2=mins($('#night-start').value),e2=mins($('#night-end').value);if(!Number.isFinite(s2)||!Number.isFinite(e2)){toast('Enter both times as HH:MM',true);return}mutate('/led/night',{enabled:$('#night-enabled').checked,start_minute:s2,end_minute:e2},'Night mode saved')}}
 bindActionSounds();bindDirty(['#led-colour','#led-brightness','#led-visualizer'],'#save-led');bindDirty(['#short-action','#long-action','#button-tones','#action-behaviour','#action-brightness','#mute-brightness'],'#save-buttons');$('#save-led').onclick=()=>{const h=$('#led-colour').value;mutate('/led',{r:parseInt(h.slice(1,3),16),g:parseInt(h.slice(3,5),16),b:parseInt(h.slice(5,7),16),brightness:+$('#led-brightness').value,visualizer_enabled:$('#led-visualizer').checked},'LED changes saved')};$$('input[type=color][data-profile]').forEach(i=>{const out=$('#led-profile-hex-'+i.dataset.profile);if(out)i.oninput=()=>{out.textContent=i.value}});
 $$('.profile-save').forEach(button=>button.onclick=()=>{const k=button.dataset.profile;const h=$(`#led-profile-${k}`).value;const brightnessInput=$(`#led-profile-brightness-${k}`);mutate('/led/profile',{name:k,r:parseInt(h.slice(1,3),16),g:parseInt(h.slice(3,5),16),b:parseInt(h.slice(5,7),16),brightness:+brightnessInput.value},`${names[k]||k} theme saved`)});$('#save-buttons').onclick=()=>mutate('/buttons',{short_press:$('#short-action').value,long_press:$('#long-action').value,tones:$('#button-tones').checked,action:{'Play a sound':'sound','Start listening':'listen','Play / pause':'playpause','Do nothing':'disabled'}[$('#action-behaviour').value]||'sound',action_sounds:actionSoundSelection(),action_brightness:parseInt($('#action-brightness').value,10),mute_brightness:parseInt($('#mute-brightness').value,10)},'Button changes saved');/* The ring test paints at the ring's own brightness, so with brightness at 0
      it runs invisibly and still reports success -- which reads as a dead
