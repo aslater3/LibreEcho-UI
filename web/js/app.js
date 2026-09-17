@@ -1401,18 +1401,30 @@ function bindWeatherLookup(a){
   note.textContent=message;
   warn();
  };
- const describe=h=>[h.name,h.admin1,h.country_code].filter(Boolean).join(', ');
+ const describe=h=>[h.name,h.admin1,h.admin2,h.country_code].filter(Boolean).join(', ');
  /*
   * An ambiguous answer is never filled in silently. Taking hits[0] is how the
   * device ended up reporting one town's weather under another town's name, and
   * a qualifier this geocoder cannot use leaves the whole world to choose from:
   * "Carnforth, Lancashire" matches nothing because a county is not a country or
   * a first-level area, and the bare name matches the English town and an Iowa
-  * one. Show what matched, with the country, and let the user pick.
+  * one. Show what matched, with the country, and let the user pick. Two places
+  * can still share a name, a first-level area and a country, so a label that
+  * would repeat falls back to its coordinates rather than showing two identical
+  * buttons for different locations.
   */
  const offer=(hits,prefix)=>{
+  const labels=hits.map(describe),repeated=labels.map(l=>labels.filter(x=>x===l).length>1);
   note.innerHTML=esc(prefix)+' <strong>Choose the place:</strong> '+hits.map((h,i)=>
-   `<button class="secondary-btn wx-candidate" data-index="${i}">${esc(describe(h))}</button>`).join(' ');
+   `<button class="secondary-btn wx-candidate" data-index="${i}">${esc(repeated[i]
+     ? labels[i]+` ${(+h.latitude).toFixed(2)}, ${(+h.longitude).toFixed(2)}` : labels[i])}</button>`).join(' ');
+  /*
+   * A choice is pending, and the coordinates still on screen belong to the
+   * previous place, so Save stays disabled until one is picked: otherwise the
+   * new name would be stored against the old coordinates. Editing any field
+   * re-enables it through bindDirty.
+   */
+  $('#save-wx').disabled=true;
   $$('.wx-candidate').forEach(button=>button.onclick=()=>{
    const hit=hits[+button.dataset.index]; if(!hit)return;
    fill(hit.latitude,hit.longitude,
@@ -1492,6 +1504,10 @@ function bindWeather(a){
   const loc=$('#wx-location').value.trim();
   const lat=$('#wx-lat').value.trim(), lon=$('#wx-lon').value.trim();
   if(loc&&(!lat||!lon)){toast('Look up the coordinates first — an empty coordinate is ignored by the device',true);return}
+  /* The same rule the Integrations renderer applies: a renamed place that keeps
+     the old coordinates would report the old town's weather under the new name. */
+  if(loc&&startLoc&&loc!==startLoc&&lat===(a.latitude||'')&&lon===(a.longitude||'')){
+   toast('The place changed but the coordinates did not. Look them up before saving.',true);return}
   mutate('/assistant',{weather_provider:wxId($('#wx-provider').value),home_location:loc,
                        latitude:lat,longitude:lon},'Home location saved');};}
 /*

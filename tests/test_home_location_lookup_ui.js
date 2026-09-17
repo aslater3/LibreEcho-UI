@@ -74,6 +74,13 @@ globalThis.fetch = async url => {
        latitude:53.76282,longitude:-2.70452},
       {name:'Preston',admin1:'Idaho',country_code:'US',
        latitude:42.09631,longitude:-111.87662}]})};
+  /* Two places that agree on every named field, differing only in position. */
+  if(name === 'Springfield')
+    return {ok:true,status:200,json:async()=>({results:[
+      {name:'Springfield',admin1:'Illinois',country_code:'US',
+       latitude:39.7817,longitude:-89.6501},
+      {name:'Springfield',admin1:'Illinois',country_code:'US',
+       latitude:39.9,longitude:-89.7}]})};
   return {ok:true,status:200,json:async()=>({results:[]})};
 };
 
@@ -136,6 +143,18 @@ const el = id => elements.get(id);
          'both candidates were not offered: '+ambiguous);
   assert.equal(el('#wx-lat').value,'53.7586',
                'an ambiguous match was filled in without asking');
+  /* The coordinates on screen are still the previous place's, so Save must not
+     be usable until a candidate is chosen. */
+  assert.equal(el('#save-wx').disabled,true,
+               'Save was left enabled while a match was pending');
+
+  /* Two places sharing every named field must still be distinguishable. */
+  el('#wx-location').value = 'Springfield';
+  await el('#wx-lookup').onclick();
+  const twins = el('#wx-lookup-note').innerHTML;
+  assert(/Springfield, Illinois, US 39\.78, -89\.65/.test(twins) &&
+         /Springfield, Illinois, US 39\.90, -89\.70/.test(twins),
+         'candidates with identical names were not told apart: '+twins);
 
   /* The advisory has to be wired too: it is how a missing coordinate shows. */
   el('#wx-location').value = 'Somewhere without coordinates';
