@@ -219,9 +219,20 @@ async function startDeviceProxy({ streamStatus = 200, intervalMs = 40, totalChun
         'X-LibreEcho-Audio': STREAM_HEADER,
         'cache-control': 'no-store'
       });
-      let sent = 0, finished = false;
-      request.on('close', () => { if (!finished) state.aborted += 1; });
-      const timer = setInterval(() => {
+      let sent = 0, finished = false, timer = null;
+      /* A client that goes away mid-response leaves the response unfinished, so
+         `writableEnded` is false when 'close' arrives; a response we ended
+         ourselves sets it true. Tracking the response rather than the request
+         keeps a stream that completed normally out of the cancellation count,
+         which is what the Stop and page-leave assertions rely on. */
+      const cancelled = () => {
+        if (response.writableEnded) return;
+        state.aborted += 1;
+        finished = true;
+        if (timer) clearInterval(timer);
+      };
+      response.on('close', cancelled);
+      timer = setInterval(() => {
         if (finished) return;
         if (sent >= totalChunks) {
           finished = true; clearInterval(timer); state.completed += 1; response.end(); return;
@@ -357,6 +368,7 @@ async function unlockAndStreamSuite(browser) {
       assert.ok(runningIndex > -1 && runningIndex < fetchIndex, 'the stream request must follow the running context');
       assert.equal(device.requests.length, 1, 'exactly one stream request should reach the device');
       assert.match(device.requests[0], /source=0%3A24&channel=0/, 'the selected source and lane must be requested');
+      assert.equal(device.aborted, 0, 'a stream the page is still reading must not be counted as cancelled');
       pass('the stream is requested only after the context reports running, for the selected source and lane');
 
       const contextHistory = started.seen.context;
@@ -384,6 +396,7 @@ async function unlockAndStreamSuite(browser) {
 
       /* Stop must abort the in-flight request, not just stop scheduling. */
       const requestsBeforeStop = device.requests.length;
+      assert.equal(device.aborted, 0, 'a healthy stream must never be counted as cancelled before Stop');
       await page.locator('#baby-stop').click();
       await page.waitForFunction(() => document.querySelector('#baby-status')?.textContent === 'Stopped', null, { timeout: 5000 });
       await waitForAllClosed(page);
@@ -397,6 +410,7 @@ async function unlockAndStreamSuite(browser) {
       assert.equal(device.requests.length, requestsBeforeStop, 'Stop must not open another stream');
       const abortedInFlight = await waitForCondition(() => device.aborted >= 1);
       assert.ok(abortedInFlight, 'Stop must abort the in-flight stream request at the device, not only stop scheduling');
+      assert.equal(device.aborted, 1, 'exactly the stopped stream must be counted as cancelled');
       pass('Stop aborts the in-flight stream request and no superseded reader keeps running');
 
       /* Restart after Stop: a fresh generation streams again, and leaving the
@@ -407,11 +421,13 @@ async function unlockAndStreamSuite(browser) {
       const restarted = await probe(page);
       assert.equal(restarted.contexts[1].state, 'running', 'a restart must unlock a fresh context');
       assert.equal(device.requests.length, 2, 'a restart must open exactly one new stream');
+      assert.equal(device.aborted, 1, 'the restarted stream must not be counted as cancelled while it runs');
       await selectPage(page, 'Overview');
       await waitForAllClosed(page);
       await page.waitForFunction(() => window.__babyAudio.seen.status.includes('Stopped'), null, { timeout: 5000 });
       const abortedOnLeave = await waitForCondition(() => device.aborted >= 2);
       assert.ok(abortedOnLeave, 'leaving the page must abort the new stream at the device');
+      assert.equal(device.aborted, 2, 'exactly the two cancelled streams must be counted, no more');
       pass('restarting streams again and leaving the page aborts the new stream');
 
       assert.deepEqual(failures, [], `browser failures:\n${failures.join('\n')}`);
@@ -523,6 +539,39 @@ async function interruptedRecoverySuite(browser) {
   }
 }
 
+/* A stream that reaches its own end must not be counted as a cancellation: the
+   cancellation counter is what the Stop and page-leave assertions above assert
+   on, and a completed response also closes its connection. */
+async function completedStreamSuite(browser) {
+  const device = await startDeviceProxy({ intervalMs: 30, totalChunks: 6 });
+  try {
+    const { context, page, failures } = await preparePage(browser, device.origin);
+    try {
+      await openBabyMonitor(page);
+      await page.locator('#baby-start').click();
+      await waitForPlayback(page);
+      const finished = await waitForCondition(() => device.completed >= 1, 8000);
+      assert.ok(finished, 'the finite stream should reach its own end');
+      await page.waitForFunction(() => document.querySelector('#baby-status')?.textContent === 'Stopped', null, { timeout: 8000 });
+      const diag = await diagnostics(page);
+      assert.equal(diag.playback, 'ended', 'a stream that ends by itself must be reported as ended');
+      assert.equal(device.aborted, 0, 'a stream that ended by itself must not be counted as cancelled');
+      pass('a stream that ends by itself is reported as ended and is not counted as a cancellation');
+
+      await selectPage(page, 'Overview');
+      await waitForAllClosed(page);
+      assert.equal(device.aborted, 0, 'leaving after a natural end must not count a cancellation');
+      pass('leaving the page after a natural end releases the audio graph without a cancellation');
+
+      assert.deepEqual(failures, [], `browser failures:\n${failures.join('\n')}`);
+    } finally {
+      await context.close();
+    }
+  } finally {
+    await device.close();
+  }
+}
+
 async function main() {
   const launcher = engines[engineName];
   assert.ok(launcher, `LIBREECHO_E2E_BROWSER must be chromium or webkit, got ${engineName}`);
@@ -533,6 +582,7 @@ async function main() {
     await blockedContextSuite(browser);
     await streamFailureSuite(browser);
     await interruptedRecoverySuite(browser);
+    await completedStreamSuite(browser);
     console.log(`\n${checks.length} checks passed, 0 console errors / page errors`);
   } finally {
     await browser.close();
