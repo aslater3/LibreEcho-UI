@@ -68,6 +68,12 @@ globalThis.fetch = async url => {
     return {ok:true,status:200,json:async()=>({results:[{
       name:'Carnforth',admin1:'England',country_code:'GB',
       latitude:54.13163,longitude:-2.76914}]})};
+  if(name === 'Preston')
+    return {ok:true,status:200,json:async()=>({results:[
+      {name:'Preston',admin1:'England',country_code:'GB',
+       latitude:53.76282,longitude:-2.70452},
+      {name:'Preston',admin1:'Idaho',country_code:'US',
+       latitude:42.09631,longitude:-111.87662}]})};
   return {ok:true,status:200,json:async()=>({results:[]})};
 };
 
@@ -106,14 +112,30 @@ const el = id => elements.get(id);
   assert(/Found/.test(el('#wx-lookup-note').textContent),
          'postcode lookup reported nothing: '+el('#wx-lookup-note').textContent);
 
-  /* A qualifier the geocoder rejects must fall back to the town itself. */
+  /*
+   * A qualifier the geocoder rejects is retried, but the retry is offered, not
+   * accepted: the bare name can match another region or country, and filling it
+   * in silently is how one town's weather gets reported under another's name.
+   */
   el('#wx-location').value = 'Carnforth, Lancashire';
   await el('#wx-lookup').onclick();
-  assert.equal(el('#wx-lat').value,'54.1316','qualified place latitude not filled');
-  assert(/Carnforth/.test(el('#wx-lookup-note').textContent),
-         'the qualified-place retry was not reported');
-  assert(/No match for/.test(el('#wx-lookup-note').textContent),
-         'the dropped qualifier was not explained');
+  assert.equal(el('#wx-lat').value,'53.7586',
+               'the retry replaced the coordinates without asking');
+  const retryNote = el('#wx-lookup-note').innerHTML;
+  assert(/Nothing matched/.test(retryNote), 'the dropped qualifier was not reported');
+  assert(/Carnforth, England, GB/.test(retryNote),
+         'the candidate did not name its country: '+retryNote);
+  assert(/wx-candidate/.test(retryNote), 'no candidate was offered: '+retryNote);
+
+  /* An ambiguous name is offered as well, with every country spelled out. */
+  el('#wx-location').value = 'Preston';
+  await el('#wx-lookup').onclick();
+  const ambiguous = el('#wx-lookup-note').innerHTML;
+  assert(/2 places match/.test(ambiguous), 'the ambiguity was not reported: '+ambiguous);
+  assert(/Preston, England, GB/.test(ambiguous) && /Preston, Idaho, US/.test(ambiguous),
+         'both candidates were not offered: '+ambiguous);
+  assert.equal(el('#wx-lat').value,'53.7586',
+               'an ambiguous match was filled in without asking');
 
   /* The advisory has to be wired too: it is how a missing coordinate shows. */
   el('#wx-location').value = 'Somewhere without coordinates';

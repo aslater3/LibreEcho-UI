@@ -1401,6 +1401,24 @@ function bindWeatherLookup(a){
   note.textContent=message;
   warn();
  };
+ const describe=h=>[h.name,h.admin1,h.country_code].filter(Boolean).join(', ');
+ /*
+  * An ambiguous answer is never filled in silently. Taking hits[0] is how the
+  * device ended up reporting one town's weather under another town's name, and
+  * a qualifier this geocoder cannot use leaves the whole world to choose from:
+  * "Carnforth, Lancashire" matches nothing because a county is not a country or
+  * a first-level area, and the bare name matches the English town and an Iowa
+  * one. Show what matched, with the country, and let the user pick.
+  */
+ const offer=(hits,prefix)=>{
+  note.innerHTML=esc(prefix)+' <strong>Choose the place:</strong> '+hits.map((h,i)=>
+   `<button class="secondary-btn wx-candidate" data-index="${i}">${esc(describe(h))}</button>`).join(' ');
+  $$('.wx-candidate').forEach(button=>button.onclick=()=>{
+   const hit=hits[+button.dataset.index]; if(!hit)return;
+   fill(hit.latitude,hit.longitude,
+        [hit.name,hit.admin1].filter(Boolean).join(', '),'Found '+describe(hit));
+  });
+ };
  /*
   * A UK postcode is the input this geocoder cannot answer: it resolves place
   * names worldwide and US ZIP codes, and returns nothing at all for "PR1 2AB"
@@ -1438,16 +1456,16 @@ function bindWeatherLookup(a){
                         +encodeURIComponent(name),{cache:'no-store'});
     return (await r.json()).results||[];
    };
-   let used=place,dropped='',hits=await search(place);
-   /*
-    * The geocoder's qualifier has to be an exact country or first-level area,
-    * so "Carnforth, Lancashire" (a county, admin2) matches nothing while
-    * "Carnforth" and "Carnforth, England" do. Retry without the qualifier
-    * rather than reporting no match for a place that exists.
-    */
+   let used=place,dropped=false,hits=await search(place);
+   /* The geocoder's qualifier has to be an exact country or first-level area,
+      so "Carnforth, Lancashire" (a county, admin2) matches nothing while
+      "Carnforth" and "Carnforth, England" do. Retry without the qualifier
+      rather than reporting no match for a place that exists -- but the retry
+      is offered, never accepted on the user's behalf, because the bare name can
+      match a different region or country. */
    if(!hits.length&&place.includes(',')){
     used=place.split(',')[0].trim();
-    if(used&&used!==place){hits=await search(used);if(hits.length)dropped=`No match for "${place}"; used "${used}" instead. `;}
+    if(used&&used!==place){hits=await search(used);if(hits.length)dropped=true;}
    }
    if(!hits.length){
     note.textContent=postcodeMissed
@@ -1455,11 +1473,11 @@ function bindWeatherLookup(a){
       : 'No match for that place. Check the spelling, or enter a town or city name (a UK postcode works too).';
     return;
    }
+   if(dropped){offer(hits,`Nothing matched "${place}". Closest name matches:`);return}
+   if(hits.length>1){offer(hits,`${hits.length} places match "${place}".`);return}
    const h=hits[0];
    fill(h.latitude,h.longitude,[h.name,h.admin1].filter(Boolean).join(', '),
-        dropped+(hits.length>1
-        ? `Using ${h.name}, ${h.admin1||''} ${h.country_code||''} — ${hits.length-1} other match(es); edit and look up again if wrong`
-        : `Found ${h.name}, ${h.admin1||''} ${h.country_code||''}`));
+        `Found ${describe(h)}`);
   }catch(e){ note.textContent='Lookup failed: '+e.message; }
  };
 }
