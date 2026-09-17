@@ -97,6 +97,7 @@ struct lived_state {
     uint64_t frames_in;
     uint64_t samples_in;
     uint64_t last_wake_sample;
+    uint64_t next_subscription_retry_ms;
     char last_event[64];
 };
 
@@ -228,6 +229,45 @@ fail:
     return -1;
 }
 
+static void drop_subscriptions(struct lived_state *state)
+{
+    if (state->wake_fd >= 0)
+        close(state->wake_fd);
+    if (state->audio_fd >= 0)
+        close(state->audio_fd);
+    state->wake_fd = -1;
+    state->audio_fd = -1;
+    state->reader.used = 0;
+}
+
+static int reconnect_subscriptions(struct lived_state *state, uint64_t now_ms)
+{
+    int wake_fd;
+    int audio_fd;
+
+    if (state->wake_fd >= 0 && state->audio_fd >= 0)
+        return 0;
+    if (now_ms < state->next_subscription_retry_ms)
+        return -1;
+    drop_subscriptions(state);
+    wake_fd = connect_wake_socket(state->wake_socket, "subscribe", "{}");
+    audio_fd = connect_wake_socket(state->wake_socket, "stream_audio", "{}");
+    if (wake_fd < 0 || audio_fd < 0 || set_nonblocking(wake_fd) < 0 ||
+        set_nonblocking(audio_fd) < 0) {
+        if (wake_fd >= 0)
+            close(wake_fd);
+        if (audio_fd >= 0)
+            close(audio_fd);
+        state->next_subscription_retry_ms = now_ms + 1000U;
+        return -1;
+    }
+    state->wake_fd = wake_fd;
+    state->audio_fd = audio_fd;
+    state->next_subscription_retry_ms = 0;
+    fprintf(stderr, "lived: wake and audio subscriptions connected\n");
+    return 0;
+}
+
 static void close_session(struct lived_state *state,
                           enum le_live_end_reason reason)
 {
@@ -334,8 +374,10 @@ static void drain_wake_events(struct lived_state *state)
         if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             return;
         if (count <= 0) {
-            fprintf(stderr, "lived: wake subscription closed\n");
-            state->wake_fd = -1;
+            fprintf(stderr, "lived: wake subscription closed; reconnecting\n");
+            close_session(state, LE_LIVE_END_TRANSPORT_ERROR);
+            drop_subscriptions(state);
+            state->next_subscription_retry_ms = monotonic_ms() + 1000U;
             return;
         }
         if (line[used] == '\n') {
@@ -385,9 +427,10 @@ static void drain_audio(struct lived_state *state)
             if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
                 return;
             if (count <= 0) {
-                fprintf(stderr, "lived: audio subscription closed\n");
-                state->audio_fd = -1;
-                state->reader.used = 0;
+                fprintf(stderr, "lived: audio subscription closed; reconnecting\n");
+                close_session(state, LE_LIVE_END_TRANSPORT_ERROR);
+                drop_subscriptions(state);
+                state->next_subscription_retry_ms = monotonic_ms() + 1000U;
                 return;
             }
             state->reader.used += (size_t)count;
@@ -442,7 +485,10 @@ static void status_json(struct lived_state *state, char *out, size_t size)
 {
     char session[1024];
     char output[320];
-    char transport[320];
+    /* Host + path + bounded error detail do not fit in the old 320-byte
+       scratch. Truncating a nested JSON object makes the whole status reply
+       malformed, so reserve the adapter's actual bounded budget. */
+    char transport[1024];
     int written;
 
     le_live_session_status_json(&state->session, session, sizeof(session));
@@ -613,14 +659,20 @@ static int run_lived(struct lived_state *state)
         struct pollfd descriptors[3];
         nfds_t count = 0;
         int result;
+        int had_wake;
+        int had_audio;
 
-        if (state->wake_fd >= 0) {
+        (void)reconnect_subscriptions(state, monotonic_ms());
+        had_wake = state->wake_fd >= 0;
+        had_audio = state->audio_fd >= 0;
+
+        if (had_wake) {
             descriptors[count].fd = state->wake_fd;
             descriptors[count].events = POLLIN;
             descriptors[count].revents = 0;
             ++count;
         }
-        if (state->audio_fd >= 0) {
+        if (had_audio) {
             descriptors[count].fd = state->audio_fd;
             descriptors[count].events = POLLIN;
             descriptors[count].revents = 0;
@@ -640,13 +692,15 @@ static int run_lived(struct lived_state *state)
         {
             nfds_t index = 0;
 
-            if (state->wake_fd >= 0) {
-                if (descriptors[index].revents & (POLLIN | POLLHUP | POLLERR))
+            if (had_wake) {
+                if (state->wake_fd >= 0 &&
+                    descriptors[index].revents & (POLLIN | POLLHUP | POLLERR))
                     drain_wake_events(state);
                 ++index;
             }
-            if (state->audio_fd >= 0) {
-                if (descriptors[index].revents & (POLLIN | POLLHUP | POLLERR))
+            if (had_audio) {
+                if (state->audio_fd >= 0 &&
+                    descriptors[index].revents & (POLLIN | POLLHUP | POLLERR))
                     drain_audio(state);
                 ++index;
             }
@@ -678,8 +732,8 @@ static void usage(const char *program)
             "[--conversation-timeout-ms N] [--max-session-ms N] "
             "[--wake-preroll-ms N] [--barge-in-rms N] [--barge-in-factor N] "
             "[--model NAME] [--voice NAME] [--credentials PATH] "
-            "[--transport realtime|mock] [--live-url URL] "
-            "[--live-allow-unverified-tls] [--mock-scenario NAME] [--enable]\n",
+            "[--transport realtime|mock] [--live-url URL] [--live-ca PATH] "
+            "[--mock-scenario NAME] [--enable]\n",
             program);
 }
 
@@ -699,7 +753,9 @@ int main(int argc, char **argv)
              DEFAULT_CONTROL_SOCKET);
     snprintf(state.audio_bus, sizeof(state.audio_bus), "%s", DEFAULT_AUDIO_BUS);
     state.speaker_rate = DEFAULT_SPEAKER_RATE;
-    state.enabled = 1;
+    /* The service is installed and available at boot, but only the explicit
+       control-centre selection arms it as a wake consumer. */
+    state.enabled = 0;
     /*
      * Default to the real transport.  A build that cannot reach GPT-Live must
      * fail closed and say so; silently substituting the mock would let a user
@@ -716,6 +772,7 @@ int main(int argc, char **argv)
     state.config.model = "gpt-live-1-codex";
     state.config.voice = "cove";
     state.config.credentials_path = "/data/libreecho/secrets/openai-codex.json";
+    state.config.ca_path = "/usr/local/share/libreecho/cacert.pem";
     state.config.mock_scenario = "session";
 
     for (i = 1; i < argc; ++i) {
@@ -773,8 +830,8 @@ int main(int argc, char **argv)
             }
         } else if (!strcmp(option, "--live-url") && value) {
             state.config.url = NEXT();
-        } else if (!strcmp(option, "--live-allow-unverified-tls")) {
-            state.config.allow_unverified_tls = 1;
+        } else if (!strcmp(option, "--live-ca") && value) {
+            state.config.ca_path = NEXT();
         } else if (!strcmp(option, "--mock-scenario") && value) {
             state.config.mock_scenario = NEXT();
         } else {
@@ -811,19 +868,8 @@ int main(int argc, char **argv)
     }
     snprintf(state.last_event, sizeof(state.last_event), "idle");
 
-    state.wake_fd = connect_wake_socket(state.wake_socket, "subscribe", "{}");
-    if (state.wake_fd < 0)
-        fprintf(stderr, "lived: warning: wake subscription unavailable\n");
-    else if (set_nonblocking(state.wake_fd) < 0)
-        fprintf(stderr, "lived: warning: wake socket not nonblocking\n");
-
-    state.audio_fd = connect_wake_socket(state.wake_socket, "stream_audio",
-                                         "{}");
-    if (state.audio_fd < 0) {
-        fprintf(stderr, "lived: warning: audio subscription unavailable\n");
-    } else if (set_nonblocking(state.audio_fd) < 0) {
-        fprintf(stderr, "lived: warning: audio socket not nonblocking\n");
-    }
+    if (reconnect_subscriptions(&state, monotonic_ms()) < 0)
+        fprintf(stderr, "lived: warning: wake/audio subscriptions unavailable; retrying\n");
 
     fprintf(stderr,
             "lived: running (mode=%s transport=%s model=%s voice=%s "

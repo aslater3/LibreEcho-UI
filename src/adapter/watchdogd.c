@@ -235,6 +235,9 @@ int main(int argc, char **argv)
          "/etc/init.d/libreecho-btd.init", 1, NULL},
         {"radiod", PROBE_SOCKET, "/run/libreecho/radio.sock",
          "/etc/init.d/libreecho-radiod.init", 1, NULL},
+        /* Lived stays available while disarmed so the UI can select GPT-Live. */
+        {"lived", PROBE_SOCKET, "/run/libreecho/live.sock",
+         "/etc/init.d/libreecho-lived.init", 1, NULL},
         /* Status can wait behind an in-flight provider response. */
         {"agentd", PROBE_PIDFILE, "/var/run/libreecho-agentd.pid",
          "/etc/init.d/libreecho-agentd.init", 1, NULL},

@@ -129,6 +129,8 @@ static int mock_send_audio(struct le_live_transport *transport,
 
     if (!samples || !count || count > LE_LIVE_AUDIO_SAMPLES)
         return -1;
+    if (state->scenario && !strcmp(state->scenario, "send_error"))
+        return -1;
     ++state->frames_received;
     state->samples_received += count;
     return 0;

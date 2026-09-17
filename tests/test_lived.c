@@ -366,6 +366,12 @@ static int test_real_transport_fails_closed(void)
     }
     CHECK(wait_for_socket(control_socket) == 0);
 
+    CHECK(control_call(control_socket, "status", "{}", status,
+                       sizeof(status)) == 0);
+    CHECK(strstr(status, "\"enabled\":false") != NULL);
+    CHECK(control_call(control_socket, "set_enabled", "{\"enabled\":true}",
+                       status, sizeof(status)) == 0);
+
     /*
      * The published transport cannot reach GPT-Live in this build, so a wake
      * must produce a bounded, speakable failure - never a silent fallback to
@@ -425,7 +431,7 @@ static int test_mock_transport_full_conversation(void)
     CHECK(daemon >= 0);
     if (daemon == 0) {
         execl("./build/libreecho-lived", "libreecho-lived", "--foreground",
-              "--transport", "mock", "--mock-scenario", "session", "--socket",
+              "--enable", "--transport", "mock", "--mock-scenario", "session", "--socket",
               control_socket, "--wake-socket", wake_socket, "--audio-bus",
               bus_path, "--conversation-timeout-ms", "800", (char *)NULL);
         _exit(127);
@@ -436,10 +442,8 @@ static int test_mock_transport_full_conversation(void)
                        sizeof(status)) == 0);
     CHECK(strstr(status, "\"enabled\":true") != NULL);
     CHECK(strstr(status, "\"transport\":\"mock\"") != NULL);
-    /* Nothing is buffered or sent before a wake. */
     CHECK(strstr(status, "\"sessions_started\":0") != NULL);
     CHECK(strstr(status, "\"wake_events\":0") != NULL);
-
     CHECK(control_call(control_socket, "tools", "{}", status,
                        sizeof(status)) == 0);
     CHECK(strstr(status, "\"timer.set\"") != NULL);
@@ -453,6 +457,7 @@ static int test_mock_transport_full_conversation(void)
     CHECK(wait_for_absent(control_socket, "\"frames_written\":0,") == 0);
     /* Delegation must have run through the allow-list. */
     CHECK(wait_for_absent(control_socket, "\"delegations\":0,") == 0);
+    CHECK(wait_for_absent(control_socket, "\"audio_input_ms\":0,") == 0);
 
     CHECK(control_call(control_socket, "status", "{}", status,
                        sizeof(status)) == 0);

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -247,16 +248,72 @@ static int accept_matches(const char *response, const char *key)
     sha1_final(&hash, digest);
     if (le_b64_encode(digest, sizeof(digest), expected, sizeof(expected)) == 0)
         return 0;
-    header = strstr(response, "Sec-WebSocket-Accept:");
-    if (!header)
-        header = strstr(response, "sec-websocket-accept:");
-    if (!header)
+    header = response;
+    while ((header = strstr(header, "\r\n")) != NULL) {
+        const char *name;
+        const char *colon;
+        size_t name_length;
+
+        header += 2;
+        name = header;
+        colon = strchr(name, ':');
+        if (!colon)
+            break;
+        name_length = (size_t)(colon - name);
+        if (name_length == strlen("Sec-WebSocket-Accept") &&
+            !strncasecmp(name, "Sec-WebSocket-Accept", name_length)) {
+            header = colon + 1;
+            while (*header == ' ' || *header == '\t')
+                ++header;
+            length = (int)strlen(expected);
+            return !strncmp(header, expected, (size_t)length) &&
+                   (header[length] == '\r' || header[length] == '\n');
+        }
+    }
+    return 0;
+}
+
+static int response_header_has_token(const char *response,
+                                     const char *header_name,
+                                     const char *token)
+{
+    const char *line = response;
+    size_t name_length = strlen(header_name);
+
+    while ((line = strstr(line, "\r\n")) != NULL) {
+        const char *colon;
+        const char *value;
+        const char *end;
+
+        line += 2;
+        colon = strchr(line, ':');
+        if (!colon)
+            break;
+        if ((size_t)(colon - line) != name_length ||
+            strncasecmp(line, header_name, name_length))
+            continue;
+        value = colon + 1;
+        end = strstr(value, "\r\n");
+        if (!end)
+            return 0;
+        while (value < end) {
+            const char *item_end = value;
+
+            while (value < end && (*value == ' ' || *value == '\t' ||
+                                   *value == ','))
+                ++value;
+            item_end = value;
+            while (item_end < end && *item_end != ',' && *item_end != ' ' &&
+                   *item_end != '\t')
+                ++item_end;
+            if ((size_t)(item_end - value) == strlen(token) &&
+                !strncasecmp(value, token, strlen(token)))
+                return 1;
+            value = item_end;
+        }
         return 0;
-    header += strlen("sec-websocket-accept:");
-    while (*header == ' ' || *header == '\t')
-        ++header;
-    length = (int)strlen(expected);
-    return !strncmp(header, expected, (size_t)length);
+    }
+    return 0;
 }
 
 int le_ws_connect(struct le_ws *ws, const struct le_ws_stream *stream,
@@ -345,13 +402,16 @@ int le_ws_connect(struct le_ws *ws, const struct le_ws_stream *stream,
         ++used;
     }
     response[used + 1] = '\0';
-    if (!strstr(response, " 101")) {
+    if (strncmp(response, "HTTP/1.1 101 ", 13) &&
+        strncmp(response, "HTTP/1.0 101 ", 13)) {
         say(detail, detail_size,
             "GPT-Live unavailable: the server refused the WebSocket upgrade.");
         le_ws_close(ws);
         return -1;
     }
-    if (!accept_matches(response, key)) {
+    if (!response_header_has_token(response, "Upgrade", "websocket") ||
+        !response_header_has_token(response, "Connection", "upgrade") ||
+        !accept_matches(response, key)) {
         say(detail, detail_size,
             "GPT-Live unavailable: the WebSocket handshake did not verify.");
         le_ws_close(ws);
@@ -456,8 +516,10 @@ static int read_frame(struct le_ws *ws, int *opcode, unsigned char *payload,
          */
         if (got == READ_TIMEOUT)
             return READ_TIMEOUT;
-        if (got < 0)
+        if (got == READ_CLOSED)
             return READ_CLOSED;
+        if (got < 0)
+            return READ_ERROR;
     }
     fin = (header[0] & 0x80) != 0;
     *opcode = header[0] & 0x0f;
@@ -469,14 +531,24 @@ static int read_frame(struct le_ws *ws, int *opcode, unsigned char *payload,
     }
     payload_length = header[1] & 0x7fU;
     if (payload_length == 126U) {
-        if (read_exact(ws, extended, 2, deadline) < 0)
+        int got = (int)read_exact(ws, extended, 2, deadline);
+        if (got == READ_TIMEOUT)
+            return READ_TIMEOUT;
+        if (got == READ_CLOSED)
             return READ_CLOSED;
+        if (got < 0)
+            return READ_ERROR;
         payload_length = ((uint64_t)extended[0] << 8) | extended[1];
     } else if (payload_length == 127U) {
         int i;
 
-        if (read_exact(ws, extended, 8, deadline) < 0)
+        int got = (int)read_exact(ws, extended, 8, deadline);
+        if (got == READ_TIMEOUT)
+            return READ_TIMEOUT;
+        if (got == READ_CLOSED)
             return READ_CLOSED;
+        if (got < 0)
+            return READ_ERROR;
         payload_length = 0;
         for (i = 0; i < 8; ++i)
             payload_length = (payload_length << 8) | extended[i];
@@ -484,9 +556,17 @@ static int read_frame(struct le_ws *ws, int *opcode, unsigned char *payload,
     if (payload_length > capacity)
         return READ_ERROR;                   /* refuse rather than truncate */
     if (payload_length) {
-        if (read_exact(ws, payload, (size_t)payload_length, deadline) < 0)
+        int got = (int)read_exact(ws, payload, (size_t)payload_length,
+                                  deadline);
+        if (got == READ_TIMEOUT)
+            return READ_TIMEOUT;
+        if (got == READ_CLOSED)
             return READ_CLOSED;
+        if (got < 0)
+            return READ_ERROR;
     }
+    if (*opcode >= OPCODE_CLOSE && (!fin || payload_length > 125U))
+        return READ_ERROR;
     *length = (size_t)payload_length;
     ++ws->frames_in;
     ws->bytes_in += (uint64_t)payload_length;

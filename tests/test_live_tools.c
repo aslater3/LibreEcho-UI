@@ -330,7 +330,7 @@ static int test_timer_dispatch_reaches_the_daemon_with_validated_fields(void)
 
     CHECK(fake_listen(&timer, "timer.sock",
                       "{\"v\":1,\"id\":1,\"ok\":true,\"data\":{\"id\":3}}") == 0);
-    CHECK(fake_spawn(&timer, 4) == 0);
+    CHECK(fake_spawn(&timer, 5) == 0);
     le_live_tools_init(&environment);
     snprintf(environment.timer_socket, sizeof(environment.timer_socket), "%s",
              timer.path);
@@ -340,6 +340,10 @@ static int test_timer_dispatch_reaches_the_daemon_with_validated_fields(void)
                                  "{\"seconds\":600,\"label\":\"pasta\"}",
                                  result, sizeof(result)) == 0);
     CHECK(strstr(result, "\"ok\":true") != NULL);
+    CHECK(le_live_tools_dispatch(&environment, "timer.set",
+                                 "{\"seconds\":60,\"label\":\"a\\\"b\"}",
+                                 result, sizeof(result)) == 0);
+    CHECK(strstr(result, "a\\\"b") != NULL);
     CHECK(le_live_tools_dispatch(&environment, "timer.cancel", "{\"id\":3}",
                                  result, sizeof(result)) == 0);
     CHECK(le_live_tools_dispatch(&environment, "timer.cancel", "{}", result,
@@ -352,9 +356,37 @@ static int test_timer_dispatch_reaches_the_daemon_with_validated_fields(void)
     CHECK(strstr(requests, "\"cmd\":\"add\"") != NULL);
     CHECK(strstr(requests, "\"seconds\":600") != NULL);
     CHECK(strstr(requests, "pasta") != NULL);
+    CHECK(strstr(requests, "a\\\"b") != NULL);
     CHECK(strstr(requests, "\"cmd\":\"cancel\"") != NULL);
     CHECK(strstr(requests, "\"cmd\":\"cancel_all\"") != NULL);
     CHECK(strstr(requests, "\"cmd\":\"dismiss\"") != NULL);
+    fake_close(&timer);
+    return 0;
+}
+
+
+static int test_voice_request_routes_to_existing_timer_tool(void)
+{
+    struct le_live_tool_environment environment;
+    struct fake_daemon timer;
+    char result[LE_LIVE_TOOL_RESULT_MAX];
+    char requests[1024];
+
+    CHECK(fake_listen(&timer, "voice-timer.sock",
+                      "{\"v\":1,\"id\":1,\"ok\":true,\"data\":{\"id\":9}}") == 0);
+    CHECK(fake_spawn(&timer, 1) == 0);
+    le_live_tools_init(&environment);
+    snprintf(environment.timer_socket, sizeof(environment.timer_socket), "%s",
+             timer.path);
+    environment.timeout_ms = 1000;
+
+    CHECK(le_live_tools_dispatch(&environment, "voice.request",
+                                 "{\"request\":\"set a timer for ten minutes\"}",
+                                 result, sizeof(result)) == 0);
+    CHECK(strstr(result, "\"ok\":true") != NULL);
+    CHECK(fake_collect(&timer, requests, sizeof(requests)) == 0);
+    CHECK(strstr(requests, "\"cmd\":\"add\"") != NULL);
+    CHECK(strstr(requests, "\"seconds\":600") != NULL);
     fake_close(&timer);
     return 0;
 }
@@ -472,6 +504,33 @@ static int test_media_stop_reports_partial_failure(void)
     return 0;
 }
 
+static int test_spoken_stop_requests_session_end(void)
+{
+    struct le_live_tool_environment environment;
+    struct fake_daemon audio;
+    char result[LE_LIVE_TOOL_RESULT_MAX];
+    char requests[1024];
+
+    CHECK(fake_listen(&audio, "voice-stop-audio.sock",
+                      "{\"v\":1,\"id\":1,\"ok\":true,\"data\":{}}") == 0);
+    CHECK(fake_spawn(&audio, 2) == 0);
+    le_live_tools_init(&environment);
+    snprintf(environment.audio_socket, sizeof(environment.audio_socket), "%s",
+             audio.path);
+    CHECK(join_path(environment.radio_socket, sizeof(environment.radio_socket),
+                    directory, "absent-voice-stop-radio.sock") == 0);
+    environment.timeout_ms = 300;
+
+    CHECK(le_live_tools_dispatch(&environment, "voice.request",
+                                 "{\"request\":\"stop\"}", result,
+                                 sizeof(result)) == 0);
+    CHECK(strstr(result, "\"end_session\":true") != NULL);
+    CHECK(fake_collect(&audio, requests, sizeof(requests)) == 0);
+    CHECK(strstr(requests, "\"cmd\":\"stop_speech\"") != NULL);
+    fake_close(&audio);
+    return 0;
+}
+
 static int test_bounded_result_for_a_long_argument(void)
 {
     struct le_live_tool_environment environment;
@@ -507,10 +566,12 @@ int main(void)
     failures += test_allow_list() != 0;
     failures += test_refusals_do_not_touch_daemons() != 0;
     failures += test_timer_dispatch_reaches_the_daemon_with_validated_fields() != 0;
+    failures += test_voice_request_routes_to_existing_timer_tool() != 0;
     failures += test_timer_query_reports_bounded_state() != 0;
     failures += test_device_time_uses_the_clock() != 0;
     failures += test_device_volume_reads_the_audio_daemon() != 0;
     failures += test_media_stop_reports_partial_failure() != 0;
+    failures += test_spoken_stop_requests_session_end() != 0;
     failures += test_bounded_result_for_a_long_argument() != 0;
     (void)refusals_reached_no_daemon;
     rmdir(directory);

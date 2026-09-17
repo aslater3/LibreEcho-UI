@@ -23,14 +23,16 @@
  */
 
 #include "live_b64.h"
+#include "live_dns.h"
 #include "live_session.h"
 #include "live_transport.h"
 #include "llm_store.h"
 #include "ws_client.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netdb.h>
+
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
@@ -64,6 +66,8 @@ struct ws_state {
     struct le_ws_stream stream;
     int fd;
     int tls_active;
+    int last_tls_active;
+    int last_tls_verified;
 #if LE_TLS_AVAILABLE
     struct le_tls *tls;
 #endif
@@ -75,9 +79,16 @@ struct ws_state {
     char model[64];
     char voice[32];
     int session_ready;
-    int allow_unverified_tls;
+    char ca_path[256];
     /* JSON scratch for one inbound message. */
     char message[LE_WS_MAX_PAYLOAD];
+    /* A server audio delta may be larger than one session event. Decode it
+       once, then emit bounded LE_LIVE_AUDIO_SAMPLES chunks across polls. */
+    int16_t audio_pending[(LE_WS_MAX_PAYLOAD * 3U / 4U) / 2U];
+    size_t audio_pending_count;
+    size_t audio_pending_offset;
+    int output_done_pending;
+    int suppress_audio;
     unsigned int messages_in;
     unsigned int audio_chunks_out;
     char detail[LE_LIVE_TEXT_MAX];
@@ -248,7 +259,7 @@ static long stream_recv(void *context, void *buffer, size_t length)
             return count;
         if (count == 0)
             return 0;
-        return -2;                 /* want-read or a retryable condition */
+        return count == -2 ? -2 : -1;
     }
 #endif
     got = recv(s->fd, buffer, length, 0);
@@ -381,59 +392,47 @@ static int parse_url(const char *url, int *secure, char *host, size_t host_size,
 
 static int connect_socket(struct ws_state *s, char *detail, size_t detail_size)
 {
-    struct addrinfo hints;
-    struct addrinfo *list = NULL;
-    char service[8];
-    int rc;
-    int last_error = 0;
+    struct sockaddr_in endpoint;
+    struct in_addr address;
+    struct pollfd descriptor;
+    int error = 0;
+    socklen_t error_size = sizeof(error);
 
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    snprintf(service, sizeof(service), "%u", s->port);
-    rc = getaddrinfo(s->host, service, &hints, &list);
-    if (rc || !list) {
+    memset(&endpoint, 0, sizeof(endpoint));
+    endpoint.sin_family = AF_INET;
+    endpoint.sin_port = htons((uint16_t)s->port);
+    if (inet_pton(AF_INET, s->host, &address) != 1 &&
+        le_live_dns_resolve_ipv4(s->host, NULL, &address, 3000) < 0) {
         say(detail, detail_size,
             "GPT-Live unavailable: the server name could not be resolved.");
         return -1;
     }
-    for (struct addrinfo *entry = list; entry; entry = entry->ai_next) {
-        int fd = socket(entry->ai_family, entry->ai_socktype, entry->ai_protocol);
-        int flags;
-
-        if (fd < 0)
-            continue;
-        flags = fcntl(fd, F_GETFL, 0);
-        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-        if (connect(fd, entry->ai_addr, entry->ai_addrlen) == 0) {
-            s->fd = fd;
-            break;
-        }
-        if (errno == EINPROGRESS) {
-            struct pollfd descriptor;
-            int error = 0;
-            socklen_t length = sizeof(error);
-
-            descriptor.fd = fd;
-            descriptor.events = POLLOUT;
-            descriptor.revents = 0;
-            if (poll(&descriptor, 1, WS_CONNECT_TIMEOUT_MS) > 0 &&
-                getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 &&
-                error == 0) {
-                s->fd = fd;
-                break;
-            }
-            last_error = error ? error : ETIMEDOUT;
-        } else {
-            last_error = errno;
-        }
-        close(fd);
-    }
-    freeaddrinfo(list);
+    endpoint.sin_addr = address;
+    s->fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (s->fd < 0) {
         say(detail, detail_size,
+            "GPT-Live unavailable: the connection could not be created.");
+        return -1;
+    }
+    if (connect(s->fd, (struct sockaddr *)&endpoint, sizeof(endpoint)) == 0)
+        return 0;
+    if (errno != EINPROGRESS) {
+        close(s->fd);
+        s->fd = -1;
+        say(detail, detail_size,
             "GPT-Live unavailable: the connection could not be established.");
-        (void)last_error;
+        return -1;
+    }
+    descriptor.fd = s->fd;
+    descriptor.events = POLLOUT;
+    descriptor.revents = 0;
+    if (poll(&descriptor, 1, WS_CONNECT_TIMEOUT_MS) <= 0 ||
+        getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &error_size) < 0 ||
+        error != 0) {
+        close(s->fd);
+        s->fd = -1;
+        say(detail, detail_size,
+            "GPT-Live unavailable: the connection could not be established.");
         return -1;
     }
     return 0;
@@ -447,6 +446,7 @@ static int send_session_update(struct ws_state *s)
     int length = snprintf(
         message, sizeof(message),
         "{\"type\":\"session.update\",\"session\":{"
+        "\"type\":\"quicksilver\",\"output_modalities\":[\"audio\"],"
         "\"instructions\":\"%s\","
         "\"model\":\"%s\","
         "\"audio\":{\"input\":{\"format\":{\"type\":\"audio/pcm\","
@@ -499,8 +499,9 @@ static int ws_start(struct le_live_transport *transport,
              config && config->model ? config->model : WS_DEFAULT_MODEL);
     snprintf(state.voice, sizeof(state.voice), "%s",
              config && config->voice ? config->voice : "cove");
-    state.allow_unverified_tls =
-        config && config->allow_unverified_tls;
+    snprintf(state.ca_path, sizeof(state.ca_path), "%s",
+             config && config->ca_path ? config->ca_path
+                                       : "/usr/local/share/libreecho/cacert.pem");
 
     memset(&credentials, 0, sizeof(credentials));
     if (!config || !config->credentials_path ||
@@ -546,26 +547,17 @@ static int ws_start(struct le_live_transport *transport,
 
 #if LE_TLS_AVAILABLE
     if (secure) {
-        state.tls = le_tls_client_open(state.fd, state.host);
-        if (!state.tls) {
+        state.tls = le_tls_client_open_verified(state.fd, state.host,
+                                                state.ca_path);
+        if (!state.tls || !le_tls_client_verified(state.tls)) {
             say(state.detail, sizeof(state.detail),
-                "GPT-Live unavailable: the secure connection failed.");
+                "GPT-Live unavailable: the server certificate could not be "
+                "verified.");
             goto fail;
         }
         state.tls_active = 1;
-        if (!le_tls_client_verified(state.tls) &&
-            !state.allow_unverified_tls) {
-            /*
-             * No CA bundle ships on this image, so the certificate chain is
-             * not checked. Sending an account token over an unauthenticated
-             * channel is a real exposure, so this is refused unless an
-             * operator has explicitly accepted it.
-             */
-            say(state.detail, sizeof(state.detail),
-                "GPT-Live unavailable: the server certificate cannot be "
-                "verified on this device.");
-            goto fail;
-        }
+        state.last_tls_active = 1;
+        state.last_tls_verified = 1;
     }
 #else
     if (secure) {
@@ -655,18 +647,25 @@ static int translate(const char *message, struct le_live_event *event)
         return 1;
     }
     if (!strcmp(type, "output_audio.delta")) {
+        if (state.suppress_audio)
+            return 0;
         if (top_string(message, "audio", encoded, sizeof(encoded)) < 0)
             return 0;
-        decoded = le_b64_decode(encoded, event->samples,
-                                sizeof(event->samples));
-        if (!decoded)
+        decoded = le_b64_decode(encoded, state.audio_pending,
+                                sizeof(state.audio_pending));
+        if (!decoded || decoded % sizeof(int16_t))
             return 0;
+        state.audio_pending_count = decoded / sizeof(int16_t);
+        state.audio_pending_offset = 0;
+        /* Emit the first bounded chunk now; later polls drain the remainder. */
         event->kind = LE_LIVE_EVENT_AUDIO;
         event->rate = WS_OUTPUT_SAMPLE_RATE;
-        event->count = decoded / sizeof(int16_t);
-        if (!event->count)
-            return 0;
-        /* The model finished this delta; a separate turn.done follows. */
+        event->count = state.audio_pending_count;
+        if (event->count > LE_LIVE_AUDIO_SAMPLES)
+            event->count = LE_LIVE_AUDIO_SAMPLES;
+        memcpy(event->samples, state.audio_pending,
+               event->count * sizeof(event->samples[0]));
+        state.audio_pending_offset = event->count;
         return 1;
     }
     if (!strcmp(type, "input_transcript.added") ||
@@ -696,6 +695,10 @@ static int translate(const char *message, struct le_live_event *event)
                                                : LE_LIVE_SPEAKER_MODEL;
         event->final = 1;
         snprintf(event->text, sizeof(event->text), "%s", transcript);
+        if (event->speaker == LE_LIVE_SPEAKER_USER)
+            state.suppress_audio = 0;
+        else if (!state.suppress_audio)
+            state.output_done_pending = 1;
         return 1;
     }
     if (!strcmp(type, "delegation.created")) {
@@ -768,15 +771,27 @@ static int ws_poll(struct le_live_transport *transport,
     (void)transport;
     if (!event || !state.ws.connected)
         return -1;
+    memset(event, 0, sizeof(*event));
+    if (state.audio_pending_offset < state.audio_pending_count) {
+        size_t remaining = state.audio_pending_count - state.audio_pending_offset;
+
+        event->kind = LE_LIVE_EVENT_AUDIO;
+        event->rate = WS_OUTPUT_SAMPLE_RATE;
+        event->count = remaining > LE_LIVE_AUDIO_SAMPLES
+            ? LE_LIVE_AUDIO_SAMPLES : remaining;
+        memcpy(event->samples,
+               state.audio_pending + state.audio_pending_offset,
+               event->count * sizeof(event->samples[0]));
+        state.audio_pending_offset += event->count;
+        return 1;
+    }
+    if (state.output_done_pending) {
+        state.output_done_pending = 0;
+        event->kind = LE_LIVE_EVENT_OUTPUT_DONE;
+        return 1;
+    }
     result = le_ws_read_text(&state.ws, state.message, sizeof(state.message),
                              timeout_ms > 0 ? timeout_ms : WS_READ_TIMEOUT_MS);
-    /*
-     * The read outcome is the one thing that cannot be reconstructed after the
-     * fact from a status snapshot, and it is what distinguishes "the server
-     * went away" from "the framing is wrong".
-     */
-    fprintf(stderr, "lived: ws read=%d %s\n", result,
-            result == 1 ? state.message : "");
     if (result == 0)
         return 0;
     if (result == 2) {
@@ -803,12 +818,13 @@ static int ws_poll(struct le_live_transport *transport,
 static int ws_interrupt(struct le_live_transport *transport)
 {
     (void)transport;
-    /*
-     * Nothing to send. Barge-in is the server's job once turn_detection is
-     * server_vad with interrupt_response, which the session request turns on;
-     * the device's own part is to stop playing and keep feeding audio, and the
-     * session does that already.
-     */
+    /* Server VAD stops generation. Locally discard all decoded audio from the
+       interrupted assistant turn and refuse later deltas until the server
+       completes the new user turn. */
+    state.audio_pending_count = 0;
+    state.audio_pending_offset = 0;
+    state.output_done_pending = 0;
+    state.suppress_audio = 1;
     return 0;
 }
 
@@ -830,13 +846,20 @@ static int ws_complete_delegation(struct le_live_transport *transport,
      */
     do {
         size_t chunk = length - offset;
-        char escaped[WS_CONTEXT_CHUNK_MAX * 2U + 16U];
+        /* Worst case is one \u00xx escape (6 bytes) per input byte. */
+        char escaped[WS_CONTEXT_CHUNK_MAX * 6U + 1U];
         size_t written = 0;
         size_t i;
         int encoded;
 
         if (chunk > WS_CONTEXT_CHUNK_MAX)
             chunk = WS_CONTEXT_CHUNK_MAX;
+        /* Never split a UTF-8 code point between context events. */
+        while (chunk > 0 && offset + chunk < length &&
+               ((unsigned char)result[offset + chunk] & 0xc0U) == 0x80U)
+            --chunk;
+        if (!chunk)
+            return -1;
         for (i = 0; i < chunk; ++i) {
             unsigned char c = (unsigned char)result[offset + i];
 
@@ -873,6 +896,10 @@ static void ws_stop(struct le_live_transport *transport)
     if (!state.in_use)
         return;
     if (state.ws.connected) {
+        static const char close_message[] = "{\"type\":\"session.close\"}";
+
+        (void)le_ws_send_text(&state.ws, close_message,
+                              sizeof(close_message) - 1U);
         (void)le_ws_send_close(&state.ws, 1000);
         /* Give the close frame a moment to leave, then let go. */
         (void)le_ws_read_text(&state.ws, state.message, sizeof(state.message),
@@ -884,11 +911,19 @@ static void ws_stop(struct le_live_transport *transport)
 static void ws_metrics(const struct le_live_transport *transport, char *out,
                        size_t size)
 {
+    char host[sizeof(state.host) * 2U];
+    char path[sizeof(state.path) * 2U];
+    char model[sizeof(state.model) * 2U];
+    char detail[sizeof(state.detail) * 2U];
     int written;
 
     (void)transport;
     if (!out || !size)
         return;
+    json_escape_into(host, sizeof(host), state.host);
+    json_escape_into(path, sizeof(path), state.path);
+    json_escape_into(model, sizeof(model), state.model);
+    json_escape_into(detail, sizeof(detail), state.detail);
     written = snprintf(
         out, size,
         "{\"implemented\":true,\"transport\":\"websocket\","
@@ -896,16 +931,16 @@ static void ws_metrics(const struct le_live_transport *transport, char *out,
         "\"session_ready\":%s,\"messages_in\":%u,\"audio_chunks_out\":%u,"
         "\"frames_in\":%llu,\"frames_out\":%llu,\"tls\":%s,"
         "\"verified_tls\":%s,\"detail\":\"%s\"}",
-        state.host, state.path, state.model,
+        host, path, model,
         state.session_ready ? "true" : "false", state.messages_in,
- state.audio_chunks_out, (unsigned long long)state.ws.frames_in,
- (unsigned long long)state.ws.frames_out,
- state.tls_active ? "true" : "false",
- /* Always false on this image: no CA bundle, so no peer can be
-    authenticated. Reported rather than implied. */
- "false", state.detail);
+        state.audio_chunks_out, (unsigned long long)state.ws.frames_in,
+        (unsigned long long)state.ws.frames_out,
+        state.last_tls_active ? "true" : "false",
+        state.last_tls_verified ? "true" : "false", detail);
     if (written < 0 || (size_t)written >= size)
-        out[size - 1] = '\0';
+        snprintf(out, size,
+                 "{\"implemented\":true,\"transport\":\"websocket\","
+                 "\"detail\":\"status exceeds the adapter limit\"}");
 }
 
 static const struct le_live_transport_ops websocket_ops = {

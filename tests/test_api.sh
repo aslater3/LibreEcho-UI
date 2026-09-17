@@ -19,6 +19,16 @@ curl -fsS "$URL/api/v1/config" | jq -e --arg version "LibreEcho OS $OS_VERSION" 
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
 history=$(curl -fsS "$URL/api/v1/assistant/history")
 printf '%s' "$history" | jq -e '.ok and .data.history_generation == 1 and (.data.turns | length == 1) and .data.turns[0].first_pcm_ms == 3100' >/dev/null
+code=$(curl -sS -o /tmp/le-live-get.out -w '%{http_code}' "$URL/api/v1/live")
+[ "$code" = 503 ]
+code=$(curl -sS -o /tmp/le-live-post.out -w '%{http_code}' -X POST "$URL/api/v1/live" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-live-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/live" -H 'Content-Type: application/json' --data '{"enabled":true}')
+[ "$code" = 403 ]
+for body in '{"enabled":"true"}' '{"nested":{"enabled":true}}' '{"note":"\"enabled\":true"}'; do
+    code=$(curl -sS -o /tmp/le-live-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/live" -H "$CSRF" -H 'Content-Type: application/json' --data "$body")
+    [ "$code" = 400 ]
+done
 code=$(curl -sS -o /tmp/le-history-method.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 405 ]
 clear_code=$(curl -fsS -o /tmp/le-history-clear.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history/clear" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')

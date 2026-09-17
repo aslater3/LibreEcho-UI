@@ -29,6 +29,7 @@ struct harness {
     int denials;
     int outputs;
     int cancels;
+    int dispatch_ends_session;
     char last_tool[LE_LIVE_TOOL_NAME_MAX];
     char last_arguments[LE_LIVE_ARGUMENT_MAX];
 };
@@ -48,7 +49,9 @@ static int harness_dispatch(void *context, const char *tool,
         snprintf(result, size, "{\"ok\":false,\"error\":\"not available\"}");
         return -1;
     }
-    snprintf(result, size, "{\"ok\":true,\"seconds\":600}");
+    snprintf(result, size, h->dispatch_ends_session
+             ? "{\"ok\":true,\"end_session\":true}"
+             : "{\"ok\":true,\"seconds\":600}");
     return 0;
 }
 
@@ -92,7 +95,7 @@ static void harness_init(struct harness *h, const char *scenario,
     h->config.connect_timeout_ms = 500;
     h->config.wake_preroll_ms = 150;
     h->config.barge_in_rms = 900;
-    h->config.barge_in_factor = 3;
+    h->config.barge_in_factor = 6;
     h->config.barge_in_frames = 3;
     h->config.model = "gpt-live-1-codex";
     h->config.voice = "cove";
@@ -136,6 +139,11 @@ static int pred_idle(struct harness *h)
 static int pred_delegated(struct harness *h)
 {
     return h->session.delegation_count > 0;
+}
+
+static int pred_second_dispatch(struct harness *h)
+{
+    return h->dispatches >= 2;
 }
 
 static int pred_deduped(struct harness *h)
@@ -247,6 +255,60 @@ static int test_duplicate_delegation_runs_once(void)
     return 0;
 }
 
+static int test_delegation_ids_are_scoped_to_one_session(void)
+{
+    struct harness h;
+
+    harness_init(&h, "session", 5000, 60000);
+    CHECK(feed_ms(&h, 300, 40) == 0);
+    CHECK(le_live_session_wake(&h.session, le_live_ring_end(&h.ring), h.now) == 0);
+    CHECK(pump_until(&h, 3000, pred_delegated) == 0);
+    CHECK(h.dispatches == 1);
+    le_live_session_close(&h.session, LE_LIVE_END_STOPPED, h.now);
+
+    CHECK(le_live_session_wake(&h.session, le_live_ring_end(&h.ring), h.now) == 0);
+    CHECK(pump_until(&h, 3000, pred_second_dispatch) == 0);
+    CHECK(h.dispatches == 2);
+    return 0;
+}
+
+static int test_missing_transport_fails_closed(void)
+{
+    struct le_live_session session;
+    struct le_live_ring ring;
+    struct le_live_session_config config;
+
+    memset(&config, 0, sizeof(config));
+    le_live_ring_reset(&ring);
+    le_live_session_init(&session, &ring, &config, &harness_ops, NULL);
+    CHECK(le_live_session_wake(&session, 0, 1000) < 0);
+    return 0;
+}
+
+static int test_empty_preroll_refuses_wake(void)
+{
+    struct harness h;
+
+    harness_init(&h, "session", 5000, 60000);
+    CHECK(le_live_session_wake(&h.session, 0, h.now) < 0);
+    CHECK(h.session.sessions_started == 0);
+    CHECK(strstr(h.session.last_error, "audio") != NULL);
+    return 0;
+}
+
+static int test_audio_send_failure_closes_session(void)
+{
+    struct harness h;
+
+    harness_init(&h, "send_error", 5000, 60000);
+    CHECK(feed_ms(&h, 200, 40) == 0);
+    CHECK(le_live_session_wake(&h.session, le_live_ring_end(&h.ring), h.now) == 0);
+    CHECK(le_live_session_pump(&h.session, 0, h.now) < 0);
+    CHECK(h.session.state == LE_LIVE_IDLE);
+    CHECK(h.session.last_end == LE_LIVE_END_TRANSPORT_ERROR);
+    return 0;
+}
+
 static int test_denied_tool_does_not_end_the_conversation(void)
 {
     struct harness h;
@@ -321,6 +383,20 @@ static int test_noisy_room_does_not_trigger_barge_in(void)
     CHECK(feed_ms(&h, 40, 20000) == 0);
     CHECK(h.session.barge_ins == 1);
     CHECK(h.session.state == LE_LIVE_LISTENING);
+    return 0;
+}
+
+static int test_delegation_can_end_session(void)
+{
+    struct harness h;
+
+    harness_init(&h, "session", 5000, 60000);
+    h.dispatch_ends_session = 1;
+    CHECK(feed_ms(&h, 200, 20) == 0);
+    CHECK(le_live_session_wake(&h.session, le_live_ring_end(&h.ring), h.now) == 0);
+    CHECK(pump_until(&h, 3000, pred_idle) == 0);
+    CHECK(h.dispatches == 1);
+    CHECK(h.session.last_end == LE_LIVE_END_STOPPED);
     return 0;
 }
 
@@ -442,9 +518,12 @@ static int test_status_and_transcript_are_bounded(void)
     CHECK(le_live_session_wake(&h.session, le_live_ring_end(&h.ring),
                                h.now) == 0);
     (void)pump_until(&h, 4000, pred_idle);
+    snprintf(h.session.last_error, sizeof(h.session.last_error),
+             "bad \"quote\"\nline");
 
     le_live_session_status_json(&h.session, status, sizeof(status));
     CHECK(strstr(status, "\"state\":\"idle\"") != NULL);
+    CHECK(strstr(status, "bad \\\"quote\\\"\\nline") != NULL);
     CHECK(strstr(status, "\"sessions_started\":1") != NULL);
     /* Status must never carry speech content or credentials. */
     CHECK(strstr(status, "kitchen") == NULL);
@@ -467,9 +546,14 @@ int main(void)
     } tests[] = {
         {"open/listen/speak/timeout", test_open_listen_speak_timeout},
         {"duplicate delegation", test_duplicate_delegation_runs_once},
+        {"delegation ids per session", test_delegation_ids_are_scoped_to_one_session},
+        {"missing transport", test_missing_transport_fails_closed},
+        {"empty preroll", test_empty_preroll_refuses_wake},
+        {"audio send failure", test_audio_send_failure_closes_session},
         {"denied tool", test_denied_tool_does_not_end_the_conversation},
         {"barge-in", test_barge_in_truncates_model_speech},
         {"noisy room", test_noisy_room_does_not_trigger_barge_in},
+        {"delegation ends session", test_delegation_can_end_session},
         {"connect timeout", test_connect_timeout_recovers_to_idle},
         {"max session duration", test_max_session_duration_is_bounded},
         {"disconnect cleanup", test_disconnect_cleans_up},

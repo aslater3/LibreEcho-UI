@@ -47,8 +47,8 @@ WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/mdns_client.c src/adapter/
 LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 	src/adapter/live_ring.c src/adapter/live_transport_mock.c \
 	src/adapter/live_transport_realtime.c src/adapter/live_audio_out.c \
-	src/adapter/live_tools.c src/adapter/radio_resample.c \
-	src/adapter/live_b64.c src/adapter/ws_client.c \
+	src/adapter/live_tools.c src/adapter/timer_intent.c src/adapter/radio_resample.c \
+	src/adapter/live_b64.c src/adapter/ws_client.c src/adapter/live_dns.c \
 	src/adapter/llm_store.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
@@ -172,12 +172,21 @@ $(BUILD)/test-live-session: tests/test_live_session.c src/adapter/live_session.c
 	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
 
 $(BUILD)/test-live-tools: tests/test_live_tools.c src/adapter/live_tools.c \
-		src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/adapter/timer_intent.c src/adapter/adapter_client.c src/adapter/adapter_server.c \
 		src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
 $(BUILD)/test-live-audio-out: tests/test_live_audio_out.c \
 		src/adapter/live_audio_out.c src/adapter/radio_resample.c
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
+
+$(BUILD)/test-ws-client: tests/test_ws_client.c src/adapter/ws_client.c \
+		src/adapter/live_b64.c
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
+
+$(BUILD)/test-live-dns: tests/test_live_dns.c src/adapter/live_dns.c
 	@mkdir -p $(BUILD)
 	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
 
@@ -188,12 +197,15 @@ $(BUILD)/test-lived: tests/test_lived.c $(BUILD)/libreecho-lived
 
 test-lived: $(BUILD)/test-live-ring $(BUILD)/test-live-session \
 		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
-		$(BUILD)/test-lived
+		$(BUILD)/test-ws-client $(BUILD)/test-live-dns $(BUILD)/test-lived
 	./$(BUILD)/test-live-ring
 	./$(BUILD)/test-live-session
 	./$(BUILD)/test-live-tools
 	./$(BUILD)/test-live-audio-out
+	./$(BUILD)/test-ws-client
+	./$(BUILD)/test-live-dns
 	./$(BUILD)/test-lived
+	sh tests/run_live_transport_e2e.sh
 
 $(BUILD)/libreecho-wyomingd-test: $(WYOMINGD_SOURCES)
 	@mkdir -p $(BUILD)
@@ -873,10 +885,12 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 
 clean:
 	rm -f $(shell find $(BUILD) -name '*.d' 2>/dev/null)
+	rm -f $(BUILD)/tls.o $(BUILD)/tls_stub.o
 	rm -f $(CAPTURE_MUX_OBJECTS) $(RADIOD_OBJECTS) $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
 		$(LOGD_OBJECTS) $(WATCHDOGD_OBJECTS) $(BTD_OBJECTS) $(AIRPLAYD_OBJECTS) $(TTSD_OBJECTS) \
 		$(TIMERD_OBJECTS) \
-		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(WYOMINGD_OBJECTS) $(ADAPTER_TARGETS) \
+		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(WYOMINGD_OBJECTS) $(LIVED_OBJECTS) \
+		$(ADAPTER_TARGETS) \
 		$(TARGET) $(LOGD_TARGET)
 	rm -f $(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32 \
 		$(BUILD)/libreecho-waked-onnx-arm32 \
@@ -905,7 +919,7 @@ clean:
 		$(BUILD)/test-agentd \
 		$(BUILD)/test-live-ring $(BUILD)/test-live-session \
 		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
-		$(BUILD)/test-lived \
+		$(BUILD)/test-ws-client $(BUILD)/test-live-dns $(BUILD)/test-lived \
 		$(BUILD)/test-voice-reply \
 		$(BUILD)/test-voice-playback \
 		$(BUILD)/test-voice-listening-feedback \

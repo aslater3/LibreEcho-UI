@@ -109,7 +109,7 @@ struct le_live_session_config {
     const char *credentials_path;
     /* Forwarded to the transport: see le_live_transport_config. */
     const char *url;
-    int allow_unverified_tls;
+    const char *ca_path;
     const char *mock_scenario;
 };
 
@@ -119,7 +119,7 @@ struct le_live_session_config {
 #define LE_LIVE_DEFAULT_CONNECT_TIMEOUT_MS 8000U
 #define LE_LIVE_DEFAULT_WAKE_PREROLL_MS 150U
 #define LE_LIVE_DEFAULT_BARGE_IN_RMS 900U
-#define LE_LIVE_DEFAULT_BARGE_IN_FACTOR 3U
+#define LE_LIVE_DEFAULT_BARGE_IN_FACTOR 6U
 #define LE_LIVE_DEFAULT_BARGE_IN_FRAMES 3U
 
 struct le_live_session {

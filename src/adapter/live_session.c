@@ -36,6 +36,8 @@ static int append_escaped(char *out, size_t size, size_t *used,
         const char *replacement = NULL;
         char buffer[8];
 
+        size_t replacement_length;
+
         if (c == '"' || c == '\\') {
             buffer[0] = '\\';
             buffer[1] = (char)c;
@@ -61,15 +63,23 @@ static int append_escaped(char *out, size_t size, size_t *used,
             out[(*used)++] = (char)c;
             continue;
         }
-        if (*used + 2 >= size)
+        replacement_length = strlen(replacement);
+        if (*used + replacement_length >= size)
             return -1;
-        out[(*used)++] = replacement[0];
-        out[(*used)++] = replacement[1];
+        memcpy(out + *used, replacement, replacement_length);
+        *used += replacement_length;
     }
     if (*used >= size)
         return -1;
     out[*used] = '\0';
     return 0;
+}
+
+static int escape_text(char *out, size_t size, const char *value)
+{
+    size_t used = 0;
+
+    return append_escaped(out, size, &used, value);
 }
 
 const char *le_live_state_name(enum le_live_state state)
@@ -124,8 +134,7 @@ void le_live_session_init(struct le_live_session *session,
     session->context = context;
     if (config)
         session->config = *config;
-    if (!session->config.transport_ops)
-        session->config.transport_ops = le_live_transport_mock_ops();
+
     if (!session->config.conversation_timeout_ms)
         session->config.conversation_timeout_ms = LE_LIVE_DEFAULT_TIMEOUT_MS;
     if (!session->config.max_session_ms)
@@ -280,7 +289,6 @@ static void handle_delegation(struct le_live_session *session,
     char result[LE_LIVE_ARGUMENT_MAX];
     int ok;
 
-    (void)now_ms;
     result[0] = '\0';
     /*
      * Replay.  The same delegation id on a reconnected or retrying transport
@@ -311,6 +319,10 @@ static void handle_delegation(struct le_live_session *session,
     if (session->transport.ops->complete_delegation)
         (void)session->transport.ops->complete_delegation(
             &session->transport, event->delegation_id, result);
+    if (strstr(result, "\"end_session\":true")) {
+        le_live_session_close(session, LE_LIVE_END_STOPPED, now_ms);
+        return;
+    }
     set_state(session, LE_LIVE_SPEAKING);
 }
 
@@ -439,16 +451,36 @@ static void check_barge_in(struct le_live_session *session,
 int le_live_session_feed(struct le_live_session *session, uint64_t first_sample,
                          const int16_t *samples, size_t count, uint64_t now_ms)
 {
+    int model_speaking;
+
     if (!session || !samples || !count)
         return -1;
     if (session->ring &&
         le_live_ring_append(session->ring, first_sample, samples, count) < 0)
         return -1;
-    observe_input(session, samples, count);
+    model_speaking = session->state == LE_LIVE_SPEAKING;
+    if (le_live_session_active(session))
+        check_barge_in(session, samples, count, now_ms);
+    /* Model output and a user's barge-in are not ambient-room samples. Feeding
+       either into the floor would raise the threshold while it is being used,
+       but retain the observed peak for diagnostics. */
+    if (!model_speaking)
+        observe_input(session, samples, count);
+    else {
+        unsigned int rms = frame_rms(samples, count);
+
+        if (rms > session->input_peak_rms)
+            session->input_peak_rms = rms;
+    }
     if (!le_live_session_active(session))
         return 0;
-    check_barge_in(session, samples, count, now_ms);
-    return flush_pending(session, now_ms);
+    if (flush_pending(session, now_ms) < 0) {
+        copy_text(session->last_error, sizeof(session->last_error),
+                  "audio upload failed");
+        le_live_session_close(session, LE_LIVE_END_TRANSPORT_ERROR, now_ms);
+        return -1;
+    }
+    return 0;
 }
 
 /* --- lifecycle ---------------------------------------------------------- */
@@ -465,6 +497,12 @@ int le_live_session_wake(struct le_live_session *session,
         return 1;
     if (!session->config.transport_ops)
         return -1;
+    if (!session->ring || !session->ring->primed || !session->ring->count ||
+        detection_sample > le_live_ring_end(session->ring)) {
+        copy_text(session->last_error, sizeof(session->last_error),
+                  "wake audio is unavailable");
+        return -1;
+    }
 
     session->transport.ops = session->config.transport_ops;
     memset(&transport_config, 0, sizeof(transport_config));
@@ -472,8 +510,7 @@ int le_live_session_wake(struct le_live_session *session,
     transport_config.voice = session->config.voice;
     transport_config.credentials_path = session->config.credentials_path;
     transport_config.url = session->config.url;
-    transport_config.allow_unverified_tls =
-        session->config.allow_unverified_tls;
+    transport_config.ca_path = session->config.ca_path;
     transport_config.mock_scenario = session->config.mock_scenario;
 
     preroll_samples = (uint64_t)session->config.wake_preroll_ms *
@@ -620,7 +657,13 @@ int le_live_session_pump(struct le_live_session *session, int timeout_ms,
         le_live_session_close(session, LE_LIVE_END_TIMEOUT, now_ms);
         return 0;
     }
-    return flush_pending(session, now_ms);
+    if (flush_pending(session, now_ms) < 0) {
+        copy_text(session->last_error, sizeof(session->last_error),
+                  "audio upload failed");
+        le_live_session_close(session, LE_LIVE_END_TRANSPORT_ERROR, now_ms);
+        return -1;
+    }
+    return 0;
 }
 
 void le_live_session_close(struct le_live_session *session,
@@ -647,6 +690,8 @@ void le_live_session_close(struct le_live_session *session,
         ++session->sessions_failed;
     session->next_send_sample = 0;
     session->barge_in_run = 0;
+    memset(session->delegation_cache, 0, sizeof(session->delegation_cache));
+    session->delegation_next = 0;
     (void)now_ms;
     set_state(session, LE_LIVE_IDLE);
 }
@@ -656,6 +701,8 @@ void le_live_session_close(struct le_live_session *session,
 void le_live_session_status_json(const struct le_live_session *session,
                                  char *out, size_t size)
 {
+    char escaped_model[LE_LIVE_TEXT_MAX * 2U + 1U];
+    char escaped_error[LE_LIVE_TEXT_MAX * 6U + 1U];
     int written;
 
     if (!out || !size)
@@ -663,6 +710,11 @@ void le_live_session_status_json(const struct le_live_session *session,
     out[0] = '\0';
     if (!session)
         return;
+    if (escape_text(escaped_model, sizeof(escaped_model),
+                    session->config.model ? session->config.model : "") < 0)
+        snprintf(escaped_model, sizeof(escaped_model), "model name unavailable");
+    if (escape_text(escaped_error, sizeof(escaped_error), session->last_error) < 0)
+        snprintf(escaped_error, sizeof(escaped_error), "error detail unavailable");
     written = snprintf(
         out, size,
         "{\"state\":\"%s\",\"active\":%s,\"model\":\"%s\","
@@ -679,7 +731,7 @@ void le_live_session_status_json(const struct le_live_session *session,
         "\"last_error\":\"%s\"}",
         le_live_state_name(session->state),
         le_live_session_active(session) ? "true" : "false",
-        session->config.model ? session->config.model : "",
+        escaped_model,
         (unsigned long long)session->sessions_started,
         (unsigned long long)session->sessions_completed,
         (unsigned long long)session->sessions_failed,
@@ -700,7 +752,11 @@ void le_live_session_status_json(const struct le_live_session *session,
         session->input_floor_rms,
         session->input_peak_rms,
         session->speech_peak_rms,
-        session->last_error);
+        escaped_error);
     if (written < 0 || (size_t)written >= size)
-        out[size - 1] = '\0';
+        snprintf(out, size,
+                 "{\"state\":\"%s\",\"active\":%s,"
+                 "\"last_error\":\"status exceeds the adapter limit\"}",
+                 le_live_state_name(session->state),
+                 le_live_session_active(session) ? "true" : "false");
 }

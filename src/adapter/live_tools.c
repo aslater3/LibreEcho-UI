@@ -2,6 +2,7 @@
 
 #include "live_tools.h"
 #include "adapter.h"
+#include "timer_intent.h"
 #include "../json.h"
 
 #include <errno.h>
@@ -160,6 +161,7 @@ static int tool_timer_set(const struct le_live_tool_environment *environment,
 {
     long long seconds = 0;
     char label[64] = "";
+    char escaped_label[128];
     char args[192];
     char response[LE_ADAPTER_MSG_MAX];
     char fields[160];
@@ -177,14 +179,16 @@ static int tool_timer_set(const struct le_live_tool_environment *environment,
     if (json_get_string(arguments, "label", label, sizeof(label)) > 0 &&
         !text_is_plain(label))
         return respond_error(result, size, "That timer label is not allowed.");
+    if (escape_into(escaped_label, sizeof(escaped_label), label) < 0)
+        return respond_error(result, size, "That timer label is too long.");
     if (snprintf(args, sizeof(args), "{\"seconds\":%lld,\"label\":\"%s\"}",
-                 seconds, label) >= (int)sizeof(args))
+                 seconds, escaped_label) >= (int)sizeof(args))
         return respond_error(result, size, "That timer request is too long.");
     if (adapter_call(environment, environment->timer_socket, "add", args,
                      response, sizeof(response)) != LE_ADAPTER_OK)
         return respond_error(result, size, "The timer could not be set.");
     if (snprintf(fields, sizeof(fields), "\"seconds\":%lld,\"label\":\"%s\"",
-                 seconds, label) >= (int)sizeof(fields))
+                 seconds, escaped_label) >= (int)sizeof(fields))
         return respond_error(result, size, "That timer request is too long.");
     return respond_ok(result, size, fields);
 }
@@ -393,12 +397,52 @@ static int tool_device_weather(const struct le_live_tool_environment *environmen
 static int tool_voice_request(const struct le_live_tool_environment *environment,
                               const char *arguments, char *result, size_t size)
 {
+    struct le_timer_intent intent;
     char request[LE_LIVE_ARGUMENT_MAX];
+    char routed[192];
+    enum le_timer_intent_kind kind;
 
-    (void)environment;
     if (json_get_string(arguments, "request", request, sizeof(request)) < 1 ||
         !request[0])
         return respond_error(result, size, "That request was empty.");
+
+    /* Stop is safety-critical and must not be captured by a narrower intent
+       grammar such as timer dismissal. */
+    if (!strcmp(request, "stop") || strstr(request, "stop playback") ||
+        strstr(request, "stop the music")) {
+        if (tool_media_stop(environment, "{}", result, size) < 0)
+            return -1;
+        return respond_ok(result, size,
+                          "\"stopped\":true,\"end_session\":true");
+    }
+
+    /* Reuse the deterministic timer grammar the local assistant already uses:
+       the same spoken request must not mean something different in Live mode. */
+    memset(&intent, 0, sizeof(intent));
+    kind = le_timer_intent_parse(request, &intent);
+    if (kind == LE_TIMER_INTENT_SET) {
+        if (snprintf(routed, sizeof(routed), "{\"seconds\":%lld}",
+                     intent.seconds) >= (int)sizeof(routed))
+            return respond_error(result, size, "That timer request is too long.");
+        return tool_timer_set(environment, routed, result, size);
+    }
+    if (kind == LE_TIMER_INTENT_CANCEL)
+        return tool_timer_cancel(environment, "{}", result, size);
+    if (kind == LE_TIMER_INTENT_DISMISS)
+        return tool_timer_dismiss(environment, "{}", result, size);
+    if (kind == LE_TIMER_INTENT_QUERY)
+        return tool_timer_query(environment, "{}", result, size);
+
+    /* Small, explicit read-only/action vocabulary. No fuzzy model-controlled
+       service name ever reaches a daemon. */
+    if (strstr(request, "volume") || strstr(request, "Volume"))
+        return tool_device_volume(environment, "{}", result, size);
+    if (strstr(request, "what time") || strstr(request, "What time") ||
+        strstr(request, "current time"))
+        return tool_device_time(environment, "{}", result, size);
+    if (strstr(request, "weather") || strstr(request, "Weather"))
+        return tool_device_weather(environment, "{}", result, size);
+
     return respond_error(result, size,
                          "I cannot do that on the device yet.");
 }

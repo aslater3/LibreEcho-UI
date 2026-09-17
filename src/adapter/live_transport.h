@@ -95,12 +95,8 @@ struct le_live_transport_config {
      * putting the account token on an unencrypted link.
      */
     const char *url;
-    /*
-     * This image ships no CA bundle, so a TLS peer cannot be authenticated.
-     * Sending the ChatGPT token over an unauthenticated channel is refused
-     * unless an operator sets this explicitly.
-     */
-    int allow_unverified_tls;
+    /* CA bundle used to authenticate the WebSocket peer. */
+    const char *ca_path;
     /*
      * Scenario selector for the mock transport; ignored by real transports.
      * Kept in the shared config so the daemon needs one configuration path.

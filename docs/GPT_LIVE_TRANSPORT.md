@@ -1,8 +1,9 @@
 # GPT-Live subscription transport (WebSocket)
 
-Status: **specification extracted from the authoritative client; not yet
-implemented in `libreecho-lived`.** This file exists so the implementation is
-executing a known wire format rather than re-deriving it.
+Status: **implemented in `libreecho-lived` and exercised against a protocol-
+accurate fake server on host and ARM32 hardware.** Real-service acceptance is
+pending an existing ChatGPT device login. This file records the authoritative
+wire format the implementation follows.
 
 ## Why this file exists
 
@@ -175,23 +176,27 @@ already built in `live_tools.c` / `live_session.c`:
 `item.type == "delegation"` and `item.target == "client"` are both required for
 the client to treat it as a handoff; anything else is ignored upstream.
 
-## What is left to build
+## Implementation status
 
-1. A WebSocket client: HTTP `Upgrade` handshake over the repository's existing
-   TLS (`src/tls.c`), then RFC 6455 framing — client-to-server frames MUST be
-   masked; the server-to-client direction MUST NOT be. Bounded read/write
-   buffers, no dynamic growth.
-2. Base64 encode/decode, bounded, for both directions.
-3. A `live_transport_websocket.c` implementing `le_live_transport_ops` on top of
-   that: `session.update` on connect, `input_audio.append` per chunk,
-   `delegation.context.append` for results, `session.close` on retire, and the
-   inbound parser table above feeding `LE_LIVE_EVENT_AUDIO`,
-   `LE_LIVE_EVENT_TRANSCRIPT`, `LE_LIVE_EVENT_DELEGATION`, `LE_LIVE_EVENT_OPEN`
-   and `LE_LIVE_EVENT_OUTPUT_DONE`.
-4. Output resampling 24 kHz to the 48 kHz bus — already handled by
-   `live_audio_out` via `le_radio_resample`.
-5. A fake server for host tests that speaks this protocol, so the parser and
-   the framing are covered without an account.
+Implemented:
+
+1. Bounded RFC 6455 framing with mandatory client masking, verified handshake,
+   ping/pong and close handling.
+2. Bounded base64 PCM encode/decode, including splitting model audio deltas into
+   session-sized playback events.
+3. `session.update`, `input_audio.append`, `delegation.context.append`,
+   `session.close`, transcripts, model audio and error events.
+4. Verified mbedTLS using the assistant payload's CA bundle. There is no
+   unauthenticated-TLS escape hatch for account tokens.
+5. A direct bounded DNS A resolver reading `/etc/resolv.conf`; the static ARM32
+   artifact has no `getaddrinfo`/glibc-NSS dependency.
+6. Protocol-accurate fake server, WebSocket/base64/DNS unit tests, host e2e, and
+   ARM32 e2e over verified TLS with real post-AEC audio and the playback bus.
+
+The server hands off natural-language requests. `voice.request` routes the
+initial deterministic subset (timers, media stop, time, volume, weather) onto
+the same allow-listed implementations as the local assistant. Other requests
+fail explicitly rather than inventing an action.
 
 ## Credentials
 

@@ -113,6 +113,14 @@ static long peer_send(void *context, const void *buffer, size_t length)
     return -1;
 }
 
+static long failing_recv(void *context, void *buffer, size_t length)
+{
+    (void)context;
+    (void)buffer;
+    (void)length;
+    return -1;
+}
+
 /* Read exactly `length` bytes the client sent, with a bounded budget. */
 static int drain(int fd, unsigned char *out, size_t length)
 {
@@ -342,6 +350,21 @@ static int test_timeout_reports_nothing(void)
     return 0;
 }
 
+static int test_stream_error_is_not_a_clean_close(void)
+{
+    struct le_ws ws;
+    struct le_ws_stream stream;
+    char message[64];
+
+    memset(&ws, 0, sizeof(ws));
+    memset(&stream, 0, sizeof(stream));
+    stream.recv = failing_recv;
+    ws.stream = &stream;
+    ws.connected = 1;
+    CHECK(le_ws_read_text(&ws, message, sizeof(message), 60) == -1);
+    return 0;
+}
+
 int main(void)
 {
     int failures = 0;
@@ -354,6 +377,7 @@ int main(void)
     failures += test_server_frames_are_read_and_validated() != 0;
     failures += test_oversized_frame_is_refused() != 0;
     failures += test_timeout_reports_nothing() != 0;
+    failures += test_stream_error_is_not_a_clean_close() != 0;
     if (failures) {
         fprintf(stderr, "ws client: FAILED\n");
         return 1;

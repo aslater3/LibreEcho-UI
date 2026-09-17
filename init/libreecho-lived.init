@@ -19,7 +19,9 @@ TRANSPORT=${TRANSPORT:-realtime}
 MODEL=${MODEL:-gpt-live-1-codex}
 VOICE=${VOICE:-cove}
 CREDENTIALS=${CREDENTIALS:-/data/libreecho/secrets/openai-codex.json}
-ARGS=${ARGS:---foreground --transport $TRANSPORT --model $MODEL --voice $VOICE --credentials $CREDENTIALS --socket $SOCKET --wake-socket $WAKE_SOCKET --audio-bus $BUS}
+ASSISTANT_ROOT=${ASSISTANT_ROOT:-/run/libreecho/features/assistant/root}
+CA_BUNDLE=${CA_BUNDLE:-$ASSISTANT_ROOT/usr/local/share/libreecho/cacert.pem}
+ARGS=${ARGS:---foreground --transport $TRANSPORT --model $MODEL --voice $VOICE --credentials $CREDENTIALS --live-ca $CA_BUNDLE --socket $SOCKET --wake-socket $WAKE_SOCKET --audio-bus $BUS}
 
 # Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life:
 # it goes stale when the daemon is started from a shell that then exits (the

@@ -11,7 +11,9 @@ than trusted.
 import base64
 import hashlib
 import json
+import os
 import socket
+import ssl
 import struct
 import sys
 import threading
@@ -116,7 +118,9 @@ def pcm_tone(count, rate):
 
 def serve_session(conn, info, log):
     log(f"PATH {info['path']}")
-    log(f"AUTH {info['headers'].get('authorization', '(none)')[:24]}...")
+    authorization = info['headers'].get('authorization')
+    log("AUTH present=%s length=%d" %
+        ("yes" if authorization else "no", len(authorization or "")))
     log(f"ACCOUNT {info['headers'].get('chatgpt-account-id', '(none)')}")
 
     send_json(conn, {"type": "session.started",
@@ -157,22 +161,22 @@ def serve_session(conn, info, log):
             if audio_bytes > 6400 and not delegated:
                 delegated = True
                 send_json(conn, {"type": "input_transcript.added",
-                                 "item": {"text": "turn the kitchen"}})
+                                 "item": {"text": "what time"}})
                 send_json(conn, {"type": "turn.done",
                                  "turn": {"role": "user",
                                           "transcript":
-                                          "turn the kitchen lights off"}})
+                                          "what time is it"}})
                 send_json(conn, {"type": "delegation.created", "item": {
                     "id": "delegation-1", "type": "delegation",
                     "target": "client",
                     "content": [{"type": "input_text",
-                                 "text": "turn off the kitchen lights"}]}})
+                                 "text": "what time is it"}]}})
         elif kind == "delegation.context.append":
             log("DELEGATION_REPLY id=%s text=%r"
                 % (message.get("delegation_item_id"),
                    message["content"][0]["text"]))
             send_json(conn, {"type": "output_transcript.added",
-                             "item": {"text": "Okay, the kitchen"}})
+                             "item": {"text": "It is noon."}})
             for _ in range(3):
                 send_json(conn, {"type": "output_audio.delta",
                                  "audio": base64.b64encode(
@@ -180,7 +184,7 @@ def serve_session(conn, info, log):
             send_json(conn, {"type": "turn.done",
                              "turn": {"role": "assistant",
                                       "transcript":
-                                      "Okay, the kitchen lights are off."}})
+                                      "It is noon."}})
         elif kind == "session.close":
             log("SESSION_CLOSE")
             send_frame(conn, 0x8, struct.pack(">H", 1000))
@@ -196,9 +200,16 @@ def main():
     def log(line):
         handle.write("FAKE %s %s\n" % (time.strftime("%H:%M:%S"), line))
 
+    bind_host = os.environ.get("FAKE_LIVE_BIND", "127.0.0.1")
+    cert = os.environ.get("FAKE_LIVE_CERT")
+    key = os.environ.get("FAKE_LIVE_KEY")
+    tls_context = None
+    if cert and key:
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.load_cert_chain(cert, key)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", port))
+    listener.bind((bind_host, port))
     listener.listen(4)
     actual = listener.getsockname()[1]
     print(f"FAKE_LISTENING {actual}", flush=True)
@@ -212,6 +223,8 @@ def main():
         except socket.timeout:
             continue
         try:
+            if tls_context:
+                conn = tls_context.wrap_socket(conn, server_side=True)
             info = handshake(conn)
             if info:
                 serve_session(conn, info, log)

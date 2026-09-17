@@ -4,10 +4,11 @@
 speech-to-speech conversation that starts on the local wake word and can
 delegate device actions back to LibreEcho.
 
-Status in 0.14: **pipeline implemented and device-validated; the OpenAI
-transport is not implemented.** This document records the transport finding,
-what is deliberately out of scope, and the measurements taken on real hardware,
-so that none of it has to be re-derived from scratch.
+Status in 0.14: **pipeline and subscription WebSocket transport implemented;
+mock-server path device-validated.** The remaining external gate is one real
+ChatGPT device login and acceptance by the live service. This document records
+the transport finding, scope and hardware measurements so none of it has to be
+re-derived from scratch.
 
 ## What runs
 
@@ -79,19 +80,12 @@ appear and `Websocket` is easy to miss; the correction is recorded in
 What remains is a WebSocket client over the repository's existing TLS
 (`src/tls.c`) plus base64, not an embedded WebRTC stack.
 
-Until that lands, `libreecho-lived` **fails closed**. With no implemented
-transport it refuses to open a session and reports why, rather than pretending
-to talk. On the current device, which has no ChatGPT credentials, that is:
-
-```
-"GPT-Live unavailable: sign in to ChatGPT again."
-```
-
-Once the device is signed in, the same path reports the missing transport:
-
-```
-"GPT-Live needs a WebSocket transport, which this build does not include yet."
-```
+`libreecho-lived` implements that WebSocket with bounded RFC 6455 framing,
+base64 PCM, verified TLS, a libc-independent DNS A resolver, session update,
+audio streaming and client-managed delegation. It fails closed before sending
+a bearer when credentials, DNS, TLS verification or the WebSocket handshake
+are unavailable. On the current device, which has no ChatGPT credentials, the
+actionable result remains `sign in to ChatGPT again`.
 
 ## What is implemented
 
@@ -108,15 +102,21 @@ Once the device is signed in, the same path reports the missing transport:
 | Exactly-once delegation (bounded id→result cache) | done |
 | Bounded status/metrics over `/run/libreecho/live.sock` | done |
 | Mock transport covering timeout, disconnect, duplicate, refusal, error | done |
-| Realtime WebSocket transport | **not implemented** (spec in `docs/GPT_LIVE_TRANSPORT.md`) |
-| Web control-centre mode selector, voice picker, status panel | not done |
-| Home Assistant `homeassistant.conversation` tool | not done |
+| Realtime WebSocket transport | done; real-account acceptance pending |
+| Web control-centre mode selector and status panel | done |
+| Spoken `stop` cancels local playback and closes the Live session | done |
+| Home Assistant `homeassistant.conversation` tool | not done; lights and HA-owned media fail closed |
 | LED patterns for Live states | not done |
-| Service-mode orchestration (stopping `sttd`/`ttsd`/`wyomingd`) | not done |
+| Process-level mode orchestration (stopping `sttd`/`ttsd`/`wyomingd`) | not done |
 
-The mode selector is not wired into the web control centre yet, so `lived` is
-started with `--enable`/`--transport` and is **not enabled at boot**: nothing
-about the shipped device behaviour changes until that integration lands.
+`lived` starts as an available but disarmed service. The control-centre selector
+uses `/api/v1/live` to arm or disarm its wake subscription and disarms the
+currently selected local assistant first. A reboot returns GPT-Live to the safe,
+disarmed state; no idle microphone audio is transmitted.
+
+The first device-test MVP deliberately limits local actions to the allow-list
+below. General lights and named music requests need the future Home Assistant
+conversation bridge and are refused rather than acknowledged without execution.
 
 ## Delegation
 
@@ -128,6 +128,7 @@ the conversation.
 timer.set  timer.cancel  timer.dismiss  timer.query
 media.stop media.status  radio.play
 device.time  device.volume  device.weather
+voice.request (bounded natural-language router for the actions above)
 ```
 
 Every handler is a client of the daemon that already owns the capability, so
@@ -200,10 +201,12 @@ present:
 |---|---|
 | Local LibreEcho | Recognised text only, to the configured model provider |
 | Home Assistant | Post-AEC audio, to the configured Home Assistant server |
-| GPT-Live | Post-AEC audio, from the wake word until the conversation closes |
+| GPT-Live | Post-AEC audio, including up to 150 ms of RAM-only preroll, after the wake word starts a conversation |
 
 Idle microphone audio is never transmitted. The preroll buffer is RAM-only,
 bounded at 96 KB, never persisted, and discarded after use. The transcript is
 bounded at ten turns and is not written to disk. Credentials stay in
 `/data/libreecho/secrets/` at mode 0600 and are never logged or published
 through the status socket.
+
+Hardware retest with model output measured AEC residual at 3353 RMS over a 569 RMS floor; the default relative factor is 6, putting the threshold at 3414 RMS. The prior factor of 3 produced one false barge-in in that run.
