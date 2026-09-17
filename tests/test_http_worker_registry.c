@@ -2,6 +2,8 @@
 #define LE_HTTP_SERVER_WORKER_TEST 1
 
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +19,8 @@
 #define LE_TEST_WORKER_EXIT_MS 5000
 #define LE_TEST_INTERRUPT_BURSTS 50
 #define LE_TEST_INTERRUPT_LIMIT 10000
+#define LE_TEST_ADAPTER_PROBE_POLLS 20
+#define LE_TEST_ADAPTER_PROBE_MS 10
 
 static void deadline_after(struct timespec *deadline, long seconds)
 {
@@ -358,35 +362,64 @@ static int test_real_update_check_worker_is_reaped(void)
     return 0;
 }
 
-/* The worker only enters its long-lived stream when an adapter actually
- * accepts the connection. A socket node left behind by an adapter that exited
- * uncleanly is not liveness - the worker's own connect() would fail and answer
- * 503 - so probe the connection the worker makes instead of the pathname, and
- * a stale node cannot silently skip these tests. */
+/* The worker only enters its long-lived stream when an adapter actually accepts
+ * the connection. Existence is not liveness - a node left behind by an adapter
+ * that exited uncleanly would make the worker's own connect() fail - so probe
+ * the connection the worker makes. The probe must not be able to hang itself:
+ * it connects non-blocking and waits only briefly, and a node that does not
+ * answer within that window is treated as live, so the tests skip instead of
+ * risking a stall on a wedged listener. */
+static int adapter_accepts_connection(const char *path)
+{
+    struct sockaddr_un address;
+    struct pollfd ready;
+    socklen_t length;
+    int error, fd, i, result;
+
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return 1;
+    if (fcntl(fd, F_SETFL, O_NONBLOCK)) {
+        close(fd);
+        return 1;
+    }
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    strncpy(address.sun_path, path, sizeof(address.sun_path) - 1);
+    result = connect(fd, (struct sockaddr *)&address, sizeof(address));
+    if (!result) {
+        close(fd);
+        return 1;
+    }
+    if (errno != EINPROGRESS) {
+        result = errno;
+        close(fd);
+        /* A full backlog is an answer, not a missing listener. */
+        return result == EAGAIN || result == EWOULDBLOCK;
+    }
+    ready.fd = fd;
+    ready.events = POLLOUT;
+    for (i = 0; i < LE_TEST_ADAPTER_PROBE_POLLS; i++) {
+        ready.revents = 0;
+        if (poll(&ready, 1, LE_TEST_ADAPTER_PROBE_MS) > 0 && ready.revents)
+            break;
+    }
+    if (i == LE_TEST_ADAPTER_PROBE_POLLS) {
+        close(fd);
+        return 1;
+    }
+    error = 0;
+    length = sizeof(error);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length))
+        error = 0;
+    close(fd);
+    return error == 0;
+}
+
 static int live_audio_adapter(void)
 {
-    static const char *const paths[] = {
-        LE_ADAPTER_WAKEWORD_SOCK,
-        LE_ADAPTER_MIC_SOCK
-    };
-    struct sockaddr_un address;
-    size_t i;
-    int fd;
-
-    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0)
-            return 0;
-        memset(&address, 0, sizeof(address));
-        address.sun_family = AF_UNIX;
-        strncpy(address.sun_path, paths[i], sizeof(address.sun_path) - 1);
-        if (!connect(fd, (struct sockaddr *)&address, sizeof(address))) {
-            close(fd);
-            return 1;
-        }
-        close(fd);
-    }
-    return 0;
+    return adapter_accepts_connection(LE_ADAPTER_WAKEWORD_SOCK) ||
+           adapter_accepts_connection(LE_ADAPTER_MIC_SOCK);
 }
 
 /* Proof that the snapshot window is deterministic: with SIGCHLD blocked the
