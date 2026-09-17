@@ -52,7 +52,9 @@ assert_incomplete() {
     url="http://127.0.0.1:$port"
     curl -fsS "$url/api/v1/config" >"$TMP/config-$label.json"
     jq -e '.data.setup_completed == false' "$TMP/config-$label.json" >/dev/null
-    [ ! -e "$3.setup-complete" ]
+    if [ "${4:-absent}" = absent ]; then
+        [ ! -e "$3.setup-complete" ]
+    fi
     curl -fsS "$url/" >"$TMP/root-$label.html"
     grep -q 'setup.js' "$TMP/root-$label.html"
     grep -q 'Create your local account.' "$TMP/root-$label.html"
@@ -100,6 +102,51 @@ curl -fsS "$url/api/v1/config" | jq -e \
 curl -fsS "$url/" >"$TMP/root-completed-restart.html"
 grep -q 'LibreEcho Control Centre' "$TMP/root-completed-restart.html"
 printf '%s\n' 'completed setup survives restart with authentication enabled'
+stop_server
+
+# Case 4: an incomplete setup stays incomplete across a restart. The persisted
+# config alone is not completion, so a reboot must not lose the wizard.
+restart_cfg=$TMP/restart-incomplete.json
+cp config/defaults.json "$restart_cfg"
+start_server "$restart_cfg" "$TMP/absent-users-restart" "$((PORT + 3))"
+assert_incomplete restart-first "$((PORT + 3))" "$restart_cfg"
+stop_server
+start_server "$restart_cfg" "$TMP/absent-users-restart" "$((PORT + 3))"
+assert_incomplete restart-second "$((PORT + 3))" "$restart_cfg"
+printf '%s\n' 'incomplete setup survives restart without a completion marker'
+stop_server
+
+# Case 5: a setup transaction that persisted its configuration and then failed
+# before writing the marker -- the shape the daemon itself leaves behind on a
+# feature-activation failure -- is still incomplete after a restart.
+failed_cfg=$TMP/failed-setup.json
+printf '%s\n' '{"hostname":"echo","privacy_local_only":false,"privacy_telemetry":false,"wake_word":"LibreEcho","wake_sensitivity":68,"integrations":16}' >"$failed_cfg"
+start_server "$failed_cfg" "$TMP/users" "$((PORT + 4))"
+assert_incomplete failed-first "$((PORT + 4))" "$failed_cfg"
+stop_server
+start_server "$failed_cfg" "$TMP/users" "$((PORT + 4))"
+assert_incomplete failed-restart "$((PORT + 4))" "$failed_cfg"
+printf '%s\n' 'persisted configuration without a marker does not complete setup'
+stop_server
+
+# Case 6: only a marker carrying the schema this build understands proves
+# completion. A leftover file with an empty or unknown schema must not skip the
+# wizard, and must keep the daemon's startup view and the configuration
+# worker's view of completion in agreement.
+unknown_cfg=$TMP/unknown-schema.json
+cp config/defaults.json "$unknown_cfg"
+printf '%s\n' 'schema=0' >"$unknown_cfg.setup-complete"
+chmod 600 "$unknown_cfg.setup-complete"
+start_server "$unknown_cfg" "$TMP/users" "$((PORT + 5))"
+assert_incomplete unknown-schema "$((PORT + 5))" "$unknown_cfg" present
+stop_server
+empty_cfg=$TMP/empty-marker.json
+cp config/defaults.json "$empty_cfg"
+: >"$empty_cfg.setup-complete"
+chmod 600 "$empty_cfg.setup-complete"
+start_server "$empty_cfg" "$TMP/users" "$((PORT + 6))"
+assert_incomplete empty-marker "$((PORT + 6))" "$empty_cfg" present
+printf '%s\n' 'an unrecognised or empty completion marker does not skip setup'
 stop_server
 
 printf '%s\n' 'setup first-run defaults/marker regression: ok'
