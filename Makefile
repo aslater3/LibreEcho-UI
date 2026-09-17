@@ -197,6 +197,14 @@ $(BUILD)/test-action-sample: tests/test_action_sample.c \
 		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
 		-lm -o $@
 
+$(BUILD)/test-cue-rate-limit: tests/test_cue_rate_limit.c \
+	src/adapter/audiod.c src/adapter/adapter_client.c \
+	src/adapter/adapter_server.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
+
 $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 	src/adapter/buttond_timing.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
