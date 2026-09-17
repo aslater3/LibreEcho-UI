@@ -8,6 +8,7 @@ int main(int argc, char **argv)
 {
     const char *config_path = NULL;
     const char *capture = getenv("LE_TEST_CURL_CAPTURE");
+    const char *append = getenv("LE_TEST_CURL_APPEND");
     const char *mode = getenv("LE_TEST_CURL_MODE");
     char buffer[16384];
     char body[16384];
@@ -41,6 +42,20 @@ int main(int argc, char **argv)
     buffer[config_used] = '\0';
     fclose(input);
     fclose(output);
+    /*
+     * The capture file holds only the newest request, so a test that needs to
+     * see an earlier one -- the weather lookup that a turn makes before the
+     * model call -- asks for an append log instead.
+     */
+    if (append) {
+        FILE *log = fopen(append, "a");
+
+        if (log) {
+            fputs(buffer, log);
+            fputs("\n---\n", log);
+            fclose(log);
+        }
+    }
     response_route =
         strstr(buffer, "/backend-api/codex/responses") != NULL;
     compatible_route =
