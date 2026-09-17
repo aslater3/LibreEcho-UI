@@ -408,13 +408,33 @@ function bindNoise(n){
  * reading is not evidence that the latch is released.
  */
 function muteLampNote(a,b){
- if(!b||b.privacy_latch===undefined||b.privacy_latch===null){
-  if(a&&a.microphone_muted)return '<p class="muted">Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — it follows the button\'s hardware privacy latch.</p>';
+ const text=(()=>{
+  if(!b||b.privacy_latch===undefined||b.privacy_latch===null){
+   if(a&&a.microphone_muted)return 'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — it follows the button\'s hardware privacy latch.';
+   return '';
+  }
+  if(b.privacy_latch)return 'The mute button\'s lamp is lit: its hardware privacy latch is engaged and the microphones are cut in hardware. Press the button to release it — software cannot.';
+  if(a&&a.microphone_muted)return 'Software mute only: the ring is red and the mute button\'s lamp stays dark, because that lamp is wired to the button\'s privacy latch. Use the button if you want the hardware cut.';
   return '';
- }
- if(b.privacy_latch)return '<p class="muted">The mute button\'s lamp is lit: its hardware privacy latch is engaged and the microphones are cut in hardware. Press the button to release it — software cannot.</p>';
- if(a&&a.microphone_muted)return '<p class="muted">Software mute only: the ring is red and the mute button\'s lamp stays dark, because that lamp is wired to the button\'s privacy latch. Use the button if you want the hardware cut.</p>';
- return '';
+ })();
+ /* Always rendered, empty when there is nothing to say: the button is on the
+    device, so the note is re-read in place while either of these pages is open,
+    and an element that was never drawn could not come back. */
+ return `<p class="muted" id="mute-lamp-note">${esc(text)}</p>`;
+}
+/*
+ * The lamp changes under the page when someone presses the mute button, and the
+ * pages otherwise read it once, so the note alone is re-read on the same timer
+ * the Overview uses. render() clears state.timer and re-arms it on every
+ * navigation, so this stops polling as soon as the page is left.
+ */
+async function refreshMuteLamp(){
+ const note=$('#mute-lamp-note');if(!note)return;
+ try{
+  const [buttons,audio]=await Promise.all([api('/buttons'),state.page==='Audio'?api('/audio'):Promise.resolve(null)]);
+  note.outerHTML=muteLampNote(audio,buttons);
+ }catch(e){}
+ state.timer=setTimeout(refreshMuteLamp,5000);
 }
 async function audioPage(){const [a,buttons]=await Promise.all([api('/audio'),api('/buttons').catch(()=>({}))]),voices=a.tts_voices||[{id:'southern-female',name:'Southern English — female'},{id:'northern-male',name:'Northern English — male'}],voiceOptions=voices.map(v=>`<option value="${esc(v.id)}" ${v.id===a.tts_voice?'selected':''}>${esc(v.name)}</option>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Output',range('Master volume',a.volume,'volume')+range('Notification volume',a.notification_volume,'notification-volume').replace('value="'+a.notification_volume+'"','value="'+a.notification_volume+'" disabled')+toggle('Startup sound',a.startup_sound,'startup-sound',true)+`<dl class="facts"><dt>Output</dt><dd class="${a.output_available?'connected':''}">${a.output_available?'Available':'Unavailable'}</dd><dt>Amplifier</dt><dd>${a.amplifier_on?'On':'Off'}</dd></dl><div class="button-row">${saveButton('save-output')}${action('Play test tone','test-tone')}</div>`)}${panel('Announcements',`<label class="field"><span>Voice</span><select id="tts-voice">${voiceOptions}</select></label><p class="muted">The selected British voice stays loaded for low-latency streamed announcements. Changing voice restarts the speech service.</p>${saveButton('save-voice')}`)}${noisePanel(a.noise||{})}${panel('Microphones',range('Microphone gain',a.microphone_gain,'mic-gain')+toggle('Microphone muted',a.microphone_muted,'mic-muted')+toggle('Acoustic echo cancellation',true,'aec',true)+`<p class="muted">Echo cancellation is reported by the future audio adapter and cannot yet be changed.</p>`+muteLampNote(a,buttons)+saveButton('save-microphones'))}</div>`;bindRange();bindDirty(['#volume'],'#save-output');bindDirty(['#tts-voice'],'#save-voice');bindDirty(['#mic-gain','#mic-muted'],'#save-microphones');$('#save-output').onclick=()=>mutate('/audio',{volume:+$('#volume').value},'Output changes saved');$('#save-voice').onclick=()=>mutate('/audio',{tts_voice:$('#tts-voice').value},'Announcement voice changed');$('#save-microphones').onclick=()=>mutate('/audio',{microphone_gain:+$('#mic-gain').value,microphone_muted:$('#mic-muted').checked},'Microphone changes saved');$('#test-tone').onclick=()=>post('/audio/test',{},'Test tone playing');bindNoise(a.noise||{})}
 const BABY_START_LEAD=0.05,BABY_RESYNC_OFFSET=0.02,BABY_SCHEDULE_LEAD=0.75,BABY_RESUME_DEADLINE=800,BABY_RESUME_POLL=100,BABY_DRAIN_GRACE=120,BABY_DRAIN_POLL=25,BABY_DRAIN_LIMIT=5000,BABY_MAX_NODES=256;
@@ -1862,7 +1882,7 @@ try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==s
  const stop=$('#dismiss-timers');if(stop)stop.onclick=()=>post('/timers/dismiss',{},'Stopped');
  content.querySelectorAll('[data-cancel]').forEach(b=>{b.onclick=()=>del('/timers/'+b.dataset.cancel,'Timer cancelled')});
  scheduleTimerRefresh()}
-async function render(){clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Timers')await timersPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations'){installIntegrationsExtras();await integrationsPage()}else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){if(document.body.classList.contains('auth-pending'))markStartupUnavailable();errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000)}
+async function render(){clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Timers')await timersPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations'){installIntegrationsExtras();await integrationsPage()}else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){if(document.body.classList.contains('auth-pending'))markStartupUnavailable();errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000);else if(state.page==='Audio'||state.page==='LED & Buttons')state.timer=setTimeout(refreshMuteLamp,5000)}
 function showPage(name,updateRoute=true){let corrected=false;if(!descriptions[name]||!navItems().some(([n])=>n===name)){name='Overview';corrected=true}if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();state.page=name;const path='/'+pageSlug(name);
  /* A route to a page that is not in the menu is not a route. Replace it, so a
     reload or a back button does not land on it again. */

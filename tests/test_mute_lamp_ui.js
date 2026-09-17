@@ -86,7 +86,29 @@ async function audioHtml(buttons){
   /* Unmuted with no reading: nothing to say about the lamp. */
   audio.microphone_muted = false;
   const idle = await audioHtml({microphone_muted:false,privacy_latch:null});
-  assert(!/lamp/i.test(idle), 'the lamp was described while it had no state to report');
+  const idleNote = /<p class="muted" id="mute-lamp-note">([^<]*)<\/p>/.exec(idle);
+  assert(idleNote && idleNote[1] === '',
+         'the lamp was described while it had no state to report: '+idle);
+
+  /*
+   * The button is on the device: pressing it while the page is open moves the
+   * latch, so the note has to be re-read rather than left showing the state the
+   * page loaded with.
+   */
+  {
+    globalThis.api = async path => {
+      if(path === '/buttons')return {privacy_latch:true};
+      if(path === '/audio')return Object.assign({}, audio);
+      throw new Error('unexpected API path '+path);
+    };
+    /* state is a lexical binding in the page scripts, not a global property. */
+    vm.runInThisContext('state.page="Audio"');
+    const note = document.querySelector('#mute-lamp-note');
+    note.outerHTML = '<p class="muted" id="mute-lamp-note"></p>';
+    await vm.runInThisContext('refreshMuteLamp')();
+    assert(/lamp is lit/.test(note.outerHTML),
+           'the open page never re-read the latch: '+note.outerHTML);
+  }
 
   console.log('mute lamp honesty on the Audio page: ok');
 })().catch(error => { console.error(error); process.exitCode = 1; });
