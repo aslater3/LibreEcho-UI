@@ -24,6 +24,7 @@ make build/test-network-health build/test-adapter-client-events build/test-gatew
 sh tests/test_factory_reset_bluetooth_contract.sh
 sh tests/test_factory_reset_quiesce_contract.sh
 sh tests/test_backup_roundtrip.sh
+sh tests/test_persistent_state_backup_contract.sh
 make build/test-backend-linux-wifi-emission
 make build/test-auth-sessions
 ./build/test-auth-sessions

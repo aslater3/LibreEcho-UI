@@ -1,4 +1,5 @@
 """Ordinary backup recovery and injected I/O failures; bwrap wrapper only."""
+import io
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,16 @@ import urllib.request
 DATA = Path('/data/libreecho')
 ARCHIVE = Path('/out/live-backup.tar.gz')
 TOOL = ['/bin/sh', '/src/tools/libreecho-backup.sh']
+# Spellings of one configured root. `test -L` follows only a *final* component,
+# so a trailing or doubled separator, and every `.`/`..` alias of the root, must
+# still reach the refusal instead of archiving whatever the link points at.
+ROOT_ALIASES = [('', 'symbolic link'), ('/', 'symbolic link'),
+                ('//', 'symbolic link'), ('/.', 'dot component'),
+                ('/./', 'dot component'), ('/.//', 'dot component'),
+                ('/..', 'dot component'), ('/../.', 'dot component')]
+EXCLUSION_NOTICE = ('Excluded by contract, never restored: transaction files '
+                    '(*.tmp, *.tmp.<suffix>, *.new, *.bak) and one-shot wake '
+                    'or vendor markers')
 RUNNING = ['libreecho-watchdogd', 'libreecho-web', 'libreecho-agentd',
            'libreecho-timerd', 'libreecho-ledd']
 STUB = '''#!/bin/sh
@@ -76,7 +87,14 @@ class BackupRoundTrip(unittest.TestCase):
             'secrets/openai-codex.json': 'synthetic-noncredential\n',
         }
         self.excluded = ['config/wake-dump.raw', 'config/web-config.json.tmp',
-                         'config/users.new', 'config/vendor-import-force-next-boot']
+                         'config/users.new', 'config/vendor-import-force-next-boot',
+                         'config/wake-dump-seconds',
+                         'config/web-config.json.bak',
+                         'secrets/openai-codex.json.bak',
+                         # `mkstemp`/pid residue from an interrupted writer:
+                         # `agentd` and `timed` append a suffix to `.tmp`.
+                         'config/agent.json.history-generation.tmp.a1b2c3',
+                         'secrets/provider.json.tmp.4242']
         for relative, value in self.files.items():
             write(DATA / relative, value)
         for relative in self.excluded:
@@ -191,6 +209,27 @@ class BackupRoundTrip(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait(timeout=3)
+
+    def test_diagnostics_never_expose_captured_bytes(self):
+        # The archive legitimately contains credentials and account state, so no
+        # operation may echo those bytes back into its output or the manifest.
+        secret = 'fixture-credential-' + secrets.token_hex(16)
+        account = 'fixture-account-' + secrets.token_hex(16)
+        write(DATA / 'secrets/openai-codex.json', secret + '\n')
+        write(DATA / 'config/users', account + '\n')
+        results = {'create': self.call('create'), 'list': self.call('list'),
+                   'restore': self.call('restore')}
+        for name, result in results.items():
+            with self.subTest(action=name):
+                for value in [secret, account]:
+                    self.assertNotIn(value, result.stdout)
+                    self.assertNotIn(value, result.stderr)
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            manifest_file = archive.extractfile('manifest.json')
+            assert manifest_file is not None
+            manifest = json.dumps(json.load(manifest_file))
+        self.assertNotIn(secret, manifest)
+        self.assertNotIn(account, manifest)
 
     def test_missing_required_state_is_not_a_complete_backup(self):
         for relative in ['config/web-config.json', 'config/users', 'secrets']:
@@ -333,11 +372,546 @@ class BackupRoundTrip(unittest.TestCase):
         self.call('restore', success=False)
         self.assertEqual(self.actions('start'), [])
 
+    def stage_archive(self, name, build):
+        """Build /out/<name> from a callback that fills a fresh staging tree."""
+        stage = Path('/out/archive-stage')
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True)
+        build(stage)
+        archive = Path('/out') / name
+        with tarfile.open(archive, 'w:gz') as handle:
+            for member in sorted(stage.rglob('*')):
+                handle.add(member, arcname=str(member.relative_to(stage)))
+        return archive
+
+    def write_basic_trees(self, stage, prefix='persistent'):
+        for relative in ['config/web-config.json', 'config/users',
+                         'secrets/openai-codex.json']:
+            write(stage / prefix / relative, self.files[relative])
+
+    def hostile_archive(self):
+        """A structurally valid archive that also plants a symlink."""
+        stage = Path('/out/hostile-stage')
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True)
+        for relative in ['config/web-config.json', 'config/users',
+                         'secrets/openai-codex.json']:
+            write(stage / 'persistent' / relative, self.files[relative])
+        # Points back at the factory seed: restored state must never be a
+        # reference to another tree, however valid its target looks.
+        os.symlink('/etc/libreecho/web-config.json',
+                   stage / 'persistent/config/escape-link')
+        write(stage / 'manifest.json', '{"version":2}\n')
+        hostile = Path('/out/hostile-backup.tar.gz')
+        with tarfile.open(hostile, 'w:gz') as archive:
+            for member in sorted(stage.rglob('*')):
+                archive.add(member, arcname=str(member.relative_to(stage)))
+        return hostile
+
+    def test_symlinked_state_is_refused_in_both_directions(self):
+        # A symlink in the live trees must not become a backup...
+        os.symlink('/etc/libreecho/web-config.json', DATA / 'config/live-link')
+        result = self.call('create', success=False)
+        self.assertIn('symbolic link', result.stderr)
+        self.assertFalse(ARCHIVE.exists())
+        (DATA / 'config/live-link').unlink()
+
+        # ...and a symlink planted in an archive must not reach live state.
+        self.call('create')
+        result = self.call('restore', path=self.hostile_archive(), success=False)
+        self.assertIn('symbolic link', result.stderr)
+        self.assertEqual(self.actions('stop'), [],
+                         'services were stopped for an archive refused up front')
+        for relative, value in self.files.items():
+            self.assertEqual((DATA / relative).read_text(), value,
+                             'live state changed: ' + relative)
+        self.assertFalse((DATA / 'config/escape-link').exists())
+        self.assertIn('symbolic link', self.call(
+            'list', path=self.hostile_archive(), success=False).stderr)
+
+    def test_symlinked_state_root_is_refused(self):
+        # A root that is itself a symlink is dereferenced by `cp -R` before the
+        # staged tree can be scanned, so the configured root itself must be
+        # refused instead of archiving whatever the link points at.
+        self.call('create')
+        before = ARCHIVE.stat()
+        outside = Path('/out/outside-config')
+        shutil.rmtree(outside, ignore_errors=True)
+        outside.mkdir(parents=True)
+        write(outside / 'web-config.json', '{"hostname":"outside-tree"}\n')
+        write(outside / 'users', 'outside-account\n')
+        live = Path('/data/config-live')
+        shutil.rmtree(live, ignore_errors=True)
+        (DATA / 'config').rename(live)
+        os.symlink(str(outside), DATA / 'config')
+        try:
+            # A trailing or doubled separator, or a dot component, is another
+            # spelling of the same root, not an escape from the check: `test -L`
+            # resolves the final component of each through the link.
+            for suffix, reason in ROOT_ALIASES:
+                with self.subTest(config_root=str(DATA / 'config') + suffix):
+                    env = {'LIBREECHO_CONFIG_DIR':
+                           str(DATA / 'config') + suffix}
+                    created = self.call('create', success=False, extra_env=env)
+                    self.assertIn(reason, created.stderr)
+                    after = ARCHIVE.stat()
+                    self.assertEqual((after.st_size, after.st_mtime_ns),
+                                     (before.st_size, before.st_mtime_ns),
+                                     'refused create overwrote the archive')
+                    restored = self.call('restore', success=False, extra_env=env)
+                    self.assertIn(reason, restored.stderr)
+                    self.assertEqual(self.actions('stop'), [],
+                                     'services were stopped for a refused restore')
+                    self.assertTrue((DATA / 'config').is_symlink(),
+                                    'the live config root was replaced')
+                    self.assertEqual((outside / 'web-config.json').read_text(),
+                                     '{"hostname":"outside-tree"}\n')
+        finally:
+            (DATA / 'config').unlink()
+            live.rename(DATA / 'config')
+
+    def test_exclusions_match_exact_paths_not_basenames(self):
+        # The wake diagnostics are excluded at their fixed config paths, not as
+        # a name class: another file that merely shares a basename is committed
+        # state and must survive a round trip.
+        nested = DATA / 'config/nested/wake-dump-seconds'
+        stray = DATA / 'secrets/wake-dump-seconds'
+        write(nested, 'unrelated-nested-state\n')
+        write(stray, 'unrelated-secret-state\n')
+        self.call('create')
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            names = [member.name for member in archive.getmembers()]
+        for kept in ['persistent/config/nested/wake-dump-seconds',
+                     'persistent/secrets/wake-dump-seconds']:
+            self.assertIn(kept, names)
+        for pruned in ['persistent/config/wake-dump-seconds',
+                       'persistent/config/wake-dump.raw',
+                       'persistent/config/vendor-import-force-next-boot']:
+            self.assertNotIn(pruned, names)
+        self.call('restore')
+        for path, value in [(nested, 'unrelated-nested-state\n'),
+                            (stray, 'unrelated-secret-state\n')]:
+            self.assertEqual(path.read_text(), value, 'restored bytes differ')
+        self.assertFalse((DATA / 'config/wake-dump-seconds').exists())
+        self.assertFalse((DATA / 'config/wake-dump.raw').exists())
+        self.assertFalse((DATA / 'config/vendor-import-force-next-boot').exists())
+
+    def test_symlinked_data_root_is_refused(self):
+        # The data root itself as a link, spelled with a trailing slash: `test
+        # -L` resolves the final component of `/data/libreecho/` through the
+        # link, so an untrimmed spelling would archive the linked tree.
+        self.call('create')
+        before = ARCHIVE.stat()
+        real = Path('/data/state-real')
+        shutil.rmtree(real, ignore_errors=True)
+        DATA.rename(real)
+        os.symlink(str(real), DATA)
+        try:
+            for suffix, reason in ROOT_ALIASES:
+                with self.subTest(data_root=str(DATA) + suffix):
+                    env = {'LIBREECHO_DATA_ROOT': str(DATA) + suffix}
+                    created = self.call('create', success=False, extra_env=env)
+                    self.assertIn(reason, created.stderr)
+                    restored = self.call('restore', success=False, extra_env=env)
+                    self.assertIn(reason, restored.stderr)
+                    self.assertEqual(self.actions('stop'), [],
+                                     'services were stopped for a refused restore')
+            after = ARCHIVE.stat()
+            self.assertEqual((after.st_size, after.st_mtime_ns),
+                             (before.st_size, before.st_mtime_ns),
+                             'refused create overwrote the archive')
+            self.assertEqual((real / 'config/web-config.json').read_text(),
+                             self.files['config/web-config.json'])
+        finally:
+            DATA.unlink()
+            real.rename(DATA)
+
+    def test_symlinked_ancestor_component_is_refused(self):
+        # Only a component *above* the configured root is a link, so the root
+        # itself and its final component are plain directories: the check has to
+        # inspect every component without following links, or the copy and the
+        # restore land inside the link target.
+        self.call('create')
+        before = ARCHIVE.stat()
+        outside = Path('/out/ancestor-target')
+        shutil.rmtree(outside, ignore_errors=True)
+        (outside / 'state/config').mkdir(parents=True)
+        (outside / 'state/secrets').mkdir(parents=True)
+        write(outside / 'state/config/web-config.json',
+              '{"hostname":"ancestor-tree"}\n')
+        write(outside / 'state/config/users', 'ancestor-account\n')
+        write(outside / 'state/secrets/ancestor-secret', 'ancestor-secret\n')
+        alias = Path('/data/alias')
+        os.symlink(str(outside), alias)
+        try:
+            for env in [{'LIBREECHO_DATA_ROOT': str(alias / 'state')},
+                        {'LIBREECHO_CONFIG_DIR': str(alias / 'state/config')}]:
+                for action in ['create', 'restore']:
+                    with self.subTest(action=action, **env):
+                        result = self.call(action, success=False, extra_env=env)
+                        self.assertIn('crosses a symbolic link', result.stderr)
+                        self.assertIn(str(alias), result.stderr)
+            # Nothing was staged into or written through the link target.
+            self.assertEqual(sorted(path.name for path in
+                                    (outside / 'state/config').iterdir()),
+                             ['users', 'web-config.json'])
+            self.assertEqual(sorted(path.name for path in
+                                    (outside / 'state/secrets').iterdir()),
+                             ['ancestor-secret'])
+            after = ARCHIVE.stat()
+            self.assertEqual((after.st_size, after.st_mtime_ns),
+                             (before.st_size, before.st_mtime_ns),
+                             'refused create overwrote the archive')
+            self.assertEqual(self.actions('stop'), [],
+                             'services were stopped for a refused restore')
+            self.assertEqual((outside / 'state/config/users').read_text(),
+                             'ancestor-account\n')
+            self.assertEqual((outside / 'state/secrets/ancestor-secret').read_text(),
+                             'ancestor-secret\n')
+        finally:
+            alias.unlink()
+
+    def test_manifest_names_the_pruned_transaction_file_class(self):
+        # A consumer auditing the archive must be able to tell an intentional
+        # omission from an incomplete backup, so the manifest names every tree
+        # and every suffix the pruning class removes, including the durable
+        # stale pre-update copies `config_write_atomic` leaves as `*.bak`.
+        write(DATA / 'secrets/provider.new', 'transaction-fixture\n')
+        write(DATA / 'config/web-config.json.bak', 'stale-fixture\n')
+        write(DATA / 'config/agent.json.history-generation.tmp.a1b2c3',
+              'transaction-fixture\n')
+        self.call('create')
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            manifest_file = archive.extractfile('manifest.json')
+            assert manifest_file is not None
+            excluded = json.load(manifest_file)['excluded']
+            names = [member.name for member in archive.getmembers()]
+        self.assertIn('transaction-files:config,secrets:*.tmp,*.tmp.*,*.new,*.bak',
+                      excluded)
+        self.assertNotIn('config-transaction-files:config/*.tmp', excluded)
+        self.assertNotIn('persistent/secrets/provider.new', names)
+        self.assertNotIn('persistent/config/web-config.json.bak', names)
+        self.assertNotIn('persistent/config/agent.json.history-generation.tmp.a1b2c3',
+                         names)
+
+    def test_dot_and_prefix_names_are_not_over_refused(self):
+        # The refusal keys on a `/`-separated `.`/`..` component, not on a name
+        # that merely contains a dot, and it must not confuse another root that
+        # shares a name prefix with the configured one: both are ordinary state
+        # and must still round-trip.
+        sibling = Path('/data/state-other')
+        outside = Path('/out/prefix-outside')
+        shutil.rmtree(outside, ignore_errors=True)
+        outside.mkdir(parents=True)
+        write(outside / 'marker', 'prefix-confusion\n')
+        os.symlink(str(outside), sibling)
+        dotted = Path('/data/.state-dotted')
+        DATA.rename(dotted)
+        try:
+            # The dotted name is a name, not a component, and the doubled
+            # separator is normalized rather than treated as an alias.
+            for spelling in [str(dotted), '/data//' + dotted.name]:
+                with self.subTest(data_root=spelling):
+                    created = self.call('create',
+                                        extra_env={'LIBREECHO_DATA_ROOT': spelling})
+                    self.assertNotIn('symbolic link', created.stderr)
+                    self.assertNotIn('dot component', created.stderr)
+                    self.call('restore',
+                              extra_env={'LIBREECHO_DATA_ROOT': spelling})
+                    for relative, value in self.files.items():
+                        self.assertEqual((dotted / relative).read_text(), value,
+                                         'state changed: ' + relative)
+        finally:
+            sibling.unlink()
+            dotted.rename(DATA)
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            payload = b''
+            for member in archive.getmembers():
+                handle = archive.extractfile(member) if member.isfile() else None
+                if handle is not None:
+                    payload += handle.read()
+        self.assertNotIn(b'prefix-confusion', payload,
+                         'a sibling root was confused with the configured one')
+
     def test_service_restart_failure_is_not_success(self):
         self.call('create')
         Path('/run/start-fail-libreecho-web').touch()
         self.call('restore', success=False)
 
+
+    def test_legacy_manifest_restore_applies_the_exclusion_contract(self):
+        # A version-1 manifest names no exclusions and was written by a tool
+        # that captured one-shot requests, transaction files, and stale `.bak`
+        # copies. The exclusions belong to the contract, not to the manifest,
+        # so restoring that archive must drop them rather than install them.
+        one_shot = 'legacy-one-shot-' + secrets.token_hex(8)
+        transaction = 'legacy-transaction-' + secrets.token_hex(8)
+        stale = 'legacy-stale-copy-' + secrets.token_hex(8)
+        committed = {
+            'config/web-config.json': '{"hostname":"legacy-user-configured"}\n',
+            'config/users': 'legacy-account\n',
+            'config/agent.json': '{"provider":"legacy"}\n',
+            'config/nested/setting': 'legacy-nested\n',
+            'secrets/openai-codex.json': 'legacy-secret\n',
+        }
+        excluded = {
+            'config/wake-dump.raw': one_shot,
+            'config/wake-dump-seconds': one_shot,
+            # A directory standing at an excluded path is dropped with it.
+            'config/vendor-import-force-next-boot/inner': one_shot,
+            'config/web-config.json.tmp': transaction,
+            'secrets/provider.new': transaction,
+            'config/users.bak': stale,
+            'secrets/openai-codex.json.bak': stale,
+            'config/agent.json.history-generation.tmp.a1b2c3': transaction,
+            'secrets/provider.json.tmp.4242': transaction,
+        }
+
+        def legacy(stage):
+            for relative, value in dict(committed, **excluded).items():
+                write(stage / 'persistent' / relative, value)
+            write(stage / 'manifest.json',
+                  '{"version":1,"components":["config","secrets"]}\n')
+
+        archive = self.stage_archive('legacy-v1.tar.gz', legacy)
+        listed = self.call('list', path=archive)
+        self.assertIn('"version":1', listed.stdout)
+        self.assertIn('persistent/config/wake-dump-seconds', listed.stdout)
+        self.assertIn(EXCLUSION_NOTICE, listed.stdout)
+        restored = self.call('restore', path=archive)
+        self.assertIn(EXCLUSION_NOTICE, restored.stdout)
+        for value in [one_shot, transaction, stale]:
+            self.assertNotIn(value, restored.stdout + restored.stderr)
+        for relative, value in committed.items():
+            path = DATA / relative
+            self.assertTrue(path.read_text() == value,
+                            'restored bytes differ: ' + relative)
+        expected = {'config', 'secrets'} | set(committed)
+        for relative in committed:
+            parent = Path(relative).parent
+            while str(parent) != '.':
+                expected.add(str(parent))
+                parent = parent.parent
+        installed = set()
+        for root in [DATA / 'config', DATA / 'secrets']:
+            for path in [root] + list(root.rglob('*')):
+                installed.add(str(path.relative_to(DATA)))
+        self.assertEqual(installed, expected,
+                         'a file the contract never restores was installed')
+        for suffix in ['wake-dump.raw', 'wake-dump-seconds',
+                       'vendor-import-force-next-boot']:
+            self.assertFalse((DATA / 'config' / suffix).exists(), suffix)
+        for suffix in ['*.bak', '*.tmp', '*.new']:
+            self.assertEqual([str(path.relative_to(DATA)) for root in
+                              [DATA / 'config', DATA / 'secrets']
+                              for path in root.rglob(suffix)], [])
+
+    def test_symlinked_or_non_regular_manifest_is_refused_before_reading(self):
+        # `list` reads the manifest with root privileges, so a manifest that is
+        # a link would print whatever it points at, and a manifest that is not
+        # a regular file is not a backup at all. Both are refused before the
+        # manifest is read or listed, and live state is left alone.
+        disclosure = 'root-readable-' + secrets.token_hex(16)
+        write('/etc/manifest-target', disclosure + '\n')
+        Path('/etc/manifest-target').chmod(0o600)
+
+        def linked(stage):
+            self.write_basic_trees(stage)
+            os.symlink('/etc/manifest-target', stage / 'manifest.json')
+
+        def dangling(stage):
+            self.write_basic_trees(stage)
+            os.symlink('/etc/absent-manifest-target', stage / 'manifest.json')
+
+        def directory(stage):
+            self.write_basic_trees(stage)
+            write(stage / 'manifest.json/inner', '{"version":2}\n')
+
+        def fifo(stage):
+            self.write_basic_trees(stage)
+            os.mkfifo(stage / 'manifest.json')
+
+        cases = [('linked', linked, 'symbolic link'),
+                 ('dangling', dangling, 'symbolic link'),
+                 ('directory', directory, 'not a regular file'),
+                 ('fifo', fifo, 'not a regular file')]
+        for name, builder, reason in cases:
+            with self.subTest(manifest=name):
+                archive = self.stage_archive('manifest-' + name + '.tar.gz',
+                                             builder)
+                for action in ['list', 'restore']:
+                    with self.subTest(manifest=name, action=action):
+                        result = self.call(action, path=archive, success=False)
+                        self.assertIn(reason, result.stderr)
+                        self.assertNotIn(disclosure,
+                                         result.stdout + result.stderr)
+                        self.assertNotIn('Contents:', result.stdout)
+                for relative, value in self.files.items():
+                    self.assertEqual((DATA / relative).read_text(), value,
+                                     'live state changed: ' + relative)
+        self.assertEqual(self.actions('stop'), [],
+                         'services were stopped for a refused archive')
+
+    def test_stale_pre_update_copies_are_never_captured(self):
+        # `config_write_atomic` keeps the previous bytes of a file behind a
+        # hard-linked `<path>.bak`, so a `.bak` of web-config.json or users is
+        # a durable stale copy of account state or credentials, not committed
+        # state. A name that merely ends in another suffix is committed state.
+        stale = 'stale-copy-' + secrets.token_hex(16)
+        for relative in ['config/web-config.json.bak', 'config/users.bak',
+                         'secrets/openai-codex.json.bak',
+                         'secrets/nested/agent.json.bak']:
+            write(DATA / relative, stale + '\n')
+        # An interrupted `mkstemp` writer leaves `<path>.tmp.<suffix>` behind,
+        # which the plain `*.tmp` suffix does not match.
+        for relative in ['config/agent.json.history-generation.tmp.a1b2c3',
+                         'secrets/provider.json.tmp.4242']:
+            write(DATA / relative, stale + '\n')
+        keep = {'config/settings.bak.keep': 'kept-almost-bak\n',
+                'config/nested/firmware.bak.txt': 'kept-almost-bak\n'}
+        for relative, value in keep.items():
+            write(DATA / relative, value)
+        created = self.call('create')
+        self.assertNotIn(stale, created.stdout + created.stderr)
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            names = [member.name for member in archive.getmembers()]
+            payload = b''
+            for member in archive.getmembers():
+                handle = archive.extractfile(member) if member.isfile() else None
+                if handle is not None:
+                    payload += handle.read()
+            manifest_file = archive.extractfile('manifest.json')
+            assert manifest_file is not None
+            excluded = json.load(manifest_file)['excluded']
+        self.assertEqual([name for name in names if name.endswith('.bak')], [],
+                         'a stale pre-update copy was archived')
+        self.assertEqual([name for name in names if '.tmp.' in name], [],
+                         'an interrupted-writer residue was archived')
+        self.assertNotIn(stale.encode(), payload)
+        for relative in keep:
+            self.assertIn('persistent/' + relative, names)
+        self.assertIn('transaction-files:config,secrets:*.tmp,*.tmp.*,*.new,*.bak',
+                      excluded)
+        self.assertNotIn('transaction-files:config,secrets:*.tmp,*.new,*.bak',
+                         excluded)
+
+    def test_archive_member_that_escapes_the_root_is_refused(self):
+        # A member name that leaves the extraction root - an absolute path, or
+        # one with a `..` component - is not guaranteed to land inside the
+        # staging directory when it is extracted, so an archive that names one
+        # is refused before extraction, by both operations.
+        def escape(stage):
+            self.write_basic_trees(stage)
+            write(stage / 'manifest.json', '{"version":2}\n')
+
+        archive = self.stage_archive('escape.tar.gz', escape)
+        hostile = Path('/out/escape-backup.tar.gz')
+        with tarfile.open(archive, 'r:gz') as source, \
+                tarfile.open(hostile, 'w:gz') as target:
+            for member in source.getmembers():
+                handle = source.extractfile(member) if member.isfile() else None
+                target.addfile(member, handle)
+            for name in ['../escape-outside.txt', '/tmp/escape-absolute.txt']:
+                info = tarfile.TarInfo(name)
+                body = b'escaped-member\n'
+                info.size = len(body)
+                target.addfile(info, io.BytesIO(body))
+        with tarfile.open(hostile, 'r:gz') as handle:
+            self.assertIn('../escape-outside.txt',
+                          [member.name for member in handle.getmembers()])
+        for action in ['list', 'restore']:
+            with self.subTest(action=action):
+                result = self.call(action, path=hostile, success=False)
+                self.assertIn('escapes the archive root', result.stderr)
+        self.assertFalse(Path('/tmp/escape-outside.txt').exists(),
+                         'an escaping member was extracted')
+        self.assertFalse(Path('/tmp/escape-absolute.txt').exists(),
+                         'an escaping member was extracted')
+        self.assertEqual(self.actions('stop'), [],
+                         'services were stopped for a refused archive')
+        for relative, value in self.files.items():
+            self.assertEqual((DATA / relative).read_text(), value,
+                             'live state changed: ' + relative)
+
+
+    def test_hard_linked_manifest_is_refused_before_reading(self):
+        # A member can be a hard link to another member, which passes both `-L`
+        # and `-f`; a `manifest.json` linked to a captured secret would then be
+        # printed by `list`. A manifest this tool writes is a fresh file with
+        # one link, so a shared inode is refused before the manifest is read.
+        disclosure = 'hard-link-disclosure-' + secrets.token_hex(16)
+        stage = Path('/out/hardlink-stage')
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True)
+        self.write_basic_trees(stage)
+        write(stage / 'persistent/secrets/openai-codex.json', disclosure + '\n')
+        archive = Path('/out/hard-linked-manifest.tar.gz')
+        with tarfile.open(archive, 'w:gz') as handle:
+            for member in sorted(stage.rglob('*')):
+                handle.add(member, arcname=str(member.relative_to(stage)))
+            link = tarfile.TarInfo('manifest.json')
+            link.type = tarfile.LNKTYPE
+            link.linkname = 'persistent/secrets/openai-codex.json'
+            handle.addfile(link)
+        with tarfile.open(archive, 'r:gz') as handle:
+            self.assertTrue(handle.getmember('manifest.json').islnk(),
+                            'the fixture did not create a hard link')
+        for action in ['list', 'restore']:
+            with self.subTest(action=action):
+                result = self.call(action, path=archive, success=False)
+                self.assertIn('shares its inode', result.stderr)
+                self.assertNotIn(disclosure, result.stdout + result.stderr)
+                self.assertNotIn('Contents:', result.stdout)
+        self.assertEqual(self.actions('stop'), [],
+                         'services were stopped for a refused archive')
+        for relative, value in self.files.items():
+            self.assertEqual((DATA / relative).read_text(), value,
+                             'live state changed: ' + relative)
+
+    def test_member_scan_streams_instead_of_buffering_a_listing(self):
+        # An archive can repeat one pathname thousands of times and stay tiny
+        # compressed, so the member scan must consume names as `tar` emits them
+        # instead of collecting them into a listing file that such an archive
+        # could grow without bound. The probe records every `mktemp` call: the
+        # scan may not make one.
+        def escape(stage):
+            self.write_basic_trees(stage)
+            write(stage / 'manifest.json', '{"version":2}\n')
+
+        archive = self.stage_archive('stream.tar.gz', escape)
+        self.inject('mktemp',
+                    'for arg do\n printf "%s " "$arg" >>/run/mktemp-args.log\ndone\n'
+                    'printf "\\n" >>/run/mktemp-args.log\nexec /usr/bin/mktemp "$@"\n')
+        # Prove the probe is live before trusting it: an ordinary list must
+        # record its own `mktemp -d`.
+        self.call('list', path=self.stage_archive('stream-ok.tar.gz', escape))
+        log = Path('/run/mktemp-args.log')
+        self.assertTrue(log.exists(), 'the tool never called mktemp; the probe is broken')
+        before = log.read_text()
+        self.assertTrue(any('-d' in line for line in before.splitlines()),
+                        'the probe did not record the ordinary mktemp -d call')
+        hostile = Path('/out/stream-backup.tar.gz')
+        body = b'escaped-member\n'
+        with tarfile.open(archive, 'r:gz') as source, \
+                tarfile.open(hostile, 'w:gz') as target:
+            for member in source.getmembers():
+                handle = source.extractfile(member) if member.isfile() else None
+                target.addfile(member, handle)
+            info = tarfile.TarInfo('../stream-escape.txt')
+            info.size = len(body)
+            target.addfile(info, io.BytesIO(body))
+            for _ in range(20000):
+                repeated = tarfile.TarInfo('persistent/config/repeated')
+                repeated.size = 0
+                target.addfile(repeated)
+        result = self.call('list', path=hostile, success=False)
+        self.assertIn('escapes the archive root', result.stderr)
+        self.assertFalse(Path('/tmp/stream-escape.txt').exists(),
+                         'an escaping member was extracted')
+        buffered = [line for line in log.read_text()[len(before):].splitlines()
+                    if '-d' not in line]
+        self.assertEqual(buffered, [],
+                         'the member scan buffered the names in a listing file')
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
