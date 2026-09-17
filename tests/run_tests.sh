@@ -160,6 +160,11 @@ sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
 sh tests/test_setup_connectivity_contract.sh
 sh tests/test_voice_pipeline_restart_contract.sh
+sh tests/test_service_env_isolation_contract.sh
+make build/test-service-env-isolation
+./build/test-service-env-isolation
+make build/test-voice-pipeline-env-isolation
+./build/test-voice-pipeline-env-isolation
 python3 tests/test_voice_latency_bench.py
 make build/test-voice-pipeline-restart
 ./build/test-voice-pipeline-restart

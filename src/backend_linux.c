@@ -9,6 +9,7 @@
 #include "log.h"
 #include "version.h"
 #include "factory_reset.h"
+#include "service_env.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -1257,8 +1258,7 @@ static int tone(struct le_backend *b)
 static int tts_voice(struct le_backend *b, const char *voice)
 {
     const char *script = getenv("LE_TTS_INIT_SCRIPT");
-    pid_t pid;
-    int status;
+    const char *argv[4];
     (void)b;
     if (!voice || (strcmp(voice, "northern-male") &&
                    strcmp(voice, "southern-female")))
@@ -1267,18 +1267,14 @@ static int tts_voice(struct le_backend *b, const char *voice)
         script = "/etc/init.d/libreecho-ttsd.init";
     if (access(script, X_OK) != 0)
         return LE_NOT_SUPPORTED;
-    pid = fork();
-    if (pid < 0)
-        return LE_IO;
-    if (pid == 0) {
-        execl(script, script, "switch", voice, (char *)NULL);
-        _exit(127);
-    }
-    do {
-        if (waitpid(pid, &status, 0) >= 0)
-            break;
-    } while (errno == EINTR);
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? LE_OK : LE_IO;
+    /* The voice switch is another service's init script: run it under the
+       environment boundary so this daemon's ARGS/DAEMON/PIDFILE/LOGFILE do
+       not become ttsd's (src/service_env.c). */
+    argv[0] = script;
+    argv[1] = "switch";
+    argv[2] = voice;
+    argv[3] = NULL;
+    return le_service_command(script, argv) ? LE_IO : LE_OK;
 }
 
 static int announce(struct le_backend *b, const char *text)
@@ -2543,23 +2539,15 @@ static const char *const factory_reset_services[] = {
 
 static int run_service_action(const char *script, const char *action)
 {
-    pid_t pid;
-    pid_t waited;
-    int status;
+    const char *argv[3];
 
-    pid = fork();
-    if (pid < 0)
-        return -1;
-    if (pid == 0) {
-        execl(script, script, action, (char *)NULL);
-        _exit(127);
-    }
-    do {
-        waited = waitpid(pid, &status, 0);
-    } while (waited < 0 && errno == EINTR);
-    if (waited < 0)
-        return -1;
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+    /* Factory reset stops and restarts the Bluetooth, timer and assistant
+       services while the Web daemon is the caller, so it crosses the same
+       environment boundary as any other service control. */
+    argv[0] = script;
+    argv[1] = action;
+    argv[2] = NULL;
+    return le_service_command(script, argv);
 }
 
 static void resume_factory_reset_services(const unsigned char *stopped)
