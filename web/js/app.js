@@ -1463,8 +1463,13 @@ function bindWeatherLookup(a){
   */
  let filled=false,touchedLat=false,touchedLon=false;
  ['#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=()=>{
+  /* Either edit supersedes the request immediately, so a slow response cannot
+     overwrite the value just typed. Pending clears only after both fields were
+     edited, because until then half of the pair can still be from the old
+     lookup. */
+  lookupSequence++;
   if(sel==='#wx-lat')touchedLat=true;else touchedLon=true;
-  if(touchedLat&&touchedLon){lookupSequence++;setPending(false)}
+  if(touchedLat&&touchedLon)setPending(false);
   warn();
  }});
  warn();
@@ -1507,7 +1512,7 @@ function bindWeatherLookup(a){
   $$('.wx-candidate').forEach(button=>button.onclick=()=>{
    const hit=hits[+button.dataset.index]; if(!hit)return;
    fill(hit.latitude,hit.longitude,
-        [hit.name,hit.admin1].filter(Boolean).join(', '),'Found '+describe(hit),mine);
+        [hit.name,hit.admin1].filter(Boolean).join(', '),'Found '+describe(hit),id);
   });
   return true;
  };

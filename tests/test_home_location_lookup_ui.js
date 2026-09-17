@@ -20,13 +20,23 @@ function element(id) {
     closest(){return null;}, focus(){} };
 }
 const elements = new Map(), content = element('content');
+let candidateHtml='',candidateNodes=[];
+function candidates(){
+  const note=elements.get('#wx-lookup-note'),html=note?.innerHTML||'';
+  if(html!==candidateHtml){
+    candidateHtml=html;
+    candidateNodes=[...html.matchAll(/class="secondary-btn wx-candidate" data-index="(\d+)"/g)]
+      .map(match=>{const item=element('wx-candidate-'+match[1]);item.dataset.index=match[1];return item});
+  }
+  return candidateNodes;
+}
 globalThis.document = {
   querySelector(s){
     if(s==='#content')return content;
     if(!elements.has(s))elements.set(s,element(s));
     return elements.get(s);
   },
-  querySelectorAll(){return [];}, createElement:element,
+  querySelectorAll(s){return s==='.wx-candidate'?candidates():[];}, createElement:element,
   addEventListener(){}, body:element('body'), activeElement:null
 };
 globalThis.window = {addEventListener(){}};
@@ -149,6 +159,15 @@ const el = id => elements.get(id);
      be usable until a candidate is chosen. */
   assert.equal(el('#save-wx').disabled,true,
                'Save was left enabled while a match was pending');
+  const offered=candidates();
+  assert.equal(offered.length,2,'the candidate controls were not bound');
+  assert.equal(typeof offered[0].onclick,'function',
+               'the first candidate has no click handler');
+  offered[0].onclick();
+  assert.equal(el('#wx-lat').value,'53.7628',
+               'clicking a candidate did not fill its coordinates');
+  assert.equal(el('#save-wx').disabled,false,
+               'clicking a candidate did not make the result savable');
 
   /* Two places sharing every named field must still be distinguishable. */
   el('#wx-location').value = 'Springfield';
@@ -234,6 +253,31 @@ const el = id => elements.get(id);
     await slowLookup;
     assert.equal(el('#wx-lat').value,'53.9000',
                  'a superseded lookup overwrote the newer result');
+    globalThis.fetch = realFetch;
+  }
+
+  /*
+   * A single manual coordinate edit supersedes a slow lookup immediately even
+   * though the form stays pending until the other coordinate is edited: the
+   * late response must not overwrite the value just typed.
+   */
+  {
+    const realFetch = globalThis.fetch;
+    let release = null;
+    const slow = new Promise(resolve => { release = resolve; });
+    globalThis.fetch = () => slow.then(()=>({ok:true,status:200,json:async()=>({results:[
+      {name:'Too Late',admin1:'Elsewhere',country_code:'GB',
+       latitude:1.1,longitude:2.2}]})}));
+    el('#wx-location').value = 'Too Late';
+    const inFlight = el('#wx-lookup').onclick();
+    el('#wx-lat').value = '54.0000';
+    el('#wx-lat').oninput();
+    assert.equal(el('#save-wx').disabled,true,
+                 'one coordinate edit cleared the pending pair');
+    release();
+    await inFlight;
+    assert.equal(el('#wx-lat').value,'54.0000',
+                 'a slow lookup overwrote the coordinate just typed');
     globalThis.fetch = realFetch;
   }
 
