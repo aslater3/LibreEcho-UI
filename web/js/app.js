@@ -1401,12 +1401,21 @@ function bindWeatherLookup(a){
   }else{ el.textContent=''; el.className='muted'; }
  };
  ['#wx-location'].forEach(sel=>{const el=$(sel);if(el)el.oninput=warn});
- /* Typing a coordinate is taking over: it ends a pending offer, and supersedes
-    any lookup still in flight so its response cannot overwrite what was typed. */
- ['#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=()=>{lookupSequence++;setPending(false);warn()}});
+ /*
+  * Typing coordinates takes over from an offered list, but only once both are
+  * the user's: clearing after one edit would leave the other half of the pair
+  * from the earlier lookup. Either edit supersedes a lookup still in flight.
+  */
+ let filled=false,touchedLat=false,touchedLon=false;
+ ['#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=()=>{
+  if(sel==='#wx-lat')touchedLat=true;else touchedLon=true;
+  if(touchedLat&&touchedLon){lookupSequence++;setPending(false)}
+  warn();
+ }});
  warn();
  const fill=(latitude,longitude,place,message,id)=>{
   if(id!==lookupSequence)return;
+  filled=true;touchedLat=false;touchedLon=false;
   $('#wx-lat').value=(+latitude).toFixed(4);
   $('#wx-lon').value=(+longitude).toFixed(4);
   if(place)$('#wx-location').value=place;
@@ -1471,14 +1480,18 @@ function bindWeatherLookup(a){
   * binding: a re-render binds the card again, and a response still in flight
   * from the previous binding must not land in the new one.
   */
- lookupSequence++;setPending(false);
+ lookupSequence++;
+ /* Not mid-lookup, and a request from an earlier binding is superseded -- but
+    the button keeps the state the render gave it, so a fresh card still needs
+    an edit (or a lookup) before it can be saved. */
+ if(save)delete save.dataset.lookupPending;
  $('#wx-lookup').onclick=async()=>{
   const place=$('#wx-location').value.trim();
   if(!place){note.textContent='Enter a place first';return}
   /* This request's number: anything older must not write, and a re-bind bumps
      the sequence so a request from before the re-render cannot either. */
   const mine=++lookupSequence;
-  let offered=false;
+  filled=false;touchedLat=false;touchedLon=false;
   setPending(true);
   note.textContent='Looking up…';
   try{
@@ -1523,13 +1536,16 @@ function bindWeatherLookup(a){
       : 'No match for that place. Check the spelling, or enter a town or city name (a UK postcode works too).';
     return;
    }
-   if(dropped){offered=offer(hits,`Nothing matched "${place}". Closest name matches:`,mine);return}
-   if(hits.length>1){offered=offer(hits,`${hits.length} places match "${place}".`,mine);return}
+   if(dropped){offer(hits,`Nothing matched "${place}". Closest name matches:`,mine);return}
+   if(hits.length>1){offer(hits,`${hits.length} places match "${place}".`,mine);return}
    const h=hits[0];
    fill(h.latitude,h.longitude,[h.name,h.admin1].filter(Boolean).join(', '),
         `Found ${describe(h)}`,mine);
   }catch(e){ if(mine===lookupSequence)note.textContent='Lookup failed: '+e.message; }
-  finally{ if(mine===lookupSequence&&!offered)setPending(false); }
+  /* Only a lookup that placed the coordinates ends the pending state: a miss, a
+     failure or an offered list leaves them belonging to whatever was resolved
+     before, so saving stays shut until the user resolves it. */
+  finally{ if(mine===lookupSequence&&filled)setPending(false); }
  };
 }
 function bindWeather(a){

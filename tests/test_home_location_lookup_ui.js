@@ -297,10 +297,15 @@ const el = id => elements.get(id);
            'the ambiguous case did not offer candidates');
     el('#wx-lat').value = '53.7586';
     el('#wx-lon').value = '-2.7036';
-    el('#wx-lat').oninput();          /* the keystroke the user just made */
+    el('#wx-lat').oninput();          /* one half of the pair is not enough */
+    el('#save-wx').disabled = false;
+    document.querySelector('#save-wx').onclick();
+    assert(mutated === null,
+           'one coordinate edit was treated as taking over the pair');
+    el('#wx-lon').oninput();
     document.querySelector('#save-wx').onclick();
     assert(mutated && mutated.path === '/assistant',
-           'typing coordinates did not end the pending offer');
+           'both coordinate edits did not end the pending offer');
     globalThis.mutate = realMutate;
     globalThis.fetch = realFetch;
   }
