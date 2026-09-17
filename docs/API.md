@@ -678,9 +678,10 @@ configuration is left unchanged.
 
 `home_location`, `latitude` and `longitude` place the device for weather and
 local answers: the place name is what the assistant says back, the coordinates
-are what the providers query. Each field is applied only when it carries a
-value, so an empty coordinate leaves the previous one in place rather than
-clearing it — a place has to be replaced, not blanked.
+are what the providers query. A field that is omitted keeps its stored value, and
+a coordinate cannot be blanked through this endpoint at all — an empty or
+malformed value is rejected with HTTP 400, so a place has to be replaced rather
+than cleared.
 
 `weather_provider` selects where that reading comes from:
 
