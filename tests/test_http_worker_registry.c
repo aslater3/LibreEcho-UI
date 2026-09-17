@@ -14,8 +14,9 @@
 #include "../src/http_server.c"
 
 #define LE_TEST_READ_SECONDS 5
-#define LE_TEST_SIGNAL_DELAY_NS 20000000L
 #define LE_TEST_WORKER_EXIT_MS 5000
+#define LE_TEST_INTERRUPT_BURSTS 50
+#define LE_TEST_INTERRUPT_LIMIT 10000
 
 static void deadline_after(struct timespec *deadline, long seconds)
 {
@@ -357,13 +358,35 @@ static int test_real_update_check_worker_is_reaped(void)
     return 0;
 }
 
-/* A live adapter turns the audio-stream worker into a long-lived stream rather
- * than a worker that answers and exits, so the snapshot and cycle tests only
- * run when no adapter is present. */
+/* The worker only enters its long-lived stream when an adapter actually
+ * accepts the connection. A socket node left behind by an adapter that exited
+ * uncleanly is not liveness - the worker's own connect() would fail and answer
+ * 503 - so probe the connection the worker makes instead of the pathname, and
+ * a stale node cannot silently skip these tests. */
 static int live_audio_adapter(void)
 {
-    return !access(LE_ADAPTER_WAKEWORD_SOCK, F_OK) ||
-           !access(LE_ADAPTER_MIC_SOCK, F_OK);
+    static const char *const paths[] = {
+        LE_ADAPTER_WAKEWORD_SOCK,
+        LE_ADAPTER_MIC_SOCK
+    };
+    struct sockaddr_un address;
+    size_t i;
+    int fd;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0)
+            return 0;
+        memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        strncpy(address.sun_path, paths[i], sizeof(address.sun_path) - 1);
+        if (!connect(fd, (struct sockaddr *)&address, sizeof(address))) {
+            close(fd);
+            return 1;
+        }
+        close(fd);
+    }
+    return 0;
 }
 
 /* Proof that the snapshot window is deterministic: with SIGCHLD blocked the
@@ -494,68 +517,67 @@ static int test_real_audio_stream_workers_reap_to_baseline(void)
     return 0;
 }
 
-static volatile sig_atomic_t interruption_count;
-
-static void count_interruption(int signo)
+/* Keeps interrupting the parent's read with SIGCHLD - the signal the daemon
+ * installs reap_child_workers() for, under the same SA_RESTART - for as long as
+ * the parent holds its end of the socket open, so the interruption cannot
+ * depend on when the parent reaches read(). The helper drops its inherited copy
+ * of the parent's end, so closing that end really ends the loop, and the loop
+ * is capped as well so a stuck helper cannot hang the test. When a payload is
+ * given it is written after a burst of interruptions and the helper exits,
+ * closing its own end. */
+static pid_t fork_interrupting_writer(int fd, int peer, const char *payload,
+                                    size_t length)
 {
-    (void)signo;
-    interruption_count++;
-}
-
-/* Signals the parent while its read is blocked, then optionally delivers the
- * response bytes. */
-static pid_t fork_deferred_signal(int fd, const char *payload, size_t length)
-{
-    struct timespec pause = {0, LE_TEST_SIGNAL_DELAY_NS};
+    struct pollfd watched;
+    struct timespec pause = {0, 1000000L};
+    int bursts = 0, rounds = 0;
     pid_t pid = fork();
 
     if (pid != 0)
         return pid;
-    nanosleep(&pause, NULL);
-    kill(getppid(), SIGUSR1);
-    nanosleep(&pause, NULL);
-    if (length && write(fd, payload, length) != (ssize_t)length)
-        _exit(1);
+    close(peer);
+    watched.fd = fd;
+    watched.events = POLLIN;
+    for (;;) {
+        watched.revents = 0;
+        poll(&watched, 1, 1);
+        if (watched.revents || rounds++ > LE_TEST_INTERRUPT_LIMIT)
+            break;
+        kill(getppid(), SIGCHLD);
+        if (length && ++bursts > LE_TEST_INTERRUPT_BURSTS) {
+            if (write(fd, payload, length) != (ssize_t)length)
+                _exit(1);
+            _exit(0);
+        }
+        nanosleep(&pause, NULL);
+    }
     _exit(0);
 }
 
-/* The cycle tests read a response while a worker is being reaped, so a signal
- * really can land inside that read. Prove the interruption happens as
- * described, and that the reader retries it instead of reporting a correctly
- * reaped worker as a failure. */
+/* The cycle tests read a response while a worker is being reaped, so a real
+ * SIGCHLD really can land inside that read. Prove both halves: the raw call
+ * reports EINTR rather than restarting, and the reader retries it instead of
+ * reporting a correctly reaped worker as a failure. */
 static int test_interrupted_response_read_is_retried(void)
 {
-    struct sigaction action, previous_action;
-    struct timeval timeout = {1, 0};
+    struct timeval timeout = {5, 0};
     int pair[2];
     char response[8];
     pid_t helper;
     ssize_t interrupted;
     int status, failed = 0;
 
-    memset(&action, 0, sizeof(action));
-    action.sa_handler = count_interruption;
-    sigemptyset(&action.sa_mask);
-    action.sa_flags = SA_RESTART;
-    if (sigaction(SIGUSR1, &action, &previous_action))
+    /* First half: the raw call the reader has to tolerate. The helper keeps
+     * delivering SIGCHLD until this end is closed, so the read is interrupted
+     * however long it takes the parent to enter it. */
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair))
         return -1;
-
-    /* First half: the raw call the reader has to tolerate. */
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair)) {
-        sigaction(SIGUSR1, &previous_action, NULL);
-        return -1;
-    }
     if (setsockopt(pair[1], SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                   sizeof(timeout))) {
-        sigaction(SIGUSR1, &previous_action, NULL);
+                   sizeof(timeout)))
         return -1;
-    }
-    interruption_count = 0;
-    helper = fork_deferred_signal(pair[0], NULL, 0);
-    if (helper < 0) {
-        sigaction(SIGUSR1, &previous_action, NULL);
+    helper = fork_interrupting_writer(pair[0], pair[1], NULL, 0);
+    if (helper < 0)
         return -1;
-    }
     close(pair[0]);
     errno = 0;
     interrupted = read(pair[1], response, 1);
@@ -568,11 +590,12 @@ static int test_interrupted_response_read_is_retried(void)
     close(pair[1]);
     waitpid(helper, &status, 0);
 
-    /* Second half: the same interruption while the worker's response is read. */
+    /* Second half: the same interruptions while the worker's response is read,
+     * which still has to arrive because the reader retries. */
     memset(response, 0, sizeof(response));
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair)) {
         failed = 1;
-    } else if ((helper = fork_deferred_signal(pair[0], "ok", 2)) < 0) {
+    } else if ((helper = fork_interrupting_writer(pair[0], pair[1], "ok", 2)) < 0) {
         failed = 1;
     } else {
         close(pair[0]);
@@ -586,11 +609,6 @@ static int test_interrupted_response_read_is_retried(void)
         close(pair[1]);
         waitpid(helper, &status, 0);
     }
-    if (interruption_count == 0) {
-        fprintf(stderr, "FAIL: the interrupting signal never arrived\n");
-        failed = 1;
-    }
-    sigaction(SIGUSR1, &previous_action, NULL);
     if (!failed)
         puts("  an interrupted response read is retried, not failed: ok");
     return failed ? -1 : 0;
