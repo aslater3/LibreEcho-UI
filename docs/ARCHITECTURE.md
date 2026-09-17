@@ -466,12 +466,13 @@ libreecho-audiod    (needs logd for logging)
 libreecho-ledd      (needs logd for logging)
     ↑
 libreecho-waked → libreecho-sttd → libreecho-ttsd → libreecho-agentd
+        └──────────────────────────────→ libreecho-lived (disarmed until selected)
     ↑
 libreecho-web       (needs all above for full functionality)
 ```
 
 **Startup order:** logd → networkd → audiod → micd → waked → sttd → ledd →
-btd → airplayd → ttsd → agentd → web
+btd → airplayd → ttsd → agentd → lived → web
 
 **Shutdown order:** reverse startup order.
 
