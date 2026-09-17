@@ -379,6 +379,16 @@ async function caseBoundedLookahead() {
     check(babyStream.nextTime - context.time <= 0.750001 + 0.2 + 1e-9,
         'the scheduling cursor is bounded by the look-ahead plus one chunk, not by the whole stream');
     checkEqual(context.playbackSources.length, 20, 'every whole chunk was scheduled');
+    /* The chunks queued beyond the resync point must be cancelled, not left to
+       play on top of the audio that follows once the cursor is reset. */
+    check(context.playbackSources.filter(source => source.stopped).length > 0,
+        'the queued backlog beyond the resync point is cancelled instead of left to overlap');
+    const live = context.playbackSources.filter(source => !source.stopped);
+    const overlaps = live.some((a, i) => live.some((b, j) => j > i
+        && a.startedAt < b.startedAt + b.buffer.duration
+        && b.startedAt < a.startedAt + a.buffer.duration));
+    check(!overlaps, 'queued audio never overlaps another queued buffer after a resync');
+    check(babyStream.nodes.size <= 6, 'the retained queue stays bounded by the look-ahead window');
 
     /* A stalled reader must not leave the cursor in the past and burst-play. */
     context.time = 5;
@@ -431,6 +441,14 @@ async function caseStreamEndAndStop() {
     await settle();
 
     body.finish();
+    await settle();
+    /* The last chunk is scheduled ahead of the clock, so ending the stream must
+       not close the graph on top of it. */
+    checkEqual(context.closeCalls, 0, 'a finished stream keeps the graph open for the queued tail');
+    checkEqual(diagnostics().playback, 'draining', 'diagnostics report the queued tail draining');
+    const tail = context.playbackSources[context.playbackSources.length - 1];
+    check(!!tail && !tail.stopped, 'the final scheduled chunk is still pending when the stream ends');
+    if (tail) tail.fireEnded();                 /* the queued tail plays out */
     await settle();
     await quiesce(pending);
     checkEqual(el('#baby-status').textContent, 'Stopped', 'a finished stream returns the page to the stopped state');
