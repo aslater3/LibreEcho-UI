@@ -429,11 +429,22 @@ function muteLampNote(a,b){
  * navigation, so this stops polling as soon as the page is left.
  */
 async function refreshMuteLamp(){
+ const page=state.page;
  const note=$('#mute-lamp-note');if(!note)return;
+ let buttons=null,audio=null;
  try{
-  const [buttons,audio]=await Promise.all([api('/buttons'),state.page==='Audio'?api('/audio'):Promise.resolve(null)]);
-  note.outerHTML=muteLampNote(audio,buttons);
+  buttons=await api('/buttons');
+  if(page==='Audio')audio=await api('/audio');
  }catch(e){}
+ /*
+  * render() clears state.timer and re-arms it for whatever page is showing, so
+  * a poll that finishes after a navigation must neither touch the note nor take
+  * the timer back over -- that would leave two loops polling and the new page's
+  * refresh untracked.
+  */
+ if(state.page!==page)return;
+ const current=$('#mute-lamp-note');
+ if(current&&buttons)current.outerHTML=muteLampNote(audio,buttons);
  state.timer=setTimeout(refreshMuteLamp,5000);
 }
 async function audioPage(){const [a,buttons]=await Promise.all([api('/audio'),api('/buttons').catch(()=>({}))]),voices=a.tts_voices||[{id:'southern-female',name:'Southern English — female'},{id:'northern-male',name:'Northern English — male'}],voiceOptions=voices.map(v=>`<option value="${esc(v.id)}" ${v.id===a.tts_voice?'selected':''}>${esc(v.name)}</option>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Output',range('Master volume',a.volume,'volume')+range('Notification volume',a.notification_volume,'notification-volume').replace('value="'+a.notification_volume+'"','value="'+a.notification_volume+'" disabled')+toggle('Startup sound',a.startup_sound,'startup-sound',true)+`<dl class="facts"><dt>Output</dt><dd class="${a.output_available?'connected':''}">${a.output_available?'Available':'Unavailable'}</dd><dt>Amplifier</dt><dd>${a.amplifier_on?'On':'Off'}</dd></dl><div class="button-row">${saveButton('save-output')}${action('Play test tone','test-tone')}</div>`)}${panel('Announcements',`<label class="field"><span>Voice</span><select id="tts-voice">${voiceOptions}</select></label><p class="muted">The selected British voice stays loaded for low-latency streamed announcements. Changing voice restarts the speech service.</p>${saveButton('save-voice')}`)}${noisePanel(a.noise||{})}${panel('Microphones',range('Microphone gain',a.microphone_gain,'mic-gain')+toggle('Microphone muted',a.microphone_muted,'mic-muted')+toggle('Acoustic echo cancellation',true,'aec',true)+`<p class="muted">Echo cancellation is reported by the future audio adapter and cannot yet be changed.</p>`+muteLampNote(a,buttons)+saveButton('save-microphones'))}</div>`;bindRange();bindDirty(['#volume'],'#save-output');bindDirty(['#tts-voice'],'#save-voice');bindDirty(['#mic-gain','#mic-muted'],'#save-microphones');$('#save-output').onclick=()=>mutate('/audio',{volume:+$('#volume').value},'Output changes saved');$('#save-voice').onclick=()=>mutate('/audio',{tts_voice:$('#tts-voice').value},'Announcement voice changed');$('#save-microphones').onclick=()=>mutate('/audio',{microphone_gain:+$('#mic-gain').value,microphone_muted:$('#mic-muted').checked},'Microphone changes saved');$('#test-tone').onclick=()=>post('/audio/test',{},'Test tone playing');bindNoise(a.noise||{})}
