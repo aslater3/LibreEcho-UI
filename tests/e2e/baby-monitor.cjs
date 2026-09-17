@@ -511,6 +511,8 @@ async function interruptedRecoverySuite(browser) {
 
       const before = await probe(page);
       const resumeCalls = before.contexts[0].resumeCalls;
+      const framesBefore = bytesOf((await diagnostics(page)).frames);
+      const sourcesBefore = before.contexts[0].started;
       await page.evaluate(() => {
         const contexts = window.__babyAudio.contexts;
         contexts[contexts.length - 1].interrupt();
@@ -522,9 +524,18 @@ async function interruptedRecoverySuite(browser) {
       }, resumeCalls, { timeout: 6000 });
       await page.waitForFunction(() => document.querySelector('#baby-diag-context')?.textContent === 'running', null, { timeout: 4000 });
       assert.equal((await diagnostics(page)).status, 'Listening', 'recovery must not silently stop playback');
+      /* The label alone proves nothing: the reader and the scheduler must still
+         be moving audio, or a stalled stream would pass as a recovered one. */
+      const framesAdvanced = await page.waitForFunction(threshold => {
+        const text = document.querySelector('#baby-diag-frames')?.textContent || '';
+        return parseInt(text.replace(/[^0-9]/g, ''), 10) > threshold;
+      }, framesBefore, { timeout: 8000 }).then(() => true, () => false);
+      assert.ok(framesAdvanced, `decoded frames must keep advancing after the interruption clears (stuck at ${framesBefore})`);
       const after = await probe(page);
+      assert.ok(after.contexts[0].started > sourcesBefore,
+        'scheduling must continue after the interruption clears');
       assert.equal(after.log.filter(e => e.name === 'fetch').length, 1, 'the recovered stream must not have been restarted');
-      pass('an interrupted context is re-resumed and playback continues without restarting the stream');
+      pass('an interrupted context is re-resumed, audio keeps being decoded and scheduled, and the stream is not restarted');
 
       await selectPage(page, 'Overview');
       await waitForAllClosed(page);
