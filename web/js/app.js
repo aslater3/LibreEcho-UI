@@ -413,7 +413,7 @@ function muteLampNote(a,b){
  /* Whether software can light the lamp at all decides how to describe it: an
     image with the kernel's mute_lamp control lights it from a software mute, and
     one without it can only follow the button. */
- const soft=!!(b&&b.lamp_control===true),muted=!!(a&&a.microphone_muted);
+ const soft=!!(b&&b.lamp_control===true),off=!!(b&&b.lamp_control===false),muted=!!(a&&a.microphone_muted);
  const text=(()=>{
   /*
    * The latch comes first and outranks the software mute: while it is engaged
@@ -424,11 +424,14 @@ function muteLampNote(a,b){
   if(b&&b.privacy_latch===true)return 'The mute button\'s lamp is lit: its hardware privacy latch is engaged and the microphones are cut in hardware. Press the button to release it — software cannot.';
   if(soft&&muted)return 'Muted: the ring is red and the mute button\'s lamp is lit — this image lights that lamp from the software mute. The lamp is an indication, not the button\'s hardware privacy latch: software cannot assert or release that latch, so press the button for it. Unmuting puts this lamp out unless the button\'s latch has taken it over.';
   if(!b||b.privacy_latch===undefined||b.privacy_latch===null){
-   if(muted)return 'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — it follows the button\'s hardware privacy latch.';
-   return '';
+   if(!muted)return '';
+   /* The latch has not been read. An absent control still means the lamp follows
+      the button; an unreported one means neither fact is known, so neither is
+      claimed -- null is not "software cannot", it is "not answered". */
+   return off?'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — software cannot light it here, so it follows the button\'s hardware privacy latch, which has no fresh reading right now.':'Software mute: the microphones are muted and the ring is red. This image has not reported whether software can light the mute button\'s lamp, so neither is claimed; the ring shows the mute either way.';
   }
-  if(muted)return 'Software mute only: the ring is red and the mute button\'s lamp stays dark, because that lamp is wired to the button\'s privacy latch. Use the button if you want the hardware cut.';
-  return '';
+  if(!muted)return '';
+  return off?'Software mute only: the ring is red and the mute button\'s lamp stays dark, because that lamp is wired to the button\'s privacy latch. Use the button if you want the hardware cut.':'Software mute: the ring is red and the microphones are muted. This image has not reported whether software can light the mute button\'s lamp, so neither is claimed; the ring shows the mute either way.';
  })();
  /* Always rendered, empty when there is nothing to say: the button is on the
     device, so the note is re-read in place while either of these pages is open,
@@ -443,7 +446,11 @@ function muteLampNote(a,b){
  */
 function muteLampHardwareNote(b){
  if(b&&b.lamp_control===true)return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and a software mute does light it — this image has the kernel control for it. That lamp is an indication: the button\'s hardware privacy latch is a separate mechanism that software cannot assert or release, and muting from this page does not engage it.';
- return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and software cannot switch it — it is wired to the button\'s privacy latch, so muting from this page lights the ring and leaves the lamp dark.';
+ if(b&&b.lamp_control===false)return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and software cannot switch it — it is wired to the button\'s privacy latch, so muting from this page lights the ring and leaves the lamp dark.';
+ /* Neither is known yet, so neither is claimed: /buttons reports null until a
+    write has tested the control, and telling the user software cannot switch the
+    lamp would be a fact the daemon has not learned. */
+ return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it. This image has not reported whether software can switch that lamp, so neither is claimed here: muting from this page lights the red ring, and whether the lamp in the mute button follows it has not been reported.';
 }
 /*
  * The lamp changes under the page when someone presses the mute button, and the

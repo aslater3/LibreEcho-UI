@@ -4,6 +4,9 @@
 #include "buttond_fixture.h"
 #define open buttond_fixture_open
 #define write(fd, buffer, count) buttond_fixture_write(fd, buffer, count)
+/* No retry window: a probe deferred by a missing attribute must be retried on
+   the next call, not after a real 30-second wait. */
+#define LAMP_PROBE_RETRY_MS 0
 static char test_privacy_path[256], test_privacy_fallback_path[256];
 static char test_lamp_path[256];
 static char test_config_path[256];
@@ -169,6 +172,7 @@ static void init_context(struct context *ctx, const char *audio_socket)
     ctx->privacy_state = -1;
     ctx->privacy_observed = -1;
     ctx->lamp_supported = -1;
+    ctx->lamp_retry_at_ms = 0;
 }
 
 int main(void)
@@ -181,6 +185,7 @@ int main(void)
     pid_t audio_pid, led_pid;
     struct timespec pause = {0, 100000000L};
     int before;
+    unsigned int opens_before;
     FILE *config;
 
     assert(mkdtemp(directory) != NULL);
@@ -262,21 +267,38 @@ int main(void)
            cycle -- long enough for both pages to call a lamp the daemon had
            just lit dark. */
         assert(status_field("lamp_control") == 1);
+        assert(ctx.lamp_retry_at_ms == 0);
     }
     unlink(test_lamp_path);
-    /* Without the control (an older image) the mute still works and the lamp is
-       reported as unsupported rather than retried forever. */
+    /* Without the attribute the mute still works and the lamp is reported as
+       unsupported -- but not as settled: the control belongs to the privacy
+       driver, which can bind after this daemon has started, so the probe stays
+       alive and the capability recovers without a restart. */
     mute_indicator(&ctx, 0);
     assert(ctx.lamp_supported == 0);
     assert(status_field("lamp_control") == 0);
+    assert(ctx.lamp_retry_at_ms != 0);
     assert(!strcmp(ctx.action, "playpause"));
+    {
+        FILE *lamp = fopen(test_lamp_path, "w");
+
+        assert(lamp != NULL);
+        assert(fclose(lamp) == 0);
+    }
+    mute_indicator(&ctx, 1);
+    assert(ctx.lamp_supported == 1);
+    assert(status_field("lamp_control") == 1);
+    assert(ctx.lamp_retry_at_ms == 0);
+    unlink(test_lamp_path);
 
     /*
      * A write the kernel defers is not an answer to the capability question.
      * The mute lamp's store() returns -EBUSY while the button's latch (or the
      * shutdown dialog) owns the line, and records the request for when the line
      * is free, so calling that "unsupported" would describe a control this image
-     * has as missing. Only a write the kernel refuses outright is the no.
+     * has as missing. A write the kernel refuses outright is the no -- and only a
+     * refusal that cannot change (-EOPNOTSUPP: this board's latch owns the line)
+     * settles it for good.
      */
     {
         FILE *lamp = fopen(test_lamp_path, "w");
@@ -287,17 +309,58 @@ int main(void)
     ctx.lamp_supported = -1;
     write_capability_status(&ctx);   /* the fresh record of an untested control */
     assert(status_field("lamp_control") == -1);
-    assert(lamp_write_is_refusal(EACCES) && lamp_write_is_refusal(EOPNOTSUPP) &&
-           lamp_write_is_refusal(EROFS) && !lamp_write_is_refusal(EBUSY));
+    assert(lamp_failure_is_final(EOPNOTSUPP) && !lamp_failure_is_final(EBUSY) &&
+           !lamp_failure_is_final(EIO) && !lamp_failure_is_final(EACCES));
     buttond_fixture_write_errno = EBUSY;
     mute_indicator(&ctx, 1);
     assert(ctx.lamp_supported == -1);
     assert(status_field("lamp_control") == -1);
-    buttond_fixture_write_errno = EOPNOTSUPP;
+    /*
+     * A deferral cannot unlearn support the kernel has already proven: with a
+     * write accepted once, EBUSY leaves both the field and the published record
+     * at true. The deferral says nothing about what software can do here, so it
+     * must not demote a control this image has.
+     */
+    ctx.lamp_supported = 1;
+    write_capability_status(&ctx);
+    assert(status_field("lamp_control") == 1);
+    opens_before = buttond_fixture_opens;
+    mute_indicator(&ctx, 0);
+    assert(buttond_fixture_opens > opens_before);   /* the probe ran, not skipped */
+    assert(ctx.lamp_supported == 1);
+    assert(status_field("lamp_control") == 1);
+    buttond_fixture_write_errno = EIO;
     mute_indicator(&ctx, 0);
     assert(ctx.lamp_supported == 0);
     assert(status_field("lamp_control") == 0);
+    assert(ctx.lamp_retry_at_ms != 0);   /* anything but a refusal is retried */
+    ctx.lamp_supported = -1;
+    buttond_fixture_write_errno = EOPNOTSUPP;
+    mute_indicator(&ctx, 1);
+    assert(ctx.lamp_supported == 0);
+    assert(status_field("lamp_control") == 0);
+    assert(ctx.lamp_retry_at_ms == 0);   /* the kernel said no: stop probing */
+    /* A settled refusal is not probed again, so the daemon does not even reopen
+       the attribute: the line keeps what it had. */
+    {
+        FILE *lamp = fopen(test_lamp_path, "w");
+
+        assert(lamp != NULL);
+        assert(fputs("0", lamp) >= 0);
+        assert(fclose(lamp) == 0);
+    }
     buttond_fixture_write_errno = 0;
+    mute_indicator(&ctx, 1);
+    assert(ctx.lamp_supported == 0);
+    {
+        char lamp[8] = "";
+        FILE *file = fopen(test_lamp_path, "r");
+
+        assert(file != NULL);
+        assert(fgets(lamp, sizeof(lamp), file) != NULL);
+        assert(fclose(file) == 0);
+        assert(lamp[0] == '0');
+    }
     unlink(test_lamp_path);
 
     /* A steady asserted latch is idempotent, so the event cannot double-toggle. */

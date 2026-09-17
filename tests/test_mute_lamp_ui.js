@@ -82,8 +82,9 @@ async function ledHtml(buttons){
 }
 
 (async () => {
-  /* Software mute with the latch released: the lamp is dark, and that is said. */
-  const soft = await audioHtml({microphone_muted:true,privacy_latch:false});
+  /* Software mute with the control absent and the latch released: the lamp is
+     dark, and that is said. */
+  const soft = await audioHtml({microphone_muted:true,privacy_latch:false,lamp_control:false});
   assert(/Software mute only/.test(soft),
          'a software mute did not explain the dark lamp');
   assert(/lamp stays dark/.test(soft), 'the dark lamp was not named');
@@ -97,11 +98,36 @@ async function ledHtml(buttons){
          'an engaged latch was still described as a software-only mute');
 
   /* No fresh reading: do not claim the latch is released. */
-  const unknown = await audioHtml({microphone_muted:true,privacy_latch:null});
-  assert(/not part of this path/.test(unknown),
-         'an unknown latch state was reported as if it had been read');
+  const unknown = await audioHtml({microphone_muted:true,privacy_latch:null,lamp_control:null});
+  assert(/has not reported whether software can light/.test(unknown),
+         'an unreported lamp capability was collapsed into a definitive claim');
+  assert(/not part of this path/.test(unknown) === false,
+         'a null lamp capability was described as if software cannot light it');
   assert(!/lamp stays dark/.test(unknown),
          'an unknown latch state claimed the lamp was dark');
+  assert(!/lamp is lit/.test(unknown),
+         'an unknown lamp capability claimed the lamp was lit');
+  /* The latch unread and the control absent: still no claim about the latch. */
+  const unknownAbsent = await audioHtml({microphone_muted:true,privacy_latch:null,lamp_control:false});
+  assert(/not part of this path/.test(unknownAbsent),
+         'an absent lamp control was not explained');
+  assert(!/lamp stays dark/.test(unknownAbsent),
+         'an unread latch state claimed the lamp was dark');
+  /* Codex review of 0.14 #258: the latch is known released but the daemon has not
+     reported the lamp capability (null -- the fresh record before any write, or a
+     deferral it has not resolved). Neither fact is available, so neither is
+     claimed: not that the lamp stays dark, and not that software cannot light it. */
+  const unknownLamp = await audioHtml({microphone_muted:true,privacy_latch:false,lamp_control:null});
+  assert(!/lamp stays dark/.test(unknownLamp),
+         'an unreported lamp capability was described as a lamp that stays dark');
+  assert(!/not part of this path/.test(unknownLamp),
+         'a null lamp capability was described as if software cannot light it');
+  assert(/has not reported whether software can light/.test(unknownLamp),
+         'an unreported lamp capability was not named as unreported');
+  /* A record with no lamp field at all is unknown too, not unsupported. */
+  const absentLamp = await audioHtml({microphone_muted:true,privacy_latch:false});
+  assert(!/lamp stays dark/.test(absentLamp),
+         'a missing lamp capability was described as a lamp that stays dark');
 
   /* With the kernel's lamp control a software mute lights the lamp, and the
      note has to say so instead of describing a dark one. */
@@ -232,6 +258,20 @@ async function ledHtml(buttons){
     assert(/software cannot switch it/.test(withoutLamp),
            'an image without the control did not say the lamp follows the button');
     assert(/stays dark/.test(withoutLamp), 'the dark lamp was not named');
+  }
+  /* The standing LED copy makes the same claim as the note, so an unreported
+     capability must not be read as "software cannot switch it" there either. */
+  {
+    const unknownLampLed = await ledHtml(Object.assign({},buttonSettings,
+      {microphone_muted:true,privacy_latch:false,lamp_control:null}));
+    assert(!/software cannot switch it/.test(unknownLampLed),
+           'the LED page said software cannot switch a lamp it has not tested');
+    assert(/has not reported whether software can switch/.test(unknownLampLed),
+           'the LED page did not say the lamp capability is unreported');
+    assert(!/lamp stays dark/.test(unknownLampLed),
+           'the LED page claimed a dark lamp from an unreported capability');
+    assert(/has not reported whether software can light/.test(unknownLampLed),
+           'the LED page note described an unreported lamp capability');
   }
 
   console.log('mute lamp honesty on the Audio and LED pages: ok');

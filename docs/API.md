@@ -1610,14 +1610,20 @@ because the lamp is wired to the latch rather than to the audio path. Where
 is what that field reports.
 `lamp_control` reports whether software can light the lamp in the mute button at
 all: `true` when the kernel exposes the mute-lamp control and last accepted a
-write, `false` when the image predates it or the kernel refuses the write
-outright (a board whose hardware latch owns the line), and `null` when there is
-no fresh reading or nothing has tested the control yet — a daemon that has not
-tried to write it has not learned that software cannot. A write the kernel
-defers while the button's latch is engaged is not a refusal: the request is
-recorded and applied when the line is free, so the field stays `null` rather than
-becoming `false`. It is what the UI uses to describe the lamp: with the control,
-a software mute lights it, and without it the lamp can only follow the button.
+write, `false` when the kernel refuses the write outright (a board whose hardware
+latch owns the line) or software cannot write the attribute at all (an image that
+predates the control, or a driver that has not bound yet), and `null` when there
+is no fresh reading or nothing has tested the control yet — a daemon that has not
+tried to write it has not learned that software cannot. Only a definite kernel
+refusal settles the question: a missing attribute, or any failure that may pass,
+is probed again, so a driver that binds later turns the field `true` without
+restarting the daemon. A write the kernel defers while the button's latch is
+engaged is not a refusal either: the request is recorded and applied when the
+line is free, so the field keeps the answer it already had — `null` while nothing
+has tested the control, and `true` where a write has already been accepted, since
+a deferral does not unlearn proven support — rather than becoming `false`. It is
+what the UI uses to describe the lamp: with the control, a software mute lights
+it, and without it the lamp can only follow the button.
 Both fields describe the lamp indication; neither reports that software engaged
 the hardware privacy latch, which only the button can do.
 

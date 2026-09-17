@@ -32,12 +32,31 @@ assert 'BUTTOND_MUTE_LAMP_PATH' in source, (
     'the lamp control path is not defined')
 assert 'lamp_control=%d' in source, (
     'the status file must report whether software can light the lamp')
-assert 'lamp_write_is_refusal' in source and 'return err != EBUSY;' in source, (
-    'a write the kernel defers while the latch owns the line must not be '
-    'reported as an unsupported control')
+assert 'lamp_failure_is_final' in source and 'return err == EOPNOTSUPP;' in source, (
+    'only the kernel refusing the control outright may settle the lamp probe')
+assert 'LAMP_PROBE_RETRY_MS' in source and \
+    'ctx->lamp_retry_at_ms = monotonic_ms() + LAMP_PROBE_RETRY_MS;' in source, (
+    'an attribute that is not there yet must be probed again, not latched off')
 assert 'set_lamp_capability(ctx, 1)' in source and \
     'set_lamp_capability(ctx, 0)' in source, (
     'the lamp capability must be remembered and published as the probe learns it')
+# The two contract documents describe the same probe, so the deferral wording has
+# to agree with the implementation in both: a write the kernel defers while the
+# latch owns the line leaves the field at the answer it already had -- null only
+# while nothing has tested the control, and a proven true intact -- and absence is
+# re-probed rather than latched off.
+for name in ('docs/API.md', 'web/openapi.json'):
+    # Flattened and with the prose's code spans removed, so the same sentence can
+    # be asserted in a wrapped markdown paragraph and in a one-line JSON string.
+    text = ' '.join(Path(name).read_text().replace('`', '').split())
+    assert 'null while nothing has tested the control' in text, (
+        name + ': the deferral must say what it leaves behind instead')
+    assert 'a write has already been accepted' in text, (
+        name + ': a deferral must not erase a proven true')
+    assert 'since a deferral does not unlearn proven support' in text, (
+        name + ': the deferral wording must match the implementation')
+    assert 'is probed again, so a driver that binds later turns' in text, (
+        name + ': a missing attribute must be retried, not latched off')
 indicator = source[source.index('static void mute_indicator('):source.index('static void show_meter(')]
 assert 'write_mute_lamp(ctx, muted);' in indicator, (
     'the mute indicator must drive the kernel lamp control')

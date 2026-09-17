@@ -73,6 +73,16 @@
    driver is unbound.  Rescan rather than exiting, so a late-appearing button
    is still picked up without an operator having to restart the daemon. */
 #define RESCAN_INTERVAL_MS 5000
+/*
+ * An attribute that is not there yet is probed again on this cadence: the mute
+ * lamp belongs to the privacy driver, which can bind after buttond starts.
+ * Latching "unsupported" on the first miss would describe an image that has the
+ * control as lacking it until the daemon was restarted. Overridable so a host
+ * test does not have to wait it out.
+ */
+#ifndef LAMP_PROBE_RETRY_MS
+#define LAMP_PROBE_RETRY_MS 30000
+#endif
 /* Overridable so a host test can read the record the daemon publishes. */
 #ifndef STATUS_PATH
 #define STATUS_PATH "/run/libreecho/buttond-status"
@@ -115,6 +125,11 @@ struct context {
        refused, -1 before it has been tried. Drives the reported capability. */
     int lamp_supported;
     int lamp_warned;
+    /* When a failed probe may be tried again, on the monotonic clock; 0 when the
+       probe has settled -- a write the kernel accepted, or one it will never
+       take. An attribute that is absent is not settled: its driver can bind
+       after this daemon starts. */
+    long long lamp_retry_at_ms;
     unsigned int step;
     unsigned int hold_ms;
     unsigned int brightness;
@@ -585,17 +600,19 @@ static void action_flourish(struct context *ctx)
 }
 
 /*
- * Whether a failed lamp write answers the capability question at all.
+ * Whether a failed lamp write settles the question for good.
  *
- * EBUSY is a deferral, not a refusal: the kernel records the request while the
- * button's latch (or the shutdown dialog) owns the line and applies it when it
- * can, so it is not evidence about what software can do here. Every other
- * failure is this image or this board refusing the write outright, which is the
- * definitive "no".
+ * A write the kernel refuses is an answer -- but only -EOPNOTSUPP is a permanent
+ * one: it is the driver declining this control on this board on purpose
+ * (amz_privacy: a board whose hardware latch owns the line, where driving the
+ * request line could hold a state the driver never records). A deferral (EBUSY,
+ * the request is recorded and applied when the line is free) is not an answer at
+ * all, and neither is an error the daemon might never see again; those keep the
+ * probe alive.
  */
-static int lamp_write_is_refusal(int err)
+static int lamp_failure_is_final(int err)
 {
-    return err != EBUSY;
+    return err == EOPNOTSUPP;
 }
 
 /*
@@ -630,7 +647,12 @@ static void write_mute_lamp(struct context *ctx, int muted)
     int failed;
     int fd;
 
-    if (ctx->lamp_supported == 0)
+    /*
+     * A probe the kernel settled for good is not repeated; one that only failed
+     * because the attribute was not there yet is, once the retry window passes.
+     */
+    if (ctx->lamp_supported == 0 &&
+        (ctx->lamp_retry_at_ms == 0 || monotonic_ms() < ctx->lamp_retry_at_ms))
         return;
     fd = open(BUTTOND_MUTE_LAMP_PATH, O_WRONLY | O_CLOEXEC
 #ifdef O_NOFOLLOW
@@ -639,15 +661,18 @@ static void write_mute_lamp(struct context *ctx, int muted)
     );
     if (fd < 0) {
         /*
-         * The attribute is missing (an image from before the control) or this
-         * daemon may not write it (the mode is group-writable, so the service
-         * user's groups matter). Either way software here cannot light the lamp
-         * and nothing the daemon does will change that, so stop trying.
+         * The attribute is missing (an image from before the control, or a
+         * driver that has not bound yet) or this daemon may not write it (the
+         * mode is group-writable, so the service user's groups matter). Either
+         * way software cannot light the lamp now and the answer is reported as
+         * unsupported -- but it is not treated as final, because the driver can
+         * appear later and only the kernel refusing a write settles it.
          */
         if (ctx->lamp_supported > 0 || errno != ENOENT)
             le_log_info("buttond: mute lamp control is not usable: %s",
                         strerror(errno));
         set_lamp_capability(ctx, 0);
+        ctx->lamp_retry_at_ms = monotonic_ms() + LAMP_PROBE_RETRY_MS;
         return;
     }
     written = write(fd, value, 1);
@@ -655,26 +680,33 @@ static void write_mute_lamp(struct context *ctx, int muted)
     close(fd);
     if (written == 1) {
         ctx->lamp_warned = 0;
+        ctx->lamp_retry_at_ms = 0;
         set_lamp_capability(ctx, 1);
         return;
     }
     if (!ctx->lamp_warned) {
-        if (lamp_write_is_refusal(failed))
-            le_log_warn("buttond: mute lamp write rejected: %s", strerror(failed));
-        else
+        if (failed == EBUSY)
             le_log_warn("buttond: mute lamp write deferred (the latch owns it?)");
+        else
+            le_log_warn("buttond: mute lamp write refused: %s", strerror(failed));
     }
     ctx->lamp_warned = 1;
-    /*
-     * A deferral is not a refusal: the kernel has the request recorded and
-     * applies it once the latch releases the line, so it says nothing about
-     * what software can do here. The capability stays as it was -- unknown
-     * until a write tests the control, which the API reports as null, and still
-     * true once one has been accepted. A refusal is the one answer that is a
-     * definite "no", and that is what the API reports as false.
-     */
-    if (lamp_write_is_refusal(failed))
-        set_lamp_capability(ctx, 0);
+    if (failed == EBUSY) {
+        /*
+         * A deferral is not an answer: the kernel has the request recorded and
+         * applies it once the latch releases the line, so it says nothing about
+         * what software can do here. The capability keeps the answer it already
+         * had -- unknown until a write tests the control, which the API reports
+         * as null, and still true once one has been accepted.
+         */
+        return;
+    }
+    /* Refused: the one answer that is a definite "no" is what the API reports as
+       false. A permanent refusal ends the probing; anything else is retried. */
+    set_lamp_capability(ctx, 0);
+    ctx->lamp_retry_at_ms = lamp_failure_is_final(failed)
+                                ? 0
+                                : monotonic_ms() + LAMP_PROBE_RETRY_MS;
 }
 
 static void mute_indicator(struct context *ctx, int muted)
@@ -1044,6 +1076,7 @@ int main(int argc, char **argv)
     ctx.privacy_state_seen = 0;
     ctx.privacy_observed = -1;
     ctx.lamp_supported = -1;
+    ctx.lamp_retry_at_ms = 0;
     ctx.indicated_mute = -1;
     ctx.audio_poll_warned = 0;
     ctx.tones = 1;
