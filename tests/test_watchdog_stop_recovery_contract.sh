@@ -13,6 +13,13 @@
 # The helpers are evaluated straight out of the shipped init script, and the
 # supervisor and its recovery are real processes, so this runs the text that
 # ships.
+#
+# Liveness is read from the process state rather than from kill -0 alone. On a
+# host where PID 1 does not promptly reap orphans -- a container without a
+# reaping init -- the recovery killed after its supervisor exited stays visible
+# in /proc with state Z, and kill -0 still succeeds for it, so both of these
+# checks reported a stopped recovery as alive. A process counts as alive only
+# while it really is one, which keeps a genuinely running recovery visible.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,7 +31,23 @@ fails=0
 pass() { echo "  PASS  $1"; }
 fail() { echo "  FAIL  $1"; fails=$((fails + 1)); }
 check() { [ "$2" = "$3" ] && pass "$1 (=$3)" || fail "$1: expected $3, got $2"; }
-alive() { kill -0 "$1" 2>/dev/null && echo yes || echo no; }
+
+# The state letter of a live process, or nothing once the process is gone. The
+# comm field can contain spaces and parentheses, so the state is read after the
+# final ')' instead of by field number.
+process_state() {
+    [ -r "/proc/$1/stat" ] || return 0
+    sed -n 's/^[0-9][0-9]* (.*) \([A-Z]\) .*$/\1/p' "/proc/$1/stat" | sed -n '1p'
+}
+
+# Alive means the process still exists and is not a zombie or already reaped.
+# Anything else -- including a recovery that is still running -- is alive.
+alive() {
+    case "$(process_state "$1")" in
+        ''|Z|X) echo no ;;
+        *) echo yes ;;
+    esac
+}
 
 # ---------------------------------------------------------------- structural
 echo "structural: $SOURCE_INIT"
@@ -59,18 +82,37 @@ else
     # exactly -- /bin/sh <init script> start -- and the script only waits, the
     # way a start waits for its dependencies before it launches anything.
     cat > "$WORK/fake-watchdog.c" <<'EOC'
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 int main(void)
 {
     const char *script = getenv("RECOVERY_SCRIPT");
+    const char *zombie_file = getenv("ZOMBIE_PIDFILE");
 
-    if (script) {
+    if (script && script[0]) {
         pid_t child = fork();
 
         if (child == 0) {
             execl("/bin/sh", "/bin/sh", script, "start", (char *)NULL);
             _exit(127);
+        }
+    }
+    /* ZOMBIE_PIDFILE asks for a child that exits and is deliberately never
+       reaped, so the fixture can show that a zombie is classified as stopped
+       even though kill -0 still succeeds for it. */
+    if (zombie_file && zombie_file[0]) {
+        pid_t dead = fork();
+
+        if (dead == 0)
+            _exit(0);
+        {
+            FILE *file = fopen(zombie_file, "w");
+
+            if (file) {
+                fprintf(file, "%d\n", (int)dead);
+                fclose(file);
+            }
         }
     }
     for (;;)
@@ -79,6 +121,37 @@ int main(void)
 }
 EOC
     "$CC" -w -o "$DAEMON" "$WORK/fake-watchdog.c"
+
+    # ------------------------------------------------------------ classification
+    # The stop checks below read liveness from the process state, so this pins
+    # down what that reading means: a child that has exited without being reaped
+    # is not alive, while a process that is still running is. PID 1 reaps
+    # promptly on most hosts, so the zombie is created on purpose here rather
+    # than left to the host's reaping policy.
+    echo "classification: a zombie is stopped, a live process is not"
+    ZOMBIE_PIDFILE=$ROOT/$WORK/zombie.pid
+    rm -f "$ZOMBIE_PIDFILE"
+    (unset RECOVERY_SCRIPT; ZOMBIE_PIDFILE=$ZOMBIE_PIDFILE; export ZOMBIE_PIDFILE; exec "$DAEMON") &
+    zombie_holder=$!
+    tries=0
+    while [ ! -s "$ZOMBIE_PIDFILE" ] && [ "$tries" -lt 100 ]; do
+        tries=$((tries + 1))
+        sleep 0.05
+    done
+    zombie_pid=$(sed -n '1p' "$ZOMBIE_PIDFILE" 2>/dev/null || true)
+    if [ -z "$zombie_pid" ]; then
+        fail "the fixture could not create a zombie to classify"
+    else
+        check "the un-reaped child really is a zombie" "$(process_state "$zombie_pid")" Z
+        check "zombie classified as stopped" "$(alive "$zombie_pid")" no
+        check "live process classified as running" "$(alive "$zombie_holder")" yes
+        # kill -0 alone is the reading this replaced, and it is what made a
+        # stopped recovery look alive on a host that had not reaped it yet.
+        if kill -0 "$zombie_pid" 2>/dev/null; then kill0=yes; else kill0=no; fi
+        check "kill -0 alone would still call the zombie alive" "$kill0" yes
+    fi
+    kill -9 "$zombie_holder" 2>/dev/null || true
+    wait "$zombie_holder" 2>/dev/null || true
     cat > "$RECOVERY_SCRIPT" <<'EOC'
 #!/bin/sh
 sleep 5
@@ -93,9 +166,19 @@ EOC
     else
         supervisor_pid=
         recovery_pid=
+        # The supervisor is a direct child of this shell, so it can be reaped
+        # here. The recovery cannot: it is reparented when the supervisor dies,
+        # which is why its liveness is classified instead of waited on.
+        reap_supervisor() {
+            [ -n "$supervisor_pid" ] || return 0
+            wait "$supervisor_pid" 2>/dev/null || true
+        }
         cleanup() {
             [ -n "$recovery_pid" ] && kill -9 "$recovery_pid" 2>/dev/null || true
-            [ -n "$supervisor_pid" ] && kill -9 "$supervisor_pid" 2>/dev/null || true
+            if [ -n "$supervisor_pid" ]; then
+                kill -9 "$supervisor_pid" 2>/dev/null || true
+                reap_supervisor
+            fi
         }
         trap cleanup EXIT INT TERM
 
@@ -120,7 +203,12 @@ EOC
             echo "behavioural: stop with a live pidfile"
             start_supervisor || fail "the supervisor never forked a recovery"
             echo "$supervisor_pid" > "$PIDFILE"
+            # The positive control for the classification: a recovery that is
+            # still running must be visible as alive, or the state reading
+            # would pass these checks by calling everything stopped.
+            check "recovery in flight is alive before the stop" "$(alive "$recovery_pid")" yes
             stop_service
+            reap_supervisor
             check "supervisor stopped" "$(alive "$supervisor_pid")" no
             check "recovery in flight stopped" "$(alive "$recovery_pid")" no
             check "pidfile removed" "$([ -e "$PIDFILE" ] && echo yes || echo no)" no
@@ -134,7 +222,9 @@ EOC
         echo "behavioural: stop without a pidfile"
         start_supervisor || fail "the supervisor never forked a recovery"
         recovery_before=$recovery_pid
+        check "recovery is alive before the stop without a pidfile" "$(alive "$recovery_before")" yes
         stop_service
+        reap_supervisor
         check "supervisor stopped without a pidfile" "$(alive "$supervisor_pid")" no
         check "recovery stopped without a pidfile" "$(alive "$recovery_before")" no
         cleanup
