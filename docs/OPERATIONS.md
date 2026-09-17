@@ -225,11 +225,14 @@ trees before the prompt, so nothing the
 contract excludes is ever installed. This holds for an archive written by an
 earlier tool or one whose manifest names no exclusions, and the restored tree is
 the archive minus those files. `list` prints the same reminder next to the
-manifest. An archive whose top-level `manifest.json` is a symlink or is not a
-regular file is refused before it is read, so listing a hostile archive cannot
-disclose a root-readable file, and an archive with a member that escapes the
-archive root (`../` or an absolute path) is refused before extraction. Both
-refusals leave live state unchanged and stop no services.
+manifest. An archive whose top-level `manifest.json` is a symlink, is not a
+regular file, or shares its inode with another member (a hard link) is refused
+before it is read, so listing a hostile archive cannot disclose a root-readable
+file or a captured secret. An archive with a member that escapes the archive
+root (`../` or an absolute path) is refused before extraction, by a scan that
+holds one member name at a time (`list` and `restore` decompress the archive
+twice for that: once to prove it is readable, once to scan). Both refusals
+leave live state unchanged and stop no services.
 
 Symlinked state is refused in both directions: creation fails instead of
 archiving a link, and an archive whose trees contain a link is rejected before

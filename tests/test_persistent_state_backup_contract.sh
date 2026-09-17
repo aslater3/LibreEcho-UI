@@ -126,6 +126,17 @@ require_in_tool 'invalid backup (manifest is a symbolic link)'
 require_in_tool 'invalid backup (manifest is not a regular file)'
 require_in_tool 'refuse_archive_escape "$backup"'
 require_in_tool 'backup member escapes the archive root'
+require_in_tool 'manifest shares its inode with another archive member'
+require_in_tool "stat -c '%h'"
+# The member scan holds one name at a time: an archive that repeats a pathname
+# is small compressed but would grow a listing file without bound.
+escape_scan=$(sed -n '/^refuse_archive_escape() {/,/^}/p' "$TOOL")
+[ -n "$escape_scan" ] || fail 'refuse_archive_escape is missing'
+printf '%s\n' "$escape_scan" | grep -Fq '| scan_archive_members' ||
+    fail 'the member scan is not streamed'
+if printf '%s\n' "$escape_scan" | grep -Fq 'mktemp'; then
+    fail 'the member scan buffers the names in a listing file'
+fi
 require_in_tool 'Excluded by contract, never restored'
 
 # 6. Create and restore apply one shared prune policy, to the trees create

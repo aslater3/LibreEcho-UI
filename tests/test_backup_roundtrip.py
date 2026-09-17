@@ -834,5 +834,84 @@ class BackupRoundTrip(unittest.TestCase):
                              'live state changed: ' + relative)
 
 
+    def test_hard_linked_manifest_is_refused_before_reading(self):
+        # A member can be a hard link to another member, which passes both `-L`
+        # and `-f`; a `manifest.json` linked to a captured secret would then be
+        # printed by `list`. A manifest this tool writes is a fresh file with
+        # one link, so a shared inode is refused before the manifest is read.
+        disclosure = 'hard-link-disclosure-' + secrets.token_hex(16)
+        stage = Path('/out/hardlink-stage')
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True)
+        self.write_basic_trees(stage)
+        write(stage / 'persistent/secrets/openai-codex.json', disclosure + '\n')
+        archive = Path('/out/hard-linked-manifest.tar.gz')
+        with tarfile.open(archive, 'w:gz') as handle:
+            for member in sorted(stage.rglob('*')):
+                handle.add(member, arcname=str(member.relative_to(stage)))
+            link = tarfile.TarInfo('manifest.json')
+            link.type = tarfile.LNKTYPE
+            link.linkname = 'persistent/secrets/openai-codex.json'
+            handle.addfile(link)
+        with tarfile.open(archive, 'r:gz') as handle:
+            self.assertTrue(handle.getmember('manifest.json').islnk(),
+                            'the fixture did not create a hard link')
+        for action in ['list', 'restore']:
+            with self.subTest(action=action):
+                result = self.call(action, path=archive, success=False)
+                self.assertIn('shares its inode', result.stderr)
+                self.assertNotIn(disclosure, result.stdout + result.stderr)
+                self.assertNotIn('Contents:', result.stdout)
+        self.assertEqual(self.actions('stop'), [],
+                         'services were stopped for a refused archive')
+        for relative, value in self.files.items():
+            self.assertEqual((DATA / relative).read_text(), value,
+                             'live state changed: ' + relative)
+
+    def test_member_scan_streams_instead_of_buffering_a_listing(self):
+        # An archive can repeat one pathname thousands of times and stay tiny
+        # compressed, so the member scan must consume names as `tar` emits them
+        # instead of collecting them into a listing file that such an archive
+        # could grow without bound. The probe records every `mktemp` call: the
+        # scan may not make one.
+        def escape(stage):
+            self.write_basic_trees(stage)
+            write(stage / 'manifest.json', '{"version":2}\n')
+
+        archive = self.stage_archive('stream.tar.gz', escape)
+        self.inject('mktemp',
+                    'for arg do\n printf "%s " "$arg" >>/run/mktemp-args.log\ndone\n'
+                    'printf "\\n" >>/run/mktemp-args.log\nexec /usr/bin/mktemp "$@"\n')
+        # Prove the probe is live before trusting it: an ordinary list must
+        # record its own `mktemp -d`.
+        self.call('list', path=self.stage_archive('stream-ok.tar.gz', escape))
+        log = Path('/run/mktemp-args.log')
+        self.assertTrue(log.exists(), 'the tool never called mktemp; the probe is broken')
+        before = log.read_text()
+        self.assertTrue(any('-d' in line for line in before.splitlines()),
+                        'the probe did not record the ordinary mktemp -d call')
+        hostile = Path('/out/stream-backup.tar.gz')
+        body = b'escaped-member\n'
+        with tarfile.open(archive, 'r:gz') as source, \
+                tarfile.open(hostile, 'w:gz') as target:
+            for member in source.getmembers():
+                handle = source.extractfile(member) if member.isfile() else None
+                target.addfile(member, handle)
+            info = tarfile.TarInfo('../stream-escape.txt')
+            info.size = len(body)
+            target.addfile(info, io.BytesIO(body))
+            for _ in range(20000):
+                repeated = tarfile.TarInfo('persistent/config/repeated')
+                repeated.size = 0
+                target.addfile(repeated)
+        result = self.call('list', path=hostile, success=False)
+        self.assertIn('escapes the archive root', result.stderr)
+        self.assertFalse(Path('/tmp/stream-escape.txt').exists(),
+                         'an escaping member was extracted')
+        buffered = [line for line in log.read_text()[len(before):].splitlines()
+                    if '-d' not in line]
+        self.assertEqual(buffered, [],
+                         'the member scan buffered the names in a listing file')
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

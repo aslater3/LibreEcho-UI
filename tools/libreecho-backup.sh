@@ -413,6 +413,16 @@ require_plain_manifest() {
     [ ! -e "$manifest" ] || [ -f "$manifest" ] ||
         fail "invalid backup (manifest is not a regular file)"
     [ -f "$manifest" ] || fail "invalid backup (missing manifest)"
+    # A regular file is not enough: a member can be a hard link to another
+    # member, so a `manifest.json` linked to `persistent/secrets/provider`
+    # passes `-L` and `-f` and reading it would print captured credentials. A
+    # manifest this tool wrote is a fresh file with one link.
+    links=$(stat -c '%h' "$manifest") || fail "invalid backup (manifest is unreadable)"
+    case "$links" in
+        ''|*[!0-9]*) fail "invalid backup (manifest is unreadable)" ;;
+    esac
+    [ "$links" = 1 ] ||
+        fail "invalid backup (manifest shares its inode with another archive member)"
 }
 
 require_plain_dir() {
@@ -439,51 +449,51 @@ validate_archive() {
     require_required_file "$root/persistent/config/users" 'required account state'
 }
 
-# Extraction is only safe while every member name stays inside the extraction
-# root. An absolute name, or one with a `..` component, does not: whether the
-# extractor writes it outside or rewrites it is up to the tar implementation
-# (GNU tar only strips a leading `/`), and a write outside the staging
-# directory would happen as root before any check that runs after extraction
-# could see it. The member list is inspected first and the archive is refused,
-# so an archive that names a member outside the extraction root is never
-# extracted, by restore or by list.
-refuse_archive_escape() {
-    archive=$1
-    listing=$(mktemp) || return 1
-    if ! tar -tzf "$archive" >"$listing"; then
-        rm -f "$listing"
-        printf '%s\n' 'Error: backup archive could not be read' >&2
-        return 1
-    fi
-    escaped=
+# `scan_archive_members` reads one member name per line and returns non-zero,
+# naming the member, at the first name that leaves the extraction root.
+scan_archive_members() {
     while IFS= read -r member; do
         case "$member" in
             /*)
-                escaped=$member
-                break
+                printf 'Error: backup member escapes the archive root: %s\n' "$member" >&2
+                return 1
                 ;;
         esac
         remainder=$member
         while [ -n "$remainder" ]; do
             component=${remainder%%/*}
-            case "$component" in
-                ..)
-                    escaped=$member
-                    break 2
-                    ;;
-            esac
+            if [ "$component" = '..' ]; then
+                printf 'Error: backup member escapes the archive root: %s\n' "$member" >&2
+                return 1
+            fi
             case "$remainder" in
                 */*) remainder=${remainder#*/} ;;
                 *) remainder= ;;
             esac
         done
-    done <"$listing"
-    rm -f "$listing"
-    [ -z "$escaped" ] || {
-        printf 'Error: backup member escapes the archive root: %s\n' "$escaped" >&2
-        return 1
-    }
+    done
     return 0
+}
+
+# Extraction is only safe while every member name stays inside the extraction
+# root. An absolute name, or one with a `..` component, does not: whether the
+# extractor writes it outside or rewrites it is up to the tar implementation
+# (GNU tar only strips a leading `/`), and a write outside the staging
+# directory would happen as root before any check that runs after extraction
+# could see it. So the names are scanned before extraction, by restore and by
+# list, and the scan holds one name at a time: an archive can repeat the same
+# pathname many times and stay tiny compressed, so collecting the names into a
+# listing file would let such an archive grow that file without bound. The
+# archive is decompressed twice - once to prove it is readable and to keep its
+# status, once to scan names as `tar` emits them - and neither pass stores the
+# listing.
+refuse_archive_escape() {
+    archive=$1
+    if ! tar -tzf "$archive" >/dev/null 2>&1; then
+        printf '%s\n' 'Error: backup archive could not be read' >&2
+        return 1
+    fi
+    tar -tzf "$archive" 2>/dev/null | scan_archive_members
 }
 
 stage_tree() {

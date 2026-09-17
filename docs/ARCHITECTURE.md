@@ -322,10 +322,11 @@ itself a link, a root spelled with a `.` or `..` component, and a root whose pat
 crosses a link in any component, rather than archived or restored. A trailing or
 doubled separator is normalized to the same root before those checks, and no
 component is resolved, so another spelling of a root cannot slip past them. The
-top-level `manifest.json` must be a regular file that is not a link, and is
-checked before it is read or listed, so reading it cannot disclose a
-root-readable file; a member that escapes the archive root is refused before
-extraction. The manifest names the tree scope and the suffixes of every pruned
+top-level `manifest.json` must be a regular file, not a link and with a single
+link count, and is checked before it is read or listed, so reading it cannot
+disclose a root-readable file or a hard-linked captured secret; a member that
+escapes the archive root is refused before extraction by a streaming scan that
+holds one name at a time. The manifest names the tree scope and the suffixes of every pruned
 file class.
 
 Restore stages and validates both trees, including numeric ownership. It only
