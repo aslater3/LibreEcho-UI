@@ -294,11 +294,20 @@ static void write_capability_status(const struct context *ctx)
     file = fopen(STATUS_TMP_PATH, "w");
     if (!file)
         return;
-    fprintf(file, "schema=1\nstate=%s\nvolume=%d\nmicrophone_mute=%d\naction=%d\n",
+    /*
+     * privacy_state is the kernel's privacy latch, reported so the UI can say
+     * whether the mute button's lamp is lit. A software mute lights the ring
+     * and leaves that lamp dark, because the lamp is wired to the latch rather
+     * than to the audio path; -1 means "not read yet", which is not the same as
+     * "released" and must not be reported as if it were.
+     */
+    fprintf(file, "schema=1\nstate=%s\nvolume=%d\nmicrophone_mute=%d\naction=%d\n"
+                  "privacy_state=%d\n",
             connected ? "connected" : "unavailable",
             connected && ctx->volume_capable,
             connected && ctx->mute_capable,
-            connected && ctx->action_capable);
+            connected && ctx->action_capable,
+            ctx->privacy_state);
     fflush(file);
     fd = fileno(file);
     if (fd >= 0)
