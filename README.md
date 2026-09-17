@@ -98,6 +98,7 @@ libreecho-web
   ├── wakeword.sock → wake-word service
   ├── btd socket    → libreecho-btd
   ├── agent.sock    → libreecho-agentd
+  ├── live.sock     → libreecho-lived (GPT-Live, disarmed by default)
   └── log.sock      → libreecho-logd
 ```
 

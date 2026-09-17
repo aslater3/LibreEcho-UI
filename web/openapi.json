@@ -187,6 +187,40 @@
     }
    }
   },
+  "/live": {
+   "get": {
+    "tags": ["Assistant"],
+    "summary": "Read GPT-Live runtime state",
+    "description": "Returns the live GPT-Live daemon status, including whether the mode is armed, transport metrics, session state, and bounded output counters. This is runtime state and is not persisted across daemon restarts.",
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "put": {
+    "tags": ["Assistant"],
+    "summary": "Arm or disarm GPT-Live",
+    "description": "Arms or disarms the GPT-Live daemon. Arming allows the local wake-word path to start a full-duplex subscription conversation; idle microphone audio is not sent. The request requires X-LibreEcho-CSRF.",
+    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": ["enabled"],
+        "properties": {"enabled": {"type": "boolean"}}
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "400": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
   "/assistant/history": {
    "get": {
     "tags": [

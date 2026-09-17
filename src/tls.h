@@ -27,6 +27,15 @@ struct le_tls;
 struct le_tls *le_tls_client_open(int fd, const char *hostname);
 
 /*
+ * Verified client TLS. The CA bundle is parsed before the handshake and the
+ * peer must chain to it and match `hostname`; otherwise this returns NULL.
+ * Use this for credentials or private data. le_tls_client_open() remains the
+ * intentionally unauthenticated radio-stream helper for compatibility.
+ */
+struct le_tls *le_tls_client_open_verified(int fd, const char *hostname,
+                                           const char *ca_path);
+
+/*
  * Accept a TLS connection on an already-accepted socket, presenting the
  * certificate and key at the given paths. Returns NULL if the handshake
  * fails or the files cannot be loaded. The caller still owns fd.
@@ -40,6 +49,7 @@ int le_tls_client_verified(const struct le_tls *tls);
 
 /* Same shape as read(2)/write(2): bytes moved, 0 on clean close, -1 on error. */
 long le_tls_read(struct le_tls *tls, void *buf, size_t len);
+/* Returns -2 when the deadline elapsed with no data, -1 on fatal error. */
 long le_tls_read_deadline(struct le_tls *tls, void *buf, size_t len,
                           int timeout_ms);
 

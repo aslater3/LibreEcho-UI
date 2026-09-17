@@ -246,6 +246,10 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -o build/test-ttsd
 ./build/test-ttsd
 sh tests/test_timed.sh
+# GPT-Live: preroll ring indexing, the session state machine driven by the mock
+# transport, the delegation allow-list, and the whole daemon end-to-end against
+# a stand-in waked.
+make test-lived
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
 sh tests/test_setup_first_run.sh

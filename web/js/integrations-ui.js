@@ -10,7 +10,8 @@ function assistantProviderPanel(options) {
     toggleId,
     enabled,
     body,
-    open
+    open,
+    disabled
   } = options;
   return `<details class="panel setting-panel integration-section assistant-provider"${open?' open':''}>
     <summary>
@@ -20,7 +21,7 @@ function assistantProviderPanel(options) {
       </div>
       <div class="provider-summary-controls">
         <span class="assistant-state"><span class="status-dot ${statusOkay?'ok':''}"></span>${esc(status)}</span>
-        ${toggle(toggleLabel,enabled,toggleId)}
+        ${toggle(toggleLabel,enabled,toggleId,disabled)}
         <span class="integration-toggle" aria-hidden="true">Show details</span>
       </div>
     </summary>
@@ -124,10 +125,58 @@ function deviceAssistantBody(a,selected) {
   </div>`;
 }
 
-// The assistant reads the time out loud, so this picks how it says it rather
-// than how anything is displayed. Anything the daemon has not set yet means a
-// device on the old build, which spoke 24-hour; show 12, the new default.
-// Both provider bodies render it, so each passes its own element id.
+function liveAssistantBody(live) {
+  if(live.unsupported) return unsupported(live.unsupported);
+  const session=live.session||{},metrics=live.transport_metrics||{};
+  return `<div class="assistant-heading">
+    <div>
+      <span class="source-pill">Subscription</span>
+      <h4>GPT-Live</h4>
+      <p class="muted">Full-duplex speech-to-speech over the ChatGPT subscription. Post-AEC audio, including the short RAM-only wake preroll, leaves the device only after a wake starts a conversation.</p>
+    </div>
+  </div>
+  <div class="settings-grid assistant-settings">
+    <div>
+      <dl class="facts">
+        <dt>Transport</dt><dd>${esc(metrics.transport||live.transport||'WebSocket')}</dd>
+        <dt>Connection</dt><dd class="${metrics.session_ready?'connected':''}">${metrics.session_ready?'Ready':'Waiting for wake'}</dd>
+        <dt>Conversation</dt><dd>${esc(session.state||'idle')}</dd>
+        <dt>Last end</dt><dd>${esc(session.last_end||'—')}</dd>
+        <dt>Completed sessions</dt><dd>${Number(session.sessions_completed||0)}</dd>
+        <dt>Delegations</dt><dd>${Number(session.delegations||0)}</dd>
+      </dl>
+    </div>
+    <div>
+      <div class="privacy-callout">GPT-Live is not enabled at boot. Turning it on arms the local wake-word path; it does not expose idle microphone audio.</div>
+      ${live.last_event&&live.last_event!=='idle'?`<p class="muted">Last event: ${esc(live.last_event)}</p>`:''}
+    </div>
+  </div>`;
+}
+
+async function setLiveProvider(enabled,assistant) {
+  if(state.busy)return;
+  setBusy(true);
+  try {
+    if(enabled && assistant && assistant.enabled) {
+      await api('/assistant',{method:'PUT',body:JSON.stringify({provider:assistant.provider,enabled:false})});
+    }
+    await api('/live',{method:'PUT',body:JSON.stringify({enabled})});
+    toast(enabled?'GPT-Live enabled':'GPT-Live disabled');
+  } catch(error) {
+    toast(error.message,true);
+  } finally {
+    await integrationsPage();
+    setBusy(false);
+  }
+}
+
+function bindLiveToggle(id,assistant) {
+  const input=$(id),row=input?.closest('.switch-row');
+  if(!input)return;
+  if(row)row.onclick=event=>event.stopPropagation();
+  input.onchange=()=>setLiveProvider(input.checked,assistant);
+}
+
 function clockFormatField(value,id) {
   const twelve = value !== '24';
   return `<label class="field"><span>Spoken time format</span><select id="${id}">`+
@@ -141,6 +190,7 @@ async function setAssistantProvider(provider,enabled,pipeline) {
   setBusy(true);
   try {
     if(enabled) {
+      await api('/live',{method:'PUT',body:JSON.stringify({enabled:false})}).catch(()=>null);
       const local=provider==='openai-compatible';
       if(local) {
         await api('/privacy',{method:'PUT',body:JSON.stringify({local_only:false})});
@@ -235,10 +285,11 @@ function bindHomeLocation(a) {
 }
 
 async function integrationsPage() {
-  const [d,a,pipeline]=await Promise.all([
+  const [d,a,pipeline,live]=await Promise.all([
     api('/integrations'),
     api('/assistant').catch(error=>({unsupported:error.message})),
-    api('/voice-pipeline').catch(()=>({mode:'local',stt:{},tts:{}}))
+    api('/voice-pipeline').catch(()=>({mode:'local',stt:{},tts:{}})),
+    api('/live').catch(error=>({unsupported:error.message}))
   ]);
   /*
    * integrationBlurb/integrationStatus come from app.js, which loads first.
@@ -260,10 +311,24 @@ async function integrationsPage() {
       ${integrations}
     </div>`;
   } else if(a.unsupported) {
+    const liveEnabled=!live.unsupported&&Boolean(live.enabled);
+    const livePanel=assistantProviderPanel({
+      title:'GPT-Live',
+      description:'Full-duplex speech with your ChatGPT subscription',
+      status:live.unsupported?'Unavailable':liveEnabled?'Enabled':'Disabled',
+      statusOkay:liveEnabled,
+      toggleLabel:'Use GPT-Live',
+      toggleId:'use-live-provider',
+      enabled:liveEnabled,
+      body:liveAssistantBody(live),
+      open:false,
+      disabled:Boolean(live.unsupported)
+    });
     content.innerHTML=`<div class="integration-grid">
-      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${unsupported(a.unsupported)}</section>
+      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${unsupported(a.unsupported)}${livePanel}</section>
       ${integrations}
     </div>`;
+    bindLiveToggle('#use-live-provider',null);
   } else {
     const localSelected=a.provider==='openai-compatible';
     const deviceSelected=a.provider==='openai-codex';
@@ -300,14 +365,27 @@ async function integrationsPage() {
       body:deviceAssistantBody(a,deviceSelected),
       open:false
     });
+    const liveEnabled=!live.unsupported&&Boolean(live.enabled);
+    const livePanel=assistantProviderPanel({
+      title:'GPT-Live',
+      description:'Full-duplex speech with your ChatGPT subscription',
+      status:live.unsupported?'Unavailable':liveEnabled?'Enabled':'Disabled',
+      statusOkay:liveEnabled,
+      toggleLabel:'Use GPT-Live',
+      toggleId:'use-live-provider',
+      enabled:liveEnabled,
+      body:liveAssistantBody(live),
+      open:false,
+      disabled:Boolean(live.unsupported)    });
     content.innerHTML=`<div class="integration-grid">
-      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}</section>
+      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}${livePanel}</section>
       ${weatherCard(a)}
       ${integrations}
     </div>`;
 
     bindProviderToggle('#use-local-provider','openai-compatible',pipeline);
     bindProviderToggle('#use-device-provider','openai-codex',pipeline);
+    bindLiveToggle('#use-live-provider',a);
     bindHomeLocation(a);
 
     bindDirty(['#local-base-url','#local-model','#local-clock-format','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
@@ -375,6 +453,9 @@ async function integrationsPage() {
     const save=$('#save-int-'+x.id);
     if(!save)return;                       /* not installed: nothing rendered to bind */
     bindDirty(['#int-'+x.id],'#save-int-'+x.id);
-    save.onclick=()=>mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
+    save.onclick=async()=>{
+      if(x.id==='home-assistant'&&$('#int-'+x.id).checked) await api('/live',{method:'PUT',body:JSON.stringify({enabled:false})}).catch(()=>null);
+      mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
+    };
   });
 }

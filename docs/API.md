@@ -615,6 +615,26 @@ returned configuration includes `clock_format`, the format used when the time
 is spoken aloud. The latency measurement is from the estimated end of speech to
 the first PCM submitted to the announcement bus; the current target is 3000 ms.
 
+#### GET /api/v1/live
+
+Returns the runtime status of `libreecho-lived`, including whether GPT-Live is
+armed, the WebSocket transport metrics, current session state, and bounded audio
+counters. The mode is runtime state and is not persisted across daemon restarts.
+If the daemon is not installed or running, the endpoint returns HTTP 503.
+
+#### PUT /api/v1/live
+
+Arms or disarms GPT-Live:
+
+```json
+{ "enabled": true }
+```
+
+Arming permits the local wake-word path to start a full-duplex ChatGPT
+subscription conversation. Idle microphone audio is not transmitted; post-AEC
+audio leaves the device only during an active conversation. The request requires
+`X-LibreEcho-CSRF`. Disabling stops an active GPT-Live conversation.
+
 #### GET /api/v1/assistant/history
 
 Returns the newest bounded turn records measured by `agentd` itself:

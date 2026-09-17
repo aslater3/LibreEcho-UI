@@ -10,6 +10,15 @@ struct le_tls *le_tls_client_open(int fd, const char *hostname)
     return NULL;
 }
 
+struct le_tls *le_tls_client_open_verified(int fd, const char *hostname,
+                                           const char *ca_path)
+{
+    (void)fd;
+    (void)hostname;
+    (void)ca_path;
+    return NULL;
+}
+
 struct le_tls *le_tls_server_open(int fd, const char *cert_path,
                                   const char *key_path)
 {
