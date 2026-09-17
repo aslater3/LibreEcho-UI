@@ -371,6 +371,7 @@ static int test_real_transport_fails_closed(void)
     CHECK(strstr(status, "\"enabled\":false") != NULL);
     CHECK(control_call(control_socket, "set_enabled", "{\"enabled\":true}",
                        status, sizeof(status)) == 0);
+    CHECK(wait_for_absent(control_socket, "\"ring_samples\":0,") == 0);
 
     /*
      * The published transport cannot reach GPT-Live in this build, so a wake
