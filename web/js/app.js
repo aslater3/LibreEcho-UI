@@ -415,13 +415,19 @@ function muteLampNote(a,b){
     one without it can only follow the button. */
  const soft=!!(b&&b.lamp_control===true),muted=!!(a&&a.microphone_muted);
  const text=(()=>{
+  /*
+   * The latch comes first and outranks the software mute: while it is engaged
+   * the button owns the lamp and software cannot put it out, so promising that
+   * unmuting lights or puts out the lamp would give the wrong instruction for
+   * the one path the user cannot drive from the page.
+   */
+  if(b&&b.privacy_latch===true)return 'The mute button\'s lamp is lit: its hardware privacy latch is engaged and the microphones are cut in hardware. Press the button to release it — software cannot.';
   if(soft&&muted)return 'Muted: the ring is red, the mute button\'s lamp is lit, and the microphones are cut in hardware while it is. Unmuting puts the lamp out.';
   if(!b||b.privacy_latch===undefined||b.privacy_latch===null){
-   if(a&&a.microphone_muted)return 'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — it follows the button\'s hardware privacy latch.';
+   if(muted)return 'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — it follows the button\'s hardware privacy latch.';
    return '';
   }
-  if(b.privacy_latch)return 'The mute button\'s lamp is lit: its hardware privacy latch is engaged and the microphones are cut in hardware. Press the button to release it — software cannot.';
-  if(a&&a.microphone_muted)return 'Software mute only: the ring is red and the mute button\'s lamp stays dark, because that lamp is wired to the button\'s privacy latch. Use the button if you want the hardware cut.';
+  if(muted)return 'Software mute only: the ring is red and the mute button\'s lamp stays dark, because that lamp is wired to the button\'s privacy latch. Use the button if you want the hardware cut.';
   return '';
  })();
  /* Always rendered, empty when there is nothing to say: the button is on the

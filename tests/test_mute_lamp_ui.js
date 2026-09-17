@@ -111,6 +111,16 @@ async function ledHtml(buttons){
   const softLampIdle = await audioHtml({microphone_muted:false,privacy_latch:false,lamp_control:true});
   assert(!/lamp is lit/.test(softLampIdle), 'an unmuted device claimed a lit lamp');
 
+  /* The latch outranks the software lamp even when software can drive it: while
+     it is engaged the button owns the lamp, so the page must not promise that
+     unmuting puts it out. */
+  audio.microphone_muted = true;
+  const latchedLamp = await audioHtml({microphone_muted:true,privacy_latch:true,lamp_control:true});
+  assert(/Press the button to release it/.test(latchedLamp),
+         'the engaged latch was not named as the only release');
+  assert(!/Unmuting puts the lamp out/.test(latchedLamp),
+         'software was said to own a lamp the engaged latch owns');
+
   /* Unmuted with no reading: nothing to say about the lamp. */
   audio.microphone_muted = false;
   const idle = await audioHtml({microphone_muted:false,privacy_latch:null});

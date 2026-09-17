@@ -315,9 +315,9 @@ static void write_capability_status(const struct context *ctx)
         return;
     /*
      * privacy_observed is the observed kernel privacy latch, reported so the UI
-     * can say whether the mute button's lamp is lit. A software mute lights the
-     * ring and leaves that lamp dark, because the lamp is wired to the latch
-     * rather than to the audio path; -1 means "not read yet" or "unreadable",
+     * can say whether the mute button's lamp is lit. The latch is the only
+     * truthful source for that lamp when software cannot drive it, which is what
+     * lamp_control below reports; -1 means "not read yet" or "unreadable",
      * which is not the same as "released" and must not be reported as if it were.
      */
     fprintf(file, "schema=1\nstate=%s\nvolume=%d\nmicrophone_mute=%d\naction=%d\n"
@@ -327,7 +327,14 @@ static void write_capability_status(const struct context *ctx)
             connected && ctx->mute_capable,
             connected && ctx->action_capable,
             ctx->privacy_observed,
-            ctx->lamp_supported == 1 ? 1 : 0);
+            /*
+             * Published as observed: -1 until a write has tested the control (or
+             * when it has never been reachable), 1 when the kernel accepted one,
+             * 0 when the control is absent or refused. Reporting -1 as 0 would
+             * describe an image that has the control as lacking it before
+             * anything has tried it, which is what the API's null is for.
+             */
+            ctx->lamp_supported);
     fflush(file);
     fd = fileno(file);
     if (fd >= 0)

@@ -1608,7 +1608,9 @@ not a state. Software cannot assert or release the latch; the button does.
 `lamp_control` reports whether software can light the lamp in the mute button at
 all: `true` when the kernel exposes the mute-lamp control and last accepted a
 write, `false` when the image predates it or a kernel refused the write because
-the physical latch owns the lamp, and `null` when there is no fresh reading. It
+the physical latch owns the lamp, and `null` when there is no fresh reading or
+nothing has tested the control yet — a daemon that has not tried to write it has
+not learned that software cannot. It
 is what the UI uses to describe the lamp: with the control, a software mute
 lights it, and without it the lamp can only follow the button.
 

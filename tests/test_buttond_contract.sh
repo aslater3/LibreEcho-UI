@@ -18,7 +18,9 @@ assert 'TEST_BIT(KEY_HELP, key_bits)' in source
 assert 'action=%d' in source
 assert 'privacy_state=%d' in source, 'the privacy latch is not reported to the UI'
 assert 'ctx->privacy_observed,' in source, 'the status file must publish the observed latch'
-assert 'ctx->lamp_supported == 1 ? 1 : 0' in source, (
+assert 'ctx->lamp_supported == 1 ? 1 : 0' not in source, (
+    'the untested lamp capability must not be published as unsupported')
+assert 'ctx->lamp_supported)' in source, (
     'the status file must publish whether software can light the lamp')
 assert 'static void publish_latch_observation(' in source, (
     'a changed observation must be published without waiting for the heartbeat')
