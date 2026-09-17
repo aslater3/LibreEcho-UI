@@ -1881,6 +1881,7 @@ static int command_configure(struct agent_state *state, const char *args,
     char value[2048];
     int boolean;
     int parsed;
+    int weather_changed = 0;
 
     parsed = json_get_bool(args, "enabled", &boolean);
     if (parsed < 0)
@@ -1914,21 +1915,30 @@ static int command_configure(struct agent_state *state, const char *args,
     parsed = json_get_string(args, "latitude", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && !coordinate_valid(value, 90.0)))
         return respond(fd, id, 0, "latitude must be between -90 and 90");
-    if (parsed > 0)
+    if (parsed > 0) {
+        if (strcmp(updated.latitude, value))
+            weather_changed = 1;
         strcpy(updated.latitude, value);
+    }
     parsed = json_get_string(args, "longitude", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && !coordinate_valid(value, 180.0)))
         return respond(fd, id, 0, "longitude must be between -180 and 180");
-    if (parsed > 0)
+    if (parsed > 0) {
+        if (strcmp(updated.longitude, value))
+            weather_changed = 1;
         strcpy(updated.longitude, value);
+    }
     parsed = json_get_string(args, "weather_provider", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && strcmp(value, "open-meteo") &&
                        strcmp(value, "ukmo") && strcmp(value, "met-no") &&
                        strcmp(value, "off")))
         return respond(fd, id, 0,
                        "weather_provider must be open-meteo, ukmo, met-no or off");
-    if (parsed > 0)
+    if (parsed > 0) {
+        if (strcmp(updated.weather_provider, value))
+            weather_changed = 1;
         strcpy(updated.weather_provider, value);
+    }
     parsed = json_get_string(args, "clock_format", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && !le_clock_format_valid(value)))
         return respond(fd, id, 0, "clock_format must be 12 or 24");
@@ -1952,6 +1962,17 @@ static int command_configure(struct agent_state *state, const char *args,
     state->provider = le_llm_provider_by_id(state->config.provider);
     if (!state->provider)
         return respond(fd, id, 0, "unsupported provider");
+    /*
+     * A reading already fetched belongs to the previous provider and location,
+     * and refresh_weather() serves it for ten minutes. Without dropping it, a
+     * provider change would answer from the old source while status already
+     * reports the new one -- the reading is only correct for what it was
+     * fetched for.
+     */
+    if (weather_changed) {
+        state->weather_text[0] = '\0';
+        state->weather_fetched = 0;
+    }
     if (save_config(state) < 0)
         return respond(fd, id, 0, "unable to save agent configuration");
     if (!strcmp(state->config.provider, "openai-compatible")) {

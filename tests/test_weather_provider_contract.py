@@ -33,6 +33,15 @@ assert '"&models=ukmo_seamless"' in agentd, "the UKMO model blend is not request
 assert agentd.count("&models=") == 1, (
     "a model parameter is built in more than one place; only the UKMO branch may add one")
 
+# A changed provider or location must not keep serving the previous reading:
+# refresh_weather() would return at its freshness check for ten minutes.
+assert "int weather_changed = 0;" in agentd, (
+    "the configure path does not detect a weather-affecting change")
+assert agentd.count("weather_changed = 1;") == 3, (
+    "provider and both coordinates must invalidate the cached reading")
+assert "if (weather_changed) {" in agentd and "state->weather_text[0] = '\\0';" in agentd, (
+    "the cached reading is not dropped when the provider or location changes")
+
 # Still keyless and still one transport: no credential, no second host.
 assert "api.metoffice.gov.uk" not in agentd, "a keyed Met Office endpoint was introduced"
 assert "datahub" not in agentd, "a keyed Met Office endpoint was introduced"
