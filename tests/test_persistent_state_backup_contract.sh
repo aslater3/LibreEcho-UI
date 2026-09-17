@@ -104,5 +104,7 @@ done
 require_in_tool 'refuse_symlinks "$tmpdir/persistent/config"'
 require_in_tool 'refuse_symlinks "$tmpdir/persistent/secrets"'
 require_in_tool 'refuse_symlinks "$tmpdir/persistent"'
+require_in_tool 'refuse_linked_roots'
+require_in_tool 'persistent state root is a symbolic link'
 
 printf '%s\n' 'persistent state backup contract: ok'

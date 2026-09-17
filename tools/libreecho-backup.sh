@@ -66,13 +66,26 @@ require_active_state() {
 refuse_symlinks() {
     root=$1
     [ -d "$root" ] || return 1
-    # Fail closed: a scan that could not complete is not a "no links" result.
-    links=$(find "$root" -type l -print) || return 1
+    # Bounded: -quit stops at the first match, so the scan never collects the
+    # tree, and its status is kept: a scan that could not complete is not a
+    # "no links" result.
+    links=$(find "$root" -type l -print -quit) || return 1
     [ -z "$links" ] || {
-        printf 'Error: symbolic link in persistent state: %s\n' \
-            "$(printf '%s\n' "$links" | sed -n '1p')" >&2
+        printf 'Error: symbolic link in persistent state: %s\n' "$links" >&2
         return 1
     }
+    return 0
+}
+
+# A root that is itself a symlink is dereferenced by `cp -R` before the staged
+# tree can be scanned, so the configured roots are refused at the source.
+refuse_linked_roots() {
+    for root in "$DATA_ROOT" "$CONFIG_DIR" "$SECRETS_DIR"; do
+        [ ! -L "$root" ] || {
+            printf 'Error: persistent state root is a symbolic link: %s\n' "$root" >&2
+            return 1
+        }
+    done
     return 0
 }
 
@@ -173,6 +186,8 @@ create_backup() {
     trap 'cleanup_dir "$tmpdir"' EXIT HUP INT TERM
 
     require_active_state
+    refuse_linked_roots ||
+        fail "a persistent state root is a symbolic link and cannot be archived"
     mkdir -p "$tmpdir/persistent/config" "$tmpdir/persistent/secrets"
     copy_tree "$CONFIG_DIR" "$tmpdir/persistent/config"
     copy_tree "$SECRETS_DIR" "$tmpdir/persistent/secrets"
@@ -351,6 +366,8 @@ restore_backup() {
     validate_archive "$tmpdir"
     refuse_symlinks "$tmpdir/persistent" ||
         fail "backup contains a symbolic link in persistent state; nothing was changed"
+    refuse_linked_roots ||
+        fail "a persistent state root is a symbolic link; state was not changed"
 
     printf 'Restore active persistent state from %s? (y/N) ' "$backup"
     reply=

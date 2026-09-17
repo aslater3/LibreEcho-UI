@@ -216,7 +216,9 @@ image reinstall remains a separate acceptance check.
 
 Symlinked state is refused in both directions: creation fails instead of
 archiving a link, and an archive whose trees contain a link is rejected before
-the restore prompt, leaving live state unchanged.
+the restore prompt, leaving live state unchanged. A configured `config` or
+`secrets` root that is itself a link is refused as well, because copying
+through it would archive another tree.
 
 Creation uses file copies, not an atomic snapshot, and does not stop services.
 Quiesce persistent-state writers before creating a backup that must be

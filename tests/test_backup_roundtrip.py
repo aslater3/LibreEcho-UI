@@ -395,6 +395,40 @@ class BackupRoundTrip(unittest.TestCase):
         self.assertIn('symbolic link', self.call(
             'list', path=self.hostile_archive(), success=False).stderr)
 
+    def test_symlinked_state_root_is_refused(self):
+        # A root that is itself a symlink is dereferenced by `cp -R` before the
+        # staged tree can be scanned, so the configured root itself must be
+        # refused instead of archiving whatever the link points at.
+        self.call('create')
+        before = ARCHIVE.stat()
+        outside = Path('/out/outside-config')
+        shutil.rmtree(outside, ignore_errors=True)
+        outside.mkdir(parents=True)
+        write(outside / 'web-config.json', '{"hostname":"outside-tree"}\n')
+        write(outside / 'users', 'outside-account\n')
+        live = Path('/data/config-live')
+        shutil.rmtree(live, ignore_errors=True)
+        (DATA / 'config').rename(live)
+        os.symlink(str(outside), DATA / 'config')
+        try:
+            created = self.call('create', success=False)
+            self.assertIn('symbolic link', created.stderr)
+            after = ARCHIVE.stat()
+            self.assertEqual((after.st_size, after.st_mtime_ns),
+                             (before.st_size, before.st_mtime_ns),
+                             'refused create overwrote the archive')
+            restored = self.call('restore', success=False)
+            self.assertIn('symbolic link', restored.stderr)
+            self.assertEqual(self.actions('stop'), [],
+                             'services were stopped for a refused restore')
+            self.assertTrue((DATA / 'config').is_symlink(),
+                            'the live config root was replaced')
+            self.assertEqual((outside / 'web-config.json').read_text(),
+                             '{"hostname":"outside-tree"}\n')
+        finally:
+            (DATA / 'config').unlink()
+            live.rename(DATA / 'config')
+
     def test_service_restart_failure_is_not_success(self):
         self.call('create')
         Path('/run/start-fail-libreecho-web').touch()
