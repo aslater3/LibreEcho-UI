@@ -217,7 +217,11 @@ function bindHomeLocation(a) {
     const originalLon=original.longitude?Number(original.longitude):null;
     let problem='';
 
-    if(haveLatitude!==haveLongitude) {
+    /* The coordinates on screen may belong to the place looked up before this
+       edit, and typing re-enables Save, so the button's state is not enough. */
+    if(lookupPending()) {
+      problem='Finish the lookup first — the coordinates on screen are not for that place yet.';
+    } else if(haveLatitude!==haveLongitude) {
       problem='Enter both latitude and longitude, or leave both unchanged.';
     } else if(haveLatitude&&(!Number.isFinite(lat)||!Number.isFinite(lon)||
               lat<-90||lat>90||lon<-180||lon>180)) {

@@ -189,14 +189,23 @@ const el = id => elements.get(id);
    * coordinates the previous lookup left behind.
    */
   {
-    const realFetch = globalThis.fetch;
+    const realFetch = globalThis.fetch, realMutate = globalThis.mutate;
+    let mutated = null;
     globalThis.fetch = () => new Promise(()=>{});
+    globalThis.mutate = (path, body) => { mutated = {path, body}; };
     el('#wx-location').value = 'Somewhere Slow';
     el('#wx-lookup').onclick();
     assert.equal(el('#save-wx').disabled,true,
                  'Save stayed open while the lookup was in flight');
+    /* bindDirty re-enables Save on the first keystroke, so the handlers must
+       refuse on the pending flag rather than on the button's state. */
+    el('#save-wx').disabled = false;
+    el('#wx-location').value = 'Typed While Slow';
+    document.querySelector('#save-wx').onclick();
+    assert(mutated === null,
+           'an edit during a lookup let the previous coordinates be saved');
     globalThis.fetch = realFetch;
-    el('#wx-location').oninput();
+    globalThis.mutate = realMutate;
   }
 
   /* The advisory has to be wired too: it is how a missing coordinate shows. */

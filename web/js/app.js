@@ -1363,6 +1363,12 @@ return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where th
  * therefore live here, and both renderers call this one function, so a
  * renderer change cannot drop the controls again.
  */
+/*
+ * True while a lookup is in flight. The coordinates on screen may still belong
+ * to the previous place, and bindDirty re-enables Save as soon as anything is
+ * typed, so both save handlers check this instead of the button's state.
+ */
+function lookupPending(){const save=$('#save-wx');return !!(save&&save.dataset.lookupPending)}
 function bindWeatherLookup(a){
  if(!$('#wx-location')||!$('#wx-lookup'))return;
  /*
@@ -1439,17 +1445,16 @@ function bindWeatherLookup(a){
   * needs no account, and answers a postcode directly.
   */
  const UK_POSTCODE=/^[A-Z]{1,2}[0-9][A-Z0-9]?\s?[0-9][A-Z]{2}$/i;
+ /* A lookup in flight means the coordinates on screen may still belong to the
+    previous place, so Save stays shut -- and the flag is what holds it shut:
+    bindDirty re-enables the button on any edit, so the save handlers check this
+    as well as the button's state. */
+ const save=$('#save-wx');
+ const setPending=pending=>{if(!save)return;if(pending){save.dataset.lookupPending='1';save.disabled=true}else delete save.dataset.lookupPending};
  $('#wx-lookup').onclick=async()=>{
   const place=$('#wx-location').value.trim();
   if(!place){note.textContent='Enter a place first';return}
-  /*
-   * Shut from the first moment, not from the moment a match is offered: the
-   * request can take a while, and Save during it would store this name against
-   * whatever coordinates the previous lookup left. Anything else the note says
-   * (a hit, a miss, a failure) leaves it shut until a field is edited, which
-   * re-enables it through bindDirty.
-   */
-  $('#save-wx').disabled=true;
+  setPending(true);
   note.textContent='Looking up…';
   try{
    let postcodeMissed=false;
@@ -1499,6 +1504,7 @@ function bindWeatherLookup(a){
    fill(h.latitude,h.longitude,[h.name,h.admin1].filter(Boolean).join(', '),
         `Found ${describe(h)}`);
   }catch(e){ note.textContent='Lookup failed: '+e.message; }
+  finally{ setPending(false); }
  };
 }
 function bindWeather(a){
@@ -1515,6 +1521,7 @@ function bindWeather(a){
   const loc=$('#wx-location').value.trim();
   const lat=$('#wx-lat').value.trim(), lon=$('#wx-lon').value.trim();
   if(loc&&(!lat||!lon)){toast('Look up the coordinates first — an empty coordinate is ignored by the device',true);return}
+  if(lookupPending()){toast('Finish the lookup first — the coordinates on screen are not for that place yet.',true);return}
   /* The same rule the Integrations renderer applies: a renamed place that keeps
      the old coordinates would report the old town's weather under the new name. */
   if(loc&&startLoc&&loc!==startLoc&&lat===(a.latitude||'')&&lon===(a.longitude||'')){
