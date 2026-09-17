@@ -659,6 +659,20 @@ static int set_software_mute(struct context *ctx, int muted)
  * changes in either direction are authoritative. An asserted latch is also
  * enforced while steady, so an API unmute cannot defeat hardware privacy.
  */
+/*
+ * The status file is otherwise written on the five-second heartbeat, and both
+ * pages read it once, so an observation that changes has to be published now:
+ * waiting for the heartbeat reportedly left /api/v1/buttons serving the previous
+ * lamp for up to five seconds.
+ */
+static void publish_latch_observation(struct context *ctx, int observed)
+{
+    if (!ctx || ctx->privacy_observed == observed)
+        return;
+    ctx->privacy_observed = observed;
+    write_capability_status(ctx);
+}
+
 static int sync_privacy_state(struct context *ctx)
 {
     int state;
@@ -669,19 +683,19 @@ static int sync_privacy_state(struct context *ctx)
          * value looking fresh. The heartbeat rewrites this status file, so a
          * stale value here keeps claiming a lamp nobody can see.
          */
-        ctx->privacy_observed = -1;
+        publish_latch_observation(ctx, -1);
         return 0;
     }
     if (!ctx->privacy_state_seen) {
         ctx->privacy_state_seen = 1;
         ctx->privacy_state = state;
-        ctx->privacy_observed = state;
+        publish_latch_observation(ctx, state);
         if (state)
             return set_software_mute(ctx, 1);
         return 0;
     }
     if (state == ctx->privacy_state) {
-        ctx->privacy_observed = state;
+        publish_latch_observation(ctx, state);
         if (state && ctx->muted != 1)
             return set_software_mute(ctx, 1);
         return 0;
@@ -692,7 +706,7 @@ static int sync_privacy_state(struct context *ctx)
      * leave the reported lamp behind. privacy_state still advances only on a
      * successful sync, so the transition itself is retried while steady.
      */
-    ctx->privacy_observed = state;
+    publish_latch_observation(ctx, state);
     if (set_software_mute(ctx, state) != 0)
         return -1;
     ctx->privacy_state = state;
