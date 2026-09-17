@@ -8,8 +8,10 @@
 # bootstrapped first, and asserts each refusal on its own: no session, missing
 # CSRF, missing confirmation and a wrong confirmation must each refuse the
 # request without touching persistent state; the accepted request must actually
-# run the reset; and the device-action rate limit must answer 429 as its own
-# contract, including for a fully valid request that arrives inside the window.
+# run the reset; a reset the device attempts and cannot complete must be
+# reported as its own failure, not as an unavailable action; and the
+# device-action rate limit must answer 429 as its own contract, including for a
+# fully valid request that arrives inside the window.
 #
 # Every destructive path (reboot, shutdown, factory-reset) arms one shared
 # 3-second window in the HTTP layer, before authentication and CSRF are checked,
@@ -30,6 +32,13 @@ DEFAULT_HOSTNAME=libreecho-dev
 FIXTURE_HOSTNAME=reset-fixture-host
 
 make build/libreecho-web >/dev/null
+# Step 8 arms the mock's fault injection to fail one factory reset, which is a
+# development control: `LE_DEV_CONTROLS` is compile-time, `src/api.c` is the
+# only file that reads it, and the default build leaves it out. Rebuilding that
+# one object through the `all` target is what puts the control in the binary;
+# removing it first is what makes make notice the flag changed.
+rm -f build/api.o build/libreecho-web
+make all >/dev/null
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete" "$USERS"
 
 ./build/libreecho-web --backend mock --config "$CFG" \
@@ -171,5 +180,35 @@ code=$(post_reset /tmp/le-reset-double.out -H "$AUTH" -H "$CSRF" -H "$CONFIRM")
 expect_code "$code" 429 /tmp/le-reset-double.out
 assert_error /tmp/le-reset-double.out 'Wait before another device action'
 [ "$(hostname_now)" = "$DEFAULT_HOSTNAME" ]
+
+sleep "$GAP"
+# A live value again, so the failing reset below has something to preserve.
+curl -fsS -X PUT "$URL/api/v1/network" -H "$AUTH" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data "{\"hostname\":\"$FIXTURE_HOSTNAME\"}" >/dev/null
+[ "$(hostname_now)" = "$FIXTURE_HOSTNAME" ]
+
+# 8. A reset the device attempts and cannot complete is its own failure, not an
+#    unavailable action: `501` says the backend has no destructive-action
+#    support at all, while a backend that supports it and fails to quiesce, to
+#    clear, or to make the removal durable answers `503` with `Device action
+#    failed`. The mock is armed to fail exactly this reset, so the request has
+#    to be reported as a failure and must not have cleared the persistent value
+#    it was asked to remove.
+curl -fsS -X POST "$URL/api/v1/dev/mock" -H "$AUTH" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"action":"fail-next","value":"factory-reset"}' >/dev/null
+code=$(post_reset /tmp/le-reset-failed.out -H "$AUTH" -H "$CSRF" -H "$CONFIRM")
+expect_code "$code" 503 /tmp/le-reset-failed.out
+assert_error /tmp/le-reset-failed.out 'Device action failed'
+[ "$(hostname_now)" = "$FIXTURE_HOSTNAME" ]
+
+# 9. The failed reset is still a destructive path: it armed the same window, so
+#    an immediate repeat is answered with the rate limit rather than a second
+#    attempt at the backend.
+code=$(post_reset /tmp/le-reset-failed-window.out -H "$AUTH" -H "$CSRF" -H "$CONFIRM")
+expect_code "$code" 429 /tmp/le-reset-failed-window.out
+assert_error /tmp/le-reset-failed-window.out 'Wait before another device action'
+[ "$(hostname_now)" = "$FIXTURE_HOSTNAME" ]
 
 echo 'factory reset API auth, CSRF, confirmation, rate limit and effect: ok'
