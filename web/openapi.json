@@ -143,6 +143,31 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 2047
+         },
+         "home_location": {
+          "type": "string",
+          "maxLength": 95,
+          "description": "Place name the assistant says back. Not used for lookups; the coordinates are."
+         },
+         "latitude": {
+          "type": "string",
+          "maxLength": 15,
+          "description": "Signed decimal latitude. Omit the field to keep the stored coordinate; an empty or malformed value is rejected with HTTP 400 rather than clearing it."
+         },
+         "longitude": {
+          "type": "string",
+          "maxLength": 15,
+          "description": "Signed decimal longitude. Omit the field to keep the stored coordinate; an empty or malformed value is rejected with HTTP 400 rather than clearing it."
+         },
+         "weather_provider": {
+          "type": "string",
+          "enum": [
+           "open-meteo",
+           "ukmo",
+           "met-no",
+           "off"
+          ],
+          "description": "Weather source for the location: open-meteo (default best-match model), ukmo (UK Met Office UKMO models served through Open-Meteo, keyless), met-no (MET Norway), or off."
          }
         }
        }
