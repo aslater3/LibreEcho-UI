@@ -216,8 +216,10 @@ image reinstall remains a separate acceptance check.
 
 The same exclusions are applied by every restore, not only by creation: the
 transaction files (`*.tmp`, `*.new`), the stale pre-update copies (`*.bak`) that
-`config_write_atomic` leaves behind, and the one-shot wake-dump and vendor-import
-markers are dropped from the incoming trees before the prompt, so nothing the
+`config_write_atomic`, `agentd`, and `timerd` leave behind (each holds the
+previous contents of a committed file, including accounts and credentials), and
+the one-shot wake-dump and vendor-import markers are dropped from the incoming
+trees before the prompt, so nothing the
 contract excludes is ever installed. This holds for an archive written by an
 earlier tool or one whose manifest names no exclusions, and the restored tree is
 the archive minus those files. `list` prints the same reminder next to the

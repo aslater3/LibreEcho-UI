@@ -238,13 +238,15 @@ apply_owner() {
 }
 
 # Transaction files and stale pre-update copies are not committed consumer
-# state: config_store, auth, and tls write `<path>.tmp` before a rename, and
-# config_write_atomic keeps the previous bytes of the file behind a hard-linked
-# `<path>.bak`, so a `.bak` of web-config.json or users is a durable stale copy
-# of account state or credentials. Both classes can appear anywhere inside
-# either captured tree, so they stay a name class. The manifest names both
-# trees and all three suffixes for that class, so a consumer auditing an
-# archive can tell the omission from an incomplete backup.
+# state. config_store, auth, tls, and timerd write `<path>.tmp` before a
+# rename, and config_write_atomic, agentd, and timerd leave the previous
+# contents behind a hard-linked `<path>.bak`, so a `.bak` of web-config.json,
+# users, or the saved agent history is a durable copy of account state,
+# credentials, or earlier history that the committed file supersedes. Both
+# classes can appear anywhere inside either captured tree, so they stay a name
+# class. The manifest names both trees and all three suffixes for that class,
+# so a consumer auditing an archive can tell the omission from an incomplete
+# backup.
 prune_transaction_files() {
     root=$1
     find "$root" -type f \( -name '*.tmp' -o -name '*.new' -o -name '*.bak' \) \

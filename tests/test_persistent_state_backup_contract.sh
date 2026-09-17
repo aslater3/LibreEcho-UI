@@ -143,6 +143,13 @@ done
 classes=$(grep -c "name '\*.bak'" "$TOOL")
 [ "$classes" -eq 1 ] ||
     fail "the stale-copy prune class is defined $classes times; the two paths can drift"
+# The class exists because these owners leave the previous contents of a
+# committed file beside it inside the captured trees; pruning by name covers
+# all of them, and this pins the reason the class is not a fixed path list.
+for writer in src/config_store.c src/adapter/agentd.c src/adapter/timerd.c; do
+    grep -Fq '.bak' "$REPO/$writer" ||
+        fail "the stale-copy class no longer covers a writer: $writer"
+done
 
 # The exclusions are applied before the prompt, so nothing is replaced with a
 # file the contract never restores, and the prompt describes what is installed.
