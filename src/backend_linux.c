@@ -2540,15 +2540,25 @@ static int linux_shutdown(struct le_backend *b)
  *    restarted with the rest when the reset refuses.
  *  - the daemons that own a reset-scoped file: btd
  *    (config/bluetooth.devices, config/bluetooth.keys), ledd
- *    (config/led-state.json), timerd (config/timers) and agentd
- *    (config/agent.json, secrets/openai-codex.json).
+ *    (config/led-state.json), timerd (config/timers), agentd
+ *    (config/agent.json, secrets/openai-codex.json) and waked
+ *    (config/wake-dump-seconds and the capture audio it writes to
+ *    config/wake-dump.raw).
  *  - networkd, the only component that can ask wpa_supplicant to SAVE_CONFIG,
  *    which is what writes config/wpa_supplicant.conf; a stack that saves Wi-Fi
  *    credentials after the clear would defeat the reset.
  *
- * timed, buttond, logd and the voice, AirPlay and mDNS daemons are deliberately
- * absent: they read the persistent configuration or write only to /run, so none
- * of them can recreate reset-scoped state between the clear and the reboot.
+ * waked is the one writer whose file is created after its startup work rather
+ * than from configuration it holds: with the one-shot dump request in place it
+ * opens config/wake-dump.raw only once its model and microphone are ready. A
+ * reset that scanned the directory before that open would leave recorded
+ * microphone audio inside the reset scope across the reboot, so waked is
+ * quiesced like the other state owners.
+ *
+ * timed, buttond, logd and the remaining voice, AirPlay and mDNS daemons (sttd,
+ * ttsd, wyomingd, airplayd, mdnsd) are deliberately absent: they read the
+ * persistent configuration or write only to /run, so none of them can recreate
+ * reset-scoped state between the clear and the reboot.
  */
 static const char *const factory_reset_services[] = {
     "/etc/init.d/libreecho-watchdogd.init",
@@ -2556,7 +2566,8 @@ static const char *const factory_reset_services[] = {
     "/etc/init.d/libreecho-ledd.init",
     "/etc/init.d/libreecho-networkd.init",
     "/etc/init.d/libreecho-timerd.init",
-    "/etc/init.d/libreecho-agentd.init"
+    "/etc/init.d/libreecho-agentd.init",
+    "/etc/init.d/libreecho-waked.init"
 };
 
 #define FACTORY_RESET_SERVICE_COUNT \

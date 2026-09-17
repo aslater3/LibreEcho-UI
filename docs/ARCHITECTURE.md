@@ -488,6 +488,12 @@ reason for each entry. Stopping it also stops the recovery it had in flight
 for its own dependencies before it launches the daemon, and a recovery left
 running would start a service the caller has already confirmed stopped.
 
+The same list carries `libreecho-waked`, which is not only a configuration
+reader: when the one-shot dump request (`config/wake-dump-seconds`) is present it
+creates `config/wake-dump.raw` inside the reset scope once its model and
+microphone are ready, so a reset that scanned the directory before that open
+would carry recorded microphone audio across the reboot.
+
 Each of those callers carries its own generic `ARGS`, `DAEMON`, `PIDFILE` and
 `LOGFILE`, and every init script resolves its settings with
 `VAR=${VAR:-default}`. An inherited value therefore wins inside the child

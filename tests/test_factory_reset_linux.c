@@ -29,6 +29,13 @@
  * reboot. The intercepted reboot inspects the fixture at the moment it is
  * called, which is what proves "cleared before rebooting" rather than assuming
  * it from source order.
+ *
+ * waked's dump output is part of the fixture because it is the one reset-scoped
+ * file a writer creates after its startup work rather than from configuration
+ * it loaded, so it is the one file a reset can leave behind by scanning the
+ * directory too early. It is written at the sync that follows the clear -- the
+ * last moment a still-running waked could create it -- and is expected to be
+ * absent from the scope the reboot is asked for.
  */
 
 #define WATCHDOG "/etc/init.d/libreecho-watchdogd.init"
@@ -37,6 +44,7 @@
 #define NETWORKD "/etc/init.d/libreecho-networkd.init"
 #define TIMERD "/etc/init.d/libreecho-timerd.init"
 #define AGENTD "/etc/init.d/libreecho-agentd.init"
+#define WAKED "/etc/init.d/libreecho-waked.init"
 
 #define MAX_EVENTS 128
 #define MAX_PATH 512
@@ -62,6 +70,10 @@ static const char *const reset_files[] = {
     "config/led-state.json",
     "config/bluetooth.devices",
     "config/bluetooth.keys",
+    /* waked's dump pair: the request drives it, the capture audio is the
+       output, and both live in the directory the reset empties. */
+    "config/wake-dump.raw",
+    "config/wake-dump-seconds",
     "secrets/openai-codex.json"
 };
 
@@ -90,7 +102,8 @@ static struct fake_service services[] = {
     {LEDD, 1},
     {NETWORKD, 1},
     {TIMERD, 1},
-    {AGENTD, 1}
+    {AGENTD, 1},
+    {WAKED, 1}
 };
 
 #define SERVICE_COUNT (sizeof(services) / sizeof(services[0]))
@@ -105,11 +118,20 @@ static int reboot_saw_cleared;
 static int test_euid;
 static const char *stop_refusal;
 static const char *fixture_root;
+/* waked was started with the one-shot dump request in place, so its capture
+   output is still to come; the request itself is consumed once it is written. */
+static int waked_dump_pending;
+/* How many dump files the fixture wrote. A test that expects the dump to be
+   modelled must be able to tell "it never happened" from "the reset removed
+   it", or an unmodelled race would pass by writing nothing at all. */
+static int waked_dump_writes;
 static const char *legacy_paths[4];
 static size_t legacy_path_count;
 
 extern int __real_access(const char *path, int mode);
 extern int __real_unlink(const char *path);
+
+static void waked_dump_if_running(void);
 
 static size_t events_for(const char *script, const char *action)
 {
@@ -165,6 +187,13 @@ int __wrap_le_service_command(const char *path, const char *const *argv)
     if (!strcmp(action, "stop")) {
         if (stop_refusal && !strcmp(stop_refusal, path))
             return -1;
+        /* A stop can land inside waked's dump window: the output file is
+           created after startup, so this is the last moment it can appear
+           before the daemon is gone. Only waked creates it -- the flag belongs
+           to that one daemon, and consuming it on another service's stop would
+           let a reset that never quiesced waked look as if it had. */
+        if (!strcmp(path, WAKED))
+            waked_dump_if_running();
         service->running = 0;
         return 0;
     }
@@ -183,6 +212,10 @@ int __wrap_geteuid(void)
 void __wrap_sync(void)
 {
     ++sync_calls;
+    /* factory_reset() synchronizes after the clear and before the reboot, so a
+       waked that is still running writes its dump output into a scope the
+       reset has already scanned. Quiescing waked is what makes this a no-op. */
+    waked_dump_if_running();
 }
 
 static int fixture_cleared(const char *root)
@@ -274,6 +307,31 @@ static void path_of(char *out, size_t size, const char *root, const char *relati
     assert(n > 0 && (size_t)n < size);
 }
 
+/*
+ * waked with the one-shot dump request in place: init/libreecho-waked.init asks
+ * it to write the audio it processes to config/wake-dump.raw, and the daemon
+ * opens that file only after its model and microphone are ready. An open that
+ * happens after the clear has scanned config/ leaves the capture inside the
+ * reset scope, which is exactly what quiescing waked prevents.
+ */
+static void waked_dump_if_running(void)
+{
+    char name[MAX_PATH];
+    int fd;
+
+    if (!waked_dump_pending || !find_service(WAKED)->running)
+        return;
+    path_of(name, sizeof(name), fixture_root, "config/wake-dump.raw");
+    fd = open(name, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+        return;
+    assert(write(fd, "pcm", 3) == 3);
+    assert(close(fd) == 0);
+    ++waked_dump_writes;
+    /* One dump per request: a restart has nothing left to write. */
+    waked_dump_pending = 0;
+}
+
 static void build_tree(const char *root)
 {
     char name[MAX_PATH];
@@ -314,6 +372,8 @@ static void reset_simulation(void)
     reboot_saw_cleared = -1;
     test_euid = 0;
     stop_refusal = NULL;
+    waked_dump_pending = 1;
+    waked_dump_writes = 0;
     for (i = 0; i < SERVICE_COUNT; ++i)
         services[i].running = 1;
 }
@@ -509,6 +569,67 @@ static void test_late_stop_refusal_leaves_earlier_writers_done(void)
     assert(!fixture_cleared(root));
 }
 
+/*
+ * waked's dump output is not configuration: it is created after the daemon's
+ * startup work, so a reset that scans the directory while waked is still
+ * running leaves recorded microphone audio behind. The fixture writes it from
+ * the sync that follows the clear -- the last moment a running waked could
+ * create it -- and the reboot assertion then checks the scope the reset really
+ * leaves rather than the order of the calls that produced it.
+ */
+static void test_waked_dump_cannot_outlive_the_clear(void)
+{
+    char template[] = "/tmp/libreecho-reset-linux-waked.XXXXXX";
+    char *root = mkdtemp(template);
+    char name[MAX_PATH];
+
+    assert(root != NULL);
+    reset_simulation();
+    build_tree(root);
+    use_root(root);
+    assert(factory_reset(NULL) == LE_OK);
+    assert(events_for(WAKED, "stop") == 1);
+    assert(reboot_calls == 1);
+    /* Nothing in the reset scope was left for the reboot to carry over, and
+       the dump output and its one-shot request are both gone. */
+    assert(waked_dump_writes == 1);
+    assert(reboot_saw_cleared == 1);
+    path_of(name, sizeof(name), root, "config/wake-dump.raw");
+    assert(access(name, F_OK) != 0);
+    path_of(name, sizeof(name), root, "config/wake-dump-seconds");
+    assert(access(name, F_OK) != 0);
+}
+
+/*
+ * The refused-reset path. Everything the reset stopped has to be put back,
+ * waked included, and the restart must be safe for the one writer whose output
+ * is not configuration: the dump request was consumed along with config/, so
+ * the restarted waked has nothing to write and cannot put capture audio back
+ * into the scope the clear just emptied.
+ */
+static void test_refused_reset_restarts_waked_without_a_dump(void)
+{
+    char template[] = "/tmp/libreecho-reset-linux-waked-resume.XXXXXX";
+    char *root = mkdtemp(template);
+    char name[MAX_PATH];
+
+    assert(root != NULL);
+    reset_simulation();
+    build_tree(root);
+    use_root(root);
+    reboot_result = -1;
+    assert(factory_reset(NULL) == LE_IO);
+    assert(events_for(WAKED, "status") == 2);
+    assert(events_for(WAKED, "stop") == 1);
+    assert(events_for(WAKED, "start") == 1);
+    assert(find_service(WAKED)->running == 1);
+    assert(waked_dump_writes == 1);
+    path_of(name, sizeof(name), root, "config/wake-dump.raw");
+    assert(access(name, F_OK) != 0);
+    path_of(name, sizeof(name), root, "config/wake-dump-seconds");
+    assert(access(name, F_OK) != 0);
+}
+
 int main(void)
 {
     test_successful_reset();
@@ -517,6 +638,8 @@ int main(void)
     test_unprivileged_refusal();
     test_stop_refusal_aborts_before_clearing();
     test_late_stop_refusal_leaves_earlier_writers_done();
+    test_waked_dump_cannot_outlive_the_clear();
+    test_refused_reset_restarts_waked_without_a_dump();
     puts("linux backend factory reset: quiesce, clear, durability, reboot and refusals: ok");
     return 0;
 }
