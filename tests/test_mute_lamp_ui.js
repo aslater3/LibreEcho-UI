@@ -110,5 +110,26 @@ async function audioHtml(buttons){
            'the open page never re-read the latch: '+note.outerHTML);
   }
 
+  /*
+   * A same-page re-render (saving Audio settings calls render()) must invalidate
+   * a poll that is already in flight, or the old response would overwrite the
+   * new note and arm a second loop that never stops.
+   */
+  {
+    globalThis.api = async path => {
+      if(path === '/buttons')return {privacy_latch:false};
+      if(path === '/audio')return Object.assign({}, audio);
+      throw new Error('unexpected API path '+path);
+    };
+    vm.runInThisContext('state.page="Audio"');
+    const note = document.querySelector('#mute-lamp-note');
+    note.outerHTML = '<p class="muted" id="mute-lamp-note">untouched</p>';
+    const inFlight = vm.runInThisContext('refreshMuteLamp')();
+    vm.runInThisContext('state.renderGeneration=(state.renderGeneration||0)+1');
+    await inFlight;
+    assert(/untouched/.test(note.outerHTML),
+           'a poll from before the re-render overwrote the new note: '+note.outerHTML);
+  }
+
   console.log('mute lamp honesty on the Audio page: ok');
 })().catch(error => { console.error(error); process.exitCode = 1; });

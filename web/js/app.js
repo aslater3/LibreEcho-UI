@@ -426,10 +426,13 @@ function muteLampNote(a,b){
  * The lamp changes under the page when someone presses the mute button, and the
  * pages otherwise read it once, so the note alone is re-read on the same timer
  * the Overview uses. render() clears state.timer and re-arms it on every
- * navigation, so this stops polling as soon as the page is left.
+ * navigation, so this stops polling as soon as the page is left. The render
+ * generation is checked as well as the page: saving Audio settings re-renders
+ * the same page, and a poll from before that render must not overwrite the new
+ * note or take over the timer the new render armed.
  */
 async function refreshMuteLamp(){
- const page=state.page;
+ const page=state.page,generation=state.renderGeneration;
  const note=$('#mute-lamp-note');if(!note)return;
  let buttons=null,audio=null;
  try{
@@ -442,7 +445,7 @@ async function refreshMuteLamp(){
   * the timer back over -- that would leave two loops polling and the new page's
   * refresh untracked.
   */
- if(state.page!==page)return;
+ if(state.page!==page||state.renderGeneration!==generation)return;
  const current=$('#mute-lamp-note');
  if(current&&buttons)current.outerHTML=muteLampNote(audio,buttons);
  state.timer=setTimeout(refreshMuteLamp,5000);
@@ -1893,7 +1896,7 @@ try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==s
  const stop=$('#dismiss-timers');if(stop)stop.onclick=()=>post('/timers/dismiss',{},'Stopped');
  content.querySelectorAll('[data-cancel]').forEach(b=>{b.onclick=()=>del('/timers/'+b.dataset.cancel,'Timer cancelled')});
  scheduleTimerRefresh()}
-async function render(){clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Timers')await timersPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations'){installIntegrationsExtras();await integrationsPage()}else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){if(document.body.classList.contains('auth-pending'))markStartupUnavailable();errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000);else if(state.page==='Audio'||state.page==='LED & Buttons')state.timer=setTimeout(refreshMuteLamp,5000)}
+async function render(){(state.renderGeneration=(state.renderGeneration||0)+1);clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Timers')await timersPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations'){installIntegrationsExtras();await integrationsPage()}else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){if(document.body.classList.contains('auth-pending'))markStartupUnavailable();errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000);else if(state.page==='Audio'||state.page==='LED & Buttons')state.timer=setTimeout(refreshMuteLamp,5000)}
 function showPage(name,updateRoute=true){let corrected=false;if(!descriptions[name]||!navItems().some(([n])=>n===name)){name='Overview';corrected=true}if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();state.page=name;const path='/'+pageSlug(name);
  /* A route to a page that is not in the menu is not a route. Replace it, so a
     reload or a back button does not land on it again. */
