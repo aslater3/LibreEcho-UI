@@ -422,7 +422,7 @@ function muteLampNote(a,b){
    * the one path the user cannot drive from the page.
    */
   if(b&&b.privacy_latch===true)return 'The mute button\'s lamp is lit: its hardware privacy latch is engaged and the microphones are cut in hardware. Press the button to release it — software cannot.';
-  if(soft&&muted)return 'Muted: the ring is red, the mute button\'s lamp is lit, and the microphones are cut in hardware while it is. Unmuting puts the lamp out.';
+  if(soft&&muted)return 'Muted: the ring is red and the mute button\'s lamp is lit — this image lights that lamp from the software mute. The lamp is an indication, not the button\'s hardware privacy latch: software cannot assert or release that latch, so press the button for it. Unmuting puts this lamp out unless the button\'s latch has taken it over.';
   if(!b||b.privacy_latch===undefined||b.privacy_latch===null){
    if(muted)return 'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — it follows the button\'s hardware privacy latch.';
    return '';
@@ -442,7 +442,7 @@ function muteLampNote(a,b){
  * same silent mismatch in the other direction.
  */
 function muteLampHardwareNote(b){
- if(b&&b.lamp_control===true)return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and a software mute does light it — this image has the kernel control for it, and the microphones are cut in hardware while it is.';
+ if(b&&b.lamp_control===true)return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and a software mute does light it — this image has the kernel control for it. That lamp is an indication: the button\'s hardware privacy latch is a separate mechanism that software cannot assert or release, and muting from this page does not engage it.';
  return 'Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and software cannot switch it — it is wired to the button\'s privacy latch, so muting from this page lights the ring and leaves the lamp dark.';
 }
 /*

@@ -8,7 +8,9 @@
  * without it lights the ring from a software mute and leaves the lamp dark. The
  * pages have to say which of the two is in force, must not claim software can
  * switch a lamp it cannot, and must not claim the latch is released when the
- * daemon has no fresh reading of it.
+ * daemon has no fresh reading of it. Writing that control lights the lamp; it is
+ * not the button's hardware privacy latch, so no copy driven by a software mute
+ * may tell the user the microphones were cut in hardware.
  */
 'use strict';
 const fs = require('fs');
@@ -107,6 +109,13 @@ async function ledHtml(buttons){
   const softLamp = await audioHtml({microphone_muted:true,privacy_latch:false,lamp_control:true});
   assert(/lamp is lit/.test(softLamp), 'a controllable lamp was not reported as lit');
   assert(!/stays dark/.test(softLamp), 'a controllable lamp was still described as dark');
+  /* Codex review of 0.14 #258: writing the lamp line is the lamp indication, not
+     the button's hardware privacy latch, so the software-mute copy must not tell
+     the user the microphones were cut in hardware. */
+  assert(!/cut in hardware/.test(softLamp),
+         'a software mute claimed a hardware microphone cut it did not make');
+  assert(/software cannot assert or release that latch/.test(softLamp),
+         'the software-driven lamp was not distinguished from the hardware latch');
   audio.microphone_muted = false;
   const softLampIdle = await audioHtml({microphone_muted:false,privacy_latch:false,lamp_control:true});
   assert(!/lamp is lit/.test(softLampIdle), 'an unmuted device claimed a lit lamp');
@@ -202,6 +211,10 @@ async function ledHtml(buttons){
            'the LED page still said software cannot switch a lamp it can');
     assert(/software mute does light it/.test(withLamp),
            'the LED page did not say a software mute lights the lamp');
+    assert(!/cut in hardware/.test(withLamp),
+           'the LED page claimed a hardware microphone cut from the software mute');
+    assert(/does not engage it/.test(withLamp),
+           'the LED page did not say the software mute leaves the hardware latch alone');
     assert(/lamp is lit/.test(withLamp),
            'the LED page note did not report the lit lamp');
     /* The note is re-read while this page is open, so the poll needs the
