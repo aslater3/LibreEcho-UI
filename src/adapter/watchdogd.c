@@ -35,6 +35,7 @@
 #include "adapter.h"
 #include "watchdog_policy.h"
 #include "../log.h"
+#include "../service_env.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -155,18 +156,18 @@ static int probe(const struct service_desc *service)
 
 static int run_init(const char *script, const char *action)
 {
-    pid_t child = fork();
-    int status = 0;
+    const char *argv[4];
 
-    if (child < 0)
-        return -1;
-    if (child == 0) {
-        execl("/bin/sh", "sh", script, action, (char *)NULL);
-        _exit(127);
-    }
-    while (waitpid(child, &status, 0) < 0)
-        ;
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+    /* Recovery runs another service's init script while this daemon carries
+       its own ARGS (--foreground --interval ...). Without the boundary that
+       argv would be resolved as the recovered service's command line, so a
+       watchdog restart would take the service down instead of bringing it
+       back. See src/service_env.c. */
+    argv[0] = "sh";
+    argv[1] = script;
+    argv[2] = action;
+    argv[3] = NULL;
+    return le_service_command("/bin/sh", argv);
 }
 
 static int in_group(const struct supervised *services, size_t index,
