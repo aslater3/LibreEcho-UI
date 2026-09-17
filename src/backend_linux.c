@@ -2528,8 +2528,33 @@ static int linux_shutdown(struct le_backend *b)
     return reboot(LINUX_REBOOT_CMD_POWER_OFF) == 0 ? LE_OK : LE_IO;
 }
 
+/*
+ * The services that must be stopped before the persistent state is removed.
+ *
+ * Clearing files while their writer is still running is a race, and three
+ * different kinds of writer exist on this image:
+ *
+ *  - the supervisor. libreecho-watchdogd probes these daemons and starts any
+ *    that stops answering, so a deliberate stop looks to it like a failure and
+ *    it would bring the writer back mid-reset. It is stopped first, and it is
+ *    restarted with the rest when the reset refuses.
+ *  - the daemons that own a reset-scoped file: btd
+ *    (config/bluetooth.devices, config/bluetooth.keys), ledd
+ *    (config/led-state.json), timerd (config/timers) and agentd
+ *    (config/agent.json, secrets/openai-codex.json).
+ *  - networkd, the only component that can ask wpa_supplicant to SAVE_CONFIG,
+ *    which is what writes config/wpa_supplicant.conf; a stack that saves Wi-Fi
+ *    credentials after the clear would defeat the reset.
+ *
+ * timed, buttond, logd and the voice, AirPlay and mDNS daemons are deliberately
+ * absent: they read the persistent configuration or write only to /run, so none
+ * of them can recreate reset-scoped state between the clear and the reboot.
+ */
 static const char *const factory_reset_services[] = {
+    "/etc/init.d/libreecho-watchdogd.init",
     "/etc/init.d/libreecho-btd.init",
+    "/etc/init.d/libreecho-ledd.init",
+    "/etc/init.d/libreecho-networkd.init",
     "/etc/init.d/libreecho-timerd.init",
     "/etc/init.d/libreecho-agentd.init"
 };
@@ -2554,6 +2579,8 @@ static void resume_factory_reset_services(const unsigned char *stopped)
 {
     size_t i;
 
+    /* Table order, so the supervisor is back before the services it watches and
+       a refused reset leaves the device as supervised as it found it. */
     for (i = 0; i < FACTORY_RESET_SERVICE_COUNT; ++i) {
         if (stopped[i])
             (void)run_service_action(factory_reset_services[i], "start");

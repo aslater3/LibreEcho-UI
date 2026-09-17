@@ -382,6 +382,22 @@ $(BUILD)/test-factory-reset: tests/test_factory_reset.c src/factory_reset.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
+# The reboot, the privilege check, the init scripts and the file-existence probe
+# are the four boundaries the reset crosses, so they are wrapped rather than
+# replaced: the backend under test is the shipped one, compiled unmodified. The
+# test includes src/backend_linux.c itself, so that file is a dependency of the
+# rule but not a separately linked object.
+$(BUILD)/test-factory-reset-linux: tests/test_factory_reset_linux.c \
+		src/backend_linux.c src/factory_reset.c src/json.c src/log.c \
+		src/service_env.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter \
+		-Wl,--wrap=le_service_command -Wl,--wrap=geteuid -Wl,--wrap=sync \
+		-Wl,--wrap=reboot -Wl,--wrap=access -Wl,--wrap=unlink \
+		$< src/factory_reset.c src/json.c src/log.c src/service_env.c -o $@
+
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@

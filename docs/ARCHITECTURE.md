@@ -479,9 +479,11 @@ btd → airplayd → ttsd → agentd → web
 
 Services are controlled by running another daemon's init script
 (`/etc/init.d/libreecho-<service>.init`): the Web daemon starts and stops the
-voice pipeline, factory reset stops and restarts the Bluetooth, timer and
-assistant services, and `libreecho-watchdogd` restarts a service that stopped
-answering.
+voice pipeline, factory reset stops the service supervisor and every daemon that
+owns persistent state, and `libreecho-watchdogd` restarts a service that stopped
+answering. The supervisor is stopped first because the daemons the reset stops
+are exactly the ones it supervises; `src/backend_linux.c` holds the list and the
+reason for each entry.
 
 Each of those callers carries its own generic `ARGS`, `DAEMON`, `PIDFILE` and
 `LOGFILE`, and every init script resolves its settings with
