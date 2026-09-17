@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Real timerd + watchdog + shipped init: a crash must retain pending timers."""
+"""Real timerd + watchdog + shipped init: a crash must retain pending timers.
+
+The watchdog is started with the Web daemon's identity (ARGS, DAEMON, PIDFILE,
+LOGFILE) in its environment, the way the Web backend carries its own. None of
+it belongs to the service being recovered, so the restart must still reach the
+shipped init script with the timer's own configuration -- the launcher below
+is that configuration, standing in for /etc/default/libreecho-timerd.
+"""
 from __future__ import annotations
 
 import json
@@ -50,20 +57,38 @@ def main():
         sock, state = root / "timer.sock", root / "timers"
         pidfile, logfile = root / "timer.pid", root / "timer.log"
         marker, wdlog = root / "actions", root / "watchdog.log"
-        env = {**os.environ, "DAEMON": str(daemon), "SOCKET": str(sock),
-               "STATE": str(state), "AUDIO_SOCKET": str(root / "absent-audio.sock"),
-               "PIDFILE": str(pidfile), "LOGFILE": str(logfile)}
-        env.pop("ARGS", None)
+        audio = root / "absent-audio.sock"
+        received = root / "recovered-environment"
+        # The caller's identity: what the Web daemon carries while it controls
+        # other services. A recovery must not turn any of it into the timer's
+        # own configuration (issue #249).
+        env = {**os.environ,
+               "ARGS": "--backend linux --config /data/libreecho/config/web-config.json "
+                       "--web-root /usr/local/share/libreecho/web --listen 0.0.0.0:8080",
+               "DAEMON": str(root / "libreecho-web"),
+               "PIDFILE": str(root / "libreecho-web.pid"),
+               "LOGFILE": str(root / "libreecho-web.log")}
         launcher = root / "timer.init"
-        launcher.write_text("#!/bin/sh\n"
-                            f'printf "%s\\n" "$1" >> {shlex.quote(str(marker))}\n'
-                            f'exec sh {shlex.quote(str(ROOT / "init/libreecho-timerd.init"))} "$1"\n')
+        launcher.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$1" >> {shlex.quote(str(marker))}\n'
+            "{\n"
+            '    printf "ARGS=%s\\n" "${ARGS-<unset>}"\n'
+            '    printf "DAEMON=%s\\n" "${DAEMON-<unset>}"\n'
+            '    printf "PIDFILE=%s\\n" "${PIDFILE-<unset>}"\n'
+            '    printf "LOGFILE=%s\\n" "${LOGFILE-<unset>}"\n'
+            f"}} >> {shlex.quote(str(received))}\n"
+            f"DAEMON={shlex.quote(str(daemon))} SOCKET={shlex.quote(str(sock))} \\\n"
+            f"STATE={shlex.quote(str(state))} PIDFILE={shlex.quote(str(pidfile))} \\\n"
+            f"LOGFILE={shlex.quote(str(logfile))} \\\n"
+            f"AUDIO_SOCKET={shlex.quote(str(audio))} \\\n"
+            f'exec sh {shlex.quote(str(ROOT / "init/libreecho-timerd.init"))} "$1"\n')
         timer = watchdog = None
         try:
             with logfile.open("w") as output:
                 timer = subprocess.Popen([str(daemon), "--foreground", "--socket", str(sock),
                                           "--state", str(state), "--audio-socket",
-                                          env["AUDIO_SOCKET"]], stdout=output, stderr=output)
+                                          str(audio)], stdout=output, stderr=output)
             pidfile.write_text(str(timer.pid) + "\n")
             wait_for(lambda: call(sock, "status"), "timer did not become ready")
             call(sock, "add", {"seconds": 600, "label": "persist-through-crash"})
@@ -88,7 +113,15 @@ def main():
             time.sleep(2.1)
             assert marker.read_text().splitlines() == ["stop", "start"], marker.read_text()
             assert "giving up" not in wdlog.read_text(), wdlog.read_text()
-            print("watchdog timer recovery: healthy service spared; crash restarted once; schedule retained")
+            # The recovery reached the init script without the watchdog's own
+            # ARGS/DAEMON/PIDFILE/LOGFILE, so the timer resolved its own.
+            recovered = received.read_text().splitlines()
+            assert recovered, "the recovery never ran the init script"
+            assert all(line.endswith("=<unset>") for line in recovered), recovered
+            assert {line.split("=", 1)[0] for line in recovered} == {
+                "ARGS", "DAEMON", "PIDFILE", "LOGFILE"}, recovered
+            print("watchdog timer recovery: healthy service spared; crash restarted once; "
+                  "schedule retained; caller identity kept out of the restart")
         finally:
             if watchdog is not None:
                 watchdog.terminate()

@@ -20,6 +20,10 @@ function saveButton(id){return `<button class="save-btn save-changes" id="${id}"
 function unsupported(msg){return `<div class="notice unsupported"><strong>Not supported</strong><span>${esc(msg)}</span></div>`}
 function applyCssVars(root){const r=root||content;r.querySelectorAll('[data-level]').forEach(el=>{el.style.setProperty('--level',el.dataset.level+'%');el.style.setProperty('--band',el.dataset.band)});r.querySelectorAll('[data-led]').forEach(el=>el.style.setProperty('--led',el.dataset.led))}
 function errorView(e){content.innerHTML=panel('Unable to load this section',`<div class="empty-state"><p>${esc(e.message)}</p>${action('Try again','retry','primary-btn')}</div>`);$('#retry').onclick=()=>render()}
+/* The connection widget lives in the shell, not in a page, so it is written by
+   whichever /status response arrives first: the startup fetch, the Overview
+   render, or the Overview background refresh. */
+function renderSidebarStatus(s){const online=$('#device-online');if(online){online.innerHTML=`<span></span>${esc(s.device_state)}`;online.classList.remove('unavailable')}const uptimeEl=$('#sidebar-uptime');if(uptimeEl)uptimeEl.textContent='Uptime: '+uptime(s.uptime_seconds)}
 function markStartupUnavailable(){const online=$('#device-online');if(online){online.innerHTML='<span></span>Unavailable';online.classList.add('unavailable')}const uptime=$('#sidebar-uptime');if(uptime)uptime.textContent='Uptime: unavailable'}
 function storageDisplay(value){const text=String(value??''),match=text.match(/^(null|\d+) \/ (null|\d+) MB$/);if(!match)return text==='undefined'||text==='null'||text==='NaN'?'Unavailable':text;const used=match[1]==='null'?null:Number(match[1]),total=match[2]==='null'?null:Number(match[2]);if(total===null||total<=0)return'Unavailable';return used===null?`${total} MB capacity · usage unavailable`:`${used} / ${total} MB`}
 /*
@@ -282,7 +286,7 @@ async function power(path,name){
  await Promise.race([fired,new Promise(r=>setTimeout(r,1500))]);
  if(refused){toast(refused.message,true);return}
  await waitForDevice(estimate,'Restarting your LibreEcho');}
-async function overview(){const [s,n,a,l,d,p,ota]=await Promise.all([api('/status'),api('/network'),api('/audio').catch(e=>({unsupported:e.message})),api('/led').catch(e=>({unsupported:e.message})),api('/device'),api('/playback').catch(()=>({state:'idle',source:null,metadata:{available:false}})),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'}))]);state.data.status=s;state.data.playback=p;state.data.led=l;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);updateVersionDisplay(d,ota);content.innerHTML=`<div class="grid-top"><div class="panel hero"><div class="sim-label" id="hero-device-label">${esc(d.hostname||d.name||'LibreEcho')}</div><h2>LibreEcho</h2><p>Open source voice assistant<br>built for privacy and freedom.</p><img class="device-img" src="/assets/device.png" alt="Amazon Echo device"><div class="hero-actions">${action('Device details','device-details','primary-btn')}${linkAction('API','/api/v1')}${linkAction('Swagger','/swagger.html')}</div></div><div class="panel status-panel"><h3>System Status</h3>${metric('device','CPU Load',s.cpu_percent+'%',s.cpu_percent)}${metric('device','Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent)}${metric('device','Storage',storageValue(s),s.storage_available?s.storage_percent:null)}${metric('sun','Temperature',s.temperature_c+' °C',s.temperature_c)}${lightMetric(s)}${metric('wifi','Wi-Fi',networkLabel(n),n.signal,n.state==='connected',true)}${metric('info','Internet',n.internet?'Reachable':'Unavailable',0,n.internet,true)+(a.unsupported?'':metric('mic','Microphone',a.microphone_muted?'Muted':'Live',0,!a.microphone_muted,true))}</div></div>${nowPlaying(p,l)}${cpuDashboard(s)}<div class="cards">${items.slice(2,10).map(([name,icon],i)=>`<button class="panel shortcut" data-page="${name}"><svg class="${['green','purple','blue','sky','green','orange','grey','orange'][i]}"><use href="#${icon}"></use></svg><span><strong>${name}</strong><small>${descriptions[name]}</small></span><span class="arrow">›</span></button>`).join('')}</div><div class="panel community"><img src="/assets/mark.svg" alt="" class="community-mark"><div><h3>Open Source. Community Driven.</h3><p>Configuration stays on your device. ${s.simulated?'This development session uses deterministic mock-capable hardware state.':'Values shown come from the Linux backend.'}</p></div></div>`;$$('[data-page]').forEach(b=>b.onclick=()=>showPage(b.dataset.page));$('#device-details').onclick=()=>showPage('Device');bindNowPlaying()}
+async function overview(){const [s,n,a,l,d,p,ota]=await Promise.all([api('/status'),api('/network'),api('/audio').catch(e=>({unsupported:e.message})),api('/led').catch(e=>({unsupported:e.message})),api('/device'),api('/playback').catch(()=>({state:'idle',source:null,metadata:{available:false}})),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'}))]);state.data.status=s;state.data.playback=p;state.data.led=l;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;renderSidebarStatus(s);updateVersionDisplay(d,ota);content.innerHTML=`<div class="grid-top"><div class="panel hero"><div class="sim-label" id="hero-device-label">${esc(d.hostname||d.name||'LibreEcho')}</div><h2>LibreEcho</h2><p>Open source voice assistant<br>built for privacy and freedom.</p><img class="device-img" src="/assets/device.png" alt="Amazon Echo device"><div class="hero-actions">${action('Device details','device-details','primary-btn')}${linkAction('API','/api/v1')}${linkAction('Swagger','/swagger.html')}</div></div><div class="panel status-panel"><h3>System Status</h3>${metric('device','CPU Load',s.cpu_percent+'%',s.cpu_percent)}${metric('device','Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent)}${metric('device','Storage',storageValue(s),s.storage_available?s.storage_percent:null)}${metric('sun','Temperature',s.temperature_c+' °C',s.temperature_c)}${lightMetric(s)}${metric('wifi','Wi-Fi',networkLabel(n),n.signal,n.state==='connected',true)}${metric('info','Internet',n.internet?'Reachable':'Unavailable',0,n.internet,true)+(a.unsupported?'':metric('mic','Microphone',a.microphone_muted?'Muted':'Live',0,!a.microphone_muted,true))}</div></div>${nowPlaying(p,l)}${cpuDashboard(s)}<div class="cards">${items.slice(2,10).map(([name,icon],i)=>`<button class="panel shortcut" data-page="${name}"><svg class="${['green','purple','blue','sky','green','orange','grey','orange'][i]}"><use href="#${icon}"></use></svg><span><strong>${name}</strong><small>${descriptions[name]}</small></span><span class="arrow">›</span></button>`).join('')}</div><div class="panel community"><img src="/assets/mark.svg" alt="" class="community-mark"><div><h3>Open Source. Community Driven.</h3><p>Configuration stays on your device. ${s.simulated?'This development session uses deterministic mock-capable hardware state.':'Values shown come from the Linux backend.'}</p></div></div>`;$$('[data-page]').forEach(b=>b.onclick=()=>showPage(b.dataset.page));$('#device-details').onclick=()=>showPage('Device');bindNowPlaying()}
 function updateOverviewMetric(label,value,percent,connected){const row=$$('.status-panel .metric').find(x=>x.querySelector('span')?.textContent===label);if(!row)return;if(label==='Storage')value=storageDisplay(value);const output=row.querySelector('.value');output.textContent=value;if(connected!==undefined)output.classList.toggle('connected',connected);const bar=row.querySelector('progress');if(bar)bar.value=Math.max(0,Math.min(100,percent));const led=row.querySelector('.power-led');if(led){led.classList.toggle('on',!!connected);led.classList.toggle('off',!connected);led.setAttribute('aria-label',connected?'Available':'Unavailable')}}
 function updateOverviewAmbientLight(s){
  const panel=$('.status-panel');
@@ -301,7 +305,7 @@ function updateOverviewAmbientLight(s){
  const temperature=$$('.metric',panel).find(x=>x.querySelector('span')?.textContent==='Temperature');
  if(temperature)temperature.insertAdjacentHTML('afterend',lightMetric(s));
 }
-async function refreshOverview(){if(state.page!=='Overview')return;let delay=5000;try{const [s,n,d,p,l]=await Promise.all([api('/status'),api('/network'),api('/device'),api('/playback'),api('/led').catch(()=>({}))]);if(state.page!=='Overview')return;state.data.status=s;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;$('#device-online').innerHTML=`<span></span>${esc(s.device_state)}`;$('#sidebar-uptime').textContent='Uptime: '+uptime(s.uptime_seconds);$('#sidebar-version').textContent=d.os_version;if(Date.now()-(state.data.otaCheckedAt||0)>=60000)updateVersionDisplay(d,await api('/system/update').catch(()=>state.data.ota));const deviceLabel=$('#hero-device-label');if(deviceLabel)deviceLabel.textContent=d.hostname||d.name||'LibreEcho';updateOverviewMetric('CPU Load',s.cpu_percent+'%',s.cpu_percent);updateOverviewMetric('Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent);updateOverviewMetric('Storage',storageValue(s),s.storage_available?s.storage_percent:null);updateOverviewMetric('Temperature',s.temperature_c+' °C',s.temperature_c);updateOverviewAmbientLight(s);updateOverviewMetric('Wi-Fi',networkLabel(n),0,n.state==='connected');updateOverviewMetric('Internet',n.internet?'Reachable':'Unavailable',0,n.internet);state.data.playback=p;state.data.led=l;
+async function refreshOverview(){if(state.page!=='Overview')return;let delay=5000;try{const [s,n,d,p,l]=await Promise.all([api('/status'),api('/network'),api('/device'),api('/playback'),api('/led').catch(()=>({}))]);if(state.page!=='Overview')return;state.data.status=s;$('#backend-badge').textContent=s.backend+(s.simulated?' · simulated':'');$('#backend-badge').className='backend-badge '+s.backend;renderSidebarStatus(s);$('#sidebar-version').textContent=d.os_version;if(Date.now()-(state.data.otaCheckedAt||0)>=60000)updateVersionDisplay(d,await api('/system/update').catch(()=>state.data.ota));const deviceLabel=$('#hero-device-label');if(deviceLabel)deviceLabel.textContent=d.hostname||d.name||'LibreEcho';updateOverviewMetric('CPU Load',s.cpu_percent+'%',s.cpu_percent);updateOverviewMetric('Memory',`${s.memory_used_mb} / ${s.memory_total_mb} MB`,s.memory_percent);updateOverviewMetric('Storage',storageValue(s),s.storage_available?s.storage_percent:null);updateOverviewMetric('Temperature',s.temperature_c+' °C',s.temperature_c);updateOverviewAmbientLight(s);updateOverviewMetric('Wi-Fi',networkLabel(n),0,n.state==='connected');updateOverviewMetric('Internet',n.internet?'Reachable':'Unavailable',0,n.internet);state.data.playback=p;state.data.led=l;
  /* A poll landing mid-interaction would throw away the click that is still in
     flight, so the card keeps whatever the user just did until it settles. */
  if(!state.busy)renderNowPlaying();const cpu=$('#cpu-dashboard');if(cpu)cpu.outerHTML=cpuDashboard(s);applyCssVars(content);if(p.state!=='idle'||l.visualizer_active)delay=1000}catch(_){/* Preserve the last good telemetry when a background refresh fails. */}finally{if(state.page==='Overview')state.timer=setTimeout(refreshOverview,delay)}}
@@ -395,9 +399,110 @@ function noisePanel(n){
 function bindNoise(n){
  const stop=$('#noise-stop');if(stop){stop.disabled=!n.active;stop.onclick=()=>del('/audio/noise','Sleep sounds stopped')}
  const start=$('#noise-start');if(start)start.onclick=()=>post('/audio/noise',{colour:$('#noise-colour').value,level:Math.max(1,+$('#noise-level').value),minutes:+$('#noise-minutes').value},'Sleep sounds playing')}
-async function audioPage(){const a=await api('/audio'),voices=a.tts_voices||[{id:'southern-female',name:'Southern English — female'},{id:'northern-male',name:'Northern English — male'}],voiceOptions=voices.map(v=>`<option value="${esc(v.id)}" ${v.id===a.tts_voice?'selected':''}>${esc(v.name)}</option>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Output',range('Master volume',a.volume,'volume')+range('Notification volume',a.notification_volume,'notification-volume').replace('value="'+a.notification_volume+'"','value="'+a.notification_volume+'" disabled')+toggle('Startup sound',a.startup_sound,'startup-sound',true)+`<dl class="facts"><dt>Output</dt><dd class="${a.output_available?'connected':''}">${a.output_available?'Available':'Unavailable'}</dd><dt>Amplifier</dt><dd>${a.amplifier_on?'On':'Off'}</dd></dl><div class="button-row">${saveButton('save-output')}${action('Play test tone','test-tone')}</div>`)}${panel('Announcements',`<label class="field"><span>Voice</span><select id="tts-voice">${voiceOptions}</select></label><p class="muted">The selected British voice stays loaded for low-latency streamed announcements. Changing voice restarts the speech service.</p>${saveButton('save-voice')}`)}${noisePanel(a.noise||{})}${panel('Microphones',range('Microphone gain',a.microphone_gain,'mic-gain')+toggle('Microphone muted',a.microphone_muted,'mic-muted')+toggle('Acoustic echo cancellation',true,'aec',true)+`<p class="muted">Echo cancellation is reported by the future audio adapter and cannot yet be changed.</p>`+saveButton('save-microphones'))}</div>`;bindRange();bindDirty(['#volume'],'#save-output');bindDirty(['#tts-voice'],'#save-voice');bindDirty(['#mic-gain','#mic-muted'],'#save-microphones');$('#save-output').onclick=()=>mutate('/audio',{volume:+$('#volume').value},'Output changes saved');$('#save-voice').onclick=()=>mutate('/audio',{tts_voice:$('#tts-voice').value},'Announcement voice changed');$('#save-microphones').onclick=()=>mutate('/audio',{microphone_gain:+$('#mic-gain').value,microphone_muted:$('#mic-muted').checked},'Microphone changes saved');$('#test-tone').onclick=()=>post('/audio/test',{},'Test tone playing');bindNoise(a.noise||{})}
-const babyStream={controller:null,context:null,gain:null,nextTime:0,generation:0};
-function stopBabyStream(){const controller=babyStream.controller,context=babyStream.context;babyStream.generation++;babyStream.controller=null;babyStream.context=null;babyStream.gain=null;babyStream.nextTime=0;if(controller)controller.abort();if(context&&context.state!=='closed')context.close().catch(()=>{});const status=$('#baby-status');if(status)status.textContent='Stopped'}
+/*
+ * The mute button's lamp is wired to the kernel's hardware privacy latch, not to
+ * the audio path, so a software mute lights the ring and leaves the lamp dark --
+ * which is exactly how a muted device gets mistaken for a working one. Say which
+ * of the two is in force rather than letting the dark lamp imply the other.
+ * `privacy_latch` is null when the daemon has no fresh reading: absence of a
+ * reading is not evidence that the latch is released.
+ */
+function muteLampNote(a,b){
+ const text=(()=>{
+  if(!b||b.privacy_latch===undefined||b.privacy_latch===null){
+   if(a&&a.microphone_muted)return 'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — it follows the button\'s hardware privacy latch.';
+   return '';
+  }
+  if(b.privacy_latch)return 'The mute button\'s lamp is lit: its hardware privacy latch is engaged and the microphones are cut in hardware. Press the button to release it — software cannot.';
+  if(a&&a.microphone_muted)return 'Software mute only: the ring is red and the mute button\'s lamp stays dark, because that lamp is wired to the button\'s privacy latch. Use the button if you want the hardware cut.';
+  return '';
+ })();
+ /* Always rendered, empty when there is nothing to say: the button is on the
+    device, so the note is re-read in place while either of these pages is open,
+    and an element that was never drawn could not come back. */
+ return `<p class="muted" id="mute-lamp-note">${esc(text)}</p>`;
+}
+/*
+ * The lamp changes under the page when someone presses the mute button, and the
+ * pages otherwise read it once, so the note alone is re-read on the same timer
+ * the Overview uses. render() clears state.timer and re-arms it on every
+ * navigation, so this stops polling as soon as the page is left. The render
+ * generation is checked as well as the page: saving Audio settings re-renders
+ * the same page, and a poll from before that render must not overwrite the new
+ * note or take over the timer the new render armed.
+ */
+async function refreshMuteLamp(){
+ const page=state.page,generation=state.renderGeneration;
+ const note=$('#mute-lamp-note');if(!note)return;
+ let buttons=null,audio=null;
+ try{
+  buttons=await api('/buttons');
+  if(page==='Audio')audio=await api('/audio');
+ }catch(e){}
+ /*
+  * render() clears state.timer and re-arms it for whatever page is showing, so
+  * a poll that finishes after a navigation must neither touch the note nor take
+  * the timer back over -- that would leave two loops polling and the new page's
+  * refresh untracked.
+  */
+ if(state.page!==page||state.renderGeneration!==generation)return;
+ /* Every response the note needs has to have arrived: on the Audio page a
+    failed /audio must not replace a real warning with an empty note. */
+ if(buttons&&(page!=='Audio'||audio)){
+  const current=$('#mute-lamp-note');
+  if(current)current.outerHTML=muteLampNote(audio,buttons);
+ }
+ state.lampTimer=setTimeout(refreshMuteLamp,5000);
+}
+async function audioPage(){const [a,buttons]=await Promise.all([api('/audio'),api('/buttons').catch(()=>({}))]),voices=a.tts_voices||[{id:'southern-female',name:'Southern English — female'},{id:'northern-male',name:'Northern English — male'}],voiceOptions=voices.map(v=>`<option value="${esc(v.id)}" ${v.id===a.tts_voice?'selected':''}>${esc(v.name)}</option>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Output',range('Master volume',a.volume,'volume')+range('Notification volume',a.notification_volume,'notification-volume').replace('value="'+a.notification_volume+'"','value="'+a.notification_volume+'" disabled')+toggle('Startup sound',a.startup_sound,'startup-sound',true)+`<dl class="facts"><dt>Output</dt><dd class="${a.output_available?'connected':''}">${a.output_available?'Available':'Unavailable'}</dd><dt>Amplifier</dt><dd>${a.amplifier_on?'On':'Off'}</dd></dl><div class="button-row">${saveButton('save-output')}${action('Play test tone','test-tone')}</div>`)}${panel('Announcements',`<label class="field"><span>Voice</span><select id="tts-voice">${voiceOptions}</select></label><p class="muted">The selected British voice stays loaded for low-latency streamed announcements. Changing voice restarts the speech service.</p>${saveButton('save-voice')}`)}${noisePanel(a.noise||{})}${panel('Microphones',range('Microphone gain',a.microphone_gain,'mic-gain')+toggle('Microphone muted',a.microphone_muted,'mic-muted')+toggle('Acoustic echo cancellation',true,'aec',true)+`<p class="muted">Echo cancellation is reported by the future audio adapter and cannot yet be changed.</p>`+muteLampNote(a,buttons)+saveButton('save-microphones'))}</div>`;bindRange();bindDirty(['#volume'],'#save-output');bindDirty(['#tts-voice'],'#save-voice');bindDirty(['#mic-gain','#mic-muted'],'#save-microphones');$('#save-output').onclick=()=>mutate('/audio',{volume:+$('#volume').value},'Output changes saved');$('#save-voice').onclick=()=>mutate('/audio',{tts_voice:$('#tts-voice').value},'Announcement voice changed');$('#save-microphones').onclick=()=>mutate('/audio',{microphone_gain:+$('#mic-gain').value,microphone_muted:$('#mic-muted').checked},'Microphone changes saved');$('#test-tone').onclick=()=>post('/audio/test',{},'Test tone playing');bindNoise(a.noise||{})}
+const BABY_START_LEAD=0.05,BABY_RESYNC_OFFSET=0.02,BABY_SCHEDULE_LEAD=0.75,BABY_RESUME_DEADLINE=800,BABY_RESUME_POLL=100,BABY_DRAIN_GRACE=120,BABY_DRAIN_POLL=25,BABY_DRAIN_LIMIT=5000,BABY_MAX_NODES=256;
+const babyStream={controller:null,context:null,gain:null,nextTime:0,generation:0,nodes:new Set(),diagnostics:{context:'idle',http:'—',received:0,frames:0,scheduled:0,playback:'idle',error:'none'}};
+const babyDiagnosticFields=[['#baby-diag-context','context'],['#baby-diag-http','http'],['#baby-diag-received','received'],['#baby-diag-frames','frames'],['#baby-diag-scheduled','scheduled'],['#baby-diag-playback','playback'],['#baby-diag-error','error']];
+function babyDiag(update={}){const d=Object.assign(babyStream.diagnostics,update),text=key=>key==='received'?d.received+' bytes':key==='frames'?d.frames+' frames':key==='scheduled'?d.scheduled.toFixed(3)+' s':String(d[key]);babyDiagnosticFields.forEach(([selector,key])=>{const el=$(selector);if(el)el.textContent=text(key)});return d}
+function babyContextState(context){babyDiag({context:context&&context.state?context.state:'unavailable'})}
+function babySilentUnlock(context,gain){const source=context.createBufferSource();source.buffer=context.createBuffer(1,1,context.sampleRate||16000);source.connect(gain);source.onended=()=>babyStream.nodes.delete(source);babyStream.nodes.add(source);source.start(0);return source}
+/* Safari can leave resume() pending indefinitely, so one attempt must never
+   outlive the deadline: race each attempt against the remaining budget so the
+   page always reaches the actionable blocked-playback error instead of sitting
+   on "Connecting…" for good. */
+function babyWithinDeadline(promise,ms){return new Promise(resolve=>{let settled=false;const finish=()=>{if(settled)return;settled=true;clearTimeout(timer);resolve()};const timer=setTimeout(finish,Math.max(0,ms));Promise.resolve(promise).then(finish,finish)})}
+async function babyEnsureRunning(context,generation){const deadline=Date.now()+BABY_RESUME_DEADLINE;for(;;){if(generation!==babyStream.generation)return false;babyContextState(context);if(context.state==='running')return true;const budget=deadline-Date.now();if(budget<=0)return false;try{await babyWithinDeadline(context.resume(),budget)}catch(_){}if(generation!==babyStream.generation)return false;babyContextState(context);if(context.state==='running')return true;const wait=Math.min(BABY_RESUME_POLL,deadline-Date.now());if(wait<=0)return false;await new Promise(resolve=>setTimeout(resolve,wait))}}
+/* Playback has run past the look-ahead window, so the sources still queued for the
+   future are dropped and the cursor restarts where the buffer that is actually
+   playing ends. Moving the timestamp alone would leave the dropped-for-latency
+   sources queued on top of the audio that follows, and would leave the retained
+   backlog unbounded. */
+function babyResyncQueue(current){babyStream.nodes.forEach(node=>{if(node.babyStart===undefined||node.babyStart<=current)return;node.onended=null;try{node.stop()}catch(_){}babyStream.nodes.delete(node)})}
+/* The look-ahead bound is a duration, so a stream fragmented into very small
+   chunks could still create thousands of sources inside the window. Keep a hard
+   ceiling on retained sources by skipping the oldest queued ones, so neither the
+   node set nor the buffer count can grow with the fragment count. */
+function babyEnforceNodeLimit(current){while(babyStream.nodes.size>=BABY_MAX_NODES){let oldest=null;babyStream.nodes.forEach(node=>{if(node.babyStart===undefined||node.babyStart<=current)return;if(!oldest||node.babyStart<oldest.babyStart)oldest=node});if(!oldest)break;oldest.onended=null;try{oldest.stop()}catch(_){}babyStream.nodes.delete(oldest)}}
+function babyScheduleStart(context){const current=context.currentTime;if(babyStream.nextTime-current<=BABY_SCHEDULE_LEAD)return Math.max(babyStream.nextTime,current+BABY_RESYNC_OFFSET);let start=current+BABY_RESYNC_OFFSET;babyStream.nodes.forEach(node=>{if(node.babyStart!==undefined&&node.babyStart<=current&&node.babyEnd>start)start=node.babyEnd});babyResyncQueue(current);return start}
+/* A coalesced chunk can carry far more audio than the look-ahead window, so each
+   quantum waits for playback to catch up before it is queued instead of being
+   pushed into the future. The wait is bounded by the excess itself, so a clock
+   that does not advance (blocked or interrupted context) falls through to the
+   resync/drop policy rather than hanging. */
+async function babyPaceToHorizon(context,generation,start){
+  if(context.state!=='running'||start-context.currentTime<=BABY_SCHEDULE_LEAD)return false;
+  const deadline=Date.now()+(start-context.currentTime-BABY_SCHEDULE_LEAD)*1000;
+  for(;;){
+    if(generation!==babyStream.generation||context.state!=='running')return false;
+    if(start-context.currentTime<=BABY_SCHEDULE_LEAD)return true;
+    const remaining=deadline-Date.now();
+    if(remaining<=0)return false;
+    await new Promise(resolve=>setTimeout(resolve,Math.min(BABY_DRAIN_POLL,remaining)))
+  }
+}
+/* The final chunk is scheduled slightly ahead of the clock, so a stream that ends
+   cleanly still has audio queued: closing the graph immediately would discard it.
+   Wait for the retained sources to end using their real scheduled end time (a
+   coalesced chunk can hold far more than the look-ahead window), bounded by a hard
+   safety limit so teardown can never hang. Manual stops and errors still release
+   immediately. */
+async function babyDrainScheduled(context,generation){babyDiag({playback:'draining'});let end=context.currentTime;babyStream.nodes.forEach(node=>{if(node.babyEnd!==undefined&&node.babyEnd>end)end=node.babyEnd});if(babyStream.nextTime>end)end=babyStream.nextTime;const deadline=Date.now()+Math.min(Math.max(0,(end-context.currentTime)*1000),BABY_DRAIN_LIMIT)+BABY_DRAIN_GRACE;while(generation===babyStream.generation&&babyStream.nodes.size&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,BABY_DRAIN_POLL))}
+function stopBabyStream(reason='stopped'){const controller=babyStream.controller,context=babyStream.context;babyStream.generation++;babyStream.controller=null;babyStream.context=null;babyStream.gain=null;babyStream.nextTime=0;babyStream.nodes.clear();if(controller)controller.abort();if(context&&context.state!=='closed')context.close().catch(()=>{});const status=$('#baby-status');if(status)status.textContent='Stopped';babyDiag({playback:reason})}
 function babyAudioContract(response,source,channel){const header=response.headers.get('X-LibreEcho-Audio')||'',fields=header.split(';'),format=fields[0]||'',value=key=>{const field=fields.find(x=>x.startsWith(key+'='));return field?field.slice(key.length+1):''},bits=format==='pcm_s24_3le'?24:format==='pcm_s16_le'?16:Number(source.bits)||16,validBits=Math.max(2,Math.min(bits,Number(value('valid-bits'))||Number(source.valid_bits)||bits)),channels=Math.max(1,Number(value('channels'))||Number(source.channels)||1),rate=Number(value('rate'))||Number(source.rate)||16000,selected=Number(value('selected-channel')),selectedChannel=Number.isFinite(selected)?selected:channels===1?0:channel;return{bits,validBits,channels,rate,channel:Math.max(0,Math.min(channels-1,selectedChannel))}}
 async function babyMonitorPage(){
   const d=await api('/baby-monitor');
@@ -420,6 +525,15 @@ async function babyMonitorPage(){
     panel('Playback',range('Browser playback volume',35,'baby-volume')+
       '<div class="status-line"><span class="status-dot" id="baby-dot"></span><span id="baby-status" aria-live="polite">Stopped</span></div>'+
       '<div class="button-row">'+action('Start listening','baby-start','primary-btn')+action('Stop','baby-stop')+'</div>'+
+      '<details class="baby-diagnostics"><summary>Playback diagnostics</summary><dl class="facts">'+
+      '<dt>Audio context</dt><dd id="baby-diag-context">idle</dd>'+
+      '<dt>Stream</dt><dd id="baby-diag-http">—</dd>'+
+      '<dt>Received</dt><dd id="baby-diag-received">0 bytes</dd>'+
+      '<dt>Frames</dt><dd id="baby-diag-frames">0 frames</dd>'+
+      '<dt>Scheduled</dt><dd id="baby-diag-scheduled">0.000 s</dd>'+
+      '<dt>Playback</dt><dd id="baby-diag-playback">idle</dd>'+
+      '<dt>Last error</dt><dd id="baby-diag-error">none</dd>'+
+      '</dl><p class="muted">State and counters only; microphone samples are never displayed or logged.</p></details>'+
       '<p class="muted">Listening starts only when you press the button. Closing this page stops capture.</p>')+
     '</div>';
   bindRange();
@@ -445,27 +559,41 @@ async function babyMonitorPage(){
     const generation=babyStream.generation;
     babyStream.context=context;
     babyStream.controller=controller;
-    babyStream.nextTime=context.currentTime+0.05;
+    babyStream.nextTime=context.currentTime+BABY_START_LEAD;
     const gain=context.createGain();
     gain.gain.value=Number($('#baby-volume').value)/100;
     gain.connect(context.destination);
     babyStream.gain=gain;
+    babyDiag({context:context.state||'unknown',http:'—',received:0,frames:0,scheduled:0,playback:'unlocking',error:'none'});
     $('#baby-status').textContent='Connecting…';
     $('#baby-dot').classList.add('ok');
     try{
-      await context.resume();
+      /* Safari only unlocks Web Audio output when a source is started inside the
+         synchronous user gesture, so emit one silent frame before any await and
+         wait for a running context only afterwards. */
+      babySilentUnlock(context,gain);
+      context.onstatechange=()=>{
+        if(generation!==babyStream.generation)return;
+        babyContextState(context);
+        if(context.state==='running'||context.state==='closed')return;
+        Promise.resolve(context.resume()).then(()=>{if(generation===babyStream.generation)babyContextState(context)}).catch(()=>{});
+      };
+      const running=await babyEnsureRunning(context,generation);
       if(generation!==babyStream.generation)return;
+      if(!running)throw new Error('Audio playback is blocked ('+(context.state||'unknown')+'); tap Start listening again');
       const response=await fetch('/api/v1/baby-monitor/stream?source='+encodeURIComponent(source.id)+'&channel='+channel,{
         headers:{Accept:'application/octet-stream',...(state.token?{Authorization:'Bearer '+state.token}:{})},
         signal:controller.signal
       });
-      if(!response.ok)throw new Error('Microphone stream failed ('+response.status+')');
+      if(!response.ok){babyDiag({http:'HTTP '+response.status});throw new Error('Microphone stream failed ('+response.status+')')}
       if(generation!==babyStream.generation)return;
+      babyDiag({http:'HTTP '+response.status});
       if(!response.body)throw new Error('Microphone stream returned no audio body');
       const contract=babyAudioContract(response,source,channel);
       const bytesPerSample=contract.bits===24?3:2;
       const frameBytes=contract.channels*bytesPerSample;
       const sampleScale=2**(contract.validBits-1);
+      let received=0,decoded=0,scheduled=0;
       $('#baby-status').textContent='Listening';
       const reader=response.body.getReader();
       let carry=new Uint8Array(0);
@@ -473,43 +601,71 @@ async function babyMonitorPage(){
         const chunk=await reader.read();
         if(generation!==babyStream.generation)return;
         if(chunk.done)break;
+        received+=chunk.value.length;
         const bytes=new Uint8Array(carry.length+chunk.value.length);
         bytes.set(carry);
         bytes.set(chunk.value,carry.length);
         const frames=Math.floor(bytes.length/frameBytes);
         const used=frames*frameBytes;
-        if(!frames){carry=bytes;continue}
+        if(!frames){carry=bytes;babyDiag({received});continue}
         carry=bytes.slice(used);
-        const audio=context.createBuffer(1,frames,contract.rate);
-        const samples=audio.getChannelData(0);
-        for(let i=0;i<frames;i++){
-          const offset=i*frameBytes+contract.channel*bytesPerSample;
-          let value;
-          if(contract.bits===24){
-            value=bytes[offset]|(bytes[offset+1]<<8)|(bytes[offset+2]<<16);
-            if(value&0x800000)value|=-16777216;
-            samples[i]=Math.max(-1,Math.min(1,value/sampleScale));
-          }else{
-            value=bytes[offset]|(bytes[offset+1]<<8);
-            if(value&0x8000)value|=-65536;
-            samples[i]=Math.max(-1,Math.min(1,value/sampleScale));
+        /* Fetch chunk boundaries are not the server's write boundaries, so one
+           chunk can carry far more than the look-ahead window. Enforce the
+           horizon for every quantum, not only the first one of a chunk: each
+           quantum is paced to the clock and the excess falls through to the
+           resync/drop policy, so neither the queued audio nor the retained node
+           set grows with the chunk size. */
+        const quantum=Math.max(1,Math.floor(contract.rate*BABY_SCHEDULE_LEAD));
+        let start=babyStream.nextTime;
+        for(let from=0;from<frames;from+=quantum){
+          await babyPaceToHorizon(context,generation,start);
+          if(generation!==babyStream.generation)return;
+          start=babyScheduleStart(context);
+          babyEnforceNodeLimit(context.currentTime);
+          if(babyStream.nodes.size>=BABY_MAX_NODES)continue;
+          const count=Math.min(quantum,frames-from);
+          const audio=context.createBuffer(1,count,contract.rate);
+          const samples=audio.getChannelData(0);
+          for(let i=0;i<count;i++){
+            const offset=(from+i)*frameBytes+contract.channel*bytesPerSample;
+            let value;
+            if(contract.bits===24){
+              value=bytes[offset]|(bytes[offset+1]<<8)|(bytes[offset+2]<<16);
+              if(value&0x800000)value|=-16777216;
+              samples[i]=Math.max(-1,Math.min(1,value/sampleScale));
+            }else{
+              value=bytes[offset]|(bytes[offset+1]<<8);
+              if(value&0x8000)value|=-65536;
+              samples[i]=Math.max(-1,Math.min(1,value/sampleScale));
+            }
           }
+          const node=context.createBufferSource();
+          node.buffer=audio;
+          node.connect(gain);
+          node.onended=()=>babyStream.nodes.delete(node);
+          babyStream.nodes.add(node);
+          node.babyStart=start;
+          node.babyEnd=start+audio.duration;
+          node.start(start);
+          babyStream.nextTime=start+audio.duration;
+          start=babyStream.nextTime;
+          scheduled+=audio.duration;
         }
-        const node=context.createBufferSource();
-        node.buffer=audio;
-        node.connect(gain);
-        const start=Math.max(babyStream.nextTime,context.currentTime+0.02);
-        node.start(start);
-        babyStream.nextTime=start+audio.duration;
+        decoded+=frames;
+        babyDiag({received,frames:decoded,scheduled,playback:'playing'});
+      }
+      if(generation===babyStream.generation){
+        await babyDrainScheduled(context,generation);
+        if(generation===babyStream.generation)stopBabyStream('ended');
       }
     }catch(e){
       if(generation===babyStream.generation){
-        if(e.name!=='AbortError'){console.error(e);toast(e.message,true)}
+        if(e.name!=='AbortError'){console.error(e);toast(e.message,true);babyDiag({error:e.message})}
         stopBabyStream();
       }
     }
   };
-  $('#baby-stop').onclick=stopBabyStream;
+  $('#baby-stop').onclick=()=>stopBabyStream();
 }
 
 /*
@@ -1198,7 +1354,7 @@ function bindActionSounds(){
 function actionSoundSelection(){
  return $$('#content input[data-sound]').filter(x=>x.checked).map(x=>x.dataset.sound).join(',');
 }
-async function ledPage(){const [l,b]=await Promise.all([api('/led'),api('/buttons')]);const hex='#'+[l.colour.r,l.colour.g,l.colour.b].map(n=>n.toString(16).padStart(2,'0')).join('');const names={listening:'Listening',thinking:'Thinking',error:'Error',dnd:'Do not disturb',night:'Night'};const n=l.night||{enabled:false,active:false,start_minute:1320,end_minute:420};const hhmm=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');const mins=t=>{const p=String(t||'').split(':');return p.length===2?(+p[0])*60+(+p[1]):NaN};const profiles=Object.entries(l.profiles||{}).map(([k,v])=>{const colour=typeof v==='string'?v:'#'+[v.r,v.g,v.b].map(n=>Number(n).toString(16).padStart(2,'0')).join('');const brightness=typeof v==='object'&&v?Number(v.brightness??l.brightness):l.brightness;return `<div class="led-profile"><label class="field"><span>${names[k]||k}</span><input id="led-profile-${k}" data-profile="${k}" type="color" value="${colour}"></label><div class="swatch-row"><code id="led-profile-hex-${k}">${esc(colour)}</code></div>${range('Brightness',brightness,`led-profile-brightness-${k}`)}<button class="secondary-btn profile-save" data-profile="${k}">Save ${names[k]||k}</button></div>`}).join('');content.innerHTML=`<div class="settings-grid">${panel('Light ring',`<label class="field"><span>Current colour</span><input id="led-colour" type="color" value="${hex}"></label>`+range('Brightness',l.brightness,'led-brightness')+toggle('Music visualizer',l.visualizer_enabled!==false,'led-visualizer')+`<p class="muted">Show reactive equalizer animations on the ring while music is playing.</p>`+ledRing(l)+`<div class="led-preview" data-led="${rgb(l.colour)}"><i></i><span>Live preview</span></div><div class="button-row">${saveButton('save-led')}${action('Run LED test','led-test')}</div>`)}${panel('State themes',`<p class="muted">Choose the ring colour and brightness used while LibreEcho is listening, thinking, reporting an error, or in do-not-disturb mode.</p><div class="led-profiles">${profiles}</div>`)}${panel('Night mode',`<p class="muted">Between these times the ring is capped to the night brightness. Colours are kept, so the device still shows what it is doing -- just dimly. Times are the device's local time.</p>${toggle('Enable night mode',n.enabled,'night-enabled')}<div class="settings-grid">${field('Starts','','night-start','time')}${field('Ends','','night-end','time')}</div><div class="status-line"><span class="status-dot ${n.active?'ok':''}"></span><span>${n.active?'Night mode is active now':'Not active right now'}</span></div>${saveButton('save-night')}`)}${panel('Buttons',select('Short press',b.short_press,'short-action',['Start listening','Play / pause','Run automation','Disabled'])+select('Long press',b.long_press,'long-action',['Open pairing mode','Toggle privacy mode','Reboot device'])+toggle('Hardware mute state',b.hardware_mute,'hw-mute',true)+select('Action button',{sound:'Play a sound',listen:'Start listening',playpause:'Play / pause',disabled:'Do nothing'}[b.action||'sound'],'action-behaviour',['Play a sound','Start listening','Play / pause','Do nothing'])+range('Action flash brightness',b.action_brightness??70,'action-brightness')+range('Mute ring brightness',b.mute_brightness??60,'mute-brightness')+`<p class="muted">Only <strong>Play a sound</strong> is wired up so far; the others are placeholders and will say so in the log if chosen. The flash is on the light ring &mdash; the action button has no lamp of its own. Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it.</p>`+toggle('Press tones',b.tones!==false,'button-tones')+`<p class="muted">A short rising or falling pair when a button is pressed. The buttons are on top of the device where the ring cannot be seen, so the tone is how you know a press registered &mdash; rising for volume up and for leaving mute, falling for the opposite.</p>`+saveButton('save-buttons'),'wide')}${actionSoundPanel(b)}</div>`;bindRange();if($('#night-start')){$('#night-start').value=hhmm(n.start_minute);$('#night-end').value=hhmm(n.end_minute);bindDirty(['#night-enabled','#night-start','#night-end'],'#save-night');$('#save-night').onclick=()=>{const s2=mins($('#night-start').value),e2=mins($('#night-end').value);if(!Number.isFinite(s2)||!Number.isFinite(e2)){toast('Enter both times as HH:MM',true);return}mutate('/led/night',{enabled:$('#night-enabled').checked,start_minute:s2,end_minute:e2},'Night mode saved')}}
+async function ledPage(){const [l,b]=await Promise.all([api('/led'),api('/buttons')]);const hex='#'+[l.colour.r,l.colour.g,l.colour.b].map(n=>n.toString(16).padStart(2,'0')).join('');const names={listening:'Listening',thinking:'Thinking',error:'Error',dnd:'Do not disturb',night:'Night'};const n=l.night||{enabled:false,active:false,start_minute:1320,end_minute:420};const hhmm=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');const mins=t=>{const p=String(t||'').split(':');return p.length===2?(+p[0])*60+(+p[1]):NaN};const profiles=Object.entries(l.profiles||{}).map(([k,v])=>{const colour=typeof v==='string'?v:'#'+[v.r,v.g,v.b].map(n=>Number(n).toString(16).padStart(2,'0')).join('');const brightness=typeof v==='object'&&v?Number(v.brightness??l.brightness):l.brightness;return `<div class="led-profile"><label class="field"><span>${names[k]||k}</span><input id="led-profile-${k}" data-profile="${k}" type="color" value="${colour}"></label><div class="swatch-row"><code id="led-profile-hex-${k}">${esc(colour)}</code></div>${range('Brightness',brightness,`led-profile-brightness-${k}`)}<button class="secondary-btn profile-save" data-profile="${k}">Save ${names[k]||k}</button></div>`}).join('');content.innerHTML=`<div class="settings-grid">${panel('Light ring',`<label class="field"><span>Current colour</span><input id="led-colour" type="color" value="${hex}"></label>`+range('Brightness',l.brightness,'led-brightness')+toggle('Music visualizer',l.visualizer_enabled!==false,'led-visualizer')+`<p class="muted">Show reactive equalizer animations on the ring while music is playing.</p>`+ledRing(l)+`<div class="led-preview" data-led="${rgb(l.colour)}"><i></i><span>Live preview</span></div><div class="button-row">${saveButton('save-led')}${action('Run LED test','led-test')}</div>`)}${panel('State themes',`<p class="muted">Choose the ring colour and brightness used while LibreEcho is listening, thinking, reporting an error, or in do-not-disturb mode.</p><div class="led-profiles">${profiles}</div>`)}${panel('Night mode',`<p class="muted">Between these times the ring is capped to the night brightness. Colours are kept, so the device still shows what it is doing -- just dimly. Times are the device's local time.</p>${toggle('Enable night mode',n.enabled,'night-enabled')}<div class="settings-grid">${field('Starts','','night-start','time')}${field('Ends','','night-end','time')}</div><div class="status-line"><span class="status-dot ${n.active?'ok':''}"></span><span>${n.active?'Night mode is active now':'Not active right now'}</span></div>${saveButton('save-night')}`)}${panel('Buttons',select('Short press',b.short_press,'short-action',['Start listening','Play / pause','Run automation','Disabled'])+select('Long press',b.long_press,'long-action',['Open pairing mode','Toggle privacy mode','Reboot device'])+toggle('Hardware mute button present',b.hardware_mute,'hw-mute',true)+select('Action button',{sound:'Play a sound',listen:'Start listening',playpause:'Play / pause',disabled:'Do nothing'}[b.action||'sound'],'action-behaviour',['Play a sound','Start listening','Play / pause','Do nothing'])+range('Action flash brightness',b.action_brightness??70,'action-brightness')+range('Mute ring brightness',b.mute_brightness??60,'mute-brightness')+`<p class="muted">Only <strong>Play a sound</strong> is wired up so far; the others are placeholders and will say so in the log if chosen. The flash is on the light ring &mdash; the action button has no lamp of its own. Mute brightness sets the red ring only: the lamp in the mute button is a plain on/off line with no dimming behind it, and software cannot switch it — it is wired to the button's privacy latch, so muting from this page lights the ring and leaves the lamp dark.</p>`+muteLampNote(null,b)+toggle('Press tones',b.tones!==false,'button-tones')+`<p class="muted">A short rising or falling pair when a button is pressed. The buttons are on top of the device where the ring cannot be seen, so the tone is how you know a press registered &mdash; rising for volume up and for leaving mute, falling for the opposite.</p>`+saveButton('save-buttons'),'wide')}${actionSoundPanel(b)}</div>`;bindRange();if($('#night-start')){$('#night-start').value=hhmm(n.start_minute);$('#night-end').value=hhmm(n.end_minute);bindDirty(['#night-enabled','#night-start','#night-end'],'#save-night');$('#save-night').onclick=()=>{const s2=mins($('#night-start').value),e2=mins($('#night-end').value);if(!Number.isFinite(s2)||!Number.isFinite(e2)){toast('Enter both times as HH:MM',true);return}mutate('/led/night',{enabled:$('#night-enabled').checked,start_minute:s2,end_minute:e2},'Night mode saved')}}
 bindActionSounds();bindDirty(['#led-colour','#led-brightness','#led-visualizer'],'#save-led');bindDirty(['#short-action','#long-action','#button-tones','#action-behaviour','#action-brightness','#mute-brightness'],'#save-buttons');$('#save-led').onclick=()=>{const h=$('#led-colour').value;mutate('/led',{r:parseInt(h.slice(1,3),16),g:parseInt(h.slice(3,5),16),b:parseInt(h.slice(5,7),16),brightness:+$('#led-brightness').value,visualizer_enabled:$('#led-visualizer').checked},'LED changes saved')};$$('input[type=color][data-profile]').forEach(i=>{const out=$('#led-profile-hex-'+i.dataset.profile);if(out)i.oninput=()=>{out.textContent=i.value}});
 $$('.profile-save').forEach(button=>button.onclick=()=>{const k=button.dataset.profile;const h=$(`#led-profile-${k}`).value;const brightnessInput=$(`#led-profile-brightness-${k}`);mutate('/led/profile',{name:k,r:parseInt(h.slice(1,3),16),g:parseInt(h.slice(3,5),16),b:parseInt(h.slice(5,7),16),brightness:+brightnessInput.value},`${names[k]||k} theme saved`)});$('#save-buttons').onclick=()=>mutate('/buttons',{short_press:$('#short-action').value,long_press:$('#long-action').value,tones:$('#button-tones').checked,action:{'Play a sound':'sound','Start listening':'listen','Play / pause':'playpause','Do nothing':'disabled'}[$('#action-behaviour').value]||'sound',action_sounds:actionSoundSelection(),action_brightness:parseInt($('#action-brightness').value,10),mute_brightness:parseInt($('#mute-brightness').value,10)},'Button changes saved');/* The ring test paints at the ring's own brightness, so with brightness at 0
      it runs invisibly and still reports success -- which reads as a dead
@@ -1235,7 +1391,7 @@ function assistantCard(a){if(a.unsupported)return `<section class="panel setting
  * key itself, so nothing here can render one back. */
 const localUrl=String(a.base_url||''),localActive=a.provider==='openai-compatible',keySet=!!a.api_key_configured,local=collapsiblePanel('Local LLM',`<div class="assistant-heading"><div><span class="source-pill">Self-hosted</span><h4>Local LLM</h4><p class="muted">Any OpenAI-compatible endpoint on your network — Ollama, llama.cpp or LM Studio. No subscription and no metered billing. The model runs on that machine; this device is the client.</p></div><div class="assistant-state"><span class="status-dot ${localActive&&localUrl?'ok':''}"></span>${localActive&&localUrl?'Active':localUrl?'Configured':'Not configured'}</div></div><div class="settings-grid assistant-settings"><div>${toggle('Enable wake-to-reply voice loop',localActive&&a.enabled,'local-enabled')}${field('Endpoint URL',localUrl,'local-base-url','text','placeholder="http://198.51.100.10:11434/v1"')}${field('Model',localActive?a.model:'','local-model','text','placeholder="qwen2.5:3b"')}${field(keySet?'API key (stored — type to replace)':'API key (optional)','','local-api-key','password',keySet?'placeholder="Leave blank to keep the stored key"':'placeholder="Leave blank if the endpoint needs no key"')}${saveButton('save-local')}</div><div><dl class="facts"><dt>Active provider</dt><dd class="${localActive?'connected':''}">${localActive?'Local LLM':'ChatGPT'}</dd><dt>Endpoint</dt><dd>${localUrl?esc(localUrl):'Not set'}</dd><dt>API key</dt><dd>${keySet?'Stored':'None'}</dd></dl><p class="muted">Accepts <code>http://</code> on your LAN as well as <code>https://</code>. Saving here makes the local endpoint the active assistant and disconnects ChatGPT.</p><div class="button-row">${localActive&&localUrl?action('Send test prompt','local-test'):''}${keySet?action('Clear key','local-clear-key','danger-btn'):''}</div></div></div>`,'assistant-provider',localActive);const chatgptActive=a.provider==='openai-codex',signedIn=chatgptActive&&a.authenticated,waiting=chatgptActive&&a.auth_state==='waiting',latency=Number(a.last_speech_end_to_first_pcm_ms||0),chatgpt=collapsiblePanel('ChatGPT',`<div class="assistant-heading"><div><span class="source-pill">Subscription</span><h4>${esc(a.provider_name||'ChatGPT')}</h4><p class="muted">Uses your ChatGPT subscription with device login. LibreEcho never asks for or stores an API key, and does not fall back to metered API billing.</p></div><div class="assistant-state"><span class="status-dot ${signedIn?'ok':''}"></span>${signedIn?'Connected':waiting?'Waiting for sign-in':'Not connected'}</div></div>${waiting?`<div class="device-code"><span>Enter this code</span><strong>${esc(a.user_code)}</strong><a class="primary-btn action-link" href="${esc(a.verification_url)}" target="_blank" rel="noopener">Open ChatGPT sign-in</a></div>`:''}<div class="settings-grid assistant-settings"><div>${toggle('Enable wake-to-reply voice loop',chatgptActive&&a.enabled,'assistant-enabled',!signedIn)}${field('Provider',a.provider_name||a.provider,'assistant-provider','text','disabled')}${field('Model',a.model,'assistant-model')}<label class="field"><span>Voice response prompt</span><textarea id="assistant-prompt" rows="8">${esc(a.prompt)}</textarea></label>${saveButton('save-assistant')}</div><div><dl class="facts"><dt>Wake audio</dt><dd class="${a.wake_connected?'connected':''}">${a.wake_connected?'Connected':'Unavailable'}</dd><dt>Post-AEC stream</dt><dd class="${a.audio_connected?'connected':''}">${a.audio_connected?'Connected':'Unavailable'}</dd><dt>Local STT</dt><dd>${a.recognizing?'Recognizing':'Ready'}</dd><dt>Completed voice turns</dt><dd>${Number(a.completed_transcripts||0)}</dd><dt>Last STT processing</dt><dd>${Number(a.last_stt_processing_ms||0)||'—'}${a.last_stt_processing_ms?' ms':''}</dd><dt>Speech end → first PCM</dt><dd class="${latency&&latency<=3000?'connected':''}">${latency?latency+' ms':'Not measured'}</dd><dt>Target</dt><dd>≤ ${Number(a.latency_target_ms||3000)} ms</dd><dt>Target violations</dt><dd>${Number(a.latency_violations||0)}</dd></dl><div class="button-row">${!signedIn&&!waiting?action('Connect ChatGPT','assistant-auth-start','primary-btn'):''}${waiting?action('Check sign-in','assistant-auth-poll','primary-btn'):''}${signedIn?action('Disconnect','assistant-logout','danger-btn'):''}</div>${signedIn?`<label class="field"><span>Test prompt</span><input id="assistant-test-text" value="Say hello in one short sentence."></label>${action('Speak test response','assistant-test')}`:''}</div></div>`,'assistant-provider',waiting);return `<section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${local}${chatgpt}</section>`}
 async function assistantAction(path,message){if(state.busy)return;setBusy(true);try{await api(path,{method:'POST',body:'{}'});toast(message);await integrationsPage()}catch(e){toast(e.message,true);await integrationsPage()}finally{setBusy(false)}}
-const WX_PROVIDERS=[['open-meteo','Open-Meteo'],['met-no','MET Norway'],['off','Off']];
+const WX_PROVIDERS=[['open-meteo','Open-Meteo'],['ukmo','Met Office UK'],['met-no','MET Norway'],['off','Off']];
 function wxLabel(id){const m=WX_PROVIDERS.find(p=>p[0]===id);return m?m[1]:'Open-Meteo'}
 function wxId(label){const m=WX_PROVIDERS.find(p=>p[1]===label);return m?m[0]:'open-meteo'}
 /*
@@ -1250,7 +1406,7 @@ function wxId(label){const m=WX_PROVIDERS.find(p=>p[1]===label);return m?m[0]:'o
  * to hide.
  */
 function weatherCard(a){if(a.unsupported)return '';
-return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Both providers are free and need no account, and nothing is sent until a location is set.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Austin, Texas"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}</div><div class="button-row">${action('Look up coordinates','wx-lookup')}<span class="muted" id="wx-lookup-note"></span></div><p class="muted" id="wx-warn"></p><div class="settings-grid">${saveButton('save-wx')}</div>`,'weather-provider')}
+return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Every provider here is free and needs no account, so nothing is sent until a location is set; Met Office UK is the UKMO model, served through Open-Meteo.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Austin, Texas"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}</div><div class="button-row">${action('Look up coordinates','wx-lookup')}<span class="muted" id="wx-lookup-note"></span></div><p class="muted" id="wx-warn"></p><div class="settings-grid">${saveButton('save-wx')}</div>`,'weather-provider')}
 function bindWeather(a){
  if(a.unsupported||!$('#wx-provider'))return;
  $('#wx-location').value=a.home_location||'';
@@ -1744,7 +1900,7 @@ try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==s
  const stop=$('#dismiss-timers');if(stop)stop.onclick=()=>post('/timers/dismiss',{},'Stopped');
  content.querySelectorAll('[data-cancel]').forEach(b=>{b.onclick=()=>del('/timers/'+b.dataset.cancel,'Timer cancelled')});
  scheduleTimerRefresh()}
-async function render(){clearTimeout(state.timer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Timers')await timersPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations'){installIntegrationsExtras();await integrationsPage()}else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){if(document.body.classList.contains('auth-pending'))markStartupUnavailable();errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000)}
+async function render(){(state.renderGeneration=(state.renderGeneration||0)+1);clearTimeout(state.timer);clearTimeout(state.lampTimer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Timers')await timersPage();else if(state.page==='Baby Monitor')await babyMonitorPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations'){installIntegrationsExtras();await integrationsPage()}else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else aboutPage()}catch(e){if(document.body.classList.contains('auth-pending'))markStartupUnavailable();errorView(e)}applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000);else if(state.page==='Audio'||state.page==='LED & Buttons')state.lampTimer=setTimeout(refreshMuteLamp,5000)}
 function showPage(name,updateRoute=true){let corrected=false;if(!descriptions[name]||!navItems().some(([n])=>n===name)){name='Overview';corrected=true}if(state.page==='Baby Monitor'&&name!=='Baby Monitor')stopBabyStream();state.page=name;const path='/'+pageSlug(name);
  /* A route to a page that is not in the menu is not a route. Replace it, so a
     reload or a back button does not land on it again. */
@@ -1761,4 +1917,4 @@ async function ensureAuth(c){state.authMode=c.authentication;updateAuthControl()
 async function signOut(){if(!state.token){redirectToLogin();return}try{await api('/auth/logout',{method:'POST',body:'{}'})}catch(_){/* The local session is cleared even if the server is unreachable. */}finally{redirectToLogin()}}
 $('#auth-control').onclick=()=>state.token?signOut():redirectToLogin();
 if(location.hash.length>1){const legacy=decodeURIComponent(location.hash.slice(1));if(items.some(([n])=>pageSlug(n)===legacy))history.replaceState(null,'','/'+legacy);}
-api('/config').then(async c=>{state.csrf=c.csrf_token;await ensureAuth(c);return Promise.all([api('/status'),api('/device'),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'})),api('/system/features').catch(()=>({simulation:false}))])}).then(async([,d,ota,features])=>{applyFeatures(features);updateVersionDisplay(d,ota);await showPage(pageFromLocation(),false);document.body.classList.remove('auth-pending')}).catch(error=>{if(state.authMode==='users'||state.authMode==='bearer-token')redirectToLogin();else{markStartupUnavailable();document.body.classList.remove('auth-pending');errorView(error)}});
+api('/config').then(async c=>{state.csrf=c.csrf_token;await ensureAuth(c);return Promise.all([api('/status'),api('/device'),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'})),api('/system/features').catch(()=>({simulation:false}))])}).then(async([s,d,ota,features])=>{applyFeatures(features);updateVersionDisplay(d,ota);/* The widget is shell state, so a deep link gets it from this response rather than from a second request or from a later visit to Overview. */renderSidebarStatus(s);await showPage(pageFromLocation(),false);document.body.classList.remove('auth-pending')}).catch(error=>{if(state.authMode==='users'||state.authMode==='bearer-token')redirectToLogin();else{markStartupUnavailable();document.body.classList.remove('auth-pending');errorView(error)}});

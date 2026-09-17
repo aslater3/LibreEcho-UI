@@ -165,6 +165,27 @@ struct snd_ctl_elem_value {
 #define LE_CHIRP_AMPLITUDE 4200.0
 
 /*
+ * Cue rate limit.
+ *
+ * Every cue request used to fork its own writer straight onto the shared
+ * system PCM, so nothing bounded how often a caller could trigger one: a
+ * repeated trigger (a looping wake-word signal, a stuck button) became a
+ * rapid-fire burst of overlapping short playbacks.  That overlap is the
+ * stream-lock contention shape that panics the AFE period IRQ path, so the
+ * limit lives here at the audio boundary and covers every caller -- button
+ * cues, the wake chirp, timers, and anything added later.
+ *
+ * 200ms is twice the 90ms chirp, so consecutive cues never touch even
+ * without the in-flight guard, and it caps a caller at five cues a second:
+ * fast enough that an intentional press cue still feels immediate (the gate
+ * only ever drops, it never delays or queues), while a runaway trigger can
+ * no longer become a machine-gun run of writers.
+ */
+#define LE_CUE_MIN_INTERVAL_MS 200
+/* start_cue's third outcome: the gate refused, nothing was forked. */
+#define LE_CUE_THROTTLED 1
+
+/*
  * Sleep-noise generator.
  *
  * Written to the media bus rather than the system bus, because this is
@@ -217,6 +238,15 @@ struct audio_hw {
     pid_t noise_pid;
     /* One sample child at a time; this also lets the reaper clear ownership. */
     pid_t sample_pid;
+    /*
+     * Cue playback: at most one writer at a time, and at most one cue per
+     * LE_CUE_MIN_INTERVAL_MS.  The PID is the writer slot and the timestamp
+     * is CLOCK_MONOTONIC, so the window survives an NTP step.  Requests are
+     * dropped, never queued, so a burst cannot drain into one later.
+     */
+    pid_t cue_pid;
+    long long cue_started_ms;
+    unsigned long cue_throttled;
     int noise_colour;
     long noise_seconds;
     int noise_level;
@@ -265,6 +295,8 @@ static void reap_children(struct audio_hw *audio)
         if (done > 0) {
             if (done == audio->sample_pid)
                 audio->sample_pid = 0;
+            if (done == audio->cue_pid)
+                audio->cue_pid = 0;
             if (done == audio->noise_pid)
                 clear_noise_state(audio);
             continue;
@@ -1384,6 +1416,41 @@ static time_t monotonic_seconds(void)
     return now.tv_sec;
 }
 
+static long long monotonic_millis(void)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return 0;
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/*
+ * May a cue start now?
+ *
+ * Two independent bounds, both enforced here so no caller can bypass them:
+ * a writer already playing must finish first (at most one cue writer exists
+ * at any moment), and the previous cue must be at least
+ * LE_CUE_MIN_INTERVAL_MS old.  A refused request is dropped, never queued:
+ * queueing a burst would just move the run of chirps to the end of the
+ * window instead of removing it.
+ */
+static int cue_may_start(struct audio_hw *audio, long long now_ms)
+{
+    if (audio->cue_pid > 0) {
+        pid_t done = waitpid(audio->cue_pid, NULL, WNOHANG);
+
+        if (done == audio->cue_pid || (done < 0 && errno == ECHILD))
+            audio->cue_pid = 0;
+        else
+            return 0;
+    }
+    if (audio->cue_started_ms != 0 &&
+        now_ms - audio->cue_started_ms < LE_CUE_MIN_INTERVAL_MS)
+        return 0;
+    return 1;
+}
+
 /*
  * A timed generator exits on its own when the sleep timer runs out.  Nothing
  * The generic reaper also handles this child, so it must clear the tracked
@@ -1625,14 +1692,30 @@ static int start_sample(struct audio_hw *audio, const char *name)
     return 0;
 }
 
-static int start_cue(const struct audio_hw *audio, double first_hz,
+/*
+ * Returns 0 when a writer was started, LE_CUE_THROTTLED when the gate
+ * refused the request (nothing forked), and -1 on error.
+ */
+static int start_cue(struct audio_hw *audio, double first_hz,
                      double second_hz, unsigned int ms)
 {
+    long long now_ms;
+    unsigned long since_ms = 0;
     int fd;
     pid_t pid;
 
     if (access(audio->system_audio_bus, F_OK) < 0)
         return -1;
+    now_ms = monotonic_millis();
+    if (!cue_may_start(audio, now_ms)) {
+        if (audio->cue_started_ms != 0 && now_ms > audio->cue_started_ms)
+            since_ms = (unsigned long)(now_ms - audio->cue_started_ms);
+        ++audio->cue_throttled;
+        le_log_debug("audiod: cue dropped (%lums since the last one, %lu "
+                     "dropped in this window)",
+                     since_ms, audio->cue_throttled);
+        return LE_CUE_THROTTLED;
+    }
     fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
         return -1;
@@ -1646,6 +1729,12 @@ static int start_cue(const struct audio_hw *audio, double first_hz,
         close(fd);
         _exit(result == 0 ? 0 : 1);
     }
+    audio->cue_pid = pid;
+    audio->cue_started_ms = now_ms;
+    if (audio->cue_throttled > 0)
+        le_log_info("audiod: cue played after dropping %lu request(s)",
+                    audio->cue_throttled);
+    audio->cue_throttled = 0;
     close(fd);
     return 0;
 }
@@ -1827,6 +1916,7 @@ static int handle_request(struct audio_hw *audio, char *message,
 
     if (!strcmp(command, "cue")) {
         long first = 0, second = 0, ms = LE_CHIRP_MS;
+        int cue;
 
         if (json_long(message, "first_hz", &first) < 0 ||
             json_long(message, "second_hz", &second) < 0)
@@ -1841,18 +1931,29 @@ static int handle_request(struct audio_hw *audio, char *message,
         (void)json_long(message, "ms", &ms);
         if (ms < 40 || ms > 800)
             ms = LE_CHIRP_MS;
-        if (start_cue(audio, (double)first, (double)second,
-                      (unsigned int)ms) < 0)
+        cue = start_cue(audio, (double)first, (double)second,
+                        (unsigned int)ms);
+        if (cue < 0)
             return response_error(response, response_size, id,
                                   "audio output unavailable");
+        /* Throttled is a normal outcome, not a failure: reporting an error
+           would invite the caller to retry into the same window. */
+        if (cue == LE_CUE_THROTTLED)
+            return response_ok(response, response_size, id,
+                               "{\"playing\":false,\"throttled\":true}");
         return response_ok(response, response_size, id, "{}");
     }
 
     if (!strcmp(command, "wake_chirp")) {
-        if (start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ,
-                      LE_CHIRP_MS) < 0)
+        int cue = start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ,
+                            LE_CHIRP_MS);
+
+        if (cue < 0)
             return response_error(response, response_size, id,
                                   "audio output unavailable");
+        if (cue == LE_CUE_THROTTLED)
+            return response_ok(response, response_size, id,
+                               "{\"playing\":false,\"throttled\":true}");
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "test_tone")) {

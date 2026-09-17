@@ -23,7 +23,7 @@ AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/a
 MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/adapter_server.c src/log.c
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
 BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
-WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/adapter/adapter_client.c src/log.c
+WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/service_env.c src/adapter/adapter_client.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
 RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
 BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
@@ -54,7 +54,7 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/diagnostic_export.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/diagnostic_export.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -256,6 +256,14 @@ $(BUILD)/test-action-sample: tests/test_action_sample.c \
 		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
 		-lm -o $@
 
+$(BUILD)/test-cue-rate-limit: tests/test_cue_rate_limit.c \
+	src/adapter/audiod.c src/adapter/adapter_client.c \
+	src/adapter/adapter_server.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
+
 $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 	src/adapter/buttond_timing.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
@@ -263,6 +271,11 @@ $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 $(BUILD)/test-watchdog-policy: tests/test_watchdog_policy.c \
 		src/adapter/watchdog_policy.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-service-env-isolation: tests/test_service_env_isolation.c \
+		src/service_env.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
 # Drives the real worker, queue, thread and decoder against scripted score
 # sequences; the test supplies its own le_wake_engine, so no ONNX runtime or
@@ -273,7 +286,7 @@ $(BUILD)/test-wake-decode: tests/test_wake_decode.c \
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
 		$^ -lpthread -lm -o $@
 
-$(BUILD)/test-wake-health: tests/test_wake_health.c src/json.c src/log.c
+$(BUILD)/test-wake-health: tests/test_wake_health.c src/json.c src/log.c src/service_env.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
@@ -286,11 +299,11 @@ $(BUILD)/test-wake-health-api: tests/test_wake_health_api.c \
 		$^ $(LDFLAGS) -lm -lpthread -o $@
 
 $(BUILD)/test-light-sensor: tests/test_light_sensor.c \
-	src/backend_linux.c src/json.c src/log.c
+	src/backend_linux.c src/json.c src/log.c src/service_env.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/json.c src/log.c -o $@
+		-Isrc -Isrc/adapter $< src/json.c src/log.c src/service_env.c -o $@
 
 $(BUILD)/test-network-health: tests/test_network_health.c \
 	src/adapter/network_health.c
@@ -313,7 +326,7 @@ $(BUILD)/test-timer-schedule: tests/test_timer_schedule.c \
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
 $(BUILD)/test-timer-json: tests/test_timer_json.c \
-	src/backend_linux.c src/json.c src/log.c
+	src/backend_linux.c src/json.c src/log.c src/service_env.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_TIMER_JSON_TEST $(CSTD) $(WARN) \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
@@ -336,7 +349,7 @@ $(BUILD)/test-timer-persistence: tests/test_timer_persistence.c \
 		src/adapter/adapter_server.c src/json.c src/log.c -o $@
 
 $(BUILD)/test-backend-linux-timers: tests/test_backend_linux_timers.c \
-	src/json.c src/log.c
+	src/json.c src/log.c src/service_env.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) \
 		$(WARN) -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $^ -o $@
@@ -364,19 +377,19 @@ $(BUILD)/test-networkd-scan-security: tests/test_networkd_scan_security.c \
 		-Isrc -Isrc/adapter tests/test_networkd_scan_security.c -o $@
 
 $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emission.c \
-		src/backend_linux.c src/json.c src/log.c
+		src/backend_linux.c src/json.c src/log.c src/service_env.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-DLE_ADAPTER_NETWORK_SOCK='"/tmp/libreecho-network-backend-test.sock"' \
 		-Isrc -Isrc/adapter tests/test_backend_linux_wifi_emission.c \
-		src/json.c src/log.c -o $@
+		src/json.c src/log.c src/service_env.c -o $@
 
 $(BUILD)/test-thermal-zone-selection: tests/test_thermal_zone_selection.c \
-	src/backend_linux.c src/json.c src/log.c
+	src/backend_linux.c src/json.c src/log.c src/service_env.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/json.c src/log.c -o $@
+		-Isrc -Isrc/adapter $< src/json.c src/log.c src/service_env.c -o $@
 
 $(BUILD)/test-auth-sessions: tests/test_auth_sessions.c src/auth.c
 	@mkdir -p $(BUILD)
@@ -713,19 +726,27 @@ $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 		src/json.c src/log.c -lpthread -o $@
 
 $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
-	src/api.c src/backend.c src/json.c
+	src/api.c src/backend.c src/json.c src/service_env.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/backend.c src/json.c -o $@
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/service_env.c -o $@
+
+$(BUILD)/test-voice-pipeline-env-isolation: tests/test_voice_pipeline_env_isolation.c \
+	src/api.c src/backend.c src/json.c src/service_env.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/service_env.c -o $@
 
 $(BUILD)/test-home-assistant-discovery: tests/test_home_assistant_discovery_lifecycle.c \
-	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c
+	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c \
+	src/service_env.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c \
-		src/adapter/wyoming_client.c -o $@
+		src/service_env.c src/adapter/wyoming_client.c -o $@
 
 $(BUILD)/test-voice-listening-feedback: \
 		tests/test_voice_listening_feedback.c \
@@ -924,6 +945,8 @@ clean:
 		$(BUILD)/test-voice-playback \
 		$(BUILD)/test-voice-listening-feedback \
 		$(BUILD)/test-voice-pipeline-restart \
+		$(BUILD)/test-service-env-isolation \
+		$(BUILD)/test-voice-pipeline-env-isolation \
 		$(BUILD)/test-home-assistant-discovery \
 		$(BUILD)/libreecho-sttd-sherpa-arm32 \
 		$(BUILD)/sttd.arm.o $(BUILD)/stt_engine_sherpa.arm.o \

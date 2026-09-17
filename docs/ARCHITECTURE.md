@@ -198,7 +198,8 @@ Each daemon owns one hardware domain and exposes it via the adapter protocol.
 | `set_gain` | `{gain: 0-100}` | Set microphone gain |
 | `set_mute` | `{muted: bool}` | Toggle mic mute |
 | `test_tone` | — | Play 440Hz sine wave |
-| `cue` | `{first_hz, second_hz, ms}` | Play a bounded two-tone notification cue |
+| `cue` | `{first_hz, second_hz, ms}` | Play a two-tone notification cue. Rate-limited at this boundary: a request inside the 200ms minimum interval, or one that arrives while the previous cue is still playing, is dropped rather than queued and is answered with `{playing:false, throttled:true}` |
+| `wake_chirp` | — | The 90ms wake acknowledgement chirp, played through the same cue gate |
 
 **ALSA interface:** Direct ioctl on `/dev/snd/controlC0`. Enumerates controls, reads/writes values. Falls back to `amixer` if ioctl fails.
 
@@ -473,3 +474,26 @@ libreecho-web       (needs all above for full functionality)
 btd → airplayd → ttsd → agentd → web
 
 **Shutdown order:** reverse startup order.
+
+## Service Control Boundary
+
+Services are controlled by running another daemon's init script
+(`/etc/init.d/libreecho-<service>.init`): the Web daemon starts and stops the
+voice pipeline, factory reset stops and restarts the Bluetooth, timer and
+assistant services, and `libreecho-watchdogd` restarts a service that stopped
+answering.
+
+Each of those callers carries its own generic `ARGS`, `DAEMON`, `PIDFILE` and
+`LOGFILE`, and every init script resolves its settings with
+`VAR=${VAR:-default}`. An inherited value therefore wins inside the child
+script, which is how a voice-pipeline change used to start
+`libreecho-sttd`/`libreecho-ttsd`/`libreecho-agentd` and `libreecho-wyomingd`
+with the Web daemon's own command line — usage on stderr, exit, and an API
+that reported "Voice assistant service is unavailable".
+
+`src/service_env.c` is that boundary: the four caller-identity names are
+removed in the forked child immediately before `exec`, so each script resolves
+its own defaults and its own root-owned `/etc/default/libreecho-<service>`
+file. Unrelated variables, including the service-scoped `LE_*` settings a
+script may read, are left alone. A service's own configuration is never the
+caller's command line.
