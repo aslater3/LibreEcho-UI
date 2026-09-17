@@ -1123,6 +1123,66 @@ directories are accepted, while any unexpected deletion or durability failure
 aborts the reboot and returns HTTP 503. Unprivileged Linux deployments and
 backends without destructive-action support return HTTP 501.
 
+#### GET /api/v1/system/update
+
+Reports signed A/B update state: installed and latest verified versions, the
+source and channel, check timestamps and errors, pending activation, slots,
+rollback state, the identity of the candidate the last completed check
+resolved, and whether the installed helper supports unsigned manual uploads.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "supported": true,
+    "current_slot": "b",
+    "inactive_slot": "a",
+    "state": "idle",
+    "progress": 0,
+    "pending_reboot": false,
+    "pending_version": "",
+    "installed_version": "LibreEcho OS 0.13.9",
+    "latest_version": "0.14.0",
+    "resolved_release_tag": "radar-puffin-build-0123456-0123456789abcdef-fedcba9876543210",
+    "ota_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "channel": "dev",
+    "source": "github-releases",
+    "source_reachable": "true",
+    "check_status": "update-available",
+    "check_error": "",
+    "last_check_epoch": 1789000000,
+    "last_success_epoch": 1789000000,
+    "automatic_updates": false,
+    "rollback_available": false,
+    "rollback_version": "",
+    "allow_unsigned": false,
+    "max_upload_bytes": 33554432,
+    "max_upload_ceiling_bytes": 33554432
+  },
+  "error": null
+}
+```
+
+`resolved_release_tag` and `ota_sha256` are additive to the check record written
+by the update helper. They name the candidate the last completed check
+resolved, so an available development build can be identified exactly rather
+than by a version string that successive builds share:
+
+- `resolved_release_tag` is the immutable GitHub release tag the pointer
+  resolved to, matching
+  `radar-puffin-(build|nightly)-<7 hex>-<16 hex>-<16 hex>`.
+- `ota_sha256` is the lower-case SHA-256 the device verifies the OTA download
+  against: exactly 64 hexadecimal digits.
+
+Both are empty strings when the check resolved no immutable candidate: a
+`stable` candidate (which has no immutable tag of its own), a failed check, a
+superseded in-flight status, a device that has not checked yet, or an update
+helper older than these keys. The UI must render the version-only result in
+that case rather than inventing or remembering an identity, and a client must
+treat an absent key, an empty value, and a value that does not match the
+grammar above as equally unknown. A malformed or oversized value is never
+truncated into a plausible-looking tag or digest; it is reported as empty.
+
 #### PUT /api/v1/system/update/channel
 
 Select the signed GitHub Releases channel. Changing the channel clears the

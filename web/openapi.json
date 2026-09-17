@@ -2855,7 +2855,7 @@
      "System"
     ],
     "summary": "Read signed A/B update and source-check state",
-    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, whether the installed update helper supports unsigned manual uploads, and canonical bounded components plus transaction_state and last_transaction_result observations. data.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity.",
+    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, whether the installed update helper supports unsigned manual uploads, and canonical bounded components plus transaction_state and last_transaction_result observations. data.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity. resolved_release_tag and ota_sha256 are additive keys naming the candidate the last completed check resolved; they are empty when the check resolved none, so a reader must treat a missing or empty value as unknown rather than inferring an identity.",
     "responses": {
      "200": {
       "description": "Successful response including separately verified signed authority (or explicitly unavailable authority).",
@@ -2877,8 +2877,16 @@
              "properties": {
               "authority_provenance": {
                "$ref": "#/components/schemas/AuthorityProvenance"
+               },
+               "resolved_release_tag": {
+                "type": "string",
+                "description": "Immutable GitHub release tag the check resolved for the candidate, in the form radar-puffin-(build|nightly)-<7 hex>-<16 hex>-<16 hex>. Empty when no immutable tag was resolved: a stable candidate, a failed or superseded check, or an update helper older than this key. A value that does not match that grammar is reported as empty, never truncated."
+               },
+               "ota_sha256": {
+                "type": "string",
+                "description": "Lower-case SHA-256 (exactly 64 hex digits) of the OTA package the resolved candidate installs, the digest the device verifies its download against. Empty whenever no immutable candidate was resolved, and any value that is not exactly 64 lower-case hex digits is reported as empty rather than truncated."
+               }
               }
-             }
             }
            }
           }
