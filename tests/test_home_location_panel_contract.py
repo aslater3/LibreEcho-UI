@@ -12,6 +12,7 @@ assert "function bindHomeLocation(a)" in source
 assert "bindHomeLocation(a);" in source
 for selector in ("#wx-provider", "#wx-location", "#wx-lat", "#wx-lon", "#save-wx"):
     assert selector in source, f"missing Home location binding: {selector}"
+assert "bindWeatherLookup(a)" in source, "the shared lookup binding is not called by this renderer"
 assert "weather_provider:provider" in source
 assert "home_location:location" in source
 assert "haveLatitude!==haveLongitude" in source

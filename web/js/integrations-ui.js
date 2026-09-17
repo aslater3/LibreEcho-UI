@@ -197,6 +197,13 @@ function bindHomeLocation(a) {
   $('#wx-lat').value=original.latitude;
   $('#wx-lon').value=original.longitude;
   bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+  /*
+   * The lookup button and the stale-coordinate advisory come from app.js.
+   * This renderer draws the same card, so it has to bind the same controls:
+   * binding only the save button here is what left "Look up coordinates" on
+   * screen with no handler at all.
+   */
+  bindWeatherLookup(a);
   $('#save-wx').onclick=()=>{
     const provider=wxId($('#wx-provider').value);
     const location=$('#wx-location').value.trim();

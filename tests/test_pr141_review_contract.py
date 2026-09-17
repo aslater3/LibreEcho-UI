@@ -28,6 +28,7 @@ assert "make build/test-auth-transport" in runner
 assert "make build/test-inherited-fds" in runner
 assert "make build/test-radiod-json" in runner
 assert "connect-src 'self' https://geocoding-api.open-meteo.com" in http
+assert "connect-src 'self' https://geocoding-api.open-meteo.com https://api.postcodes.io" in http
 assert "json_escape" in Path("src/json.c").read_text(encoding="utf-8")
 assert "test_unit.c" in runner
 

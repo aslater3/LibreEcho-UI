@@ -1351,13 +1351,20 @@ function wxId(label){const m=WX_PROVIDERS.find(p=>p[1]===label);return m?m[0]:'o
  * to hide.
  */
 function weatherCard(a){if(a.unsupported)return '';
-return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Both providers are free and need no account, and nothing is sent until a location is set.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Austin, Texas"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}</div><div class="button-row">${action('Look up coordinates','wx-lookup')}<span class="muted" id="wx-lookup-note"></span></div><p class="muted" id="wx-warn"></p><div class="settings-grid">${saveButton('save-wx')}</div>`,'weather-provider')}
-function bindWeather(a){
- if(a.unsupported||!$('#wx-provider'))return;
- $('#wx-location').value=a.home_location||'';
- $('#wx-lat').value=a.latitude||'';
- $('#wx-lon').value=a.longitude||'';
- bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Both providers are free and need no account, and nothing is sent until a location is set.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Town or postcode"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="53.7630"')}${field('Longitude','','wx-lon','text','placeholder="-2.7030"')}</div><div class="button-row">${action('Look up coordinates','wx-lookup')}<span class="muted" id="wx-lookup-note"></span></div><p class="muted" id="wx-warn"></p><div class="settings-grid">${saveButton('save-wx')}</div>`,'weather-provider')}
+/*
+ * Look up coordinates from the place name.
+ *
+ * Two renderers draw this card -- app.js on every page but Integrations, and
+ * integrations-ui.js on Integrations -- and each binds it separately. That
+ * split is what left the button on screen with no handler at all: app.js bound
+ * its own copy, the Integrations renderer replaced it and bound only the save
+ * button, and nothing attached the lookup. The lookup and the advisory text
+ * therefore live here, and both renderers call this one function, so a
+ * renderer change cannot drop the controls again.
+ */
+function bindWeatherLookup(a){
+ if(!$('#wx-location')||!$('#wx-lookup'))return;
  /*
   * Coordinates are what the weather provider actually queries; the place name
   * is only what the assistant says back. They can therefore disagree
@@ -1371,6 +1378,7 @@ function bindWeather(a){
   * device work it out".
   */
  const startLoc=(a.home_location||'').trim();
+ const note=$('#wx-lookup-note');
  const warn=()=>{
   const el=$('#wx-warn'); if(!el)return;
   const loc=$('#wx-location').value.trim();
@@ -1385,32 +1393,83 @@ function bindWeather(a){
  };
  ['#wx-location','#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=warn});
  warn();
+ const fill=(latitude,longitude,place,message)=>{
+  $('#wx-lat').value=(+latitude).toFixed(4);
+  $('#wx-lon').value=(+longitude).toFixed(4);
+  if(place)$('#wx-location').value=place;
+  $('#save-wx').disabled=false;
+  note.textContent=message;
+  warn();
+ };
+ /*
+  * A UK postcode is the input this geocoder cannot answer: it resolves place
+  * names worldwide and US ZIP codes, and returns nothing at all for "PR1 2AB"
+  * or "SW1A 1AA". The most natural thing to type for a UK home therefore
+  * looked like a dead button while "78701" worked. postcodes.io is free,
+  * needs no account, and answers a postcode directly.
+  */
+ const UK_POSTCODE=/^[A-Z]{1,2}[0-9][A-Z0-9]?\s?[0-9][A-Z]{2}$/i;
  $('#wx-lookup').onclick=async()=>{
   const place=$('#wx-location').value.trim();
-  const note=$('#wx-lookup-note');
   if(!place){note.textContent='Enter a place first';return}
   note.textContent='Looking up…';
   try{
+   let postcodeMissed=false;
+   if(UK_POSTCODE.test(place)){
+    const pr=await fetch('https://api.postcodes.io/postcodes/'
+                         +encodeURIComponent(place),{cache:'no-store'});
+    if(pr.ok){
+     const p=(await pr.json()).result||{};
+     if(Number.isFinite(+p.latitude)&&Number.isFinite(+p.longitude)){
+      fill(p.latitude,p.longitude,
+           [p.postcode,p.admin_district||p.region||p.country].filter(Boolean).join(', '),
+           `Found ${[p.postcode,p.admin_district||p.country||''].filter(Boolean).join(', ')} — now set the place name if you want something shorter`);
+      return;
+     }
+    }
+    postcodeMissed=pr.status===404;
+   }
    /* Queried from this browser rather than the device: the daemon is a
       single bounded poll() loop with no threads, and a blocking lookup
       inside it would stall every other request. Explicit button, so no
       request leaves the browser unless it is asked for. */
-   const r=await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name='
-                       +encodeURIComponent(place),{cache:'no-store'});
-   const j=await r.json();
-   const hits=j.results||[];
-   if(!hits.length){note.textContent='No match for that place';return}
+   const search=async name=>{
+    const r=await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name='
+                        +encodeURIComponent(name),{cache:'no-store'});
+    return (await r.json()).results||[];
+   };
+   let used=place,dropped='',hits=await search(place);
+   /*
+    * The geocoder's qualifier has to be an exact country or first-level area,
+    * so "Carnforth, Lancashire" (a county, admin2) matches nothing while
+    * "Carnforth" and "Carnforth, England" do. Retry without the qualifier
+    * rather than reporting no match for a place that exists.
+    */
+   if(!hits.length&&place.includes(',')){
+    used=place.split(',')[0].trim();
+    if(used&&used!==place){hits=await search(used);if(hits.length)dropped=`No match for "${place}"; used "${used}" instead. `;}
+   }
+   if(!hits.length){
+    note.textContent=postcodeMissed
+      ? 'That postcode was not found — a retired postcode is the usual reason. Check the spelling, or enter the town name.'
+      : 'No match for that place. Check the spelling, or enter a town or city name (a UK postcode works too).';
+    return;
+   }
    const h=hits[0];
-   $('#wx-lat').value=(+h.latitude).toFixed(4);
-   $('#wx-lon').value=(+h.longitude).toFixed(4);
-   $('#wx-location').value=[h.name,h.admin1].filter(Boolean).join(', ');
-   note.textContent=hits.length>1
-     ? `Using ${h.name}, ${h.admin1||''} ${h.country_code||''} — ${hits.length-1} other match(es); edit and look up again if wrong`
-     : `Found ${h.name}, ${h.admin1||''} ${h.country_code||''}`;
-   $('#save-wx').disabled=false;
-   warn();
+   fill(h.latitude,h.longitude,[h.name,h.admin1].filter(Boolean).join(', '),
+        dropped+(hits.length>1
+        ? `Using ${h.name}, ${h.admin1||''} ${h.country_code||''} — ${hits.length-1} other match(es); edit and look up again if wrong`
+        : `Found ${h.name}, ${h.admin1||''} ${h.country_code||''}`));
   }catch(e){ note.textContent='Lookup failed: '+e.message; }
  };
+}
+function bindWeather(a){
+ if(a.unsupported||!$('#wx-provider'))return;
+ $('#wx-location').value=a.home_location||'';
+ $('#wx-lat').value=a.latitude||'';
+ $('#wx-lon').value=a.longitude||'';
+ bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+ bindWeatherLookup(a);
  $('#save-wx').onclick=()=>{
   const loc=$('#wx-location').value.trim();
   const lat=$('#wx-lat').value.trim(), lon=$('#wx-lon').value.trim();
