@@ -183,6 +183,22 @@ const el = id => elements.get(id);
            'the fallback binder blocked a legitimate save');
   }
 
+  /*
+   * Save is shut for the whole lookup, not only once a list of candidates
+   * arrives: on a slow request, saving would store this name against the
+   * coordinates the previous lookup left behind.
+   */
+  {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = () => new Promise(()=>{});
+    el('#wx-location').value = 'Somewhere Slow';
+    el('#wx-lookup').onclick();
+    assert.equal(el('#save-wx').disabled,true,
+                 'Save stayed open while the lookup was in flight');
+    globalThis.fetch = realFetch;
+    el('#wx-location').oninput();
+  }
+
   /* The advisory has to be wired too: it is how a missing coordinate shows. */
   el('#wx-location').value = 'Somewhere without coordinates';
   el('#wx-lat').value = '';

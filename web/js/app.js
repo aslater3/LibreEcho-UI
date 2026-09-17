@@ -1442,6 +1442,14 @@ function bindWeatherLookup(a){
  $('#wx-lookup').onclick=async()=>{
   const place=$('#wx-location').value.trim();
   if(!place){note.textContent='Enter a place first';return}
+  /*
+   * Shut from the first moment, not from the moment a match is offered: the
+   * request can take a while, and Save during it would store this name against
+   * whatever coordinates the previous lookup left. Anything else the note says
+   * (a hit, a miss, a failure) leaves it shut until a field is edited, which
+   * re-enables it through bindDirty.
+   */
+  $('#save-wx').disabled=true;
   note.textContent='Looking up…';
   try{
    let postcodeMissed=false;
