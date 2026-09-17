@@ -21,8 +21,11 @@
  */
 #include "service_env.h"
 
+#include <dirent.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -37,6 +40,77 @@ void le_service_env_isolate(void)
 
     for (i = 0; i < sizeof(caller_identity) / sizeof(caller_identity[0]); ++i)
         unsetenv(caller_identity[i]);
+}
+
+/*
+ * Is any member of this process group still able to run?
+ *
+ * kill(-pgid, 0) answers whether the group exists, not whether it can still
+ * do anything. A process that has finished and has not been reaped -- a
+ * zombie, which is what a recovery's descendants become once the shell that
+ * was their parent has been killed -- is still a member, so a group made only
+ * of zombies reads as alive and a caller waiting on that answer waits out a
+ * grace period for work that is already over and cannot be killed. On a host
+ * whose PID 1 does not promptly reap orphans that is every stop.
+ *
+ * So the group is read member by member: /proc/<pid>/stat carries each
+ * process's state and its process group, and a member in state Z (or X, the
+ * dead state) has finished. Only a member that is still runnable counts. The
+ * comm field can hold spaces and parentheses, so the fields are read from the
+ * final ')' rather than by number. Without /proc the group's existence is the
+ * only evidence there is, and that answer is used instead.
+ */
+int le_service_group_is_live(pid_t pgid)
+{
+    DIR *dir;
+    struct dirent *entry;
+    int live = 0;
+
+    if (pgid <= 0)
+        return 0;
+    dir = opendir("/proc");
+    if (!dir)
+        return !(kill(-pgid, 0) < 0 && errno == ESRCH);
+    while (!live && (entry = readdir(dir)) != NULL) {
+        char path[64];
+        char line[512];
+        char *state;
+        char *field;
+        char *end;
+        FILE *file;
+        long pid;
+
+        /* The pid the directory entry names, not the string itself: a name
+           that is not a number is not a process. */
+        pid = strtol(entry->d_name, &end, 10);
+        if (end == entry->d_name || *end != '\0' || pid <= 0)
+            continue;
+        snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+        file = fopen(path, "r");
+        if (!file)
+            continue;               /* it exited while the directory was read */
+        if (!fgets(line, sizeof(line), file)) {
+            fclose(file);
+            continue;
+        }
+        fclose(file);
+        state = strrchr(line, ')');
+        if (!state || state[1] != ' ')
+            continue;
+        state += 2;
+        if (*state == 'Z' || *state == 'X')
+            continue;               /* finished, only waiting to be reaped */
+        field = strchr(state, ' ');          /* space before ppid */
+        if (!field)
+            continue;
+        field = strchr(field + 1, ' ');      /* space before pgrp */
+        if (!field)
+            continue;
+        if (strtol(field + 1, NULL, 10) == (long)pgid)
+            live = 1;
+    }
+    closedir(dir);
+    return live;
 }
 
 int le_service_command(const char *path, const char *const *argv)
@@ -93,8 +167,10 @@ int le_service_command(const char *path, const char *const *argv)
  * with the group still running, and returning there leaves the recovery --
  * reparented and alive -- doing the very thing the caller stopped it for. The
  * wait therefore covers the leader and the group separately: the leader is
- * reaped so no zombie is left, and the group is then waited on until it is
- * empty, with SIGKILL for whatever is still in it when the grace period ends.
+ * reaped so no zombie is left, and the group is then waited on until it has
+ * no runnable member -- a member that has finished cannot be killed and must
+ * not be waited on -- with SIGKILL for whatever is still running in it when
+ * the grace period ends (see le_service_group_is_live).
  */
 int le_service_command_cancellable(const char *path, const char *const *argv,
                                    const volatile sig_atomic_t *running)
@@ -155,21 +231,17 @@ int le_service_command_cancellable(const char *path, const char *const *argv,
     }
     /* Then the group, which can outlive its leader: the shell that held the
        init script is reaped and the child it started -- ignoring SIGTERM --
-       is still in the group. Wait for the group to empty, then SIGKILL what
-       is left. The leader being gone is not the recovery being gone. */
-    for (polls = 0; polls < 10; ++polls) {
-        if (kill(-child, 0) < 0 && errno == ESRCH)
-            break;
+       is still in the group. Wait for the group to have no runnable member,
+       then SIGKILL what is left. A member that has already finished is not
+       work: it is a zombie waiting to be reaped, and waiting on that would
+       spend the grace period and the SIGKILL on nothing. */
+    for (polls = 0; polls < 10 && le_service_group_is_live(child); ++polls)
         (void)nanosleep(&tick, NULL);
-    }
-    if (kill(-child, 0) == 0 || errno != ESRCH) {
+    if (le_service_group_is_live(child)) {
         (void)kill(-child, SIGKILL);
         (void)kill(child, SIGKILL);
-        for (polls = 0; polls < 10; ++polls) {
-            if (kill(-child, 0) < 0 && errno == ESRCH)
-                break;
+        for (polls = 0; polls < 10 && le_service_group_is_live(child); ++polls)
             (void)nanosleep(&tick, NULL);
-        }
     }
     return -1;
 }

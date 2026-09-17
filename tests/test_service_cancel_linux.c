@@ -263,6 +263,56 @@ static void test_stop_ends_the_group_after_the_leader_exits(void)
     assert_no_child_left();
 }
 
+/* A group whose members have all finished is not work: they are zombies the
+   caller can neither kill nor wait for, and the difference between reading
+   them as stopped and reading them as running is the whole grace period on a
+   host that does not reap orphans promptly. Both polarities are pinned here
+   directly rather than through a recovery, because a recovery's zombies are
+   reaped by this host's PID 1 before they can be observed -- the case would
+   be timing, not fact -- while a child this process deliberately does not
+   reap is a zombie for as long as the case needs one. */
+static void test_finished_group_members_are_not_live(void)
+{
+    siginfo_t info;
+    pid_t child;
+
+    /* One member, finished, not reaped: the group it led is held open by a
+       zombie. waitid() observes the exit without reaping, so the state under
+       test is still there when it is read. */
+    child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        (void)setpgid(0, 0);
+        _exit(0);
+    }
+    memset(&info, 0, sizeof(info));
+    assert(waitid(P_PID, (id_t)child, &info, WEXITED | WNOWAIT) == 0);
+    assert(info.si_pid == child);
+    assert(!alive(child));
+    /* kill() reports the group as existing -- a zombie is a member -- which
+       is the answer a stop must not act on by itself. */
+    assert(kill(-child, 0) == 0);
+    assert(le_service_group_is_live(child) == 0);
+    assert(waitpid(child, NULL, 0) == child);
+
+    /* And the other polarity: a member that can still run is live, so the
+       same answer cannot be reached by always saying no. */
+    child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        (void)setpgid(0, 0);
+        for (;;)
+            sleep(1);
+    }
+    /* The group is set here as well as in the child, so the case does not
+       depend on the child having been scheduled yet. */
+    assert(setpgid(child, child) == 0);
+    assert(le_service_group_is_live(child) == 1);
+    assert(kill(child, SIGKILL) == 0);
+    assert(waitpid(child, NULL, 0) == child);
+    assert(le_service_group_is_live(child) == 0);
+}
+
 /* A caller that has already been asked to stop starts nothing: the recovery
    would be work it is quiescing, forked only to be killed again. */
 static void test_stop_before_the_fork_starts_nothing(void)
@@ -299,6 +349,7 @@ int main(void)
     test_stop_ends_the_work_the_recovery_started();
     test_interruption_alone_does_not_cancel();
     test_stop_ends_the_group_after_the_leader_exits();
+    test_finished_group_members_are_not_live();
     test_stop_before_the_fork_starts_nothing();
     test_wait_semantics_are_unchanged();
     puts("service command cancellation: stop ends the recovery "

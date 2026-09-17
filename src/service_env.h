@@ -38,4 +38,14 @@ int le_service_command(const char *path, const char *const *argv);
 int le_service_command_cancellable(const char *path, const char *const *argv,
                                    const volatile sig_atomic_t *running);
 
+/*
+ * Whether any member of process group `pgid` is still able to run. A process
+ * that has finished and has not been reaped -- the zombie a killed recovery's
+ * descendants become once their shell is gone -- is still a member of the
+ * group, so kill(-pgid, 0) reports such a group as alive and a stop that
+ * trusts that answer waits out a grace period for work that is already over.
+ * See service_env.c.
+ */
+int le_service_group_is_live(pid_t pgid);
+
 #endif
