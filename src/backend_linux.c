@@ -2547,6 +2547,9 @@ static int linux_shutdown(struct le_backend *b)
  *  - networkd, the only component that can ask wpa_supplicant to SAVE_CONFIG,
  *    which is what writes config/wpa_supplicant.conf; a stack that saves Wi-Fi
  *    credentials after the clear would defeat the reset.
+ *  - micd, which owns no reset-scoped file and is here for waked: the two are
+ *    one unit, and the pair is the reason the restart order below is not the
+ *    table order.
  *
  * waked is the one writer whose file is created after its startup work rather
  * than from configuration it holds: with the one-shot dump request in place it
@@ -2554,6 +2557,15 @@ static int linux_shutdown(struct le_backend *b)
  * reset that scanned the directory before that open would leave recorded
  * microphone audio inside the reset scope across the reboot, so waked is
  * quiesced like the other state owners.
+ *
+ * micd and waked are one unit, exactly as they are for the supervisor
+ * (src/adapter/watchdogd.c): waked connects to the mono stream micd offers
+ * once and has no reconnect path, and micd offers that stream once, so a waked
+ * restarted against a micd that already handed its stream out fails with
+ * "microphone stream: Protocol error" and costs the device its wake word until
+ * the next reboot. Stopping micd ends the stream waked is holding, so the
+ * reset stops the consumer before the producer and brings the pair back as a
+ * unit, micd first -- the order the supervisor uses for the same two.
  *
  * timed, buttond, logd and the remaining voice, AirPlay and mDNS daemons (sttd,
  * ttsd, wyomingd, airplayd, mdnsd) are deliberately absent: they read the
@@ -2567,11 +2579,22 @@ static const char *const factory_reset_services[] = {
     "/etc/init.d/libreecho-networkd.init",
     "/etc/init.d/libreecho-timerd.init",
     "/etc/init.d/libreecho-agentd.init",
-    "/etc/init.d/libreecho-waked.init"
+    "/etc/init.d/libreecho-waked.init",
+    "/etc/init.d/libreecho-micd.init"
 };
 
 #define FACTORY_RESET_SERVICE_COUNT \
     (sizeof(factory_reset_services) / sizeof(factory_reset_services[0]))
+
+/*
+ * The capture unit in the order it is restored: producer before consumer.
+ * Stopping runs the other way round, which is why the table above stops waked
+ * before micd.
+ */
+static const char *const factory_reset_capture[] = {
+    "/etc/init.d/libreecho-micd.init",
+    "/etc/init.d/libreecho-waked.init"
+};
 
 static int run_service_action(const char *script, const char *action)
 {
@@ -2586,16 +2609,60 @@ static int run_service_action(const char *script, const char *action)
     return le_service_command(script, argv);
 }
 
-static void resume_factory_reset_services(const unsigned char *stopped)
+static size_t factory_reset_index(const char *script)
 {
     size_t i;
 
+    for (i = 0; i < FACTORY_RESET_SERVICE_COUNT; ++i)
+        if (!strcmp(factory_reset_services[i], script))
+            return i;
+    return FACTORY_RESET_SERVICE_COUNT;
+}
+
+/*
+ * Put the capture unit back. Either member having been stopped means the pair
+ * is no longer usable: micd offered its stream once and waked consumed it, so
+ * a waked restarted without a fresh micd fails with a protocol error. micd is
+ * stopped first -- a no-op when the reset already stopped it, and the one thing
+ * that makes the restart work when it did not -- and the pair is left alone
+ * entirely when neither member was running, so a wake word that was disabled
+ * before the reset stays disabled.
+ */
+static void restore_factory_reset_capture(const unsigned char *stopped)
+{
+    size_t producer = factory_reset_index(factory_reset_capture[0]);
+    size_t consumer = factory_reset_index(factory_reset_capture[1]);
+
+    if (producer >= FACTORY_RESET_SERVICE_COUNT ||
+        consumer >= FACTORY_RESET_SERVICE_COUNT)
+        return;
+    if (!stopped[producer] && !stopped[consumer])
+        return;
+    /* A micd that survived the quiesce has already offered its stream, so it
+       has to be replaced before waked can attach to it; when the reset stopped
+       it, the start below is the only step left. */
+    if (!stopped[producer])
+        (void)run_service_action(factory_reset_services[producer], "stop");
+    (void)run_service_action(factory_reset_services[producer], "start");
+    (void)run_service_action(factory_reset_services[consumer], "start");
+}
+
+static void resume_factory_reset_services(const unsigned char *stopped)
+{
+    size_t i;
+    size_t producer = factory_reset_index(factory_reset_capture[0]);
+    size_t consumer = factory_reset_index(factory_reset_capture[1]);
+
     /* Table order, so the supervisor is back before the services it watches and
-       a refused reset leaves the device as supervised as it found it. */
+       a refused reset leaves the device as supervised as it found it. The
+       capture unit is the exception: it comes back last and as a unit, after
+       the micd the restarted waked has to attach to. */
     for (i = 0; i < FACTORY_RESET_SERVICE_COUNT; ++i) {
-        if (stopped[i])
-            (void)run_service_action(factory_reset_services[i], "start");
+        if (!stopped[i] || i == producer || i == consumer)
+            continue;
+        (void)run_service_action(factory_reset_services[i], "start");
     }
+    restore_factory_reset_capture(stopped);
 }
 
 static int quiesce_factory_reset_services(unsigned char *stopped)

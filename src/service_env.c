@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static const char *const caller_identity[] = {
@@ -58,4 +59,83 @@ int le_service_command(const char *path, const char *const *argv)
             return -1;
     }
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+/*
+ * The same command for a caller that can be asked to stop while the child is
+ * still running.
+ *
+ * The waitpid() above retries across a signal, so a SIGTERM that arrives during
+ * a child's run neither stops the child nor ends the wait: for the watchdog's
+ * recovery path that leaves the recovery -- a shell running another service's
+ * init script -- to be reparented when its supervisor exits, after which it
+ * starts a service the caller has already confirmed stopped. The reset stops
+ * the supervisor first for exactly that reason.
+ *
+ * A stop request is therefore checked before anything is forked, and the wait
+ * below polls rather than blocking. Polling is what makes the request reliable:
+ * a signal that arrives before a blocking waitpid() call is handled there and
+ * then, so the wait would sleep through the request -- the recovery would be
+ * waited out and the service started anyway. Here the caller's flag is read
+ * every tick, whatever the signal did to the wait, and the recovery is
+ * terminated rather than waited out.
+ *
+ * The child leads its own process group, so cancelling reaches the work the
+ * recovery has already started -- the dependency wait, start-stop-daemon, the
+ * daemon itself -- and not only the shell holding the init script. SIGTERM
+ * first, then SIGKILL for a recovery that ignores it, and the child is reaped
+ * on every path: a stop that left a zombie behind would still answer kill -0
+ * and the caller would read its own stop as incomplete.
+ */
+int le_service_command_cancellable(const char *path, const char *const *argv,
+                                   const volatile sig_atomic_t *running)
+{
+    struct timespec tick = { 0, 100000000L };   /* 100 ms */
+    pid_t child;
+    int status;
+    int polls;
+
+    if (!path || !path[0] || !argv)
+        return -1;
+    /* The flag is already clear: the caller has been asked to stop, and forking
+       now would start the very work it is quiescing, only to kill it again. */
+    if (running && !*running)
+        return -1;
+    child = fork();
+    if (child < 0)
+        return -1;
+    if (child == 0) {
+        (void)setpgid(0, 0);
+        le_service_env_isolate();
+        execv(path, (char *const *)argv);
+        _exit(127);
+    }
+    for (;;) {
+        pid_t done = waitpid(child, &status, WNOHANG);
+
+        if (done == child)
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+        if (done < 0 && errno != EINTR)
+            return -1;
+        if (running && !*running)
+            break;
+        (void)nanosleep(&tick, NULL);
+    }
+    /* A negative pid addresses the process group whose id is its absolute
+       value, which is the group the child created for itself: the recovery and
+       the work it has started. The group is never shared with this process, and
+       the plain signal that follows covers the case where the group was not
+       created. */
+    (void)kill(-child, SIGTERM);
+    (void)kill(child, SIGTERM);
+    for (polls = 0; polls < 10; ++polls) {
+        if (waitpid(child, &status, WNOHANG) == child)
+            return -1;
+        nanosleep(&tick, NULL);
+    }
+    (void)kill(-child, SIGKILL);
+    (void)kill(child, SIGKILL);
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+        continue;
+    return -1;
 }

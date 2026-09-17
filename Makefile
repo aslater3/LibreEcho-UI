@@ -218,6 +218,13 @@ $(BUILD)/test-service-env-isolation: tests/test_service_env_isolation.c \
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
+# The wait behind the supervisor's recovery path: a stop request has to end the
+# recovery that is in flight, not be waited out.
+$(BUILD)/test-service-cancel-linux: tests/test_service_cancel_linux.c \
+		src/service_env.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
 # Drives the real worker, queue, thread and decoder against scripted score
 # sequences; the test supplies its own le_wake_engine, so no ONNX runtime or
 # model is needed to exercise the decoding rules.
@@ -898,6 +905,7 @@ clean:
 		$(BUILD)/test-voice-listening-feedback \
 		$(BUILD)/test-voice-pipeline-restart \
 		$(BUILD)/test-service-env-isolation \
+		$(BUILD)/test-service-cancel-linux \
 		$(BUILD)/test-voice-pipeline-env-isolation \
 		$(BUILD)/test-home-assistant-discovery \
 		$(BUILD)/libreecho-sttd-sherpa-arm32 \

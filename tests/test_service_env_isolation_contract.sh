@@ -30,8 +30,8 @@ expect "$(has 'le_service_command(' src/backend_linux.c)" \
     "the voice switch and factory reset go through the boundary"
 expect "$(lacks 'execl(script' src/backend_linux.c)" \
     "no raw exec of a service script is left in the backend"
-expect "$(has 'le_service_command(' src/adapter/watchdogd.c)" \
-    "the watchdog recovery path goes through the boundary"
+expect "$(has 'le_service_command_cancellable(' src/adapter/watchdogd.c)" \
+    "the watchdog recovery path goes through the boundary, cancellably"
 expect "$(lacks 'execl("/bin/sh"' src/adapter/watchdogd.c)" \
     "the watchdog recovery path keeps no raw exec"
 

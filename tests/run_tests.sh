@@ -102,6 +102,7 @@ sh tests/test_startup_animation.sh
 ./build/test-watchdog-policy
 make build/libreecho-watchdogd
 sh tests/test_watchdogd_recovery.sh
+sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
 make build/libreecho-timerd build/libreecho-watchdogd
 python3 tests/test_watchdog_timer_recovery.py
@@ -169,6 +170,8 @@ sh tests/test_pr95_followups_contract.sh
 sh tests/test_setup_connectivity_contract.sh
 sh tests/test_voice_pipeline_restart_contract.sh
 sh tests/test_service_env_isolation_contract.sh
+make build/test-service-cancel-linux
+./build/test-service-cancel-linux
 make build/test-service-env-isolation
 ./build/test-service-env-isolation
 make build/test-voice-pipeline-env-isolation

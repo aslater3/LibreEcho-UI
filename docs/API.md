@@ -1126,7 +1126,9 @@ both persistent directories and reboots. Installed feature payloads, OTA
 artifacts, and release identity outside those directories are preserved.
 The operation requires `X-LibreEcho-Confirm: confirm-device-action`; missing
 directories are accepted, while any unexpected deletion or durability failure
-aborts the reboot, restores the stopped daemons, and returns HTTP 503.
+aborts the reboot, restores the stopped daemons, and returns HTTP 503. A
+restored microphone and wake-word pair is restarted as a unit, microphone
+service first, so the restarted consumer attaches to a stream it can use.
 Unprivileged Linux deployments and backends without destructive-action support
 return HTTP 501.
 

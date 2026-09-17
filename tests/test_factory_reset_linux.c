@@ -45,6 +45,7 @@
 #define TIMERD "/etc/init.d/libreecho-timerd.init"
 #define AGENTD "/etc/init.d/libreecho-agentd.init"
 #define WAKED "/etc/init.d/libreecho-waked.init"
+#define MICD "/etc/init.d/libreecho-micd.init"
 
 #define MAX_EVENTS 128
 #define MAX_PATH 512
@@ -103,7 +104,8 @@ static struct fake_service services[] = {
     {NETWORKD, 1},
     {TIMERD, 1},
     {AGENTD, 1},
-    {WAKED, 1}
+    {WAKED, 1},
+    {MICD, 1}
 };
 
 #define SERVICE_COUNT (sizeof(services) / sizeof(services[0]))
@@ -445,6 +447,34 @@ static void assert_legacy_state_targeted(void)
     assert(!strcmp(legacy_paths[1], "/etc/libreecho/bluetooth.keys"));
 }
 
+/*
+ * The capture pair. micd offers its mono stream once and waked connects to it
+ * once with no reconnect path, so the order matters in both directions: the
+ * consumer is stopped before the producer, and the producer is started before
+ * the consumer. Nothing else in the table is ordered relative to its peers.
+ */
+static void assert_capture_pair_stop_order(void)
+{
+    size_t consumer = first_event(WAKED, "stop");
+    size_t producer = first_event(MICD, "stop");
+
+    assert(consumer != (size_t)-1);
+    assert(producer != (size_t)-1);
+    assert(consumer < producer);
+}
+
+static void assert_capture_pair_restored(void)
+{
+    size_t consumer = first_event(WAKED, "start");
+    size_t producer = first_event(MICD, "start");
+
+    assert(consumer != (size_t)-1);
+    assert(producer != (size_t)-1);
+    assert(producer < consumer);
+    assert(find_service(WAKED)->running == 1);
+    assert(find_service(MICD)->running == 1);
+}
+
 static void test_successful_reset(void)
 {
     char template[] = "/tmp/libreecho-reset-linux.XXXXXX";
@@ -457,6 +487,7 @@ static void test_successful_reset(void)
     assert(factory_reset(NULL) == LE_OK);
     assert_quiesced();
     assert_supervisor_stopped_first();
+    assert_capture_pair_stop_order();
     assert(fixture_cleared(root));
     assert(fixture_preserved(root));
     assert_legacy_state_targeted();
@@ -601,13 +632,14 @@ static void test_waked_dump_cannot_outlive_the_clear(void)
 }
 
 /*
- * The refused-reset path. Everything the reset stopped has to be put back,
- * waked included, and the restart must be safe for the one writer whose output
- * is not configuration: the dump request was consumed along with config/, so
- * the restarted waked has nothing to write and cannot put capture audio back
- * into the scope the clear just emptied.
+ * The refused-reset path. Everything the reset stopped has to be put back --
+ * the capture pair as a unit and in the order it can actually work in -- and
+ * the restart must be safe for the one writer whose output is not
+ * configuration: the dump request was consumed along with config/, so the
+ * restarted waked has nothing to write and cannot put capture audio back into
+ * the scope the clear just emptied.
  */
-static void test_refused_reset_restarts_waked_without_a_dump(void)
+static void test_refused_reset_restores_the_capture_pair(void)
 {
     char template[] = "/tmp/libreecho-reset-linux-waked-resume.XXXXXX";
     char *root = mkdtemp(template);
@@ -622,12 +654,45 @@ static void test_refused_reset_restarts_waked_without_a_dump(void)
     assert(events_for(WAKED, "status") == 2);
     assert(events_for(WAKED, "stop") == 1);
     assert(events_for(WAKED, "start") == 1);
-    assert(find_service(WAKED)->running == 1);
+    assert(events_for(MICD, "status") == 2);
+    assert(events_for(MICD, "stop") == 1);
+    assert(events_for(MICD, "start") == 1);
+    assert_capture_pair_stop_order();
+    assert_capture_pair_restored();
     assert(waked_dump_writes == 1);
     path_of(name, sizeof(name), root, "config/wake-dump.raw");
     assert(access(name, F_OK) != 0);
     path_of(name, sizeof(name), root, "config/wake-dump-seconds");
     assert(access(name, F_OK) != 0);
+}
+
+/*
+ * The capture unit is restored even when the producer refused to stop: micd is
+ * still running with the stream it handed to the previous waked, so stopping it
+ * again and starting it is what gives the restarted waked something to attach
+ * to. Restarting waked alone here is the failure this covers -- micd answers
+ * the second stream request with a protocol error and the device keeps its
+ * microphone but loses its wake word until the next reboot.
+ */
+static void test_capture_pair_restored_when_the_producer_will_not_stop(void)
+{
+    char template[] = "/tmp/libreecho-reset-linux-capture.XXXXXX";
+    char *root = mkdtemp(template);
+
+    assert(root != NULL);
+    reset_simulation();
+    build_tree(root);
+    use_root(root);
+    stop_refusal = MICD;
+    assert(factory_reset(NULL) == LE_IO);
+    assert(reboot_calls == 0);
+    /* waked was quiesced before the refusal, and the pair comes back with the
+       producer started first. */
+    assert(events_for(WAKED, "stop") == 1);
+    assert(events_for(MICD, "stop") == 2);
+    assert_capture_pair_restored();
+    /* Nothing was removed: the reset stopped at the refusal. */
+    assert(!fixture_cleared(root));
 }
 
 int main(void)
@@ -639,7 +704,8 @@ int main(void)
     test_stop_refusal_aborts_before_clearing();
     test_late_stop_refusal_leaves_earlier_writers_done();
     test_waked_dump_cannot_outlive_the_clear();
-    test_refused_reset_restarts_waked_without_a_dump();
+    test_refused_reset_restores_the_capture_pair();
+    test_capture_pair_restored_when_the_producer_will_not_stop();
     puts("linux backend factory reset: quiesce, clear, durability, reboot and refusals: ok");
     return 0;
 }

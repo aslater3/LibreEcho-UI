@@ -483,10 +483,22 @@ voice pipeline, factory reset stops the service supervisor and every daemon that
 owns persistent state, and `libreecho-watchdogd` restarts a service that stopped
 answering. The supervisor is stopped first because the daemons the reset stops
 are exactly the ones it supervises; `src/backend_linux.c` holds the list and the
-reason for each entry. Stopping it also stops the recovery it had in flight
-(`init/libreecho-watchdogd.init`), because a service start can wait a long time
-for its own dependencies before it launches the daemon, and a recovery left
-running would start a service the caller has already confirmed stopped.
+reason for each entry. Stopping it also stops the recovery it had in flight, in
+both halves: the init script collects the supervisor's descendants while it is
+still alive (`init/libreecho-watchdogd.init`), and the supervisor itself stops
+launching recoveries as soon as it is asked to stop and terminates the one it is
+running with the work it has started (`src/service_env.c`). The second half is
+what covers a fork that happens after that one-time snapshot, which is the
+window that matters: a service start can wait a long time for its own
+dependencies before it launches the daemon, and a recovery left running would
+start a service the caller has already confirmed stopped.
+
+`libreecho-micd` and `libreecho-waked` are one unit in that same list. micd
+offers its mono stream once and waked attaches to it once with no reconnect
+path, so the reset stops the consumer before the producer, and a refused reset
+restores the pair in the other order -- micd first -- because a waked started
+against the micd it was stopped with answers the second stream request with a
+protocol error and leaves the device without a wake word until the next reboot.
 
 The same list carries `libreecho-waked`, which is not only a configuration
 reader: when the one-shot dump request (`config/wake-dump-seconds`) is present it

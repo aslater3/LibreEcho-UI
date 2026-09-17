@@ -5,6 +5,8 @@
 #ifndef LE_SERVICE_ENV_H
 #define LE_SERVICE_ENV_H
 
+#include <signal.h>
+
 /*
  * Drop the calling service's own identity (ARGS, DAEMON, PIDFILE, LOGFILE)
  * from this process's environment. It is called in the forked child right
@@ -20,5 +22,20 @@ void le_service_env_isolate(void);
  * for, or exited non-zero.
  */
 int le_service_command(const char *path, const char *const *argv);
+
+/*
+ * The same command, for a caller that can be asked to stop while the child is
+ * still running. `running` is the caller's own still-running flag -- the one
+ * its signal handler clears, like the watchdog's -- and it is read before the
+ * fork and while the child runs: when it is clear the child, and the process
+ * group it leads, so the work it has started goes with it, is terminated,
+ * reaped, and the call reports failure. Without this a stop request neither
+ * ends a wait that retries across the signal nor ends the child: for the
+ * watchdog that leaves a recovery reparented and still starting the service
+ * its caller has just confirmed stopped. Pass NULL for a caller with no stop
+ * request. See service_env.c for why the wait polls.
+ */
+int le_service_command_cancellable(const char *path, const char *const *argv,
+                                   const volatile sig_atomic_t *running);
 
 #endif
