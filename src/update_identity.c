@@ -45,61 +45,98 @@ int update_identity_sha256_valid(const char *value)
     return value && hex_run(value, 64) && value[64] == '\0';
 }
 
+static int identity_key(const char *key)
+{
+    return !strcmp(key, LE_UPDATE_TAG_KEY) || !strcmp(key, LE_UPDATE_SHA_KEY);
+}
+
 /* Copy one key's value out of a record line that carries it, reporting whether
-   this line was the key's own. A value that does not fit the caller's buffer,
-   or that filled the line buffer without a terminator, is not copied: the key
-   stays unresolved instead of yielding a truncated value. */
-static int line_value(const char *line, const char *key, char *out, size_t size)
+   this line was the key's own. A value that filled the line buffer without a
+   terminator is never copied. An identity that does not fit the caller's buffer
+   is not copied either, so it stays unresolved instead of being cut down to a
+   buffer-sized prefix; an opaque field keeps the bounded copy this envelope has
+   always reported. */
+static int line_value(const char *line, const char *key, char *out, size_t size,
+                      int exact)
 {
     size_t key_len = strlen(key);
     size_t len;
+
     if (strncmp(line, key, key_len) || line[key_len] != '=')
         return 0;
     len = strcspn(line + key_len + 1, "\r\n");
-    if (len >= size || len + key_len + 1 >= RECORD_LINE_MAX)
+    if (len + key_len + 1 >= RECORD_LINE_MAX)
         return 0;
+    if (len >= size) {
+        if (exact)
+            return 0;
+        len = size - 1;
+    }
     memcpy(out, line + key_len + 1, len);
     out[len] = '\0';
     return 1;
 }
 
-int update_identity_pair(const char *path, char *tag, size_t tag_size,
-                         char *sha, size_t sha_size)
+int update_record_read(const char *path, struct le_update_field *fields,
+                       size_t count)
 {
     FILE *f;
     char line[RECORD_LINE_MAX];
-    int seen_tag = 0, seen_sha = 0, resolved = 0;
+    unsigned char taken[LE_UPDATE_RECORD_FIELD_MAX];
+    size_t i, pending = 0, reported = 0;
 
-    if (!tag || !tag_size || !sha || !sha_size)
+    if (!path || !fields || !count || count > LE_UPDATE_RECORD_FIELD_MAX)
         return 0;
-    tag[0] = '\0';
-    sha[0] = '\0';
-    if (!path)
+    memset(taken, 0, sizeof(taken));
+    for (i = 0; i < count; i++)
+        if (fields[i].key && fields[i].key[0] && fields[i].value && fields[i].size)
+            pending++;
+    if (!pending)
         return 0;
-    if (!(f = fopen(path, "r")))
-        return 0;
-    /* One open, one pass: both values come from the same snapshot of the
-       record, so they always describe the same candidate. The first
-       occurrence of each key wins, matching how a record written before these
-       keys existed leaves them unresolved. */
-    while (fgets(line, sizeof(line), f)) {
-        if (!seen_tag && line_value(line, LE_UPDATE_TAG_KEY, tag, tag_size)) {
-            seen_tag = 1;
-            continue;
+    /* One open, one pass: every field is resolved while this one descriptor is
+       held, so no two of them can come from different generations of the
+       record. The first occurrence of a key wins, which is what a record whose
+       writer never repeats a key has always meant here. */
+    if ((f = fopen(path, "r"))) {
+        while (pending && fgets(line, sizeof(line), f)) {
+            for (i = 0; i < count; i++) {
+                if (taken[i] || !fields[i].key || !fields[i].key[0] ||
+                    !fields[i].value || !fields[i].size)
+                    continue;
+                if (line_value(line, fields[i].key, fields[i].value,
+                               fields[i].size, identity_key(fields[i].key))) {
+                    taken[i] = 1;
+                    pending--;
+                }
+            }
         }
-        if (!seen_sha && line_value(line, LE_UPDATE_SHA_KEY, sha, sha_size))
-            seen_sha = 1;
+        fclose(f);
     }
-    fclose(f);
-    /* Validate once the snapshot is complete, so a malformed value is reported
-       as absent and never reaches the caller as an identity. */
-    if (update_identity_tag_valid(tag))
-        resolved++;
-    else
-        tag[0] = '\0';
-    if (update_identity_sha256_valid(sha))
-        resolved++;
-    else
-        sha[0] = '\0';
-    return resolved;
+    /* Validation runs on the completed snapshot. An identity is only ever
+       reported when the record carried that exact value, so an empty, malformed
+       or oversized one -- and a record that could not be read at all -- leaves
+       an empty string rather than a value the device did not resolve. */
+    for (i = 0; i < count; i++) {
+        if (!fields[i].key || !fields[i].key[0] || !fields[i].value ||
+            !fields[i].size)
+            continue;
+        if (!strcmp(fields[i].key, LE_UPDATE_TAG_KEY)) {
+            if (taken[i] && update_identity_tag_valid(fields[i].value)) {
+                reported++;
+            } else {
+                fields[i].value[0] = '\0';
+                taken[i] = 0;
+            }
+        } else if (!strcmp(fields[i].key, LE_UPDATE_SHA_KEY)) {
+            if (taken[i] && update_identity_sha256_valid(fields[i].value)) {
+                reported++;
+            } else {
+                fields[i].value[0] = '\0';
+                taken[i] = 0;
+            }
+        } else if (taken[i]) {
+            reported++;
+        }
+    }
+    return (int)reported;
 }

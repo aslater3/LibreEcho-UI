@@ -152,28 +152,27 @@ static void update_status_json(struct api_context*c,struct api_response*r)
                       installed_version,sizeof(installed_version));
         key_from_file("/data/libreecho/update/rolled-back","version",
                       rollback_version,sizeof(rollback_version));
-        key_from_file("/data/libreecho/update/check-status","status",
-                      check_status,sizeof(check_status));
-        key_from_file("/data/libreecho/update/check-status","error",
-                      check_error,sizeof(check_error));
-        key_from_file("/data/libreecho/update/check-status","source",
-                      source,sizeof(source));
-        key_from_file("/data/libreecho/update/check-status","channel",
-                      channel,sizeof(channel));
-        key_from_file("/data/libreecho/update/check-status","source_reachable",
-                      reachable,sizeof(reachable));
-        key_from_file("/data/libreecho/update/check-status","latest_version",
-                      latest_version,sizeof(latest_version));
-        /* One read of the record for both values: the check writer replaces it
-           with an atomic rename, so a single snapshot cannot pair the tag from
-           one check with the digest from the next. */
-        update_identity_pair("/data/libreecho/update/check-status",
-                             resolved_tag,sizeof(resolved_tag),
-                             ota_sha,sizeof(ota_sha));
-        key_from_file("/data/libreecho/update/check-status","last_check_epoch",
-                      last_check_text,sizeof(last_check_text));
-        key_from_file("/data/libreecho/update/check-status","last_success_epoch",
-                      last_success_text,sizeof(last_success_text));
+        /* Every field of the check record is read in one pass over one opened
+           snapshot. The check writer commits a new record with an atomic rename
+           while GETs stay serviceable, so separate reads could describe two
+           checks at once -- an old status or version beside the next check's
+           identity. */
+        {
+            struct le_update_field check_fields[]={
+                {"status",check_status,sizeof(check_status)},
+                {"error",check_error,sizeof(check_error)},
+                {"source",source,sizeof(source)},
+                {"channel",channel,sizeof(channel)},
+                {"source_reachable",reachable,sizeof(reachable)},
+                {"latest_version",latest_version,sizeof(latest_version)},
+                {LE_UPDATE_TAG_KEY,resolved_tag,sizeof(resolved_tag)},
+                {LE_UPDATE_SHA_KEY,ota_sha,sizeof(ota_sha)},
+                {"last_check_epoch",last_check_text,sizeof(last_check_text)},
+                {"last_success_epoch",last_success_text,sizeof(last_success_text)}
+            };
+            update_record_read("/data/libreecho/update/check-status",check_fields,
+                               sizeof(check_fields)/sizeof(check_fields[0]));
+        }
         key_from_file("/data/libreecho/update/automatic-updates","enabled",
                       automatic_text,sizeof(automatic_text));
         automatic=!strcmp(automatic_text,"1");

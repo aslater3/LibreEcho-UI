@@ -1183,6 +1183,11 @@ treat an absent key, an empty value, and a value that does not match the
 grammar above as equally unknown. A malformed or oversized value is never
 truncated into a plausible-looking tag or digest; it is reported as empty.
 
+Every field of this response is read from one snapshot of the device's check
+record, so a check that lands while the response is assembled cannot describe
+two different checks at once: a client never sees an `up-to-date` status beside
+the next check's release tag.
+
 #### PUT /api/v1/system/update/channel
 
 Select the signed GitHub Releases channel. Changing the channel clears the

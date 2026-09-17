@@ -10,11 +10,12 @@ from pathlib import Path
 # reader only, publishes both keys additively in the existing envelope, and the
 # OpenAPI document, API reference, page and test runner all carry them.
 #
-# The identity keys are also a single-snapshot contract: the update helper
-# commits a new check record with an atomic rename, so a reader that opened the
-# record once per key could pair one candidate's tag with the next candidate's
-# digest. The reader must open the record exactly once, resolve both keys over
-# that one pass, and validate them after the snapshot is complete.
+# The check record is also a single-snapshot contract: the update helper commits
+# a new record with an atomic rename, so a reader that opened it once per key
+# could describe two different checks at once -- an old status or version beside
+# the next check's identity. The reader must open the record exactly once,
+# resolve every field over that one pass, and validate the identity keys once
+# the snapshot is complete.
 api = Path('src/api.c').read_text()
 header = Path('src/update_identity.h').read_text()
 module = Path('src/update_identity.c').read_text()
@@ -33,44 +34,57 @@ assert 'radar-puffin-build-' in module and 'radar-puffin-nightly-' in module
 assert 'hex_run(value, 64)' in module
 assert 'len >= size' in module and 'sizeof(line)' in module
 
-# --- one open, one pass: both keys come from the same snapshot --------------
-assert 'int update_identity_pair(' in module and 'int update_identity_pair(' in header
-# The two-pass reader is gone: no caller can read the identity one key at a time.
+# --- one open, one pass: every field of the check record from one snapshot --
+assert 'struct le_update_field' in header
+assert 'int update_record_read(' in header and 'int update_record_read(' in module
+# The per-key reader is gone: nothing can read a field of the record on its own.
 assert 'update_identity_value' not in module and 'update_identity_value' not in header
-assert module.count('fopen(') == 1, 'the reader must open the record once'
-pair = module[module.index('int update_identity_pair('):]
-assert pair.count('fopen(') == 1 and pair.count('fgets(') == 1
-assert pair.index('fopen(') < pair.index('fgets(')
-assert pair.count('fclose(') == 1
-# Both keys are consumed by that one pass ...
-assert pair.index('LE_UPDATE_TAG_KEY') < pair.index('fclose(')
-assert pair.index('LE_UPDATE_SHA_KEY') < pair.index('fclose(')
+assert 'update_identity_pair' not in module and 'update_identity_pair' not in api
+assert module.count('fopen(') == 1, 'the record must be opened once'
+reader = module[module.index('int update_record_read('):]
+assert reader.count('fopen(') == 1 and reader.count('fgets(') == 1
+assert reader.index('fopen(') < reader.index('fgets(')
+assert reader.count('fclose(') == 1
+assert reader.index('fgets(') < reader.index('fclose(')
+# Both identity keys are recognised inside that one pass, through the module's
+# own key check, so an oversized identity is refused while the descriptor is
+# held rather than copied out and trimmed afterwards.
+assert "!strcmp(key, LE_UPDATE_TAG_KEY) || !strcmp(key, LE_UPDATE_SHA_KEY)" in module
+assert reader.index('identity_key(') < reader.index('fclose(')
 # ... and validated once the snapshot is complete, so a malformed value is
 # reported as absent rather than reaching the caller as an identity.
-assert pair.index('fclose(') < pair.index('update_identity_tag_valid(')
-assert pair.index('fclose(') < pair.index('update_identity_sha256_valid(')
-assert 'resolved++' in pair and 'return resolved;' in pair
+assert reader.index('fclose(') < reader.index('update_identity_tag_valid(')
+assert reader.index('fclose(') < reader.index('update_identity_sha256_valid(')
+assert 'return (int)reported;' in reader
 
-# --- api.c publishes both keys from that one snapshot -----------------------
+# --- api.c publishes the whole check record from that one snapshot ----------
 assert '#include "update_identity.h"' in api
 body = api[api.index('static void update_status_json'):]
 body = body[:body.index('static const char*agent_socket_path')]
-assert body.count('update_identity_pair(') == 1, \
-    'the API must publish the identity from one snapshot read'
-assert 'update_identity_value' not in api
-assert 'update_identity_pair("/data/libreecho/update/check-status",' in body
-assert 'resolved_tag,sizeof(resolved_tag),' in body
-assert 'ota_sha,sizeof(ota_sha));' in body
+assert api.count('update_record_read("/data/libreecho/update/check-status"') == 1, \
+    'the check record must be read through one snapshot'
+# Every field of that record travels through the snapshot read: a field read on
+# its own could describe a different check than the identity beside it. (The
+# apply gate in api_update_fetch_authorize reads `status` alone, before any
+# value is published, so it is not this envelope's mismatch.)
+assert 'key_from_file("/data/libreecho/update/check-status"' not in body
+for field in ('{"status",check_status,sizeof(check_status)}',
+              '{"error",check_error,sizeof(check_error)}',
+              '{"source",source,sizeof(source)}',
+              '{"channel",channel,sizeof(channel)}',
+              '{"source_reachable",reachable,sizeof(reachable)}',
+              '{"latest_version",latest_version,sizeof(latest_version)}',
+              '{LE_UPDATE_TAG_KEY,resolved_tag,sizeof(resolved_tag)}',
+              '{LE_UPDATE_SHA_KEY,ota_sha,sizeof(ota_sha)}',
+              '{"last_check_epoch",last_check_text,sizeof(last_check_text)}',
+              '{"last_success_epoch",last_success_text,sizeof(last_success_text)}'):
+    assert field in body, f'{field} is not read from the check record snapshot'
 assert 'char resolved_tag[LE_UPDATE_TAG_SIZE]="",ota_sha[LE_UPDATE_SHA_SIZE]=""' in body
-# The identity keys never go through the unchecked reader, which would publish
-# a truncated or malformed value as though the device had resolved it.
-assert 'key_from_file("/data/libreecho/update/check-status","resolved_release_tag"' not in api
-assert 'key_from_file("/data/libreecho/update/check-status","ota_sha256"' not in api
 
 # --- the torn-read regression is wired into the build and the runner --------
 # The fixture stands at the reader's own open of the record, where it commits
-# the next check, so the test can show both that the pair reader publishes one
-# generation and that the removed two-pass design published two.
+# the next check, so the test can show both that the snapshot reader publishes
+# one check and that the removed per-field design published two.
 assert 'FILE *__wrap_fopen(' in unit and 'commit_generation(' in unit
 assert 'legacy_read_key(' in unit
 assert 'record_opens == 1' in unit
