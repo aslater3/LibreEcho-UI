@@ -2877,16 +2877,16 @@
              "properties": {
               "authority_provenance": {
                "$ref": "#/components/schemas/AuthorityProvenance"
-               },
-               "resolved_release_tag": {
-                "type": "string",
-                "description": "Immutable GitHub release tag the check resolved for the candidate, in the form radar-puffin-(build|nightly)-<7 hex>-<16 hex>-<16 hex>. Empty when no immutable tag was resolved: a stable candidate, a failed or superseded check, or an update helper older than this key. A value that does not match that grammar is reported as empty, never truncated."
-               },
-               "ota_sha256": {
-                "type": "string",
-                "description": "Lower-case SHA-256 (exactly 64 hex digits) of the OTA package the resolved candidate installs, the digest the device verifies its download against. Empty whenever no immutable candidate was resolved, and any value that is not exactly 64 lower-case hex digits is reported as empty rather than truncated."
-               }
+              },
+              "resolved_release_tag": {
+               "type": "string",
+               "description": "Immutable GitHub release tag the check resolved for the candidate, in the form radar-puffin-(build|nightly)-<7 hex>-<16 hex>-<16 hex>. Empty when no immutable tag was resolved: a stable candidate, a failed or superseded check, or an update helper older than this key. A value that does not match that grammar is reported as empty, never truncated."
+              },
+              "ota_sha256": {
+               "type": "string",
+               "description": "Lower-case SHA-256 (exactly 64 hex digits) of the OTA package the resolved candidate installs, the digest the device verifies its download against. Empty whenever no immutable candidate was resolved, and any value that is not exactly 64 lower-case hex digits is reported as empty rather than truncated."
               }
+             }
             }
            }
           }
