@@ -118,6 +118,8 @@ const el = id => elements.get(id);
          'postcode place name not set: '+el('#wx-location').value);
   assert(/Found/.test(el('#wx-lookup-note').textContent),
          'postcode lookup reported nothing: '+el('#wx-lookup-note').textContent);
+  assert.equal(el('#save-wx').disabled,false,
+               'a successful lookup left Save disabled');
 
   /*
    * A qualifier the geocoder rejects is retried, but the retry is offered, not
@@ -253,6 +255,52 @@ const el = id => elements.get(id);
     document.querySelector('#save-wx').onclick();
     assert(mutated === null,
            'an edited name was saved against an earlier lookup\'s coordinates');
+    globalThis.mutate = realMutate;
+    globalThis.fetch = realFetch;
+  }
+
+  /*
+   * A re-render re-binds the card: a lookup that was already in flight must not
+   * land in the new binding, so the sequence has to live outside it.
+   */
+  {
+    const realFetch = globalThis.fetch;
+    let release = null;
+    const slow = new Promise(resolve => { release = resolve; });
+    globalThis.fetch = url => String(url).includes('name=Rebind')
+      ? slow.then(()=>({ok:true,status:200,json:async()=>({results:[
+          {name:'Rebind',admin1:'Somewhere',country_code:'GB',
+           latitude:9.9,longitude:9.9}]})}))
+      : Promise.resolve({ok:true,status:200,json:async()=>({results:[]})});
+    el('#wx-location').value = 'Rebind';
+    const inFlight = el('#wx-lookup').onclick();
+    content.innerHTML = vm.runInThisContext('weatherCard')(assistant);
+    vm.runInThisContext('bindWeather')(assistant);
+    release();
+    await inFlight;
+    assert.equal(el('#wx-lat').value,'',
+                 'a lookup from before the re-render wrote into the new card');
+    globalThis.fetch = realFetch;
+  }
+
+  /*
+   * Rejecting the offered candidates by typing coordinates ends the pending
+   * state: the user has taken over, so Save works again.
+   */
+  {
+    const realFetch = globalThis.fetch, realMutate = globalThis.mutate;
+    let mutated = null;
+    globalThis.mutate = (path, body) => { mutated = {path, body}; };
+    el('#wx-location').value = 'Preston';
+    await el('#wx-lookup').onclick();
+    assert(/wx-candidate/.test(el('#wx-lookup-note').innerHTML),
+           'the ambiguous case did not offer candidates');
+    el('#wx-lat').value = '53.7586';
+    el('#wx-lon').value = '-2.7036';
+    el('#wx-lat').oninput();          /* the keystroke the user just made */
+    document.querySelector('#save-wx').onclick();
+    assert(mutated && mutated.path === '/assistant',
+           'typing coordinates did not end the pending offer');
     globalThis.mutate = realMutate;
     globalThis.fetch = realFetch;
   }

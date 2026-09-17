@@ -1369,6 +1369,9 @@ return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where th
  * typed, so both save handlers check this instead of the button's state.
  */
 function lookupPending(){const save=$('#save-wx');return !!(save&&save.dataset.lookupPending)}
+/* Shared by every binding of the card, so a re-render supersedes a request that
+   was already in flight rather than letting it write into the new card. */
+let lookupSequence=0;
 function bindWeatherLookup(a){
  if(!$('#wx-location')||!$('#wx-lookup'))return;
  /*
@@ -1397,10 +1400,13 @@ function bindWeatherLookup(a){
    el.className='muted error-text';
   }else{ el.textContent=''; el.className='muted'; }
  };
- ['#wx-location','#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=warn});
+ ['#wx-location'].forEach(sel=>{const el=$(sel);if(el)el.oninput=warn});
+ /* Typing a coordinate is taking over: it ends a pending offer, and supersedes
+    any lookup still in flight so its response cannot overwrite what was typed. */
+ ['#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=()=>{lookupSequence++;setPending(false);warn()}});
  warn();
- const fill=(latitude,longitude,place,message,mine)=>{
-  if(mine!==seq)return;
+ const fill=(latitude,longitude,place,message,id)=>{
+  if(id!==lookupSequence)return;
   $('#wx-lat').value=(+latitude).toFixed(4);
   $('#wx-lon').value=(+longitude).toFixed(4);
   if(place)$('#wx-location').value=place;
@@ -1421,8 +1427,8 @@ function bindWeatherLookup(a){
   * would repeat falls back to its coordinates rather than showing two identical
   * buttons for different locations.
   */
- const offer=(hits,prefix,mine)=>{
-  if(mine!==seq)return false;
+ const offer=(hits,prefix,id)=>{
+  if(id!==lookupSequence)return false;
   const labels=hits.map(describe),repeated=labels.map(l=>labels.filter(x=>x===l).length>1);
   note.innerHTML=esc(prefix)+' <strong>Choose the place:</strong> '+hits.map((h,i)=>
    `<button class="secondary-btn wx-candidate" data-index="${i}">${esc(repeated[i]
@@ -1454,18 +1460,24 @@ function bindWeatherLookup(a){
     bindDirty re-enables the button on any edit, so the save handlers check this
     as well as the button's state. */
  const save=$('#save-wx');
- const setPending=pending=>{if(!save)return;if(pending){save.dataset.lookupPending='1';save.disabled=true}else delete save.dataset.lookupPending};
- /* Every lookup takes a number, and only the newest may write anything: a slow
-    request that lands after a newer one has to be dropped rather than overwrite
-    the newer result. */
- let seq=0;
- /* A card that has just been bound is not mid-lookup, and a request still in
-    flight from a previous binding must not write into this one. */
- seq++;setPending(false);
+ /*
+  * Pending means "the coordinates on screen are not this place's yet". Save is
+  * shut while it holds, and opened again when it clears -- the fields are filled
+  * programmatically, so nothing else would re-enable the button.
+  */
+ const setPending=pending=>{if(!save)return;if(pending){save.dataset.lookupPending='1';save.disabled=true}else{delete save.dataset.lookupPending;save.disabled=false}};
+ /*
+  * Only the newest lookup may write anything, and the counter lives outside this
+  * binding: a re-render binds the card again, and a response still in flight
+  * from the previous binding must not land in the new one.
+  */
+ lookupSequence++;setPending(false);
  $('#wx-lookup').onclick=async()=>{
   const place=$('#wx-location').value.trim();
   if(!place){note.textContent='Enter a place first';return}
-  const mine=++seq;
+  /* This request's number: anything older must not write, and a re-bind bumps
+     the sequence so a request from before the re-render cannot either. */
+  const mine=++lookupSequence;
   let offered=false;
   setPending(true);
   note.textContent='Looking up…';
@@ -1516,8 +1528,8 @@ function bindWeatherLookup(a){
    const h=hits[0];
    fill(h.latitude,h.longitude,[h.name,h.admin1].filter(Boolean).join(', '),
         `Found ${describe(h)}`,mine);
-  }catch(e){ if(mine===seq)note.textContent='Lookup failed: '+e.message; }
-  finally{ if(mine===seq&&!offered)setPending(false); }
+  }catch(e){ if(mine===lookupSequence)note.textContent='Lookup failed: '+e.message; }
+  finally{ if(mine===lookupSequence&&!offered)setPending(false); }
  };
 }
 function bindWeather(a){
