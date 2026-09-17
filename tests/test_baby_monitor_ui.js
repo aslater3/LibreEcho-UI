@@ -3,10 +3,12 @@
  * The page is driven through the real web/js/app.js under a small DOM shim with
  * a controllable Web Audio implementation, so the lifecycle Safari enforces is
  * covered behaviourally rather than by source-text assertions: synchronous
- * gesture unlock, suspended/interrupted AudioContext, delayed resume, stream
- * chunk scheduling, bounded look-ahead, abort/restart generation ownership and
- * a missing response body. The diagnostics assertions pin the privacy contract
- * (context state and counters only, never microphone samples).
+ * gesture unlock, suspended/interrupted AudioContext, a resume() that never
+ * settles against the bounded playback deadline, delayed resume, stream chunk
+ * scheduling, bounded look-ahead, oversize coalesced chunks, abort/restart
+ * generation ownership and a missing response body. The diagnostics assertions
+ * pin the privacy contract (context state and counters only, never microphone
+ * samples).
  */
 'use strict';
 const fs = require('fs');
@@ -571,6 +573,81 @@ async function caseBlockedContext() {
     await settle();
 }
 
+/* Safari may leave resume() pending forever: an attempt that never settles must
+   not outlive the playback deadline, or the page stays on "Connecting…"
+   indefinitely and never offers the actionable blocked-playback error. */
+async function caseNeverSettlingResume() {
+    reset();
+    await mountPage();
+    let attempt = null;
+    resumeImpl = context => { attempt = context; return new Promise(() => {}); };
+    installStream('pcm_s16_le;channels=1;valid-bits=16;rate=16000');
+    const pending = clickStart();
+    await settle(1400);
+    const context = contexts[0];
+    check(context.resumeCalls >= 1, 'a resume() attempt is made while the context stays suspended');
+    checkEqual(streamRequests.length, 0, 'no stream is requested while resume() never settles');
+    checkEqual(el('#baby-status').textContent, 'Stopped',
+        'a resume() that never settles still returns the page to stopped inside the deadline');
+    check(diagnostics().error.toLowerCase().includes('blocked'),
+        'a resume() that never settles is exposed as an actionable blocked-playback error');
+    checkEqual(diagnostics().context, 'suspended',
+        'diagnostics expose the still-suspended AudioContext state');
+
+    /* A late resolution must not revive the abandoned attempt. */
+    if (attempt) attempt.setState('running');
+    await settle();
+    checkEqual(streamRequests.length, 0, 'a late running state cannot start a stream after the deadline');
+    checkEqual(el('#baby-status').textContent, 'Stopped', 'a late running state cannot restart playback');
+    await quiesce(pending);
+    await settle();
+}
+
+/* Fetch chunk boundaries are not the server's write boundaries, so a coalesced
+   final chunk can carry far more than the scheduling look-ahead. It must be
+   scheduled in bounded quanta and its whole tail must drain before teardown. */
+async function caseOversizedFinalChunk() {
+    reset();
+    await mountPage();
+    resumeImpl = context => { context.state = 'running'; return Promise.resolve(); };
+    const body = installStream('pcm_s16_le;channels=1;valid-bits=16;rate=16000;selected-channel=0');
+    const pending = clickStart();
+    await settle();
+    const context = contexts[0];
+    const frames = Math.round(16000 * 1.2);              /* 1.2 s in a single coalesced chunk */
+    body.push(tinyPcm(new Array(frames).fill(500)));
+    await settle();
+    check(context.playbackSources.length > 1,
+        'a coalesced chunk larger than the look-ahead is split into bounded scheduling quanta');
+    check(context.playbackSources.every(source => source.buffer.duration <= 0.750001),
+        'no scheduled source exceeds the scheduling look-ahead quantum');
+    const scheduledSeconds = context.playbackSources.reduce((total, source) => total + source.buffer.duration, 0);
+    check(Math.abs(scheduledSeconds - frames / 16000) < 1e-9,
+        'the whole coalesced chunk is scheduled instead of truncated');
+    const starts = context.playbackSources.map(source => source.startedAt);
+    check(starts.every((start, i) => i === 0 || start >= starts[i - 1] + context.playbackSources[i - 1].buffer.duration - 1e-9),
+        'the split quanta are scheduled contiguously without gaps or overlap');
+    checkEqual(diagnostics().frames, frames + ' frames', 'diagnostics count every decoded frame');
+
+    body.finish();
+    await settle();
+    checkEqual(context.closeCalls, 0, 'the stream stays open while the oversized tail is queued');
+    checkEqual(diagnostics().playback, 'draining', 'diagnostics report the oversized tail draining');
+    /* The drain bound must follow the retained audio's real end time, not the
+       fixed look-ahead cap that used to close the graph over the queued tail. */
+    await settle(1000);
+    checkEqual(context.closeCalls, 0, 'the graph stays open past the previous fixed drain cap');
+    checkEqual(context.playbackSources.filter(source => babyStream.nodes.has(source)).length,
+        context.playbackSources.length, 'every queued source is still retained while the tail drains');
+    context.playbackSources.forEach(source => source.fireEnded());   /* the tail plays out */
+    await settle();
+    await quiesce(pending);
+    checkEqual(el('#baby-status').textContent, 'Stopped', 'the oversized tail returns the page to stopped');
+    checkEqual(diagnostics().playback, 'ended', 'the oversized tail ends cleanly');
+    check(context.closeCalls >= 1, 'the oversized tail eventually releases its AudioContext');
+    checkEqual(babyStream.nodes.size, 0, 'the oversized tail releases its retained nodes');
+}
+
 async function casePacked24Contract() {
     reset();
     await mountPage();
@@ -621,6 +698,8 @@ async function main() {
         ['abort/restart generation ownership', caseGenerationOwnership],
         ['missing response body and HTTP failure', caseMissingBodyAndHttpFailure],
         ['AudioContext that never leaves suspended', caseBlockedContext],
+        ['AudioContext resume() that never settles against the deadline', caseNeverSettlingResume],
+        ['oversize coalesced final chunk schedules and drains completely', caseOversizedFinalChunk],
         ['packed 24-bit audio contract', casePacked24Contract]
     ];
     for (const [name, run] of cases) {
