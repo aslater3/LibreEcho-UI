@@ -53,6 +53,42 @@ has_dot_component() {
     return 1
 }
 
+# `test -L` on the root itself is not enough: an ancestor component that is a
+# link (with `LIBREECHO_DATA_ROOT=/mnt/link/state`, only `/mnt/link` is one)
+# redirects the copy and the restore into the link target while the final
+# component stays a plain directory. Every ancestor is inspected with `test -L`,
+# which never follows the link, so no component can move the state tree; the
+# final component keeps its own message below. Nothing is resolved here.
+has_linked_ancestor() {
+    root=$1
+    remainder=$root
+    prefix=
+    case "$remainder" in
+        /*) remainder=${remainder#/} ;;
+        *) prefix=. ;;
+    esac
+    while [ -n "$remainder" ]; do
+        component=${remainder%%/*}
+        case "$remainder" in
+            */*) remainder=${remainder#*/} ;;
+            *) remainder= ;;
+        esac
+        [ -n "$component" ] || continue
+        if [ -z "$prefix" ]; then
+            prefix=/$component
+        else
+            prefix=$prefix/$component
+        fi
+        # The final component is the root itself, reported by the caller.
+        [ -n "$remainder" ] || break
+        [ ! -L "$prefix" ] || {
+            printf 'Error: persistent state root crosses a symbolic link: %s\n' "$prefix" >&2
+            return 1
+        }
+    done
+    return 0
+}
+
 DATA_ROOT=$(trim_slashes "$DATA_ROOT")
 CONFIG_DIR=$(trim_slashes "$CONFIG_DIR")
 SECRETS_DIR=$(trim_slashes "$SECRETS_DIR")
@@ -117,13 +153,15 @@ refuse_symlinks() {
 
 # A root that is itself a symlink is dereferenced by `cp -R` before the staged
 # tree can be scanned, so the configured roots are refused at the source, and so
-# is any spelling of one that uses a `.` or `..` component.
+# is any spelling of one that uses a `.` or `..` component or a link in its own
+# path.
 refuse_linked_roots() {
     for root in "$DATA_ROOT" "$CONFIG_DIR" "$SECRETS_DIR"; do
         if has_dot_component "$root"; then
             printf 'Error: persistent state root uses a dot component: %s\n' "$root" >&2
             return 1
         fi
+        has_linked_ancestor "$root" || return 1
         [ ! -L "$root" ] || {
             printf 'Error: persistent state root is a symbolic link: %s\n' "$root" >&2
             return 1
@@ -196,6 +234,8 @@ apply_owner() {
 
 # Transaction files are not committed consumer state, and config_store can
 # leave them anywhere inside either captured tree, so they stay a name class.
+# The manifest names both trees and both suffixes for that class, so a consumer
+# auditing an archive can tell the omission from an incomplete backup.
 prune_transaction_files() {
     root=$1
     find "$root" -type f \( -name '*.tmp' -o -name '*.new' \) -exec rm -f {} + || return 1
@@ -228,7 +268,7 @@ write_manifest() {
   "components": ["config", "secrets"],
   "required": ["config/web-config.json", "config/users"],
   "secret_policy": "included-with-private-permissions; protect or encrypt archive out-of-band",
-  "excluded": ["factory-seed:/etc/libreecho", "payloads:/data/libreecho/features", "ota:/data/libreecho/update", "release-identity:/data/libreecho/data-manifest.json", "runtime-guard:/data/libreecho/network-recovery-reboot.guard", "runtime:/run/libreecho", "logs:/var/log/libreecho", "config-transaction-files:config/*.tmp", "config/wake-dump.raw", "config/wake-dump-seconds", "config/vendor-import-force-next-boot", "symlinked-state"]
+  "excluded": ["factory-seed:/etc/libreecho", "payloads:/data/libreecho/features", "ota:/data/libreecho/update", "release-identity:/data/libreecho/data-manifest.json", "runtime-guard:/data/libreecho/network-recovery-reboot.guard", "runtime:/run/libreecho", "logs:/var/log/libreecho", "transaction-files:config,secrets:*.tmp,*.new", "config/wake-dump.raw", "config/wake-dump-seconds", "config/vendor-import-force-next-boot", "symlinked-state"]
 }
 EOF
 }

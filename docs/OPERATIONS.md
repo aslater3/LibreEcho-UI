@@ -219,7 +219,9 @@ archiving a link, and an archive whose trees contain a link is rejected before
 the restore prompt, leaving live state unchanged. A configured `config` or
 `secrets` root that is itself a link is refused as well, because copying
 through it would archive another tree, and so is a root spelled with a `.` or
-`..` component. A trailing or doubled separator is normalized to that same root
+`..` component or one whose path crosses a link above the root itself. Every
+component is inspected without following it, so an ancestor cannot move the
+state tree. A trailing or doubled separator is normalized to that same root
 before the checks, and no root is canonicalized: a name that merely contains a
 dot is an ordinary root.
 

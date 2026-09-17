@@ -499,6 +499,66 @@ class BackupRoundTrip(unittest.TestCase):
             DATA.unlink()
             real.rename(DATA)
 
+    def test_symlinked_ancestor_component_is_refused(self):
+        # Only a component *above* the configured root is a link, so the root
+        # itself and its final component are plain directories: the check has to
+        # inspect every component without following links, or the copy and the
+        # restore land inside the link target.
+        self.call('create')
+        before = ARCHIVE.stat()
+        outside = Path('/out/ancestor-target')
+        shutil.rmtree(outside, ignore_errors=True)
+        (outside / 'state/config').mkdir(parents=True)
+        (outside / 'state/secrets').mkdir(parents=True)
+        write(outside / 'state/config/web-config.json',
+              '{"hostname":"ancestor-tree"}\n')
+        write(outside / 'state/config/users', 'ancestor-account\n')
+        write(outside / 'state/secrets/ancestor-secret', 'ancestor-secret\n')
+        alias = Path('/data/alias')
+        os.symlink(str(outside), alias)
+        try:
+            for env in [{'LIBREECHO_DATA_ROOT': str(alias / 'state')},
+                        {'LIBREECHO_CONFIG_DIR': str(alias / 'state/config')}]:
+                for action in ['create', 'restore']:
+                    with self.subTest(action=action, **env):
+                        result = self.call(action, success=False, extra_env=env)
+                        self.assertIn('crosses a symbolic link', result.stderr)
+                        self.assertIn(str(alias), result.stderr)
+            # Nothing was staged into or written through the link target.
+            self.assertEqual(sorted(path.name for path in
+                                    (outside / 'state/config').iterdir()),
+                             ['users', 'web-config.json'])
+            self.assertEqual(sorted(path.name for path in
+                                    (outside / 'state/secrets').iterdir()),
+                             ['ancestor-secret'])
+            after = ARCHIVE.stat()
+            self.assertEqual((after.st_size, after.st_mtime_ns),
+                             (before.st_size, before.st_mtime_ns),
+                             'refused create overwrote the archive')
+            self.assertEqual(self.actions('stop'), [],
+                             'services were stopped for a refused restore')
+            self.assertEqual((outside / 'state/config/users').read_text(),
+                             'ancestor-account\n')
+            self.assertEqual((outside / 'state/secrets/ancestor-secret').read_text(),
+                             'ancestor-secret\n')
+        finally:
+            alias.unlink()
+
+    def test_manifest_names_the_pruned_transaction_file_class(self):
+        # A consumer auditing the archive must be able to tell an intentional
+        # omission from an incomplete backup, so the manifest names every tree
+        # and every suffix the pruning class removes.
+        write(DATA / 'secrets/provider.new', 'transaction-fixture\n')
+        self.call('create')
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            manifest_file = archive.extractfile('manifest.json')
+            assert manifest_file is not None
+            excluded = json.load(manifest_file)['excluded']
+            names = [member.name for member in archive.getmembers()]
+        self.assertIn('transaction-files:config,secrets:*.tmp,*.new', excluded)
+        self.assertNotIn('config-transaction-files:config/*.tmp', excluded)
+        self.assertNotIn('persistent/secrets/provider.new', names)
+
     def test_dot_and_prefix_names_are_not_over_refused(self):
         # The refusal keys on a `/`-separated `.`/`..` component, not on a name
         # that merely contains a dot, and it must not confuse another root that
