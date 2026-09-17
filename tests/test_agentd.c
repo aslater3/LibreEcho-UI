@@ -429,6 +429,22 @@ int main(void)
     CHECK(i < 300);
     CHECK(count_in_file(weather_log, "api.open-meteo.com/v1/forecast") >= 1);
     CHECK(count_in_file(weather_log, "models=ukmo_seamless") == 1);
+    {
+        /* Nothing changed and the reading is fresh, so another turn reuses it
+           rather than asking the provider again. */
+        int cached = count_in_file(weather_log, "api.open-meteo.com/v1/forecast");
+
+        for (i = 0; i < 300; ++i) {
+            if (call(socket_path, "respond",
+                     "{\"text\":\"Still the weather?\"}",
+                     response, sizeof(response)) == 0 &&
+                strstr(response, "a voice response is already playing") == NULL)
+                break;
+            nanosleep(&delay, NULL);
+        }
+        CHECK(i < 300);
+        CHECK(count_in_file(weather_log, "api.open-meteo.com/v1/forecast") == cached);
+    }
     CHECK(call(socket_path, "configure",
                "{\"weather_provider\":\"open-meteo\"}",
                response, sizeof(response)) == 0);
