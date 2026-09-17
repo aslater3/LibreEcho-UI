@@ -13,10 +13,72 @@
 
 #include "../src/http_server.c"
 
+#define LE_TEST_READ_SECONDS 5
+#define LE_TEST_SIGNAL_DELAY_NS 20000000L
+
+static void deadline_after(struct timespec *deadline, long seconds)
+{
+    clock_gettime(CLOCK_MONOTONIC, deadline);
+    deadline->tv_sec += seconds;
+}
+
+static int deadline_expired(const struct timespec *deadline)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (now.tv_sec != deadline->tv_sec)
+        return now.tv_sec > deadline->tv_sec;
+    return now.tv_nsec >= deadline->tv_nsec;
+}
+
+/* A worker may be reaped while its response is being read, and a signal
+ * delivered into a blocked read on a socket carrying SO_RCVTIMEO reports
+ * EINTR rather than restarting, even under SA_RESTART. Only that result is
+ * retried; SO_RCVTIMEO stays set, so a silent peer still fails the read at the
+ * timeout, and the retries run inside a monotonic deadline so a signal storm
+ * cannot make the read unbounded. */
+static ssize_t read_response_bytes(int fd, void *buffer, size_t count)
+{
+    struct timespec deadline;
+    ssize_t n;
+
+    deadline_after(&deadline, LE_TEST_READ_SECONDS);
+    for (;;) {
+        n = read(fd, buffer, count);
+        if (n >= 0 || errno != EINTR)
+            return n;
+        if (deadline_expired(&deadline))
+            return -1;
+    }
+}
+
+/* capacity includes the terminator: at most capacity-1 bytes are read. */
+static int read_worker_response(int fd, char *response, size_t capacity)
+{
+    struct timeval timeout = {1, 0};
+    size_t used = 0;
+    ssize_t n;
+
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)))
+        return -1;
+    while (used + 1 < capacity) {
+        n = read_response_bytes(fd, response + used, capacity - 1 - used);
+        if (n == 0)
+            break;
+        if (n < 0)
+            return -1;
+        used += (size_t)n;
+    }
+    response[used] = '\0';
+    return 0;
+}
+
 static int wait_for_workers(int kind)
 {
     struct timespec pause = {0, 1000000L};
     int i;
+
     for (i = 0; i < 100; i++) {
         le_test_reap_child_workers();
         if (le_test_worker_count(kind) == 0)
@@ -29,8 +91,19 @@ static int wait_for_workers(int kind)
 static int read_socket_message(int fd)
 {
     char message[3] = {0};
-    return read(fd, message, sizeof(message) - 1) == 2 &&
+
+    return read_worker_response(fd, message, sizeof(message)) == 0 &&
            !strcmp(message, "ok");
+}
+
+static int start_pcm_stream_worker(int fd)
+{
+    return start_pcm_stream(fd, 0);
+}
+
+static int start_update_check_worker(int fd)
+{
+    return start_update_fetch(fd, "check");
 }
 
 static int test_normal_outer_workers_are_reaped(void)
@@ -57,7 +130,6 @@ static int test_normal_outer_workers_are_reaped(void)
 
 static int test_normal_update_checks_are_reaped(void)
 {
-    struct timeval timeout = {1, 0};
     int i;
 
     if (setenv("LIBREECHO_UPDATE_FETCH", "/bin/true", 1))
@@ -65,31 +137,19 @@ static int test_normal_update_checks_are_reaped(void)
     for (i = 0; i < 3; i++) {
         int pair[2];
         char response[512];
-        size_t used = 0;
-        ssize_t n;
 
         memset(response, 0, sizeof(response));
         if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair))
             return -1;
-        if (setsockopt(pair[1], SOL_SOCKET, SO_RCVTIMEO,
-                       &timeout, sizeof(timeout)) ||
-            start_update_fetch(pair[0], "check") < 0) {
+        if (start_update_check_worker(pair[0]) < 0) {
             close(pair[0]);
             close(pair[1]);
             return -1;
         }
-        while (used + 1 < sizeof(response)) {
-            n = read(pair[1], response + used,
-                     sizeof(response) - 1 - used);
-            if (n == 0)
-                break;
-            if (n < 0)
-                return -1;
-            used += (size_t)n;
-        }
+        if (read_worker_response(pair[1], response, sizeof(response)))
+            return -1;
         close(pair[1]);
-        response[used] = '\0';
-        if (used == 0 || !strstr(response, "HTTP/1.1 200 OK") ||
+        if (response[0] == '\0' || !strstr(response, "HTTP/1.1 200 OK") ||
             !strstr(response, "\"checked\":true") ||
             wait_for_workers(LE_TEST_WORKER_UPDATE_FETCH))
             return -1;
@@ -223,23 +283,39 @@ static int worker_status_consumed(pid_t pid)
     return waitpid(pid, &status, WNOHANG) < 0 && errno == ECHILD;
 }
 
-static int read_worker_response(int fd, char *response, size_t capacity)
+static int sigchld_block(sigset_t *previous)
 {
-    struct timeval timeout = {1, 0};
-    size_t used = 0;
-    ssize_t n;
+    sigset_t blocked;
 
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)))
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGCHLD);
+    return sigprocmask(SIG_BLOCK, &blocked, previous);
+}
+
+static void sigchld_restore(const sigset_t *previous)
+{
+    sigprocmask(SIG_SETMASK, previous, NULL);
+}
+
+typedef int (*worker_start)(int fd);
+
+/* A short-lived worker exits as soon as it has answered, and the installed
+ * handler reaps it the moment it is allowed to run - clearing the registry
+ * slot this test needs. Hold SIGCHLD blocked across the real startup and the
+ * PID snapshot, the same window child_worker_begin() holds, so the lookup
+ * cannot lose a worker that ran correctly. */
+static int start_worker_and_capture_pid(worker_start start, int fd, int kind,
+                                        pid_t *pid)
+{
+    sigset_t previous;
+
+    if (sigchld_block(&previous))
         return -1;
-    while (used + 1 < capacity) {
-        n = read(fd, response + used, capacity - 1 - used);
-        if (n == 0)
-            break;
-        if (n < 0)
-            return -1;
-        used += (size_t)n;
+    if (start(fd) < 0 || (*pid = registered_worker_pid(kind)) <= 0) {
+        sigchld_restore(&previous);
+        return -1;
     }
-    response[used] = '\0';
+    sigchld_restore(&previous);
     return 0;
 }
 
@@ -256,18 +332,19 @@ static int test_real_update_check_worker_is_reaped(void)
         return -1;
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair))
         return -1;
-    if (start_update_fetch(pair[0], "check") < 0) {
-        close(pair[0]);
+    if (start_worker_and_capture_pid(start_update_check_worker, pair[0],
+                                     LE_TEST_WORKER_UPDATE_FETCH, &pid)) {
+        fprintf(stderr, "FAIL: real update-check worker published no PID "
+                "(errno=%d)\n", errno);
         close(pair[1]);
         return -1;
     }
-    pid = registered_worker_pid(LE_TEST_WORKER_UPDATE_FETCH);
     if (read_worker_response(pair[1], response, sizeof(response))) {
         close(pair[1]);
         return -1;
     }
     close(pair[1]);
-    if (pid <= 0 || !strstr(response, "HTTP/1.1 200 OK") ||
+    if (!strstr(response, "HTTP/1.1 200 OK") ||
         !strstr(response, "\"checked\":true") ||
         wait_for_workers(LE_TEST_WORKER_UPDATE_FETCH) ||
         !worker_status_consumed(pid)) {
@@ -277,6 +354,60 @@ static int test_real_update_check_worker_is_reaped(void)
     }
     puts("  real update-check worker is reaped, not left waiting: ok");
     return 0;
+}
+
+/* Proof that the snapshot window is deterministic: with SIGCHLD blocked the
+ * handler cannot clear the slot even though the worker has already exited, so
+ * the cycle tests cannot lose a worker that behaved correctly. After the
+ * window closes, the pending signal reaps the worker and the slot empties. */
+static int test_pid_snapshot_survives_worker_exit(void)
+{
+    struct timespec pause = {0, 1000000L};
+    sigset_t previous;
+    siginfo_t info;
+    int pair[2];
+    pid_t pid;
+    int i, failed = 0;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair))
+        return -1;
+    if (sigchld_block(&previous)) {
+        close(pair[0]);
+        close(pair[1]);
+        return -1;
+    }
+    if (start_pcm_stream_worker(pair[0]) < 0 ||
+        (pid = registered_worker_pid(LE_TEST_WORKER_PCM)) <= 0) {
+        fprintf(stderr, "FAIL: audio-stream worker published no PID inside the "
+                "blocked window (errno=%d)\n", errno);
+        sigchld_restore(&previous);
+        close(pair[1]);
+        return -1;
+    }
+    /* WNOWAIT waits for the exit without consuming the status, so the slot
+     * still has to name the worker while SIGCHLD stays blocked. */
+    memset(&info, 0, sizeof(info));
+    if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT)) {
+        failed = 1;
+    } else if (registered_worker_pid(LE_TEST_WORKER_PCM) != pid) {
+        fprintf(stderr, "FAIL: the exited worker's slot was cleared while "
+                "SIGCHLD was blocked\n");
+        failed = 1;
+    }
+    sigchld_restore(&previous);
+    for (i = 0; i < 200 && !worker_status_consumed(pid); i++)
+        nanosleep(&pause, NULL);
+    close(pair[1]);
+    if (!failed && (!worker_status_consumed(pid) ||
+                    registered_worker_pid(LE_TEST_WORKER_PCM) != (pid_t)-1)) {
+        fprintf(stderr, "FAIL: the pending SIGCHLD did not reap worker %ld\n",
+                (long)pid);
+        failed = 1;
+    }
+    if (!failed)
+        puts("  PID snapshot survives an exited worker inside the blocked "
+             "window: ok");
+    return failed ? -1 : 0;
 }
 
 #define LE_TEST_STREAM_CYCLES 24
@@ -300,18 +431,21 @@ static int test_real_audio_stream_workers_reap_to_baseline(void)
 
         if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair))
             return -1;
-        if (start_pcm_stream(pair[0], 0) < 0) {
-            close(pair[0]);
+        if (start_worker_and_capture_pid(start_pcm_stream_worker, pair[0],
+                                         LE_TEST_WORKER_PCM, &pid)) {
+            fprintf(stderr, "FAIL: audio-stream cycle %d published no PID "
+                    "(errno=%d)\n", cycle, errno);
             close(pair[1]);
             return -1;
         }
-        pid = registered_worker_pid(LE_TEST_WORKER_PCM);
         if (read_worker_response(pair[1], response, sizeof(response))) {
+            fprintf(stderr, "FAIL: audio-stream cycle %d read no response "
+                    "(errno=%d)\n", cycle, errno);
             close(pair[1]);
             return -1;
         }
         close(pair[1]);
-        if (pid <= 0 || !strstr(response, "HTTP/1.1 503") ||
+        if (!strstr(response, "HTTP/1.1 503") ||
             wait_for_workers(LE_TEST_WORKER_PCM) ||
             le_test_worker_count(LE_TEST_WORKER_PCM) != 0 ||
             !worker_status_consumed(pid)) {
@@ -324,6 +458,169 @@ static int test_real_audio_stream_workers_reap_to_baseline(void)
     printf("  audio-stream workers reap to baseline over %d cycles: ok\n",
            LE_TEST_STREAM_CYCLES);
     return 0;
+}
+
+static volatile sig_atomic_t interruption_count;
+
+static void count_interruption(int signo)
+{
+    (void)signo;
+    interruption_count++;
+}
+
+/* Signals the parent while its read is blocked, then optionally delivers the
+ * response bytes. */
+static pid_t fork_deferred_signal(int fd, const char *payload, size_t length)
+{
+    struct timespec pause = {0, LE_TEST_SIGNAL_DELAY_NS};
+    pid_t pid = fork();
+
+    if (pid != 0)
+        return pid;
+    nanosleep(&pause, NULL);
+    kill(getppid(), SIGUSR1);
+    nanosleep(&pause, NULL);
+    if (length && write(fd, payload, length) != (ssize_t)length)
+        _exit(1);
+    _exit(0);
+}
+
+/* The cycle tests read a response while a worker is being reaped, so a signal
+ * really can land inside that read. Prove the interruption happens as
+ * described, and that the reader retries it instead of reporting a correctly
+ * reaped worker as a failure. */
+static int test_interrupted_response_read_is_retried(void)
+{
+    struct sigaction action, previous_action;
+    struct timeval timeout = {1, 0};
+    int pair[2];
+    char response[8];
+    pid_t helper;
+    ssize_t interrupted;
+    int status, failed = 0;
+
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = count_interruption;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    if (sigaction(SIGUSR1, &action, &previous_action))
+        return -1;
+
+    /* First half: the raw call the reader has to tolerate. */
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair)) {
+        sigaction(SIGUSR1, &previous_action, NULL);
+        return -1;
+    }
+    if (setsockopt(pair[1], SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout))) {
+        sigaction(SIGUSR1, &previous_action, NULL);
+        return -1;
+    }
+    interruption_count = 0;
+    helper = fork_deferred_signal(pair[0], NULL, 0);
+    if (helper < 0) {
+        sigaction(SIGUSR1, &previous_action, NULL);
+        return -1;
+    }
+    close(pair[0]);
+    errno = 0;
+    interrupted = read(pair[1], response, 1);
+    if (!(interrupted < 0 && errno == EINTR)) {
+        fprintf(stderr, "FAIL: a signal during a timed socket read did not "
+                "report EINTR (%ld/%s); the retry would not be exercised\n",
+                (long)interrupted, strerror(errno));
+        failed = 1;
+    }
+    close(pair[1]);
+    waitpid(helper, &status, 0);
+
+    /* Second half: the same interruption while the worker's response is read. */
+    memset(response, 0, sizeof(response));
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair)) {
+        failed = 1;
+    } else if ((helper = fork_deferred_signal(pair[0], "ok", 2)) < 0) {
+        failed = 1;
+    } else {
+        close(pair[0]);
+        if (read_worker_response(pair[1], response, sizeof(response)) ||
+            strcmp(response, "ok")) {
+            fprintf(stderr, "FAIL: an interrupted response read was reported "
+                    "as a failure (response=%s errno=%d)\n",
+                    response, errno);
+            failed = 1;
+        }
+        close(pair[1]);
+        waitpid(helper, &status, 0);
+    }
+    if (interruption_count == 0) {
+        fprintf(stderr, "FAIL: the interrupting signal never arrived\n");
+        failed = 1;
+    }
+    sigaction(SIGUSR1, &previous_action, NULL);
+    if (!failed)
+        puts("  an interrupted response read is retried, not failed: ok");
+    return failed ? -1 : 0;
+}
+
+/* Fork a child that exits 9, register it and then drop its registry entry
+ * without consuming its status - the shape a reaper that dropped a slot
+ * instead of reaping the child would leave behind. SIGCHLD is held blocked, so
+ * the handler cannot hide that. */
+static pid_t fork_dropped_worker(void)
+{
+    siginfo_t info;
+    pid_t pid = fork();
+
+    if (pid < 0)
+        return -1;
+    if (pid == 0)
+        _exit(9);
+    if (le_test_register_worker_pid(pid, LE_TEST_WORKER_PCM))
+        return -1;
+    memset(&info, 0, sizeof(info));
+    if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT))
+        return -1;
+    le_test_reset_worker_registry();
+    return pid;
+}
+
+/* The cycle tests assert that a reaped worker's status is gone. Prove that
+ * assertion is not vacuous: an entry dropped without the status being consumed
+ * - the defect this issue is about - is reported as unconsumed, and only a real
+ * reap flips it. worker_status_consumed() itself reaps what it finds, so each
+ * direction gets its own worker. */
+static int test_dropped_entry_without_reap_is_detected(void)
+{
+    sigset_t previous;
+    pid_t pid;
+    int status, failed = 0;
+
+    if (sigchld_block(&previous))
+        return -1;
+
+    pid = fork_dropped_worker();
+    if (pid <= 0 || worker_status_consumed(pid)) {
+        fprintf(stderr, "FAIL: the reap check cannot see a dropped-but-"
+                "unreaped worker\n");
+        failed = 1;
+    }
+    if (pid > 0)
+        waitpid(pid, &status, 0);
+
+    pid = fork_dropped_worker();
+    if (pid <= 0 || waitpid(pid, &status, 0) != pid ||
+        !WIFEXITED(status) || WEXITSTATUS(status) != 9 ||
+        !worker_status_consumed(pid)) {
+        fprintf(stderr, "FAIL: a reaped worker is not reported as consumed "
+                "(pid=%ld)\n", (long)pid);
+        failed = 1;
+    }
+
+    le_test_reset_worker_registry();
+    sigchld_restore(&previous);
+    if (!failed)
+        puts("  a dropped-but-unreaped entry is still detected: ok");
+    return failed ? -1 : 0;
 }
 
 /* After a mixed run of update and stream operations nothing may remain in the
@@ -358,8 +655,11 @@ int main(void)
         test_normal_outer_workers_are_reaped() ||
         test_normal_update_checks_are_reaped() ||
         test_real_update_check_worker_is_reaped() ||
+        test_pid_snapshot_survives_worker_exit() ||
         test_real_audio_stream_workers_reap_to_baseline() ||
+        test_interrupted_response_read_is_retried() ||
         test_registry_returns_to_baseline() ||
+        test_dropped_entry_without_reap_is_detected() ||
         test_registry_full_is_bounded() ||
         test_fork_failure_does_not_publish_worker() ||
         test_unrelated_child_status_remains_owned())
