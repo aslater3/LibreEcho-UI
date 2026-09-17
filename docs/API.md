@@ -1596,6 +1596,15 @@ Returns the saved button settings and the live capability state reported by
 record. `volume_capable`, `hardware_mute`, and `action_capable` reflect the
 keys found on the currently discovered evdev devices; `stale` is true when the
 status record is missing, disconnected, or older than 15 seconds.
+
+`privacy_latch` reports the kernel's privacy latch, which is what lights the lamp
+in the mute button: `true` when it is engaged, `false` when it is released, and
+`null` when there is no fresh reading — absence of a reading is not evidence that
+the latch is released. It is the only truthful source for that lamp's state: a
+software mute (`microphone_muted` on `/audio`) lights the light ring and leaves
+the lamp dark, because the lamp is wired to the latch rather than to the audio
+path. `hardware_mute` above is a capability ("this device has a mute button"),
+not a state. Software cannot assert or release the latch; the button does.
 `available_sounds` lists the installed raw sounds that can be previewed, and
 `action_sounds` is the comma-separated rotation list in play order. Sound names
 are lowercase letters, digits, hyphens, or underscores and are at most 48
@@ -1643,6 +1652,7 @@ previous in-memory preferences remain active.
     "state": "stale",
     "volume_capable": false,
     "hardware_mute": false,
+    "privacy_latch": null,
     "action_capable": false,
     "stale": true,
     "tones": true,

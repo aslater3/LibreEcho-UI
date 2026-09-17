@@ -16,6 +16,12 @@ source = Path('src/adapter/buttond.c').read_text()
 assert 'action_capable' in source
 assert 'TEST_BIT(KEY_HELP, key_bits)' in source
 assert 'action=%d' in source
+assert 'privacy_state=%d' in source, 'the privacy latch is not reported to the UI'
+assert 'ctx->privacy_observed)' in source, 'the status file must publish the observed latch'
+assert 'static void publish_latch_observation(' in source, (
+    'a changed observation must be published without waiting for the heartbeat')
+assert 'publish_latch_observation(ctx, -1)' in source, (
+    'an unreadable latch must publish as unknown')
 assert 'json_get_int(buffer, "button_action_brightness", &value) > 0' in source
 assert 'json_get_int(buffer, "button_mute_brightness", &value) > 0' in source
 assert 'json_get_string(buffer, "button_action_sounds", value_text,\n                        sizeof(value_text)) == 1' in source
