@@ -82,8 +82,9 @@ grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 make build/libreecho-ledd build/libreecho-buttond
 python3 tests/test_buttond_led_restart.py
-make build/test-action-sample build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing build/test-watchdog-policy
+make build/test-action-sample build/test-cue-rate-limit build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing build/test-watchdog-policy
 ./build/test-action-sample
+./build/test-cue-rate-limit
 ./build/test-audiod-review
 ./build/test-led-night-review
 ./build/test-button-settings
