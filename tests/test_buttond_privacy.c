@@ -334,6 +334,22 @@ int main(void)
     assert(ctx.lamp_supported == 0);
     assert(status_field("lamp_control") == 0);
     assert(ctx.lamp_retry_at_ms != 0);   /* anything but a refusal is retried */
+    /*
+     * A short write is not a refusal either, and errno means nothing for it: a
+     * kernel store() that consumes nothing can return 0 while errno still holds
+     * whatever an earlier call set. Reading errno there would let a stale
+     * -EOPNOTSUPP settle the probe and stop the retry, permanently disabling a
+     * control that is still present.
+     */
+    ctx.lamp_supported = -1;
+    buttond_fixture_write_short = 1;
+    buttond_fixture_write_short_errno = EOPNOTSUPP;   /* stale, not this answer */
+    mute_indicator(&ctx, 1);
+    buttond_fixture_write_short = 0;
+    buttond_fixture_write_short_errno = 0;
+    assert(ctx.lamp_supported == 0);
+    assert(status_field("lamp_control") == 0);
+    assert(ctx.lamp_retry_at_ms != 0);   /* retryable, never settled */
     ctx.lamp_supported = -1;
     buttond_fixture_write_errno = EOPNOTSUPP;
     mute_indicator(&ctx, 1);

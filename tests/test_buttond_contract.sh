@@ -34,6 +34,8 @@ assert 'lamp_control=%d' in source, (
     'the status file must report whether software can light the lamp')
 assert 'lamp_failure_is_final' in source and 'return err == EOPNOTSUPP;' in source, (
     'only the kernel refusing the control outright may settle the lamp probe')
+assert 'failed = written < 0 ? errno : 0;' in source, (
+    'a short write carries no errno, so a stale one must not settle the probe')
 assert 'LAMP_PROBE_RETRY_MS' in source and \
     'ctx->lamp_retry_at_ms = monotonic_ms() + LAMP_PROBE_RETRY_MS;' in source, (
     'an attribute that is not there yet must be probed again, not latched off')

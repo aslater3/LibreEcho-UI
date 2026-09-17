@@ -676,7 +676,14 @@ static void write_mute_lamp(struct context *ctx, int muted)
         return;
     }
     written = write(fd, value, 1);
-    failed = errno;
+    /*
+     * errno says nothing unless the write itself failed. A short write is
+     * possible (a store() that consumed nothing) and can leave errno holding
+     * whatever an earlier call set, so reading it here would let a stale
+     * -EOPNOTSUPP settle a probe this write never refused -- and stop the retry
+     * that a control which is still there deserves.
+     */
+    failed = written < 0 ? errno : 0;
     close(fd);
     if (written == 1) {
         ctx->lamp_warned = 0;
@@ -687,8 +694,10 @@ static void write_mute_lamp(struct context *ctx, int muted)
     if (!ctx->lamp_warned) {
         if (failed == EBUSY)
             le_log_warn("buttond: mute lamp write deferred (the latch owns it?)");
-        else
+        else if (failed != 0)
             le_log_warn("buttond: mute lamp write refused: %s", strerror(failed));
+        else
+            le_log_warn("buttond: mute lamp write was short");
     }
     ctx->lamp_warned = 1;
     if (failed == EBUSY) {
