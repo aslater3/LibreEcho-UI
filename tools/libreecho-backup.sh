@@ -19,6 +19,21 @@ SKIP_SERVICES=${LIBREECHO_SKIP_SERVICES:-0}
 CONFIG_OWNER=${LIBREECHO_CONFIG_OWNER:-}
 SECRETS_OWNER=${LIBREECHO_SECRETS_OWNER:-}
 
+# A trailing slash makes `test -L` resolve the final component through the
+# link, so a root spelled `/mnt/state/` would pass the symlink refusal below.
+# The roots are normalized before any check or copy.
+trim_slashes() {
+    root=$1
+    while [ -n "${root%/}" ] && [ "${root%/}" != "$root" ]; do
+        root=${root%/}
+    done
+    printf '%s\n' "$root"
+}
+
+DATA_ROOT=$(trim_slashes "$DATA_ROOT")
+CONFIG_DIR=$(trim_slashes "$CONFIG_DIR")
+SECRETS_DIR=$(trim_slashes "$SECRETS_DIR")
+
 # Stop the supervisor before its writers; resume in reverse dependency order.
 # Missing image services are allowed. Installed but inactive services stay off.
 SERVICE_NAMES="libreecho-watchdogd libreecho-web libreecho-agentd libreecho-waked libreecho-airplayd libreecho-ttsd libreecho-sttd libreecho-btd libreecho-radiod libreecho-timerd libreecho-buttond libreecho-ledd libreecho-micd libreecho-audiod libreecho-networkd libreecho-timed"
@@ -151,15 +166,25 @@ apply_owner() {
     find "$root" -exec chown "$owner" {} + || return 1
 }
 
-prune_excluded_files() {
+# Transaction files are not committed consumer state, and config_store can
+# leave them anywhere inside either captured tree, so they stay a name class.
+prune_transaction_files() {
     root=$1
-    # Transaction files are not committed consumer state.  Raw PCM is a
-    # diagnostic artifact and may contain private microphone audio, and
-    # wake-dump-seconds is the one-shot request that produces it: waked clears
-    # that file as it reads it and exits when the dump ends, taking the wake
-    # word with it for that boot. Restoring an already-consumed request would
-    # replay a diagnostic outage, so neither file belongs in a backup.
-    find "$root" -type f \( -name '*.tmp' -o -name '*.new' -o -name 'wake-dump.raw' -o -name 'wake-dump-seconds' -o -name 'vendor-import-force-next-boot' \) -exec rm -f {} + || return 1
+    find "$root" -type f \( -name '*.tmp' -o -name '*.new' \) -exec rm -f {} + || return 1
+}
+
+# These are fixed paths directly under the active config directory, not a name
+# class: the waked raw PCM dump and the one-shot request that produces it,
+# which waked clears as it reads the dump and which would otherwise replay a
+# diagnostic outage after a restore, plus the next-boot vendor-import marker.
+# They are pruned by exact path so a file elsewhere in a captured tree that
+# merely shares a basename is still backed up.
+prune_one_shot_config_files() {
+    root=$1
+    for path in "$root/wake-dump.raw" "$root/wake-dump-seconds" \
+        "$root/vendor-import-force-next-boot"; do
+        [ ! -f "$path" ] || rm -f "$path" || return 1
+    done
 }
 
 write_manifest() {
@@ -195,8 +220,9 @@ create_backup() {
         fail "active config contains a symbolic link and cannot be archived"
     refuse_symlinks "$tmpdir/persistent/secrets" ||
         fail "active secrets contain a symbolic link and cannot be archived"
-    prune_excluded_files "$tmpdir/persistent/config"
-    prune_excluded_files "$tmpdir/persistent/secrets"
+    prune_transaction_files "$tmpdir/persistent/config"
+    prune_transaction_files "$tmpdir/persistent/secrets"
+    prune_one_shot_config_files "$tmpdir/persistent/config"
     secure_tree "$tmpdir/persistent"
     [ -f "$tmpdir/persistent/config/web-config.json" ] || fail "required active config could not be staged"
     [ -f "$tmpdir/persistent/config/users" ] || fail "required account state could not be staged"

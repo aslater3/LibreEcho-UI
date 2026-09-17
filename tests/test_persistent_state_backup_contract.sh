@@ -92,8 +92,11 @@ for script in "$REPO"/init/*.init; do
             "$DATA_ROOT"/*) ;;
             *) continue ;;
         esac
-        grep -Fq -- "-name '${default##*/}'" "$TOOL" ||
-            fail "one-shot persistent file is captured and restored: $default"
+        grep -Fq -- "\$root/${default##*/}" "$TOOL" ||
+            fail "one-shot persistent file is not pruned by its exact path: $default"
+        if grep -Fq -- "-name '${default##*/}'" "$TOOL"; then
+            fail "one-shot persistent file is pruned by basename anywhere: $default"
+        fi
         pruned=$((pruned + 1))
     done
 done

@@ -411,23 +411,86 @@ class BackupRoundTrip(unittest.TestCase):
         (DATA / 'config').rename(live)
         os.symlink(str(outside), DATA / 'config')
         try:
-            created = self.call('create', success=False)
-            self.assertIn('symbolic link', created.stderr)
+            # A trailing slash is another spelling of the same root, not an
+            # escape from the check: `test -L` resolves the final component of
+            # a path that ends in `/` through the link.
+            for suffix in ['', '/']:
+                with self.subTest(config_root=str(DATA / 'config') + suffix):
+                    env = {'LIBREECHO_CONFIG_DIR':
+                           str(DATA / 'config') + suffix}
+                    created = self.call('create', success=False, extra_env=env)
+                    self.assertIn('symbolic link', created.stderr)
+                    after = ARCHIVE.stat()
+                    self.assertEqual((after.st_size, after.st_mtime_ns),
+                                     (before.st_size, before.st_mtime_ns),
+                                     'refused create overwrote the archive')
+                    restored = self.call('restore', success=False, extra_env=env)
+                    self.assertIn('symbolic link', restored.stderr)
+                    self.assertEqual(self.actions('stop'), [],
+                                     'services were stopped for a refused restore')
+                    self.assertTrue((DATA / 'config').is_symlink(),
+                                    'the live config root was replaced')
+                    self.assertEqual((outside / 'web-config.json').read_text(),
+                                     '{"hostname":"outside-tree"}\n')
+        finally:
+            (DATA / 'config').unlink()
+            live.rename(DATA / 'config')
+
+    def test_exclusions_match_exact_paths_not_basenames(self):
+        # The wake diagnostics are excluded at their fixed config paths, not as
+        # a name class: another file that merely shares a basename is committed
+        # state and must survive a round trip.
+        nested = DATA / 'config/nested/wake-dump-seconds'
+        stray = DATA / 'secrets/wake-dump-seconds'
+        write(nested, 'unrelated-nested-state\n')
+        write(stray, 'unrelated-secret-state\n')
+        self.call('create')
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            names = [member.name for member in archive.getmembers()]
+        for kept in ['persistent/config/nested/wake-dump-seconds',
+                     'persistent/secrets/wake-dump-seconds']:
+            self.assertIn(kept, names)
+        for pruned in ['persistent/config/wake-dump-seconds',
+                       'persistent/config/wake-dump.raw',
+                       'persistent/config/vendor-import-force-next-boot']:
+            self.assertNotIn(pruned, names)
+        self.call('restore')
+        for path, value in [(nested, 'unrelated-nested-state\n'),
+                            (stray, 'unrelated-secret-state\n')]:
+            self.assertEqual(path.read_text(), value, 'restored bytes differ')
+        self.assertFalse((DATA / 'config/wake-dump-seconds').exists())
+        self.assertFalse((DATA / 'config/wake-dump.raw').exists())
+        self.assertFalse((DATA / 'config/vendor-import-force-next-boot').exists())
+
+    def test_symlinked_data_root_is_refused(self):
+        # The data root itself as a link, spelled with a trailing slash: `test
+        # -L` resolves the final component of `/data/libreecho/` through the
+        # link, so an untrimmed spelling would archive the linked tree.
+        self.call('create')
+        before = ARCHIVE.stat()
+        real = Path('/data/state-real')
+        shutil.rmtree(real, ignore_errors=True)
+        DATA.rename(real)
+        os.symlink(str(real), DATA)
+        try:
+            for suffix in ['', '/']:
+                with self.subTest(data_root=str(DATA) + suffix):
+                    env = {'LIBREECHO_DATA_ROOT': str(DATA) + suffix}
+                    created = self.call('create', success=False, extra_env=env)
+                    self.assertIn('symbolic link', created.stderr)
+                    restored = self.call('restore', success=False, extra_env=env)
+                    self.assertIn('symbolic link', restored.stderr)
+                    self.assertEqual(self.actions('stop'), [],
+                                     'services were stopped for a refused restore')
             after = ARCHIVE.stat()
             self.assertEqual((after.st_size, after.st_mtime_ns),
                              (before.st_size, before.st_mtime_ns),
                              'refused create overwrote the archive')
-            restored = self.call('restore', success=False)
-            self.assertIn('symbolic link', restored.stderr)
-            self.assertEqual(self.actions('stop'), [],
-                             'services were stopped for a refused restore')
-            self.assertTrue((DATA / 'config').is_symlink(),
-                            'the live config root was replaced')
-            self.assertEqual((outside / 'web-config.json').read_text(),
-                             '{"hostname":"outside-tree"}\n')
+            self.assertEqual((real / 'config/web-config.json').read_text(),
+                             self.files['config/web-config.json'])
         finally:
-            (DATA / 'config').unlink()
-            live.rename(DATA / 'config')
+            DATA.unlink()
+            real.rename(DATA)
 
     def test_service_restart_failure_is_not_success(self):
         self.call('create')
