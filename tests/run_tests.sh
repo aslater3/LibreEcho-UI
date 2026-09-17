@@ -82,8 +82,9 @@ grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 make build/libreecho-ledd build/libreecho-buttond
 python3 tests/test_buttond_led_restart.py
-make build/test-action-sample build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing build/test-watchdog-policy
+make build/test-action-sample build/test-cue-rate-limit build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing build/test-watchdog-policy
 ./build/test-action-sample
+./build/test-cue-rate-limit
 ./build/test-audiod-review
 ./build/test-led-night-review
 ./build/test-button-settings
@@ -122,6 +123,7 @@ python3 tests/test_wake_word_ui_contract.py
 node tests/test_wifi_security_interaction.js
 sh tests/test_local_llm_ui_contract.sh
 python3 tests/test_home_location_panel_contract.py
+python3 tests/test_weather_provider_contract.py
 python3 tools/test_virtual_echo.py
 python3 tests/test_now_playing_ui_contract.py
 python3 tests/test_config_persist_contract.py
@@ -133,7 +135,11 @@ node tests/test_timers_ui.js
 node tests/test_baby_monitor_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
 node tests/test_assistant_clock_format_ui.js
+<<<<<<< HEAD
 node tests/test_home_location_lookup_ui.js
+=======
+node tests/test_mute_lamp_ui.js
+>>>>>>> origin/release/0.14.0
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py

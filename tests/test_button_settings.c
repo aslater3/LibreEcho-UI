@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 static int failures;
@@ -34,6 +36,18 @@ static int request(struct api_context *context, const char *method,
     memset(response, 0, sizeof(*response));
     api_handle(context, &query, response);
     return response->status;
+}
+
+static void write_button_status(const char *path, int privacy)
+{
+    FILE *file = fopen(path, "w");
+
+    CHECK(file != NULL, "create a buttond status fixture");
+    if (!file)
+        return;
+    fprintf(file, "schema=1\nstate=connected\nvolume=1\nmicrophone_mute=1\n"
+                  "action=1\nprivacy_state=%d\n", privacy);
+    fclose(file);
 }
 
 static int init_context(struct api_context *context, struct le_backend **backend)
@@ -91,6 +105,53 @@ int main(void)
           "GET button response is valid JSON");
     CHECK(strstr(response.body, "\"action\":\"sound\"") != NULL,
           "GET exposes default action setting");
+
+    /*
+     * privacy_latch: the mute button's lamp follows the kernel privacy latch, so
+     * every state the reader can report has to serialize correctly -- engaged,
+     * released, unread, and a record too old to trust (0.14 #258).
+     */
+    {
+        char status_path[] = "/tmp/libreecho-buttond-status-XXXXXX";
+        int status_fd = mkstemp(status_path);
+
+        CHECK(status_fd >= 0, "create a buttond status path");
+        if (status_fd >= 0) {
+            struct timeval old;
+
+            close(status_fd);
+            context.buttond_status_path = status_path;
+
+            write_button_status(status_path, 1);
+            CHECK(request(&context, "GET", NULL, &response) == 200 &&
+                  strstr(response.body, "\"privacy_latch\":true") != NULL,
+                  "an engaged latch serializes as true");
+            CHECK(strstr(response.body, "\"stale\":true") == NULL,
+                  "a fresh status record is not stale");
+
+            write_button_status(status_path, 0);
+            CHECK(request(&context, "GET", NULL, &response) == 200 &&
+                  strstr(response.body, "\"privacy_latch\":false") != NULL,
+                  "a released latch serializes as false");
+
+            write_button_status(status_path, -1);
+            CHECK(request(&context, "GET", NULL, &response) == 200 &&
+                  strstr(response.body, "\"privacy_latch\":null") != NULL,
+                  "an unread latch serializes as null");
+
+            write_button_status(status_path, 1);
+            old.tv_sec = time(NULL) - 60;
+            old.tv_usec = 0;
+            CHECK(utimes(status_path, (struct timeval[]){old, old}) == 0,
+                  "age the status record");
+            CHECK(request(&context, "GET", NULL, &response) == 200 &&
+                  strstr(response.body, "\"privacy_latch\":null") != NULL &&
+                  strstr(response.body, "\"stale\":true") != NULL,
+                  "a stale record reports an unknown lamp, not its last value");
+
+            unlink(status_path);
+        }
+    }
 
     CHECK(request(&context, "PUT",
                   "{\"tones\":false,\"action\":\"listen\","

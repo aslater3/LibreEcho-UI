@@ -198,7 +198,8 @@ Each daemon owns one hardware domain and exposes it via the adapter protocol.
 | `set_gain` | `{gain: 0-100}` | Set microphone gain |
 | `set_mute` | `{muted: bool}` | Toggle mic mute |
 | `test_tone` | — | Play 440Hz sine wave |
-| `cue` | `{first_hz, second_hz, ms}` | Play a bounded two-tone notification cue |
+| `cue` | `{first_hz, second_hz, ms}` | Play a two-tone notification cue. Rate-limited at this boundary: a request inside the 200ms minimum interval, or one that arrives while the previous cue is still playing, is dropped rather than queued and is answered with `{playing:false, throttled:true}` |
+| `wake_chirp` | — | The 90ms wake acknowledgement chirp, played through the same cue gate |
 
 **ALSA interface:** Direct ioctl on `/dev/snd/controlC0`. Enumerates controls, reads/writes values. Falls back to `amixer` if ioctl fails.
 

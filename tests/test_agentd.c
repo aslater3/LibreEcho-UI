@@ -93,6 +93,20 @@ static int clear_history_after_barrier(const char *socket_path, int barrier_fd)
                 response, sizeof(response)) == 0 ? 0 : 1;
 }
 
+static int count_in_file(const char *path, const char *needle)
+{
+    char data[65536];
+    FILE *file = fopen(path, "r");
+    size_t n;
+
+    if (!file)
+        return 0;
+    n = fread(data, 1, sizeof(data) - 1, file);
+    fclose(file);
+    data[n] = '\0';
+    return count_occurrences(data, needle);
+}
+
 int main(void)
 {
     char directory[] = "/tmp/libreecho-agentd-test-XXXXXX";
@@ -102,6 +116,7 @@ int main(void)
     char history_backup_path[400];
     char credentials_path[256];
     char capture_path[256];
+    char weather_log[256];
     char audio_socket[256];
     char audio_capture[256];
     char wake_socket[256];
@@ -144,6 +159,10 @@ int main(void)
     snprintf(first_pcm_path, sizeof(first_pcm_path),
              "%s/first-pcm", directory);
     CHECK(setenv("LE_TEST_CURL_CAPTURE", capture_path, 1) == 0);
+    /* Every request agentd makes, appended: the weather lookup happens before
+       the model call, so the single capture file never holds it. */
+    snprintf(weather_log, sizeof(weather_log), "%s/requests.log", directory);
+    CHECK(setenv("LE_TEST_CURL_APPEND", weather_log, 1) == 0);
     CHECK(unsetenv("LE_TEST_CURL_MODE") == 0);
     CHECK(setenv("LE_AGENT_AUTH_POLL_MIN_SECONDS", "0", 1) == 0);
     CHECK(setenv("LE_TEST_TTS_MARKER", first_pcm_path, 1) == 0);
@@ -385,6 +404,62 @@ int main(void)
                "{\"text\":\"Check the local provider.\"}",
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"text\":\"Local ready\"") != NULL);
+    /*
+     * The configured provider has to reach the request. The UK Met Office model
+     * is asked for by name, the other provider must not ask for it, and changing
+     * provider has to drop the cached reading rather than serve the previous
+     * source's numbers for the rest of the refresh window.
+     */
+    CHECK(call(socket_path, "configure",
+               "{\"home_location\":\"Preston\",\"latitude\":\"53.763\","
+               "\"longitude\":\"-2.703\",\"weather_provider\":\"ukmo\"}",
+               response, sizeof(response)) == 0);
+    CHECK(strstr(response, "\"weather_provider\":\"ukmo\"") != NULL);
+    /*
+     * A turn is refused while the previous reply is still playing, so retry
+     * briefly instead of racing the mock audio path.
+     */
+    for (i = 0; i < 300; ++i) {
+        if (call(socket_path, "respond", "{\"text\":\"What is the weather?\"}",
+                 response, sizeof(response)) == 0 &&
+            strstr(response, "a voice response is already playing") == NULL)
+            break;
+        nanosleep(&delay, NULL);
+    }
+    CHECK(i < 300);
+    CHECK(count_in_file(weather_log, "api.open-meteo.com/v1/forecast") >= 1);
+    CHECK(count_in_file(weather_log, "models=ukmo_seamless") == 1);
+    {
+        /* Nothing changed and the reading is fresh, so another turn reuses it
+           rather than asking the provider again. */
+        int cached = count_in_file(weather_log, "api.open-meteo.com/v1/forecast");
+
+        for (i = 0; i < 300; ++i) {
+            if (call(socket_path, "respond",
+                     "{\"text\":\"Still the weather?\"}",
+                     response, sizeof(response)) == 0 &&
+                strstr(response, "a voice response is already playing") == NULL)
+                break;
+            nanosleep(&delay, NULL);
+        }
+        CHECK(i < 300);
+        CHECK(count_in_file(weather_log, "api.open-meteo.com/v1/forecast") == cached);
+    }
+    CHECK(call(socket_path, "configure",
+               "{\"weather_provider\":\"open-meteo\"}",
+               response, sizeof(response)) == 0);
+    for (i = 0; i < 300; ++i) {
+        if (call(socket_path, "respond", "{\"text\":\"And now?\"}",
+                 response, sizeof(response)) == 0 &&
+            strstr(response, "a voice response is already playing") == NULL)
+            break;
+        nanosleep(&delay, NULL);
+    }
+    CHECK(i < 300);
+    /* A second forecast request went out, and it carries no model. */
+    CHECK(count_in_file(weather_log, "api.open-meteo.com/v1/forecast") >= 2);
+    CHECK(count_in_file(weather_log, "models=ukmo_seamless") == 1);
+    CHECK(count_in_file(weather_log, "models=") == 1);
     CHECK(call(socket_path, "logout", NULL,
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"authenticated\":false") != NULL);
