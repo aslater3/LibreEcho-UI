@@ -615,6 +615,26 @@ returned configuration includes `clock_format`, the format used when the time
 is spoken aloud. The latency measurement is from the estimated end of speech to
 the first PCM submitted to the announcement bus; the current target is 3000 ms.
 
+#### GET /api/v1/live
+
+Returns the runtime status of `libreecho-lived`, including whether GPT-Live is
+armed, the WebSocket transport metrics, current session state, and bounded audio
+counters. The mode is runtime state and is not persisted across daemon restarts.
+If the daemon is not installed or running, the endpoint returns HTTP 503.
+
+#### PUT /api/v1/live
+
+Arms or disarms GPT-Live:
+
+```json
+{ "enabled": true }
+```
+
+Arming permits the local wake-word path to start a full-duplex ChatGPT
+subscription conversation. Idle microphone audio is not transmitted; post-AEC
+audio leaves the device only during an active conversation. The request requires
+`X-LibreEcho-CSRF`. Disabling stops an active GPT-Live conversation.
+
 #### GET /api/v1/assistant/history
 
 Returns the newest bounded turn records measured by `agentd` itself:
@@ -1132,6 +1152,71 @@ service first, so the restarted consumer attaches to a stream it can use.
 Unprivileged Linux deployments and backends without destructive-action support
 return HTTP 501.
 
+#### GET /api/v1/system/update
+
+Reports signed A/B update state: installed and latest verified versions, the
+source and channel, check timestamps and errors, pending activation, slots,
+rollback state, the identity of the candidate the last completed check
+resolved, and whether the installed helper supports unsigned manual uploads.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "supported": true,
+    "current_slot": "b",
+    "inactive_slot": "a",
+    "state": "idle",
+    "progress": 0,
+    "pending_reboot": false,
+    "pending_version": "",
+    "installed_version": "LibreEcho OS 0.13.9",
+    "latest_version": "0.14.0",
+    "resolved_release_tag": "radar-puffin-build-0123456-0123456789abcdef-fedcba9876543210",
+    "ota_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "channel": "dev",
+    "source": "github-releases",
+    "source_reachable": "true",
+    "check_status": "update-available",
+    "check_error": "",
+    "last_check_epoch": 1789000000,
+    "last_success_epoch": 1789000000,
+    "automatic_updates": false,
+    "rollback_available": false,
+    "rollback_version": "",
+    "allow_unsigned": false,
+    "max_upload_bytes": 33554432,
+    "max_upload_ceiling_bytes": 33554432
+  },
+  "error": null
+}
+```
+
+`resolved_release_tag` and `ota_sha256` are additive to the check record written
+by the update helper. They name the candidate the last completed check
+resolved, so an available development build can be identified exactly rather
+than by a version string that successive builds share:
+
+- `resolved_release_tag` is the immutable GitHub release tag the pointer
+  resolved to, matching
+  `radar-puffin-(build|nightly)-<7 hex>-<16 hex>-<16 hex>`.
+- `ota_sha256` is the lower-case SHA-256 the device verifies the OTA download
+  against: exactly 64 hexadecimal digits.
+
+Both are empty strings when the check resolved no immutable candidate: a
+`stable` candidate (which has no immutable tag of its own), a failed check, a
+superseded in-flight status, a device that has not checked yet, or an update
+helper older than these keys. The UI must render the version-only result in
+that case rather than inventing or remembering an identity, and a client must
+treat an absent key, an empty value, and a value that does not match the
+grammar above as equally unknown. A malformed or oversized value is never
+truncated into a plausible-looking tag or digest; it is reported as empty.
+
+Every field of this response is read from one snapshot of the device's check
+record, so a check that lands while the response is assembled cannot describe
+two different checks at once: a client never sees an `up-to-date` status beside
+the next check's release tag.
+
 #### PUT /api/v1/system/update/channel
 
 Select the signed GitHub Releases channel. Changing the channel clears the
@@ -1606,14 +1691,36 @@ record. `volume_capable`, `hardware_mute`, and `action_capable` reflect the
 keys found on the currently discovered evdev devices; `stale` is true when the
 status record is missing, disconnected, or older than 15 seconds.
 
-`privacy_latch` reports the kernel's privacy latch, which is what lights the lamp
-in the mute button: `true` when it is engaged, `false` when it is released, and
-`null` when there is no fresh reading — absence of a reading is not evidence that
-the latch is released. It is the only truthful source for that lamp's state: a
-software mute (`microphone_muted` on `/audio`) lights the light ring and leaves
-the lamp dark, because the lamp is wired to the latch rather than to the audio
-path. `hardware_mute` above is a capability ("this device has a mute button"),
-not a state. Software cannot assert or release the latch; the button does.
+`privacy_latch` reports the kernel's privacy latch, which lights the lamp in the
+mute button: `true` when it is engaged, `false` when it is released, and `null`
+when there is no fresh reading — absence of a reading is not evidence that the
+latch is released. Software cannot assert or release that latch, and while it is
+engaged the button owns the lamp. `hardware_mute` above is a capability ("this
+device has a mute button"), not a state. On an image without the mute-lamp
+control the latch is the only source for the lamp's state: a software mute
+(`microphone_muted` on `/audio`) lights the light ring and leaves the lamp dark,
+because the lamp is wired to the latch rather than to the audio path. Where
+`lamp_control` below is `true`, a software mute lights that lamp as well, which
+is what that field reports.
+`lamp_control` reports whether software can light the lamp in the mute button at
+all: `true` when the kernel exposes the mute-lamp control and last accepted a
+write, `false` when the kernel refuses the write outright (a board whose hardware
+latch owns the line) or software cannot write the attribute at all (an image that
+predates the control, or a driver that has not bound yet), and `null` when there
+is no fresh reading or nothing has tested the control yet — a daemon that has not
+tried to write it has not learned that software cannot. Only a definite kernel
+refusal settles the question: a missing attribute, or any failure that may pass,
+is probed again, so a driver that binds later turns the field `true` without
+restarting the daemon. A write the kernel defers while the button's latch is
+engaged is not a refusal either: the request is recorded and applied when the
+line is free, so the field keeps the answer it already had — `null` while nothing
+has tested the control, and `true` where a write has already been accepted, since
+a deferral does not unlearn proven support — rather than becoming `false`. It is
+what the UI uses to describe the lamp: with the control, a software mute lights
+it, and without it the lamp can only follow the button.
+Both fields describe the lamp indication; neither reports that software engaged
+the hardware privacy latch, which only the button can do.
+
 `available_sounds` lists the installed raw sounds that can be previewed, and
 `action_sounds` is the comma-separated rotation list in play order. Sound names
 are lowercase letters, digits, hyphens, or underscores and are at most 48

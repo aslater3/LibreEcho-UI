@@ -98,6 +98,7 @@ libreecho-web
   ├── wakeword.sock → wake-word service
   ├── btd socket    → libreecho-btd
   ├── agent.sock    → libreecho-agentd
+  ├── live.sock     → libreecho-lived (GPT-Live, disarmed by default)
   └── log.sock      → libreecho-logd
 ```
 
@@ -295,6 +296,19 @@ git diff --check
 ```
 
 See [`tests/browser-checklist.md`](tests/browser-checklist.md) for the responsive/accessibility pass.
+
+The browser suites in `tests/e2e/` run the real frontend in a real engine against the preview mock backend:
+
+```sh
+sh tests/e2e/run.sh                                  # every suite, Chromium
+LIBREECHO_E2E_SUITES=baby-monitor sh tests/e2e/run.sh
+LIBREECHO_E2E_BROWSER=webkit LIBREECHO_E2E_SUITES=baby-monitor sh tests/e2e/run.sh
+```
+
+`LIBREECHO_E2E_SUITES` narrows the run to a subset (`smoke features-radio baby-monitor`) and
+`LIBREECHO_E2E_BROWSER` selects the engine (Chromium, or WebKit as the Safari engine).
+`baby-monitor.cjs` drives the Baby Monitor playback lifecycle; it needs Playwright's browser
+binaries, which CI installs in [`.github/workflows/playwright-e2e.yml`](.github/workflows/playwright-e2e.yml).
 
 ## Security and public-source rules
 

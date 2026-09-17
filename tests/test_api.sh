@@ -19,6 +19,16 @@ curl -fsS "$URL/api/v1/config" | jq -e --arg version "LibreEcho OS $OS_VERSION" 
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
 history=$(curl -fsS "$URL/api/v1/assistant/history")
 printf '%s' "$history" | jq -e '.ok and .data.history_generation == 1 and (.data.turns | length == 1) and .data.turns[0].first_pcm_ms == 3100' >/dev/null
+code=$(curl -sS -o /tmp/le-live-get.out -w '%{http_code}' "$URL/api/v1/live")
+[ "$code" = 503 ]
+code=$(curl -sS -o /tmp/le-live-post.out -w '%{http_code}' -X POST "$URL/api/v1/live" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-live-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/live" -H 'Content-Type: application/json' --data '{"enabled":true}')
+[ "$code" = 403 ]
+for body in '{"enabled":"true"}' '{"nested":{"enabled":true}}' '{"note":"\"enabled\":true"}'; do
+    code=$(curl -sS -o /tmp/le-live-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/live" -H "$CSRF" -H 'Content-Type: application/json' --data "$body")
+    [ "$code" = 400 ]
+done
 code=$(curl -sS -o /tmp/le-history-method.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 405 ]
 clear_code=$(curl -fsS -o /tmp/le-history-clear.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history/clear" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
@@ -311,7 +321,15 @@ curl -fsS "$URL/api/v1/system/update" | jq -e --arg version "$OS_VERSION" \
      .data.check_status == "not-checked" and .data.check_error == "" and
      .data.last_check_epoch == 0 and .data.last_success_epoch == 0 and
      .data.automatic_updates == false and
-     .data.rollback_version == ""' \
+     # The resolved candidate identity is additive: the keys are always present,
+     # as strings, and a device with no finished check reports them empty, never
+     # stale. Every field of this envelope is read from one snapshot of the check
+     # record, so a check that lands mid-read cannot mix fields of two different
+     # checks (tests/test_update_identity.c drives that torn-read regression).
+     .data.rollback_version == "" and
+     (.data.resolved_release_tag | type == "string") and
+     (.data.ota_sha256 | type == "string") and
+     .data.resolved_release_tag == "" and .data.ota_sha256 == ""' \
     >/dev/null
 for endpoint in check apply; do
     code=$(curl -sS -o "/tmp/le-update-$endpoint.out" -w '%{http_code}' \

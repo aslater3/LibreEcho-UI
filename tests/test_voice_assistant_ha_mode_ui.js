@@ -52,6 +52,7 @@ async function page(homeAssistant,assistant){
       return assistant;
     }
     if(path==='/voice-pipeline')return {mode:'local',stt:{},tts:{}};
+    if(path==='/live')return {enabled:false,mode:'inactive',transport:'realtime',last_event:'idle',session:{state:'idle',last_end:'none',sessions_completed:0,delegations:0},transport_metrics:{transport:'websocket',session_ready:false}};
     throw new Error('unexpected API path '+path);
   };
   await render();assert.equal(writes,0,'rendering must not mutate voice state');
@@ -63,13 +64,14 @@ async function page(homeAssistant,assistant){
     const html=await page(true,assistant);
     assert(html.includes('Managed by Home Assistant')&&html.includes('Wyoming'));
     assert(!html.includes('Voice assistant service is unavailable'));
-    for(const id of ['use-local-provider','use-device-provider','save-wx'])
+    for(const id of ['use-local-provider','use-device-provider','use-live-provider','save-wx'])
       assert(!html.includes('id="'+id+'"'),id+' leaked into HA mode');
     assert(html.includes('int-home-assistant'),'HA must remain disableable');
   }
   const local=await page(false,healthy);
-  for(const id of ['local-base-url','local-api-key','local-model','stt-wyoming-uri','tts-wyoming-uri','save-wx'])
+  for(const id of ['local-base-url','local-api-key','local-model','stt-wyoming-uri','tts-wyoming-uri','save-wx','use-live-provider'])
     assert(local.includes('id="'+id+'"'),'0.14 control lost: '+id);
+  assert(local.includes('GPT-Live'),'GPT-Live provider option is missing');
   assert(!local.includes('Managed by Home Assistant'));
   assert(!local.includes('id="int-spotify"'),'uninstalled integration became actionable');
   const down=await page(false,null);

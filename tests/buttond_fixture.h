@@ -44,4 +44,41 @@ static int buttond_fixture_open(const char *path, int flags, ...)
     return open(path, flags, mode);
 }
 
+/*
+ * A kernel attribute can refuse a write that no host filesystem refuses: the
+ * mute lamp's store() returns -EBUSY while the physical latch (or the shutdown
+ * dialog) owns the line -- the request is recorded and applied when the line is
+ * free -- and -EOPNOTSUPP on a board whose latch this control must not drive.
+ * Arm one of those errnos here to stand in for it; 0 leaves writes alone.
+ * buttond.c writes exactly one thing with write(), the lamp line, so a test that
+ * arms this around a single call cannot disturb anything else. Include this
+ * header before redirecting write().
+ */
+static int buttond_fixture_write_errno;
+
+/*
+ * A kernel store() can also consume nothing and return a short (0) write, and
+ * such a return leaves errno unspecified -- on a host it may still hold whatever
+ * an earlier call set. Arm this to stand in for it, with the stale errno given
+ * explicitly so a test is deterministic: the caller must classify the short
+ * write on its return value, never on errno. 0 disarms it.
+ */
+static int buttond_fixture_write_short;
+static int buttond_fixture_write_short_errno;
+
+/* static inline: a test that only redirects open() must not trip -Wunused. */
+static inline ssize_t buttond_fixture_write(int fd, const void *buffer,
+                                            size_t count)
+{
+    if (buttond_fixture_write_short) {
+        errno = buttond_fixture_write_short_errno;
+        return 0;
+    }
+    if (buttond_fixture_write_errno) {
+        errno = buttond_fixture_write_errno;
+        return -1;
+    }
+    return write(fd, buffer, count);
+}
+
 #endif

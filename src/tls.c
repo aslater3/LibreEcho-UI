@@ -3,8 +3,8 @@
 
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
-#include <mbedtls/net_sockets.h>
 #include <mbedtls/pk.h>
+#include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/x509_crt.h>
@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,10 +26,12 @@ struct le_tls {
     mbedtls_ssl_config conf;
     mbedtls_ctr_drbg_context drbg;
     mbedtls_entropy_context entropy;
-    mbedtls_net_context net;
+    int fd;
     mbedtls_x509_crt cert;      /* server only */
+    mbedtls_x509_crt ca;        /* verified client only */
     mbedtls_pk_context key;     /* server only */
     int is_server;
+    int ca_initialized;
     int verified;
 };
 
@@ -43,9 +46,40 @@ static long long monotonic_ms(void)
     return (long long)now.tv_sec * 1000LL + now.tv_nsec / 1000000LL;
 }
 
-struct le_tls *le_tls_client_open(int fd, const char *hostname)
+/* Socket callbacks kept here rather than mbedtls_net_send/recv. Pulling the
+ * mbedTLS net_sockets object into a static glibc binary also pulls
+ * getaddrinfo(), which requires glibc NSS modules that do not exist on the
+ * musl target. */
+static int tls_send(void *context, const unsigned char *buffer, size_t length)
+{
+    struct le_tls *tls = context;
+    ssize_t result = send(tls->fd, buffer, length, MSG_NOSIGNAL);
+
+    if (result >= 0)
+        return (int)result;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+        return MBEDTLS_ERR_SSL_WANT_WRITE;
+    return MBEDTLS_ERR_NET_SEND_FAILED;
+}
+
+static int tls_recv(void *context, unsigned char *buffer, size_t length)
+{
+    struct le_tls *tls = context;
+    ssize_t result = recv(tls->fd, buffer, length, 0);
+
+    if (result >= 0)
+        return (int)result;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+        return MBEDTLS_ERR_SSL_WANT_READ;
+    return MBEDTLS_ERR_NET_RECV_FAILED;
+}
+
+static struct le_tls *client_open(int fd, const char *hostname,
+                                  const char *ca_path)
 {
     struct le_tls *tls = calloc(1, sizeof(*tls));
+    int original_flags;
+    long long deadline;
 
     if (!tls)
         return NULL;
@@ -53,8 +87,9 @@ struct le_tls *le_tls_client_open(int fd, const char *hostname)
     mbedtls_ssl_config_init(&tls->conf);
     mbedtls_ctr_drbg_init(&tls->drbg);
     mbedtls_entropy_init(&tls->entropy);
-    mbedtls_net_init(&tls->net);
-    tls->net.fd = fd;
+    mbedtls_x509_crt_init(&tls->ca);
+    tls->ca_initialized = 1;
+    tls->fd = fd;
 
     if (mbedtls_ctr_drbg_seed(&tls->drbg, mbedtls_entropy_func, &tls->entropy,
                               (const unsigned char *)SEED, strlen(SEED)) ||
@@ -63,38 +98,70 @@ struct le_tls *le_tls_client_open(int fd, const char *hostname)
                                     MBEDTLS_SSL_PRESET_DEFAULT))
         goto fail;
 
-    /*
-     * No CA bundle ships on this image and there is no mechanism to keep one
-     * current, so a chain cannot be validated. Encrypt anyway -- an
-     * unauthenticated TLS stream is still better than cleartext for a radio
-     * feed -- and record that it was not verified so callers do not claim
-     * more than was actually established.
-     */
-    mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_NONE);
+    if (ca_path) {
+        if (!hostname || !hostname[0] ||
+            mbedtls_x509_crt_parse_file(&tls->ca, ca_path))
+            goto fail;
+        mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+        mbedtls_ssl_conf_ca_chain(&tls->conf, &tls->ca, NULL);
+    } else {
+        /* Radio compatibility: encrypted but deliberately unauthenticated. */
+        mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_NONE);
+    }
     mbedtls_ssl_conf_rng(&tls->conf, mbedtls_ctr_drbg_random, &tls->drbg);
 
     if (mbedtls_ssl_setup(&tls->ssl, &tls->conf))
         goto fail;
     if (hostname && *hostname && mbedtls_ssl_set_hostname(&tls->ssl, hostname))
         goto fail;
-    mbedtls_ssl_set_bio(&tls->ssl, &tls->net, mbedtls_net_send,
-                        mbedtls_net_recv, NULL);
+    mbedtls_ssl_set_bio(&tls->ssl, tls, tls_send, tls_recv, NULL);
 
+    original_flags = fcntl(fd, F_GETFL);
+    if (original_flags < 0 ||
+        fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) < 0)
+        goto fail;
+    deadline = monotonic_ms() + LE_TLS_HANDSHAKE_TIMEOUT_MS;
     for (;;) {
         int rc = mbedtls_ssl_handshake(&tls->ssl);
+        struct pollfd waitfd;
+        long long remaining;
 
         if (!rc)
             break;
         if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE)
             goto fail;
+        remaining = deadline - monotonic_ms();
+        if (remaining <= 0)
+            goto fail;
+        waitfd.fd = fd;
+        waitfd.events = rc == MBEDTLS_ERR_SSL_WANT_WRITE ? POLLOUT : POLLIN;
+        waitfd.revents = 0;
+        if (poll(&waitfd, 1, remaining > 2147483647LL
+                 ? 2147483647 : (int)remaining) <= 0 ||
+            (waitfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+            goto fail;
     }
-    tls->verified = 0;
+    (void)fcntl(fd, F_SETFL, original_flags);
+    tls->verified = ca_path && mbedtls_ssl_get_verify_result(&tls->ssl) == 0;
     return tls;
 
 fail:
-    tls->net.fd = -1;            /* the caller still owns the socket */
+    tls->fd = -1;            /* the caller still owns the socket */
     le_tls_close(tls);
     return NULL;
+}
+
+struct le_tls *le_tls_client_open(int fd, const char *hostname)
+{
+    return client_open(fd, hostname, NULL);
+}
+
+struct le_tls *le_tls_client_open_verified(int fd, const char *hostname,
+                                           const char *ca_path)
+{
+    if (!ca_path || !ca_path[0])
+        return NULL;
+    return client_open(fd, hostname, ca_path);
 }
 
 struct le_tls *le_tls_server_open(int fd, const char *cert_path,
@@ -110,10 +177,9 @@ struct le_tls *le_tls_server_open(int fd, const char *cert_path,
     mbedtls_ssl_config_init(&tls->conf);
     mbedtls_ctr_drbg_init(&tls->drbg);
     mbedtls_entropy_init(&tls->entropy);
-    mbedtls_net_init(&tls->net);
-    mbedtls_x509_crt_init(&tls->cert);
+        mbedtls_x509_crt_init(&tls->cert);
     mbedtls_pk_init(&tls->key);
-    tls->net.fd = fd;
+    tls->fd = fd;
     tls->is_server = 1;
 
     if (mbedtls_ctr_drbg_seed(&tls->drbg, mbedtls_entropy_func, &tls->entropy,
@@ -133,8 +199,7 @@ struct le_tls *le_tls_server_open(int fd, const char *cert_path,
         goto fail;
     if (mbedtls_ssl_setup(&tls->ssl, &tls->conf))
         goto fail;
-    mbedtls_ssl_set_bio(&tls->ssl, &tls->net, mbedtls_net_send,
-                        mbedtls_net_recv, NULL);
+    mbedtls_ssl_set_bio(&tls->ssl, tls, tls_send, tls_recv, NULL);
 
     original_flags = fcntl(fd, F_GETFL);
     if (original_flags < 0 || fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) < 0)
@@ -199,8 +264,8 @@ long le_tls_read_deadline(struct le_tls *tls, void *buf, size_t len,
     long long deadline;
     if (!tls || !buf || timeout_ms < 0)
         return -1;
-    flags = fcntl(tls->net.fd, F_GETFL);
-    if (flags < 0 || fcntl(tls->net.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    flags = fcntl(tls->fd, F_GETFL);
+    if (flags < 0 || fcntl(tls->fd, F_SETFL, flags | O_NONBLOCK) < 0)
         return -1;
     deadline = monotonic_ms() + timeout_ms;
     for (;;) {
@@ -213,20 +278,23 @@ long le_tls_read_deadline(struct le_tls *tls, void *buf, size_t len,
             rc != MBEDTLS_ERR_SSL_WANT_WRITE)
             break;
         remaining = deadline - monotonic_ms();
-        if (remaining <= 0) { rc = -1; break; }
-        waitfd.fd = tls->net.fd;
+        if (remaining <= 0) { rc = -2; break; }
+        waitfd.fd = tls->fd;
         waitfd.events = rc == MBEDTLS_ERR_SSL_WANT_WRITE ? POLLOUT : POLLIN;
         waitfd.revents = 0;
         rc = poll(&waitfd, 1, remaining > 2147483647LL ?
                   2147483647 : (int)remaining);
-        if (rc <= 0 || (waitfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+        if (rc == 0) { rc = -2; break; }
+        if (rc < 0 || (waitfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
             rc = -1;
             break;
         }
     }
-    (void)fcntl(tls->net.fd, F_SETFL, flags);
+    (void)fcntl(tls->fd, F_SETFL, flags);
     if (rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
         return 0;
+    if (rc == -2)
+        return -2;
     return rc < 0 ? -1 : rc;
 }
 
@@ -252,8 +320,8 @@ long le_tls_write_deadline(struct le_tls *tls, const void *buf, size_t len,
 
     if (!tls || !buf || timeout_ms < 0)
         return -1;
-    flags = fcntl(tls->net.fd, F_GETFL);
-    if (flags < 0 || fcntl(tls->net.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    flags = fcntl(tls->fd, F_GETFL);
+    if (flags < 0 || fcntl(tls->fd, F_SETFL, flags | O_NONBLOCK) < 0)
         return -1;
     deadline = monotonic_ms() + timeout_ms;
     while (written < len) {
@@ -269,7 +337,7 @@ long le_tls_write_deadline(struct le_tls *tls, const void *buf, size_t len,
             break;
         if (remaining <= 0)
             break;
-        waitfd.fd = tls->net.fd;
+        waitfd.fd = tls->fd;
         waitfd.events = rc == MBEDTLS_ERR_SSL_WANT_WRITE ? POLLOUT : POLLIN;
         waitfd.revents = 0;
         rc = poll(&waitfd, 1, remaining > 2147483647LL ?
@@ -277,7 +345,7 @@ long le_tls_write_deadline(struct le_tls *tls, const void *buf, size_t len,
         if (rc <= 0 || (waitfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
             break;
     }
-    (void)fcntl(tls->net.fd, F_SETFL, flags);
+    (void)fcntl(tls->fd, F_SETFL, flags);
     return written == len ? (long)written : -1;
 }
 
@@ -285,7 +353,7 @@ void le_tls_close(struct le_tls *tls)
 {
     if (!tls)
         return;
-    if (tls->net.fd >= 0)
+    if (tls->fd >= 0)
         mbedtls_ssl_close_notify(&tls->ssl);
     mbedtls_ssl_free(&tls->ssl);
     mbedtls_ssl_config_free(&tls->conf);
@@ -295,6 +363,8 @@ void le_tls_close(struct le_tls *tls)
         mbedtls_x509_crt_free(&tls->cert);
         mbedtls_pk_free(&tls->key);
     }
+    if (tls->ca_initialized)
+        mbedtls_x509_crt_free(&tls->ca);
     free(tls);
 }
 

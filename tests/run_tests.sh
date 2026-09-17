@@ -6,6 +6,8 @@ CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
+make build/test-update-identity
+./build/test-update-identity
 python3 tests/test_github_link_contract.py
 python3 tests/test_acoustic_events_placeholder.py
 python3 tests/test_acoustic_events_review_contract.py
@@ -25,6 +27,7 @@ sh tests/test_factory_reset_bluetooth_contract.sh
 sh tests/test_factory_reset_quiesce_contract.sh
 sh tests/test_factory_reset_api.sh
 sh tests/test_backup_roundtrip.sh
+sh tests/test_persistent_state_backup_contract.sh
 make build/test-backend-linux-wifi-emission
 make build/test-auth-sessions
 ./build/test-auth-sessions
@@ -137,6 +140,7 @@ node tests/test_kernel_log_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
+node tests/test_update_identity_ui.js
 node tests/test_baby_monitor_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
 node tests/test_assistant_clock_format_ui.js
@@ -165,6 +169,7 @@ python3 tests/test_feature_provenance_http.py
 sh tests/test_source_provenance.sh
 sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
+sh tests/test_update_identity_contract.sh
 sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
 sh tests/test_setup_connectivity_contract.sh
@@ -253,6 +258,10 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -o build/test-ttsd
 ./build/test-ttsd
 sh tests/test_timed.sh
+# GPT-Live: preroll ring indexing, the session state machine driven by the mock
+# transport, the delegation allow-list, and the whole daemon end-to-end against
+# a stand-in waked.
+make test-lived
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
 sh tests/test_setup_first_run.sh

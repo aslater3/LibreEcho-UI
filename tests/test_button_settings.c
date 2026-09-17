@@ -38,7 +38,7 @@ static int request(struct api_context *context, const char *method,
     return response->status;
 }
 
-static void write_button_status(const char *path, int privacy)
+static void write_button_status(const char *path, int privacy, int lamp)
 {
     FILE *file = fopen(path, "w");
 
@@ -46,7 +46,8 @@ static void write_button_status(const char *path, int privacy)
     if (!file)
         return;
     fprintf(file, "schema=1\nstate=connected\nvolume=1\nmicrophone_mute=1\n"
-                  "action=1\nprivacy_state=%d\n", privacy);
+                  "action=1\nprivacy_state=%d\nlamp_control=%d\n",
+            privacy, lamp);
     fclose(file);
 }
 
@@ -122,24 +123,40 @@ int main(void)
             close(status_fd);
             context.buttond_status_path = status_path;
 
-            write_button_status(status_path, 1);
+            write_button_status(status_path, 1, 1);
             CHECK(request(&context, "GET", NULL, &response) == 200 &&
                   strstr(response.body, "\"privacy_latch\":true") != NULL,
                   "an engaged latch serializes as true");
             CHECK(strstr(response.body, "\"stale\":true") == NULL,
                   "a fresh status record is not stale");
 
-            write_button_status(status_path, 0);
+            write_button_status(status_path, 0, 1);
             CHECK(request(&context, "GET", NULL, &response) == 200 &&
                   strstr(response.body, "\"privacy_latch\":false") != NULL,
                   "a released latch serializes as false");
 
-            write_button_status(status_path, -1);
+            write_button_status(status_path, -1, 1);
             CHECK(request(&context, "GET", NULL, &response) == 200 &&
                   strstr(response.body, "\"privacy_latch\":null") != NULL,
                   "an unread latch serializes as null");
 
-            write_button_status(status_path, 1);
+            /* Whether software can light the lamp, for the UI to describe it.
+               buttond writes 1 or 0; -1 would only come from a reader that did
+               not get an answer, which must read as unknown. */
+            write_button_status(status_path, 0, 1);
+            CHECK(request(&context, "GET", NULL, &response) == 200 &&
+                  strstr(response.body, "\"lamp_control\":true") != NULL,
+                  "a lamp the kernel accepts serializes as controllable");
+            write_button_status(status_path, 0, 0);
+            CHECK(request(&context, "GET", NULL, &response) == 200 &&
+                  strstr(response.body, "\"lamp_control\":false") != NULL,
+                  "an unsupported lamp serializes as false");
+            write_button_status(status_path, 0, -1);
+            CHECK(request(&context, "GET", NULL, &response) == 200 &&
+                  strstr(response.body, "\"lamp_control\":null") != NULL,
+                  "an unread lamp control serializes as null");
+
+            write_button_status(status_path, 1, 1);
             old.tv_sec = time(NULL) - 60;
             old.tv_usec = 0;
             CHECK(utimes(status_path, (struct timeval[]){old, old}) == 0,

@@ -15,6 +15,7 @@
 #include "logd.h"
 #include "log.h"
 #include "service_env.h"
+#include "update_identity.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -120,6 +121,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     char state[64]="idle",progress_text[16]="0",version[96]="";
     char installed_version[96]="",rollback_version[96]="",latest_version[96]="";
     char check_status[64]="not-checked",check_error[96]="";
+    char resolved_tag[LE_UPDATE_TAG_SIZE]="",ota_sha[LE_UPDATE_SHA_SIZE]="";
     char source[64]="github-releases",channel[32]="stable",reachable[16]="unknown";
     char automatic_text[16]="0";
     char last_check_text[24]="0",last_success_text[24]="0";
@@ -127,6 +129,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     char escaped_rollback[192],escaped_latest[192],escaped_check_status[128];
     char escaped_check_error[192],escaped_source[128],escaped_channel[64];
     char escaped_reachable[32];
+    char escaped_resolved_tag[192],escaped_ota_sha[160];
     char components[LE_FEATURE_COMPONENTS_JSON_MAX],authority[LE_AUTHORITY_PROVENANCE_JSON_MAX];
     char escaped_transaction_state[80],escaped_last_result[80];
     le_feature_transaction_state transaction;
@@ -149,22 +152,27 @@ static void update_status_json(struct api_context*c,struct api_response*r)
                       installed_version,sizeof(installed_version));
         key_from_file("/data/libreecho/update/rolled-back","version",
                       rollback_version,sizeof(rollback_version));
-        key_from_file("/data/libreecho/update/check-status","status",
-                      check_status,sizeof(check_status));
-        key_from_file("/data/libreecho/update/check-status","error",
-                      check_error,sizeof(check_error));
-        key_from_file("/data/libreecho/update/check-status","source",
-                      source,sizeof(source));
-        key_from_file("/data/libreecho/update/check-status","channel",
-                      channel,sizeof(channel));
-        key_from_file("/data/libreecho/update/check-status","source_reachable",
-                      reachable,sizeof(reachable));
-        key_from_file("/data/libreecho/update/check-status","latest_version",
-                      latest_version,sizeof(latest_version));
-        key_from_file("/data/libreecho/update/check-status","last_check_epoch",
-                      last_check_text,sizeof(last_check_text));
-        key_from_file("/data/libreecho/update/check-status","last_success_epoch",
-                      last_success_text,sizeof(last_success_text));
+        /* Every field of the check record is read in one pass over one opened
+           snapshot. The check writer commits a new record with an atomic rename
+           while GETs stay serviceable, so separate reads could describe two
+           checks at once -- an old status or version beside the next check's
+           identity. */
+        {
+            struct le_update_field check_fields[]={
+                {"status",check_status,sizeof(check_status)},
+                {"error",check_error,sizeof(check_error)},
+                {"source",source,sizeof(source)},
+                {"channel",channel,sizeof(channel)},
+                {"source_reachable",reachable,sizeof(reachable)},
+                {"latest_version",latest_version,sizeof(latest_version)},
+                {LE_UPDATE_TAG_KEY,resolved_tag,sizeof(resolved_tag)},
+                {LE_UPDATE_SHA_KEY,ota_sha,sizeof(ota_sha)},
+                {"last_check_epoch",last_check_text,sizeof(last_check_text)},
+                {"last_success_epoch",last_success_text,sizeof(last_success_text)}
+            };
+            update_record_read("/data/libreecho/update/check-status",check_fields,
+                               sizeof(check_fields)/sizeof(check_fields[0]));
+        }
         key_from_file("/data/libreecho/update/automatic-updates","enabled",
                       automatic_text,sizeof(automatic_text));
         automatic=!strcmp(automatic_text,"1");
@@ -214,6 +222,8 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     json_escape(escaped_transaction_state,sizeof(escaped_transaction_state),transaction.state);
     json_escape(escaped_last_result,sizeof(escaped_last_result),transaction.last_result);
     json_escape(escaped_latest,sizeof(escaped_latest),latest_version);
+    json_escape(escaped_resolved_tag,sizeof(escaped_resolved_tag),resolved_tag);
+    json_escape(escaped_ota_sha,sizeof(escaped_ota_sha),ota_sha);
     json_escape(escaped_check_status,sizeof(escaped_check_status),check_status);
     json_escape(escaped_check_error,sizeof(escaped_check_error),check_error);
     json_escape(escaped_source,sizeof(escaped_source),source);
@@ -223,6 +233,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         "\"inactive_slot\":\"%s\",\"state\":\"%s\",\"progress\":%d,"
         "\"pending_reboot\":%s,\"pending_version\":\"%s\","
         "\"installed_version\":\"%s\",\"latest_version\":\"%s\","
+        "\"resolved_release_tag\":\"%s\",\"ota_sha256\":\"%s\","
         "\"channel\":\"%s\",\"source\":\"%s\",\"source_reachable\":\"%s\","
         "\"check_status\":\"%s\",\"check_error\":\"%s\","
         "\"last_check_epoch\":%ld,\"last_success_epoch\":%ld,"
@@ -233,7 +244,8 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         "\"components\":%s,\"transaction_state\":\"%s\",\"last_transaction_result\":\"%s\",\"authority_provenance\":%s},"
         "\"error\":null}",supported?"true":"false",current,inactive,escaped_state,
         progress,pending?"true":"false",escaped_version,escaped_installed,
-        escaped_latest,escaped_channel,escaped_source,escaped_reachable,
+        escaped_latest,escaped_resolved_tag,escaped_ota_sha,
+        escaped_channel,escaped_source,escaped_reachable,
         escaped_check_status,escaped_check_error,last_check,last_success,
         automatic?"true":"false",supported?"true":"false",escaped_rollback,
         allow_unsigned?"true":"false",le_update_max_upload_bytes(),
@@ -243,6 +255,8 @@ static void update_status_json(struct api_context*c,struct api_response*r)
 static const char*agent_socket_path(void){const char*p=getenv("LIBREECHO_AGENT_SOCKET");return p&&*p?p:LE_ADAPTER_AGENT_SOCK;}
 static int agent_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*agent=le_adapter_connect(agent_socket_path(),15000);int rc;if(!agent)return LE_NOT_SUPPORTED;if(!strcmp(command,"respond"))le_adapter_set_io_timeout(agent,120000);rc=le_adapter_call(agent,command,args,output,size);le_adapter_close(agent);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
 static void agent_result(struct api_response*r,const char*command,const char*args){char data[LE_ADAPTER_MSG_MAX];int rc=agent_command(command,args,data,sizeof(data));if(rc)err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?503:502,rc,rc==LE_NOT_SUPPORTED?"Voice assistant service is unavailable":rc==LE_INVALID?data:"Voice assistant service request failed");else ok(r,data);}
+static int live_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*live=le_adapter_connect(LE_ADAPTER_LIVE_SOCK,1000);int rc;if(!live)return LE_NOT_SUPPORTED;rc=le_adapter_call(live,command,args,output,size);le_adapter_close(live);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
+static void live_result(struct api_response*r,const char*command,const char*args){char data[LE_ADAPTER_MSG_MAX];int rc=live_command(command,args,data,sizeof(data));if(rc)err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?503:502,rc,rc==LE_NOT_SUPPORTED?"GPT-Live service is unavailable":rc==LE_INVALID?data:"GPT-Live service request failed");else ok(r,data);}
 static int wifi_scan_json(struct api_response*r,const struct le_wifi_scan*s){size_t i,n=0;char ssid[LE_TEXT*2],security[64],capabilities[256],band[64];int written;if(!r||!s)return -1;written=snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"networks\":[");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;for(i=0;i<s->count&&i<LE_MAX_WIFI;i++){json_escape(ssid,sizeof(ssid),s->networks[i].ssid);json_escape(security,sizeof(security),s->networks[i].security);json_escape(capabilities,sizeof(capabilities),s->networks[i].capabilities[0]?s->networks[i].capabilities:"unknown");json_escape(band,sizeof(band),s->networks[i].band[0]?s->networks[i].band:"unknown");written=snprintf(r->body+n,sizeof(r->body)-n,"%s{\"ssid\":\"%s\",\"security\":\"%s\",\"capabilities\":\"%s\",\"signal\":%d,\"rssi_dbm\":%d,\"frequency_mhz\":%d,\"channel\":%d,\"band\":\"%s\",\"wpa2_attempt\":%s}",i?",":"",ssid,security,capabilities,s->networks[i].signal,s->networks[i].rssi_dbm,s->networks[i].frequency_mhz,s->networks[i].channel,band,s->networks[i].wpa2_attempt?"true":"false");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;}written=snprintf(r->body+n,sizeof(r->body)-n,"]},\"error\":null}");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n+(size_t)written;return 0;}
 static int persist_configuration(struct api_context*);
 static void radio_load(struct api_context*);
@@ -1964,8 +1978,9 @@ static void buttons_json(struct api_context *c, struct api_response *r)
     char escaped_short[80], escaped_long[80];
     struct stat st;
     time_t now = time(NULL);
-    int fd, fresh = 0, volume = 0, mute = 0, action = 0, privacy = -1;
+    int fd, fresh = 0, volume = 0, mute = 0, action = 0, privacy = -1, lamp = -1;
     const char *latch;
+    const char *lamp_state;
     ssize_t n;
     json_escape(escaped_short, sizeof(escaped_short), c->button_short);
     json_escape(escaped_long, sizeof(escaped_long), c->button_long);
@@ -1982,20 +1997,31 @@ static void buttons_json(struct api_context *c, struct api_response *r)
             if (button_status_value(data, "microphone_mute", value, sizeof(value))) mute = !strcmp(value, "1");
             if (button_status_value(data, "action", value, sizeof(value))) action = !strcmp(value, "1");
             if (button_status_value(data, "privacy_state", value, sizeof(value))) privacy = atoi(value);
+            if (button_status_value(data, "lamp_control", value, sizeof(value))) lamp = atoi(value);
         }
     } else if (fd >= 0) close(fd);
     if (!fresh) strcpy(state, "stale");
     /*
-     * The mute button's lamp is wired to the kernel privacy latch, so the latch
-     * is the only truthful source for whether that lamp is lit: a software mute
-     * lights the ring and leaves the lamp dark. Report it as null rather than
-     * false when it is unknown, so the reader is not told a dark lamp it cannot
-     * see. `hardware_mute` above is a capability ("this device has a mute
-     * button"), not a state, and stays as it was.
+     * The mute button's lamp is wired to the kernel privacy latch, and while the
+     * latch is engaged the button owns that lamp. On an image with no mute-lamp
+     * control the latch is therefore the only truthful source for whether the
+     * lamp is lit: a software mute lights the ring and leaves the lamp dark.
+     * Report it as null rather than false when it is unknown, so the reader is
+     * not told a dark lamp it cannot see. `hardware_mute` above is a capability
+     * ("this device has a mute button"), not a state, and stays as it was.
      */
     latch = (fresh && privacy >= 0) ? (privacy ? "true" : "false") : "null";
+    /*
+     * Whether software can light the mute button's lamp at all (the kernel's
+     * mute_lamp control, and a board that accepts the write). The UI describes
+     * the lamp differently depending on this, so an unknown answer is null
+     * rather than false -- and a write the kernel defers while the button's
+     * latch owns the line is not evidence either way. Like privacy_latch above,
+     * this describes the lamp indication, not the hardware privacy latch.
+     */
+    lamp_state = (fresh && lamp >= 0) ? (lamp ? "true" : "false") : "null";
     button_sounds_available(available, sizeof(available));
-    out(r, 200, "{\"ok\":true,\"data\":{\"short_press\":\"%s\",\"long_press\":\"%s\",\"available\":%s,\"state\":\"%s\",\"volume_capable\":%s,\"hardware_mute\":%s,\"action_capable\":%s,\"stale\":%s,\"privacy_latch\":%s,\"tones\":%s,\"action\":\"%s\",\"action_sounds\":\"%s\",\"available_sounds\":%s,\"action_brightness\":%d,\"mute_brightness\":%d},\"error\":null}", escaped_short, escaped_long, fresh && !strcmp(state, "connected") ? "true" : "false", state, volume ? "true" : "false", mute ? "true" : "false", action ? "true" : "false", !fresh ? "true" : "false", latch, c->button_tones ? "true" : "false", c->button_action, c->button_action_sounds, available, c->button_action_brightness, c->button_mute_brightness);
+    out(r, 200, "{\"ok\":true,\"data\":{\"short_press\":\"%s\",\"long_press\":\"%s\",\"available\":%s,\"state\":\"%s\",\"volume_capable\":%s,\"hardware_mute\":%s,\"action_capable\":%s,\"stale\":%s,\"privacy_latch\":%s,\"lamp_control\":%s,\"tones\":%s,\"action\":\"%s\",\"action_sounds\":\"%s\",\"available_sounds\":%s,\"action_brightness\":%d,\"mute_brightness\":%d},\"error\":null}", escaped_short, escaped_long, fresh && !strcmp(state, "connected") ? "true" : "false", state, volume ? "true" : "false", mute ? "true" : "false", action ? "true" : "false", !fresh ? "true" : "false", latch, lamp_state, c->button_tones ? "true" : "false", c->button_action, c->button_action_sounds, available, c->button_action_brightness, c->button_mute_brightness);
 }
 
 /*
@@ -2075,7 +2101,7 @@ static void timers_json(struct api_context*c,struct api_response*r){
 
 void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if(!strcmp(p,"/api/v1/setup/vendor-import-force-next-boot")){if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;setup_force_next_boot(c,q,r);return;}if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/spotify")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/light")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations/radio/play")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio/stop")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/storage/usb/play")&&strcmp(q->method,"POST"))||(!strncmp(p,"/api/v1/storage/usb",19)&&(p[19]==0||p[19]=='?')&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/audio/sample")&&strcmp(q->method,"POST"))){method_not_allowed(r);return;}if((!strcmp(p,"/api/v1/timers")&&(strcmp(q->method,"GET")&&strcmp(q->method,"POST")))||(!strcmp(p,"/api/v1/timers/dismiss")&&strcmp(q->method,"POST"))||(!strncmp(p,"/api/v1/timers/",15)&&strcmp(p,"/api/v1/timers/dismiss")&&strcmp(q->method,"DELETE"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(persist_auth_sessions(c)&&(le_auth_save_persisted_sessions(&c->auth,c->sessions_path)!=0)){err(r,503,LE_IO,"The session could not be saved after logout");return;}}ok(r,"{\"logged_out\":true}");return;}
  if(!strcmp(p,"/api/v1/config/export")&&!strcmp(q->method,"GET")){char config[4096];rc=configuration_json(c,config,sizeof(config));if(rc)err(r,501,rc,"Configuration export is unavailable for this backend");else ok(r,config);return;}if(!strcmp(p,"/api/v1/config/import")&&!strcmp(q->method,"POST")){rc=import_configuration(c,q->body,q->body_len);if(rc)err(r,rc==LE_INVALID?400:501,rc,rc==LE_INVALID?"Configuration file is invalid or incomplete":"Configuration restore is unavailable for this backend");else{api_log(c,"warning","Configuration restored from uploaded JSON");ok(r,"{\"restored\":true,\"schema_version\":1}");}return;}
- if(!strcmp(p,"/api/v1/assistant")){if(!strcmp(q->method,"GET")){agent_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){agent_result(r,"configure",q->body);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/live")){if(!strcmp(q->method,"GET")){live_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){int enabled;if(json_duplicate_key(q->body,q->body_len,"enabled")||json_get_top_level_bool(q->body,q->body_len,"enabled",&enabled)!=1){err(r,400,LE_INVALID,"enabled must be a single top-level boolean");return;}live_result(r,"set_enabled",enabled?"{\"enabled\":true}":"{\"enabled\":false}");return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/assistant")){if(!strcmp(q->method,"GET")){agent_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){agent_result(r,"configure",q->body);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/assistant/history/clear")&&!strcmp(q->method,"POST")){agent_result(r,"history_clear",NULL);return;}
  if(!strcmp(p,"/api/v1/assistant/history/clear")){method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/assistant/history")&&!strcmp(q->method,"GET")){agent_result(r,"history",NULL);return;}
