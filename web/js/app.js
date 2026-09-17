@@ -1495,6 +1495,9 @@ function bindWeatherLookup(a){
 }
 function bindWeather(a){
  if(a.unsupported||!$('#wx-provider'))return;
+ /* The saved place, for the stale-coordinate guard below: bindWeatherLookup
+    keeps its own copy, and this handler cannot see it. */
+ const startLoc=(a.home_location||'').trim();
  $('#wx-location').value=a.home_location||'';
  $('#wx-lat').value=a.latitude||'';
  $('#wx-lon').value=a.longitude||'';

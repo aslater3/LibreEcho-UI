@@ -156,6 +156,33 @@ const el = id => elements.get(id);
          /Springfield, Illinois, US 39\.90, -89\.70/.test(twins),
          'candidates with identical names were not told apart: '+twins);
 
+  /*
+   * The fallback binder (used when Home Assistant draws the page) must be able
+   * to save at all, and must not save a renamed place against the old
+   * coordinates: its guard reads the saved place, which used to be out of scope
+   * and threw before the request.
+   */
+  {
+    const saved = Object.assign({}, assistant, {home_location:'Old Place',
+      latitude:'53.7630',longitude:'-2.7030'});
+    content.innerHTML = vm.runInThisContext('weatherCard')(saved);
+    let mutated = null;
+    globalThis.mutate = (path, body) => { mutated = {path, body}; };
+    vm.runInThisContext('bindWeather')(saved);
+    document.querySelector('#save-wx').onclick();
+    assert(mutated && mutated.path === '/assistant',
+           'the fallback Home location card could not be saved');
+    mutated = null;
+    el('#wx-location').value = 'A Different Place';
+    document.querySelector('#save-wx').onclick();
+    assert(mutated === null,
+           'the fallback binder saved a renamed place with the old coordinates');
+    el('#wx-lat').value = '54.1316';
+    document.querySelector('#save-wx').onclick();
+    assert(mutated && mutated.body.latitude === '54.1316',
+           'the fallback binder blocked a legitimate save');
+  }
+
   /* The advisory has to be wired too: it is how a missing coordinate shows. */
   el('#wx-location').value = 'Somewhere without coordinates';
   el('#wx-lat').value = '';
