@@ -143,6 +143,7 @@ static void init_context(struct context *ctx, const char *audio_socket)
     ctx->tones = 0;
     ctx->mute_brightness = 60;
     ctx->privacy_state = -1;
+    ctx->privacy_observed = -1;
 }
 
 int main(void)
@@ -272,6 +273,44 @@ int main(void)
     write_state(BUTTOND_PRIVACY_STATE_FALLBACK_PATH, 1);
     sync_privacy_state(&ctx);
     assert(ctx.muted == 1);
+
+    /*
+     * A latch transition is published to the UI even when audiod cannot be told:
+     * the reported lamp state must not depend on the software sync succeeding.
+     */
+    {
+        char dead_socket[256];
+
+        snprintf(dead_socket, sizeof(dead_socket), "%s/absent-audio.sock",
+                 directory);
+        unlink(BUTTOND_PRIVACY_STATE_FALLBACK_PATH);
+        ctx.privacy_state_seen = 1;
+        ctx.privacy_state = 0;
+        ctx.privacy_observed = 0;
+        ctx.muted = 0;
+        write_state(BUTTOND_PRIVACY_STATE_PATH, 1);
+        ctx.audio_sock = dead_socket;
+        sync_privacy_state(&ctx);
+        assert(ctx.privacy_observed == 1);
+        assert(ctx.muted == 0);
+        assert(ctx.privacy_state == 0);
+        ctx.audio_sock = audio_socket;
+    }
+
+    /* The transition itself is still retried while steady. */
+    sync_privacy_state(&ctx);
+    assert(ctx.muted == 1 && ctx.privacy_state == 1);
+
+    /* An unreadable latch publishes as unknown, not as the last value. */
+    unlink(BUTTOND_PRIVACY_STATE_PATH);
+    sync_privacy_state(&ctx);
+    assert(ctx.privacy_observed == -1);
+    assert(ctx.privacy_state == 1);   /* the synchronization anchor is untouched */
+
+    /* And it recovers as soon as the latch can be read again. */
+    write_state(BUTTOND_PRIVACY_STATE_PATH, 1);
+    sync_privacy_state(&ctx);
+    assert(ctx.privacy_observed == 1);
 
     assert(buttond_fixture_opens > 0);
     kill(audio_pid, SIGTERM);

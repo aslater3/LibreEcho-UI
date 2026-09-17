@@ -91,6 +91,13 @@ struct context {
     int muted;           /* cached; -1 when unknown */
     int privacy_state;   /* last kernel-owned privacy latch state; -1 unknown */
     int privacy_state_seen;
+    /*
+     * The observed latch, published to the UI. Separate from privacy_state,
+     * which is the synchronization anchor and only advances once audiod has
+     * been told: if it were the published value, a failed sync would either
+     * report a stale lamp or lose the retry.
+     */
+    int privacy_observed;
     unsigned int step;
     unsigned int hold_ms;
     unsigned int brightness;
@@ -295,11 +302,11 @@ static void write_capability_status(const struct context *ctx)
     if (!file)
         return;
     /*
-     * privacy_state is the kernel's privacy latch, reported so the UI can say
-     * whether the mute button's lamp is lit. A software mute lights the ring
-     * and leaves that lamp dark, because the lamp is wired to the latch rather
-     * than to the audio path; -1 means "not read yet", which is not the same as
-     * "released" and must not be reported as if it were.
+     * privacy_observed is the observed kernel privacy latch, reported so the UI
+     * can say whether the mute button's lamp is lit. A software mute lights the
+     * ring and leaves that lamp dark, because the lamp is wired to the latch
+     * rather than to the audio path; -1 means "not read yet" or "unreadable",
+     * which is not the same as "released" and must not be reported as if it were.
      */
     fprintf(file, "schema=1\nstate=%s\nvolume=%d\nmicrophone_mute=%d\naction=%d\n"
                   "privacy_state=%d\n",
@@ -307,7 +314,7 @@ static void write_capability_status(const struct context *ctx)
             connected && ctx->volume_capable,
             connected && ctx->mute_capable,
             connected && ctx->action_capable,
-            ctx->privacy_state);
+            ctx->privacy_observed);
     fflush(file);
     fd = fileno(file);
     if (fd >= 0)
@@ -656,20 +663,36 @@ static int sync_privacy_state(struct context *ctx)
 {
     int state;
 
-    if (!read_privacy_state(&state))
+    if (!read_privacy_state(&state)) {
+        /*
+         * No reading at all: publish "unknown" rather than leaving the last
+         * value looking fresh. The heartbeat rewrites this status file, so a
+         * stale value here keeps claiming a lamp nobody can see.
+         */
+        ctx->privacy_observed = -1;
         return 0;
+    }
     if (!ctx->privacy_state_seen) {
         ctx->privacy_state_seen = 1;
         ctx->privacy_state = state;
+        ctx->privacy_observed = state;
         if (state)
             return set_software_mute(ctx, 1);
         return 0;
     }
     if (state == ctx->privacy_state) {
+        ctx->privacy_observed = state;
         if (state && ctx->muted != 1)
             return set_software_mute(ctx, 1);
         return 0;
     }
+    /*
+     * The latch is the kernel's own state and is true whether or not audiod can
+     * be told, so publish it before synchronizing: a sync that fails must not
+     * leave the reported lamp behind. privacy_state still advances only on a
+     * successful sync, so the transition itself is retried while steady.
+     */
+    ctx->privacy_observed = state;
     if (set_software_mute(ctx, state) != 0)
         return -1;
     ctx->privacy_state = state;
@@ -884,6 +907,7 @@ int main(int argc, char **argv)
     ctx.muted = -1;
     ctx.privacy_state = -1;
     ctx.privacy_state_seen = 0;
+    ctx.privacy_observed = -1;
     ctx.indicated_mute = -1;
     ctx.audio_poll_warned = 0;
     ctx.tones = 1;
