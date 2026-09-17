@@ -46,6 +46,14 @@
 
 #ifndef BUTTOND_PRIVACY_STATE_PATH
 #define BUTTOND_PRIVACY_STATE_PATH "/sys/devices/platform/amz_privacy/privacy_state"
+/*
+ * The kernel's mute lamp control (LibreEcho-Linux-6.1: mute_lamp in the
+ * amz_privacy driver). Optional: an image built without it, or a kernel where
+ * the physical latch owns the lamp, leaves the ring as the only indicator.
+ */
+#ifndef BUTTOND_MUTE_LAMP_PATH
+#define BUTTOND_MUTE_LAMP_PATH "/sys/devices/platform/amz_privacy/mute_lamp"
+#endif
 #endif
 #ifndef BUTTOND_PRIVACY_STATE_FALLBACK_PATH
 #define BUTTOND_PRIVACY_STATE_FALLBACK_PATH "/sys/devices/platform/amz-privacy/privacy_state"
@@ -65,8 +73,23 @@
    driver is unbound.  Rescan rather than exiting, so a late-appearing button
    is still picked up without an operator having to restart the daemon. */
 #define RESCAN_INTERVAL_MS 5000
+/*
+ * An attribute that is not there yet is probed again on this cadence: the mute
+ * lamp belongs to the privacy driver, which can bind after buttond starts.
+ * Latching "unsupported" on the first miss would describe an image that has the
+ * control as lacking it until the daemon was restarted. Overridable so a host
+ * test does not have to wait it out.
+ */
+#ifndef LAMP_PROBE_RETRY_MS
+#define LAMP_PROBE_RETRY_MS 30000
+#endif
+/* Overridable so a host test can read the record the daemon publishes. */
+#ifndef STATUS_PATH
 #define STATUS_PATH "/run/libreecho/buttond-status"
+#endif
+#ifndef STATUS_TMP_PATH
 #define STATUS_TMP_PATH "/run/libreecho/buttond-status.tmp"
+#endif
 
 #define BITS_PER_LONG (8 * (int)sizeof(long))
 #define NBITS(x) (((x) - 1) / BITS_PER_LONG + 1)
@@ -98,6 +121,15 @@ struct context {
      * report a stale lamp or lose the retry.
      */
     int privacy_observed;
+    /* 1 when the kernel lamp control accepted a write, 0 when it is absent or
+       refused, -1 before it has been tried. Drives the reported capability. */
+    int lamp_supported;
+    int lamp_warned;
+    /* When a failed probe may be tried again, on the monotonic clock; 0 when the
+       probe has settled -- a write the kernel accepted, or one it will never
+       take. An attribute that is absent is not settled: its driver can bind
+       after this daemon starts. */
+    long long lamp_retry_at_ms;
     unsigned int step;
     unsigned int hold_ms;
     unsigned int brightness;
@@ -303,18 +335,26 @@ static void write_capability_status(const struct context *ctx)
         return;
     /*
      * privacy_observed is the observed kernel privacy latch, reported so the UI
-     * can say whether the mute button's lamp is lit. A software mute lights the
-     * ring and leaves that lamp dark, because the lamp is wired to the latch
-     * rather than to the audio path; -1 means "not read yet" or "unreadable",
+     * can say whether the mute button's lamp is lit. The latch is the only
+     * truthful source for that lamp when software cannot drive it, which is what
+     * lamp_control below reports; -1 means "not read yet" or "unreadable",
      * which is not the same as "released" and must not be reported as if it were.
      */
     fprintf(file, "schema=1\nstate=%s\nvolume=%d\nmicrophone_mute=%d\naction=%d\n"
-                  "privacy_state=%d\n",
+                  "privacy_state=%d\nlamp_control=%d\n",
             connected ? "connected" : "unavailable",
             connected && ctx->volume_capable,
             connected && ctx->mute_capable,
             connected && ctx->action_capable,
-            ctx->privacy_observed);
+            ctx->privacy_observed,
+            /*
+             * Published as observed: -1 until a write has tested the control (or
+             * when it has never been reachable), 1 when the kernel accepted one,
+             * 0 when the control is absent or refused. Reporting -1 as 0 would
+             * describe an image that has the control as lacking it before
+             * anything has tried it, which is what the API's null is for.
+             */
+            ctx->lamp_supported);
     fflush(file);
     fd = fileno(file);
     if (fd >= 0)
@@ -559,11 +599,133 @@ static void action_flourish(struct context *ctx)
     le_adapter_close(adapter);
 }
 
+/*
+ * Whether a failed lamp write settles the question for good.
+ *
+ * A write the kernel refuses is an answer -- but only -EOPNOTSUPP is a permanent
+ * one: it is the driver declining this control on this board on purpose
+ * (amz_privacy: a board whose hardware latch owns the line, where driving the
+ * request line could hold a state the driver never records). A deferral (EBUSY,
+ * the request is recorded and applied when the line is free) is not an answer at
+ * all, and neither is an error the daemon might never see again; those keep the
+ * probe alive.
+ */
+static int lamp_failure_is_final(int err)
+{
+    return err == EOPNOTSUPP;
+}
+
+/*
+ * Remember and publish what software can do with the lamp.
+ *
+ * /buttons reads the status file, which is otherwise only written on the
+ * five-second heartbeat, and the heartbeat writes it before the mute indicator
+ * runs -- so a capability the first lamp write has just learned has to be
+ * published here or the API serves the previous answer for a cycle.
+ */
+static void set_lamp_capability(struct context *ctx, int supported)
+{
+    if (ctx->lamp_supported == supported)
+        return;
+    ctx->lamp_supported = supported;
+    write_capability_status(ctx);
+}
+
+/*
+ * Drive the kernel's mute lamp, when this image has the control.
+ *
+ * Best effort on purpose: an image without the attribute, or a kernel that
+ * refuses the write because the physical latch owns the lamp, must not stop the
+ * software mute or the ring. The outcome is remembered so the status file can
+ * say whether software can light the lamp at all, which is what the UI needs in
+ * order to describe it honestly.
+ */
+static void write_mute_lamp(struct context *ctx, int muted)
+{
+    const char *value = muted ? "1" : "0";
+    ssize_t written;
+    int failed;
+    int fd;
+
+    /*
+     * A probe the kernel settled for good is not repeated; one that only failed
+     * because the attribute was not there yet is, once the retry window passes.
+     */
+    if (ctx->lamp_supported == 0 &&
+        (ctx->lamp_retry_at_ms == 0 || monotonic_ms() < ctx->lamp_retry_at_ms))
+        return;
+    fd = open(BUTTOND_MUTE_LAMP_PATH, O_WRONLY | O_CLOEXEC
+#ifdef O_NOFOLLOW
+              | O_NOFOLLOW
+#endif
+    );
+    if (fd < 0) {
+        /*
+         * The attribute is missing (an image from before the control, or a
+         * driver that has not bound yet) or this daemon may not write it (the
+         * mode is group-writable, so the service user's groups matter). Either
+         * way software cannot light the lamp now and the answer is reported as
+         * unsupported -- but it is not treated as final, because the driver can
+         * appear later and only the kernel refusing a write settles it.
+         */
+        if (ctx->lamp_supported > 0 || errno != ENOENT)
+            le_log_info("buttond: mute lamp control is not usable: %s",
+                        strerror(errno));
+        set_lamp_capability(ctx, 0);
+        ctx->lamp_retry_at_ms = monotonic_ms() + LAMP_PROBE_RETRY_MS;
+        return;
+    }
+    written = write(fd, value, 1);
+    /*
+     * errno says nothing unless the write itself failed. A short write is
+     * possible (a store() that consumed nothing) and can leave errno holding
+     * whatever an earlier call set, so reading it here would let a stale
+     * -EOPNOTSUPP settle a probe this write never refused -- and stop the retry
+     * that a control which is still there deserves.
+     */
+    failed = written < 0 ? errno : 0;
+    close(fd);
+    if (written == 1) {
+        ctx->lamp_warned = 0;
+        ctx->lamp_retry_at_ms = 0;
+        set_lamp_capability(ctx, 1);
+        return;
+    }
+    if (!ctx->lamp_warned) {
+        if (failed == EBUSY)
+            le_log_warn("buttond: mute lamp write deferred (the latch owns it?)");
+        else if (failed != 0)
+            le_log_warn("buttond: mute lamp write refused: %s", strerror(failed));
+        else
+            le_log_warn("buttond: mute lamp write was short");
+    }
+    ctx->lamp_warned = 1;
+    if (failed == EBUSY) {
+        /*
+         * A deferral is not an answer: the kernel has the request recorded and
+         * applies it once the latch releases the line, so it says nothing about
+         * what software can do here. The capability keeps the answer it already
+         * had -- unknown until a write tests the control, which the API reports
+         * as null, and still true once one has been accepted.
+         */
+        return;
+    }
+    /* Refused: the one answer that is a definite "no" is what the API reports as
+       false. A permanent refusal ends the probing; anything else is retried. */
+    set_lamp_capability(ctx, 0);
+    ctx->lamp_retry_at_ms = lamp_failure_is_final(failed)
+                                ? 0
+                                : monotonic_ms() + LAMP_PROBE_RETRY_MS;
+}
+
 static void mute_indicator(struct context *ctx, int muted)
 {
     struct le_adapter *adapter;
     char args[96];
 
+    /* The lamp is the kernel's and needs no daemon, so it goes first: it must
+       not be skipped because the ring could not be reached. */
+    write_mute_lamp(ctx, muted);
     adapter = le_adapter_connect(ctx->led_sock, CONNECT_TIMEOUT_MS);
     if (!adapter) {
         if (!ctx->indicator_warned)
@@ -922,6 +1084,8 @@ int main(int argc, char **argv)
     ctx.privacy_state = -1;
     ctx.privacy_state_seen = 0;
     ctx.privacy_observed = -1;
+    ctx.lamp_supported = -1;
+    ctx.lamp_retry_at_ms = 0;
     ctx.indicated_mute = -1;
     ctx.audio_poll_warned = 0;
     ctx.tones = 1;
