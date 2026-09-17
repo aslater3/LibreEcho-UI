@@ -52,7 +52,11 @@ curl -fsS -X POST "$URL/api/v1/setup" \
 # unnoticed until nothing it asserted was true any more. It runs after smoke
 # because it leaves the simulation feature off, which is how smoke expects to
 # find it.
-for suite in smoke features-radio; do
+#
+# LIBREECHO_E2E_SUITES narrows the list (the WebKit job runs baby-monitor on its
+# own) and LIBREECHO_E2E_BROWSER selects the engine inside baby-monitor.cjs.
+SUITES=${LIBREECHO_E2E_SUITES:-"smoke features-radio baby-monitor"}
+for suite in $SUITES; do
   if ! LIBREECHO_E2E_URL="$URL" node "tests/e2e/$suite.cjs"; then
     echo "--- libreecho-web E2E server log ($suite) ---" >&2
     cat "$LOG" >&2
