@@ -15,6 +15,7 @@
 
 #define LE_TEST_READ_SECONDS 5
 #define LE_TEST_SIGNAL_DELAY_NS 20000000L
+#define LE_TEST_WORKER_EXIT_MS 5000
 
 static void deadline_after(struct timespec *deadline, long seconds)
 {
@@ -356,6 +357,15 @@ static int test_real_update_check_worker_is_reaped(void)
     return 0;
 }
 
+/* A live adapter turns the audio-stream worker into a long-lived stream rather
+ * than a worker that answers and exits, so the snapshot and cycle tests only
+ * run when no adapter is present. */
+static int live_audio_adapter(void)
+{
+    return !access(LE_ADAPTER_WAKEWORD_SOCK, F_OK) ||
+           !access(LE_ADAPTER_MIC_SOCK, F_OK);
+}
+
 /* Proof that the snapshot window is deterministic: with SIGCHLD blocked the
  * handler cannot clear the slot even though the worker has already exited, so
  * the cycle tests cannot lose a worker that behaved correctly. After the
@@ -367,8 +377,12 @@ static int test_pid_snapshot_survives_worker_exit(void)
     siginfo_t info;
     int pair[2];
     pid_t pid;
-    int i, failed = 0;
+    int i, status, failed = 0;
 
+    if (live_audio_adapter()) {
+        puts("  PID snapshot window: skipped, a live adapter is present");
+        return 0;
+    }
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair))
         return -1;
     if (sigchld_block(&previous)) {
@@ -384,30 +398,51 @@ static int test_pid_snapshot_survives_worker_exit(void)
         close(pair[1]);
         return -1;
     }
-    /* WNOWAIT waits for the exit without consuming the status, so the slot
-     * still has to name the worker while SIGCHLD stays blocked. */
+    /* WNOWAIT observes the exit without consuming the status, so the slot still
+     * has to name the worker while SIGCHLD stays blocked. The wait is polled
+     * rather than blocking, so a worker that never exits fails the test instead
+     * of hanging it. */
     memset(&info, 0, sizeof(info));
-    if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT)) {
+    for (i = 0; i < LE_TEST_WORKER_EXIT_MS && !info.si_pid; i++) {
+        if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT | WNOHANG)) {
+            fprintf(stderr, "FAIL: waiting on audio-stream worker %ld failed "
+                    "(errno=%d)\n", (long)pid, errno);
+            failed = 1;
+            break;
+        }
+        if (!info.si_pid)
+            nanosleep(&pause, NULL);
+    }
+    if (!failed && info.si_pid != pid) {
+        fprintf(stderr, "FAIL: audio-stream worker %ld did not exit within "
+                "%d ms\n", (long)pid, LE_TEST_WORKER_EXIT_MS);
         failed = 1;
-    } else if (registered_worker_pid(LE_TEST_WORKER_PCM) != pid) {
+    }
+    if (!failed && registered_worker_pid(LE_TEST_WORKER_PCM) != pid) {
         fprintf(stderr, "FAIL: the exited worker's slot was cleared while "
                 "SIGCHLD was blocked\n");
         failed = 1;
     }
     sigchld_restore(&previous);
+    if (failed) {
+        /* Never leave a streaming worker behind on the failure path. */
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        close(pair[1]);
+        return -1;
+    }
     for (i = 0; i < 200 && !worker_status_consumed(pid); i++)
         nanosleep(&pause, NULL);
     close(pair[1]);
-    if (!failed && (!worker_status_consumed(pid) ||
-                    registered_worker_pid(LE_TEST_WORKER_PCM) != (pid_t)-1)) {
+    if (!worker_status_consumed(pid) ||
+        registered_worker_pid(LE_TEST_WORKER_PCM) != (pid_t)-1) {
         fprintf(stderr, "FAIL: the pending SIGCHLD did not reap worker %ld\n",
                 (long)pid);
-        failed = 1;
+        return -1;
     }
-    if (!failed)
-        puts("  PID snapshot survives an exited worker inside the blocked "
-             "window: ok");
-    return failed ? -1 : 0;
+    puts("  PID snapshot survives an exited worker inside the blocked "
+         "window: ok");
+    return 0;
 }
 
 #define LE_TEST_STREAM_CYCLES 24
@@ -419,8 +454,7 @@ static int test_real_audio_stream_workers_reap_to_baseline(void)
 {
     int cycle;
 
-    if (!access(LE_ADAPTER_WAKEWORD_SOCK, F_OK) ||
-        !access(LE_ADAPTER_MIC_SOCK, F_OK)) {
+    if (live_audio_adapter()) {
         puts("  audio-stream reap cycle: skipped, a live adapter is present");
         return 0;
     }
