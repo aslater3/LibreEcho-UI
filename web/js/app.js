@@ -400,7 +400,7 @@ function bindNoise(n){
  const stop=$('#noise-stop');if(stop){stop.disabled=!n.active;stop.onclick=()=>del('/audio/noise','Sleep sounds stopped')}
  const start=$('#noise-start');if(start)start.onclick=()=>post('/audio/noise',{colour:$('#noise-colour').value,level:Math.max(1,+$('#noise-level').value),minutes:+$('#noise-minutes').value},'Sleep sounds playing')}
 async function audioPage(){const a=await api('/audio'),voices=a.tts_voices||[{id:'southern-female',name:'Southern English — female'},{id:'northern-male',name:'Northern English — male'}],voiceOptions=voices.map(v=>`<option value="${esc(v.id)}" ${v.id===a.tts_voice?'selected':''}>${esc(v.name)}</option>`).join('');content.innerHTML=`<div class="settings-grid">${panel('Output',range('Master volume',a.volume,'volume')+range('Notification volume',a.notification_volume,'notification-volume').replace('value="'+a.notification_volume+'"','value="'+a.notification_volume+'" disabled')+toggle('Startup sound',a.startup_sound,'startup-sound',true)+`<dl class="facts"><dt>Output</dt><dd class="${a.output_available?'connected':''}">${a.output_available?'Available':'Unavailable'}</dd><dt>Amplifier</dt><dd>${a.amplifier_on?'On':'Off'}</dd></dl><div class="button-row">${saveButton('save-output')}${action('Play test tone','test-tone')}</div>`)}${panel('Announcements',`<label class="field"><span>Voice</span><select id="tts-voice">${voiceOptions}</select></label><p class="muted">The selected British voice stays loaded for low-latency streamed announcements. Changing voice restarts the speech service.</p>${saveButton('save-voice')}`)}${noisePanel(a.noise||{})}${panel('Microphones',range('Microphone gain',a.microphone_gain,'mic-gain')+toggle('Microphone muted',a.microphone_muted,'mic-muted')+toggle('Acoustic echo cancellation',true,'aec',true)+`<p class="muted">Echo cancellation is reported by the future audio adapter and cannot yet be changed.</p>`+saveButton('save-microphones'))}</div>`;bindRange();bindDirty(['#volume'],'#save-output');bindDirty(['#tts-voice'],'#save-voice');bindDirty(['#mic-gain','#mic-muted'],'#save-microphones');$('#save-output').onclick=()=>mutate('/audio',{volume:+$('#volume').value},'Output changes saved');$('#save-voice').onclick=()=>mutate('/audio',{tts_voice:$('#tts-voice').value},'Announcement voice changed');$('#save-microphones').onclick=()=>mutate('/audio',{microphone_gain:+$('#mic-gain').value,microphone_muted:$('#mic-muted').checked},'Microphone changes saved');$('#test-tone').onclick=()=>post('/audio/test',{},'Test tone playing');bindNoise(a.noise||{})}
-const BABY_START_LEAD=0.05,BABY_RESYNC_OFFSET=0.02,BABY_SCHEDULE_LEAD=0.75,BABY_RESUME_DEADLINE=800,BABY_RESUME_POLL=100,BABY_DRAIN_GRACE=120,BABY_DRAIN_POLL=25,BABY_DRAIN_LIMIT=5000;
+const BABY_START_LEAD=0.05,BABY_RESYNC_OFFSET=0.02,BABY_SCHEDULE_LEAD=0.75,BABY_RESUME_DEADLINE=800,BABY_RESUME_POLL=100,BABY_DRAIN_GRACE=120,BABY_DRAIN_POLL=25,BABY_DRAIN_LIMIT=5000,BABY_MAX_NODES=256;
 const babyStream={controller:null,context:null,gain:null,nextTime:0,generation:0,nodes:new Set(),diagnostics:{context:'idle',http:'—',received:0,frames:0,scheduled:0,playback:'idle',error:'none'}};
 const babyDiagnosticFields=[['#baby-diag-context','context'],['#baby-diag-http','http'],['#baby-diag-received','received'],['#baby-diag-frames','frames'],['#baby-diag-scheduled','scheduled'],['#baby-diag-playback','playback'],['#baby-diag-error','error']];
 function babyDiag(update={}){const d=Object.assign(babyStream.diagnostics,update),text=key=>key==='received'?d.received+' bytes':key==='frames'?d.frames+' frames':key==='scheduled'?d.scheduled.toFixed(3)+' s':String(d[key]);babyDiagnosticFields.forEach(([selector,key])=>{const el=$(selector);if(el)el.textContent=text(key)});return d}
@@ -418,6 +418,11 @@ async function babyEnsureRunning(context,generation){const deadline=Date.now()+B
    sources queued on top of the audio that follows, and would leave the retained
    backlog unbounded. */
 function babyResyncQueue(current){babyStream.nodes.forEach(node=>{if(node.babyStart===undefined||node.babyStart<=current)return;node.onended=null;try{node.stop()}catch(_){}babyStream.nodes.delete(node)})}
+/* The look-ahead bound is a duration, so a stream fragmented into very small
+   chunks could still create thousands of sources inside the window. Keep a hard
+   ceiling on retained sources by skipping the oldest queued ones, so neither the
+   node set nor the buffer count can grow with the fragment count. */
+function babyEnforceNodeLimit(current){while(babyStream.nodes.size>=BABY_MAX_NODES){let oldest=null;babyStream.nodes.forEach(node=>{if(node.babyStart===undefined||node.babyStart<=current)return;if(!oldest||node.babyStart<oldest.babyStart)oldest=node});if(!oldest)break;oldest.onended=null;try{oldest.stop()}catch(_){}babyStream.nodes.delete(oldest)}}
 function babyScheduleStart(context){const current=context.currentTime;if(babyStream.nextTime-current<=BABY_SCHEDULE_LEAD)return Math.max(babyStream.nextTime,current+BABY_RESYNC_OFFSET);let start=current+BABY_RESYNC_OFFSET;babyStream.nodes.forEach(node=>{if(node.babyStart!==undefined&&node.babyStart<=current&&node.babyEnd>start)start=node.babyEnd});babyResyncQueue(current);return start}
 /* A coalesced chunk can carry far more audio than the look-ahead window, so each
    quantum waits for playback to catch up before it is queued instead of being
@@ -561,6 +566,8 @@ async function babyMonitorPage(){
           await babyPaceToHorizon(context,generation,start);
           if(generation!==babyStream.generation)return;
           start=babyScheduleStart(context);
+          babyEnforceNodeLimit(context.currentTime);
+          if(babyStream.nodes.size>=BABY_MAX_NODES)continue;
           const count=Math.min(quantum,frames-from);
           const audio=context.createBuffer(1,count,contract.rate);
           const samples=audio.getChannelData(0);

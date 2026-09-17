@@ -700,6 +700,36 @@ async function caseCoalescedChunkQueueBound() {
     await quiesce(pending);
 }
 
+/* The look-ahead bound is a duration, so a stream that arrives one tiny fragment
+   per chunk could still create thousands of sources inside the horizon. A
+   separate hard ceiling on retained sources keeps mobile Safari safe. */
+async function caseFragmentBurstNodeLimit() {
+    reset();
+    await mountPage();
+    resumeImpl = context => { context.state = 'running'; return Promise.resolve(); };
+    const body = installStream('pcm_s16_le;channels=1;valid-bits=16;rate=16000;selected-channel=0');
+    const pending = clickStart();
+    await settle();
+    const context = contexts[0];
+    const fragments = 400;
+    const fragment = tinyPcm([500]);            /* one frame per chunk: 0.0625 ms each */
+    for (let i = 0; i < fragments; i++) body.push(fragment);
+    await waitFor(() => diagnostics().frames === fragments + ' frames');
+    checkEqual(diagnostics().frames, fragments + ' frames', 'every fragment is decoded and counted');
+    const retained = context.playbackSources.filter(source => babyStream.nodes.has(source));
+    check(retained.length <= 255,
+        `retained playback sources are capped (got ${retained.length})`);
+    check(babyStream.nodes.size <= 256, `the retained node set is capped (got ${babyStream.nodes.size})`);
+    check(context.playbackSources.some(source => source.stopped),
+        'the oldest queued fragment is skipped once the source ceiling is reached');
+    const live = context.playbackSources.filter(source => !source.stopped);
+    check(live.every((source, i) => i === 0 || source.startedAt > live[i - 1].startedAt),
+        'the fragments that survive are still scheduled in playback order');
+    body.finish();
+    await settle();
+    await quiesce(pending);
+}
+
 async function casePacked24Contract() {
     reset();
     await mountPage();
@@ -753,6 +783,7 @@ async function main() {
         ['AudioContext resume() that never settles against the deadline', caseNeverSettlingResume],
         ['oversize coalesced final chunk is paced and drains completely', caseOversizedFinalChunk],
         ['coalesced chunks never queue beyond the look-ahead', caseCoalescedChunkQueueBound],
+        ['fragment-per-chunk bursts hit a hard source ceiling', caseFragmentBurstNodeLimit],
         ['packed 24-bit audio contract', casePacked24Contract]
     ];
     for (const [name, run] of cases) {
