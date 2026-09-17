@@ -83,6 +83,16 @@ async function audioHtml(buttons){
   assert(!/lamp stays dark/.test(unknown),
          'an unknown latch state claimed the lamp was dark');
 
+  /* With the kernel's lamp control a software mute lights the lamp, and the
+     note has to say so instead of describing a dark one. */
+  audio.microphone_muted = true;
+  const softLamp = await audioHtml({microphone_muted:true,privacy_latch:false,lamp_control:true});
+  assert(/lamp is lit/.test(softLamp), 'a controllable lamp was not reported as lit');
+  assert(!/stays dark/.test(softLamp), 'a controllable lamp was still described as dark');
+  audio.microphone_muted = false;
+  const softLampIdle = await audioHtml({microphone_muted:false,privacy_latch:false,lamp_control:true});
+  assert(!/lamp is lit/.test(softLampIdle), 'an unmuted device claimed a lit lamp');
+
   /* Unmuted with no reading: nothing to say about the lamp. */
   audio.microphone_muted = false;
   const idle = await audioHtml({microphone_muted:false,privacy_latch:null});

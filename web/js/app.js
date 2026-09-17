@@ -408,7 +408,12 @@ function bindNoise(n){
  * reading is not evidence that the latch is released.
  */
 function muteLampNote(a,b){
+ /* Whether software can light the lamp at all decides how to describe it: an
+    image with the kernel's mute_lamp control lights it from a software mute, and
+    one without it can only follow the button. */
+ const soft=!!(b&&b.lamp_control===true),muted=!!(a&&a.microphone_muted);
  const text=(()=>{
+  if(soft&&muted)return 'Muted: the ring is red, the mute button\'s lamp is lit, and the microphones are cut in hardware while it is. Unmuting puts the lamp out.';
   if(!b||b.privacy_latch===undefined||b.privacy_latch===null){
    if(a&&a.microphone_muted)return 'Software mute: the microphones are muted and the ring is red. The lamp in the mute button is not part of this path — it follows the button\'s hardware privacy latch.';
    return '';

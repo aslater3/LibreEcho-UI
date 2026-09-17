@@ -1964,8 +1964,9 @@ static void buttons_json(struct api_context *c, struct api_response *r)
     char escaped_short[80], escaped_long[80];
     struct stat st;
     time_t now = time(NULL);
-    int fd, fresh = 0, volume = 0, mute = 0, action = 0, privacy = -1;
+    int fd, fresh = 0, volume = 0, mute = 0, action = 0, privacy = -1, lamp = -1;
     const char *latch;
+    const char *lamp_state;
     ssize_t n;
     json_escape(escaped_short, sizeof(escaped_short), c->button_short);
     json_escape(escaped_long, sizeof(escaped_long), c->button_long);
@@ -1982,6 +1983,7 @@ static void buttons_json(struct api_context *c, struct api_response *r)
             if (button_status_value(data, "microphone_mute", value, sizeof(value))) mute = !strcmp(value, "1");
             if (button_status_value(data, "action", value, sizeof(value))) action = !strcmp(value, "1");
             if (button_status_value(data, "privacy_state", value, sizeof(value))) privacy = atoi(value);
+            if (button_status_value(data, "lamp_control", value, sizeof(value))) lamp = atoi(value);
         }
     } else if (fd >= 0) close(fd);
     if (!fresh) strcpy(state, "stale");
@@ -1994,8 +1996,15 @@ static void buttons_json(struct api_context *c, struct api_response *r)
      * button"), not a state, and stays as it was.
      */
     latch = (fresh && privacy >= 0) ? (privacy ? "true" : "false") : "null";
+    /*
+     * Whether software can light the mute button's lamp at all (the kernel's
+     * mute_lamp control, and a board where the latch does not own it). The UI
+     * describes the lamp differently depending on this, so an unknown answer is
+     * null rather than false.
+     */
+    lamp_state = (fresh && lamp >= 0) ? (lamp ? "true" : "false") : "null";
     button_sounds_available(available, sizeof(available));
-    out(r, 200, "{\"ok\":true,\"data\":{\"short_press\":\"%s\",\"long_press\":\"%s\",\"available\":%s,\"state\":\"%s\",\"volume_capable\":%s,\"hardware_mute\":%s,\"action_capable\":%s,\"stale\":%s,\"privacy_latch\":%s,\"tones\":%s,\"action\":\"%s\",\"action_sounds\":\"%s\",\"available_sounds\":%s,\"action_brightness\":%d,\"mute_brightness\":%d},\"error\":null}", escaped_short, escaped_long, fresh && !strcmp(state, "connected") ? "true" : "false", state, volume ? "true" : "false", mute ? "true" : "false", action ? "true" : "false", !fresh ? "true" : "false", latch, c->button_tones ? "true" : "false", c->button_action, c->button_action_sounds, available, c->button_action_brightness, c->button_mute_brightness);
+    out(r, 200, "{\"ok\":true,\"data\":{\"short_press\":\"%s\",\"long_press\":\"%s\",\"available\":%s,\"state\":\"%s\",\"volume_capable\":%s,\"hardware_mute\":%s,\"action_capable\":%s,\"stale\":%s,\"privacy_latch\":%s,\"lamp_control\":%s,\"tones\":%s,\"action\":\"%s\",\"action_sounds\":\"%s\",\"available_sounds\":%s,\"action_brightness\":%d,\"mute_brightness\":%d},\"error\":null}", escaped_short, escaped_long, fresh && !strcmp(state, "connected") ? "true" : "false", state, volume ? "true" : "false", mute ? "true" : "false", action ? "true" : "false", !fresh ? "true" : "false", latch, lamp_state, c->button_tones ? "true" : "false", c->button_action, c->button_action_sounds, available, c->button_action_brightness, c->button_mute_brightness);
 }
 
 /*

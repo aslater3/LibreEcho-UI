@@ -46,6 +46,14 @@
 
 #ifndef BUTTOND_PRIVACY_STATE_PATH
 #define BUTTOND_PRIVACY_STATE_PATH "/sys/devices/platform/amz_privacy/privacy_state"
+/*
+ * The kernel's mute lamp control (LibreEcho-Linux-6.1: mute_lamp in the
+ * amz_privacy driver). Optional: an image built without it, or a kernel where
+ * the physical latch owns the lamp, leaves the ring as the only indicator.
+ */
+#ifndef BUTTOND_MUTE_LAMP_PATH
+#define BUTTOND_MUTE_LAMP_PATH "/sys/devices/platform/amz_privacy/mute_lamp"
+#endif
 #endif
 #ifndef BUTTOND_PRIVACY_STATE_FALLBACK_PATH
 #define BUTTOND_PRIVACY_STATE_FALLBACK_PATH "/sys/devices/platform/amz-privacy/privacy_state"
@@ -98,6 +106,10 @@ struct context {
      * report a stale lamp or lose the retry.
      */
     int privacy_observed;
+    /* 1 when the kernel lamp control accepted a write, 0 when it is absent or
+       refused, -1 before it has been tried. Drives the reported capability. */
+    int lamp_supported;
+    int lamp_warned;
     unsigned int step;
     unsigned int hold_ms;
     unsigned int brightness;
@@ -309,12 +321,13 @@ static void write_capability_status(const struct context *ctx)
      * which is not the same as "released" and must not be reported as if it were.
      */
     fprintf(file, "schema=1\nstate=%s\nvolume=%d\nmicrophone_mute=%d\naction=%d\n"
-                  "privacy_state=%d\n",
+                  "privacy_state=%d\nlamp_control=%d\n",
             connected ? "connected" : "unavailable",
             connected && ctx->volume_capable,
             connected && ctx->mute_capable,
             connected && ctx->action_capable,
-            ctx->privacy_observed);
+            ctx->privacy_observed,
+            ctx->lamp_supported == 1 ? 1 : 0);
     fflush(file);
     fd = fileno(file);
     if (fd >= 0)
@@ -559,11 +572,58 @@ static void action_flourish(struct context *ctx)
     le_adapter_close(adapter);
 }
 
+/*
+ * Drive the kernel's mute lamp, when this image has the control.
+ *
+ * Best effort on purpose: an image without the attribute, or a kernel that
+ * refuses the write because the physical latch owns the lamp, must not stop the
+ * software mute or the ring. The outcome is remembered so the status file can
+ * say whether software can light the lamp at all, which is what the UI needs in
+ * order to describe it honestly.
+ */
+static void write_mute_lamp(struct context *ctx, int muted)
+{
+    const char *value = muted ? "1" : "0";
+    ssize_t written;
+    int fd;
+
+    if (ctx->lamp_supported == 0)
+        return;
+    fd = open(BUTTOND_MUTE_LAMP_PATH, O_WRONLY | O_CLOEXEC
+#ifdef O_NOFOLLOW
+              | O_NOFOLLOW
+#endif
+    );
+    if (fd < 0) {
+        if (ctx->lamp_supported > 0)
+            le_log_info("buttond: mute lamp control is not present");
+        ctx->lamp_supported = 0;
+        return;
+    }
+    written = write(fd, value, 1);
+    close(fd);
+    if (written == 1) {
+        ctx->lamp_supported = 1;
+        ctx->lamp_warned = 0;
+        return;
+    }
+    /* Refused: the latch owns the lamp. Not a state this daemon can fix, and
+       the ring still shows the mute, so this is a warning once, not a retry
+       loop -- but the capability is reported as unsupported. */
+    if (!ctx->lamp_warned)
+        le_log_warn("buttond: mute lamp write refused (latch engaged?)");
+    ctx->lamp_warned = 1;
+    ctx->lamp_supported = -1;
+}
+
 static void mute_indicator(struct context *ctx, int muted)
 {
     struct le_adapter *adapter;
     char args[96];
 
+    /* The lamp is the kernel's and needs no daemon, so it goes first: it must
+       not be skipped because the ring could not be reached. */
+    write_mute_lamp(ctx, muted);
     adapter = le_adapter_connect(ctx->led_sock, CONNECT_TIMEOUT_MS);
     if (!adapter) {
         if (!ctx->indicator_warned)
@@ -922,6 +982,7 @@ int main(int argc, char **argv)
     ctx.privacy_state = -1;
     ctx.privacy_state_seen = 0;
     ctx.privacy_observed = -1;
+    ctx.lamp_supported = -1;
     ctx.indicated_mute = -1;
     ctx.audio_poll_warned = 0;
     ctx.tones = 1;

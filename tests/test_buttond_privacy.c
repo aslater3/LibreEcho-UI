@@ -4,8 +4,10 @@
 #include "buttond_fixture.h"
 #define open buttond_fixture_open
 static char test_privacy_path[256], test_privacy_fallback_path[256];
+static char test_lamp_path[256];
 static char test_config_path[256];
 #define BUTTOND_PRIVACY_STATE_PATH test_privacy_path
+#define BUTTOND_MUTE_LAMP_PATH test_lamp_path
 #define BUTTOND_PRIVACY_STATE_FALLBACK_PATH test_privacy_fallback_path
 #define LE_BUTTOND_CONFIG test_config_path
 #define main buttond_program_main
@@ -144,6 +146,7 @@ static void init_context(struct context *ctx, const char *audio_socket)
     ctx->mute_brightness = 60;
     ctx->privacy_state = -1;
     ctx->privacy_observed = -1;
+    ctx->lamp_supported = -1;
 }
 
 int main(void)
@@ -162,6 +165,15 @@ int main(void)
     snprintf(test_privacy_path, sizeof(test_privacy_path), "%s/privacy", directory);
     snprintf(test_privacy_fallback_path, sizeof(test_privacy_fallback_path), "%s/privacy-fallback", directory);
     snprintf(test_config_path, sizeof(test_config_path), "%s/config.json", directory);
+    snprintf(test_lamp_path, sizeof(test_lamp_path), "%s/mute-lamp", directory);
+    {
+        /* The kernel attribute exists on a device that has the control; the
+           fixture has to exist before the daemon tries to write it. */
+        FILE *lamp = fopen(test_lamp_path, "w");
+
+        assert(lamp != NULL);
+        assert(fclose(lamp) == 0);
+    }
     snprintf(audio_socket, sizeof(audio_socket), "%s/audio.sock", directory);
     snprintf(led_socket, sizeof(led_socket), "%s/led.sock", directory);
     snprintf(audio_log, sizeof(audio_log), "%s/audio.log", directory);
@@ -208,6 +220,25 @@ int main(void)
     assert(ctx.muted == 1);
     nanosleep(&pause, NULL);
     assert(log_count(audio_log, "\"cmd\":\"set_mute\"") == before + 1);
+
+    /* The kernel lamp control is driven with the software mute, and the
+       capability is reported so the UI can describe the lamp. */
+    {
+        char lamp[8] = "";
+        FILE *file = fopen(test_lamp_path, "r");
+
+        assert(file != NULL);
+        assert(fgets(lamp, sizeof(lamp), file) != NULL);
+        fclose(file);
+        assert(lamp[0] == '1');
+        assert(ctx.lamp_supported == 1);
+    }
+    unlink(test_lamp_path);
+    /* Without the control (an older image) the mute still works and the lamp is
+       reported as unsupported rather than retried forever. */
+    mute_indicator(&ctx, 0);
+    assert(ctx.lamp_supported == 0);
+    assert(!strcmp(ctx.action, "playpause"));
 
     /* A steady asserted latch is idempotent, so the event cannot double-toggle. */
     sync_privacy_state(&ctx);
@@ -323,6 +354,7 @@ int main(void)
     unlink(BUTTOND_PRIVACY_STATE_PATH);
     unlink(BUTTOND_PRIVACY_STATE_FALLBACK_PATH);
     unlink(test_config_path);
+    unlink(test_lamp_path);
     rmdir(directory);
     puts("buttond privacy synchronization: startup, transitions, fallback, and no double-toggle: ok");
     return 0;

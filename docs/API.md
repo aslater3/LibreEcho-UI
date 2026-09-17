@@ -1605,6 +1605,13 @@ software mute (`microphone_muted` on `/audio`) lights the light ring and leaves
 the lamp dark, because the lamp is wired to the latch rather than to the audio
 path. `hardware_mute` above is a capability ("this device has a mute button"),
 not a state. Software cannot assert or release the latch; the button does.
+`lamp_control` reports whether software can light the lamp in the mute button at
+all: `true` when the kernel exposes the mute-lamp control and last accepted a
+write, `false` when the image predates it or a kernel refused the write because
+the physical latch owns the lamp, and `null` when there is no fresh reading. It
+is what the UI uses to describe the lamp: with the control, a software mute
+lights it, and without it the lamp can only follow the button.
+
 `available_sounds` lists the installed raw sounds that can be previewed, and
 `action_sounds` is the comma-separated rotation list in play order. Sound names
 are lowercase letters, digits, hyphens, or underscores and are at most 48

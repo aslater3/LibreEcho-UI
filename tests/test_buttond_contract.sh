@@ -17,11 +17,24 @@ assert 'action_capable' in source
 assert 'TEST_BIT(KEY_HELP, key_bits)' in source
 assert 'action=%d' in source
 assert 'privacy_state=%d' in source, 'the privacy latch is not reported to the UI'
-assert 'ctx->privacy_observed)' in source, 'the status file must publish the observed latch'
+assert 'ctx->privacy_observed,' in source, 'the status file must publish the observed latch'
+assert 'ctx->lamp_supported == 1 ? 1 : 0' in source, (
+    'the status file must publish whether software can light the lamp')
 assert 'static void publish_latch_observation(' in source, (
     'a changed observation must be published without waiting for the heartbeat')
 assert 'publish_latch_observation(ctx, -1)' in source, (
     'an unreadable latch must publish as unknown')
+assert 'write_mute_lamp(ctx, muted);' in source, (
+    'the software mute must drive the kernel lamp control')
+assert 'BUTTOND_MUTE_LAMP_PATH' in source, (
+    'the lamp control path is not defined')
+assert 'lamp_control=%d' in source, (
+    'the status file must report whether software can light the lamp')
+indicator = source[source.index('static void mute_indicator('):source.index('static void show_meter(')]
+assert 'write_mute_lamp(ctx, muted);' in indicator, (
+    'the mute indicator must drive the kernel lamp control')
+assert indicator.index('write_mute_lamp(ctx, muted);') < indicator.index('le_adapter_connect('), (
+    'the lamp is the kernel\'s and must not depend on the LED daemon')
 assert 'json_get_int(buffer, "button_action_brightness", &value) > 0' in source
 assert 'json_get_int(buffer, "button_mute_brightness", &value) > 0' in source
 assert 'json_get_string(buffer, "button_action_sounds", value_text,\n                        sizeof(value_text)) == 1' in source
