@@ -483,7 +483,10 @@ voice pipeline, factory reset stops the service supervisor and every daemon that
 owns persistent state, and `libreecho-watchdogd` restarts a service that stopped
 answering. The supervisor is stopped first because the daemons the reset stops
 are exactly the ones it supervises; `src/backend_linux.c` holds the list and the
-reason for each entry.
+reason for each entry. Stopping it also stops the recovery it had in flight
+(`init/libreecho-watchdogd.init`), because a service start can wait a long time
+for its own dependencies before it launches the daemon, and a recovery left
+running would start a service the caller has already confirmed stopped.
 
 Each of those callers carries its own generic `ARGS`, `DAEMON`, `PIDFILE` and
 `LOGFILE`, and every init script resolves its settings with

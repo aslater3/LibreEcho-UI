@@ -1117,8 +1117,9 @@ Permanently removes every file and nested directory below the product image's
 device-local accounts, setup completion, Wi-Fi profiles/PSKs, assistant
 credentials, timers, and all mutable user configuration. The daemons that own
 that state are stopped first and confirmed stopped -- including the service
-supervisor, which would otherwise restart a deliberately stopped daemon -- and
-any that could not be stopped aborts the reset before anything is removed. The
+supervisor, which would otherwise restart a deliberately stopped daemon or
+finish a recovery it had already started -- and any that could not be stopped
+aborts the reset before anything is removed. The
 reset then synchronizes both persistent directories and reboots. Installed
 feature payloads, OTA artifacts, and release identity outside those directories
 are preserved.
