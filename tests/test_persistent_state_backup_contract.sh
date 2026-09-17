@@ -13,7 +13,9 @@
 #      captured tree or named in the manifest as excluded;
 #   4. every persistent file an init script consumes one-shot is pruned, so a
 #      restore cannot replay an already-consumed request;
-#   5. symlinked state is refused on both create and restore.
+#   5. symlinked state is refused on both create and restore, including a
+#      configured root that is itself a link or is spelled with a `.`/`..`
+#      component.
 #
 # This is a source-contract test: it proves the tool describes the same state as
 # its consumers, not that a backup ran on a device.
@@ -108,6 +110,8 @@ require_in_tool 'refuse_symlinks "$tmpdir/persistent/config"'
 require_in_tool 'refuse_symlinks "$tmpdir/persistent/secrets"'
 require_in_tool 'refuse_symlinks "$tmpdir/persistent"'
 require_in_tool 'refuse_linked_roots'
+require_in_tool 'has_dot_component "$root"'
 require_in_tool 'persistent state root is a symbolic link'
+require_in_tool 'persistent state root uses a dot component'
 
 printf '%s\n' 'persistent state backup contract: ok'

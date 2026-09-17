@@ -218,7 +218,10 @@ Symlinked state is refused in both directions: creation fails instead of
 archiving a link, and an archive whose trees contain a link is rejected before
 the restore prompt, leaving live state unchanged. A configured `config` or
 `secrets` root that is itself a link is refused as well, because copying
-through it would archive another tree.
+through it would archive another tree, and so is a root spelled with a `.` or
+`..` component. A trailing or doubled separator is normalized to that same root
+before the checks, and no root is canonicalized: a name that merely contains a
+dot is an ordinary root.
 
 Creation uses file copies, not an atomic snapshot, and does not stop services.
 Quiesce persistent-state writers before creating a backup that must be

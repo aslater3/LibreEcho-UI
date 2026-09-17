@@ -313,7 +313,9 @@ policy, and exclusions. Factory defaults under `/etc/libreecho`, installed
 feature payloads, OTA/release identity, runtime state, logs, transaction files,
 raw wake PCM, and one-shot platform markers are not backed up. Symlinked state
 is refused in both directions, including a configured state root that is itself
-a link, rather than archived or restored.
+a link and a root spelled with a `.` or `..` component, rather than archived or
+restored. A trailing or doubled separator is normalized to the same root before
+those checks, so another spelling of a root cannot slip past them.
 
 Restore stages and validates both trees, including numeric ownership. It only
 replaces the live trees after staging succeeds, so ordinary copy or permission

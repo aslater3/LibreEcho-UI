@@ -13,6 +13,13 @@ import urllib.request
 DATA = Path('/data/libreecho')
 ARCHIVE = Path('/out/live-backup.tar.gz')
 TOOL = ['/bin/sh', '/src/tools/libreecho-backup.sh']
+# Spellings of one configured root. `test -L` follows only a *final* component,
+# so a trailing or doubled separator, and every `.`/`..` alias of the root, must
+# still reach the refusal instead of archiving whatever the link points at.
+ROOT_ALIASES = [('', 'symbolic link'), ('/', 'symbolic link'),
+                ('//', 'symbolic link'), ('/.', 'dot component'),
+                ('/./', 'dot component'), ('/.//', 'dot component'),
+                ('/..', 'dot component'), ('/../.', 'dot component')]
 RUNNING = ['libreecho-watchdogd', 'libreecho-web', 'libreecho-agentd',
            'libreecho-timerd', 'libreecho-ledd']
 STUB = '''#!/bin/sh
@@ -411,21 +418,21 @@ class BackupRoundTrip(unittest.TestCase):
         (DATA / 'config').rename(live)
         os.symlink(str(outside), DATA / 'config')
         try:
-            # A trailing slash is another spelling of the same root, not an
-            # escape from the check: `test -L` resolves the final component of
-            # a path that ends in `/` through the link.
-            for suffix in ['', '/']:
+            # A trailing or doubled separator, or a dot component, is another
+            # spelling of the same root, not an escape from the check: `test -L`
+            # resolves the final component of each through the link.
+            for suffix, reason in ROOT_ALIASES:
                 with self.subTest(config_root=str(DATA / 'config') + suffix):
                     env = {'LIBREECHO_CONFIG_DIR':
                            str(DATA / 'config') + suffix}
                     created = self.call('create', success=False, extra_env=env)
-                    self.assertIn('symbolic link', created.stderr)
+                    self.assertIn(reason, created.stderr)
                     after = ARCHIVE.stat()
                     self.assertEqual((after.st_size, after.st_mtime_ns),
                                      (before.st_size, before.st_mtime_ns),
                                      'refused create overwrote the archive')
                     restored = self.call('restore', success=False, extra_env=env)
-                    self.assertIn('symbolic link', restored.stderr)
+                    self.assertIn(reason, restored.stderr)
                     self.assertEqual(self.actions('stop'), [],
                                      'services were stopped for a refused restore')
                     self.assertTrue((DATA / 'config').is_symlink(),
@@ -473,13 +480,13 @@ class BackupRoundTrip(unittest.TestCase):
         DATA.rename(real)
         os.symlink(str(real), DATA)
         try:
-            for suffix in ['', '/']:
+            for suffix, reason in ROOT_ALIASES:
                 with self.subTest(data_root=str(DATA) + suffix):
                     env = {'LIBREECHO_DATA_ROOT': str(DATA) + suffix}
                     created = self.call('create', success=False, extra_env=env)
-                    self.assertIn('symbolic link', created.stderr)
+                    self.assertIn(reason, created.stderr)
                     restored = self.call('restore', success=False, extra_env=env)
-                    self.assertIn('symbolic link', restored.stderr)
+                    self.assertIn(reason, restored.stderr)
                     self.assertEqual(self.actions('stop'), [],
                                      'services were stopped for a refused restore')
             after = ARCHIVE.stat()
@@ -491,6 +498,45 @@ class BackupRoundTrip(unittest.TestCase):
         finally:
             DATA.unlink()
             real.rename(DATA)
+
+    def test_dot_and_prefix_names_are_not_over_refused(self):
+        # The refusal keys on a `/`-separated `.`/`..` component, not on a name
+        # that merely contains a dot, and it must not confuse another root that
+        # shares a name prefix with the configured one: both are ordinary state
+        # and must still round-trip.
+        sibling = Path('/data/state-other')
+        outside = Path('/out/prefix-outside')
+        shutil.rmtree(outside, ignore_errors=True)
+        outside.mkdir(parents=True)
+        write(outside / 'marker', 'prefix-confusion\n')
+        os.symlink(str(outside), sibling)
+        dotted = Path('/data/.state-dotted')
+        DATA.rename(dotted)
+        try:
+            # The dotted name is a name, not a component, and the doubled
+            # separator is normalized rather than treated as an alias.
+            for spelling in [str(dotted), '/data//' + dotted.name]:
+                with self.subTest(data_root=spelling):
+                    created = self.call('create',
+                                        extra_env={'LIBREECHO_DATA_ROOT': spelling})
+                    self.assertNotIn('symbolic link', created.stderr)
+                    self.assertNotIn('dot component', created.stderr)
+                    self.call('restore',
+                              extra_env={'LIBREECHO_DATA_ROOT': spelling})
+                    for relative, value in self.files.items():
+                        self.assertEqual((dotted / relative).read_text(), value,
+                                         'state changed: ' + relative)
+        finally:
+            sibling.unlink()
+            dotted.rename(DATA)
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            payload = b''
+            for member in archive.getmembers():
+                handle = archive.extractfile(member) if member.isfile() else None
+                if handle is not None:
+                    payload += handle.read()
+        self.assertNotIn(b'prefix-confusion', payload,
+                         'a sibling root was confused with the configured one')
 
     def test_service_restart_failure_is_not_success(self):
         self.call('create')

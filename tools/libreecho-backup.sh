@@ -20,14 +20,37 @@ CONFIG_OWNER=${LIBREECHO_CONFIG_OWNER:-}
 SECRETS_OWNER=${LIBREECHO_SECRETS_OWNER:-}
 
 # A trailing slash makes `test -L` resolve the final component through the
-# link, so a root spelled `/mnt/state/` would pass the symlink refusal below.
-# The roots are normalized before any check or copy.
+# link, so a root spelled `/mnt/state/`, `/mnt/state//` or `/mnt/state/.` would
+# pass the symlink refusal below. The roots are normalized before any check or
+# copy.
 trim_slashes() {
     root=$1
     while [ -n "${root%/}" ] && [ "${root%/}" != "$root" ]; do
         root=${root%/}
     done
     printf '%s\n' "$root"
+}
+
+# `test -L` reports false for a spelling that ends in a dot component as well:
+# `/mnt/state/.` names the directory the link points at, `..` walks back out
+# through the link to its target's parent, and a relative `./` or `../` root
+# resolves through the working directory. A root that uses one is refused
+# rather than rewritten: the tool never canonicalizes a configured root, so a
+# directory whose name merely starts with a dot (`.state`) or one that shares a
+# name prefix with another root (`state-old`) is still an ordinary root.
+has_dot_component() {
+    remainder=$1
+    while [ -n "$remainder" ]; do
+        component=${remainder%%/*}
+        case "$component" in
+            .|..) return 0 ;;
+        esac
+        case "$remainder" in
+            */*) remainder=${remainder#*/} ;;
+            *) return 1 ;;
+        esac
+    done
+    return 1
 }
 
 DATA_ROOT=$(trim_slashes "$DATA_ROOT")
@@ -93,9 +116,14 @@ refuse_symlinks() {
 }
 
 # A root that is itself a symlink is dereferenced by `cp -R` before the staged
-# tree can be scanned, so the configured roots are refused at the source.
+# tree can be scanned, so the configured roots are refused at the source, and so
+# is any spelling of one that uses a `.` or `..` component.
 refuse_linked_roots() {
     for root in "$DATA_ROOT" "$CONFIG_DIR" "$SECRETS_DIR"; do
+        if has_dot_component "$root"; then
+            printf 'Error: persistent state root uses a dot component: %s\n' "$root" >&2
+            return 1
+        fi
         [ ! -L "$root" ] || {
             printf 'Error: persistent state root is a symbolic link: %s\n' "$root" >&2
             return 1
@@ -210,9 +238,12 @@ create_backup() {
     tmpdir=$(mktemp -d)
     trap 'cleanup_dir "$tmpdir"' EXIT HUP INT TERM
 
-    require_active_state
+    # Refuse a root that is not a plain directory before anything else looks at
+    # the state, so the refusal does not depend on which files happen to exist
+    # under another spelling of the root.
     refuse_linked_roots ||
-        fail "a persistent state root is a symbolic link and cannot be archived"
+        fail "a persistent state root is not a plain directory and cannot be archived"
+    require_active_state
     mkdir -p "$tmpdir/persistent/config" "$tmpdir/persistent/secrets"
     copy_tree "$CONFIG_DIR" "$tmpdir/persistent/config"
     copy_tree "$SECRETS_DIR" "$tmpdir/persistent/secrets"
@@ -393,7 +424,7 @@ restore_backup() {
     refuse_symlinks "$tmpdir/persistent" ||
         fail "backup contains a symbolic link in persistent state; nothing was changed"
     refuse_linked_roots ||
-        fail "a persistent state root is a symbolic link; state was not changed"
+        fail "a persistent state root is not a plain directory; state was not changed"
 
     printf 'Restore active persistent state from %s? (y/N) ' "$backup"
     reply=
