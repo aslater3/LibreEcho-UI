@@ -3,17 +3,22 @@
 /* Host regression for the kernel-owned privacy latch synchronizer. */
 #include "buttond_fixture.h"
 #define open buttond_fixture_open
+#define write(fd, buffer, count) buttond_fixture_write(fd, buffer, count)
 static char test_privacy_path[256], test_privacy_fallback_path[256];
 static char test_lamp_path[256];
 static char test_config_path[256];
+static char test_status_path[256], test_status_tmp_path[256];
 #define BUTTOND_PRIVACY_STATE_PATH test_privacy_path
 #define BUTTOND_MUTE_LAMP_PATH test_lamp_path
 #define BUTTOND_PRIVACY_STATE_FALLBACK_PATH test_privacy_fallback_path
 #define LE_BUTTOND_CONFIG test_config_path
+#define STATUS_PATH test_status_path
+#define STATUS_TMP_PATH test_status_tmp_path
 #define main buttond_program_main
 #include "../src/adapter/buttond.c"
 #undef main
 #undef open
+#undef write
 
 #include <assert.h>
 #include <sys/socket.h>
@@ -113,6 +118,23 @@ static void write_state(const char *path, int state)
     assert(fclose(file) == 0);
 }
 
+/* Read one integer field out of the published capability status record. */
+static int status_field(const char *name)
+{
+    char data[512], needle[32], *found;
+    FILE *file = fopen(STATUS_PATH, "r");
+    size_t n;
+
+    assert(file != NULL);
+    n = fread(data, 1, sizeof(data) - 1, file);
+    data[n] = '\0';
+    assert(fclose(file) == 0);
+    snprintf(needle, sizeof(needle), "%s=", name);
+    found = strstr(data, needle);
+    assert(found != NULL);
+    return atoi(found + strlen(needle));
+}
+
 static int log_count(const char *path, const char *needle)
 {
     char data[32768];
@@ -166,6 +188,8 @@ int main(void)
     snprintf(test_privacy_fallback_path, sizeof(test_privacy_fallback_path), "%s/privacy-fallback", directory);
     snprintf(test_config_path, sizeof(test_config_path), "%s/config.json", directory);
     snprintf(test_lamp_path, sizeof(test_lamp_path), "%s/mute-lamp", directory);
+    snprintf(test_status_path, sizeof(test_status_path), "%s/status", directory);
+    snprintf(test_status_tmp_path, sizeof(test_status_tmp_path), "%s/status.tmp", directory);
     {
         /* The kernel attribute exists on a device that has the control; the
            fixture has to exist before the daemon tries to write it. */
@@ -232,13 +256,49 @@ int main(void)
         fclose(file);
         assert(lamp[0] == '1');
         assert(ctx.lamp_supported == 1);
+        /* Published as soon as the probe learned it: /buttons reads this file,
+           and the heartbeat writes it before the mute indicator runs, so
+           waiting for the next cycle served the previous answer for a whole
+           cycle -- long enough for both pages to call a lamp the daemon had
+           just lit dark. */
+        assert(status_field("lamp_control") == 1);
     }
     unlink(test_lamp_path);
     /* Without the control (an older image) the mute still works and the lamp is
        reported as unsupported rather than retried forever. */
     mute_indicator(&ctx, 0);
     assert(ctx.lamp_supported == 0);
+    assert(status_field("lamp_control") == 0);
     assert(!strcmp(ctx.action, "playpause"));
+
+    /*
+     * A write the kernel defers is not an answer to the capability question.
+     * The mute lamp's store() returns -EBUSY while the button's latch (or the
+     * shutdown dialog) owns the line, and records the request for when the line
+     * is free, so calling that "unsupported" would describe a control this image
+     * has as missing. Only a write the kernel refuses outright is the no.
+     */
+    {
+        FILE *lamp = fopen(test_lamp_path, "w");
+
+        assert(lamp != NULL);
+        assert(fclose(lamp) == 0);
+    }
+    ctx.lamp_supported = -1;
+    write_capability_status(&ctx);   /* the fresh record of an untested control */
+    assert(status_field("lamp_control") == -1);
+    assert(lamp_write_is_refusal(EACCES) && lamp_write_is_refusal(EOPNOTSUPP) &&
+           lamp_write_is_refusal(EROFS) && !lamp_write_is_refusal(EBUSY));
+    buttond_fixture_write_errno = EBUSY;
+    mute_indicator(&ctx, 1);
+    assert(ctx.lamp_supported == -1);
+    assert(status_field("lamp_control") == -1);
+    buttond_fixture_write_errno = EOPNOTSUPP;
+    mute_indicator(&ctx, 0);
+    assert(ctx.lamp_supported == 0);
+    assert(status_field("lamp_control") == 0);
+    buttond_fixture_write_errno = 0;
+    unlink(test_lamp_path);
 
     /* A steady asserted latch is idempotent, so the event cannot double-toggle. */
     sync_privacy_state(&ctx);
@@ -354,6 +414,8 @@ int main(void)
     unlink(BUTTOND_PRIVACY_STATE_PATH);
     unlink(BUTTOND_PRIVACY_STATE_FALLBACK_PATH);
     unlink(test_config_path);
+    unlink(test_status_path);
+    unlink(test_status_tmp_path);
     unlink(test_lamp_path);
     rmdir(directory);
     puts("buttond privacy synchronization: startup, transitions, fallback, and no double-toggle: ok");

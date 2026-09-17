@@ -32,6 +32,12 @@ assert 'BUTTOND_MUTE_LAMP_PATH' in source, (
     'the lamp control path is not defined')
 assert 'lamp_control=%d' in source, (
     'the status file must report whether software can light the lamp')
+assert 'lamp_write_is_refusal' in source and 'return err != EBUSY;' in source, (
+    'a write the kernel defers while the latch owns the line must not be '
+    'reported as an unsupported control')
+assert 'set_lamp_capability(ctx, 1)' in source and \
+    'set_lamp_capability(ctx, 0)' in source, (
+    'the lamp capability must be remembered and published as the probe learns it')
 indicator = source[source.index('static void mute_indicator('):source.index('static void show_meter(')]
 assert 'write_mute_lamp(ctx, muted);' in indicator, (
     'the mute indicator must drive the kernel lamp control')

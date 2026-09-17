@@ -73,8 +73,13 @@
    driver is unbound.  Rescan rather than exiting, so a late-appearing button
    is still picked up without an operator having to restart the daemon. */
 #define RESCAN_INTERVAL_MS 5000
+/* Overridable so a host test can read the record the daemon publishes. */
+#ifndef STATUS_PATH
 #define STATUS_PATH "/run/libreecho/buttond-status"
+#endif
+#ifndef STATUS_TMP_PATH
 #define STATUS_TMP_PATH "/run/libreecho/buttond-status.tmp"
+#endif
 
 #define BITS_PER_LONG (8 * (int)sizeof(long))
 #define NBITS(x) (((x) - 1) / BITS_PER_LONG + 1)
@@ -580,6 +585,36 @@ static void action_flourish(struct context *ctx)
 }
 
 /*
+ * Whether a failed lamp write answers the capability question at all.
+ *
+ * EBUSY is a deferral, not a refusal: the kernel records the request while the
+ * button's latch (or the shutdown dialog) owns the line and applies it when it
+ * can, so it is not evidence about what software can do here. Every other
+ * failure is this image or this board refusing the write outright, which is the
+ * definitive "no".
+ */
+static int lamp_write_is_refusal(int err)
+{
+    return err != EBUSY;
+}
+
+/*
+ * Remember and publish what software can do with the lamp.
+ *
+ * /buttons reads the status file, which is otherwise only written on the
+ * five-second heartbeat, and the heartbeat writes it before the mute indicator
+ * runs -- so a capability the first lamp write has just learned has to be
+ * published here or the API serves the previous answer for a cycle.
+ */
+static void set_lamp_capability(struct context *ctx, int supported)
+{
+    if (ctx->lamp_supported == supported)
+        return;
+    ctx->lamp_supported = supported;
+    write_capability_status(ctx);
+}
+
+/*
  * Drive the kernel's mute lamp, when this image has the control.
  *
  * Best effort on purpose: an image without the attribute, or a kernel that
@@ -592,6 +627,7 @@ static void write_mute_lamp(struct context *ctx, int muted)
 {
     const char *value = muted ? "1" : "0";
     ssize_t written;
+    int failed;
     int fd;
 
     if (ctx->lamp_supported == 0)
@@ -602,25 +638,43 @@ static void write_mute_lamp(struct context *ctx, int muted)
 #endif
     );
     if (fd < 0) {
-        if (ctx->lamp_supported > 0)
-            le_log_info("buttond: mute lamp control is not present");
-        ctx->lamp_supported = 0;
+        /*
+         * The attribute is missing (an image from before the control) or this
+         * daemon may not write it (the mode is group-writable, so the service
+         * user's groups matter). Either way software here cannot light the lamp
+         * and nothing the daemon does will change that, so stop trying.
+         */
+        if (ctx->lamp_supported > 0 || errno != ENOENT)
+            le_log_info("buttond: mute lamp control is not usable: %s",
+                        strerror(errno));
+        set_lamp_capability(ctx, 0);
         return;
     }
     written = write(fd, value, 1);
+    failed = errno;
     close(fd);
     if (written == 1) {
-        ctx->lamp_supported = 1;
         ctx->lamp_warned = 0;
+        set_lamp_capability(ctx, 1);
         return;
     }
-    /* Refused: the latch owns the lamp. Not a state this daemon can fix, and
-       the ring still shows the mute, so this is a warning once, not a retry
-       loop -- but the capability is reported as unsupported. */
-    if (!ctx->lamp_warned)
-        le_log_warn("buttond: mute lamp write refused (latch engaged?)");
+    if (!ctx->lamp_warned) {
+        if (lamp_write_is_refusal(failed))
+            le_log_warn("buttond: mute lamp write rejected: %s", strerror(failed));
+        else
+            le_log_warn("buttond: mute lamp write deferred (the latch owns it?)");
+    }
     ctx->lamp_warned = 1;
-    ctx->lamp_supported = -1;
+    /*
+     * A deferral is not a refusal: the kernel has the request recorded and
+     * applies it once the latch releases the line, so it says nothing about
+     * what software can do here. The capability stays as it was -- unknown
+     * until a write tests the control, which the API reports as null, and still
+     * true once one has been accepted. A refusal is the one answer that is a
+     * definite "no", and that is what the API reports as false.
+     */
+    if (lamp_write_is_refusal(failed))
+        set_lamp_capability(ctx, 0);
 }
 
 static void mute_indicator(struct context *ctx, int muted)

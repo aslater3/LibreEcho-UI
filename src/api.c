@@ -1988,19 +1988,22 @@ static void buttons_json(struct api_context *c, struct api_response *r)
     } else if (fd >= 0) close(fd);
     if (!fresh) strcpy(state, "stale");
     /*
-     * The mute button's lamp is wired to the kernel privacy latch, so the latch
-     * is the only truthful source for whether that lamp is lit: a software mute
-     * lights the ring and leaves the lamp dark. Report it as null rather than
-     * false when it is unknown, so the reader is not told a dark lamp it cannot
-     * see. `hardware_mute` above is a capability ("this device has a mute
-     * button"), not a state, and stays as it was.
+     * The mute button's lamp is wired to the kernel privacy latch, and while the
+     * latch is engaged the button owns that lamp. On an image with no mute-lamp
+     * control the latch is therefore the only truthful source for whether the
+     * lamp is lit: a software mute lights the ring and leaves the lamp dark.
+     * Report it as null rather than false when it is unknown, so the reader is
+     * not told a dark lamp it cannot see. `hardware_mute` above is a capability
+     * ("this device has a mute button"), not a state, and stays as it was.
      */
     latch = (fresh && privacy >= 0) ? (privacy ? "true" : "false") : "null";
     /*
      * Whether software can light the mute button's lamp at all (the kernel's
-     * mute_lamp control, and a board where the latch does not own it). The UI
-     * describes the lamp differently depending on this, so an unknown answer is
-     * null rather than false.
+     * mute_lamp control, and a board that accepts the write). The UI describes
+     * the lamp differently depending on this, so an unknown answer is null
+     * rather than false -- and a write the kernel defers while the button's
+     * latch owns the line is not evidence either way. Like privacy_latch above,
+     * this describes the lamp indication, not the hardware privacy latch.
      */
     lamp_state = (fresh && lamp >= 0) ? (lamp ? "true" : "false") : "null";
     button_sounds_available(available, sizeof(available));
