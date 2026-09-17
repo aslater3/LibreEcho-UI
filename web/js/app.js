@@ -1455,19 +1455,28 @@ function bindWeatherLookup(a){
    el.className='muted error-text';
   }else{ el.textContent=''; el.className='muted'; }
  };
- ['#wx-location'].forEach(sel=>{const el=$(sel);if(el)el.oninput=warn});
+ ['#wx-location'].forEach(sel=>{const el=$(sel);if(el)el.oninput=()=>{
+  /* A place edit supersedes the request that used the old text immediately.
+     Keep pending: the coordinates still belong to whatever was resolved before,
+     and remove an offered list because it describes the old place. */
+  lookupSequence++;
+  if(lookupPending()){
+   note.textContent='Place changed — look it up again before saving.';
+   setPending(true);
+  }
+  warn();
+ }});
  /*
   * Typing coordinates takes over from an offered list, but only once both are
   * the user's: clearing after one edit would leave the other half of the pair
-  * from the earlier lookup. Either edit supersedes a lookup still in flight.
+  * from the earlier lookup. Either edit supersedes a lookup still in flight and
+  * removes the offered list, so a visible candidate can never silently stop
+  * working after its generation was invalidated.
   */
  let filled=false,touchedLat=false,touchedLon=false;
  ['#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=()=>{
-  /* Either edit supersedes the request immediately, so a slow response cannot
-     overwrite the value just typed. Pending clears only after both fields were
-     edited, because until then half of the pair can still be from the old
-     lookup. */
   lookupSequence++;
+  if(lookupPending())note.textContent='Manual coordinates in progress — enter both before saving.';
   if(sel==='#wx-lat')touchedLat=true;else touchedLon=true;
   if(touchedLat&&touchedLon)setPending(false);
   warn();

@@ -14,10 +14,16 @@ const vm = require('vm');
 const assert = require('assert');
 
 function element(id) {
-  return { id, innerHTML:'', textContent:'', value:'', disabled:false,
+  let html='',text='';
+  const item={ id, value:'', disabled:false,
     classList:{add(){},remove(){},toggle(){}}, style:{}, dataset:{},
     addEventListener(){}, appendChild(){}, querySelectorAll(){return [];},
     closest(){return null;}, focus(){} };
+  Object.defineProperties(item,{
+    innerHTML:{get(){return html},set(value){html=String(value);text=''}},
+    textContent:{get(){return text||html.replace(/<[^>]*>/g,'')},set(value){text=String(value);html=''}}
+  });
+  return item;
 }
 const elements = new Map(), content = element('content');
 let candidateHtml='',candidateNodes=[];
@@ -282,6 +288,30 @@ const el = id => elements.get(id);
   }
 
   /*
+   * Editing the place while a request is in flight supersedes that request too:
+   * its late response must not replace the newly typed text or coordinates.
+   */
+  {
+    const realFetch = globalThis.fetch;
+    let release = null;
+    const slow = new Promise(resolve => { release = resolve; });
+    globalThis.fetch = () => slow.then(()=>({ok:true,status:200,json:async()=>({results:[
+      {name:'Old Query',admin1:'Elsewhere',country_code:'GB',
+       latitude:7.7,longitude:8.8}]})}));
+    el('#wx-location').value = 'Old Query';
+    const inFlight = el('#wx-lookup').onclick();
+    el('#wx-location').value = 'Newly typed place';
+    el('#wx-location').oninput();
+    release();
+    await inFlight;
+    assert.equal(el('#wx-location').value,'Newly typed place',
+                 'a slow lookup replaced the newly typed place');
+    assert.notEqual(el('#wx-lat').value,'7.7000',
+                    'a slow lookup filled coordinates after the place changed');
+    globalThis.fetch = realFetch;
+  }
+
+  /*
    * Once candidates are on offer the card stays pending through an edit:
    * bindDirty re-enables Save, and the coordinates on screen are the previous
    * lookup's, so saving would pair them with the edited name.
@@ -342,6 +372,10 @@ const el = id => elements.get(id);
     el('#wx-lat').value = '53.7586';
     el('#wx-lon').value = '-2.7036';
     el('#wx-lat').oninput();          /* one half of the pair is not enough */
+    assert.equal(candidates().length,0,
+                 'manual entry left stale candidate controls visible');
+    assert(/Manual coordinates/.test(el('#wx-lookup-note').textContent),
+           'manual takeover was not explained');
     el('#save-wx').disabled = false;
     document.querySelector('#save-wx').onclick();
     assert(mutated === null,
