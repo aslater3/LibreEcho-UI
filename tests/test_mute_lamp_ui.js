@@ -131,5 +131,24 @@ async function audioHtml(buttons){
            'a poll from before the re-render overwrote the new note: '+note.outerHTML);
   }
 
+  /*
+   * If /audio fails while /buttons answers, the note has to keep what it said:
+   * replacing it with an empty one would claim nothing is muted on a device that
+   * is still muted.
+   */
+  {
+    globalThis.api = async path => {
+      if(path === '/buttons')return {privacy_latch:false};
+      if(path === '/audio')throw new Error('audiod unavailable');
+      throw new Error('unexpected API path '+path);
+    };
+    vm.runInThisContext('state.page="Audio"');
+    const note = document.querySelector('#mute-lamp-note');
+    note.outerHTML = '<p class="muted" id="mute-lamp-note">Software mute only</p>';
+    await vm.runInThisContext('refreshMuteLamp')();
+    assert(/Software mute only/.test(note.outerHTML),
+           'a failed audio request blanked the note: '+note.outerHTML);
+  }
+
   console.log('mute lamp honesty on the Audio page: ok');
 })().catch(error => { console.error(error); process.exitCode = 1; });
