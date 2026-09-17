@@ -120,7 +120,7 @@ require_in_tool 'has_linked_ancestor "$root"'
 require_in_tool 'persistent state root is a symbolic link'
 require_in_tool 'persistent state root uses a dot component'
 require_in_tool 'persistent state root crosses a symbolic link'
-require_in_tool 'transaction-files:config,secrets:*.tmp,*.new,*.bak'
+require_in_tool 'transaction-files:config,secrets:*.tmp,*.tmp.*,*.new,*.bak'
 require_in_tool 'require_plain_manifest "$root/manifest.json"'
 require_in_tool 'invalid backup (manifest is a symbolic link)'
 require_in_tool 'invalid backup (manifest is not a regular file)'
@@ -150,6 +150,11 @@ for writer in src/config_store.c src/adapter/agentd.c src/adapter/timerd.c; do
     grep -Fq '.bak' "$REPO/$writer" ||
         fail "the stale-copy class no longer covers a writer: $writer"
 done
+# `mkstemp` appends an unguessable suffix, so a suffix-only match would miss
+# the residue those writers leave; pin both the pattern and the writer.
+require_in_tool "-name '*.tmp.*'"
+grep -Fq 'tmp.XXXXXX' "$REPO/src/adapter/agentd.c" ||
+    fail 'no mkstemp-style transaction writer justifies the *.tmp.* pattern'
 
 # The exclusions are applied before the prompt, so nothing is replaced with a
 # file the contract never restores, and the prompt describes what is installed.

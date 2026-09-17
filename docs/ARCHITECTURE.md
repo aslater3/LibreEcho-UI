@@ -311,7 +311,8 @@ tools/libreecho-backup.sh restore /tmp/backup.tar.gz
 version-2 manifest records the bounded scope, required files, private secret
 policy, and exclusions. Factory defaults under `/etc/libreecho`, installed
 feature payloads, OTA/release identity, runtime state, logs, transaction files
-(`*.tmp`, `*.new`), stale pre-update copies (`*.bak`, the durable copy
+(`*.tmp` and the `*.tmp.<suffix>` residue of an interrupted `mkstemp` writer,
+`*.new`), stale pre-update copies (`*.bak`, the durable copy
 `config_write_atomic`, `agentd`, and `timerd` leave of the previous file
 contents), raw wake PCM, and one-shot platform markers are not backed up. The same exclusions are applied to
 the incoming trees of every restore, so an archive written by an earlier tool,

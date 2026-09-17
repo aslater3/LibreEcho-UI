@@ -111,7 +111,8 @@ usage() {
         "  list <path>      List backup contents" \
         "" \
         "The archive contains /data/libreecho/config and /data/libreecho/secrets." \
-        "Transaction files (*.tmp, *.new, *.bak) and one-shot wake or vendor" \
+        "Transaction files (*.tmp, *.tmp.<suffix>, *.new, *.bak) and one-shot" \
+        "wake or vendor" \
         "markers are excluded from create and from every restore."
     exit 1
 }
@@ -238,19 +239,22 @@ apply_owner() {
 }
 
 # Transaction files and stale pre-update copies are not committed consumer
-# state. config_store, auth, tls, and timerd write `<path>.tmp` before a
-# rename, and config_write_atomic, agentd, and timerd leave the previous
-# contents behind a hard-linked `<path>.bak`, so a `.bak` of web-config.json,
-# users, or the saved agent history is a durable copy of account state,
-# credentials, or earlier history that the committed file supersedes. Both
-# classes can appear anywhere inside either captured tree, so they stay a name
-# class. The manifest names both trees and all three suffixes for that class,
-# so a consumer auditing an archive can tell the omission from an incomplete
-# backup.
+# state. config_store, auth, tls, timerd, btd, and ttsd write `<path>.tmp`
+# before a rename, agentd and timed use `mkstemp` on `<path>.tmp.XXXXXX` and
+# `<path>.tmp.<pid>`, and config_write_atomic, agentd, and timerd leave the
+# previous contents behind a hard-linked `<path>.bak`; so a `.bak` of
+# web-config.json, users, or the saved agent history is a durable copy of
+# account state, credentials, or earlier history that the committed file
+# supersedes, and a `.tmp.<suffix>` is the residue of an interrupted writer
+# that never reached its rename. Every one of them can appear anywhere inside
+# either captured tree, so they stay a name class, and the class is the only
+# place the suffixes are declared: the manifest names both trees and all four
+# forms, so a consumer auditing an archive can tell the omission from an
+# incomplete backup.
 prune_transaction_files() {
     root=$1
-    find "$root" -type f \( -name '*.tmp' -o -name '*.new' -o -name '*.bak' \) \
-        -exec rm -f {} + || return 1
+    find "$root" -type f \( -name '*.tmp' -o -name '*.tmp.*' -o -name '*.new' \
+        -o -name '*.bak' \) -exec rm -f {} + || return 1
 }
 
 # These are fixed paths directly under the active config directory, not a name
@@ -293,7 +297,7 @@ apply_restore_exclusions() {
 # the omission is stated rather than silent. Never printed with captured bytes.
 report_restore_exclusions() {
     printf '%s\n' \
-        'Excluded by contract, never restored: transaction files (*.tmp, *.new, *.bak) and one-shot wake or vendor markers'
+        'Excluded by contract, never restored: transaction files (*.tmp, *.tmp.<suffix>, *.new, *.bak) and one-shot wake or vendor markers'
 }
 
 write_manifest() {
@@ -309,7 +313,7 @@ write_manifest() {
   "components": ["config", "secrets"],
   "required": ["config/web-config.json", "config/users"],
   "secret_policy": "included-with-private-permissions; protect or encrypt archive out-of-band",
-  "excluded": ["factory-seed:/etc/libreecho", "payloads:/data/libreecho/features", "ota:/data/libreecho/update", "release-identity:/data/libreecho/data-manifest.json", "runtime-guard:/data/libreecho/network-recovery-reboot.guard", "runtime:/run/libreecho", "logs:/var/log/libreecho", "transaction-files:config,secrets:*.tmp,*.new,*.bak", "config/wake-dump.raw", "config/wake-dump-seconds", "config/vendor-import-force-next-boot", "symlinked-state"]
+  "excluded": ["factory-seed:/etc/libreecho", "payloads:/data/libreecho/features", "ota:/data/libreecho/update", "release-identity:/data/libreecho/data-manifest.json", "runtime-guard:/data/libreecho/network-recovery-reboot.guard", "runtime:/run/libreecho", "logs:/var/log/libreecho", "transaction-files:config,secrets:*.tmp,*.tmp.*,*.new,*.bak", "config/wake-dump.raw", "config/wake-dump-seconds", "config/vendor-import-force-next-boot", "symlinked-state"]
 }
 EOF
 }

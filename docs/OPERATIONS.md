@@ -187,7 +187,8 @@ tools/libreecho-backup.sh create /tmp/backup.tar.gz
 # The archive contains active /data/libreecho/config and /data/libreecho/secrets
 # only. It does not contain the /etc/libreecho factory seed, logs, installed
 # features, OTA/release identity, runtime state, transaction files (*.tmp,
-# *.new), stale pre-update copies (*.bak), one-shot diagnostic requests,
+# *.tmp.<suffix>, *.new), stale pre-update copies (*.bak), one-shot diagnostic
+# requests,
 # symlinked state, or raw wake audio. Credentials are included as private files
 # and the archive must be protected or encrypted out-of-band.
 ```
@@ -215,7 +216,8 @@ directories must already exist with the intended owner; restore after a fresh
 image reinstall remains a separate acceptance check.
 
 The same exclusions are applied by every restore, not only by creation: the
-transaction files (`*.tmp`, `*.new`), the stale pre-update copies (`*.bak`) that
+transaction files (`*.tmp` and the `*.tmp.<suffix>` residue of an interrupted
+`mkstemp` writer, `*.new`), the stale pre-update copies (`*.bak`) that
 `config_write_atomic`, `agentd`, and `timerd` leave behind (each holds the
 previous contents of a committed file, including accounts and credentials), and
 the one-shot wake-dump and vendor-import markers are dropped from the incoming

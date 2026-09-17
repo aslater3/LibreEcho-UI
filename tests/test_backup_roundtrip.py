@@ -22,7 +22,8 @@ ROOT_ALIASES = [('', 'symbolic link'), ('/', 'symbolic link'),
                 ('/./', 'dot component'), ('/.//', 'dot component'),
                 ('/..', 'dot component'), ('/../.', 'dot component')]
 EXCLUSION_NOTICE = ('Excluded by contract, never restored: transaction files '
-                    '(*.tmp, *.new, *.bak) and one-shot wake or vendor markers')
+                    '(*.tmp, *.tmp.<suffix>, *.new, *.bak) and one-shot wake '
+                    'or vendor markers')
 RUNNING = ['libreecho-watchdogd', 'libreecho-web', 'libreecho-agentd',
            'libreecho-timerd', 'libreecho-ledd']
 STUB = '''#!/bin/sh
@@ -89,7 +90,11 @@ class BackupRoundTrip(unittest.TestCase):
                          'config/users.new', 'config/vendor-import-force-next-boot',
                          'config/wake-dump-seconds',
                          'config/web-config.json.bak',
-                         'secrets/openai-codex.json.bak']
+                         'secrets/openai-codex.json.bak',
+                         # `mkstemp`/pid residue from an interrupted writer:
+                         # `agentd` and `timed` append a suffix to `.tmp`.
+                         'config/agent.json.history-generation.tmp.a1b2c3',
+                         'secrets/provider.json.tmp.4242']
         for relative, value in self.files.items():
             write(DATA / relative, value)
         for relative in self.excluded:
@@ -573,17 +578,21 @@ class BackupRoundTrip(unittest.TestCase):
         # stale pre-update copies `config_write_atomic` leaves as `*.bak`.
         write(DATA / 'secrets/provider.new', 'transaction-fixture\n')
         write(DATA / 'config/web-config.json.bak', 'stale-fixture\n')
+        write(DATA / 'config/agent.json.history-generation.tmp.a1b2c3',
+              'transaction-fixture\n')
         self.call('create')
         with tarfile.open(ARCHIVE, 'r:gz') as archive:
             manifest_file = archive.extractfile('manifest.json')
             assert manifest_file is not None
             excluded = json.load(manifest_file)['excluded']
             names = [member.name for member in archive.getmembers()]
-        self.assertIn('transaction-files:config,secrets:*.tmp,*.new,*.bak',
+        self.assertIn('transaction-files:config,secrets:*.tmp,*.tmp.*,*.new,*.bak',
                       excluded)
         self.assertNotIn('config-transaction-files:config/*.tmp', excluded)
         self.assertNotIn('persistent/secrets/provider.new', names)
         self.assertNotIn('persistent/config/web-config.json.bak', names)
+        self.assertNotIn('persistent/config/agent.json.history-generation.tmp.a1b2c3',
+                         names)
 
     def test_dot_and_prefix_names_are_not_over_refused(self):
         # The refusal keys on a `/`-separated `.`/`..` component, not on a name
@@ -654,6 +663,8 @@ class BackupRoundTrip(unittest.TestCase):
             'secrets/provider.new': transaction,
             'config/users.bak': stale,
             'secrets/openai-codex.json.bak': stale,
+            'config/agent.json.history-generation.tmp.a1b2c3': transaction,
+            'secrets/provider.json.tmp.4242': transaction,
         }
 
         def legacy(stage):
@@ -751,6 +762,11 @@ class BackupRoundTrip(unittest.TestCase):
                          'secrets/openai-codex.json.bak',
                          'secrets/nested/agent.json.bak']:
             write(DATA / relative, stale + '\n')
+        # An interrupted `mkstemp` writer leaves `<path>.tmp.<suffix>` behind,
+        # which the plain `*.tmp` suffix does not match.
+        for relative in ['config/agent.json.history-generation.tmp.a1b2c3',
+                         'secrets/provider.json.tmp.4242']:
+            write(DATA / relative, stale + '\n')
         keep = {'config/settings.bak.keep': 'kept-almost-bak\n',
                 'config/nested/firmware.bak.txt': 'kept-almost-bak\n'}
         for relative, value in keep.items():
@@ -769,12 +785,14 @@ class BackupRoundTrip(unittest.TestCase):
             excluded = json.load(manifest_file)['excluded']
         self.assertEqual([name for name in names if name.endswith('.bak')], [],
                          'a stale pre-update copy was archived')
+        self.assertEqual([name for name in names if '.tmp.' in name], [],
+                         'an interrupted-writer residue was archived')
         self.assertNotIn(stale.encode(), payload)
         for relative in keep:
             self.assertIn('persistent/' + relative, names)
-        self.assertIn('transaction-files:config,secrets:*.tmp,*.new,*.bak',
+        self.assertIn('transaction-files:config,secrets:*.tmp,*.tmp.*,*.new,*.bak',
                       excluded)
-        self.assertNotIn('transaction-files:config,secrets:*.tmp,*.new',
+        self.assertNotIn('transaction-files:config,secrets:*.tmp,*.new,*.bak',
                          excluded)
 
     def test_archive_member_that_escapes_the_root_is_refused(self):
