@@ -4,8 +4,12 @@
 # The factory image under /etc/libreecho is a seed, not live state.  This tool
 # deliberately scopes itself to the consumer-owned /data/libreecho config and
 # secrets directories.  Feature payloads, OTA state, release identity, logs,
-# runtime state, transaction files, one-shot markers, and symlinked state are
-# outside this backup contract: they are never captured and never restored.
+# runtime state, transaction files (*.tmp, *.new), stale pre-update copies
+# (*.bak), one-shot markers, and symlinked state are outside this backup
+# contract: they are never captured and never restored.  The same exclusion and
+# prune policy runs against the incoming trees of every restore, so an archive
+# written by an older tool, or one whose manifest names no exclusions at all,
+# cannot reintroduce them.
 
 set -eu
 umask 077
@@ -106,8 +110,9 @@ usage() {
         "  restore <path>   Restore active persistent state" \
         "  list <path>      List backup contents" \
         "" \
-        "The archive contains /data/libreecho/config and /data/libreecho/secrets" \
-        "(with transaction files and raw wake diagnostics excluded)."
+        "The archive contains /data/libreecho/config and /data/libreecho/secrets." \
+        "Transaction files (*.tmp, *.new, *.bak) and one-shot wake or vendor" \
+        "markers are excluded from create and from every restore."
     exit 1
 }
 
@@ -232,27 +237,61 @@ apply_owner() {
     find "$root" -exec chown "$owner" {} + || return 1
 }
 
-# Transaction files are not committed consumer state, and config_store can
-# leave them anywhere inside either captured tree, so they stay a name class.
-# The manifest names both trees and both suffixes for that class, so a consumer
-# auditing an archive can tell the omission from an incomplete backup.
+# Transaction files and stale pre-update copies are not committed consumer
+# state: config_store, auth, and tls write `<path>.tmp` before a rename, and
+# config_write_atomic keeps the previous bytes of the file behind a hard-linked
+# `<path>.bak`, so a `.bak` of web-config.json or users is a durable stale copy
+# of account state or credentials. Both classes can appear anywhere inside
+# either captured tree, so they stay a name class. The manifest names both
+# trees and all three suffixes for that class, so a consumer auditing an
+# archive can tell the omission from an incomplete backup.
 prune_transaction_files() {
     root=$1
-    find "$root" -type f \( -name '*.tmp' -o -name '*.new' \) -exec rm -f {} + || return 1
+    find "$root" -type f \( -name '*.tmp' -o -name '*.new' -o -name '*.bak' \) \
+        -exec rm -f {} + || return 1
 }
 
 # These are fixed paths directly under the active config directory, not a name
 # class: the waked raw PCM dump and the one-shot request that produces it,
 # which waked clears as it reads the dump and which would otherwise replay a
 # diagnostic outage after a restore, plus the next-boot vendor-import marker.
-# They are pruned by exact path so a file elsewhere in a captured tree that
-# merely shares a basename is still backed up.
+# They are pruned by exact path, so a file elsewhere in a captured tree that
+# merely shares a basename is still backed up, and by path rather than by type,
+# so a directory standing at one of those paths is dropped with its contents.
 prune_one_shot_config_files() {
     root=$1
     for path in "$root/wake-dump.raw" "$root/wake-dump-seconds" \
         "$root/vendor-import-force-next-boot"; do
-        [ ! -f "$path" ] || rm -f "$path" || return 1
+        [ ! -e "$path" ] || rm -rf "$path" || return 1
     done
+}
+
+# The exclusions are a property of the contract, not of the archive: create
+# applies them to what it stages, and every restore applies the same three
+# rules to what it unpacked, whatever the archive's manifest version says and
+# even when that manifest names no exclusions at all. Pruning the extracted
+# trees before the prompt means the prompt describes exactly what will be
+# installed, and the required state is re-checked afterwards, so a pruned
+# archive cannot lose required state without the restore failing.
+apply_restore_exclusions() {
+    # Not `root`: the prune helpers assign that name, and the extracted trees
+    # are addressed again after they return.
+    trees=$1
+    [ -d "$trees/config" ] || return 1
+    [ -d "$trees/secrets" ] || return 1
+    prune_transaction_files "$trees/config" || return 1
+    prune_transaction_files "$trees/secrets" || return 1
+    prune_one_shot_config_files "$trees/config" || return 1
+    [ -f "$trees/config/web-config.json" ] || return 1
+    [ -f "$trees/config/users" ] || return 1
+    return 0
+}
+
+# Printed by `restore` before the prompt and by `list` next to the manifest, so
+# the omission is stated rather than silent. Never printed with captured bytes.
+report_restore_exclusions() {
+    printf '%s\n' \
+        'Excluded by contract, never restored: transaction files (*.tmp, *.new, *.bak) and one-shot wake or vendor markers'
 }
 
 write_manifest() {
@@ -268,7 +307,7 @@ write_manifest() {
   "components": ["config", "secrets"],
   "required": ["config/web-config.json", "config/users"],
   "secret_policy": "included-with-private-permissions; protect or encrypt archive out-of-band",
-  "excluded": ["factory-seed:/etc/libreecho", "payloads:/data/libreecho/features", "ota:/data/libreecho/update", "release-identity:/data/libreecho/data-manifest.json", "runtime-guard:/data/libreecho/network-recovery-reboot.guard", "runtime:/run/libreecho", "logs:/var/log/libreecho", "transaction-files:config,secrets:*.tmp,*.new", "config/wake-dump.raw", "config/wake-dump-seconds", "config/vendor-import-force-next-boot", "symlinked-state"]
+  "excluded": ["factory-seed:/etc/libreecho", "payloads:/data/libreecho/features", "ota:/data/libreecho/update", "release-identity:/data/libreecho/data-manifest.json", "runtime-guard:/data/libreecho/network-recovery-reboot.guard", "runtime:/run/libreecho", "logs:/var/log/libreecho", "transaction-files:config,secrets:*.tmp,*.new,*.bak", "config/wake-dump.raw", "config/wake-dump-seconds", "config/vendor-import-force-next-boot", "symlinked-state"]
 }
 EOF
 }
@@ -355,13 +394,90 @@ start_services() {
     return "$start_failed"
 }
 
+# An archive is untrusted input that this tool reads with root privileges. The
+# manifest is the first thing read, and `list` prints it, so it is checked
+# before anything opens it: a manifest.json that is a link is a disclosure
+# primitive, because reading it would print whatever it points at, and a
+# manifest that is not a regular file is not a backup. Every top-level
+# component the tool reads is checked the same way, before a probe follows any
+# of them.
+require_plain_manifest() {
+    manifest=$1
+    [ ! -L "$manifest" ] || fail "invalid backup (manifest is a symbolic link)"
+    [ ! -e "$manifest" ] || [ -f "$manifest" ] ||
+        fail "invalid backup (manifest is not a regular file)"
+    [ -f "$manifest" ] || fail "invalid backup (missing manifest)"
+}
+
+require_plain_dir() {
+    directory=$1
+    description=$2
+    [ ! -L "$directory" ] || fail "invalid backup ($description is a symbolic link)"
+    [ -d "$directory" ] || fail "invalid backup (missing $description)"
+}
+
+require_required_file() {
+    file=$1
+    description=$2
+    [ ! -L "$file" ] || fail "invalid backup ($description is a symbolic link)"
+    [ -f "$file" ] || fail "backup is missing $description"
+}
+
 validate_archive() {
     root=$1
-    [ -f "$root/manifest.json" ] || fail "invalid backup (missing manifest)"
-    [ -d "$root/persistent/config" ] || fail "invalid backup (missing active config component)"
-    [ -d "$root/persistent/secrets" ] || fail "invalid backup (missing secrets component)"
-    [ -f "$root/persistent/config/web-config.json" ] || fail "backup is missing required active config"
-    [ -f "$root/persistent/config/users" ] || fail "backup is missing required account state"
+    require_plain_manifest "$root/manifest.json"
+    require_plain_dir "$root/persistent" 'persistent state component'
+    require_plain_dir "$root/persistent/config" 'active config component'
+    require_plain_dir "$root/persistent/secrets" 'secrets component'
+    require_required_file "$root/persistent/config/web-config.json" 'required active config'
+    require_required_file "$root/persistent/config/users" 'required account state'
+}
+
+# Extraction is only safe while every member name stays inside the extraction
+# root. An absolute name, or one with a `..` component, does not: whether the
+# extractor writes it outside or rewrites it is up to the tar implementation
+# (GNU tar only strips a leading `/`), and a write outside the staging
+# directory would happen as root before any check that runs after extraction
+# could see it. The member list is inspected first and the archive is refused,
+# so an archive that names a member outside the extraction root is never
+# extracted, by restore or by list.
+refuse_archive_escape() {
+    archive=$1
+    listing=$(mktemp) || return 1
+    if ! tar -tzf "$archive" >"$listing"; then
+        rm -f "$listing"
+        printf '%s\n' 'Error: backup archive could not be read' >&2
+        return 1
+    fi
+    escaped=
+    while IFS= read -r member; do
+        case "$member" in
+            /*)
+                escaped=$member
+                break
+                ;;
+        esac
+        remainder=$member
+        while [ -n "$remainder" ]; do
+            component=${remainder%%/*}
+            case "$component" in
+                ..)
+                    escaped=$member
+                    break 2
+                    ;;
+            esac
+            case "$remainder" in
+                */*) remainder=${remainder#*/} ;;
+                *) remainder= ;;
+            esac
+        done
+    done <"$listing"
+    rm -f "$listing"
+    [ -z "$escaped" ] || {
+        printf 'Error: backup member escapes the archive root: %s\n' "$escaped" >&2
+        return 1
+    }
+    return 0
 }
 
 stage_tree() {
@@ -457,15 +573,20 @@ replace_staged_trees() {
 restore_backup() {
     backup=$1
     [ -f "$backup" ] || fail "backup file not found: $backup"
+    refuse_archive_escape "$backup" ||
+        fail "backup members can escape the archive root; nothing was changed"
     tmpdir=$(mktemp -d)
     trap 'cleanup_dir "$tmpdir"' EXIT HUP INT TERM
     tar -xzf "$backup" -C "$tmpdir"
     validate_archive "$tmpdir"
     refuse_symlinks "$tmpdir/persistent" ||
         fail "backup contains a symbolic link in persistent state; nothing was changed"
+    apply_restore_exclusions "$tmpdir/persistent" ||
+        fail "backup exclusions could not be applied; nothing was changed"
     refuse_linked_roots ||
         fail "a persistent state root is not a plain directory; state was not changed"
 
+    report_restore_exclusions
     printf 'Restore active persistent state from %s? (y/N) ' "$backup"
     reply=
     IFS= read -r reply || true
@@ -498,6 +619,8 @@ restore_backup() {
 list_backup() {
     backup=$1
     [ -f "$backup" ] || fail "backup file not found: $backup"
+    refuse_archive_escape "$backup" ||
+        fail "backup members can escape the archive root and were not listed"
     tmpdir=$(mktemp -d)
     trap 'cleanup_dir "$tmpdir"' EXIT HUP INT TERM
     tar -xzf "$backup" -C "$tmpdir"
@@ -506,6 +629,7 @@ list_backup() {
         fail "backup contains a symbolic link in persistent state and was not listed"
     printf 'Backup: %s\nManifest:\n' "$backup"
     cat "$tmpdir/manifest.json"
+    report_restore_exclusions
     printf '%s\n' 'Contents:'
     tar -tzf "$backup"
 }

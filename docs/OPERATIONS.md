@@ -186,10 +186,10 @@ tools/libreecho-backup.sh create /tmp/backup.tar.gz
 
 # The archive contains active /data/libreecho/config and /data/libreecho/secrets
 # only. It does not contain the /etc/libreecho factory seed, logs, installed
-# features, OTA/release identity, runtime state, transaction files, one-shot
-# diagnostic requests, symlinked state, or raw wake audio. Credentials are
-# included as private files and the archive must be protected or encrypted
-# out-of-band.
+# features, OTA/release identity, runtime state, transaction files (*.tmp,
+# *.new), stale pre-update copies (*.bak), one-shot diagnostic requests,
+# symlinked state, or raw wake audio. Credentials are included as private files
+# and the archive must be protected or encrypted out-of-band.
 ```
 
 ### Restore Backup
@@ -214,6 +214,19 @@ This is not a power-loss-atomic transaction across the two trees. Both target
 directories must already exist with the intended owner; restore after a fresh
 image reinstall remains a separate acceptance check.
 
+The same exclusions are applied by every restore, not only by creation: the
+transaction files (`*.tmp`, `*.new`), the stale pre-update copies (`*.bak`) that
+`config_write_atomic` leaves behind, and the one-shot wake-dump and vendor-import
+markers are dropped from the incoming trees before the prompt, so nothing the
+contract excludes is ever installed. This holds for an archive written by an
+earlier tool or one whose manifest names no exclusions, and the restored tree is
+the archive minus those files. `list` prints the same reminder next to the
+manifest. An archive whose top-level `manifest.json` is a symlink or is not a
+regular file is refused before it is read, so listing a hostile archive cannot
+disclose a root-readable file, and an archive with a member that escapes the
+archive root (`../` or an absolute path) is refused before extraction. Both
+refusals leave live state unchanged and stop no services.
+
 Symlinked state is refused in both directions: creation fails instead of
 archiving a link, and an archive whose trees contain a link is rejected before
 the restore prompt, leaving live state unchanged. A configured `config` or
@@ -234,6 +247,10 @@ consistent across config, accounts, and secrets.
 ```sh
 tools/libreecho-backup.sh list /tmp/backup.tar.gz
 ```
+
+`list` refuses the same archives that `restore` refuses, prints the manifest
+stored in the archive followed by the exclusion reminder, and lists member names
+only: captured file bytes and credentials are never printed by any operation.
 
 ## Service Management
 

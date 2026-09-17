@@ -310,14 +310,22 @@ tools/libreecho-backup.sh restore /tmp/backup.tar.gz
 `/data/libreecho/secrets`, including accounts and supported daemon stores. The
 version-2 manifest records the bounded scope, required files, private secret
 policy, and exclusions. Factory defaults under `/etc/libreecho`, installed
-feature payloads, OTA/release identity, runtime state, logs, transaction files,
-raw wake PCM, and one-shot platform markers are not backed up. Symlinked state
-is refused in both directions, including a configured state root that is itself
-a link, a root spelled with a `.` or `..` component, and a root whose path
+feature payloads, OTA/release identity, runtime state, logs, transaction files
+(`*.tmp`, `*.new`), stale pre-update copies (`*.bak`, the durable copy
+`config_write_atomic` leaves of the previous file contents), raw wake PCM, and
+one-shot platform markers are not backed up. The same exclusions are applied to
+the incoming trees of every restore, so an archive written by an earlier tool,
+or one whose manifest names no exclusions, cannot install them either. Symlinked
+state is refused in both directions, including a configured state root that is
+itself a link, a root spelled with a `.` or `..` component, and a root whose path
 crosses a link in any component, rather than archived or restored. A trailing or
 doubled separator is normalized to the same root before those checks, and no
 component is resolved, so another spelling of a root cannot slip past them. The
-manifest names the tree scope and the suffixes of every pruned file class.
+top-level `manifest.json` must be a regular file that is not a link, and is
+checked before it is read or listed, so reading it cannot disclose a
+root-readable file; a member that escapes the archive root is refused before
+extraction. The manifest names the tree scope and the suffixes of every pruned
+file class.
 
 Restore stages and validates both trees, including numeric ownership. It only
 replaces the live trees after staging succeeds, so ordinary copy or permission

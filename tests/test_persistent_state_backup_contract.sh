@@ -15,7 +15,12 @@
 #      restore cannot replay an already-consumed request;
 #   5. symlinked state is refused on both create and restore, including a
 #      configured root that is itself a link or is spelled with a `.`/`..`
-#      component.
+#      component;
+#   6. the exclusion contract is applied by restore as well as by create, so an
+#      archive written by an earlier tool, or one whose manifest names no
+#      exclusions, cannot install a pruned file;
+#   7. the top-level manifest must be a regular file that is not a link, and a
+#      member that escapes the archive root is refused before extraction.
 #
 # This is a source-contract test: it proves the tool describes the same state as
 # its consumers, not that a backup ran on a device.
@@ -115,6 +120,41 @@ require_in_tool 'has_linked_ancestor "$root"'
 require_in_tool 'persistent state root is a symbolic link'
 require_in_tool 'persistent state root uses a dot component'
 require_in_tool 'persistent state root crosses a symbolic link'
-require_in_tool 'transaction-files:config,secrets:*.tmp,*.new'
+require_in_tool 'transaction-files:config,secrets:*.tmp,*.new,*.bak'
+require_in_tool 'require_plain_manifest "$root/manifest.json"'
+require_in_tool 'invalid backup (manifest is a symbolic link)'
+require_in_tool 'invalid backup (manifest is not a regular file)'
+require_in_tool 'refuse_archive_escape "$backup"'
+require_in_tool 'backup member escapes the archive root'
+require_in_tool 'Excluded by contract, never restored'
+
+# 6. Create and restore apply one shared prune policy, to the trees create
+# stages and to the trees every restore unpacks.
+for call in \
+    'prune_transaction_files "$tmpdir/persistent/config"' \
+    'prune_transaction_files "$tmpdir/persistent/secrets"' \
+    'prune_one_shot_config_files "$tmpdir/persistent/config"' \
+    'prune_transaction_files "$trees/config"' \
+    'prune_transaction_files "$trees/secrets"' \
+    'prune_one_shot_config_files "$trees/config"' \
+    'apply_restore_exclusions "$tmpdir/persistent"'; do
+    require_in_tool "$call"
+done
+classes=$(grep -c "name '\*.bak'" "$TOOL")
+[ "$classes" -eq 1 ] ||
+    fail "the stale-copy prune class is defined $classes times; the two paths can drift"
+
+# The exclusions are applied before the prompt, so nothing is replaced with a
+# file the contract never restores, and the prompt describes what is installed.
+exclusion_line=$(grep -n 'apply_restore_exclusions "\$tmpdir/persistent"' "$TOOL" |
+    head -n1 | cut -d: -f1)
+prompt_line=$(grep -n 'Restore active persistent state from' "$TOOL" |
+    head -n1 | cut -d: -f1)
+stage_line=$(grep -n 'stage_restore_trees "\$tmpdir/persistent/config"' "$TOOL" |
+    head -n1 | cut -d: -f1)
+[ -n "$exclusion_line" ] && [ -n "$prompt_line" ] && [ -n "$stage_line" ] ||
+    fail 'the restore sequence is not declared where the contract expects it'
+[ "$exclusion_line" -lt "$prompt_line" ] && [ "$prompt_line" -lt "$stage_line" ] ||
+    fail 'restore does not apply the exclusions before it changes live state'
 
 printf '%s\n' 'persistent state backup contract: ok'

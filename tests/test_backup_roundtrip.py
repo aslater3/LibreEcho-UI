@@ -1,4 +1,5 @@
 """Ordinary backup recovery and injected I/O failures; bwrap wrapper only."""
+import io
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,8 @@ ROOT_ALIASES = [('', 'symbolic link'), ('/', 'symbolic link'),
                 ('//', 'symbolic link'), ('/.', 'dot component'),
                 ('/./', 'dot component'), ('/.//', 'dot component'),
                 ('/..', 'dot component'), ('/../.', 'dot component')]
+EXCLUSION_NOTICE = ('Excluded by contract, never restored: transaction files '
+                    '(*.tmp, *.new, *.bak) and one-shot wake or vendor markers')
 RUNNING = ['libreecho-watchdogd', 'libreecho-web', 'libreecho-agentd',
            'libreecho-timerd', 'libreecho-ledd']
 STUB = '''#!/bin/sh
@@ -84,7 +87,9 @@ class BackupRoundTrip(unittest.TestCase):
         }
         self.excluded = ['config/wake-dump.raw', 'config/web-config.json.tmp',
                          'config/users.new', 'config/vendor-import-force-next-boot',
-                         'config/wake-dump-seconds']
+                         'config/wake-dump-seconds',
+                         'config/web-config.json.bak',
+                         'secrets/openai-codex.json.bak']
         for relative, value in self.files.items():
             write(DATA / relative, value)
         for relative in self.excluded:
@@ -362,6 +367,23 @@ class BackupRoundTrip(unittest.TestCase):
         self.call('restore', success=False)
         self.assertEqual(self.actions('start'), [])
 
+    def stage_archive(self, name, build):
+        """Build /out/<name> from a callback that fills a fresh staging tree."""
+        stage = Path('/out/archive-stage')
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True)
+        build(stage)
+        archive = Path('/out') / name
+        with tarfile.open(archive, 'w:gz') as handle:
+            for member in sorted(stage.rglob('*')):
+                handle.add(member, arcname=str(member.relative_to(stage)))
+        return archive
+
+    def write_basic_trees(self, stage, prefix='persistent'):
+        for relative in ['config/web-config.json', 'config/users',
+                         'secrets/openai-codex.json']:
+            write(stage / prefix / relative, self.files[relative])
+
     def hostile_archive(self):
         """A structurally valid archive that also plants a symlink."""
         stage = Path('/out/hostile-stage')
@@ -547,17 +569,21 @@ class BackupRoundTrip(unittest.TestCase):
     def test_manifest_names_the_pruned_transaction_file_class(self):
         # A consumer auditing the archive must be able to tell an intentional
         # omission from an incomplete backup, so the manifest names every tree
-        # and every suffix the pruning class removes.
+        # and every suffix the pruning class removes, including the durable
+        # stale pre-update copies `config_write_atomic` leaves as `*.bak`.
         write(DATA / 'secrets/provider.new', 'transaction-fixture\n')
+        write(DATA / 'config/web-config.json.bak', 'stale-fixture\n')
         self.call('create')
         with tarfile.open(ARCHIVE, 'r:gz') as archive:
             manifest_file = archive.extractfile('manifest.json')
             assert manifest_file is not None
             excluded = json.load(manifest_file)['excluded']
             names = [member.name for member in archive.getmembers()]
-        self.assertIn('transaction-files:config,secrets:*.tmp,*.new', excluded)
+        self.assertIn('transaction-files:config,secrets:*.tmp,*.new,*.bak',
+                      excluded)
         self.assertNotIn('config-transaction-files:config/*.tmp', excluded)
         self.assertNotIn('persistent/secrets/provider.new', names)
+        self.assertNotIn('persistent/config/web-config.json.bak', names)
 
     def test_dot_and_prefix_names_are_not_over_refused(self):
         # The refusal keys on a `/`-separated `.`/`..` component, not on a name
@@ -602,6 +628,192 @@ class BackupRoundTrip(unittest.TestCase):
         self.call('create')
         Path('/run/start-fail-libreecho-web').touch()
         self.call('restore', success=False)
+
+
+    def test_legacy_manifest_restore_applies_the_exclusion_contract(self):
+        # A version-1 manifest names no exclusions and was written by a tool
+        # that captured one-shot requests, transaction files, and stale `.bak`
+        # copies. The exclusions belong to the contract, not to the manifest,
+        # so restoring that archive must drop them rather than install them.
+        one_shot = 'legacy-one-shot-' + secrets.token_hex(8)
+        transaction = 'legacy-transaction-' + secrets.token_hex(8)
+        stale = 'legacy-stale-copy-' + secrets.token_hex(8)
+        committed = {
+            'config/web-config.json': '{"hostname":"legacy-user-configured"}\n',
+            'config/users': 'legacy-account\n',
+            'config/agent.json': '{"provider":"legacy"}\n',
+            'config/nested/setting': 'legacy-nested\n',
+            'secrets/openai-codex.json': 'legacy-secret\n',
+        }
+        excluded = {
+            'config/wake-dump.raw': one_shot,
+            'config/wake-dump-seconds': one_shot,
+            # A directory standing at an excluded path is dropped with it.
+            'config/vendor-import-force-next-boot/inner': one_shot,
+            'config/web-config.json.tmp': transaction,
+            'secrets/provider.new': transaction,
+            'config/users.bak': stale,
+            'secrets/openai-codex.json.bak': stale,
+        }
+
+        def legacy(stage):
+            for relative, value in dict(committed, **excluded).items():
+                write(stage / 'persistent' / relative, value)
+            write(stage / 'manifest.json',
+                  '{"version":1,"components":["config","secrets"]}\n')
+
+        archive = self.stage_archive('legacy-v1.tar.gz', legacy)
+        listed = self.call('list', path=archive)
+        self.assertIn('"version":1', listed.stdout)
+        self.assertIn('persistent/config/wake-dump-seconds', listed.stdout)
+        self.assertIn(EXCLUSION_NOTICE, listed.stdout)
+        restored = self.call('restore', path=archive)
+        self.assertIn(EXCLUSION_NOTICE, restored.stdout)
+        for value in [one_shot, transaction, stale]:
+            self.assertNotIn(value, restored.stdout + restored.stderr)
+        for relative, value in committed.items():
+            path = DATA / relative
+            self.assertTrue(path.read_text() == value,
+                            'restored bytes differ: ' + relative)
+        expected = {'config', 'secrets'} | set(committed)
+        for relative in committed:
+            parent = Path(relative).parent
+            while str(parent) != '.':
+                expected.add(str(parent))
+                parent = parent.parent
+        installed = set()
+        for root in [DATA / 'config', DATA / 'secrets']:
+            for path in [root] + list(root.rglob('*')):
+                installed.add(str(path.relative_to(DATA)))
+        self.assertEqual(installed, expected,
+                         'a file the contract never restores was installed')
+        for suffix in ['wake-dump.raw', 'wake-dump-seconds',
+                       'vendor-import-force-next-boot']:
+            self.assertFalse((DATA / 'config' / suffix).exists(), suffix)
+        for suffix in ['*.bak', '*.tmp', '*.new']:
+            self.assertEqual([str(path.relative_to(DATA)) for root in
+                              [DATA / 'config', DATA / 'secrets']
+                              for path in root.rglob(suffix)], [])
+
+    def test_symlinked_or_non_regular_manifest_is_refused_before_reading(self):
+        # `list` reads the manifest with root privileges, so a manifest that is
+        # a link would print whatever it points at, and a manifest that is not
+        # a regular file is not a backup at all. Both are refused before the
+        # manifest is read or listed, and live state is left alone.
+        disclosure = 'root-readable-' + secrets.token_hex(16)
+        write('/etc/manifest-target', disclosure + '\n')
+        Path('/etc/manifest-target').chmod(0o600)
+
+        def linked(stage):
+            self.write_basic_trees(stage)
+            os.symlink('/etc/manifest-target', stage / 'manifest.json')
+
+        def dangling(stage):
+            self.write_basic_trees(stage)
+            os.symlink('/etc/absent-manifest-target', stage / 'manifest.json')
+
+        def directory(stage):
+            self.write_basic_trees(stage)
+            write(stage / 'manifest.json/inner', '{"version":2}\n')
+
+        def fifo(stage):
+            self.write_basic_trees(stage)
+            os.mkfifo(stage / 'manifest.json')
+
+        cases = [('linked', linked, 'symbolic link'),
+                 ('dangling', dangling, 'symbolic link'),
+                 ('directory', directory, 'not a regular file'),
+                 ('fifo', fifo, 'not a regular file')]
+        for name, builder, reason in cases:
+            with self.subTest(manifest=name):
+                archive = self.stage_archive('manifest-' + name + '.tar.gz',
+                                             builder)
+                for action in ['list', 'restore']:
+                    with self.subTest(manifest=name, action=action):
+                        result = self.call(action, path=archive, success=False)
+                        self.assertIn(reason, result.stderr)
+                        self.assertNotIn(disclosure,
+                                         result.stdout + result.stderr)
+                        self.assertNotIn('Contents:', result.stdout)
+                for relative, value in self.files.items():
+                    self.assertEqual((DATA / relative).read_text(), value,
+                                     'live state changed: ' + relative)
+        self.assertEqual(self.actions('stop'), [],
+                         'services were stopped for a refused archive')
+
+    def test_stale_pre_update_copies_are_never_captured(self):
+        # `config_write_atomic` keeps the previous bytes of a file behind a
+        # hard-linked `<path>.bak`, so a `.bak` of web-config.json or users is
+        # a durable stale copy of account state or credentials, not committed
+        # state. A name that merely ends in another suffix is committed state.
+        stale = 'stale-copy-' + secrets.token_hex(16)
+        for relative in ['config/web-config.json.bak', 'config/users.bak',
+                         'secrets/openai-codex.json.bak',
+                         'secrets/nested/agent.json.bak']:
+            write(DATA / relative, stale + '\n')
+        keep = {'config/settings.bak.keep': 'kept-almost-bak\n',
+                'config/nested/firmware.bak.txt': 'kept-almost-bak\n'}
+        for relative, value in keep.items():
+            write(DATA / relative, value)
+        created = self.call('create')
+        self.assertNotIn(stale, created.stdout + created.stderr)
+        with tarfile.open(ARCHIVE, 'r:gz') as archive:
+            names = [member.name for member in archive.getmembers()]
+            payload = b''
+            for member in archive.getmembers():
+                handle = archive.extractfile(member) if member.isfile() else None
+                if handle is not None:
+                    payload += handle.read()
+            manifest_file = archive.extractfile('manifest.json')
+            assert manifest_file is not None
+            excluded = json.load(manifest_file)['excluded']
+        self.assertEqual([name for name in names if name.endswith('.bak')], [],
+                         'a stale pre-update copy was archived')
+        self.assertNotIn(stale.encode(), payload)
+        for relative in keep:
+            self.assertIn('persistent/' + relative, names)
+        self.assertIn('transaction-files:config,secrets:*.tmp,*.new,*.bak',
+                      excluded)
+        self.assertNotIn('transaction-files:config,secrets:*.tmp,*.new',
+                         excluded)
+
+    def test_archive_member_that_escapes_the_root_is_refused(self):
+        # A member name that leaves the extraction root - an absolute path, or
+        # one with a `..` component - is not guaranteed to land inside the
+        # staging directory when it is extracted, so an archive that names one
+        # is refused before extraction, by both operations.
+        def escape(stage):
+            self.write_basic_trees(stage)
+            write(stage / 'manifest.json', '{"version":2}\n')
+
+        archive = self.stage_archive('escape.tar.gz', escape)
+        hostile = Path('/out/escape-backup.tar.gz')
+        with tarfile.open(archive, 'r:gz') as source, \
+                tarfile.open(hostile, 'w:gz') as target:
+            for member in source.getmembers():
+                handle = source.extractfile(member) if member.isfile() else None
+                target.addfile(member, handle)
+            for name in ['../escape-outside.txt', '/tmp/escape-absolute.txt']:
+                info = tarfile.TarInfo(name)
+                body = b'escaped-member\n'
+                info.size = len(body)
+                target.addfile(info, io.BytesIO(body))
+        with tarfile.open(hostile, 'r:gz') as handle:
+            self.assertIn('../escape-outside.txt',
+                          [member.name for member in handle.getmembers()])
+        for action in ['list', 'restore']:
+            with self.subTest(action=action):
+                result = self.call(action, path=hostile, success=False)
+                self.assertIn('escapes the archive root', result.stderr)
+        self.assertFalse(Path('/tmp/escape-outside.txt').exists(),
+                         'an escaping member was extracted')
+        self.assertFalse(Path('/tmp/escape-absolute.txt').exists(),
+                         'an escaping member was extracted')
+        self.assertEqual(self.actions('stop'), [],
+                         'services were stopped for a refused archive')
+        for relative, value in self.files.items():
+            self.assertEqual((DATA / relative).read_text(), value,
+                             'live state changed: ' + relative)
 
 
 if __name__ == '__main__':
