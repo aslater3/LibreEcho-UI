@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 /*
- * The mute state shown on the Audio page must not imply a lit mute button lamp
- * (0.14 #258).
+ * The mute state shown on the Audio and LED & Buttons pages must not imply a lit
+ * mute button lamp (0.14 #258).
  *
- * The lamp is wired to the kernel's hardware privacy latch, so a software mute
- * lights the ring and leaves the lamp dark. The page has to say which of the two
- * is in force, and must not claim the latch is released when the daemon has no
- * fresh reading of it.
+ * The lamp is wired to the kernel's hardware privacy latch. An image whose
+ * kernel exposes the mute_lamp control lets software light it directly; one
+ * without it lights the ring from a software mute and leaves the lamp dark. The
+ * pages have to say which of the two is in force, must not claim software can
+ * switch a lamp it cannot, and must not claim the latch is released when the
+ * daemon has no fresh reading of it.
  */
 'use strict';
 const fs = require('fs');
@@ -58,6 +60,22 @@ async function audioHtml(buttons){
     throw new Error('unexpected API path '+path);
   };
   await vm.runInThisContext('audioPage')();
+  return content.innerHTML;
+}
+
+const led = {colour:{r:255,g:0,b:0},brightness:60,profiles:{},night:{}};
+const buttonSettings = {short_press:'Start listening',long_press:'Open pairing mode',
+  hardware_mute:true,action:'sound',action_brightness:70,mute_brightness:60,
+  tones:true,action_sounds:'',available_sounds:[]};
+
+async function ledHtml(buttons){
+  globalThis.api = async path => {
+    if(path === '/led')return Object.assign({},led);
+    if(path === '/audio')return Object.assign({},audio);
+    if(path === '/buttons')return buttons;
+    throw new Error('unexpected API path '+path);
+  };
+  await vm.runInThisContext('ledPage')();
   return content.innerHTML;
 }
 
@@ -160,5 +178,38 @@ async function audioHtml(buttons){
            'a failed audio request blanked the note: '+note.outerHTML);
   }
 
-  console.log('mute lamp honesty on the Audio page: ok');
+  /*
+   * The LED & Buttons page makes the same claim in its standing copy, so it has
+   * to follow the same capability: with the kernel control a software mute does
+   * light the lamp, and saying software cannot switch it would be the same
+   * mismatch in the other direction.
+   */
+  audio.microphone_muted = true;
+  {
+    const withLamp = await ledHtml(Object.assign({},buttonSettings,
+      {microphone_muted:true,privacy_latch:false,lamp_control:true}));
+    assert(!/software cannot switch it/.test(withLamp),
+           'the LED page still said software cannot switch a lamp it can');
+    assert(/software mute does light it/.test(withLamp),
+           'the LED page did not say a software mute lights the lamp');
+    assert(/lamp is lit/.test(withLamp),
+           'the LED page note did not report the lit lamp');
+    /* The note is re-read while this page is open, so the poll needs the
+       software mute state here too -- the buttons record cannot carry it. */
+    vm.runInThisContext('state.page="LED & Buttons"');
+    const ledNote = document.querySelector('#mute-lamp-note');
+    ledNote.outerHTML = '<p class="muted" id="mute-lamp-note"></p>';
+    await vm.runInThisContext('refreshMuteLamp')();
+    assert(/lamp is lit/.test(ledNote.outerHTML),
+           'the LED page never re-read the lamp: '+ledNote.outerHTML);
+  }
+  {
+    const withoutLamp = await ledHtml(Object.assign({},buttonSettings,
+      {microphone_muted:true,privacy_latch:false,lamp_control:false}));
+    assert(/software cannot switch it/.test(withoutLamp),
+           'an image without the control did not say the lamp follows the button');
+    assert(/stays dark/.test(withoutLamp), 'the dark lamp was not named');
+  }
+
+  console.log('mute lamp honesty on the Audio and LED pages: ok');
 })().catch(error => { console.error(error); process.exitCode = 1; });
