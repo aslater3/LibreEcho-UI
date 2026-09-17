@@ -419,6 +419,22 @@ async function babyEnsureRunning(context,generation){const deadline=Date.now()+B
    backlog unbounded. */
 function babyResyncQueue(current){babyStream.nodes.forEach(node=>{if(node.babyStart===undefined||node.babyStart<=current)return;node.onended=null;try{node.stop()}catch(_){}babyStream.nodes.delete(node)})}
 function babyScheduleStart(context){const current=context.currentTime;if(babyStream.nextTime-current<=BABY_SCHEDULE_LEAD)return Math.max(babyStream.nextTime,current+BABY_RESYNC_OFFSET);let start=current+BABY_RESYNC_OFFSET;babyStream.nodes.forEach(node=>{if(node.babyStart!==undefined&&node.babyStart<=current&&node.babyEnd>start)start=node.babyEnd});babyResyncQueue(current);return start}
+/* A coalesced chunk can carry far more audio than the look-ahead window, so each
+   quantum waits for playback to catch up before it is queued instead of being
+   pushed into the future. The wait is bounded by the excess itself, so a clock
+   that does not advance (blocked or interrupted context) falls through to the
+   resync/drop policy rather than hanging. */
+async function babyPaceToHorizon(context,generation,start){
+  if(context.state!=='running'||start-context.currentTime<=BABY_SCHEDULE_LEAD)return false;
+  const deadline=Date.now()+(start-context.currentTime-BABY_SCHEDULE_LEAD)*1000;
+  for(;;){
+    if(generation!==babyStream.generation||context.state!=='running')return false;
+    if(start-context.currentTime<=BABY_SCHEDULE_LEAD)return true;
+    const remaining=deadline-Date.now();
+    if(remaining<=0)return false;
+    await new Promise(resolve=>setTimeout(resolve,Math.min(BABY_DRAIN_POLL,remaining)))
+  }
+}
 /* The final chunk is scheduled slightly ahead of the clock, so a stream that ends
    cleanly still has audio queued: closing the graph immediately would discard it.
    Wait for the retained sources to end using their real scheduled end time (a
@@ -534,13 +550,17 @@ async function babyMonitorPage(){
         if(!frames){carry=bytes;babyDiag({received});continue}
         carry=bytes.slice(used);
         /* Fetch chunk boundaries are not the server's write boundaries, so one
-           chunk can carry far more than the look-ahead window. Schedule it in
-           bounded quanta so no single source outlives the scheduling horizon and
-           the drain below covers every retained source by its real end time. The
-           chunk as a whole still makes the existing resync decision once. */
+           chunk can carry far more than the look-ahead window. Enforce the
+           horizon for every quantum, not only the first one of a chunk: each
+           quantum is paced to the clock and the excess falls through to the
+           resync/drop policy, so neither the queued audio nor the retained node
+           set grows with the chunk size. */
         const quantum=Math.max(1,Math.floor(contract.rate*BABY_SCHEDULE_LEAD));
-        let start=babyScheduleStart(context);
+        let start=babyStream.nextTime;
         for(let from=0;from<frames;from+=quantum){
+          await babyPaceToHorizon(context,generation,start);
+          if(generation!==babyStream.generation)return;
+          start=babyScheduleStart(context);
           const count=Math.min(quantum,frames-from);
           const audio=context.createBuffer(1,count,contract.rate);
           const samples=audio.getChannelData(0);

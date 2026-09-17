@@ -206,6 +206,16 @@ async function settle(ms = 5) {
 async function quiesce(promise, ms = 400) {
     await Promise.race([promise.catch(() => {}), settle(ms)]);
 }
+/* Look-ahead pacing makes the handler consume a burst in real time, so poll for
+   the expected progress instead of assuming it finished within one tick. */
+async function waitFor(predicate, ms = 4000) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+        if (predicate()) return true;
+        await settle(10);
+    }
+    return predicate();
+}
 function tinyPcm(values) {
     const bytes = new Uint8Array(values.length * 2);
     values.forEach((value, i) => {
@@ -374,6 +384,7 @@ async function caseBoundedLookahead() {
     const context = contexts[0];
     const big = tinyPcm(new Array(3200).fill(600));            /* 0.2 s per chunk */
     for (let i = 0; i < 20; i++) { body.push(big); await settle(0); }
+    await waitFor(() => context.playbackSources.length >= 20);
     await settle();
     const ahead = context.playbackSources.map(source => source.startedAt - context.time);
     check(ahead.every(value => value <= 0.750001),
@@ -605,7 +616,8 @@ async function caseNeverSettlingResume() {
 
 /* Fetch chunk boundaries are not the server's write boundaries, so a coalesced
    final chunk can carry far more than the scheduling look-ahead. It must be
-   scheduled in bounded quanta and its whole tail must drain before teardown. */
+   paced into the queue in bounded quanta (never queued beyond the horizon) and
+   its whole tail must drain before teardown. */
 async function caseOversizedFinalChunk() {
     reset();
     await mountPage();
@@ -615,37 +627,77 @@ async function caseOversizedFinalChunk() {
     await settle();
     const context = contexts[0];
     const frames = Math.round(16000 * 1.2);              /* 1.2 s in a single coalesced chunk */
+    /* Playback advances the clock in real time; this pump stands in for that so
+       the look-ahead pacing below can release the second quantum. */
+    const pump = setInterval(() => { if (context.time < 0.15) context.time += 0.025; }, 5);
     body.push(tinyPcm(new Array(frames).fill(500)));
-    await settle();
+    await settle(300);
+    clearInterval(pump);
     check(context.playbackSources.length > 1,
         'a coalesced chunk larger than the look-ahead is split into bounded scheduling quanta');
     check(context.playbackSources.every(source => source.buffer.duration <= 0.750001),
         'no scheduled source exceeds the scheduling look-ahead quantum');
+    check(context.playbackSources.every(source => !source.stopped),
+        'pacing keeps the whole coalesced chunk instead of discarding its tail');
+    check(context.playbackSources.every(source => source.startedAt - context.time <= 0.750001),
+        'no scheduled source is queued beyond the look-ahead horizon');
+    const starts = context.playbackSources.map(source => source.startedAt);
+    check(starts.every((start, i) => i === 0 || start >= starts[i - 1] + context.playbackSources[i - 1].buffer.duration - 1e-9),
+        'the paced quanta are scheduled contiguously without gaps or overlap');
     const scheduledSeconds = context.playbackSources.reduce((total, source) => total + source.buffer.duration, 0);
     check(Math.abs(scheduledSeconds - frames / 16000) < 1e-9,
         'the whole coalesced chunk is scheduled instead of truncated');
-    const starts = context.playbackSources.map(source => source.startedAt);
-    check(starts.every((start, i) => i === 0 || start >= starts[i - 1] + context.playbackSources[i - 1].buffer.duration - 1e-9),
-        'the split quanta are scheduled contiguously without gaps or overlap');
     checkEqual(diagnostics().frames, frames + ' frames', 'diagnostics count every decoded frame');
+    check(babyStream.nodes.size <= 3, 'the retained queue stays bounded instead of growing with the chunk');
 
     body.finish();
     await settle();
-    checkEqual(context.closeCalls, 0, 'the stream stays open while the oversized tail is queued');
-    checkEqual(diagnostics().playback, 'draining', 'diagnostics report the oversized tail draining');
-    /* The drain bound must follow the retained audio's real end time, not the
-       fixed look-ahead cap that used to close the graph over the queued tail. */
-    await settle(1000);
-    checkEqual(context.closeCalls, 0, 'the graph stays open past the previous fixed drain cap');
-    checkEqual(context.playbackSources.filter(source => babyStream.nodes.has(source)).length,
-        context.playbackSources.length, 'every queued source is still retained while the tail drains');
-    context.playbackSources.forEach(source => source.fireEnded());   /* the tail plays out */
+    checkEqual(context.closeCalls, 0, 'the stream stays open while the paced tail is queued');
+    checkEqual(diagnostics().playback, 'draining', 'diagnostics report the tail draining');
+    context.sources.filter(source => babyStream.nodes.has(source)).forEach(source => source.fireEnded());
     await settle();
     await quiesce(pending);
-    checkEqual(el('#baby-status').textContent, 'Stopped', 'the oversized tail returns the page to stopped');
-    checkEqual(diagnostics().playback, 'ended', 'the oversized tail ends cleanly');
-    check(context.closeCalls >= 1, 'the oversized tail eventually releases its AudioContext');
-    checkEqual(babyStream.nodes.size, 0, 'the oversized tail releases its retained nodes');
+    checkEqual(el('#baby-status').textContent, 'Stopped', 'the coalesced tail returns the page to stopped');
+    checkEqual(diagnostics().playback, 'ended', 'the coalesced tail ends cleanly');
+    check(context.closeCalls >= 1, 'the coalesced tail eventually releases its AudioContext');
+    checkEqual(babyStream.nodes.size, 0, 'the coalesced tail releases its retained nodes');
+}
+
+/* A stalled clock (blocked or interrupted AudioContext) must not let a coalesced
+   chunk queue audio arbitrarily far ahead of playback: the retained queue stays
+   bounded by the look-ahead and the excess is discarded instead of retained. */
+async function caseCoalescedChunkQueueBound() {
+    reset();
+    await mountPage();
+    resumeImpl = context => { context.state = 'running'; return Promise.resolve(); };
+    const body = installStream('pcm_s16_le;channels=1;valid-bits=16;rate=16000;selected-channel=0');
+    const pending = clickStart();
+    await settle();
+    const context = contexts[0];
+    body.push(tinyPcm(new Array(16000 * 3).fill(500)));   /* 3 s in one chunk, clock stalled */
+    await settle(300);
+    check(context.playbackSources.length > 1, 'a multi-second chunk is scheduled as several bounded quanta');
+    check(context.playbackSources.every(source => source.buffer.duration <= 0.750001),
+        'no scheduled source exceeds the scheduling look-ahead quantum');
+    check(context.playbackSources.every(source => source.startedAt - context.time <= 0.750001),
+        'no source is queued beyond the look-ahead horizon while the clock is stalled');
+    check(context.playbackSources.filter(source => !source.stopped).length <= 3,
+        'the retained queue stays bounded by the look-ahead whatever the chunk size');
+    check(context.playbackSources.some(source => source.stopped),
+        'the excess beyond the horizon is discarded instead of queued');
+    check(babyStream.nodes.size <= 3, 'the retained node set does not grow with the coalesced chunk');
+
+    /* The bound must hold for a second, larger coalesced chunk as well. */
+    body.push(tinyPcm(new Array(16000 * 6).fill(500)));   /* 6 s in one chunk */
+    await settle(500);
+    check(context.playbackSources.every(source => source.buffer.duration <= 0.750001),
+        'no scheduled source exceeds the scheduling look-ahead quantum for a larger chunk');
+    check(context.playbackSources.every(source => source.startedAt - context.time <= 0.750001),
+        'a larger coalesced chunk does not queue sources beyond the look-ahead horizon');
+    check(babyStream.nodes.size <= 3, 'the retained node set stays bounded for a larger coalesced chunk');
+    body.finish();
+    await settle();
+    await quiesce(pending);
 }
 
 async function casePacked24Contract() {
@@ -699,7 +751,8 @@ async function main() {
         ['missing response body and HTTP failure', caseMissingBodyAndHttpFailure],
         ['AudioContext that never leaves suspended', caseBlockedContext],
         ['AudioContext resume() that never settles against the deadline', caseNeverSettlingResume],
-        ['oversize coalesced final chunk schedules and drains completely', caseOversizedFinalChunk],
+        ['oversize coalesced final chunk is paced and drains completely', caseOversizedFinalChunk],
+        ['coalesced chunks never queue beyond the look-ahead', caseCoalescedChunkQueueBound],
         ['packed 24-bit audio contract', casePacked24Contract]
     ];
     for (const [name, run] of cases) {
