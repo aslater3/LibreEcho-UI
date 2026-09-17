@@ -9,9 +9,16 @@ from pathlib import Path
 # reads the recorded candidate identity through the bounded, format-checked
 # reader only, publishes both keys additively in the existing envelope, and the
 # OpenAPI document, API reference, page and test runner all carry them.
+#
+# The identity keys are also a single-snapshot contract: the update helper
+# commits a new check record with an atomic rename, so a reader that opened the
+# record once per key could pair one candidate's tag with the next candidate's
+# digest. The reader must open the record exactly once, resolve both keys over
+# that one pass, and validate them after the snapshot is complete.
 api = Path('src/api.c').read_text()
 header = Path('src/update_identity.h').read_text()
 module = Path('src/update_identity.c').read_text()
+unit = Path('tests/test_update_identity.c').read_text()
 ui = Path('web/js/app.js').read_text()
 docs = Path('docs/API.md').read_text()
 openapi = json.loads(Path('web/openapi.json').read_text())
@@ -24,20 +31,50 @@ assert '#define LE_UPDATE_SHA_KEY "ota_sha256"' in header
 assert 'radar-puffin-' in module
 assert 'radar-puffin-build-' in module and 'radar-puffin-nightly-' in module
 assert 'hex_run(value, 64)' in module
-assert 'len < size' in module and 'sizeof(line)' in module
+assert 'len >= size' in module and 'sizeof(line)' in module
 
-# --- api.c reads both keys from the check record through that reader --------
+# --- one open, one pass: both keys come from the same snapshot --------------
+assert 'int update_identity_pair(' in module and 'int update_identity_pair(' in header
+# The two-pass reader is gone: no caller can read the identity one key at a time.
+assert 'update_identity_value' not in module and 'update_identity_value' not in header
+assert module.count('fopen(') == 1, 'the reader must open the record once'
+pair = module[module.index('int update_identity_pair('):]
+assert pair.count('fopen(') == 1 and pair.count('fgets(') == 1
+assert pair.index('fopen(') < pair.index('fgets(')
+assert pair.count('fclose(') == 1
+# Both keys are consumed by that one pass ...
+assert pair.index('LE_UPDATE_TAG_KEY') < pair.index('fclose(')
+assert pair.index('LE_UPDATE_SHA_KEY') < pair.index('fclose(')
+# ... and validated once the snapshot is complete, so a malformed value is
+# reported as absent rather than reaching the caller as an identity.
+assert pair.index('fclose(') < pair.index('update_identity_tag_valid(')
+assert pair.index('fclose(') < pair.index('update_identity_sha256_valid(')
+assert 'resolved++' in pair and 'return resolved;' in pair
+
+# --- api.c publishes both keys from that one snapshot -----------------------
 assert '#include "update_identity.h"' in api
 body = api[api.index('static void update_status_json'):]
 body = body[:body.index('static const char*agent_socket_path')]
-assert 'update_identity_value("/data/libreecho/update/check-status",' in body
-assert 'LE_UPDATE_TAG_KEY,resolved_tag,sizeof(resolved_tag)' in body
-assert 'LE_UPDATE_SHA_KEY,ota_sha,sizeof(ota_sha)' in body
+assert body.count('update_identity_pair(') == 1, \
+    'the API must publish the identity from one snapshot read'
+assert 'update_identity_value' not in api
+assert 'update_identity_pair("/data/libreecho/update/check-status",' in body
+assert 'resolved_tag,sizeof(resolved_tag),' in body
+assert 'ota_sha,sizeof(ota_sha));' in body
 assert 'char resolved_tag[LE_UPDATE_TAG_SIZE]="",ota_sha[LE_UPDATE_SHA_SIZE]=""' in body
 # The identity keys never go through the unchecked reader, which would publish
 # a truncated or malformed value as though the device had resolved it.
 assert 'key_from_file("/data/libreecho/update/check-status","resolved_release_tag"' not in api
 assert 'key_from_file("/data/libreecho/update/check-status","ota_sha256"' not in api
+
+# --- the torn-read regression is wired into the build and the runner --------
+# The fixture stands at the reader's own open of the record, where it commits
+# the next check, so the test can show both that the pair reader publishes one
+# generation and that the removed two-pass design published two.
+assert 'FILE *__wrap_fopen(' in unit and 'commit_generation(' in unit
+assert 'legacy_read_key(' in unit
+assert 'record_opens == 1' in unit
+assert '-Wl,--wrap=fopen' in makefile
 
 # --- both values are escaped before they reach the envelope -----------------
 escape_tag = 'json_escape(escaped_resolved_tag,sizeof(escaped_resolved_tag),resolved_tag);'

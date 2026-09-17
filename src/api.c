@@ -164,10 +164,12 @@ static void update_status_json(struct api_context*c,struct api_response*r)
                       reachable,sizeof(reachable));
         key_from_file("/data/libreecho/update/check-status","latest_version",
                       latest_version,sizeof(latest_version));
-        update_identity_value("/data/libreecho/update/check-status",
-                              LE_UPDATE_TAG_KEY,resolved_tag,sizeof(resolved_tag));
-        update_identity_value("/data/libreecho/update/check-status",
-                              LE_UPDATE_SHA_KEY,ota_sha,sizeof(ota_sha));
+        /* One read of the record for both values: the check writer replaces it
+           with an atomic rename, so a single snapshot cannot pair the tag from
+           one check with the digest from the next. */
+        update_identity_pair("/data/libreecho/update/check-status",
+                             resolved_tag,sizeof(resolved_tag),
+                             ota_sha,sizeof(ota_sha));
         key_from_file("/data/libreecho/update/check-status","last_check_epoch",
                       last_check_text,sizeof(last_check_text));
         key_from_file("/data/libreecho/update/check-status","last_success_epoch",

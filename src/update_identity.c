@@ -45,51 +45,61 @@ int update_identity_sha256_valid(const char *value)
     return value && hex_run(value, 64) && value[64] == '\0';
 }
 
-static int identity_value_valid(const char *key, const char *value)
+/* Copy one key's value out of a record line that carries it, reporting whether
+   this line was the key's own. A value that does not fit the caller's buffer,
+   or that filled the line buffer without a terminator, is not copied: the key
+   stays unresolved instead of yielding a truncated value. */
+static int line_value(const char *line, const char *key, char *out, size_t size)
 {
-    if (!strcmp(key, LE_UPDATE_TAG_KEY))
-        return update_identity_tag_valid(value);
-    if (!strcmp(key, LE_UPDATE_SHA_KEY))
-        return update_identity_sha256_valid(value);
-    return value[0] != '\0';
+    size_t key_len = strlen(key);
+    size_t len;
+    if (strncmp(line, key, key_len) || line[key_len] != '=')
+        return 0;
+    len = strcspn(line + key_len + 1, "\r\n");
+    if (len >= size || len + key_len + 1 >= RECORD_LINE_MAX)
+        return 0;
+    memcpy(out, line + key_len + 1, len);
+    out[len] = '\0';
+    return 1;
 }
 
-int update_identity_value(const char *path, const char *key, char *out,
-                          size_t size)
+int update_identity_pair(const char *path, char *tag, size_t tag_size,
+                         char *sha, size_t sha_size)
 {
     FILE *f;
     char line[RECORD_LINE_MAX];
-    size_t key_len;
-    int found = 0;
+    int seen_tag = 0, seen_sha = 0, resolved = 0;
 
-    if (!out || !size)
+    if (!tag || !tag_size || !sha || !sha_size)
         return 0;
-    out[0] = '\0';
-    if (!path || !key || !key[0])
-        return 0;
-    key_len = strlen(key);
-    if (key_len + 2 >= sizeof(line))
+    tag[0] = '\0';
+    sha[0] = '\0';
+    if (!path)
         return 0;
     if (!(f = fopen(path, "r")))
         return 0;
+    /* One open, one pass: both values come from the same snapshot of the
+       record, so they always describe the same candidate. The first
+       occurrence of each key wins, matching how a record written before these
+       keys existed leaves them unresolved. */
     while (fgets(line, sizeof(line), f)) {
-        size_t len;
-        if (strncmp(line, key, key_len) || line[key_len] != '=')
+        if (!seen_tag && line_value(line, LE_UPDATE_TAG_KEY, tag, tag_size)) {
+            seen_tag = 1;
             continue;
-        len = strcspn(line + key_len + 1, "\r\n");
-        found = 1;
-        /* A value that does not fit the caller's buffer, or that filled the
-           line buffer without a terminator, is absent -- never truncated. */
-        if (len < size && len < sizeof(line) - (key_len + 1)) {
-            memcpy(out, line + key_len + 1, len);
-            out[len] = '\0';
         }
-        break;
+        if (!seen_sha && line_value(line, LE_UPDATE_SHA_KEY, sha, sha_size))
+            seen_sha = 1;
     }
     fclose(f);
-    if (!found || !identity_value_valid(key, out)) {
-        out[0] = '\0';
-        return 0;
-    }
-    return 1;
+    /* Validate once the snapshot is complete, so a malformed value is reported
+       as absent and never reaches the caller as an identity. */
+    if (update_identity_tag_valid(tag))
+        resolved++;
+    else
+        tag[0] = '\0';
+    if (update_identity_sha256_valid(sha))
+        resolved++;
+    else
+        sha[0] = '\0';
+    return resolved;
 }

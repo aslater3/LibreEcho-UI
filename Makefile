@@ -384,7 +384,11 @@ $(BUILD)/test-factory-reset: tests/test_factory_reset.c src/factory_reset.c
 
 $(BUILD)/test-update-identity: tests/test_update_identity.c src/update_identity.c
 	@mkdir -p $(BUILD)
-	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+	# --wrap lets the torn-read fixture stand at the reader's own open of the
+	# record: the test counts every open the reader makes and commits the next
+	# check record there, as the update helper's atomic rename would.
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc \
+		-Wl,--wrap=fopen $^ -o $@
 
 $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 		src/adapter/wyoming_protocol.c src/json.c
