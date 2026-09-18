@@ -123,7 +123,7 @@ def serve_session(conn, info, log):
         ("yes" if authorization else "no", len(authorization or "")))
     log(f"ACCOUNT {info['headers'].get('chatgpt-account-id', '(none)')}")
 
-    send_json(conn, {"type": "session.started",
+    send_json(conn, {"type": "session.created",
                      "session": {"id": "fake-session-1"}})
     audio_bytes = 0
     delegated = False
@@ -148,13 +148,14 @@ def serve_session(conn, info, log):
             received.append(message)
         if kind == "session.update":
             session = message.get("session", {})
-            log("SESSION_UPDATE model=%s voice=%s delegation=%s"
+            tools = [tool.get("name") for tool in session.get("tools", [])]
+            log("SESSION_UPDATE model=%s voice=%s tools=%s"
                 % (session.get("model"),
                    (session.get("audio") or {}).get("output", {}).get("voice"),
-                   (session.get("delegation") or {}).get("type")))
+                   ",".join(tools)))
             send_json(conn, {"type": "session.updated",
                              "session": {"id": "fake-session-1"}})
-        elif kind == "input_audio.append":
+        elif kind == "input_audio_buffer.append":
             raw = base64.b64decode(message["audio"])
             audio_bytes += len(raw)
             log("AUDIO_APPEND bytes=%d total=%d" % (len(raw), audio_bytes))
@@ -166,29 +167,25 @@ def serve_session(conn, info, log):
                                  "turn": {"role": "user",
                                           "transcript":
                                           "what time is it"}})
-                send_json(conn, {"type": "delegation.created", "item": {
-                    "id": "delegation-1", "type": "delegation",
-                    "target": "client",
-                    "content": [{"type": "input_text",
-                                 "text": "what time is it"}]}})
-        elif kind == "delegation.context.append":
-            log("DELEGATION_REPLY id=%s text=%r"
-                % (message.get("delegation_item_id"),
-                   message["content"][0]["text"]))
-            send_json(conn, {"type": "output_transcript.added",
-                             "item": {"text": "It is noon."}})
+                send_json(conn, {
+                    "type": "response.function_call_arguments.done",
+                    "call_id": "call-1", "name": "device_time",
+                    "arguments": "{}"})
+                send_json(conn, {"type": "response.done",
+                                 "response": {"id": "tool-response"}})
+        elif (kind == "conversation.item.create" and
+              (message.get("item") or {}).get("type") ==
+              "function_call_output"):
+            item = message["item"]
+            log("FUNCTION_OUTPUT id=%s output=%s"
+                % (item.get("call_id"), item.get("output")))
+        elif kind == "response.create":
             for _ in range(3):
-                send_json(conn, {"type": "output_audio.delta",
-                                 "audio": base64.b64encode(
+                send_json(conn, {"type": "response.output_audio.delta",
+                                 "delta": base64.b64encode(
                                      pcm_tone(2400, SAMPLE_RATE)).decode()})
-            send_json(conn, {"type": "turn.done",
-                             "turn": {"role": "assistant",
-                                      "transcript":
-                                      "It is noon."}})
-        elif kind == "session.close":
-            log("SESSION_CLOSE")
-            send_frame(conn, 0x8, struct.pack(">H", 1000))
-            return
+            send_json(conn, {"type": "response.done",
+                             "response": {"id": "spoken-response"}})
 
 
 def main():

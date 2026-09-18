@@ -76,6 +76,14 @@ static pid_t g_active_child = -1;
 static char g_pending_text[LE_TTS_MAX_TEXT];
 static char g_pending_request_id[LE_TTS_REQUEST_ID_MAX];
 static int g_pending_speech;
+static pthread_mutex_t g_inprocess_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t g_inprocess_thread;
+static int g_inprocess_active;
+static int g_inprocess_joinable;
+static volatile sig_atomic_t g_inprocess_cancel;
+static struct tts_engine *g_inprocess_engine;
+static char g_inprocess_text[LE_TTS_MAX_TEXT];
+static char g_inprocess_request_id[LE_TTS_REQUEST_ID_MAX];
 
 static void mark_first_pcm(const char *request_id);
 
@@ -393,7 +401,11 @@ static int write_pcm_fd(int fd, const int16_t *pcm, size_t frames)
     size_t sent = 0;
 
     while (sent < total_bytes) {
-        ssize_t n = write(fd, (const char *)pcm + sent, total_bytes - sent);
+        ssize_t n;
+
+        if (g_inprocess_cancel)
+            return 0;
+        n = write(fd, (const char *)pcm + sent, total_bytes - sent);
         if (n > 0) {
             sent += (size_t)n;
             continue;
@@ -403,8 +415,8 @@ static int write_pcm_fd(int fd, const int16_t *pcm, size_t frames)
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             struct pollfd pfd = { fd, POLLOUT, 0 };
             int rc;
-            do { rc = poll(&pfd, 1, 2000); } while (rc < 0 && errno == EINTR);
-            if (rc > 0)
+            do { rc = poll(&pfd, 1, 40); } while (rc < 0 && errno == EINTR);
+            if (rc >= 0)
                 continue;
         }
         le_log_perr("ttsd: write to announcement bus failed");
@@ -420,7 +432,7 @@ static int write_pcm_to_bus(const int16_t *pcm, size_t frames,
     int fd;
     int rc;
 
-    fd = open(bus_path, O_WRONLY | O_CLOEXEC);
+    fd = open(bus_path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         le_log_perr("ttsd: open announcement bus %s", bus_path);
         return -1;
@@ -689,7 +701,7 @@ static int stream_queue_push(struct pcm_stream_queue *queue,
     chunk->frames = frames;
 
     pthread_mutex_lock(&queue->mutex);
-    if (queue->closed || queue->failed) {
+    if (queue->closed || queue->failed || g_inprocess_cancel) {
         pthread_mutex_unlock(&queue->mutex);
         free(chunk);
         return -1;
@@ -784,8 +796,14 @@ static void *stream_writer(void *opaque)
         pthread_mutex_unlock(&queue->mutex);
 
         if (chunk) {
+            if (g_inprocess_cancel) {
+                free(chunk->samples);
+                free(chunk);
+                stream_queue_fail(queue);
+                break;
+            }
             if (fd < 0) {
-                fd = open(bus_path, O_WRONLY | O_CLOEXEC);
+                fd = open(bus_path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
                 if (fd < 0) {
                     le_log_perr("ttsd: open announcement bus %s",
                                 bus_path);
@@ -1042,6 +1060,11 @@ static int synthesize_and_play(struct tts_engine *engine, const char *text,
         cpu_boost_end(&boost);
         return -1;
     }
+    if (g_inprocess_cancel) {
+        free(stereo);
+        cpu_boost_end(&boost);
+        return 0;
+    }
     le_log_info("ttsd: playing %zu frames (%.2f s) on announcement bus",
                 stereo_frames, (double)stereo_frames / LE_TTS_BUS_RATE);
     rc = write_pcm_to_bus(stereo, stereo_frames, request_id);
@@ -1094,6 +1117,93 @@ static void reap_children(void)
     g_child_exited = 0;
 }
 
+static void *inprocess_worker(void *opaque)
+{
+    int rc;
+
+    (void)opaque;
+    rc = synthesize_and_play(g_inprocess_engine, g_inprocess_text,
+                             g_inprocess_request_id);
+    pthread_mutex_lock(&g_inprocess_mutex);
+    g_inprocess_active = 0;
+    pthread_mutex_unlock(&g_inprocess_mutex);
+    if (rc < 0 && !g_inprocess_cancel)
+        le_log_error("ttsd: in-process speech worker failed");
+    return NULL;
+}
+
+static int start_inprocess_speech(struct tts_engine *engine, const char *text,
+                                  const char *request_id)
+{
+    pthread_t previous;
+    int join_previous = 0;
+
+    pthread_mutex_lock(&g_inprocess_mutex);
+    if (g_inprocess_active) {
+        pthread_mutex_unlock(&g_inprocess_mutex);
+        return -1;
+    }
+    if (g_inprocess_joinable) {
+        previous = g_inprocess_thread;
+        g_inprocess_joinable = 0;
+        join_previous = 1;
+    }
+    pthread_mutex_unlock(&g_inprocess_mutex);
+    if (join_previous)
+        (void)pthread_join(previous, NULL);
+
+    pthread_mutex_lock(&g_inprocess_mutex);
+    g_inprocess_engine = engine;
+    snprintf(g_inprocess_text, sizeof(g_inprocess_text), "%s", text);
+    snprintf(g_inprocess_request_id, sizeof(g_inprocess_request_id), "%s",
+             request_id ? request_id : "");
+    g_inprocess_cancel = 0;
+    g_inprocess_active = 1;
+    if (pthread_create(&g_inprocess_thread, NULL, inprocess_worker, NULL) != 0) {
+        g_inprocess_active = 0;
+        pthread_mutex_unlock(&g_inprocess_mutex);
+        return -1;
+    }
+    g_inprocess_joinable = 1;
+    pthread_mutex_unlock(&g_inprocess_mutex);
+    return 0;
+}
+
+static int inprocess_speaking(void)
+{
+    int active;
+
+    pthread_mutex_lock(&g_inprocess_mutex);
+    active = g_inprocess_active && !g_inprocess_cancel;
+    pthread_mutex_unlock(&g_inprocess_mutex);
+    return active;
+}
+
+static void cancel_inprocess_speech(void)
+{
+    g_inprocess_cancel = 1;
+    g_pending_speech = 0;
+    g_pending_text[0] = '\0';
+    g_pending_request_id[0] = '\0';
+}
+
+static void join_inprocess_speech(void)
+{
+    pthread_t thread;
+    int join = 0;
+
+    cancel_inprocess_speech();
+    pthread_mutex_lock(&g_inprocess_mutex);
+    if (g_inprocess_joinable) {
+        thread = g_inprocess_thread;
+        g_inprocess_joinable = 0;
+        join = 1;
+    }
+    pthread_mutex_unlock(&g_inprocess_mutex);
+    if (join)
+        (void)pthread_join(thread, NULL);
+}
+
 static int start_speech(struct tts_engine *engine, const char *text,
                         const char *request_id)
 {
@@ -1104,19 +1214,11 @@ static int start_speech(struct tts_engine *engine, const char *text,
      * the command loop, but avoids the parent/child peak during profiling
      * and for deployments where memory is tighter than responsiveness. */
     if (getenv("LE_TTS_IN_PROCESS") &&
-        !strcmp(getenv("LE_TTS_IN_PROCESS"), "1")) {
-        int rc = synthesize_and_play(engine, text, request_id);
-        if (rc < 0) {
-            le_log_error("ttsd: in-process synthesis failed for text (%zu chars)",
-                         strlen(text));
-            return -1;
-        }
-        le_log_info("ttsd: in-process speech completed (%zu chars)",
-                    strlen(text));
-        return 0;
-    }
+        !strcmp(getenv("LE_TTS_IN_PROCESS"), "1"))
+        return start_inprocess_speech(engine, text, request_id);
 
     /* Kill any in-progress utterance. */
+    g_inprocess_cancel = 0;
     kill_active_child();
     reap_children();
 
@@ -1307,8 +1409,9 @@ static int handle_request(struct tts_engine *engine, char *message,
         char data[128];
         (void)snprintf(data, sizeof(data),
                        "{\"speaking\":%s,\"engine\":\"%s\"}",
-                       (g_active_child > 0 || g_pending_speech)
-                           ? "true" : "false",
+                       (g_active_child > 0 || g_pending_speech ||
+                        inprocess_speaking())
+                            ? "true" : "false",
                        LE_TTSD_ENGINE_NAME);
         return response_ok(response, response_size, id, data);
     }
@@ -1358,6 +1461,7 @@ static int handle_request(struct tts_engine *engine, char *message,
         }
     }
     if (!strcmp(command, "stop_speech")) {
+        cancel_inprocess_speech();
         kill_active_child();
         return response_ok(response, response_size, id, "{\"speaking\":false}");
     }
@@ -1632,6 +1736,7 @@ int main(int argc, char **argv)
     }
 
     le_log_info("ttsd: shutting down");
+    join_inprocess_speech();
     kill_active_child();
     reap_children();
     for (i = 0; i < LE_TTS_MAX_CLIENTS; ++i)

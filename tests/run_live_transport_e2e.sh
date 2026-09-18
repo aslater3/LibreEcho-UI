@@ -50,7 +50,7 @@ if [ -n "$LIVED_RUN" ]; then
     $LIVED_RUN "for e in /proc/[0-9]*; do a=\$(tr '\\0' '\\n' < \$e/cmdline 2>/dev/null | sed -n 1p); \
         [ \"\$a\" = \"$LIVED_BIN\" ] && kill -TERM \${e#/proc/}; done; sleep 0.5; \
         setsid $LIVED_BIN --foreground --enable --transport realtime \
-        --live-url ws://127.0.0.1:$PORT/v1/realtime?intent=quicksilver \
+        --live-url ws://127.0.0.1:$PORT/v1/realtime \
         --credentials $CREDENTIALS --socket $CONTROL_SOCKET \
         --wake-socket $WAKED_SOCKET --audio-bus $BUS \
         --conversation-timeout-ms 4000 >> $WORK/lived.log 2>&1 </dev/null &"
@@ -58,7 +58,7 @@ if [ -n "$LIVED_RUN" ]; then
     CONTROL_PORT=19399
 else
     "$LIVED_BIN" --foreground --enable --transport realtime \
-        --live-url "ws://127.0.0.1:$PORT/v1/realtime?intent=quicksilver" \
+        --live-url "ws://127.0.0.1:$PORT/v1/realtime" \
         --credentials "$CREDENTIALS" --socket "$CONTROL_SOCKET" \
         --wake-socket "$WAKED_SOCKET" --audio-bus "$BUS" \
         --conversation-timeout-ms 4000 > "$WORK/lived.log" 2>&1 &
@@ -83,12 +83,12 @@ cat "$FAKE_LOG"
 echo "--- assertions ---"
 FAIL=0
 check() { if echo "$1" | grep -q "$2"; then echo "  PASS  $3"; else echo "  FAIL  $3"; FAIL=1; fi; }
-check "$(cat "$FAKE_LOG")" "SESSION_UPDATE model=gpt-live-1-codex" "session.update carried the model"
+check "$(cat "$FAKE_LOG")" "SESSION_UPDATE model=gpt-realtime" "session.update carried the model"
 check "$(cat "$FAKE_LOG")" "AUTH present=yes" "the bearer header reached the server"
 check "$(cat "$FAKE_LOG")" "ACCOUNT acct-e2e" "the account header reached the server"
-check "$(cat "$FAKE_LOG")" "delegation=client" "delegation is client-managed"
+check "$(cat "$FAKE_LOG")" "session_stop" "the bounded stop tool was published"
 check "$(cat "$FAKE_LOG")" "AUDIO_APPEND" "post-AEC audio reached the server"
-check "$(cat "$FAKE_LOG")" "DELEGATION_REPLY id=delegation-1" "the delegation was answered"
+check "$(cat "$FAKE_LOG")" "FUNCTION_OUTPUT id=call-1" "the function call was answered"
 check "$(cat "$FAKE_LOG")" '"ok":true' "the delegated local action succeeded"
 check "$STATUS" '"messages_in"' "messages were parsed"
 check "$STATUS" '"audio_chunks_out"' "audio chunks were sent"
