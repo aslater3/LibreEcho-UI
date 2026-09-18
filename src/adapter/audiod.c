@@ -1803,6 +1803,33 @@ static int queue_output(struct client *client, const char *message, size_t lengt
     return 0;
 }
 
+static int cancel_playback_bus(const char *bus)
+{
+    struct sockaddr_un address;
+    char message[64];
+    int fd;
+    int length;
+    ssize_t sent;
+
+    if (!bus || (strcmp(bus, "system") && strcmp(bus, "announcement") &&
+                 strcmp(bus, "alarm")))
+        return -1;
+    length = snprintf(message, sizeof(message), "cancel %s", bus);
+    if (length <= 0 || (size_t)length >= sizeof(message))
+        return -1;
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0)
+        return -1;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s",
+             "/run/libreecho-audio/control.sock");
+    sent = sendto(fd, message, (size_t)length, MSG_DONTWAIT | MSG_NOSIGNAL,
+                  (struct sockaddr *)&address, sizeof(address));
+    close(fd);
+    return sent == length ? 0 : -1;
+}
+
 static int handle_request(struct audio_hw *audio, char *message,
                           char *response, size_t response_size)
 {
@@ -2031,6 +2058,9 @@ static int handle_request(struct audio_hw *audio, char *message,
         le_adapter_close(tts);
         if (rc != LE_ADAPTER_OK)
             return response_error(response, response_size, id, "tts stop failed");
+        if (cancel_playback_bus("announcement") < 0)
+            return response_error(response, response_size, id,
+                                  "announcement playback cancellation unavailable");
         return response_ok(response, response_size, id, "{\"speaking\":false}");
     }
     return response_error(response, response_size, id, "unknown command");

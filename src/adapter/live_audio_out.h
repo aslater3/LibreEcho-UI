@@ -33,6 +33,7 @@
 #include <stdint.h>
 
 #define LE_LIVE_AUDIO_OUT_PATH_MAX 128
+#define LE_LIVE_AUDIO_OUT_STATUS_PATH_MAX 160
 /*
  * Longest a single chunk may spend waiting on playback back-pressure.  lived
  * runs one poll() loop; a bus that never drains must not be able to hold that
@@ -58,6 +59,8 @@ struct le_live_audio_out {
     int fd;
     int opened;
     char path[LE_LIVE_AUDIO_OUT_PATH_MAX];
+    char status_path[LE_LIVE_AUDIO_OUT_STATUS_PATH_MAX];
+    char control_path[LE_LIVE_AUDIO_OUT_STATUS_PATH_MAX];
     unsigned int speaker_rate;
     int cancelled;
     /*
@@ -74,6 +77,10 @@ struct le_live_audio_out {
     uint64_t cancels;
     uint64_t reopenings;
     uint64_t write_errors;
+    uint64_t drain_checks;
+    uint64_t drain_confirmations;
+    uint64_t cancel_requests;
+    uint64_t cancel_failures;
 };
 
 /*
@@ -94,6 +101,9 @@ void le_live_audio_out_init(struct le_live_audio_out *out, const char *bus_path,
 int le_live_audio_out_write(struct le_live_audio_out *out,
                             const int16_t *samples, size_t count,
                             unsigned int rate);
+
+/* True only after the FIFO and audio engine's system bus are both empty. */
+int le_live_audio_out_drained(struct le_live_audio_out *out);
 
 /*
  * Drop everything still queued and stop playing.  Called on barge-in, on

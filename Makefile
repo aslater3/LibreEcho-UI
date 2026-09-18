@@ -38,6 +38,7 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/time
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 	src/adapter/voice_listening_led.c \
+	src/adapter/playback_status_client.c \
 	src/adapter/spoken_time.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c \
 	src/config_store.c src/json.c src/log.c
@@ -47,6 +48,7 @@ WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/mdns_client.c src/adapter/
 LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 	src/adapter/live_ring.c src/adapter/live_transport_mock.c \
 	src/adapter/live_transport_realtime.c src/adapter/live_audio_out.c \
+	src/adapter/playback_status_client.c \
 	src/adapter/live_tools.c src/adapter/timer_intent.c src/adapter/radio_resample.c \
 	src/adapter/live_b64.c src/adapter/ws_client.c src/adapter/live_dns.c \
 	src/adapter/llm_store.c \
@@ -177,7 +179,13 @@ $(BUILD)/test-live-tools: tests/test_live_tools.c src/adapter/live_tools.c \
 	@mkdir -p $(BUILD)
 	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
 $(BUILD)/test-live-audio-out: tests/test_live_audio_out.c \
-		src/adapter/live_audio_out.c src/adapter/radio_resample.c
+		src/adapter/live_audio_out.c src/adapter/radio_resample.c \
+		src/adapter/playback_status_client.c
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
+
+$(BUILD)/test-playback-status-client: tests/test_playback_status_client.c \
+		src/adapter/playback_status_client.c
 	@mkdir -p $(BUILD)
 	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
 
@@ -197,11 +205,13 @@ $(BUILD)/test-lived: tests/test_lived.c $(BUILD)/libreecho-lived
 
 test-lived: $(BUILD)/test-live-ring $(BUILD)/test-live-session \
 		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
+		$(BUILD)/test-playback-status-client \
 		$(BUILD)/test-ws-client $(BUILD)/test-live-dns $(BUILD)/test-lived
 	./$(BUILD)/test-live-ring
 	./$(BUILD)/test-live-session
 	./$(BUILD)/test-live-tools
 	./$(BUILD)/test-live-audio-out
+	./$(BUILD)/test-playback-status-client
 	./$(BUILD)/test-ws-client
 	./$(BUILD)/test-live-dns
 	./$(BUILD)/test-lived

@@ -531,6 +531,18 @@ static int test_spoken_stop_requests_session_end(void)
     return 0;
 }
 
+static int test_session_stop_returns_end_session(void)
+{
+    struct le_live_tool_environment environment;
+    char result[LE_LIVE_TOOL_RESULT_MAX];
+
+    le_live_tools_init(&environment);
+    CHECK(le_live_tools_dispatch(&environment, "session.stop", "{}", result,
+                                 sizeof(result)) == 0);
+    CHECK(strstr(result, "\"end_session\":true") != NULL);
+    return 0;
+}
+
 static int test_bounded_result_for_a_long_argument(void)
 {
     struct le_live_tool_environment environment;
@@ -572,6 +584,7 @@ int main(void)
     failures += test_device_volume_reads_the_audio_daemon() != 0;
     failures += test_media_stop_reports_partial_failure() != 0;
     failures += test_spoken_stop_requests_session_end() != 0;
+    failures += test_session_stop_returns_end_session() != 0;
     failures += test_bounded_result_for_a_long_argument() != 0;
     (void)refusals_reached_no_daemon;
     rmdir(directory);

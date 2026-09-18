@@ -86,6 +86,10 @@ struct le_live_transport_config {
     const char *model;
     /* Voice name from the provider's published set. */
     const char *voice;
+    /* Bounded device/context instructions for this session. */
+    const char *instructions;
+    /* Optional one-shot preview prompt sent after session.updated. */
+    const char *initial_text;
     /* Path to the shared credential file (openai-codex.json). */
     const char *credentials_path;
     /*

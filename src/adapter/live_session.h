@@ -23,6 +23,7 @@ enum le_live_state {
     LE_LIVE_CONNECTING,
     LE_LIVE_LISTENING,
     LE_LIVE_SPEAKING,
+    LE_LIVE_COOLDOWN,
     LE_LIVE_WAITING_FOR_TOOL,
     LE_LIVE_CLOSING
 };
@@ -78,6 +79,8 @@ struct le_live_session_ops {
     int (*dispatch)(void *context, const char *tool, const char *arguments,
                     char *result, size_t size);
     void (*state_changed)(void *context, enum le_live_state state);
+    /* True only when the playback FIFO and hardware engine report empty. */
+    int (*output_drained)(void *context);
 };
 
 struct le_live_session_config {
@@ -106,6 +109,9 @@ struct le_live_session_config {
     unsigned int barge_in_frames;
     const char *model;
     const char *voice;
+    const char *instructions;
+    const char *initial_text;
+    int preview_only;
     const char *credentials_path;
     /* Forwarded to the transport: see le_live_transport_config. */
     const char *url;
@@ -121,6 +127,8 @@ struct le_live_session_config {
 #define LE_LIVE_DEFAULT_BARGE_IN_RMS 900U
 #define LE_LIVE_DEFAULT_BARGE_IN_FACTOR 6U
 #define LE_LIVE_DEFAULT_BARGE_IN_FRAMES 3U
+#define LE_LIVE_OUTPUT_DRAIN_STABLE_MS 80U
+#define LE_LIVE_OUTPUT_DRAIN_TIMEOUT_MS 10000U
 
 struct le_live_session {
     struct le_live_transport transport;
@@ -140,6 +148,8 @@ struct le_live_session {
     uint64_t last_model_speech_ms;
     uint64_t last_user_speech_ms;
     uint64_t first_audio_at_ms;
+    uint64_t drain_started_ms;
+    uint64_t drain_quiet_since_ms;
     /* First sample not yet handed to the transport. */
     uint64_t next_send_sample;
     unsigned int barge_in_run;
@@ -175,6 +185,8 @@ struct le_live_session {
     uint64_t barge_ins;
     uint64_t last_connection_ms;
     uint64_t last_first_audio_ms;
+    uint64_t last_drain_ms;
+    uint64_t drain_timeouts;
     char last_error[LE_LIVE_TEXT_MAX];
 };
 
@@ -191,6 +203,9 @@ void le_live_session_init(struct le_live_session *session,
  */
 int le_live_session_wake(struct le_live_session *session,
                          uint64_t detection_sample, uint64_t now_ms);
+int le_live_session_interrupt_for_wake(struct le_live_session *session,
+                                       uint64_t detection_sample,
+                                       uint64_t now_ms);
 
 /*
  * Feed post-AEC audio that has just arrived from waked.  Frames are appended to

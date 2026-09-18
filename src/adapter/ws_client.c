@@ -323,8 +323,8 @@ int le_ws_connect(struct le_ws *ws, const struct le_ws_stream *stream,
 {
     unsigned char nonce[16];
     char key[32];
-    char request[1024];
-    char response[2048];
+    char request[12288];
+    char response[8192];
     uint64_t deadline;
     size_t used = 0;
     int length;

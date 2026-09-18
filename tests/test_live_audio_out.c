@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -50,6 +52,26 @@ static int make_bus(const char *name, char *path, size_t size)
     if (join_path(path, size, name) < 0)
         return -1;
     return close(open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600));
+}
+
+static int write_engine_status(int system_active)
+{
+    char path[160];
+    const char *text = system_active
+        ? "{\"buses\":{\"system\":false},\"drain\":{\"system\":{\"drained\":false}}}\n"
+        : "{\"buses\":{\"system\":false},\"drain\":{\"system\":{\"drained\":true}}}\n";
+    int fd;
+
+    if (join_path(path, sizeof(path), "status.json") < 0)
+        return -1;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+        return -1;
+    if (write(fd, text, strlen(text)) != (ssize_t)strlen(text)) {
+        close(fd);
+        return -1;
+    }
+    return close(fd);
 }
 
 static void fill(int16_t *samples, size_t count)
@@ -270,6 +292,59 @@ static int test_rejects_a_chunk_larger_than_the_transport_contract(void)
     return 0;
 }
 
+static int test_drain_follows_audio_engine_status(void)
+{
+    struct le_live_audio_out out;
+    char path[160];
+
+    CHECK(make_bus("drain.pcm", path, sizeof(path)) == 0);
+    le_live_audio_out_init(&out, path, 48000);
+    CHECK(write_engine_status(1) == 0);
+    CHECK(le_live_audio_out_drained(&out) == 0);
+    CHECK(write_engine_status(0) == 0);
+    CHECK(le_live_audio_out_drained(&out) == 1);
+    CHECK(out.drain_checks == 2);
+    CHECK(out.drain_confirmations == 1);
+    le_live_audio_out_close(&out);
+    unlink(path);
+    CHECK(join_path(path, sizeof(path), "status.json") == 0);
+    unlink(path);
+    return 0;
+}
+
+static int test_cancel_notifies_system_bus_only(void)
+{
+    struct le_live_audio_out out;
+    struct sockaddr_un address;
+    char bus[160], control[160], message[64];
+    int fd;
+    ssize_t count;
+
+    CHECK(make_bus("system.pcm", bus, sizeof(bus)) == 0);
+    CHECK(join_path(control, sizeof(control), "control.sock") == 0);
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    CHECK(fd >= 0);
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    CHECK(strlen(control) < sizeof(address.sun_path));
+    strcpy(address.sun_path, control);
+    unlink(control);
+    CHECK(bind(fd, (struct sockaddr *)&address, sizeof(address)) == 0);
+    le_live_audio_out_init(&out, bus, 48000);
+    le_live_audio_out_cancel(&out);
+    count = recv(fd, message, sizeof(message) - 1U, 0);
+    CHECK(count > 0);
+    message[count] = '\0';
+    CHECK(!strcmp(message, "cancel system"));
+    CHECK(out.cancel_requests == 1);
+    CHECK(out.cancel_failures == 0);
+    le_live_audio_out_close(&out);
+    close(fd);
+    unlink(control);
+    unlink(bus);
+    return 0;
+}
+
 int main(void)
 {
     int failures = 0;
@@ -288,6 +363,8 @@ int main(void)
     failures += test_stalled_bus_gives_up_within_the_budget() != 0;
     failures += test_cancel_stops_playback_and_closes_the_turn() != 0;
     failures += test_rejects_a_chunk_larger_than_the_transport_contract() != 0;
+    failures += test_drain_follows_audio_engine_status() != 0;
+    failures += test_cancel_notifies_system_bus_only() != 0;
     rmdir(directory);
     if (failures) {
         fprintf(stderr, "live audio out: FAILED\n");

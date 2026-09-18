@@ -89,6 +89,7 @@ const char *le_live_state_name(enum le_live_state state)
     case LE_LIVE_CONNECTING: return "connecting";
     case LE_LIVE_LISTENING: return "listening";
     case LE_LIVE_SPEAKING: return "speaking";
+    case LE_LIVE_COOLDOWN: return "cooldown";
     case LE_LIVE_WAITING_FOR_TOOL: return "waiting_for_tool";
     case LE_LIVE_CLOSING: return "closing";
     }
@@ -448,6 +449,41 @@ static void check_barge_in(struct le_live_session *session,
     set_state(session, LE_LIVE_LISTENING);
 }
 
+static int advance_playback_drain(struct le_live_session *session,
+                                  uint64_t now_ms)
+{
+    int drained = session->ops.output_drained
+        ? session->ops.output_drained(session->context) : 1;
+
+    if (drained) {
+        if (!session->drain_quiet_since_ms)
+            session->drain_quiet_since_ms = now_ms;
+        if (!session->ops.output_drained ||
+            now_ms - session->drain_quiet_since_ms >=
+                LE_LIVE_OUTPUT_DRAIN_STABLE_MS) {
+            session->last_drain_ms = now_ms - session->drain_started_ms;
+            session->drain_started_ms = 0;
+            session->drain_quiet_since_ms = 0;
+            if (session->config.preview_only)
+                le_live_session_close(session, LE_LIVE_END_STOPPED, now_ms);
+            else
+                set_state(session, LE_LIVE_LISTENING);
+            return 1;
+        }
+    } else {
+        session->drain_quiet_since_ms = 0;
+    }
+    if (now_ms - session->drain_started_ms >=
+        LE_LIVE_OUTPUT_DRAIN_TIMEOUT_MS) {
+        ++session->drain_timeouts;
+        copy_text(session->last_error, sizeof(session->last_error),
+                  "playback drain timed out");
+        le_live_session_close(session, LE_LIVE_END_AUDIO_FAILED, now_ms);
+        return -1;
+    }
+    return 0;
+}
+
 int le_live_session_feed(struct le_live_session *session, uint64_t first_sample,
                          const int16_t *samples, size_t count, uint64_t now_ms)
 {
@@ -458,8 +494,19 @@ int le_live_session_feed(struct le_live_session *session, uint64_t first_sample,
     if (session->ring &&
         le_live_ring_append(session->ring, first_sample, samples, count) < 0)
         return -1;
+    if (session->config.preview_only && le_live_session_active(session)) {
+        session->next_send_sample = le_live_ring_end(session->ring);
+        if (session->state == LE_LIVE_COOLDOWN)
+            (void)advance_playback_drain(session, now_ms);
+        return 0;
+    }
+    if (session->state == LE_LIVE_COOLDOWN) {
+        session->next_send_sample = le_live_ring_end(session->ring);
+        (void)advance_playback_drain(session, now_ms);
+        return 0;
+    }
     model_speaking = session->state == LE_LIVE_SPEAKING;
-    if (le_live_session_active(session))
+    if (le_live_session_active(session) && !model_speaking)
         check_barge_in(session, samples, count, now_ms);
     /* Model output and a user's barge-in are not ambient-room samples. Feeding
        either into the floor would raise the threshold while it is being used,
@@ -471,6 +518,14 @@ int le_live_session_feed(struct le_live_session *session, uint64_t first_sample,
 
         if (rms > session->input_peak_rms)
             session->input_peak_rms = rms;
+        /* Half-duplex while the model is speaking. Even with the AEC reference,
+           residual speaker energy can look like a user barge-in and can be
+           uploaded as a new turn. Drop the corresponding microphone interval;
+           response.done moves the session back to LISTENING, after which fresh
+           frames are uploaded again. */
+        if (session->ring)
+            session->next_send_sample = le_live_ring_end(session->ring);
+        return 0;
     }
     if (!le_live_session_active(session))
         return 0;
@@ -480,6 +535,32 @@ int le_live_session_feed(struct le_live_session *session, uint64_t first_sample,
         le_live_session_close(session, LE_LIVE_END_TRANSPORT_ERROR, now_ms);
         return -1;
     }
+    return 0;
+}
+
+int le_live_session_interrupt_for_wake(struct le_live_session *session,
+                                       uint64_t detection_sample,
+                                       uint64_t now_ms)
+{
+    uint64_t preroll_samples;
+
+    if (!session || !le_live_session_active(session) ||
+        session->state == LE_LIVE_CONNECTING || !session->ring ||
+        detection_sample > le_live_ring_end(session->ring))
+        return -1;
+    if (session->transport.ops->interrupt)
+        (void)session->transport.ops->interrupt(&session->transport);
+    if (session->ops.cancel_output)
+        session->ops.cancel_output(session->context);
+    preroll_samples = (uint64_t)session->config.wake_preroll_ms *
+                      LE_LIVE_INPUT_RATE / 1000U;
+    session->next_send_sample = le_live_ring_start_for_wake(
+        session->ring, detection_sample, preroll_samples);
+    session->barge_in_run = 0;
+    session->drain_started_ms = 0;
+    session->drain_quiet_since_ms = 0;
+    session->last_user_speech_ms = now_ms;
+    set_state(session, LE_LIVE_LISTENING);
     return 0;
 }
 
@@ -508,6 +589,8 @@ int le_live_session_wake(struct le_live_session *session,
     memset(&transport_config, 0, sizeof(transport_config));
     transport_config.model = session->config.model;
     transport_config.voice = session->config.voice;
+    transport_config.instructions = session->config.instructions;
+    transport_config.initial_text = session->config.initial_text;
     transport_config.credentials_path = session->config.credentials_path;
     transport_config.url = session->config.url;
     transport_config.ca_path = session->config.ca_path;
@@ -522,6 +605,8 @@ int le_live_session_wake(struct le_live_session *session,
     session->last_model_speech_ms = now_ms;
     session->last_user_speech_ms = now_ms;
     session->first_audio_at_ms = 0;
+    session->drain_started_ms = 0;
+    session->drain_quiet_since_ms = 0;
     session->audio_started = 0;
     session->barge_in_run = 0;
     session->speech_peak_rms = 0;
@@ -583,12 +668,12 @@ static void handle_event(struct le_live_session *session,
         set_state(session, LE_LIVE_SPEAKING);
         break;
     case LE_LIVE_EVENT_OUTPUT_DONE:
-        /*
-         * The follow-up window starts when the model stops talking, so a
-         * conversational reply does not need the wake word again.
-         */
+        /* Provider completion starts a measured playback drain. Microphone
+           upload stays suppressed until the playback FIFO and engine are empty. */
         session->last_model_speech_ms = now_ms;
-        set_state(session, LE_LIVE_LISTENING);
+        session->drain_started_ms = now_ms;
+        session->drain_quiet_since_ms = 0;
+        set_state(session, LE_LIVE_COOLDOWN);
         break;
     case LE_LIVE_EVENT_INPUT_STARTED:
         session->last_user_speech_ms = now_ms;
@@ -647,6 +732,12 @@ int le_live_session_pump(struct le_live_session *session, int timeout_ms,
         }
         return 0;
     }
+    if (session->state == LE_LIVE_COOLDOWN) {
+        (void)advance_playback_drain(session, now_ms);
+        if (!le_live_session_active(session) ||
+            session->state == LE_LIVE_COOLDOWN)
+            return 0;
+    }
     if (now_ms - session->opened_ms >= session->config.max_session_ms) {
         le_live_session_close(session, LE_LIVE_END_MAX_DURATION, now_ms);
         return 0;
@@ -655,6 +746,10 @@ int le_live_session_pump(struct le_live_session *session, int timeout_ms,
         ? session->last_model_speech_ms : session->last_user_speech_ms;
     if (now_ms - reference >= session->config.conversation_timeout_ms) {
         le_live_session_close(session, LE_LIVE_END_TIMEOUT, now_ms);
+        return 0;
+    }
+    if (session->config.preview_only) {
+        session->next_send_sample = le_live_ring_end(session->ring);
         return 0;
     }
     if (flush_pending(session, now_ms) < 0) {
@@ -724,6 +819,7 @@ void le_live_session_status_json(const struct le_live_session *session,
         "\"delegations\":%llu,\"delegation_failures\":%llu,"
         "\"delegation_deduped\":%llu,\"barge_ins\":%llu,"
         "\"connection_ms\":%llu,\"first_audio_ms\":%llu,"
+        "\"playback_drain_ms\":%llu,\"drain_timeouts\":%llu,"
         "\"transcript_turns\":%u,\"conversation_timeout_ms\":%u,"
         "\"max_session_ms\":%u,\"barge_in_rms\":%u,"
         "\"barge_in_factor\":%u,\"input_floor_rms\":%u,"
@@ -744,6 +840,8 @@ void le_live_session_status_json(const struct le_live_session *session,
         (unsigned long long)session->barge_ins,
         (unsigned long long)session->last_connection_ms,
         (unsigned long long)session->last_first_audio_ms,
+        (unsigned long long)session->last_drain_ms,
+        (unsigned long long)session->drain_timeouts,
         (unsigned)session->turn_count,
         session->config.conversation_timeout_ms,
         session->config.max_session_ms,

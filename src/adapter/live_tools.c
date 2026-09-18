@@ -447,6 +447,15 @@ static int tool_voice_request(const struct le_live_tool_environment *environment
                          "I cannot do that on the device yet.");
 }
 
+static int tool_session_stop(const struct le_live_tool_environment *environment,
+                             const char *arguments, char *result, size_t size)
+{
+    (void)environment;
+    (void)arguments;
+    return respond_ok(result, size,
+                      "\"stopped\":true,\"end_session\":true");
+}
+
 struct le_live_tool_entry {
     const char *name;
     int (*run)(const struct le_live_tool_environment *environment,
@@ -464,6 +473,7 @@ static const struct le_live_tool_entry tool_table[] = {
     {"device.time", tool_device_time},
     {"device.volume", tool_device_volume},
     {"device.weather", tool_device_weather},
+    {"session.stop", tool_session_stop},
     {"voice.request", tool_voice_request}
 };
 
