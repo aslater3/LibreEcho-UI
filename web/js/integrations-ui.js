@@ -247,6 +247,13 @@ function bindHomeLocation(a) {
   $('#wx-lat').value=original.latitude;
   $('#wx-lon').value=original.longitude;
   bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+  /*
+   * The lookup button and the stale-coordinate advisory come from app.js.
+   * This renderer draws the same card, so it has to bind the same controls:
+   * binding only the save button here is what left "Look up coordinates" on
+   * screen with no handler at all.
+   */
+  bindWeatherLookup(a);
   $('#save-wx').onclick=()=>{
     const provider=wxId($('#wx-provider').value);
     const location=$('#wx-location').value.trim();
@@ -260,7 +267,11 @@ function bindHomeLocation(a) {
     const originalLon=original.longitude?Number(original.longitude):null;
     let problem='';
 
-    if(haveLatitude!==haveLongitude) {
+    /* The coordinates on screen may belong to the place looked up before this
+       edit, and typing re-enables Save, so the button's state is not enough. */
+    if(lookupPending()) {
+      problem='Finish the lookup first — the coordinates on screen are not for that place yet.';
+    } else if(haveLatitude!==haveLongitude) {
       problem='Enter both latitude and longitude, or leave both unchanged.';
     } else if(haveLatitude&&(!Number.isFinite(lat)||!Number.isFinite(lon)||
               lat<-90||lat>90||lon<-180||lon>180)) {

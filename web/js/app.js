@@ -1440,13 +1440,29 @@ function wxId(label){const m=WX_PROVIDERS.find(p=>p[1]===label);return m?m[0]:'o
  * to hide.
  */
 function weatherCard(a){if(a.unsupported)return '';
-return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Every provider here is free and needs no account, so nothing is sent until a location is set; Met Office UK is the UKMO model, served through Open-Meteo.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Austin, Texas"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="30.2672"')}${field('Longitude','','wx-lon','text','placeholder="-97.7431"')}</div><div class="button-row">${action('Look up coordinates','wx-lookup')}<span class="muted" id="wx-lookup-note"></span></div><p class="muted" id="wx-warn"></p><div class="settings-grid">${saveButton('save-wx')}</div>`,'weather-provider')}
-function bindWeather(a){
- if(a.unsupported||!$('#wx-provider'))return;
- $('#wx-location').value=a.home_location||'';
- $('#wx-lat').value=a.latitude||'';
- $('#wx-lon').value=a.longitude||'';
- bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+return collapsiblePanel('Home location &amp; weather',`<p class="muted">Where this device is. The assistant uses it for weather, local time and, in future, directions.</p><p class="muted">The place name below is what the assistant says back; the coordinates are what the weather providers actually use. Every provider here is free and needs no account, so nothing is sent until a location is set; Met Office UK is the UKMO model, served through Open-Meteo.</p><div class="settings-grid">${field('Home address or place','','wx-location','text','placeholder="Town or postcode"')}${select('Weather provider',wxLabel(a.weather_provider),'wx-provider',WX_PROVIDERS.map(p=>p[1]))}${field('Latitude','','wx-lat','text','placeholder="53.7630"')}${field('Longitude','','wx-lon','text','placeholder="-2.7030"')}</div><div class="button-row">${action('Look up coordinates','wx-lookup')}<span class="muted" id="wx-lookup-note"></span></div><p class="muted" id="wx-warn"></p><div class="settings-grid">${saveButton('save-wx')}</div>`,'weather-provider')}
+/*
+ * Look up coordinates from the place name.
+ *
+ * Two renderers draw this card -- app.js on every page but Integrations, and
+ * integrations-ui.js on Integrations -- and each binds it separately. That
+ * split is what left the button on screen with no handler at all: app.js bound
+ * its own copy, the Integrations renderer replaced it and bound only the save
+ * button, and nothing attached the lookup. The lookup and the advisory text
+ * therefore live here, and both renderers call this one function, so a
+ * renderer change cannot drop the controls again.
+ */
+/*
+ * True while a lookup is in flight. The coordinates on screen may still belong
+ * to the previous place, and bindDirty re-enables Save as soon as anything is
+ * typed, so both save handlers check this instead of the button's state.
+ */
+function lookupPending(){const save=$('#save-wx');return !!(save&&save.dataset.lookupPending)}
+/* Shared by every binding of the card, so a re-render supersedes a request that
+   was already in flight rather than letting it write into the new card. */
+let lookupSequence=0;
+function bindWeatherLookup(a){
+ if(!$('#wx-location')||!$('#wx-lookup'))return;
  /*
   * Coordinates are what the weather provider actually queries; the place name
   * is only what the assistant says back. They can therefore disagree
@@ -1460,6 +1476,7 @@ function bindWeather(a){
   * device work it out".
   */
  const startLoc=(a.home_location||'').trim();
+ const note=$('#wx-lookup-note');
  const warn=()=>{
   const el=$('#wx-warn'); if(!el)return;
   const loc=$('#wx-location').value.trim();
@@ -1472,38 +1489,189 @@ function bindWeather(a){
    el.className='muted error-text';
   }else{ el.textContent=''; el.className='muted'; }
  };
- ['#wx-location','#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=warn});
+ ['#wx-location'].forEach(sel=>{const el=$(sel);if(el)el.oninput=()=>{
+  /* A place edit supersedes the request that used the old text immediately.
+     Keep pending: the coordinates still belong to whatever was resolved before,
+     and remove an offered list because it describes the old place. */
+  lookupSequence++;
+  /* Any place edit makes the current coordinate pair stale, including after a
+     successful but unsaved lookup: those coordinates describe the result that
+     was just renamed, not the new text. Keep Save pending until another lookup
+     fills the pair or both coordinates are entered explicitly. */
+  note.textContent='Place changed — look it up again before saving.';
+  setPending(true);
+  warn();
+ }});
+ /*
+  * Typing coordinates takes over from an offered list, but only once both are
+  * the user's: clearing after one edit would leave the other half of the pair
+  * from the earlier lookup. Either edit supersedes a lookup still in flight and
+  * removes the offered list, so a visible candidate can never silently stop
+  * working after its generation was invalidated.
+  */
+ let filled=false,touchedLat=false,touchedLon=false;
+ ['#wx-lat','#wx-lon'].forEach(sel=>{const el=$(sel);if(el)el.oninput=()=>{
+  lookupSequence++;
+  if(lookupPending())note.textContent='Manual coordinates in progress — enter both before saving.';
+  if(sel==='#wx-lat')touchedLat=true;else touchedLon=true;
+  if(touchedLat&&touchedLon)setPending(false);
+  warn();
+ }});
  warn();
+ const fill=(latitude,longitude,place,message,id)=>{
+  if(id!==lookupSequence)return;
+  filled=true;touchedLat=false;touchedLon=false;
+  $('#wx-lat').value=(+latitude).toFixed(4);
+  $('#wx-lon').value=(+longitude).toFixed(4);
+  if(place)$('#wx-location').value=place;
+  /* These coordinates are this place's, so the pending state is over. */
+  setPending(false);
+  note.textContent=message;
+  warn();
+ };
+ const describe=h=>[h.name,h.admin1,h.admin2,h.country_code].filter(Boolean).join(', ');
+ /*
+  * An ambiguous answer is never filled in silently. Taking hits[0] is how the
+  * device ended up reporting one town's weather under another town's name, and
+  * a qualifier this geocoder cannot use leaves the whole world to choose from:
+  * "Carnforth, Lancashire" matches nothing because a county is not a country or
+  * a first-level area, and the bare name matches the English town and an Iowa
+  * one. Show what matched, with the country, and let the user pick. Two places
+  * can still share a name, a first-level area and a country, so a label that
+  * would repeat falls back to its coordinates rather than showing two identical
+  * buttons for different locations.
+  */
+ const offer=(hits,prefix,id)=>{
+  if(id!==lookupSequence)return false;
+  const labels=hits.map(describe),repeated=labels.map(l=>labels.filter(x=>x===l).length>1);
+  note.innerHTML=esc(prefix)+' <strong>Choose the place:</strong> '+hits.map((h,i)=>
+   `<button class="secondary-btn wx-candidate" data-index="${i}">${esc(repeated[i]
+     ? labels[i]+` ${(+h.latitude).toFixed(2)}, ${(+h.longitude).toFixed(2)}` : labels[i])}</button>`).join(' ');
+  /*
+   * A choice is still pending: the coordinates on screen belong to whatever was
+   * looked up before, so Save stays shut until one of these is picked -- and
+   * stays shut through an edit, because bindDirty would otherwise re-enable it
+   * and the name could be stored against those coordinates.
+   */
+  setPending(true);
+  $$('.wx-candidate').forEach(button=>button.onclick=()=>{
+   const hit=hits[+button.dataset.index]; if(!hit)return;
+   fill(hit.latitude,hit.longitude,
+        [hit.name,hit.admin1].filter(Boolean).join(', '),'Found '+describe(hit),id);
+  });
+  return true;
+ };
+ /*
+  * A UK postcode is the input this geocoder cannot answer: it resolves place
+  * names worldwide and US ZIP codes, and returns nothing at all for "PR1 2AB"
+  * or "SW1A 1AA". The most natural thing to type for a UK home therefore
+  * looked like a dead button while "78701" worked. postcodes.io is free,
+  * needs no account, and answers a postcode directly.
+  */
+ const UK_POSTCODE=/^[A-Z]{1,2}[0-9][A-Z0-9]?\s?[0-9][A-Z]{2}$/i;
+ /* A lookup in flight means the coordinates on screen may still belong to the
+    previous place, so Save stays shut -- and the flag is what holds it shut:
+    bindDirty re-enables the button on any edit, so the save handlers check this
+    as well as the button's state. */
+ const save=$('#save-wx');
+ /*
+  * Pending means "the coordinates on screen are not this place's yet". Save is
+  * shut while it holds, and opened again when it clears -- the fields are filled
+  * programmatically, so nothing else would re-enable the button.
+  */
+ const setPending=pending=>{if(!save)return;if(pending){save.dataset.lookupPending='1';save.disabled=true}else{delete save.dataset.lookupPending;save.disabled=false}};
+ /*
+  * Only the newest lookup may write anything, and the counter lives outside this
+  * binding: a re-render binds the card again, and a response still in flight
+  * from the previous binding must not land in the new one.
+  */
+ lookupSequence++;
+ /* Not mid-lookup, and a request from an earlier binding is superseded -- but
+    the button keeps the state the render gave it, so a fresh card still needs
+    an edit (or a lookup) before it can be saved. */
+ if(save)delete save.dataset.lookupPending;
  $('#wx-lookup').onclick=async()=>{
   const place=$('#wx-location').value.trim();
-  const note=$('#wx-lookup-note');
   if(!place){note.textContent='Enter a place first';return}
+  /* This request's number: anything older must not write, and a re-bind bumps
+     the sequence so a request from before the re-render cannot either. */
+  const mine=++lookupSequence;
+  filled=false;touchedLat=false;touchedLon=false;
+  setPending(true);
   note.textContent='Looking up…';
   try{
+   let postcodeMissed=false;
+   if(UK_POSTCODE.test(place)){
+    const pr=await fetch('https://api.postcodes.io/postcodes/'
+                         +encodeURIComponent(place),{cache:'no-store'});
+    if(pr.ok){
+     const p=(await pr.json()).result||{};
+     if(Number.isFinite(+p.latitude)&&Number.isFinite(+p.longitude)){
+      fill(p.latitude,p.longitude,
+           [p.postcode,p.admin_district||p.region||p.country].filter(Boolean).join(', '),
+           `Found ${[p.postcode,p.admin_district||p.country||''].filter(Boolean).join(', ')}`,mine);
+      return;
+     }
+    }
+    postcodeMissed=pr.status===404;
+   }
    /* Queried from this browser rather than the device: the daemon is a
       single bounded poll() loop with no threads, and a blocking lookup
       inside it would stall every other request. Explicit button, so no
       request leaves the browser unless it is asked for. */
-   const r=await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name='
-                       +encodeURIComponent(place),{cache:'no-store'});
-   const j=await r.json();
-   const hits=j.results||[];
-   if(!hits.length){note.textContent='No match for that place';return}
+   const search=async name=>{
+    const r=await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name='
+                        +encodeURIComponent(name),{cache:'no-store'});
+    return (await r.json()).results||[];
+   };
+   let used=place,dropped=false,hits=await search(place);
+   /* The geocoder's qualifier has to be an exact country or first-level area,
+      so "Carnforth, Lancashire" (a county, admin2) matches nothing while
+      "Carnforth" and "Carnforth, England" do. Retry without the qualifier
+      rather than reporting no match for a place that exists -- but the retry
+      is offered, never accepted on the user's behalf, because the bare name can
+      match a different region or country. */
+   if(!hits.length&&place.includes(',')){
+    used=place.split(',')[0].trim();
+    if(used&&used!==place){hits=await search(used);if(hits.length)dropped=true;}
+   }
+   if(!hits.length){
+    note.textContent=postcodeMissed
+      ? 'That postcode was not found — a retired postcode is the usual reason. Check the spelling, or enter the town name.'
+      : 'No match for that place. Check the spelling, or enter a town or city name (a UK postcode works too).';
+    return;
+   }
+   if(dropped){offer(hits,`Nothing matched "${place}". Closest name matches:`,mine);return}
+   if(hits.length>1){offer(hits,`${hits.length} places match "${place}".`,mine);return}
    const h=hits[0];
-   $('#wx-lat').value=(+h.latitude).toFixed(4);
-   $('#wx-lon').value=(+h.longitude).toFixed(4);
-   $('#wx-location').value=[h.name,h.admin1].filter(Boolean).join(', ');
-   note.textContent=hits.length>1
-     ? `Using ${h.name}, ${h.admin1||''} ${h.country_code||''} — ${hits.length-1} other match(es); edit and look up again if wrong`
-     : `Found ${h.name}, ${h.admin1||''} ${h.country_code||''}`;
-   $('#save-wx').disabled=false;
-   warn();
-  }catch(e){ note.textContent='Lookup failed: '+e.message; }
+   fill(h.latitude,h.longitude,[h.name,h.admin1].filter(Boolean).join(', '),
+        `Found ${describe(h)}`,mine);
+  }catch(e){ if(mine===lookupSequence)note.textContent='Lookup failed: '+e.message; }
+  /* Only a lookup that placed the coordinates ends the pending state: a miss, a
+     failure or an offered list leaves them belonging to whatever was resolved
+     before, so saving stays shut until the user resolves it. */
+  finally{ if(mine===lookupSequence&&filled)setPending(false); }
  };
+}
+function bindWeather(a){
+ if(a.unsupported||!$('#wx-provider'))return;
+ /* The saved place, for the stale-coordinate guard below: bindWeatherLookup
+    keeps its own copy, and this handler cannot see it. */
+ const startLoc=(a.home_location||'').trim();
+ $('#wx-location').value=a.home_location||'';
+ $('#wx-lat').value=a.latitude||'';
+ $('#wx-lon').value=a.longitude||'';
+ bindDirty(['#wx-provider','#wx-location','#wx-lat','#wx-lon'],'#save-wx');
+ bindWeatherLookup(a);
  $('#save-wx').onclick=()=>{
   const loc=$('#wx-location').value.trim();
   const lat=$('#wx-lat').value.trim(), lon=$('#wx-lon').value.trim();
   if(loc&&(!lat||!lon)){toast('Look up the coordinates first — an empty coordinate is ignored by the device',true);return}
+  if(lookupPending()){toast('Finish the lookup first — the coordinates on screen are not for that place yet.',true);return}
+  /* The same rule the Integrations renderer applies: a renamed place that keeps
+     the old coordinates would report the old town's weather under the new name. */
+  if(loc&&startLoc&&loc!==startLoc&&lat===(a.latitude||'')&&lon===(a.longitude||'')){
+   toast('The place changed but the coordinates did not. Look them up before saving.',true);return}
   mutate('/assistant',{weather_provider:wxId($('#wx-provider').value),home_location:loc,
                        latitude:lat,longitude:lon},'Home location saved');};}
 /*

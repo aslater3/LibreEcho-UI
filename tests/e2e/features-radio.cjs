@@ -347,7 +347,10 @@ async function main() {
   assert.equal(await page.locator('#wx-lon').inputValue(), '-97.7431');
   assert.equal(await page.locator('#save-wx').isDisabled(), true);
   await page.locator('#wx-location').fill('Round Rock, Texas');
-  assert.equal(await page.locator('#save-wx').isDisabled(), false);
+  /* A place edit makes the existing coordinates stale: Save stays shut until
+     the new place is looked up or both coordinates are entered explicitly. */
+  assert.equal(await page.locator('#save-wx').isDisabled(), true);
+  assert.match(await page.locator('#wx-lookup-note').innerText(), /look it up again/i);
   assert.deepEqual(
     await page.$$eval('.integration-grid > *', els => els.map(e => (e.querySelector('h3') || {}).textContent)),
     ['Voice Assistants', 'Home location & weather', 'Home Assistant', 'MQTT', 'Local REST API',

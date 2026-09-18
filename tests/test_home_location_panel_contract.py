@@ -12,6 +12,18 @@ assert "function bindHomeLocation(a)" in source
 assert "bindHomeLocation(a);" in source
 for selector in ("#wx-provider", "#wx-location", "#wx-lat", "#wx-lon", "#save-wx"):
     assert selector in source, f"missing Home location binding: {selector}"
+assert "bindWeatherLookup(a)" in source, "the shared lookup binding is not called by this renderer"
+app = Path("web/js/app.js").read_text(encoding="utf-8")
+assert "function lookupPending(" in app and "if(lookupPending())" in app, (
+    "a lookup in flight must block saving on the fallback path too")
+assert "if(lookupPending())" in source, (
+    "a lookup in flight must block saving here as well")
+assert app.count("!==lookupSequence") == 2, (
+    "a superseded lookup must not write into the fields")
+assert "const mine=++lookupSequence;" in app, "the lookup sequence is not tracked"
+assert "save.disabled=false}" in app, (
+    "clearing the pending state must re-enable Save: the fields are filled "
+    "programmatically, so bindDirty never fires for a successful lookup")
 assert "weather_provider:provider" in source
 assert "home_location:location" in source
 assert "haveLatitude!==haveLongitude" in source
