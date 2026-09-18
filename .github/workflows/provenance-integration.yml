@@ -1,0 +1,49 @@
+name: Signed provenance integration
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'web/openapi.json'
+      - 'Makefile'
+      - '.github/workflows/provenance-integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  signed-provenance:
+    name: Signed Platform to UI integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - name: Check out UI
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: ui
+          persist-credentials: false
+      - name: Check out immutable companion Platform contract
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: aslater3/LibreEcho-Platform
+          ref: c34d26e7f2266191e056f7b8ed2822f524f46d75
+          path: platform
+          persist-credentials: false
+      - name: Install host-only verification dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential busybox python3-nacl python3-jsonschema
+      - name: Exercise actual signed producer and consumer
+        env:
+          LIBREECHO_PLATFORM_SRC: ${{ github.workspace }}/platform
+        run: |
+          set -euo pipefail
+          make build/libreecho-web build/test-authority-provenance
+          ./build/test-authority-provenance
+          python3 tests/test_authority_provenance_integration.py

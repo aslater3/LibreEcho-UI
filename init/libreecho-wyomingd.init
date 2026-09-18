@@ -15,7 +15,12 @@ LOGFILE=${LOGFILE:-/var/log/libreecho-wyomingd.log}
 PORT=${PORT:-10700}
 WAKE_SOCKET=${WAKE_SOCKET:-/run/libreecho/wakeword.sock}
 AUDIO_BUS=${AUDIO_BUS:-/run/libreecho-audio/system.pcm}
-ARGS=${ARGS:---foreground --port $PORT --wake-socket $WAKE_SOCKET --audio-bus $AUDIO_BUS}
+# Discovery is registration, not ownership: the shared libreecho-mdnsd
+# supervisor publishes the record and this daemon only takes a lease on it.
+# Registration is optional at startup, so a missing supervisor degrades
+# discovery without stopping the Wyoming listener.
+MDNS_SOCKET=${MDNS_SOCKET:-/run/libreecho/mdns.sock}
+ARGS=${ARGS:---foreground --port $PORT --wake-socket $WAKE_SOCKET --audio-bus $AUDIO_BUS --mdns-socket $MDNS_SOCKET}
 
 # Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life:
 # it goes stale when the daemon is started from a shell that then exits (the

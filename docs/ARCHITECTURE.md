@@ -198,7 +198,8 @@ Each daemon owns one hardware domain and exposes it via the adapter protocol.
 | `set_gain` | `{gain: 0-100}` | Set microphone gain |
 | `set_mute` | `{muted: bool}` | Toggle mic mute |
 | `test_tone` | — | Play 440Hz sine wave |
-| `cue` | `{first_hz, second_hz, ms}` | Play a bounded two-tone notification cue |
+| `cue` | `{first_hz, second_hz, ms}` | Play a two-tone notification cue. Rate-limited at this boundary: a request inside the 200ms minimum interval, or one that arrives while the previous cue is still playing, is dropped rather than queued and is answered with `{playing:false, throttled:true}` |
+| `wake_chirp` | — | The 90ms wake acknowledgement chirp, played through the same cue gate |
 
 **ALSA interface:** Direct ioctl on `/dev/snd/controlC0`. Enumerates controls, reads/writes values. Falls back to `amixer` if ioctl fails.
 
@@ -305,7 +306,37 @@ tools/libreecho-backup.sh create /tmp/backup.tar.gz
 tools/libreecho-backup.sh restore /tmp/backup.tar.gz
 ```
 
-**Contents:** Config files, recent logs, web state, manifest with version/timestamp/hostname.
+**Contents:** Active persistent state only: `/data/libreecho/config` and
+`/data/libreecho/secrets`, including accounts and supported daemon stores. The
+version-2 manifest records the bounded scope, required files, private secret
+policy, and exclusions. Factory defaults under `/etc/libreecho`, installed
+feature payloads, OTA/release identity, runtime state, logs, transaction files
+(`*.tmp` and the `*.tmp.<suffix>` residue of an interrupted `mkstemp` writer,
+`*.new`), stale pre-update copies (`*.bak`, the durable copy
+`config_write_atomic`, `agentd`, and `timerd` leave of the previous file
+contents), raw wake PCM, and one-shot platform markers are not backed up. The same exclusions are applied to
+the incoming trees of every restore, so an archive written by an earlier tool,
+or one whose manifest names no exclusions, cannot install them either. Symlinked
+state is refused in both directions, including a configured state root that is
+itself a link, a root spelled with a `.` or `..` component, and a root whose path
+crosses a link in any component, rather than archived or restored. A trailing or
+doubled separator is normalized to the same root before those checks, and no
+component is resolved, so another spelling of a root cannot slip past them. The
+top-level `manifest.json` must be a regular file, not a link and with a single
+link count, and is checked before it is read or listed, so reading it cannot
+disclose a root-readable file or a hard-linked captured secret; a member that
+escapes the archive root is refused before extraction by a streaming scan that
+holds one name at a time. The manifest names the tree scope and the suffixes of every pruned
+file class.
+
+Restore stages and validates both trees, including numeric ownership. It only
+replaces the live trees after staging succeeds, so ordinary copy or permission
+failures leave existing state untouched. `LIBREECHO_CONFIG_OWNER` and
+`LIBREECHO_SECRETS_OWNER` may supply numeric `uid:gid` values; when set they
+must match the existing tree owner. No account or credential database is read.
+Service recovery treats shipped inactive status `1` (most init scripts) and
+`3` (watchdog/radio) as inactive, stops the watchdog first, and starts only
+the services that were running, in dependency order.
 
 ## Data Flow Examples
 
@@ -451,11 +482,58 @@ libreecho-audiod    (needs logd for logging)
 libreecho-ledd      (needs logd for logging)
     ↑
 libreecho-waked → libreecho-sttd → libreecho-ttsd → libreecho-agentd
+        └──────────────────────────────→ libreecho-lived (disarmed until selected)
     ↑
 libreecho-web       (needs all above for full functionality)
 ```
 
 **Startup order:** logd → networkd → audiod → micd → waked → sttd → ledd →
-btd → airplayd → ttsd → agentd → web
+btd → airplayd → ttsd → agentd → lived → web
 
 **Shutdown order:** reverse startup order.
+
+## Service Control Boundary
+
+Services are controlled by running another daemon's init script
+(`/etc/init.d/libreecho-<service>.init`): the Web daemon starts and stops the
+voice pipeline, factory reset stops the service supervisor and every daemon that
+owns persistent state, and `libreecho-watchdogd` restarts a service that stopped
+answering. The supervisor is stopped first because the daemons the reset stops
+are exactly the ones it supervises; `src/backend_linux.c` holds the list and the
+reason for each entry. Stopping it also stops the recovery it had in flight, in
+both halves: the init script collects the supervisor's descendants while it is
+still alive (`init/libreecho-watchdogd.init`), and the supervisor itself stops
+launching recoveries as soon as it is asked to stop and terminates the one it is
+running with the work it has started (`src/service_env.c`). The second half is
+what covers a fork that happens after that one-time snapshot, which is the
+window that matters: a service start can wait a long time for its own
+dependencies before it launches the daemon, and a recovery left running would
+start a service the caller has already confirmed stopped.
+
+`libreecho-micd` and `libreecho-waked` are one unit in that same list. micd
+offers its mono stream once and waked attaches to it once with no reconnect
+path, so the reset stops the consumer before the producer, and a refused reset
+restores the pair in the other order -- micd first -- because a waked started
+against the micd it was stopped with answers the second stream request with a
+protocol error and leaves the device without a wake word until the next reboot.
+
+The same list carries `libreecho-waked`, which is not only a configuration
+reader: when the one-shot dump request (`config/wake-dump-seconds`) is present it
+creates `config/wake-dump.raw` inside the reset scope once its model and
+microphone are ready, so a reset that scanned the directory before that open
+would carry recorded microphone audio across the reboot.
+
+Each of those callers carries its own generic `ARGS`, `DAEMON`, `PIDFILE` and
+`LOGFILE`, and every init script resolves its settings with
+`VAR=${VAR:-default}`. An inherited value therefore wins inside the child
+script, which is how a voice-pipeline change used to start
+`libreecho-sttd`/`libreecho-ttsd`/`libreecho-agentd` and `libreecho-wyomingd`
+with the Web daemon's own command line — usage on stderr, exit, and an API
+that reported "Voice assistant service is unavailable".
+
+`src/service_env.c` is that boundary: the four caller-identity names are
+removed in the forked child immediately before `exec`, so each script resolves
+its own defaults and its own root-owned `/etc/default/libreecho-<service>`
+file. Unrelated variables, including the service-scoped `LE_*` settings a
+script may read, are left alone. A service's own configuration is never the
+caller's command line.

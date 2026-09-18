@@ -1,20 +1,7 @@
+#!/usr/bin/env python3
+"""Run startup behaviour against the scripts actually loaded by index.html."""
 from pathlib import Path
+import subprocess
 
-
-source = Path("web/js/app.js").read_text()
-ensure_auth = source[source.index("async function ensureAuth"):source.index("async function signOut")]
-show_page = source[source.index("function showPage"):source.index("items.forEach", source.index("function showPage"))]
-bootstrap = source[source.index("api('/config')"):]
-
-# The shell must remain hidden until the first requested page has finished
-# rendering; otherwise the static sidebar placeholders flash behind the UI.
-assert "document.body.classList.remove('auth-pending')" not in ensure_auth
-assert "return render()" in show_page
-assert "await showPage(pageFromLocation(),false)" in bootstrap
-assert "document.body.classList.remove('auth-pending')" in bootstrap
-
-# A failed first render must not leave the green Connecting placeholder behind.
-assert "markStartupUnavailable" in source
-assert "markStartupUnavailable()" in bootstrap
-
-print("startup state contract: ok")
+ROOT = Path(__file__).resolve().parents[1]
+subprocess.run(["node", "tests/test_startup_state.js"], cwd=ROOT, check=True, timeout=10)
