@@ -332,13 +332,13 @@ async function main() {
   await home.waitFor({ timeout: 5000 });
   assert.equal(await home.count(), 1, 'exactly one home-location card');
   assert.match(await home.locator('summary h3').innerText(), /Home location & weather/);
-  /* Collapsed by default since "stop expanding panels": Home location, Local
-     LLM, the on-device assistant, GPT-Live and Internet radio must not open
-     themselves on load. */
+  /* Configuration panels stay collapsed, but the subscription-backed device
+     assistant remains open while sign-in is required so polling cannot hide
+     its device code and Connect action. */
   assert.equal(await home.evaluate(el => el.open), false, 'the card starts collapsed');
   const providerPanels = page.locator('.assistant-provider');
   assert.equal(await providerPanels.count(), 3, 'all three voice provider panels render');
-  assert.deepEqual(await providerPanels.evaluateAll(els => els.map(el => el.open)), [false, false, false], 'voice provider panels start collapsed');
+  assert.deepEqual(await providerPanels.evaluateAll(els => els.map(el => el.open)), [false, true, false], 'only the sign-in-required provider starts open');
   await home.locator('summary').click();
   assert.match(await home.innerText(), /Home address or place/);
   assert.match(await home.innerText(), /weather, local time and, in future, directions/);
