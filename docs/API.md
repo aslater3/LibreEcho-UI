@@ -1135,13 +1135,22 @@ Shutdown device. Requires confirmation.
 Permanently removes every file and nested directory below the product image's
 `/data/libreecho/config` and `/data/libreecho/secrets` directories, including
 device-local accounts, setup completion, Wi-Fi profiles/PSKs, assistant
-credentials, timers, and all mutable user configuration. The reset synchronizes
+credentials, timers, and all mutable user configuration. The daemons that own
+that state are stopped first and confirmed stopped -- including the service
+supervisor, which would otherwise restart a deliberately stopped daemon or
+finish a recovery it had already started, and waked, which opens its microphone
+dump output inside the reset scope once its startup work is done rather than
+reading it from the persistent configuration -- and any that could not be
+stopped aborts the reset before anything is removed. The reset then synchronizes
 both persistent directories and reboots. Installed feature payloads, OTA
 artifacts, and release identity outside those directories are preserved.
 The operation requires `X-LibreEcho-Confirm: confirm-device-action`; missing
 directories are accepted, while any unexpected deletion or durability failure
-aborts the reboot and returns HTTP 503. Unprivileged Linux deployments and
-backends without destructive-action support return HTTP 501.
+aborts the reboot, restores the stopped daemons, and returns HTTP 503. A
+restored microphone and wake-word pair is restarted as a unit, microphone
+service first, so the restarted consumer attaches to a stream it can use.
+Unprivileged Linux deployments and backends without destructive-action support
+return HTTP 501.
 
 #### GET /api/v1/system/update
 

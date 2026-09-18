@@ -21,8 +21,11 @@ make build/test-network-health build/test-adapter-client-events build/test-gatew
 ./build/test-adapter-client-events
 ./build/test-gateway-probe
 ./build/test-factory-reset
+make build/test-factory-reset-linux
+./build/test-factory-reset-linux
 sh tests/test_factory_reset_bluetooth_contract.sh
 sh tests/test_factory_reset_quiesce_contract.sh
+sh tests/test_factory_reset_api.sh
 sh tests/test_backup_roundtrip.sh
 sh tests/test_persistent_state_backup_contract.sh
 make build/test-backend-linux-wifi-emission
@@ -52,6 +55,7 @@ python3 tests/test_networkd_health_integration.py
 python3 tests/test_backend_linux_wifi_contract.py
 sh tests/test_network_liveness_contract.sh
 sh tests/test_init_service_control.sh
+sh tests/test_watchdog_stop_recovery_contract.sh
 sh tests/test_bluetooth_pairing_contract.sh
 sh tests/test_bluetooth_pairing_code_ui.sh
 sh tests/test_bluetooth_io_capability_contract.sh
@@ -101,6 +105,7 @@ sh tests/test_startup_animation.sh
 ./build/test-watchdog-policy
 make build/libreecho-watchdogd
 sh tests/test_watchdogd_recovery.sh
+sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
 make build/libreecho-timerd build/libreecho-watchdogd
 python3 tests/test_watchdog_timer_recovery.py
@@ -170,6 +175,8 @@ sh tests/test_pr95_followups_contract.sh
 sh tests/test_setup_connectivity_contract.sh
 sh tests/test_voice_pipeline_restart_contract.sh
 sh tests/test_service_env_isolation_contract.sh
+make build/test-service-cancel-linux
+./build/test-service-cancel-linux
 make build/test-service-env-isolation
 ./build/test-service-env-isolation
 make build/test-voice-pipeline-env-isolation

@@ -56,6 +56,26 @@ pidfile_pid() {
     kill -0 "$pid" 2>/dev/null || return 1
     printf '%s\n' "$pid"
 }
+# Every process whose parent is $1. Recovery runs another service's init script
+# as a child of this daemon, and a service start can wait a long time -- agentd
+# waits up to 90s for its dependency sockets -- before it launches anything or
+# touches /data/libreecho. Stopping the supervisor therefore has to stop the
+# recovery it already launched: a recovery that is still in flight when the
+# daemon dies keeps running, and the caller that asked for the stop has no way
+# to see it. A dead daemon's children are reparented, so they are collected
+# while the parent is still alive.
+children_of() {
+    parent=$1
+    [ -n "$parent" ] || return 0
+    for entry in /proc/[0-9]*; do
+        candidate=${entry#/proc/}
+        [ "$candidate" = "$$" ] && continue
+        [ "$candidate" = "$parent" ] && continue
+        [ -r "$entry/status" ] || continue
+        ppid=$(sed -n 's/^PPid:[^0-9]*//p' "$entry/status" 2>/dev/null | sed -n '1p')
+        [ "$ppid" = "$parent" ] && printf '%s\n' "$candidate"
+    done
+}
 is_running() { pidfile_pid >/dev/null && return 0; [ -n "$(running_pids)" ]; }
 terminate() {
     target=$1; limit=${2:-5}; kill "$target" 2>/dev/null || true; count=0
@@ -77,9 +97,22 @@ start_service() {
     fi
 }
 stop_service() {
+    # Collect the supervisor process and the recovery it has in flight before
+    # terminating anything: once the daemon is gone its children are reparented
+    # and can no longer be found by parent.
+    recovery=
+    for owner in $(pidfile_pid 2>/dev/null || true) $(running_pids); do
+        for child in $(children_of "$owner"); do recovery="$recovery $child"; done
+    done
     if pidfile_pid >/dev/null && command -v start-stop-daemon >/dev/null 2>&1; then start-stop-daemon -K -p "$PIDFILE" -R TERM/5/KILL/2
     else pid=$(pidfile_pid) && terminate "$pid" 5; fi
-    for stray in $(running_pids); do terminate "$stray" 5; done
+    for stray in $(running_pids); do
+        for child in $(children_of "$stray"); do recovery="$recovery $child"; done
+        terminate "$stray" 5
+    done
+    # A recovery is a shell waiting on another service's init script, so a
+    # two-second grace is enough and keeps the caller's stop bounded.
+    for child in $recovery; do terminate "$child" 2; done
     rm -f "$PIDFILE"
 }
 

@@ -167,7 +167,19 @@ static int run_init(const char *script, const char *action)
     argv[1] = script;
     argv[2] = action;
     argv[3] = NULL;
-    return le_service_command("/bin/sh", argv);
+    /* A stop request cancels the recovery rather than waiting it out: the
+       caller stopping the watchdog is quiescing the services it supervises
+       (the factory reset stops it first for exactly that reason), so a
+       recovery this daemon launches must not outlive it -- the shell would be
+       reparented and start a service the caller has already confirmed
+       stopped. The request is read before the fork as well as during it, so a
+       recovery that arrives after the signal is not started at all, and one
+       that is already running is terminated with the work it has begun rather
+       than waited out. The init script collects the recoveries it can still
+       see; this covers the ones it cannot -- a fork after its snapshot -- and
+       is what keeps this daemon's shutdown from ending before the work it
+       started. */
+    return le_service_command_cancellable("/bin/sh", argv, &running);
 }
 
 static int in_group(const struct supervised *services, size_t index,
@@ -199,6 +211,11 @@ static void restart_group(struct supervised *services, size_t count,
 {
     size_t i;
 
+    /* A stop request arrived before this group was reached: the caller is
+       quiescing these services, and starting one now would undo that. */
+    if (!running)
+        return;
+
     /* Stop in reverse order, so a consumer is down before its producer, and
        ignore the result: a wedged service often fails to stop cleanly, and
        refusing to start again because of that would leave it down
@@ -206,6 +223,10 @@ static void restart_group(struct supervised *services, size_t count,
     for (i = count; i-- > 0;)
         if (in_group(services, i, leader))
             (void)run_init(services[i].desc->init_script, "stop");
+
+    /* The stop request can also have arrived while that ran. */
+    if (!running)
+        return;
 
     for (i = 0; i < count; ++i) {
         if (!in_group(services, i, leader))

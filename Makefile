@@ -277,6 +277,13 @@ $(BUILD)/test-service-env-isolation: tests/test_service_env_isolation.c \
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
+# The wait behind the supervisor's recovery path: a stop request has to end the
+# recovery that is in flight, not be waited out.
+$(BUILD)/test-service-cancel-linux: tests/test_service_cancel_linux.c \
+		src/service_env.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
 # Drives the real worker, queue, thread and decoder against scripted score
 # sequences; the test supplies its own le_wake_engine, so no ONNX runtime or
 # model is needed to exercise the decoding rules.
@@ -440,6 +447,22 @@ $(BUILD)/test-radiod-mp3-frames: tests/test_radiod_mp3_frames.c tests/radiod_mp3
 $(BUILD)/test-factory-reset: tests/test_factory_reset.c src/factory_reset.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+# The reboot, the privilege check, the init scripts and the file-existence probe
+# are the four boundaries the reset crosses, so they are wrapped rather than
+# replaced: the backend under test is the shipped one, compiled unmodified. The
+# test includes src/backend_linux.c itself, so that file is a dependency of the
+# rule but not a separately linked object.
+$(BUILD)/test-factory-reset-linux: tests/test_factory_reset_linux.c \
+		src/backend_linux.c src/factory_reset.c src/json.c src/log.c \
+		src/service_env.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter \
+		-Wl,--wrap=le_service_command -Wl,--wrap=geteuid -Wl,--wrap=sync \
+		-Wl,--wrap=reboot -Wl,--wrap=access -Wl,--wrap=unlink \
+		$< src/factory_reset.c src/json.c src/log.c src/service_env.c -o $@
 
 $(BUILD)/test-update-identity: tests/test_update_identity.c src/update_identity.c
 	@mkdir -p $(BUILD)
@@ -955,6 +978,7 @@ clean:
 		$(BUILD)/test-voice-listening-feedback \
 		$(BUILD)/test-voice-pipeline-restart \
 		$(BUILD)/test-service-env-isolation \
+		$(BUILD)/test-service-cancel-linux \
 		$(BUILD)/test-voice-pipeline-env-isolation \
 		$(BUILD)/test-home-assistant-discovery \
 		$(BUILD)/libreecho-sttd-sherpa-arm32 \
