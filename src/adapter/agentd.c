@@ -35,7 +35,7 @@
 #define DEFAULT_AGENT_CREDENTIALS \
     "/data/libreecho/secrets/openai-codex.json"
 #define DEFAULT_CURL "/usr/local/libexec/libreecho-curl"
-#define DEFAULT_MODEL "gpt-5.4"
+#define DEFAULT_MODEL "gpt-5.6-luna"
 #define DEFAULT_AUDIO_SOCKET LE_ADAPTER_AUDIO_SOCK
 #define DEFAULT_RADIO_SOCKET LE_ADAPTER_RADIO_SOCK
 #define DEFAULT_MEDIA_STATUS "/run/libreecho-audio/status.json"

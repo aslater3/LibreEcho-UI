@@ -220,6 +220,7 @@ int main(void)
     CHECK(call(socket_path, "status", NULL,
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"authenticated\":false") != NULL);
+    CHECK(strstr(response, "\"model\":\"gpt-5.6-luna\"") != NULL);
     CHECK(strstr(response, "\"latency_target_ms\":3000") != NULL);
     CHECK(call(socket_path, "auth_start", NULL,
                response, sizeof(response)) == 0);
@@ -234,7 +235,7 @@ int main(void)
     CHECK((status.st_mode & 0777) == 0600);
     CHECK(call(
               socket_path, "configure",
-              "{\"enabled\":true,\"model\":\"gpt-5.4\","
+              "{\"enabled\":true,\"model\":\"gpt-5.6-luna\","
               "\"prompt\":\"Answer briefly for spoken playback.\"}",
               response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"enabled\":true") != NULL);

@@ -680,7 +680,7 @@ Updates the provider-neutral assistant configuration:
 {
   "enabled": true,
   "provider": "openai-codex",
-  "model": "gpt-5.4",
+  "model": "gpt-5.6-luna",
   "clock_format": "12",
   "prompt": "Reply in concise, natural spoken English without markdown."
 }

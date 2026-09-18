@@ -322,7 +322,7 @@ async function main() {
   await page.route('**/api/v1/assistant', async route => {
     if (route.request().method() !== 'GET') return route.fallback();
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, data: {
-      enabled: false, provider: 'openai-codex', provider_name: 'ChatGPT', model: 'gpt-5.4', prompt: 'Reply briefly.',
+      enabled: false, provider: 'openai-codex', provider_name: 'ChatGPT', model: 'gpt-5.6-luna', prompt: 'Reply briefly.',
       authenticated: false, auth_state: 'idle', weather_provider: 'open-meteo',
       home_location: 'Austin, Texas', latitude: '30.2672', longitude: '-97.7431' }, error: null }) });
   });
