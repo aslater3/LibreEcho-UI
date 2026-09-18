@@ -1609,7 +1609,7 @@ function bindWeatherLookup(a){
      if(Number.isFinite(+p.latitude)&&Number.isFinite(+p.longitude)){
       fill(p.latitude,p.longitude,
            [p.postcode,p.admin_district||p.region||p.country].filter(Boolean).join(', '),
-           `Found ${[p.postcode,p.admin_district||p.country||''].filter(Boolean).join(', ')} — now set the place name if you want something shorter`,mine);
+           `Found ${[p.postcode,p.admin_district||p.country||''].filter(Boolean).join(', ')}`,mine);
       return;
      }
     }
