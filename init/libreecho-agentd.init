@@ -161,11 +161,12 @@ start_service() {
         "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")"
     chmod 0700 /data/libreecho/secrets
     export LE_AGENT_CA_BUNDLE="$CA_BUNDLE"
-    if [ -r /data/libreecho/config/web-config.json ] &&
-        grep -q '"voice_pipeline_mode"[[:space:]]*:[[:space:]]*"custom"' \
-            /data/libreecho/config/web-config.json; then
-        export LE_AGENT_TTS_AGGREGATE=1
-    fi
+    # ttsd is deliberately single-flight. Sending one synthesis request per
+    # streamed sentence makes it wait for each sentence to finish before it can
+    # synthesize the next, producing a large artificial pause at every full
+    # stop/newline. Aggregate the short, voice-safe response into one request;
+    # this trades a small amount of first-audio latency for continuous speech.
+    export LE_AGENT_TTS_AGGREGATE=1
     ARGS=${ARGS:---socket $SOCKET --curl $CURL}
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS \

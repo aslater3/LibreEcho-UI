@@ -34,6 +34,11 @@ for socket_name in ('wakeword.sock', 'stt.sock', 'audio.sock', 'tts.sock'):
 assert 'sleep "$AGENT_DEPENDENCY_POLL_SECONDS"' not in source
 assert 'remaining=$((AGENT_DEPENDENCY_TIMEOUT_SECONDS - elapsed))' in source
 assert 'poll_seconds=$AGENT_DEPENDENCY_POLL_SECONDS' in source
+assert source.count('export LE_AGENT_TTS_AGGREGATE=1') == 1
+aggregate = source.index('export LE_AGENT_TTS_AGGREGATE=1')
+args = source.index('ARGS=${ARGS:', aggregate)
+assert aggregate < args
+assert 'voice_pipeline_mode' not in source[max(0, aggregate - 300):aggregate]
 PY
 
 WAKE_SOCKET=$WORK/wakeword.sock
