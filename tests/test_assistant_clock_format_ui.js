@@ -97,14 +97,14 @@ async function main() {
     // With the device assistant selected, both panels render distinct spoken
     // time selectors and the device save keeps sending its own choice.
     assistant = { provider: 'openai-codex', enabled: true, authenticated: true,
-        provider_name: 'ChatGPT', model: 'gpt-5.4', prompt: 'Reply briefly.',
+        provider_name: 'ChatGPT', model: 'gpt-5.6-luna', prompt: 'Reply briefly.',
         clock_format: '12' };
     await integrationsPage();
     if (!content.innerHTML.includes('id="local-clock-format"') ||
         !content.innerHTML.includes('id="assistant-clock-format"'))
         throw new Error('both assistant panels should render distinct spoken time selectors');
     document.querySelector('#assistant-clock-format').value = '24';
-    document.querySelector('#assistant-model').value = 'gpt-5.4';
+    document.querySelector('#assistant-model').value = 'gpt-5.6-luna';
     document.querySelector('#assistant-prompt').value = 'Reply briefly.';
     await document.querySelector('#save-assistant').onclick();
     const device = lastPutBody('/assistant');

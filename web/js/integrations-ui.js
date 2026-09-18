@@ -29,6 +29,65 @@ function assistantProviderPanel(options) {
   </details>`;
 }
 
+/*
+ * The ChatGPT account is shared by every subscription-backed assistant, so the
+ * sign-in controls belong to the account rather than to one provider panel.
+ * They are rendered wherever the account is required -- including while the
+ * provider is not selected or not enabled -- and bound from one place per
+ * panel that draws them, so account setup is never reachable only through
+ * activation.
+ */
+function chatgptAccount(a) {
+  const authState=String(a?.auth_state||(a?.authenticated?'signed_in':'signed_out'));
+  const signedIn=Boolean(a?.authenticated);
+  const waiting=authState==='waiting';
+  const failed=authState==='error';
+  return {signedIn,waiting,failed,authState,
+    status:signedIn?'Signed in':waiting?'Waiting for sign-in':failed?'Sign-in failed':'Sign in required'};
+}
+
+function chatgptSignInBlock(a,prefix) {
+  const waiting=a.auth_state==='waiting';
+  const signedIn=Boolean(a.authenticated);
+  return `${
+    waiting?`<div class="device-code"><span>Enter this code</span><strong>${esc(a.user_code)}</strong><a class="primary-btn action-link" href="${esc(a.verification_url)}" target="_blank" rel="noopener">Open ChatGPT sign-in</a></div>`:''
+  }${
+    a.auth_state==='error'&&a.auth_error?`<p class="error-text">ChatGPT sign-in failed: ${esc(a.auth_error)}</p>`:''
+  }<div class="button-row">
+    ${!signedIn&&!waiting?action('Connect ChatGPT',prefix+'-auth-start','primary-btn'):''}
+    ${waiting?action('Check sign-in',prefix+'-auth-poll','primary-btn'):''}
+    ${signedIn?action('Disconnect',prefix+'-logout','danger-btn'):''}
+  </div>${
+    signedIn?'':'<p class="muted">The switch above stays off until this account is signed in.</p>'
+  }`;
+}
+
+function bindChatgptSignIn(prefix) {
+  if($('#'+prefix+'-auth-start'))$('#'+prefix+'-auth-start').onclick=()=>assistantAction('/assistant/auth/start','ChatGPT device sign-in started');
+  if($('#'+prefix+'-auth-poll'))$('#'+prefix+'-auth-poll').onclick=()=>assistantAction('/assistant/auth/poll','Sign-in status checked');
+  if($('#'+prefix+'-logout'))$('#'+prefix+'-logout').onclick=()=>assistantAction('/assistant/logout','ChatGPT disconnected');
+}
+
+/*
+ * A pending device login is polled so the code and the verification link stay
+ * valid while the user finishes the sign-in in another tab. This runs for the
+ * account, not for the selected provider: sign-in can be started from either
+ * ChatGPT-backed panel, and the poll re-renders the whole page -- which is why
+ * those panels are rendered open while the account is signed out or waiting.
+ */
+function scheduleChatgptAuthPoll(a) {
+  if(!a||a.unsupported||a.auth_state!=='waiting')return;
+  state.timer=setTimeout(async()=>{
+    if(state.page!=='Integrations')return;
+    try {
+      await api('/assistant/auth/poll',{method:'POST',body:'{}'});
+      await integrationsPage();
+    } catch(error) {
+      toast(error.message,true);
+    }
+  },3000);
+}
+
 function assistantTelemetry(a) {
   const latency=Number(a.last_speech_end_to_first_pcm_ms||0);
   return `<dl class="facts">
@@ -86,25 +145,23 @@ function localAssistantBody(a,selected,pipeline) {
 }
 
 function deviceAssistantBody(a,selected) {
-  if(!selected) {
-    return `<div class="assistant-heading">
-      <div>
-        <span class="source-pill">Subscription</span>
-        <h4>ChatGPT</h4>
-        <p class="muted">Uses ChatGPT device login without storing an API key or falling back to metered API billing.</p>
-      </div>
-    </div>
-    <div class="privacy-callout">Enable this assistant to view or change its ChatGPT sign-in.</div>`;
-  }
-  const signedIn=Boolean(a.authenticated),waiting=a.auth_state==='waiting';
-  return `<div class="assistant-heading">
+  const heading=`<div class="assistant-heading">
     <div>
       <span class="source-pill">Subscription</span>
       <h4>${esc(a.provider_name||'ChatGPT')}</h4>
       <p class="muted">Uses ChatGPT device login without storing an API key or falling back to metered API billing.</p>
     </div>
-  </div>
-  ${waiting?`<div class="device-code"><span>Enter this code</span><strong>${esc(a.user_code)}</strong><a class="primary-btn action-link" href="${esc(a.verification_url)}" target="_blank" rel="noopener">Open ChatGPT sign-in</a></div>`:''}
+  </div>`;
+  if(!selected) {
+    /* Sign-in is account setup, not provider activation: it is rendered and
+       bound here even while another provider is selected. */
+    return `${heading}
+    ${chatgptSignInBlock(a,'assistant')}
+    <div class="privacy-callout">Enable this assistant with the switch above to run wake-to-reply on the device. Its ChatGPT sign-in is shared with GPT-Live.</div>`;
+  }
+  const signedIn=Boolean(a.authenticated);
+  return `${heading}
+  ${chatgptSignInBlock(a,'assistant')}
   <div class="settings-grid assistant-settings">
     <div>
       ${field('Provider',a.provider_name||a.provider,'assistant-provider','text','disabled')}
@@ -115,27 +172,38 @@ function deviceAssistantBody(a,selected) {
     </div>
     <div>
       ${assistantTelemetry(a)}
-      <div class="button-row">
-        ${!signedIn&&!waiting?action('Connect ChatGPT','assistant-auth-start','primary-btn'):''}
-        ${waiting?action('Check sign-in','assistant-auth-poll','primary-btn'):''}
-        ${signedIn?action('Disconnect','assistant-logout','danger-btn'):''}
-      </div>
       ${signedIn?`<label class="field"><span>Test prompt</span><input id="assistant-test-text" value="Say hello in one short sentence."></label>${action('Speak test response','assistant-test')}`:''}
     </div>
   </div>`;
 }
 
-function liveAssistantBody(live) {
+function liveAssistantBody(live,account,authPrefix) {
   if(live.unsupported) return unsupported(live.unsupported);
   const session=live.session||{},metrics=live.transport_metrics||{};
+  const signedIn=account?account.signedIn:true;
+  const disabled=signedIn?'':'disabled';
+  const voices=['alloy','ash','ballad','coral','echo','sage','shimmer','verse','marin','cedar'];
+  const accents=['natural British English','neutral English','natural Irish English','natural American English'];
+  const voice=live.voice||'marin',accent=live.accent||'natural British English';
+  const voiceOptions=voices.map(v=>`<option value="${v}" ${v===voice?'selected':''}>${v[0].toUpperCase()+v.slice(1)}</option>`).join('');
+  const accentOptions=accents.map(v=>`<option value="${v}" ${v===accent?'selected':''}>${esc(v)}</option>`).join('');
   return `<div class="assistant-heading">
     <div>
       <span class="source-pill">Subscription</span>
       <h4>GPT-Live</h4>
-      <p class="muted">Full-duplex speech-to-speech over the ChatGPT subscription. Post-AEC audio, including the short RAM-only wake preroll, leaves the device only after a wake starts a conversation.</p>
+      <p class="muted">Speech-to-speech over the ChatGPT subscription. Post-AEC audio, including the short RAM-only wake preroll, leaves the device only after a wake starts a conversation.</p>
     </div>
   </div>
+  ${signedIn?'':`${chatgptSignInBlock(live,authPrefix)}
+  <div class="privacy-callout">GPT-Live speaks over the same ChatGPT account as the On Device Voice Assistant, so it cannot be switched on until that sign-in completes.</div>`}
   <div class="settings-grid assistant-settings">
+    <div>
+      <label class="field"><span>Realtime voice</span><select id="live-voice" ${disabled}>${voiceOptions}</select></label>
+      <label class="field"><span>English accent instruction</span><select id="live-accent" ${disabled}>${accentOptions}</select></label>
+      <p class="muted">Voice names are provider personas, not guaranteed regional accents. The accent instruction is advisory and every session is explicitly instructed to remain in English.</p>
+      ${saveButton('save-live-voice')}
+      ${action('Test selected voice','test-live-voice',!signedIn||!live.enabled)}
+    </div>
     <div>
       <dl class="facts">
         <dt>Transport</dt><dd>${esc(metrics.transport||live.transport||'WebSocket')}</dd>
@@ -146,21 +214,30 @@ function liveAssistantBody(live) {
         <dt>Delegations</dt><dd>${Number(session.delegations||0)}</dd>
       </dl>
     </div>
-    <div>
-      <div class="privacy-callout">GPT-Live is not enabled at boot. Turning it on arms the local wake-word path; it does not expose idle microphone audio.</div>
-      ${live.last_event&&live.last_event!=='idle'?`<p class="muted">Last event: ${esc(live.last_event)}</p>`:''}
-    </div>
-  </div>`;
+  </div>
+  <label class="field"><span>Context supplied when a session opens</span><textarea id="live-context" rows="7" readonly>${esc(live.context||'Context is collected locally when the service starts and refreshed for each wake.')}</textarea></label>
+  <div class="privacy-callout">Context includes the LibreEcho product identity, host name, local date/time, now-playing state and active timers. Credentials, network identifiers, transcripts and microphone audio are excluded.</div>
+  ${live.last_event&&live.last_event!=='idle'?`<p class="muted">Last event: ${esc(live.last_event)}</p>`:''}`;
 }
 
-async function setLiveProvider(enabled,assistant) {
+async function setLiveProvider(enabled,assistant,gate) {
   if(state.busy)return;
+  /* See setAssistantProvider: the disabled switch is the visible half of this
+     prerequisite, not the only place it is enforced. */
+  if(enabled&&gate&&!gate.signedIn) {
+    toast('Sign in to ChatGPT before enabling GPT-Live',true);
+    await integrationsPage();
+    return;
+  }
   setBusy(true);
   try {
     if(enabled && assistant && assistant.enabled) {
       await api('/assistant',{method:'PUT',body:JSON.stringify({provider:assistant.provider,enabled:false})});
     }
-    await api('/live',{method:'PUT',body:JSON.stringify({enabled})});
+    const body={enabled};
+    if($('#live-voice'))body.voice=$('#live-voice').value;
+    if($('#live-accent'))body.accent=$('#live-accent').value;
+    await api('/live',{method:'PUT',body:JSON.stringify(body)});
     toast(enabled?'GPT-Live enabled':'GPT-Live disabled');
   } catch(error) {
     toast(error.message,true);
@@ -170,11 +247,37 @@ async function setLiveProvider(enabled,assistant) {
   }
 }
 
-function bindLiveToggle(id,assistant) {
+function bindLiveToggle(id,assistant,gate) {
   const input=$(id),row=input?.closest('.switch-row');
   if(!input)return;
   if(row)row.onclick=event=>event.stopPropagation();
-  input.onchange=()=>setLiveProvider(input.checked,assistant);
+  input.onchange=()=>setLiveProvider(input.checked,assistant,gate);
+}
+
+function bindLiveVoiceControls(live) {
+  const save=$('#save-live-voice'),test=$('#test-live-voice');
+  const apply=async preview=>{
+    if(state.busy)return;
+    if(preview&&!live.enabled){toast('Enable GPT-Live before testing a voice',true);return;}
+    setBusy(true);
+    try {
+      await api('/live',{method:'PUT',body:JSON.stringify({
+        enabled:Boolean(live.enabled),
+        voice:$('#live-voice').value,
+        accent:$('#live-accent').value
+      })});
+      if(preview)await api('/live/preview',{method:'POST',body:'{}'});
+      toast(preview?'Playing the selected realtime voice':'GPT-Live voice settings saved');
+    } catch(error) {
+      toast(error.message,true);
+    } finally {
+      await integrationsPage();
+      setBusy(false);
+    }
+  };
+  if(save)save.onclick=()=>apply(false);
+  if(test)test.onclick=()=>apply(true);
+  bindDirty(['#live-voice','#live-accent'],'#save-live-voice');
 }
 
 function clockFormatField(value,id) {
@@ -185,8 +288,20 @@ function clockFormatField(value,id) {
     `</select></label>`;
 }
 
-async function setAssistantProvider(provider,enabled,pipeline) {
+async function setAssistantProvider(provider,enabled,pipeline,gate) {
   if(state.busy)return;
+  /*
+   * A subscription-backed assistant cannot be enabled before the shared
+   * ChatGPT account is signed in: the daemon accepts the write and only fails
+   * later, at the first voice turn. The switch is rendered disabled in that
+   * state; this guard is what makes the prerequisite hold for any path that
+   * still reaches a change event.
+   */
+  if(enabled&&gate&&!gate.signedIn) {
+    toast('Sign in to ChatGPT before enabling this assistant',true);
+    await integrationsPage();
+    return;
+  }
   setBusy(true);
   try {
     if(enabled) {
@@ -223,11 +338,11 @@ async function setAssistantProvider(provider,enabled,pipeline) {
   }
 }
 
-function bindProviderToggle(id,provider,pipeline) {
+function bindProviderToggle(id,provider,pipeline,gate) {
   const input=$(id),row=input?.closest('.switch-row');
   if(!input)return;
   if(row)row.onclick=event=>event.stopPropagation();
-  input.onchange=()=>setAssistantProvider(provider,input.checked,pipeline);
+  input.onchange=()=>setAssistantProvider(provider,input.checked,pipeline,gate);
 }
 
 /*
@@ -331,7 +446,7 @@ async function integrationsPage() {
       toggleLabel:'Use GPT-Live',
       toggleId:'use-live-provider',
       enabled:liveEnabled,
-      body:liveAssistantBody(live),
+      body:liveAssistantBody(live,null,'live'),
       open:false,
       disabled:Boolean(live.unsupported)
     });
@@ -339,7 +454,8 @@ async function integrationsPage() {
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${unsupported(a.unsupported)}${livePanel}</section>
       ${integrations}
     </div>`;
-    bindLiveToggle('#use-live-provider',null);
+    bindLiveToggle('#use-live-provider',null,null);
+    bindLiveVoiceControls(live);
   } else {
     const localSelected=a.provider==='openai-compatible';
     const deviceSelected=a.provider==='openai-codex';
@@ -347,7 +463,21 @@ async function integrationsPage() {
     const deviceEnabled=deviceSelected&&Boolean(a.enabled);
     const localConfigured=Boolean(a.base_url);
     const localStatus=localEnabled?'Enabled':localSelected?'Disabled':localConfigured?'Configured':'Not configured';
-    const deviceStatus=deviceEnabled?(a.authenticated?'Enabled':'Sign-in required'):deviceSelected?'Disabled':'Inactive';
+    /*
+     * The ChatGPT account is a prerequisite for every subscription-backed
+     * assistant, so its state is read once and drives both panels: the device
+     * provider reports it as "Sign-in required" while signed out, and GPT-Live
+     * reports service availability and account state separately so a missing
+     * daemon never looks like an authentication problem (and vice versa).
+     */
+    const account=chatgptAccount(a);
+    /*
+     * The account state wins over the stored enable flag: a credential that
+     * expired after the assistant was switched on leaves the daemon reporting
+     * enabled with authenticated false, and that is a sign-in problem, not a
+     * running assistant.
+     */
+    const deviceStatus=!account.signedIn?account.status:deviceEnabled?'Enabled':'Disabled';
     const localPanel=assistantProviderPanel({
       title:'Local LLM',
       description:'OpenAI-compatible server on your network',
@@ -361,7 +491,9 @@ async function integrationsPage() {
        * Collapsed even when this is the selected provider. Opening on
        * selection meant the page arrived expanded on every load for anyone
        * actually using it -- the same "stop expanding panels" complaint that
-       * closed Home location, the voice assistant and Internet radio.
+       * closed Home location, the voice assistant and Internet radio. This
+       * panel is also independent of the ChatGPT account: a LAN endpoint needs
+       * no sign-in, so it is never forced open or disabled by one.
        */
       open:false
     });
@@ -369,34 +501,53 @@ async function integrationsPage() {
       title:'On Device Voice Assistant',
       description:'ChatGPT subscription with device login',
       status:deviceStatus,
-      statusOkay:deviceEnabled&&Boolean(a.authenticated),
+      statusOkay:deviceEnabled&&account.signedIn,
       toggleLabel:'Use On Device Voice Assistant',
       toggleId:'use-device-provider',
       enabled:deviceEnabled,
       body:deviceAssistantBody(a,deviceSelected),
-      open:false
+      /*
+       * Open while the account needs attention. The device code and the
+       * Connect control live inside this panel, and the auth poll re-renders
+       * the whole page every few seconds, so a fixed open:false collapsed the
+       * panel out from under the code the user was told to enter.
+       */
+      open:!account.signedIn,
+      disabled:!account.signedIn
     });
-    const liveEnabled=!live.unsupported&&Boolean(live.enabled);
+    const liveAvailable=!live.unsupported;
+    const liveEnabled=liveAvailable&&Boolean(live.enabled);
+    const liveStatus=!liveAvailable?'Unavailable':!account.signedIn?account.status:liveEnabled?'Enabled':'Disabled';
     const livePanel=assistantProviderPanel({
       title:'GPT-Live',
       description:'Full-duplex speech with your ChatGPT subscription',
-      status:live.unsupported?'Unavailable':liveEnabled?'Enabled':'Disabled',
-      statusOkay:liveEnabled,
+      status:liveStatus,
+      statusOkay:liveEnabled&&account.signedIn,
       toggleLabel:'Use GPT-Live',
       toggleId:'use-live-provider',
       enabled:liveEnabled,
-      body:liveAssistantBody(live),
-      open:false,
-      disabled:Boolean(live.unsupported)    });
+      body:liveAssistantBody(live,account,'live'),
+      open:liveAvailable&&!account.signedIn,
+      disabled:!liveAvailable||!account.signedIn
+    });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}${livePanel}</section>
       ${weatherCard(a)}
       ${integrations}
     </div>`;
 
-    bindProviderToggle('#use-local-provider','openai-compatible',pipeline);
-    bindProviderToggle('#use-device-provider','openai-codex',pipeline);
-    bindLiveToggle('#use-live-provider',a);
+    bindProviderToggle('#use-local-provider','openai-compatible',pipeline,null);
+    bindProviderToggle('#use-device-provider','openai-codex',pipeline,{signedIn:account.signedIn});
+    bindLiveToggle('#use-live-provider',a,{signedIn:account.signedIn,available:liveAvailable});
+    if(liveAvailable)bindLiveVoiceControls(live);
+    /*
+     * The sign-in controls are bound for every ChatGPT-backed panel that drew
+     * them, not only for the selected provider, and the pending-login poll runs
+     * for the account. Local LLM takes part in none of it.
+     */
+    bindChatgptSignIn('assistant');
+    if(liveAvailable)bindChatgptSignIn('live');
+    scheduleChatgptAuthPoll(a);
     bindHomeLocation(a);
 
     bindDirty(['#local-base-url','#local-model','#local-clock-format','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
@@ -439,24 +590,13 @@ async function integrationsPage() {
       bindDirty(['#assistant-model','#assistant-clock-format','#assistant-prompt'],'#save-assistant');
       $('#save-assistant').onclick=()=>mutate('/assistant',{
         provider:'openai-codex',
-        enabled:deviceEnabled,
+        /* A save must not turn into an enable the account cannot honour. */
+        enabled:deviceEnabled&&account.signedIn,
         model:$('#assistant-model').value.trim(),
         clock_format:$('#assistant-clock-format').value,
         prompt:$('#assistant-prompt').value.trim()
       },'On Device Voice Assistant settings saved');
-      if($('#assistant-auth-start'))$('#assistant-auth-start').onclick=()=>assistantAction('/assistant/auth/start','ChatGPT device sign-in started');
-      if($('#assistant-auth-poll'))$('#assistant-auth-poll').onclick=()=>assistantAction('/assistant/auth/poll','Sign-in status checked');
-      if($('#assistant-logout'))$('#assistant-logout').onclick=()=>assistantAction('/assistant/logout','ChatGPT disconnected');
       if($('#assistant-test'))$('#assistant-test').onclick=()=>post('/assistant/respond',{text:$('#assistant-test-text').value},'Test response queued');
-      if(a.auth_state==='waiting')state.timer=setTimeout(async()=>{
-        if(state.page!=='Integrations')return;
-        try {
-          await api('/assistant/auth/poll',{method:'POST',body:'{}'});
-          await integrationsPage();
-        } catch(error) {
-          toast(error.message,true);
-        }
-      },3000);
     }
   }
 
