@@ -181,16 +181,29 @@ function liveAssistantBody(live,account,authPrefix) {
   if(live.unsupported) return unsupported(live.unsupported);
   const session=live.session||{},metrics=live.transport_metrics||{};
   const signedIn=account?account.signedIn:true;
+  const disabled=signedIn?'':'disabled';
+  const voices=['alloy','ash','ballad','coral','echo','sage','shimmer','verse','marin','cedar'];
+  const accents=['natural British English','neutral English','natural Irish English','natural American English'];
+  const voice=live.voice||'marin',accent=live.accent||'natural British English';
+  const voiceOptions=voices.map(v=>`<option value="${v}" ${v===voice?'selected':''}>${v[0].toUpperCase()+v.slice(1)}</option>`).join('');
+  const accentOptions=accents.map(v=>`<option value="${v}" ${v===accent?'selected':''}>${esc(v)}</option>`).join('');
   return `<div class="assistant-heading">
     <div>
       <span class="source-pill">Subscription</span>
       <h4>GPT-Live</h4>
-      <p class="muted">Full-duplex speech-to-speech over the ChatGPT subscription. Post-AEC audio, including the short RAM-only wake preroll, leaves the device only after a wake starts a conversation.</p>
+      <p class="muted">Speech-to-speech over the ChatGPT subscription. Post-AEC audio, including the short RAM-only wake preroll, leaves the device only after a wake starts a conversation.</p>
     </div>
   </div>
   ${signedIn?'':`${chatgptSignInBlock(live,authPrefix)}
   <div class="privacy-callout">GPT-Live speaks over the same ChatGPT account as the On Device Voice Assistant, so it cannot be switched on until that sign-in completes.</div>`}
   <div class="settings-grid assistant-settings">
+    <div>
+      <label class="field"><span>Realtime voice</span><select id="live-voice" ${disabled}>${voiceOptions}</select></label>
+      <label class="field"><span>English accent instruction</span><select id="live-accent" ${disabled}>${accentOptions}</select></label>
+      <p class="muted">Voice names are provider personas, not guaranteed regional accents. The accent instruction is advisory and every session is explicitly instructed to remain in English.</p>
+      ${saveButton('save-live-voice')}
+      ${action('Test selected voice','test-live-voice',!signedIn||!live.enabled)}
+    </div>
     <div>
       <dl class="facts">
         <dt>Transport</dt><dd>${esc(metrics.transport||live.transport||'WebSocket')}</dd>
@@ -201,11 +214,10 @@ function liveAssistantBody(live,account,authPrefix) {
         <dt>Delegations</dt><dd>${Number(session.delegations||0)}</dd>
       </dl>
     </div>
-    <div>
-      <div class="privacy-callout">GPT-Live is not enabled at boot. Turning it on arms the local wake-word path; it does not expose idle microphone audio.</div>
-      ${live.last_event&&live.last_event!=='idle'?`<p class="muted">Last event: ${esc(live.last_event)}</p>`:''}
-    </div>
-  </div>`;
+  </div>
+  <label class="field"><span>Context supplied when a session opens</span><textarea id="live-context" rows="7" readonly>${esc(live.context||'Context is collected locally when the service starts and refreshed for each wake.')}</textarea></label>
+  <div class="privacy-callout">Context includes the LibreEcho product identity, host name, local date/time, now-playing state and active timers. Credentials, network identifiers, transcripts and microphone audio are excluded.</div>
+  ${live.last_event&&live.last_event!=='idle'?`<p class="muted">Last event: ${esc(live.last_event)}</p>`:''}`;
 }
 
 async function setLiveProvider(enabled,assistant,gate) {
@@ -222,7 +234,10 @@ async function setLiveProvider(enabled,assistant,gate) {
     if(enabled && assistant && assistant.enabled) {
       await api('/assistant',{method:'PUT',body:JSON.stringify({provider:assistant.provider,enabled:false})});
     }
-    await api('/live',{method:'PUT',body:JSON.stringify({enabled})});
+    const body={enabled};
+    if($('#live-voice'))body.voice=$('#live-voice').value;
+    if($('#live-accent'))body.accent=$('#live-accent').value;
+    await api('/live',{method:'PUT',body:JSON.stringify(body)});
     toast(enabled?'GPT-Live enabled':'GPT-Live disabled');
   } catch(error) {
     toast(error.message,true);
@@ -237,6 +252,32 @@ function bindLiveToggle(id,assistant,gate) {
   if(!input)return;
   if(row)row.onclick=event=>event.stopPropagation();
   input.onchange=()=>setLiveProvider(input.checked,assistant,gate);
+}
+
+function bindLiveVoiceControls(live) {
+  const save=$('#save-live-voice'),test=$('#test-live-voice');
+  const apply=async preview=>{
+    if(state.busy)return;
+    if(preview&&!live.enabled){toast('Enable GPT-Live before testing a voice',true);return;}
+    setBusy(true);
+    try {
+      await api('/live',{method:'PUT',body:JSON.stringify({
+        enabled:Boolean(live.enabled),
+        voice:$('#live-voice').value,
+        accent:$('#live-accent').value
+      })});
+      if(preview)await api('/live/preview',{method:'POST',body:'{}'});
+      toast(preview?'Playing the selected realtime voice':'GPT-Live voice settings saved');
+    } catch(error) {
+      toast(error.message,true);
+    } finally {
+      await integrationsPage();
+      setBusy(false);
+    }
+  };
+  if(save)save.onclick=()=>apply(false);
+  if(test)test.onclick=()=>apply(true);
+  bindDirty(['#live-voice','#live-accent'],'#save-live-voice');
 }
 
 function clockFormatField(value,id) {
@@ -414,6 +455,7 @@ async function integrationsPage() {
       ${integrations}
     </div>`;
     bindLiveToggle('#use-live-provider',null,null);
+    bindLiveVoiceControls(live);
   } else {
     const localSelected=a.provider==='openai-compatible';
     const deviceSelected=a.provider==='openai-codex';
@@ -497,6 +539,7 @@ async function integrationsPage() {
     bindProviderToggle('#use-local-provider','openai-compatible',pipeline,null);
     bindProviderToggle('#use-device-provider','openai-codex',pipeline,{signedIn:account.signedIn});
     bindLiveToggle('#use-live-provider',a,{signedIn:account.signedIn,available:liveAvailable});
+    if(liveAvailable)bindLiveVoiceControls(live);
     /*
      * The sign-in controls are bound for every ChatGPT-backed panel that drew
      * them, not only for the selected provider, and the pending-login poll runs
