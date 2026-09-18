@@ -1494,10 +1494,12 @@ function bindWeatherLookup(a){
      Keep pending: the coordinates still belong to whatever was resolved before,
      and remove an offered list because it describes the old place. */
   lookupSequence++;
-  if(lookupPending()){
-   note.textContent='Place changed — look it up again before saving.';
-   setPending(true);
-  }
+  /* Any place edit makes the current coordinate pair stale, including after a
+     successful but unsaved lookup: those coordinates describe the result that
+     was just renamed, not the new text. Keep Save pending until another lookup
+     fills the pair or both coordinates are entered explicitly. */
+  note.textContent='Place changed — look it up again before saving.';
+  setPending(true);
   warn();
  }});
  /*

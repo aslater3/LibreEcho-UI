@@ -136,6 +136,23 @@ const el = id => elements.get(id);
          'postcode lookup reported nothing: '+el('#wx-lookup-note').textContent);
   assert.equal(el('#save-wx').disabled,false,
                'a successful lookup left Save disabled');
+  /* A successful lookup is not yet persisted. Renaming only its place must
+     make its coordinates stale again rather than allowing the new name to be
+     saved against that unsaved result. */
+  {
+    const realMutate=globalThis.mutate;
+    let mutated=null;
+    globalThis.mutate=(path,body)=>{mutated={path,body}};
+    el('#wx-location').value='A name for the postcode result';
+    el('#wx-location').oninput();
+    assert.equal(el('#save-wx').disabled,true,
+                 'renaming an unsaved lookup did not make its coordinates stale');
+    el('#save-wx').disabled=false;       /* what bindDirty would do */
+    document.querySelector('#save-wx').onclick();
+    assert(mutated===null,
+           'a renamed place was saved against an earlier lookup result');
+    globalThis.mutate=realMutate;
+  }
 
   /*
    * A qualifier the geocoder rejects is retried, but the retry is offered, not
