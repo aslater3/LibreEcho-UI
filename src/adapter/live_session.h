@@ -81,6 +81,9 @@ struct le_live_session_ops {
     void (*state_changed)(void *context, enum le_live_state state);
     /* True only when the playback FIFO and hardware engine report empty. */
     int (*output_drained)(void *context);
+    /* Backpressure pauses provider polling, never wake/control processing. */
+    int (*output_ready)(void *context);
+    uint64_t (*output_played_ms)(void *context);
 };
 
 struct le_live_session_config {
@@ -112,6 +115,8 @@ struct le_live_session_config {
     const char *instructions;
     const char *initial_text;
     int preview_only;
+    /* Opt-in until the device's AEC/double-talk acceptance is measured. */
+    int full_duplex;
     const char *credentials_path;
     /* Forwarded to the transport: see le_live_transport_config. */
     const char *url;

@@ -8,6 +8,8 @@
 # script runs against a host build or the staged device binary; set
 # LIVED_BIN, LIVED_RUN and CONTROL_HOST for the device case.
 set -eu
+# This fixture has a regular-file sink, not a render engine. Never a production default.
+export LE_LIVE_ALLOW_LEGACY_TEST_SINK=1
 LIVED_BIN=${LIVED_BIN:-./build/libreecho-lived}
 WORK=${WORK:-/tmp/live-transport-e2e}
 WAKED_SOCKET="$WORK/wakeword.sock"
@@ -23,6 +25,7 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 : > "$FAKE_LOG"
 : > "$BUS"
+printf '{"drain":{"system":{"drained":true}}}\n' > "$WORK/status.json"
 # A synthetic credential file. It is never sent to OpenAI: the fake server is
 # the only peer, and the point is to exercise the real credential path.
 printf '{"access_token":"synthetic-access-token-for-e2e","refresh_token":"r",' > "$CREDENTIALS"

@@ -191,7 +191,7 @@
    "get": {
     "tags": ["Assistant"],
     "summary": "Read GPT-Live runtime state",
-    "description": "Returns the live GPT-Live daemon status, including whether the mode is armed, transport metrics, session state, and bounded output counters. This is runtime state and is not persisted across daemon restarts.",
+    "description": "Returns the live GPT-Live daemon status, including whether the mode is armed, transport metrics, session.full_duplex, and bounded output counters (managed, queued_frames, played_frames). Played frames are engine-confirmed, not bytes submitted. This is runtime state and is not persisted across daemon restarts.",
     "responses": {
      "200": {"$ref": "#/components/responses/Success"},
      "503": {"$ref": "#/components/responses/Error"}
@@ -200,7 +200,7 @@
    "put": {
     "tags": ["Assistant"],
     "summary": "Arm or disarm GPT-Live",
-    "description": "Arms or disarms the GPT-Live daemon. Arming allows the local wake-word path to start a full-duplex subscription conversation; idle microphone audio is not sent. The request requires X-LibreEcho-CSRF.",
+    "description": "Arms or disarms the GPT-Live daemon. Arming allows the local wake-word path to start a conversation using the configured transport. Half-duplex is the default; natural speech barge-in is an explicit AEC-qualification opt-in. idle microphone audio is not sent. The request requires X-LibreEcho-CSRF.",
     "parameters": [{"$ref": "#/components/parameters/Csrf"}],
     "requestBody": {
      "required": true,

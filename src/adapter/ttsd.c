@@ -28,6 +28,7 @@
 #include "adapter.h"
 #include "log.h"
 #include "tts_engine.h"
+#include "pcm_stream_client.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -405,7 +406,7 @@ static int write_pcm_fd(int fd, const int16_t *pcm, size_t frames)
 
         if (g_inprocess_cancel)
             return 0;
-        n = write(fd, (const char *)pcm + sent, total_bytes - sent);
+        n = le_pcm_write(fd, (const char *)pcm + sent, total_bytes - sent);
         if (n > 0) {
             sent += (size_t)n;
             continue;
@@ -432,13 +433,14 @@ static int write_pcm_to_bus(const int16_t *pcm, size_t frames,
     int fd;
     int rc;
 
-    fd = open(bus_path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    fd = le_pcm_open(bus_path, 2U, 1, 1);
     if (fd < 0) {
         le_log_perr("ttsd: open announcement bus %s", bus_path);
         return -1;
     }
     mark_first_pcm(request_id);
     rc = write_pcm_fd(fd, pcm, frames);
+    if (rc == 0) rc = le_pcm_finish_wait(fd, 2000U, &g_inprocess_cancel);
     close(fd);
     return rc;
 }
@@ -803,7 +805,7 @@ static void *stream_writer(void *opaque)
                 break;
             }
             if (fd < 0) {
-                fd = open(bus_path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+                fd = le_pcm_open(bus_path, 2U, 1, 1);
                 if (fd < 0) {
                     le_log_perr("ttsd: open announcement bus %s",
                                 bus_path);
@@ -856,8 +858,12 @@ static void *stream_writer(void *opaque)
         ++queue->inserted_gap_periods;
         pthread_mutex_unlock(&queue->mutex);
     }
-    if (fd >= 0)
+    if (fd >= 0) {
+        if (!stream_queue_failed(queue) &&
+            le_pcm_finish_wait(fd, 2000U, &g_inprocess_cancel) < 0)
+            stream_queue_fail(queue);
         close(fd);
+    }
     return NULL;
 }
 

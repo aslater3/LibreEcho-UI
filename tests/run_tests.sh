@@ -263,6 +263,10 @@ sh tests/test_timed.sh
 # transport, the delegation allow-list, and the whole daemon end-to-end against
 # a stand-in waked.
 make test-lived
+sh tests/test_pcm_producer_contract.sh
+if [ -n "${LIBREECHO_AUDIO_PLATFORM_SOURCE:-}" ]; then
+    sh tests/test_pcm_cross_repo.sh "$LIBREECHO_AUDIO_PLATFORM_SOURCE"
+fi
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
 sh tests/test_setup_first_run.sh

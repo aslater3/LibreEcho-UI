@@ -619,8 +619,12 @@ the first PCM submitted to the announcement bus; the current target is 3000 ms.
 
 Returns the runtime status of `libreecho-lived`, including whether GPT-Live is
 armed, the WebSocket transport metrics, current session state, and bounded audio
-counters. The mode is runtime state and is not persisted across daemon restarts.
-If the daemon is not installed or running, the endpoint returns HTTP 503.
+counters. `session.full_duplex` reports the explicit daemon opt-in (false by
+default). Output `managed` indicates the stream-scoped playback protocol;
+`queued_frames` is the bounded local queue and `played_frames` counts confirmed
+48 kHz speaker frames for the current output generation, not generated duration.
+These fields contain no audio samples. The mode is runtime state and is not
+persisted across daemon restarts. If the daemon is not installed or running, the endpoint returns HTTP 503.
 
 #### PUT /api/v1/live
 
@@ -630,8 +634,10 @@ Arms or disarms GPT-Live:
 { "enabled": true }
 ```
 
-Arming permits the local wake-word path to start a full-duplex ChatGPT
-subscription conversation. Idle microphone audio is not transmitted; post-AEC
+Arming permits the local wake-word path to start a conversation using the
+configured transport and credentials. Half-duplex remains the default; an
+explicit wake can interrupt playback. Natural speech barge-in requires the
+`--full-duplex` daemon opt-in and device AEC qualification. Idle microphone audio is not transmitted; post-AEC
 audio leaves the device only during an active conversation. The request requires
 `X-LibreEcho-CSRF`. Disabling stops an active GPT-Live conversation.
 

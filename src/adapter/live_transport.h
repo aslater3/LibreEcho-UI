@@ -122,7 +122,8 @@ struct le_live_transport_ops {
     int (*start)(struct le_live_transport *transport,
                  const struct le_live_transport_config *config,
                  char *detail, size_t detail_size);
-    /* Forward post-AEC PCM.  Must not block; returns -1 to drop the session. */
+    /* Forward post-AEC PCM. 0=accepted, 1=backpressure (no samples consumed),
+       -1=fatal. Must not block the capture/control loop. */
     int (*send_audio)(struct le_live_transport *transport,
                       const int16_t *samples, size_t count);
     /*
@@ -152,6 +153,9 @@ struct le_live_transport_ops {
 
 struct le_live_transport {
     const struct le_live_transport_ops *ops;
+    /* Coordinator's last confirmed playback position, not generated duration.
+       Set immediately before interrupt; adapters convert to item-relative time. */
+    uint64_t output_played_ms;
     /* Implementation-private state.  Bounded; no dynamic growth. */
     unsigned char state[2048];
 };

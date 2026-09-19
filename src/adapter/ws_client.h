@@ -49,6 +49,18 @@ struct le_ws {
     int close_received;
     /* Longest a single send may spend waiting for the stream to accept bytes. */
     int send_timeout_ms;
+    /* Frame state survives EAGAIN at any byte boundary. */
+    unsigned char rx_header[10];
+    size_t rx_header_used, rx_header_need, rx_used, rx_length;
+    unsigned int rx_opcode;
+    unsigned char rx_payload[LE_WS_MAX_PAYLOAD];
+    /* Complete masked frames queue atomically. TLS retries use an immutable
+       chunk, never a caller-owned or moving buffer. */
+    unsigned char tx_queue[(LE_WS_MAX_PAYLOAD + 14U) * 2U];
+    size_t tx_used;
+    unsigned char tx_chunk[4096];
+    size_t tx_chunk_used, tx_chunk_sent;
+    uint64_t tx_stalled_ms;
     uint64_t frames_in;
     uint64_t frames_out;
     uint64_t bytes_in;
@@ -70,7 +82,10 @@ int le_ws_connect(struct le_ws *ws, const struct le_ws_stream *stream,
                   const char *extra_headers, int timeout_ms,
                   char *detail, size_t detail_size);
 
-/* Send one unfragmented text message. Returns 0 on success. */
+/* Nonblocking queue/pump. Queue exhaustion fails rather than losing bytes. */
+int le_ws_pump(struct le_ws *ws);
+size_t le_ws_send_capacity(const struct le_ws *ws);
+/* Send one unfragmented text message. Returns 0 when accepted to the queue. */
 int le_ws_send_text(struct le_ws *ws, const char *payload, size_t length);
 
 /* Send a close frame. Best effort; the caller closes the stream after. */

@@ -167,8 +167,10 @@ def serve_session(conn, info, log):
                                  "turn": {"role": "user",
                                           "transcript":
                                           "what time is it"}})
+                send_json(conn, {"type": "response.created", "response": {"id": "tool-response"}})
                 send_json(conn, {
                     "type": "response.function_call_arguments.done",
+                    "response_id": "tool-response",
                     "call_id": "call-1", "name": "device_time",
                     "arguments": "{}"})
                 send_json(conn, {"type": "response.done",
@@ -180,9 +182,11 @@ def serve_session(conn, info, log):
             log("FUNCTION_OUTPUT id=%s output=%s"
                 % (item.get("call_id"), item.get("output")))
         elif kind == "response.create":
+            send_json(conn, {"type": "response.created", "response": {"id": "spoken-response"}})
             for _ in range(3):
                 send_json(conn, {"type": "response.output_audio.delta",
-                                 "delta": base64.b64encode(
+                                 "response_id": "spoken-response", "item_id": "spoken-item",
+                                 "content_index": 0, "delta": base64.b64encode(
                                      pcm_tone(2400, SAMPLE_RATE)).decode()})
             send_json(conn, {"type": "response.done",
                              "response": {"id": "spoken-response"}})

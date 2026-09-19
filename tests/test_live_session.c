@@ -88,7 +88,7 @@ static int harness_drained(void *context)
 
 static const struct le_live_session_ops harness_ops = {
     harness_output, harness_cancel, harness_dispatch, harness_state,
-    harness_drained
+    harness_drained, NULL, NULL
 };
 
 static void harness_init(struct harness *h, const char *scenario,
@@ -596,12 +596,35 @@ static int test_status_and_transcript_are_bounded(void)
     return 0;
 }
 
+static int test_full_duplex_interruption_keeps_user_audio(void)
+{
+    struct harness h;
+    uint64_t uploaded;
+    harness_init(&h,"session",10000,60000);
+    h.session.config.full_duplex=1;
+    CHECK(feed_ms(&h,200,100)==0);
+    CHECK(le_live_session_wake(&h.session,le_live_ring_end(&h.ring),h.now)==0);
+    h.now+=10;CHECK(le_live_session_pump(&h.session,0,h.now)>=0);
+    /* A real open transport, with output continuing while new mic frames arrive. */
+    h.session.state=LE_LIVE_SPEAKING;
+    uploaded=h.session.audio_input_ms;
+    CHECK(feed_ms(&h,20,100)==0 && h.session.audio_input_ms>uploaded);
+    CHECK(h.session.barge_ins==0);
+    uploaded=h.session.audio_input_ms;
+    CHECK(feed_ms(&h,30,8000)==0);
+    CHECK(h.session.barge_ins==1 && h.cancels==1);
+    CHECK(h.session.state==LE_LIVE_LISTENING && h.session.audio_input_ms>=uploaded+30);
+    le_live_session_close(&h.session,LE_LIVE_END_STOPPED,h.now);
+    return 0;
+}
+
 int main(void)
 {
     struct {
         const char *name;
         int (*run)(void);
     } tests[] = {
+        {"full duplex interruption", test_full_duplex_interruption_keeps_user_audio},
         {"open/listen/speak/timeout", test_open_listen_speak_timeout},
         {"wake-gated interruption", test_wake_interrupts_model_for_stop_action},
         {"observed playback drain", test_waits_for_observed_playback_drain},

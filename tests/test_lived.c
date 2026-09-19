@@ -513,6 +513,7 @@ static int test_mock_transport_full_conversation(void)
 
 int main(void)
 {
+    (void)setenv("LE_LIVE_ALLOW_LEGACY_TEST_SINK", "1", 1);
     int failures = 0;
 
     snprintf(directory, sizeof(directory), "/tmp/le-lived-%d", (int)getpid());

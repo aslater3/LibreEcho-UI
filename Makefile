@@ -215,6 +215,7 @@ test-lived: $(BUILD)/test-live-ring $(BUILD)/test-live-session \
 	./$(BUILD)/test-ws-client
 	./$(BUILD)/test-live-dns
 	./$(BUILD)/test-lived
+	sh tests/test_live_realtime_interrupt.sh
 	sh tests/run_live_transport_e2e.sh
 
 $(BUILD)/libreecho-wyomingd-test: $(WYOMINGD_SOURCES)

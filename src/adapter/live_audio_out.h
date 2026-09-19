@@ -2,32 +2,19 @@
 #define LIBREECHO_LIVE_AUDIO_OUT_H
 
 /*
- * GPT-Live model speech into the central playback bus.
+ * Hardware-independent streaming output. Each reply has an immutable managed
+ * PCM connection; a separate focus lease spans the conversation. The shared
+ * Platform render engine owns the codec, amplifier, mixing and AEC reference.
  *
- * lived must never open the codec or an ALSA device.  Model audio goes to the
- * same bus the Wyoming satellite and the local assistant already use, so
- * volume, mute, AirPlay arbitration, the AEC reference and every
- * hardware-specific codec detail stay inside audiod where they already live.
- *
- * The rate conversion is not reimplemented here: it is the repository's
- * existing shared resampler (`le_radio_resample`), which already carries phase
- * and history across blocks and is covered by its own tests.  A second
- * converter would be a second place for the channel mapping to be wrong.
- *
- * Two properties matter here and neither is free:
- *
- *   - Bounded buffering.  A model that talks faster than the bus drains must
- *     not grow a queue in lived's heap.  Writes are chunked and back-pressure
- *     is a short poll, not an allocation.
- *
- *   - Cancellation.  Barge-in and session close have to stop playback
- *     promptly.  A blocking write to the bus would make that impossible, so
- *     the bus is opened non-blocking and the write loop re-checks the cancel
- *     flag between chunks.
+ * Conversion uses the shared stateful resampler. Fixed queues preserve frames
+ * across nonblocking EAGAIN without preventing wake/control handling. Ordered
+ * FINISH flushes finite tails; only the engine's per-stream played cursor
+ * confirms completion. Disconnect cancels just this reply's generation.
  */
 
 #include "live_transport.h"
 #include "radio_resample.h"
+#include "pcm_stream_client.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -35,11 +22,11 @@
 #define LE_LIVE_AUDIO_OUT_PATH_MAX 128
 #define LE_LIVE_AUDIO_OUT_STATUS_PATH_MAX 160
 /*
- * Longest a single chunk may spend waiting on playback back-pressure.  lived
- * runs one poll() loop; a bus that never drains must not be able to hold that
- * loop - and with it the wake path and every session timeout - forever.
+ * Maximum elapsed time without queued-output progress. Each pump itself is
+ * nonblocking; this deadline reports a failed sink rather than holding the loop.
  */
 #define LE_LIVE_AUDIO_OUT_STALL_BUDGET_MS 2000U
+#define LE_LIVE_AUDIO_OUT_QUEUE_FRAMES 16384U
 /*
  * The shared resampler consumes at most one codec frame at a time, so a
  * transport chunk is split into sub-blocks of this size.  The resampler's
@@ -57,7 +44,18 @@
 
 struct le_live_audio_out {
     int fd;
+    int focus_fd;
     int opened;
+    int allow_legacy;
+    int finishing;
+    int finish_sent;
+    size_t queued_frames;
+    int16_t queue[LE_LIVE_AUDIO_OUT_QUEUE_FRAMES * 2U];
+    uint64_t stalled_since_ms;
+    uint64_t source_frames;
+    uint64_t produced_frames;
+    uint64_t turn_frames_written;
+    struct le_pcm_progress progress;
     char path[LE_LIVE_AUDIO_OUT_PATH_MAX];
     char status_path[LE_LIVE_AUDIO_OUT_STATUS_PATH_MAX];
     char control_path[LE_LIVE_AUDIO_OUT_STATUS_PATH_MAX];
@@ -102,7 +100,12 @@ int le_live_audio_out_write(struct le_live_audio_out *out,
                             const int16_t *samples, size_t count,
                             unsigned int rate);
 
-/* True only after the FIFO and audio engine's system bus are both empty. */
+/* The main loop services output independently of model/network events. */
+int le_live_audio_out_pump(struct le_live_audio_out *out);
+int le_live_audio_out_ready(const struct le_live_audio_out *out);
+int le_live_audio_out_focus(struct le_live_audio_out *out, int enabled);
+uint64_t le_live_audio_out_played_ms(const struct le_live_audio_out *out);
+/* FINISH drains this stream, never an unrelated cue or another bus. */
 int le_live_audio_out_drained(struct le_live_audio_out *out);
 
 /*

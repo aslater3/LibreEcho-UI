@@ -97,6 +97,10 @@ struct lived_state {
     unsigned int speaker_rate;
     int enabled;
 
+    char wake_line[2048];
+    size_t wake_line_used;
+    int wake_line_discard;
+    uint64_t pending_wake_sample, pending_wake_deadline;
     uint64_t wake_events;
     uint64_t wake_ignored;
     uint64_t frames_in;
@@ -249,6 +253,8 @@ static void drop_subscriptions(struct lived_state *state)
     state->wake_fd = -1;
     state->audio_fd = -1;
     state->reader.used = 0;
+    state->wake_line_used = 0; state->wake_line_discard = 0;
+    state->pending_wake_deadline = 0;
 }
 
 static int reconnect_subscriptions(struct lived_state *state, uint64_t now_ms)
@@ -331,8 +337,10 @@ static void on_state_changed(void *context, enum le_live_state session_state)
 
     snprintf(state->last_event, sizeof(state->last_event), "%s",
              le_live_state_name(session_state));
-    if (session_state == LE_LIVE_IDLE)
+    if (session_state == LE_LIVE_IDLE) {
         state->last_wake_gate_ms = 0;
+        (void)le_live_audio_out_focus(&state->output, 0);
+    }
     set_session_led(session_state);
     fprintf(stderr,
             "lived: state=%s at_ms=%llu frames_in=%llu samples_in=%llu "
@@ -392,12 +400,24 @@ static int on_output_drained(void *context)
     return le_live_audio_out_drained(&state->output);
 }
 
+static int on_output_ready(void *context)
+{
+    struct lived_state *state = context;
+    /* COOLDOWN must continue processing control/input events but cannot accept
+       a new response on a stream whose FINISH is already ordered. */
+    return le_live_audio_out_ready(&state->output);
+}
+static uint64_t on_output_played_ms(void *context)
+{
+    return le_live_audio_out_played_ms(&((struct lived_state *)context)->output);
+}
+
 static const struct le_live_session_ops lived_session_ops = {
     on_output_audio,
     on_cancel_output,
     on_dispatch,
     on_state_changed,
-    on_output_drained
+    on_output_drained, on_output_ready, on_output_played_ms
 };
 
 static int voice_supported(const char *voice)
@@ -474,6 +494,11 @@ static int start_session(struct lived_state *state, uint64_t detection_sample)
                 (unsigned long long)state->last_wake_gate_ms);
         return 1;
     }
+    if (le_live_audio_out_focus(&state->output, 1) < 0) {
+        snprintf(state->session.last_error, sizeof(state->session.last_error),
+                 "managed audio engine unavailable");
+        return -1;
+    }
     state->last_wake_gate_ms = monotonic_ms();
     build_session_context(state);
     state->config.initial_text = state->preview_text[0] ? state->preview_text : NULL;
@@ -482,6 +507,7 @@ static int start_session(struct lived_state *state, uint64_t detection_sample)
     state->session.config.preview_only = state->config.preview_only;
     result = le_live_session_wake(&state->session, detection_sample,
                                   monotonic_ms());
+    if (result < 0) (void)le_live_audio_out_focus(&state->output, 0);
     state->preview_text[0] = '\0';
     state->config.initial_text = NULL;
     state->config.preview_only = 0;
@@ -515,39 +541,37 @@ static void handle_wake_line(struct lived_state *state, const char *line)
         fprintf(stderr, "lived: wake event without a usable sample\n");
         return;
     }
+    if (detection_sample < 0) return;
     state->last_wake_sample = (uint64_t)detection_sample;
-    (void)start_session(state, (uint64_t)detection_sample);
+    if ((uint64_t)detection_sample > le_live_ring_end(&state->ring)) {
+        state->pending_wake_sample = (uint64_t)detection_sample;
+        state->pending_wake_deadline = monotonic_ms() + 1000U;
+    } else (void)start_session(state, (uint64_t)detection_sample);
 }
 
 static void drain_wake_events(struct lived_state *state)
 {
-    char line[2048];
-    size_t used = 0;
-
-    for (;;) {
-        ssize_t count = read(state->wake_fd, line + used, 1);
-
-        if (count < 0 && errno == EINTR)
-            continue;
-        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-            return;
+    unsigned int budget;
+    for (budget = 0; budget < 4096U; ++budget) {
+        char character;
+        ssize_t count = read(state->wake_fd, &character, 1);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
         if (count <= 0) {
-            fprintf(stderr, "lived: wake subscription closed; reconnecting\n");
             close_session(state, LE_LIVE_END_TRANSPORT_ERROR);
             drop_subscriptions(state);
             state->next_subscription_retry_ms = monotonic_ms() + 1000U;
             return;
         }
-        if (line[used] == '\n') {
-            line[used] = '\0';
-            if (used)
-                handle_wake_line(state, line);
-            used = 0;
-            continue;
-        }
-        if (++used >= sizeof(line)) {
-            fprintf(stderr, "lived: oversized wake event discarded\n");
-            used = 0;
+        if (character == '\n') {
+            state->wake_line[state->wake_line_used] = '\0';
+            if (!state->wake_line_discard && state->wake_line_used)
+                handle_wake_line(state, state->wake_line);
+            state->wake_line_used = 0; state->wake_line_discard = 0;
+        } else if (!state->wake_line_discard) {
+            if (state->wake_line_used + 1U < sizeof(state->wake_line))
+                state->wake_line[state->wake_line_used++] = character;
+            else state->wake_line_discard = 1;
         }
     }
 }
@@ -572,7 +596,8 @@ static void handle_audio_frame(struct lived_state *state, uint64_t first_sample,
 
 static void drain_audio(struct lived_state *state)
 {
-    for (;;) {
+    unsigned int budget;
+    for (budget = 0; budget < 32U; ++budget) {
         ssize_t count;
         size_t consumed = 0;
 
@@ -604,6 +629,7 @@ static void drain_audio(struct lived_state *state)
                 get_u32(packet + 20) != 0) {
                 fprintf(stderr, "lived: malformed audio frame, resyncing\n");
                 state->reader.used = 0;
+                state->pending_wake_deadline = 0;
                 break;
             }
             sample_count = get_u32(packet + 16);
@@ -611,6 +637,7 @@ static void drain_audio(struct lived_state *state)
                 sample_count > LE_VOICE_STREAM_MAX_SAMPLES) {
                 fprintf(stderr, "lived: audio frame out of range\n");
                 state->reader.used = 0;
+                state->pending_wake_deadline = 0;
                 break;
             }
             frame_bytes = LE_VOICE_STREAM_HEADER_BYTES +
@@ -661,7 +688,7 @@ static void json_escape_text(char *out, size_t size, const char *in)
 static void status_json(struct lived_state *state, char *out, size_t size)
 {
     char session[1024];
-    char output[320];
+    char output[768];
     /* Host + path + bounded error detail do not fit in the old 320-byte
        scratch. Truncating a nested JSON object makes the whole status reply
        malformed, so reserve the adapter's actual bounded budget. */
@@ -699,7 +726,9 @@ static void status_json(struct lived_state *state, char *out, size_t size)
         (unsigned)LE_LIVE_RING_CAPACITY, voice, accent, context,
         session, output, transport);
     if (written < 0 || (size_t)written >= size)
-        out[size - 1] = '\0';
+        snprintf(out, size,
+                 "{\"enabled\":%s,\"last_error\":\"status exceeds adapter budget\"}",
+                 state->enabled ? "true" : "false");
 }
 
 static int parse_bool(const char *args, const char *key, int *out)
@@ -897,6 +926,10 @@ static int run_lived(struct lived_state *state)
         int had_wake;
         int had_audio;
 
+        if (le_live_audio_out_pump(&state->output) < 0) {
+            close_session(state, LE_LIVE_END_AUDIO_FAILED);
+            le_live_audio_out_close(&state->output);
+        }
         (void)reconnect_subscriptions(state, monotonic_ms());
         had_wake = state->wake_fd >= 0;
         had_audio = state->audio_fd >= 0;
@@ -949,6 +982,19 @@ static int run_lived(struct lived_state *state)
             }
         }
 
+        if (state->pending_wake_deadline) {
+            uint64_t now = monotonic_ms();
+            if (now > state->pending_wake_deadline) state->pending_wake_deadline = 0;
+            else if (state->pending_wake_sample <= le_live_ring_end(&state->ring)) {
+                uint64_t sample = state->pending_wake_sample;
+                state->pending_wake_deadline = 0;
+                (void)start_session(state, sample);
+            }
+        }
+        if (le_live_audio_out_pump(&state->output) < 0) {
+            close_session(state, LE_LIVE_END_AUDIO_FAILED);
+            le_live_audio_out_close(&state->output);
+        }
         /*
          * Non-blocking pump: without an explicit pump a session that stopped
          * receiving events would never hit its connect, conversation or
@@ -965,7 +1011,7 @@ static void usage(const char *program)
             "Usage: %s [--foreground] [--socket PATH] [--wake-socket PATH] "
             "[--audio-bus PATH] [--speaker-rate HZ] "
             "[--conversation-timeout-ms N] [--max-session-ms N] "
-            "[--wake-preroll-ms N] [--barge-in-rms N] [--barge-in-factor N] "
+            "[--wake-preroll-ms N] [--barge-in-rms N] [--barge-in-factor N] [--full-duplex] "
             "[--model NAME] [--voice NAME] [--credentials PATH] "
             "[--transport realtime|mock] [--live-url URL] [--live-ca PATH] "
             "[--mock-scenario NAME] [--enable]\n",
@@ -1018,7 +1064,10 @@ int main(int argc, char **argv)
         const char *value = i + 1 < argc ? argv[i + 1] : NULL;
 
 #define NEXT() (++i, value)
-        if (!strcmp(option, "--foreground")) {
+        if (!strcmp(option, "--full-duplex")) {
+            state.config.full_duplex = 1;
+            continue;
+        } else if (!strcmp(option, "--foreground")) {
             /* Accepted for init-script compatibility; the daemon does not
                detach itself, the supervisor does. */
             continue;
