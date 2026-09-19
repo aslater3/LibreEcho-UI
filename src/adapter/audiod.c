@@ -15,6 +15,7 @@
 #endif
 
 #include "adapter.h"
+#include "pcm_stream_client.h"
 #include "log.h"
 
 #include <errno.h>
@@ -1229,7 +1230,7 @@ static int write_tone_fd(int fd)
             break;
         generate_tone(buffer, frames, &sine, &cosine);
         while (sent < bytes) {
-            ssize_t n = write(fd, buffer + sent, bytes - sent);
+            ssize_t n = le_pcm_write(fd, buffer + sent, bytes - sent);
             if (n < 0 && errno == EINTR)
                 continue;
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -1291,7 +1292,7 @@ static int write_chirp_fd(int fd, double first_hz, double second_hz,
             samples[i * 2 + 1] = value;
         }
         while (sent < bytes) {
-            ssize_t n = write(fd, buffer + sent, bytes - sent);
+            ssize_t n = le_pcm_write(fd, buffer + sent, bytes - sent);
 
             if (n < 0 && errno == EINTR)
                 continue;
@@ -1622,7 +1623,7 @@ static int write_sample_fd(int fd, int sample_fd)
             samples[i * 2 + 1] = in[i];
         }
         while (sent < bytes) {
-            ssize_t n = write(fd, out + sent, bytes - sent);
+            ssize_t n = le_pcm_write(fd, out + sent, bytes - sent);
 
             if (n < 0 && errno == EINTR)
                 continue;
@@ -1670,7 +1671,7 @@ static int start_sample(struct audio_hw *audio, const char *name)
     sample_fd = sample_open_fd(name);
     if (sample_fd < 0)
         return -1;
-    fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    fd = le_pcm_open(audio->system_audio_bus, 1U, 0, 1);
     if (fd < 0) {
         close(sample_fd);
         return -1;
@@ -1683,6 +1684,7 @@ static int start_sample(struct audio_hw *audio, const char *name)
     }
     if (pid == 0) {
         int result = write_sample_fd(fd, sample_fd);
+        if (result == 0) result = le_pcm_finish_wait(fd, 2000U, NULL);
         close(fd);
         _exit(result < 0 ? 1 : 0);
     }
@@ -1716,7 +1718,7 @@ static int start_cue(struct audio_hw *audio, double first_hz,
                      since_ms, audio->cue_throttled);
         return LE_CUE_THROTTLED;
     }
-    fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    fd = le_pcm_open(audio->system_audio_bus, 1U, 0, 1);
     if (fd < 0)
         return -1;
     pid = fork();
@@ -1726,6 +1728,7 @@ static int start_cue(struct audio_hw *audio, double first_hz,
     }
     if (pid == 0) {
         int result = write_chirp_fd(fd, first_hz, second_hz, ms);
+        if (result == 0) result = le_pcm_finish_wait(fd, 2000U, NULL);
         close(fd);
         _exit(result == 0 ? 0 : 1);
     }
@@ -1747,7 +1750,7 @@ static int start_test_tone(const struct audio_hw *audio)
     if (!audio->output_available ||
         access(LE_SYSTEM_AUDIO_BUS, F_OK) < 0)
         return -1;
-    fd = open(LE_SYSTEM_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    fd = le_pcm_open(LE_SYSTEM_AUDIO_BUS, 1U, 0, 1);
     if (fd < 0)
         return -1;
     pid = fork();
@@ -1757,6 +1760,7 @@ static int start_test_tone(const struct audio_hw *audio)
     }
     if (pid == 0) {
         int result = write_tone_fd(fd);
+        if (result == 0) result = le_pcm_finish_wait(fd, 2000U, NULL);
         close(fd);
         _exit(result == 0 ? 0 : 1);
     }
@@ -1801,6 +1805,33 @@ static int queue_output(struct client *client, const char *message, size_t lengt
     memcpy(client->output + pending, message, length);
     client->output_used = pending + length;
     return 0;
+}
+
+static int cancel_playback_bus(const char *bus)
+{
+    struct sockaddr_un address;
+    char message[64];
+    int fd;
+    int length;
+    ssize_t sent;
+
+    if (!bus || (strcmp(bus, "system") && strcmp(bus, "announcement") &&
+                 strcmp(bus, "alarm")))
+        return -1;
+    length = snprintf(message, sizeof(message), "cancel %s", bus);
+    if (length <= 0 || (size_t)length >= sizeof(message))
+        return -1;
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0)
+        return -1;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s",
+             "/run/libreecho-audio/control.sock");
+    sent = sendto(fd, message, (size_t)length, MSG_DONTWAIT | MSG_NOSIGNAL,
+                  (struct sockaddr *)&address, sizeof(address));
+    close(fd);
+    return sent == length ? 0 : -1;
 }
 
 static int handle_request(struct audio_hw *audio, char *message,
@@ -2031,6 +2062,9 @@ static int handle_request(struct audio_hw *audio, char *message,
         le_adapter_close(tts);
         if (rc != LE_ADAPTER_OK)
             return response_error(response, response_size, id, "tts stop failed");
+        if (cancel_playback_bus("announcement") < 0)
+            return response_error(response, response_size, id,
+                                  "announcement playback cancellation unavailable");
         return response_ok(response, response_size, id, "{\"speaking\":false}");
     }
     return response_error(response, response_size, id, "unknown command");

@@ -21,6 +21,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <time.h>
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -365,6 +366,56 @@ static int test_stream_error_is_not_a_clean_close(void)
     return 0;
 }
 
+static int test_fragmented_tcp_delivery_and_zero_poll(void)
+{
+    struct le_ws ws;
+    struct le_ws_stream stream;
+    struct peer peer;
+    int pair[2];
+    unsigned char frame[134];
+    char output[256];
+    struct timespec before,after;
+    size_t i;
+    CHECK(setup(&ws,&stream,&peer,pair)==0);
+    frame[0]=0x81;frame[1]=126;frame[2]=0;frame[3]=130;
+    memset(frame+4,'x',130);
+    for(i=0;i<sizeof(frame);++i) {
+        CHECK(write(pair[1],frame+i,1)==1);
+        CHECK(le_ws_read_text(&ws,output,sizeof(output),0)==(i+1==sizeof(frame)?1:0));
+    }
+    CHECK(strlen(output)==130 && ws.frames_in==1);
+    clock_gettime(CLOCK_MONOTONIC,&before);
+    CHECK(le_ws_read_text(&ws,output,sizeof(output),0)==0);
+    clock_gettime(CLOCK_MONOTONIC,&after);
+    CHECK((after.tv_sec-before.tv_sec)*1000000000LL+after.tv_nsec-before.tv_nsec < 30000000LL);
+    close(pair[0]);close(pair[1]);le_ws_close(&ws);return 0;
+}
+static long blocked_send(void *context, const void *buffer, size_t size)
+{
+    (void)context;(void)buffer;(void)size;return -2;
+}
+static int test_backpressure_retains_masked_frame(void)
+{
+    struct le_ws ws;
+    struct le_ws_stream stream;
+    struct peer peer;
+    int pair[2];
+    unsigned char received[32];
+    const char *text="hello";
+    size_t i;
+    CHECK(setup(&ws,&stream,&peer,pair)==0);
+    stream.send=blocked_send;
+    CHECK(le_ws_send_text(&ws,text,5)==0);
+    CHECK(ws.tx_chunk_used==11 && ws.tx_chunk_sent==0);
+    CHECK(le_ws_pump(&ws)==0 && ws.tx_chunk_sent==0);
+    stream.send=peer_send;
+    CHECK(le_ws_pump(&ws)==0);
+    CHECK(drain(pair[1],received,11)==0);
+    CHECK(received[0]==0x81 && received[1]==0x85);
+    for(i=0;i<5;++i) CHECK((received[6+i]^received[2+i%4])==(unsigned char)text[i]);
+    close(pair[0]);close(pair[1]);le_ws_close(&ws);return 0;
+}
+
 int main(void)
 {
     int failures = 0;
@@ -372,6 +423,8 @@ int main(void)
     /* The suite runs on a build machine with no operator watching. */
     alarm(60);
 
+    failures += test_fragmented_tcp_delivery_and_zero_poll() != 0;
+    failures += test_backpressure_retains_masked_frame() != 0;
     failures += test_base64() != 0;
     failures += test_client_frames_are_masked() != 0;
     failures += test_server_frames_are_read_and_validated() != 0;

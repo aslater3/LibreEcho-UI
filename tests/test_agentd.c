@@ -123,6 +123,7 @@ int main(void)
     char stt_socket[256];
     char voice_trigger[256];
     char first_pcm_path[256];
+    char playback_status_path[256];
     char persisted_history[LE_ADAPTER_MSG_MAX];
     char response[LE_ADAPTER_MSG_MAX];
     struct stat status;
@@ -158,6 +159,15 @@ int main(void)
              "%s/voice.trigger", directory);
     snprintf(first_pcm_path, sizeof(first_pcm_path),
              "%s/first-pcm", directory);
+    snprintf(playback_status_path, sizeof(playback_status_path),
+             "%s/playback-status.json", directory);
+    {
+        FILE *playback = fopen(playback_status_path, "w");
+        CHECK(playback != NULL);
+        CHECK(fputs("{\"drain\":{\"announcement\":{\"drained\":true}}}\n",
+                    playback) >= 0);
+        CHECK(fclose(playback) == 0);
+    }
     CHECK(setenv("LE_TEST_CURL_CAPTURE", capture_path, 1) == 0);
     /* Every request agentd makes, appended: the weather lookup happens before
        the model call, so the single capture file never holds it. */
@@ -209,6 +219,7 @@ int main(void)
               "--audio-socket", audio_socket,
               "--tts-socket", audio_socket,
               "--tts-first-pcm-file", first_pcm_path,
+              "--media-status", playback_status_path,
               "--wake-socket", wake_socket,
               "--stt-socket", stt_socket,
               (char *)NULL);
@@ -334,6 +345,7 @@ int main(void)
               "--audio-socket", audio_socket,
               "--tts-socket", audio_socket,
               "--tts-first-pcm-file", first_pcm_path,
+              "--media-status", playback_status_path,
               "--wake-socket", wake_socket,
               "--stt-socket", stt_socket,
               (char *)NULL);
@@ -373,6 +385,7 @@ int main(void)
               "--audio-socket", audio_socket,
               "--tts-socket", audio_socket,
               "--tts-first-pcm-file", first_pcm_path,
+              "--media-status", playback_status_path,
               "--wake-socket", wake_socket,
               "--stt-socket", stt_socket,
               (char *)NULL);
@@ -529,6 +542,7 @@ cleanup:
     unlink(audio_capture);
     unlink(wake_socket);
     unlink(stt_socket);
+    unlink(playback_status_path);
     unlink(voice_trigger);
     unlink(first_pcm_path);
     rmdir(directory);

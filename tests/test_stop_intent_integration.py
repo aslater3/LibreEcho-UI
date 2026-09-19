@@ -55,7 +55,9 @@ class StopIntegration(unittest.TestCase):
                                 ('audio',{'noise_active':True}), ('tts',{'speaking':False})]:
                 adapters[name] = Adapter(root/(name+'.sock'),state)
                 stack.callback(adapters[name].close)
-            media = root/'media.json'; media.write_text('{"active":"none"}')
+            media = root/'media.json'; media.write_text(
+                '{"active":"none","drain":{"announcement":{"drained":true}}}'
+            )
             args = [str(ROOT/'build/libreecho-agentd'), '--socket',str(root/'agent.sock'),
                     '--config',str(root/'agent.json'),'--credentials',str(root/'credentials.json'),
                     '--curl','/nonexistent/no-model-transport','--media-status',str(media),
@@ -100,7 +102,9 @@ class StopIntegration(unittest.TestCase):
                     self.assertTrue(adapters['radio'].state['playing'])
                     adapters['radio'].failed.clear()
                     self.assertTrue(request('stop')['ok'])
-                    media.write_text('{"active":"airplay2"}')
+                    media.write_text(
+                        '{"active":"airplay2","drain":{"announcement":{"drained":true}}}'
+                    )
                     result=request('stop')
                     self.assertTrue(result['ok'],result)
                     self.assertIn('phone',result['data']['text'])

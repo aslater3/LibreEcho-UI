@@ -4,11 +4,12 @@
 speech-to-speech conversation that starts on the local wake word and can
 delegate device actions back to LibreEcho.
 
-Status in 0.14: **pipeline and subscription WebSocket transport implemented;
-mock-server path device-validated.** The remaining external gate is one real
-ChatGPT device login and acceptance by the live service. This document records
-the transport finding, scope and hardware measurements so none of it has to be
-re-derived from scratch.
+Status in 0.14: **development prototype with a public Realtime-compatible
+adapter and managed playback integration**. Authentication behaviour is unchanged.
+See `AUDIO_LIFECYCLE.md` for the current protocol, cancellation semantics, tests
+and remaining device gates. Historical measurements below describe the older
+prototype, not acceptance evidence for this revision. Half-duplex is the default;
+natural barge-in is an explicit `--full-duplex` opt-in pending AEC qualification.
 
 ## What runs
 
@@ -30,7 +31,7 @@ micd ─► waked ── wake_detected ─────────────�
                             /run/libreecho-audio/system.pcm
                                           │
                                           ▼
-                                        audiod
+                              Platform audio_engine
 ```
 
 `lived` owns no hardware. It subscribes to the stream and the wake events
@@ -94,9 +95,9 @@ actionable result remains `sign in to ChatGPT again`.
 | Sample-indexed preroll ring (3 s, 96 KB, RAM only) | done |
 | Wake-sample alignment so the first word is not clipped | done |
 | Session state machine with connect / conversation / maximum-duration bounds | done |
-| Continuous full-duplex input forwarding | done |
+| Continuous full-duplex input forwarding | opt-in; hardware AEC qualification pending |
 | Model audio into the central playback bus, cancellable | done |
-| Barge-in with relative (self-calibrating) threshold | done |
+| Natural speech barge-in | opt-in; explicit wake interruption remains available |
 | Bounded transcript (10 turns, never written to disk) | done |
 | Delegation allow-list with argument validation | done |
 | Exactly-once delegation (bounded id→result cache) | done |
@@ -106,7 +107,7 @@ actionable result remains `sign in to ChatGPT again`.
 | Web control-centre mode selector and status panel | done |
 | Spoken `stop` cancels local playback and closes the Live session | done |
 | Home Assistant `homeassistant.conversation` tool | not done; lights and HA-owned media fail closed |
-| LED patterns for Live states | not done |
+| LED patterns for Live states | implemented in the prototype |
 | Process-level mode orchestration (stopping `sttd`/`ttsd`/`wyomingd`) | not done |
 
 `lived` starts as an available but disarmed service. The control-centre selector

@@ -323,8 +323,8 @@ int le_ws_connect(struct le_ws *ws, const struct le_ws_stream *stream,
 {
     unsigned char nonce[16];
     char key[32];
-    char request[1024];
-    char response[2048];
+    char request[12288];
+    char response[8192];
     uint64_t deadline;
     size_t used = 0;
     int length;
@@ -423,56 +423,72 @@ int le_ws_connect(struct le_ws *ws, const struct le_ws_stream *stream,
 
 /* --- frames ------------------------------------------------------------- */
 
+size_t le_ws_send_capacity(const struct le_ws *ws)
+{
+    return ws ? sizeof(ws->tx_queue) - ws->tx_used : 0;
+}
+
+int le_ws_pump(struct le_ws *ws)
+{
+    unsigned int budget;
+    if (!ws || !ws->connected) return -1;
+    for (budget = 0; budget < 16U; ++budget) {
+        long wrote;
+        if (ws->tx_chunk_sent == ws->tx_chunk_used) {
+            size_t n = ws->tx_used;
+            if (!n) { ws->tx_stalled_ms = 0; return 0; }
+            if (n > sizeof(ws->tx_chunk)) n = sizeof(ws->tx_chunk);
+            memcpy(ws->tx_chunk, ws->tx_queue, n);
+            ws->tx_used -= n;
+            memmove(ws->tx_queue, ws->tx_queue + n, ws->tx_used);
+            ws->tx_chunk_used = n; ws->tx_chunk_sent = 0;
+        }
+        wrote = ws->stream->send(ws->stream->context,
+            ws->tx_chunk + ws->tx_chunk_sent, ws->tx_chunk_used - ws->tx_chunk_sent);
+        if (wrote == -2) {
+            uint64_t now = monotonic_ms();
+            if (!ws->tx_stalled_ms) ws->tx_stalled_ms = now;
+            return now - ws->tx_stalled_ms >=
+                (uint64_t)(ws->send_timeout_ms > 0 ? ws->send_timeout_ms : 2000)
+                ? -1 : 0;
+        }
+        if (wrote <= 0 || (size_t)wrote > ws->tx_chunk_used - ws->tx_chunk_sent)
+            return -1;
+        ws->tx_chunk_sent += (size_t)wrote;
+        ws->tx_stalled_ms = 0;
+    }
+    return 0;
+}
+
 static int send_frame(struct le_ws *ws, int opcode, const void *payload,
                       size_t length)
 {
-    unsigned char header[14];
-    unsigned char mask[4];
-    /* Masking scratch. The caller's buffer is const and is not the transport's
-       to scribble on; a masked copy also never needs the whole frame resident. */
-    unsigned char scratch[512];
+    unsigned char header[14], mask[4];
     const unsigned char *body = payload;
-    size_t header_length;
-    size_t offset;
-    size_t i;
-
-    if (!ws->connected || length > LE_WS_MAX_PAYLOAD)
-        return -1;
-    if (random_bytes(ws, mask, sizeof(mask)) < 0)
-        return -1;
+    size_t header_length, i;
+    if (!ws->connected || length > LE_WS_MAX_PAYLOAD ||
+        length + sizeof(header) > le_ws_send_capacity(ws)) return -1;
+    if (random_bytes(ws, mask, sizeof(mask)) < 0) return -1;
     header[0] = (unsigned char)(0x80 | opcode);
     if (length < 126U) {
-        header[1] = (unsigned char)(0x80U | length);
-        header_length = 2;
+        header[1] = (unsigned char)(0x80U | length); header_length = 2;
     } else if (length <= 0xffffU) {
         header[1] = 0x80U | 126U;
         header[2] = (unsigned char)(length >> 8);
-        header[3] = (unsigned char)length;
-        header_length = 4;
+        header[3] = (unsigned char)length; header_length = 4;
     } else {
         header[1] = 0x80U | 127U;
-        for (i = 0; i < 8; ++i)
-            header[2 + i] = (unsigned char)((uint64_t)length >>
-                                            (56 - i * 8));
+        for (i = 0; i < 8U; ++i)
+            header[2 + i] = (unsigned char)((uint64_t)length >> (56U - i * 8U));
         header_length = 10;
     }
-    memcpy(header + header_length, mask, sizeof(mask));
-    header_length += sizeof(mask);
-    if (write_all(ws, header, header_length) < 0)
-        return -1;
-    for (offset = 0; offset < length; offset += sizeof(scratch)) {
-        size_t chunk = length - offset;
-
-        if (chunk > sizeof(scratch))
-            chunk = sizeof(scratch);
-        for (i = 0; i < chunk; ++i)
-            scratch[i] = body[offset + i] ^ mask[(offset + i) % 4U];
-        if (write_all(ws, scratch, chunk) < 0)
-            return -1;
-    }
-    ++ws->frames_out;
-    ws->bytes_out += header_length + length;
-    return 0;
+    memcpy(header + header_length, mask, sizeof(mask)); header_length += sizeof(mask);
+    memcpy(ws->tx_queue + ws->tx_used, header, header_length);
+    for (i = 0; i < length; ++i)
+        ws->tx_queue[ws->tx_used + header_length + i] = body[i] ^ mask[i % 4U];
+    ws->tx_used += header_length + length;
+    ++ws->frames_out; ws->bytes_out += header_length + length;
+    return le_ws_pump(ws);
 }
 
 int le_ws_send_text(struct le_ws *ws, const char *payload, size_t length)
@@ -501,78 +517,59 @@ int le_ws_send_close(struct le_ws *ws, int code)
 static int read_frame(struct le_ws *ws, int *opcode, unsigned char *payload,
                       size_t capacity, size_t *length, uint64_t deadline)
 {
-    unsigned char header[2];
-    unsigned char extended[8];
-    uint64_t payload_length;
-    int fin;
-
-    {
-        long got = read_exact(ws, header, sizeof(header), deadline);
-
-        /*
-         * A quiet moment and a closed stream are different outcomes: reporting
-         * a timeout as a close would end a healthy session every time the
-         * model paused.
-         */
-        if (got == READ_TIMEOUT)
-            return READ_TIMEOUT;
-        if (got == READ_CLOSED)
-            return READ_CLOSED;
-        if (got < 0)
-            return READ_ERROR;
+    unsigned int budget;
+    if (!ws->rx_header_need) ws->rx_header_need = 2;
+    for (budget = 0; budget < 128U; ++budget) {
+        unsigned char *destination;
+        size_t needed;
+        long got;
+        if (ws->rx_header_used < ws->rx_header_need) {
+            destination = ws->rx_header + ws->rx_header_used;
+            needed = ws->rx_header_need - ws->rx_header_used;
+        } else {
+            destination = ws->rx_payload + ws->rx_used;
+            needed = ws->rx_length - ws->rx_used;
+        }
+        got = needed ? ws->stream->recv(ws->stream->context, destination, needed) : 0;
+        if (needed && got == -2) {
+            if (monotonic_ms() >= deadline) return READ_TIMEOUT;
+            continue;
+        }
+        if (needed && got == 0)
+            return ws->rx_header_used || ws->rx_used ? READ_ERROR : READ_CLOSED;
+        if (needed && (got < 0 || (size_t)got > needed)) return READ_ERROR;
+        if (ws->rx_header_used < ws->rx_header_need) {
+            uint64_t n;
+            unsigned int i, code;
+            ws->rx_header_used += (size_t)got;
+            if (ws->rx_header_used < ws->rx_header_need) continue;
+            if (!(ws->rx_header[0] & 0x80U) || (ws->rx_header[0] & 0x70U) ||
+                (ws->rx_header[1] & 0x80U)) return READ_ERROR;
+            code = ws->rx_header[1] & 0x7fU;
+            ws->rx_header_need = code == 126U ? 4U : code == 127U ? 10U : 2U;
+            if (ws->rx_header_used < ws->rx_header_need) continue;
+            n = code;
+            if (code >= 126U) {
+                n = 0;
+                for (i = 2; i < ws->rx_header_need; ++i) n = (n << 8) | ws->rx_header[i];
+                if ((code == 126U && n < 126U) ||
+                    (code == 127U && (n < 65536U || (ws->rx_header[2] & 0x80U))))
+                    return READ_ERROR;
+            }
+            ws->rx_opcode = ws->rx_header[0] & 0x0fU;
+            if (n > capacity || n > sizeof(ws->rx_payload) ||
+                (ws->rx_opcode >= OPCODE_CLOSE && n > 125U)) return READ_ERROR;
+            ws->rx_length = (size_t)n;
+            if (n) continue;
+        } else ws->rx_used += (size_t)got;
+        if (ws->rx_used < ws->rx_length) continue;
+        *opcode = (int)ws->rx_opcode; *length = ws->rx_length;
+        memcpy(payload, ws->rx_payload, *length);
+        ++ws->frames_in; ws->bytes_in += *length;
+        ws->rx_header_used = ws->rx_header_need = ws->rx_used = ws->rx_length = 0;
+        return 0;
     }
-    fin = (header[0] & 0x80) != 0;
-    *opcode = header[0] & 0x0f;
-    if (header[0] & 0x70) {                  /* RSV: no extensions negotiated */
-        return READ_ERROR;
-    }
-    if (header[1] & 0x80) {                  /* masked server frame */
-        return READ_ERROR;
-    }
-    payload_length = header[1] & 0x7fU;
-    if (payload_length == 126U) {
-        int got = (int)read_exact(ws, extended, 2, deadline);
-        if (got == READ_TIMEOUT)
-            return READ_TIMEOUT;
-        if (got == READ_CLOSED)
-            return READ_CLOSED;
-        if (got < 0)
-            return READ_ERROR;
-        payload_length = ((uint64_t)extended[0] << 8) | extended[1];
-    } else if (payload_length == 127U) {
-        int i;
-
-        int got = (int)read_exact(ws, extended, 8, deadline);
-        if (got == READ_TIMEOUT)
-            return READ_TIMEOUT;
-        if (got == READ_CLOSED)
-            return READ_CLOSED;
-        if (got < 0)
-            return READ_ERROR;
-        payload_length = 0;
-        for (i = 0; i < 8; ++i)
-            payload_length = (payload_length << 8) | extended[i];
-    }
-    if (payload_length > capacity)
-        return READ_ERROR;                   /* refuse rather than truncate */
-    if (payload_length) {
-        int got = (int)read_exact(ws, payload, (size_t)payload_length,
-                                  deadline);
-        if (got == READ_TIMEOUT)
-            return READ_TIMEOUT;
-        if (got == READ_CLOSED)
-            return READ_CLOSED;
-        if (got < 0)
-            return READ_ERROR;
-    }
-    if (*opcode >= OPCODE_CLOSE && (!fin || payload_length > 125U))
-        return READ_ERROR;
-    *length = (size_t)payload_length;
-    ++ws->frames_in;
-    ws->bytes_in += (uint64_t)payload_length;
-    if (!fin && *opcode != OPCODE_CLOSE)
-        return READ_ERROR;                   /* fragmentation unsupported */
-    return 0;
+    return READ_TIMEOUT;
 }
 
 int le_ws_read_text(struct le_ws *ws, char *out, size_t out_size,
@@ -580,12 +577,14 @@ int le_ws_read_text(struct le_ws *ws, char *out, size_t out_size,
 {
     static unsigned char payload[LE_WS_MAX_PAYLOAD];
     uint64_t deadline;
+    unsigned int budget;
 
     if (!ws || !ws->connected || !out || out_size == 0)
         return -1;
     out[0] = '\0';
-    deadline = monotonic_ms() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 100);
-    for (;;) {
+    if (le_ws_pump(ws) < 0) return -1;
+    deadline = monotonic_ms() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0);
+    for (budget = 0; budget < 8U; ++budget) {
         int opcode = 0;
         size_t length = 0;
         int result = read_frame(ws, &opcode, payload, sizeof(payload) - 1U,
@@ -597,8 +596,7 @@ int le_ws_read_text(struct le_ws *ws, char *out, size_t out_size,
             ws->close_received = 1;
             return 2;
         }
-        if (result < 0)
-            return -1;
+        if (result < 0) { ws->connected = 0; return -1; }
         if (opcode == OPCODE_PING) {
             if (send_frame(ws, OPCODE_PONG, payload, length) < 0)
                 return -1;
@@ -618,6 +616,7 @@ int le_ws_read_text(struct le_ws *ws, char *out, size_t out_size,
         out[length] = '\0';
         return 1;
     }
+    return 0;
 }
 
 void le_ws_close(struct le_ws *ws)

@@ -54,6 +54,7 @@ int main(void)
     CHECK(child >= 0);
     if (child == 0) {
         (void)setenv("LE_TTS_STREAMING", "1", 1);
+        (void)setenv("LE_TTS_IN_PROCESS", "1", 1);
         (void)setenv("LE_TTS_ANNOUNCEMENT_BUS", fifo_path, 1);
         (void)setenv("LE_TTS_FIRST_PCM_FILE", first_pcm_path, 1);
         execl("./build/libreecho-ttsd", "libreecho-ttsd",
@@ -117,6 +118,25 @@ int main(void)
     CHECK(le_adapter_call(adapter, "stop_speech", NULL,
                           response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"speaking\":false") != NULL);
+
+    /* In-process low-memory synthesis must not block the command loop. */
+    {
+        char text[2500];
+        char args[2700];
+        memset(text, 'a', sizeof(text) - 1);
+        text[sizeof(text) - 1] = '\0';
+        nanosleep(&pause_time, NULL);
+        nanosleep(&pause_time, NULL);
+        nanosleep(&pause_time, NULL);
+        nanosleep(&pause_time, NULL);
+        nanosleep(&pause_time, NULL);
+        CHECK(snprintf(args, sizeof(args), "{\"text\":\"%s\"}", text) > 0);
+        CHECK(le_adapter_call(adapter, "speak", args,
+                              response, sizeof(response)) == 0);
+        CHECK(le_adapter_call(adapter, "stop_speech", NULL,
+                              response, sizeof(response)) == 0);
+        CHECK(strstr(response, "\"speaking\":false") != NULL);
+    }
 
     /* 4. speak with empty text should be rejected (non-zero return). */
     CHECK(le_adapter_call(adapter, "speak", "{\"text\":\"\"}",

@@ -310,6 +310,17 @@ long le_tls_write(struct le_tls *tls, const void *buf, size_t len)
     return rc < 0 ? -1 : rc;
 }
 
+long le_tls_try_write(struct le_tls *tls, const void *buf, size_t len)
+{
+    int rc;
+    if (!tls || !buf || !len) return -1;
+    /* The Realtime transport owns an O_NONBLOCK descriptor. */
+    rc = mbedtls_ssl_write(&tls->ssl, buf, len);
+    if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE)
+        return -2;
+    return rc < 0 ? -1 : rc;
+}
+
 long le_tls_write_deadline(struct le_tls *tls, const void *buf, size_t len,
                            int timeout_ms)
 {
