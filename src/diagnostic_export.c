@@ -1,6 +1,7 @@
 #include "api.h"
 #include "feature_provenance.h"
 #include "authority_provenance.h"
+#include "boot_control.h"
 #include "json.h"
 #include "version.h"
 #include <ctype.h>
@@ -311,6 +312,20 @@ static void append_unavailable(struct diag_writer *w, const char *name)
     (void)diag_append(w, "\"%s\":{\"available\":false,\"reason\":\"unavailable\"},", name);
 }
 
+/* Boot-slot countdown evidence read from userdata.  A device that stops booting
+   cannot report anything else, so this is the section that explains why: the
+   per-slot retry counts, the confirmation verdict, and the reason no
+   confirmation was attempted. */
+static void append_boot_control(struct diag_writer *w)
+{
+    struct le_boot_control boot;
+    char payload[LE_BOOT_CONTROL_JSON_MAX];
+    le_boot_control_read(&boot);
+    if (le_boot_control_json(payload, sizeof(payload), &boot))
+        snprintf(payload, sizeof(payload), "{\"available\":false,\"reason\":\"unavailable\"}");
+    (void)diag_append(w, "\"boot_control\":%s,", payload);
+}
+
 void diagnostics_export_json(struct api_context *c, struct api_response *r)
 {
     struct le_system_status status;
@@ -501,8 +516,9 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
     (void)diag_append(&w, "\"privacy\":{\"local_only\":%s,\"audio_retention\":%s,\"diagnostic_telemetry\":%s,\"crash_reports\":%s,\"hardware_mute_capable\":true},",
                       json_bool(c->privacy_local_only), json_bool(c->privacy_audio_retention),
                       json_bool(c->privacy_telemetry), json_bool(c->privacy_crash_reports));
+    append_boot_control(&w);
     (void)append_logs(&w, c);
-    (void)diag_append(&w, "\"manifest\":{\"sections\":[\"release_identity\",\"runtime\",\"network\",\"audio\",\"wake_word\",\"bluetooth\",\"playback\",\"privacy\",\"logs\"],\"redactions\":[\"wifi_credentials\",\"ssid_bssid\",\"ip_addresses\",\"bluetooth_addresses\",\"owner_identifiers\",\"tokens_cookies\",\"private_paths\",\"media_metadata\"],\"omitted\":[\"private_keys\",\"ota_signing_material\",\"raw_pstore\",\"arbitrary_request_paths\"]}},\"error\":null}");
+    (void)diag_append(&w, "\"manifest\":{\"sections\":[\"release_identity\",\"runtime\",\"network\",\"audio\",\"wake_word\",\"bluetooth\",\"playback\",\"privacy\",\"boot_control\",\"logs\"],\"redactions\":[\"wifi_credentials\",\"ssid_bssid\",\"ip_addresses\",\"bluetooth_addresses\",\"owner_identifiers\",\"tokens_cookies\",\"private_paths\",\"media_metadata\"],\"omitted\":[\"private_keys\",\"ota_signing_material\",\"raw_pstore\",\"arbitrary_request_paths\"]}},\"error\":null}");
     if (w.failed) {
         snprintf(r->body, sizeof(r->body), "{\"ok\":true,\"data\":{\"schema_version\":1,\"format\":\"libreecho-diagnostic-bundle\",\"bounded\":true,\"partial\":true,\"manifest\":{\"redactions\":[\"all-private-identifiers\"]}},\"error\":null}");
     }
