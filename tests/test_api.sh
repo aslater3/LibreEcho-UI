@@ -185,6 +185,16 @@ expect "$(curl -fsS "$URL/api/v1/system")" '"ntp":false'
 expect "$(curl -fsS "$URL/api/v1/system")" '"clock_valid":true'
 expect "$(curl -fsS "$URL/api/v1/system")" '"ntp_state":"unavailable"'
 expect "$(curl -fsS "$URL/api/v1/system")" '"rtc_available":false'
+# Boot-slot diagnostics: this environment has no recorded boot state, so the
+# endpoint reports the absence instead of inventing one.
+curl -fsS "$URL/api/v1/system/boot" | jq -e \
+    '.ok and .data.available == false and .data.state == "unavailable" and
+     .data.confirmed == false and .data.running_slot == "-" and
+     .data.running_slot_tries == -1 and .data.boot_count == 0 and
+     .data.history == []' >/dev/null
+code=$(curl -sS -o /tmp/le-boot-control-method.out -w '%{http_code}' \
+    -X POST "$URL/api/v1/system/boot" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
 curl -fsS "$URL/api/v1/system/update" | jq -e \
     '.ok and .data.supported == false and
      .data.current_slot == "-" and .data.inactive_slot == "-" and

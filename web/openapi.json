@@ -2067,6 +2067,121 @@
     }
    }
   },
+  "/system/boot": {
+    "get": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Read boot-slot confirmation and retry state",
+      "description": "Reports the boot-control record libreecho-init writes to userdata on every boot. `state` is one of booting, pending, confirmed, failed, restarting, skipped (plus `unknown` if the record is malformed); `confirmed` mirrors `state == confirmed`. `mode` distinguishes a first-boot confirmation from an OTA confirmation. `last_check` names the check that last failed, or services-degraded when the boot/recovery plane passed while the complete application service graph did not (`strict_graph` records that observation). slot_a and slot_b report the bootloader priority, remaining tries and success flag, with -1 when the record is unreadable. `running_slot_tries` is the number of attempts the preloader will still grant the running slot: an unconfirmed slot stops booting when they reach zero, after which the device has no ADB. `history` is a bounded, one-line-per-boot record carrying the previous boot's verdict. `available: false` means no record exists on this image; nothing is inferred, and values are matched against the vocabulary the device writes rather than passed through.",
+      "responses": {
+        "200": {
+          "description": "Boot-slot confirmation state, retry countdown and per-boot history.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/Envelope"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "data": {
+                        "type": "object",
+                        "required": [
+                          "available",
+                          "state",
+                          "confirmed"
+                        ],
+                        "properties": {
+                          "available": {
+                            "type": "boolean"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "booting",
+                              "pending",
+                              "confirmed",
+                              "failed",
+                              "restarting",
+                              "skipped",
+                              "unavailable",
+                              "unknown"
+                            ]
+                          },
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "first-boot",
+                              "ota",
+                              "none",
+                              "unknown"
+                            ]
+                          },
+                          "confirmed": {
+                            "type": "boolean"
+                          },
+                          "running_slot": {
+                            "type": "string"
+                          },
+                          "selected_slot": {
+                            "type": "string"
+                          },
+                          "pending_slot": {
+                            "type": "string"
+                          },
+                          "boot_count": {
+                            "type": "integer"
+                          },
+                          "attempt": {
+                            "type": "integer"
+                          },
+                          "passed": {
+                            "type": "integer"
+                          },
+                          "last_check": {
+                            "type": "string"
+                          },
+                          "strict_graph": {
+                            "type": "boolean"
+                          },
+                          "running_slot_tries": {
+                            "type": "integer"
+                          },
+                          "running_slot_success": {
+                            "type": "integer"
+                          },
+                          "slot_a": {
+                            "type": "object",
+                            "description": "Bootloader priority, tries and success for slot A; -1 when unreadable."
+                          },
+                          "slot_b": {
+                            "type": "object",
+                            "description": "Bootloader priority, tries and success for slot B; -1 when unreadable."
+                          },
+                          "history": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "405": {
+          "description": "Only GET is supported."
+        }
+      }
+    }
+  },
   "/system/factory-reset": {
    "post": {
     "tags": [

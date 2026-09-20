@@ -85,6 +85,8 @@ make build/test-authority-provenance
 # with its exact Platform checkout; it is distinct from the mock C reader test.
 make build/test-feature-provenance
 ./build/test-feature-provenance
+make build/test-boot-control
+./build/test-boot-control
 make build/test-diagnostic-export
 ./build/test-diagnostic-export
 make build/libreecho-web
@@ -238,6 +240,35 @@ EOF
 mkdir -p ./build/test-vendor-config
 rm -f ./build/test-vendor-config/vendor-import-force-next-boot
 : >./build/test-wlan0
+# Boot-slot diagnostics fixture: the records init writes on a device that has
+# failed to confirm its slot.
+mkdir -p ./build/test-boot-control-root
+cat >./build/test-boot-control-root/boot-health <<'EOF'
+schema=1
+state=failed
+mode=first-boot
+running_slot=a
+selected_slot=a
+pending_slot=-
+slot_a_priority=15
+slot_a_tries=0
+slot_a_success=0
+slot_b_priority=14
+slot_b_tries=7
+slot_b_success=0
+boot_count=4
+attempt=6
+passed=1
+last_check=startup-ready-marker-missing
+strict_graph=0
+epoch=1700000000
+EOF
+printf '%s\n' 4 >./build/test-boot-control-root/boot-count
+cat >./build/test-boot-control-root/boot-history <<'EOF'
+epoch=1699999000 boot=3 mode=first-boot running=a selected=a pending=- a=15/1/0 b=14/7/0 prev=pending:none prev_slot=a
+epoch=1700000000 boot=4 mode=first-boot running=a selected=a pending=- a=15/0/0 b=14/7/0 prev=failed:startup-ready-marker-missing prev_slot=a
+EOF
+LIBREECHO_UPDATE_ROOT=./build/test-boot-control-root \
 LIBREECHO_TIME_STATUS=./build/test-time.status \
 LIBREECHO_VENDOR_STATUS_PATH=./build/test-vendor-import.status \
 LIBREECHO_VENDOR_FORCE_MARKER=./build/test-vendor-config/vendor-import-force-next-boot \

@@ -804,6 +804,53 @@ state. The hardware clock is maintained in UTC.
 }
 ```
 
+#### GET /api/v1/system/boot
+
+Reports the boot-control record `libreecho-init` writes to userdata on every
+boot. The preloader refuses a slot whose retry count reaches zero while its
+success flag is `0`, and only `libreecho-bootctl confirm` clears that countdown,
+so this record is the evidence that explains a device which stopped booting.
+
+`available` is `false` when no record exists on the image; nothing is inferred.
+`state` is `booting`, `pending`, `confirmed`, `failed`, `restarting` or
+`skipped` (`unknown` if the record is malformed), and `confirmed` mirrors
+`state == "confirmed"`. `last_check` names the check that last failed, or
+`services-degraded` when the boot/recovery plane passed while the complete
+application service graph did not — `strict_graph` records that observation, and
+`mode` distinguishes a `first-boot` confirmation from an `ota` one.
+`running_slot_tries` is the remaining number of attempts the bootloader will
+grant the running slot, and `history` carries one bounded line per boot with the
+previous boot's verdict.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "available": true,
+    "state": "failed",
+    "mode": "first-boot",
+    "confirmed": false,
+    "running_slot": "a",
+    "selected_slot": "a",
+    "pending_slot": "-",
+    "boot_count": 4,
+    "attempt": 6,
+    "passed": 1,
+    "last_check": "services-degraded",
+    "strict_graph": false,
+    "running_slot_tries": 0,
+    "running_slot_success": 0,
+    "slot_a": { "priority": 15, "tries": 0, "success": 0 },
+    "slot_b": { "priority": 14, "tries": 7, "success": 0 },
+    "history": [
+      "epoch=1700000000 boot=4 mode=first-boot running=a selected=a pending=- a=15/0/0 b=14/7/0 prev=failed:services-degraded prev_slot=a"
+    ]
+  },
+  "error": null
+}
+```
+
 #### POST /api/v1/system/reboot
 
 Reboot device. Requires `X-LibreEcho-Confirm: confirm-device-action`.
