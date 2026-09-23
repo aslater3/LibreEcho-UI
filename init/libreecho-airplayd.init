@@ -144,16 +144,57 @@ mount_runtime() {
         }
     fi
     create_support_mounts || return 1
+    configure_service_name
     stage_airplay_services
     mount_led_socket
 }
 
-# AirPlay service definitions are published by the shared supervisor, which
-# reads them from its own runtime root. Staging is best-effort by design: a
-# missing supervisor directory means AirPlay is not advertised, and that must
-# degrade discovery rather than refuse to start audio.
+# The payload ships a fixed service name, so two LibreEcho units on one LAN
+# announce the same _airplay._tcp name. Avahi then withholds or renames one of
+# them, and because the RAOP record's instance name is MAC-prefixed and unique
+# that is the only one that survives - the unit is present as a legacy RAOP
+# speaker but missing from AirPlay pickers. Announce the name this device is
+# configured with, which the setup flow already persists.
+configure_service_name() {
+    target=$RUNTIME_ROOT/etc/libreecho/airplay2.conf
+    [ -f "$target" ] || return 0
+    grep -q " $target " /proc/mounts 2>/dev/null && return 0
+
+    service_name=
+    if [ -r "$CONFIG" ]; then
+        service_name=$(sed -n \
+            's/.*"device_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$CONFIG" 2>/dev/null | head -n 1)
+    fi
+    [ -n "$service_name" ] || service_name=$(cat /etc/hostname 2>/dev/null)
+    [ -n "$service_name" ] || return 0
+    # The name is announced on the LAN, so keep it to plain name characters.
+    case "$service_name" in
+        *[!A-Za-z0-9._\ -]*) return 0 ;;
+    esac
+
+    # Only the general section's name. The pipe and metadata sections each carry
+    # a "name" as well, and those are paths - rewriting one breaks audio.
+    generated=$RUNTIME_ROOT/var/libreecho-airplay2.conf
+    sed "s|^\([[:space:]]*\)name = \"[^/\"]*\";|\1name = \"$service_name\";|" \
+        "$target" > "$generated" 2>/dev/null || return 0
+    grep -q "name = \"$service_name\";" "$generated" || return 0
+    mount_support "$target" --bind "$generated" || {
+        echo "libreecho-airplayd: could not announce \"$service_name\"; using the payload name" >&2
+        return 0
+    }
+    echo "libreecho-airplayd: AirPlay service name is \"$service_name\"" >&2
+    return 0
+}
+
+# AirPlay 2 records are registered dynamically by shairport-sync with the shared
+# responder, so an absent payload directory is not a discovery failure - but
+# returning silently made it impossible to tell apart from one.
 stage_airplay_services() {
-    [ -d "$AVAHI_SERVICES_SOURCE" ] || return 0
+    if [ ! -d "$AVAHI_SERVICES_SOURCE" ]; then
+        echo "libreecho-airplayd: nothing to stage in $AVAHI_SERVICES_SOURCE; relying on the responder's dynamic registration" >&2
+        return 0
+    fi
     if mkdir -p "$MDNS_SERVICES_DIR" &&
         cp -a "$AVAHI_SERVICES_SOURCE/." "$MDNS_SERVICES_DIR/"; then
         return 0
