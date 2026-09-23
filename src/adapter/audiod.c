@@ -1239,8 +1239,15 @@ static int write_tone_fd(int fd)
                 do {
                     rc = poll(&pfd, 1, 1000);
                 } while (rc < 0 && errno == EINTR);
-                if (rc >= 0)
+                if (rc > 0)
                     continue;
+                /* A full timeout means the shared playback engine is no
+                 * longer draining the bus.  Fail the request instead of
+                 * leaving a child writer blocked forever. */
+                if (rc == 0) {
+                    errno = ETIMEDOUT;
+                    return -1;
+                }
             }
             if (n <= 0)
                 return -1;
