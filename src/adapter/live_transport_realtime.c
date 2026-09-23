@@ -48,15 +48,16 @@
 #include "../tls.h"
 #endif
 
-#define WS_DEFAULT_HOST "chatgpt.com"
-#define WS_DEFAULT_PATH "/v1/realtime?intent=quicksilver"
-#define WS_DEFAULT_MODEL "gpt-live-1-codex"
+#define WS_DEFAULT_HOST "api.openai.com"
+#define WS_DEFAULT_PATH "/v1/realtime"
+#define WS_DEFAULT_MODEL "gpt-realtime"
 #define WS_DEFAULT_PORT 443
 #define WS_CONNECT_TIMEOUT_MS 8000
 #define WS_READ_TIMEOUT_MS 250
 
 /* Audio the protocol carries, and the shape the device produces. */
-#define WS_INPUT_SAMPLE_RATE 16000U
+#define WS_SOURCE_SAMPLE_RATE 16000U
+#define WS_INPUT_SAMPLE_RATE 24000U
 #define WS_OUTPUT_SAMPLE_RATE 24000U
 #define WS_CONTEXT_CHUNK_MAX 500U
 
@@ -76,8 +77,12 @@ struct ws_state {
     unsigned int port;
     char bearer[LE_LLM_TOKEN_MAX];
     char account_id[160];
-    char model[64];
+    char model[128];
     char voice[32];
+    char instructions[2048];
+    char initial_text[256];
+    int initial_sent;
+    int request_response_pending;
     int session_ready;
     char ca_path[256];
     /* JSON scratch for one inbound message. */
@@ -89,8 +94,15 @@ struct ws_state {
     size_t audio_pending_offset;
     int output_done_pending;
     int suppress_audio;
+    int response_active;
+    char response_id[128], cancelled_response_id[128], item_id[128];
+    uint64_t response_audio_frames, item_start_frames, item_audio_frames;
+    unsigned int content_index;
     unsigned int messages_in;
     unsigned int audio_chunks_out;
+    int16_t input_previous;
+    int input_have_previous;
+    unsigned int input_next_third;
     char detail[LE_LIVE_TEXT_MAX];
 };
 
@@ -253,7 +265,7 @@ static long stream_recv(void *context, void *buffer, size_t length)
 
 #if LE_TLS_AVAILABLE
     if (s->tls_active) {
-        long count = le_tls_read_deadline(s->tls, buffer, length, 50);
+        long count = le_tls_read_deadline(s->tls, buffer, length, 0);
 
         if (count > 0)
             return count;
@@ -279,11 +291,11 @@ static long stream_send(void *context, const void *buffer, size_t length)
 
 #if LE_TLS_AVAILABLE
     if (s->tls_active) {
-        long count = le_tls_write_deadline(s->tls, buffer, length, 50);
+        long count = le_tls_try_write(s->tls, buffer, length);
 
         if (count > 0)
             return count;
-        return -2;
+        return count == -2 ? -2 : -1;
     }
 #endif
     wrote = send(s->fd, buffer, length, MSG_NOSIGNAL);
@@ -442,20 +454,34 @@ static int connect_socket(struct ws_state *s, char *detail, size_t detail_size)
 
 static int send_session_update(struct ws_state *s)
 {
-    char message[1024];
+    char message[8192];
+    char instructions[sizeof(s->instructions) * 2U];
+
+    json_escape_into(instructions, sizeof(instructions), s->instructions);
     int length = snprintf(
         message, sizeof(message),
         "{\"type\":\"session.update\",\"session\":{"
-        "\"type\":\"quicksilver\",\"output_modalities\":[\"audio\"],"
+        "\"type\":\"realtime\",\"output_modalities\":[\"audio\"],"
         "\"instructions\":\"%s\","
         "\"model\":\"%s\","
         "\"audio\":{\"input\":{\"format\":{\"type\":\"audio/pcm\","
-        "\"rate\":%u},\"turn_detection\":{\"type\":\"server_vad\","
-        "\"interrupt_response\":true}},\"output\":{\"voice\":\"%s\","
+        "\"rate\":%u},\"noise_reduction\":{\"type\":\"near_field\"},"
+        "\"turn_detection\":{\"type\":\"server_vad\","
+        "\"interrupt_response\":true,\"create_response\":true,"
+        "\"silence_duration_ms\":500}},\"output\":{\"voice\":\"%s\","
         "\"format\":{\"type\":\"audio/pcm\",\"rate\":%u}}},"
-        "\"delegation\":{\"type\":\"client\"}}}",
-        "You are the voice assistant built into this device. Answer briefly "
-        "and naturally. When a request needs a device action, delegate it.",
+        "\"tools\":["
+        "{\"type\":\"function\",\"name\":\"timer_set\",\"description\":\"Set a countdown timer on this LibreEcho device\",\"parameters\":{\"type\":\"object\",\"properties\":{\"seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":86400},\"label\":{\"type\":\"string\",\"maxLength\":63}},\"required\":[\"seconds\"],\"additionalProperties\":false}},"
+        "{\"type\":\"function\",\"name\":\"timer_cancel\",\"description\":\"Cancel one timer by id, or all timers when id is omitted\",\"parameters\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"minimum\":1}},\"additionalProperties\":false}},"
+        "{\"type\":\"function\",\"name\":\"timer_dismiss\",\"description\":\"Dismiss a ringing timer\",\"parameters\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+        "{\"type\":\"function\",\"name\":\"timer_query\",\"description\":\"Read active timer status\",\"parameters\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+        "{\"type\":\"function\",\"name\":\"media_stop\",\"description\":\"Stop music, radio, noise, or other media playback; never use this to end the voice conversation\",\"parameters\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+        "{\"type\":\"function\",\"name\":\"media_status\",\"description\":\"Read the current playback source\",\"parameters\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+        "{\"type\":\"function\",\"name\":\"device_time\",\"description\":\"Read the device local time and synchronization state\",\"parameters\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+        "{\"type\":\"function\",\"name\":\"device_volume\",\"description\":\"Read current volume and mute state\",\"parameters\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+        "{\"type\":\"function\",\"name\":\"session_stop\",\"description\":\"Immediately end this voice conversation after a wake-gated stop, cancel, never-mind, goodbye, or end-conversation request\",\"parameters\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}}"
+        "]}}",
+        instructions,
         s->model, WS_INPUT_SAMPLE_RATE, s->voice, WS_OUTPUT_SAMPLE_RATE);
 
     if (length <= 0 || (size_t)length >= sizeof(message)) {
@@ -499,6 +525,11 @@ static int ws_start(struct le_live_transport *transport,
              config && config->model ? config->model : WS_DEFAULT_MODEL);
     snprintf(state.voice, sizeof(state.voice), "%s",
              config && config->voice ? config->voice : "cove");
+    snprintf(state.instructions, sizeof(state.instructions), "%s",
+             config && config->instructions ? config->instructions :
+             "You are the voice assistant built into this device. Always answer in English. Answer briefly and naturally.");
+    snprintf(state.initial_text, sizeof(state.initial_text), "%s",
+             config && config->initial_text ? config->initial_text : "");
     snprintf(state.ca_path, sizeof(state.ca_path), "%s",
              config && config->ca_path ? config->ca_path
                                        : "/usr/local/share/libreecho/cacert.pem");
@@ -606,21 +637,55 @@ fail:
 static int ws_send_audio(struct le_live_transport *transport,
                          const int16_t *samples, size_t count)
 {
+    int16_t resampled[(LE_LIVE_AUDIO_SAMPLES * 3U) / 2U + 2U];
     char encoded[LE_WS_MAX_PAYLOAD / 2];
     char message[LE_WS_MAX_PAYLOAD];
     size_t encoded_length;
+    size_t input;
+    size_t output = 0;
     int length;
 
     (void)transport;
     if (!state.session_ready || !samples || !count ||
         count > LE_LIVE_AUDIO_SAMPLES)
         return -1;
-    encoded_length = le_b64_encode(samples, count * sizeof(int16_t), encoded,
+    if (le_ws_pump(&state.ws) < 0) return -1;
+    /* Reserve space for cancellation/tool messages, without consuming input
+       or changing resampler history when the network is backpressured. */
+    if (le_ws_send_capacity(&state.ws) < count * 4U + 8448U) return 1;
+    /* Stateful linear 16 -> 24 kHz conversion. The next output position is
+       represented in thirds of one input interval; advancing by two produces
+       exactly three output samples per two input samples without resetting
+       phase at frame boundaries. */
+    for (input = 0; input < count; ++input) {
+        int16_t current = samples[input];
+
+        if (!state.input_have_previous) {
+            state.input_previous = current;
+            state.input_have_previous = 1;
+            continue;
+        }
+        while (state.input_next_third < 3U) {
+            int difference = (int)current - (int)state.input_previous;
+            int value = (int)state.input_previous +
+                difference * (int)state.input_next_third / 3;
+
+            if (output >= sizeof(resampled) / sizeof(resampled[0]))
+                return -1;
+            resampled[output++] = (int16_t)value;
+            state.input_next_third += 2U;
+        }
+        state.input_next_third -= 3U;
+        state.input_previous = current;
+    }
+    if (!output)
+        return 0;
+    encoded_length = le_b64_encode(resampled, output * sizeof(int16_t), encoded,
                                    sizeof(encoded));
     if (!encoded_length)
         return -1;
     length = snprintf(message, sizeof(message),
-                      "{\"type\":\"input_audio.append\",\"audio\":\"%s\"}",
+                      "{\"type\":\"input_audio_buffer.append\",\"audio\":\"%s\"}",
                       encoded);
     if (length <= 0 || (size_t)length >= sizeof(message))
         return -1;
@@ -628,6 +693,52 @@ static int ws_send_audio(struct le_live_transport *transport,
         return -1;
     ++state.audio_chunks_out;
     return 0;
+}
+
+static int send_initial_prompt(void)
+{
+    char escaped[sizeof(state.initial_text) * 2U];
+    char message[sizeof(escaped) + 192U];
+    int length;
+
+    if (!state.initial_text[0] || state.initial_sent)
+        return 0;
+    json_escape_into(escaped, sizeof(escaped), state.initial_text);
+    length = snprintf(
+        message, sizeof(message),
+        "{\"type\":\"conversation.item.create\",\"item\":{"
+        "\"type\":\"message\",\"role\":\"user\",\"content\":[{"
+        "\"type\":\"input_text\",\"text\":\"%s\"}]}}",
+        escaped);
+    if (length <= 0 || (size_t)length >= sizeof(message) ||
+        le_ws_send_text(&state.ws, message, (size_t)length) < 0)
+        return -1;
+    if (le_ws_send_text(&state.ws, "{\"type\":\"response.create\"}",
+                        sizeof("{\"type\":\"response.create\"}") - 1U) < 0)
+        return -1;
+    state.initial_sent = 1;
+    return 0;
+}
+
+static const char *function_tool_name(const char *name)
+{
+    static const struct { const char *remote; const char *local; } tools[] = {
+        {"timer_set", "timer.set"},
+        {"timer_cancel", "timer.cancel"},
+        {"timer_dismiss", "timer.dismiss"},
+        {"timer_query", "timer.query"},
+        {"media_stop", "media.stop"},
+        {"media_status", "media.status"},
+        {"device_time", "device.time"},
+        {"device_volume", "device.volume"},
+        {"session_stop", "session.stop"}
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(tools) / sizeof(tools[0]); ++i)
+        if (!strcmp(name, tools[i].remote))
+            return tools[i].local;
+    return NULL;
 }
 
 /* Map one inbound frameless-bidi message onto a session event. */
@@ -643,19 +754,59 @@ static int translate(const char *message, struct le_live_event *event)
 
     if (!strcmp(type, "session.started") || !strcmp(type, "session.updated")) {
         state.session_ready = 1;
+        if (send_initial_prompt() < 0)
+            return 0;
         event->kind = LE_LIVE_EVENT_OPEN;
         return 1;
     }
-    if (!strcmp(type, "output_audio.delta")) {
+    if (!strcmp(type, "response.created")) {
+        const char *response = top_value(message, "response");
+        char id[128];
+        if (!response || top_string(response, "id", id, sizeof(id)) < 0) return 0;
+        if (!strcmp(id, state.cancelled_response_id)) return 0;
+        snprintf(state.response_id, sizeof(state.response_id), "%s", id);
+        state.response_active = 1;
+        state.item_id[0] = '\0';
+        state.response_audio_frames = state.item_start_frames = state.item_audio_frames = 0;
+        state.suppress_audio = 0;
+        return 0;
+    }
+    if (!strcmp(type, "input_audio_buffer.speech_started")) {
+        event->kind = LE_LIVE_EVENT_INPUT_STARTED;
+        return 1;
+    }
+    if (!strcmp(type, "output_audio.delta") ||
+        !strcmp(type, "response.output_audio.delta") ||
+        !strcmp(type, "response.audio.delta")) {
+        char response_id[128], item_id[128];
+        long long index = 0;
+        int have_response = top_string(message, "response_id", response_id, sizeof(response_id)) == 0;
+        if (have_response && (!strcmp(response_id, state.cancelled_response_id) ||
+            (state.response_id[0] && strcmp(response_id, state.response_id)))) return 0;
+        if (have_response && !state.response_id[0]) {
+            snprintf(state.response_id, sizeof(state.response_id), "%s", response_id);
+            state.response_active = 1;
+        }
+        if (top_string(message, "item_id", item_id, sizeof(item_id)) == 0 &&
+            strcmp(item_id, state.item_id)) {
+            snprintf(state.item_id, sizeof(state.item_id), "%s", item_id);
+            state.item_start_frames = state.response_audio_frames;
+            state.item_audio_frames = 0;
+        }
+        if (json_get_int64(message, "content_index", &index) == 1 && index >= 0 && index < 128)
+            state.content_index = (unsigned int)index;
         if (state.suppress_audio)
             return 0;
-        if (top_string(message, "audio", encoded, sizeof(encoded)) < 0)
+        if (top_string(message, "audio", encoded, sizeof(encoded)) < 0 &&
+            top_string(message, "delta", encoded, sizeof(encoded)) < 0)
             return 0;
         decoded = le_b64_decode(encoded, state.audio_pending,
                                 sizeof(state.audio_pending));
         if (!decoded || decoded % sizeof(int16_t))
             return 0;
         state.audio_pending_count = decoded / sizeof(int16_t);
+        state.response_audio_frames += state.audio_pending_count;
+        state.item_audio_frames += state.audio_pending_count;
         state.audio_pending_offset = 0;
         /* Emit the first bounded chunk now; later polls drain the remainder. */
         event->kind = LE_LIVE_EVENT_AUDIO;
@@ -681,6 +832,15 @@ static int translate(const char *message, struct le_live_event *event)
         snprintf(event->text, sizeof(event->text), "%s", text);
         return 1;
     }
+    if (!strcmp(type, "conversation.item.input_audio_transcription.completed") ||
+        !strcmp(type, "response.output_audio_transcript.done") ||
+        !strcmp(type, "response.audio_transcript.done")) {
+        if (top_string(message, "transcript", event->text, sizeof(event->text)) < 0) return 0;
+        event->kind = LE_LIVE_EVENT_TRANSCRIPT;
+        event->speaker = type[0] == 'c' ? LE_LIVE_SPEAKER_USER : LE_LIVE_SPEAKER_MODEL;
+        event->final = 1;
+        return 1;
+    }
     if (!strcmp(type, "turn.done")) {
         const char *turn = top_value(message, "turn");
         char role[24];
@@ -700,6 +860,51 @@ static int translate(const char *message, struct le_live_event *event)
         else if (!state.suppress_audio)
             state.output_done_pending = 1;
         return 1;
+    }
+    if (!strcmp(type, "response.function_call_arguments.done")) {
+        char call_id[LE_LIVE_DELEGATION_ID_MAX - 3U];
+        char function[64];
+        char arguments[LE_LIVE_ARGUMENT_MAX];
+        const char *tool;
+
+        if (top_string(message, "call_id", call_id, sizeof(call_id)) < 0 ||
+            top_string(message, "name", function, sizeof(function)) < 0 ||
+            top_string(message, "arguments", arguments, sizeof(arguments)) < 0)
+            return 0;
+        tool = function_tool_name(function);
+        if (!tool)
+            return 0;
+        event->kind = LE_LIVE_EVENT_DELEGATION;
+        {
+            char response_id[128];
+            if (top_string(message, "response_id", response_id, sizeof(response_id)) == 0 &&
+                (!strcmp(response_id, state.cancelled_response_id) ||
+                 (state.response_id[0] && strcmp(response_id, state.response_id)))) return 0;
+        }
+        snprintf(event->delegation_id, sizeof(event->delegation_id),
+                 "fn:%s", call_id);
+        snprintf(event->tool, sizeof(event->tool), "%s", tool);
+        snprintf(event->arguments, sizeof(event->arguments), "%s", arguments);
+        return 1;
+    }
+    if (!strcmp(type, "response.done")) {
+        const char *response = top_value(message, "response");
+        char id[128];
+        if (response && top_string(response, "id", id, sizeof(id)) == 0 &&
+            (strcmp(id, state.response_id) || !strcmp(id, state.cancelled_response_id))) return 0;
+        state.response_active = 0;
+        if (state.request_response_pending) {
+            static const char create[] = "{\"type\":\"response.create\"}";
+            state.request_response_pending = 0;
+            if (le_ws_send_text(&state.ws, create, sizeof(create) - 1U) < 0) {
+                event->kind = LE_LIVE_EVENT_ERROR;
+                snprintf(event->detail, sizeof(event->detail), "tool continuation could not be sent");
+                return 1;
+            }
+        }
+        if (!state.suppress_audio)
+            state.output_done_pending = 1;
+        return 0;
     }
     if (!strcmp(type, "delegation.created")) {
         const char *item = top_value(message, "item");
@@ -749,8 +954,12 @@ static int translate(const char *message, struct le_live_event *event)
     }
     if (!strcmp(type, "error")) {
         char message_text[LE_LIVE_TEXT_MAX];
+        const char *error = top_value(message, "error");
 
-        if (top_string(message, "message", message_text,
+        fprintf(stderr, "lived: realtime provider reported an error\n");
+        if ((!error || top_string(error, "message", message_text,
+                                  sizeof(message_text)) < 0) &&
+            top_string(message, "message", message_text,
                        sizeof(message_text)) < 0)
             snprintf(message_text, sizeof(message_text),
                      "the model reported an error");
@@ -791,7 +1000,7 @@ static int ws_poll(struct le_live_transport *transport,
         return 1;
     }
     result = le_ws_read_text(&state.ws, state.message, sizeof(state.message),
-                             timeout_ms > 0 ? timeout_ms : WS_READ_TIMEOUT_MS);
+                             timeout_ms > 0 ? timeout_ms : 0);
     if (result == 0)
         return 0;
     if (result == 2) {
@@ -817,15 +1026,36 @@ static int ws_poll(struct le_live_transport *transport,
 
 static int ws_interrupt(struct le_live_transport *transport)
 {
-    (void)transport;
-    /* Server VAD stops generation. Locally discard all decoded audio from the
-       interrupted assistant turn and refuse later deltas until the server
-       completes the new user turn. */
-    state.audio_pending_count = 0;
-    state.audio_pending_offset = 0;
-    state.output_done_pending = 0;
-    state.suppress_audio = 1;
-    return 0;
+    char message[1024], escaped[768];
+    int result = 0, length;
+    uint64_t played = transport->output_played_ms;
+    uint64_t start = state.item_start_frames * 1000U / WS_OUTPUT_SAMPLE_RATE;
+    uint64_t duration = state.item_audio_frames * 1000U / WS_OUTPUT_SAMPLE_RATE;
+    /* Quarantine the old response before attempting any network operation. */
+    snprintf(state.cancelled_response_id, sizeof(state.cancelled_response_id),
+             "%s", state.response_id);
+    state.audio_pending_count = state.audio_pending_offset = 0;
+    state.output_done_pending = 0; state.suppress_audio = 1;
+    state.request_response_pending = 0;
+    if (state.response_active && state.response_id[0]) {
+        json_escape_into(escaped, sizeof(escaped), state.response_id);
+        length = snprintf(message, sizeof(message),
+            "{\"type\":\"response.cancel\",\"response_id\":\"%s\"}", escaped);
+        if (length < 0 || (size_t)length >= sizeof(message) ||
+            le_ws_send_text(&state.ws, message, (size_t)length) < 0) result = -1;
+    }
+    if (state.item_id[0]) {
+        played = played > start ? played - start : 0;
+        if (played > duration) played = duration;
+        json_escape_into(escaped, sizeof(escaped), state.item_id);
+        length = snprintf(message, sizeof(message),
+            "{\"type\":\"conversation.item.truncate\",\"item_id\":\"%s\","
+            "\"content_index\":%u,\"audio_end_ms\":%llu}",
+            escaped, state.content_index, (unsigned long long)played);
+        if (length < 0 || (size_t)length >= sizeof(message) ||
+            le_ws_send_text(&state.ws, message, (size_t)length) < 0) result = -1;
+    }
+    return result;
 }
 
 static int ws_complete_delegation(struct le_live_transport *transport,
@@ -839,6 +1069,27 @@ static int ws_complete_delegation(struct le_live_transport *transport,
     (void)transport;
     if (!delegation_id || !delegation_id[0] || !result || !state.ws.connected)
         return -1;
+    if (!strncmp(delegation_id, "fn:", 3)) {
+        char escaped[LE_LIVE_ARGUMENT_MAX * 2U];
+        char item[sizeof(escaped) + LE_LIVE_DELEGATION_ID_MAX + 160U];
+        int written;
+
+        json_escape_into(escaped, sizeof(escaped), result);
+        written = snprintf(
+            item, sizeof(item),
+            "{\"type\":\"conversation.item.create\",\"item\":{"
+            "\"type\":\"function_call_output\",\"call_id\":\"%s\","
+            "\"output\":\"%s\"}}",
+            delegation_id + 3, escaped);
+        if (written <= 0 || (size_t)written >= sizeof(item) ||
+            le_ws_send_text(&state.ws, item, (size_t)written) < 0)
+            return -1;
+        if (state.response_active) state.request_response_pending = 1;
+        else if (le_ws_send_text(&state.ws, "{\"type\":\"response.create\"}",
+                                sizeof("{\"type\":\"response.create\"}") - 1U) < 0)
+            return -1;
+        return 0;
+    }
     length = strlen(result);
     /*
      * The protocol chunks context appends at 500 bytes; a longer answer is

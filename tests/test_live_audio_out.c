@@ -15,8 +15,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -50,6 +53,26 @@ static int make_bus(const char *name, char *path, size_t size)
     if (join_path(path, size, name) < 0)
         return -1;
     return close(open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600));
+}
+
+static int write_engine_status(int system_active)
+{
+    char path[160];
+    const char *text = system_active
+        ? "{\"buses\":{\"system\":false},\"drain\":{\"system\":{\"drained\":false}}}\n"
+        : "{\"buses\":{\"system\":false},\"drain\":{\"system\":{\"drained\":true}}}\n";
+    int fd;
+
+    if (join_path(path, sizeof(path), "status.json") < 0)
+        return -1;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+        return -1;
+    if (write(fd, text, strlen(text)) != (ssize_t)strlen(text)) {
+        close(fd);
+        return -1;
+    }
+    return close(fd);
 }
 
 static void fill(int16_t *samples, size_t count)
@@ -202,17 +225,19 @@ static int test_stalled_bus_gives_up_within_the_budget(void)
     fill(samples, LE_LIVE_AUDIO_SAMPLES);
 
     clock_gettime(CLOCK_MONOTONIC, &start);
-    for (i = 0; i < 64 && result == 0; ++i)
-        result = le_live_audio_out_write(&out, samples,
-                                         LE_LIVE_AUDIO_SAMPLES, 16000);
+    for (i = 0; i < 64 && le_live_audio_out_ready(&out); ++i)
+        CHECK(le_live_audio_out_write(&out, samples, LE_LIVE_AUDIO_SAMPLES, 16000) == 0);
     clock_gettime(CLOCK_MONOTONIC, &finish);
     elapsed_ms = (long)(finish.tv_sec - start.tv_sec) * 1000L +
                  (finish.tv_nsec - start.tv_nsec) / 1000000L;
-
-    /* The write must have failed, and the failure must be bounded. */
-    CHECK(result == -1);
-    CHECK(out.stall_timeouts >= 1);
-    CHECK(elapsed_ms < 15000);
+    CHECK(out.stalls > 0 && out.queued_frames > 0);
+    CHECK(elapsed_ms < 100); /* Backpressure yields, rather than waiting 2 s. */
+    CHECK(out.stalled_since_ms > 0);
+    out.stalled_since_ms -= LE_LIVE_AUDIO_OUT_STALL_BUDGET_MS;
+    result = le_live_audio_out_pump(&out);
+    CHECK(result == -1 && out.stall_timeouts == 1);
+    le_live_audio_out_cancel(&out);
+    CHECK(out.queued_frames == 0 && out.fd == -1);
     close(reader);
     le_live_audio_out_close(&out);
     unlink(path);
@@ -270,16 +295,127 @@ static int test_rejects_a_chunk_larger_than_the_transport_contract(void)
     return 0;
 }
 
+static int test_drain_follows_audio_engine_status(void)
+{
+    struct le_live_audio_out out;
+    char path[160];
+
+    CHECK(make_bus("drain.pcm", path, sizeof(path)) == 0);
+    le_live_audio_out_init(&out, path, 48000);
+    {
+        int16_t samples[16] = {0};
+        CHECK(le_live_audio_out_write(&out, samples, 16, 24000) == 0);
+    }
+    CHECK(write_engine_status(1) == 0);
+    CHECK(le_live_audio_out_drained(&out) == 0);
+    CHECK(write_engine_status(0) == 0);
+    CHECK(le_live_audio_out_drained(&out) == 1);
+    CHECK(out.drain_checks == 2);
+    CHECK(out.drain_confirmations == 1);
+    le_live_audio_out_close(&out);
+    unlink(path);
+    CHECK(join_path(path, sizeof(path), "status.json") == 0);
+    unlink(path);
+    return 0;
+}
+
+static int test_cancel_never_clears_shared_system_bus(void)
+{
+    struct le_live_audio_out out;
+    struct sockaddr_un address;
+    char bus[160], control[160], message[64];
+    int fd;
+    ssize_t count;
+
+    CHECK(make_bus("system.pcm", bus, sizeof(bus)) == 0);
+    CHECK(join_path(control, sizeof(control), "control.sock") == 0);
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    CHECK(fd >= 0);
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    CHECK(strlen(control) < sizeof(address.sun_path));
+    strcpy(address.sun_path, control);
+    unlink(control);
+    CHECK(bind(fd, (struct sockaddr *)&address, sizeof(address)) == 0);
+    le_live_audio_out_init(&out, bus, 48000);
+    le_live_audio_out_cancel(&out);
+    count = recv(fd, message, sizeof(message) - 1U, 0);
+    CHECK(count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+    CHECK(out.cancel_requests == 1);
+    CHECK(out.cancel_failures == 0);
+    le_live_audio_out_close(&out);
+    close(fd);
+    unlink(control);
+    unlink(bus);
+    return 0;
+}
+
+static int test_managed_finish_and_resampler_tail(void)
+{
+    static const unsigned int rates[]={8000,16000,22050,24000,44100,48000};
+    static const size_t lengths[]={1,2,17,1023,1024,1280};
+    struct sockaddr_un address={0};
+    char path[160], endpoint[160];
+    int listener;
+    size_t r,n;
+    CHECK(join_path(path,sizeof(path),"system.pcm")==0);
+    CHECK(join_path(endpoint,sizeof(endpoint),"streams.sock")==0);
+    CHECK(strlen(endpoint)<sizeof(address.sun_path));
+    listener=socket(AF_UNIX,SOCK_SEQPACKET|SOCK_NONBLOCK,0);
+    CHECK(listener>=0);address.sun_family=AF_UNIX;strcpy(address.sun_path,endpoint);
+    CHECK(bind(listener,(struct sockaddr *)&address,sizeof(address))==0 && listen(listener,4)==0);
+    CHECK(unsetenv("LE_LIVE_ALLOW_LEGACY_TEST_SINK")==0);
+    for(r=0;r<sizeof(rates)/sizeof(rates[0]);++r) for(n=0;n<sizeof(lengths)/sizeof(lengths[0]);++n) {
+        struct le_live_audio_out out;
+        int16_t pcm[1280];
+        unsigned char packet[LE_PCM_PACKET_BYTES],reply[LE_PCM_HEADER];
+        int peer,opened=0,finished=0;
+        uint64_t accepted=0,target=lengths[n]*48000U/rates[r];
+        ssize_t bytes;
+        fill(pcm,1280);le_live_audio_out_init(&out,path,48000);
+        CHECK(le_live_audio_out_write(&out,pcm,lengths[n],rates[r])==0);
+        peer=accept(listener,NULL,NULL);CHECK(peer>=0);
+        CHECK(le_live_audio_out_drained(&out)==0);
+        while((bytes=recv(peer,packet,sizeof(packet),MSG_DONTWAIT))>0) {
+            unsigned int type=le_pcm_get32(packet+4),frames=le_pcm_get32(packet+8);
+            CHECK(bytes>=LE_PCM_HEADER && le_pcm_get32(packet)==LE_PCM_MAGIC);
+            if(type==LE_PCM_OPEN) { CHECK(!opened); opened=1; }
+            else if(type==LE_PCM_DATA) {
+                CHECK(opened && !finished && bytes==(ssize_t)(LE_PCM_HEADER+frames*4U));
+                accepted+=frames;
+            } else { CHECK(type==LE_PCM_FINISH && !finished);finished=1; }
+        }
+        CHECK(opened && finished && accepted==target && out.turn_frames_written==target);
+        /* A stale global bus-idle file cannot complete our own stream. */
+        CHECK(write_engine_status(0)==0 && le_live_audio_out_drained(&out)==0);
+        le_pcm_header(reply,LE_PCM_STATE,LE_PCM_FINISHING,1);
+        le_pcm_put64(reply+16,accepted);le_pcm_put64(reply+24,target?target-1:0);
+        CHECK(send(peer,reply,sizeof(reply),0)==LE_PCM_HEADER);
+        CHECK(le_live_audio_out_drained(&out)==0);
+        le_pcm_header(reply,LE_PCM_STATE,LE_PCM_DRAINED,1);
+        le_pcm_put64(reply+16,accepted);le_pcm_put64(reply+24,target);
+        CHECK(send(peer,reply,sizeof(reply),0)==LE_PCM_HEADER);
+        CHECK(le_live_audio_out_drained(&out)==1);
+        le_live_audio_out_close(&out);CHECK(recv(peer,packet,sizeof(packet),0)==0);close(peer);
+    }
+    close(listener);unlink(endpoint);
+    CHECK(join_path(path,sizeof(path),"status.json")==0);unlink(path);
+    CHECK(setenv("LE_LIVE_ALLOW_LEGACY_TEST_SINK","1",1)==0);
+    return 0;
+}
+
 int main(void)
 {
     int failures = 0;
 
+    CHECK(setenv("LE_LIVE_ALLOW_LEGACY_TEST_SINK", "1", 1) == 0);
     snprintf(directory, sizeof(directory), "/tmp/le-live-out-%d",
              (int)getpid());
     if (mkdir(directory, 0700) < 0 && errno != EEXIST) {
         fprintf(stderr, "cannot create %s\n", directory);
         return 1;
     }
+    failures += test_managed_finish_and_resampler_tail() != 0;
     failures += test_regular_file_receives_speaker_format() != 0;
     failures += test_input_rate_is_honoured() != 0;
     failures += test_missing_bus_fails_loudly() != 0;
@@ -288,6 +424,8 @@ int main(void)
     failures += test_stalled_bus_gives_up_within_the_budget() != 0;
     failures += test_cancel_stops_playback_and_closes_the_turn() != 0;
     failures += test_rejects_a_chunk_larger_than_the_transport_contract() != 0;
+    failures += test_drain_follows_audio_engine_status() != 0;
+    failures += test_cancel_never_clears_shared_system_bus() != 0;
     rmdir(directory);
     if (failures) {
         fprintf(stderr, "live audio out: FAILED\n");

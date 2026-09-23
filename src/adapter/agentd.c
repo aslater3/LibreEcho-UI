@@ -7,6 +7,7 @@
 #include "llm_store.h"
 #include "voice_pipeline.h"
 #include "voice_playback.h"
+#include "playback_status_client.h"
 #include "timer_intent.h"
 #include "stop_intent.h"
 #include "voice_reply.h"
@@ -493,7 +494,9 @@ static int play_sentence_internal(void *context, const char *text, int queued)
         }
         if (adapter_call(state->tts_socket, 250, "status", NULL,
                          response, sizeof(response)) == LE_ADAPTER_OK &&
-            json_get_bool(response, "speaking", &speaking) == 1 && !speaking)
+            json_get_bool(response, "speaking", &speaking) == 1 && !speaking &&
+            le_playback_status_bus_drained(
+                state->media_status, "announcement") == 1)
             return 0;
         nanosleep(&delay, NULL);
     }

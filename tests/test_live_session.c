@@ -30,6 +30,7 @@ struct harness {
     int outputs;
     int cancels;
     int dispatch_ends_session;
+    int output_drained;
     char last_tool[LE_LIVE_TOOL_NAME_MAX];
     char last_arguments[LE_LIVE_ARGUMENT_MAX];
 };
@@ -80,14 +81,21 @@ static void harness_state(void *context, enum le_live_state state)
     (void)state;
 }
 
+static int harness_drained(void *context)
+{
+    return ((struct harness *)context)->output_drained;
+}
+
 static const struct le_live_session_ops harness_ops = {
-    harness_output, harness_cancel, harness_dispatch, harness_state
+    harness_output, harness_cancel, harness_dispatch, harness_state,
+    harness_drained, NULL, NULL
 };
 
 static void harness_init(struct harness *h, const char *scenario,
                          unsigned int timeout_ms, unsigned int max_ms)
 {
     memset(h, 0, sizeof(*h));
+    h->output_drained = 1;
     le_live_ring_reset(&h->ring);
     h->config.transport_ops = le_live_transport_mock_ops();
     h->config.conversation_timeout_ms = timeout_ms;
@@ -134,6 +142,11 @@ static int pred_listening(struct harness *h)
 static int pred_idle(struct harness *h)
 {
     return h->session.state == LE_LIVE_IDLE;
+}
+
+static int pred_cooldown(struct harness *h)
+{
+    return h->session.state == LE_LIVE_COOLDOWN;
 }
 
 static int pred_delegated(struct harness *h)
@@ -236,6 +249,49 @@ static int test_open_listen_speak_timeout(void)
     return 0;
 }
 
+static int test_wake_interrupts_model_for_stop_action(void)
+{
+    struct harness h;
+    int cancels;
+
+    harness_init(&h, "session", 5000, 60000);
+    CHECK(feed_ms(&h, 500, 50) == 0);
+    CHECK(le_live_session_wake(&h.session, le_live_ring_end(&h.ring), h.now) == 0);
+    CHECK(pump_until(&h, 3000, pred_output) == 0);
+    CHECK(h.session.state == LE_LIVE_SPEAKING);
+    cancels = h.cancels;
+    CHECK(le_live_session_interrupt_for_wake(
+              &h.session, le_live_ring_end(&h.ring), h.now) == 0);
+    CHECK(h.session.state == LE_LIVE_LISTENING);
+    CHECK(h.cancels == cancels + 1);
+    CHECK(h.session.next_send_sample <= le_live_ring_end(&h.ring));
+    return 0;
+}
+
+static int test_waits_for_observed_playback_drain(void)
+{
+    struct harness h;
+    unsigned int i;
+
+    harness_init(&h, "session", 5000, 60000);
+    h.output_drained = 0;
+    CHECK(feed_ms(&h, 500, 50) == 0);
+    CHECK(le_live_session_wake(&h.session, le_live_ring_end(&h.ring), h.now) == 0);
+    CHECK(pump_until(&h, 3000, pred_output) == 0);
+    CHECK(pump_until(&h, 3000, pred_cooldown) == 0);
+    for (i = 0; i < 100; ++i) {
+        h.now += 5;
+        CHECK(le_live_session_pump(&h.session, 0, h.now) == 0);
+    }
+    CHECK(h.session.state == LE_LIVE_COOLDOWN);
+    CHECK(h.session.last_drain_ms == 0);
+    h.output_drained = 1;
+    CHECK(pump_until(&h, 500, pred_listening) == 0);
+    CHECK(h.session.last_drain_ms >= 500);
+    CHECK(h.session.drain_timeouts == 0);
+    return 0;
+}
+
 static int test_duplicate_delegation_runs_once(void)
 {
     struct harness h;
@@ -326,7 +382,7 @@ static int test_denied_tool_does_not_end_the_conversation(void)
     return 0;
 }
 
-static int test_barge_in_truncates_model_speech(void)
+static int test_model_speech_is_not_reingested(void)
 {
     struct harness h;
 
@@ -339,18 +395,19 @@ static int test_barge_in_truncates_model_speech(void)
     {
         int cancels_before = h.cancels;
 
-        /* Three loud 10 ms frames confirm the user is talking over the model. */
+        /* Loud post-AEC frames while the speaker is active are not uploaded or
+           treated as barge-in: residual device output otherwise makes the
+           model answer itself in a loop. */
         CHECK(feed_ms(&h, 30, 20000) == 0);
-        CHECK(h.session.barge_ins == 1);
-        CHECK(h.cancels > cancels_before);
-        CHECK(h.session.state == LE_LIVE_LISTENING);
-        /* The observed peak is reported so the threshold can be set from a
-           measurement rather than a guess. */
+        CHECK(h.session.barge_ins == 0);
+        CHECK(h.cancels == cancels_before);
+        CHECK(h.session.state == LE_LIVE_SPEAKING);
+        /* The observed peak is retained for diagnostics. */
         CHECK(h.session.input_peak_rms >= 20000);
     }
-    /* A single quiet frame must not count as barge-in. */
+    /* A quiet frame likewise cannot interrupt model speech. */
     CHECK(feed_ms(&h, 10, 20) == 0);
-    CHECK(h.session.barge_ins == 1);
+    CHECK(h.session.barge_ins == 0);
     return 0;
 }
 
@@ -379,10 +436,11 @@ static int test_noisy_room_does_not_trigger_barge_in(void)
     CHECK(h.session.barge_ins == 0);
     CHECK(h.session.state == LE_LIVE_SPEAKING);
 
-    /* A real barge-in is well clear of the room. */
+    /* Even a large frame while model audio is playing is discarded; explicit
+       half-duplex avoids self-trigger loops on this hardware. */
     CHECK(feed_ms(&h, 40, 20000) == 0);
-    CHECK(h.session.barge_ins == 1);
-    CHECK(h.session.state == LE_LIVE_LISTENING);
+    CHECK(h.session.barge_ins == 0);
+    CHECK(h.session.state == LE_LIVE_SPEAKING);
     return 0;
 }
 
@@ -538,20 +596,45 @@ static int test_status_and_transcript_are_bounded(void)
     return 0;
 }
 
+static int test_full_duplex_interruption_keeps_user_audio(void)
+{
+    struct harness h;
+    uint64_t uploaded;
+    harness_init(&h,"session",10000,60000);
+    h.session.config.full_duplex=1;
+    CHECK(feed_ms(&h,200,100)==0);
+    CHECK(le_live_session_wake(&h.session,le_live_ring_end(&h.ring),h.now)==0);
+    h.now+=10;CHECK(le_live_session_pump(&h.session,0,h.now)>=0);
+    /* A real open transport, with output continuing while new mic frames arrive. */
+    h.session.state=LE_LIVE_SPEAKING;
+    uploaded=h.session.audio_input_ms;
+    CHECK(feed_ms(&h,20,100)==0 && h.session.audio_input_ms>uploaded);
+    CHECK(h.session.barge_ins==0);
+    uploaded=h.session.audio_input_ms;
+    CHECK(feed_ms(&h,30,8000)==0);
+    CHECK(h.session.barge_ins==1 && h.cancels==1);
+    CHECK(h.session.state==LE_LIVE_LISTENING && h.session.audio_input_ms>=uploaded+30);
+    le_live_session_close(&h.session,LE_LIVE_END_STOPPED,h.now);
+    return 0;
+}
+
 int main(void)
 {
     struct {
         const char *name;
         int (*run)(void);
     } tests[] = {
+        {"full duplex interruption", test_full_duplex_interruption_keeps_user_audio},
         {"open/listen/speak/timeout", test_open_listen_speak_timeout},
+        {"wake-gated interruption", test_wake_interrupts_model_for_stop_action},
+        {"observed playback drain", test_waits_for_observed_playback_drain},
         {"duplicate delegation", test_duplicate_delegation_runs_once},
         {"delegation ids per session", test_delegation_ids_are_scoped_to_one_session},
         {"missing transport", test_missing_transport_fails_closed},
         {"empty preroll", test_empty_preroll_refuses_wake},
         {"audio send failure", test_audio_send_failure_closes_session},
         {"denied tool", test_denied_tool_does_not_end_the_conversation},
-        {"barge-in", test_barge_in_truncates_model_speech},
+        {"half-duplex model speech", test_model_speech_is_not_reingested},
         {"noisy room", test_noisy_room_does_not_trigger_barge_in},
         {"delegation ends session", test_delegation_can_end_session},
         {"connect timeout", test_connect_timeout_recovers_to_idle},

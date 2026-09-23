@@ -537,3 +537,26 @@ its own defaults and its own root-owned `/etc/default/libreecho-<service>`
 file. Unrelated variables, including the service-scoped `LE_*` settings a
 script may read, are left alone. A service's own configuration is never the
 caller's command line.
+
+
+## Managed playback and GPT-live lifecycle
+
+The Platform render engine additionally serves `streams.sock` (version-1,
+little-endian, bounded UNIX SEQPACKET). A connection is a producer generation;
+roles remain media/system/announcement/alarm, but two producers on the same role
+are now mixed independently. See `docs/AUDIO_LIFECYCLE.md`. Cues and TTS use the
+managed endpoint when present with an explicit legacy-FIFO migration fallback.
+Live requires the managed endpoint in production. Disconnect cancels only that
+generation. FINISH is ordered after DATA; producers retain the connection until
+DRAINED confirms every valid sample passed the playback cursor. Final partial
+periods are zero-padded, not discarded. Silence primes a cold speaker path before
+programme samples are submitted. Capture and AEC remain local and independent.
+
+Live holds a separate audio-focus connection while listening/thinking/speaking,
+so media is ducked throughout the interaction. Input capture continues in both
+modes. Half-duplex forwarding remains the default; `--full-duplex` explicitly
+enables post-AEC double-talk detection/input forwarding and is not a claim of
+physical AEC qualification. WebSocket message framing and output buffering yield
+on backpressure; finite queues fail observably rather than dropping samples.
+Initial DNS/TCP/TLS/Upgrade setup is still bounded synchronous work and is not
+claimed to be an asynchronous connection state machine.

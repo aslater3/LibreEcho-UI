@@ -98,3 +98,8 @@ int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
     (void)common_name;
     return LE_NOT_SUPPORTED;
 }
+
+long le_tls_try_write(struct le_tls *tls, const void *buf, size_t len)
+{
+    (void)tls; (void)buf; (void)len; return -1;
+}
