@@ -147,9 +147,14 @@ static void test_airplay_restore(void)
     REQUEST("\"airplay_volume\",\"args\":{\"session\":\"1:4:3:1\",\"callback\":\"1:4:3:1\",\"volume\":10}");
     activate_marker("1:5:4:1");
     REQUEST("\"airplay_volume\",\"args\":{\"session\":\"1:5:4:1\",\"callback\":\"1:5:4:1\",\"volume\":60}");
+    file = fopen(LE_AIRPLAY_MASTER_ACK_PATH, "w");
+    require_condition(file != NULL && fclose(file) == 0, "replacement ack fixture");
     REQUEST("\"airplay_end\",\"args\":{\"session\":\"1:4:3:1\"}");
-    require_condition(audio.volume == 60, "old session cannot end replacement");
+    require_condition(audio.volume == 60 && access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) == 0,
+                      "old session cannot end or revoke replacement");
     REQUEST("\"airplay_end\",\"args\":{\"session\":\"1:5:4:1\"}");
+    require_condition(access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) != 0,
+                      "replacement end revokes its acknowledgment");
     require_condition(audio.volume == 25, "replacement restores baseline");
     REQUEST("\"airplay_end\",\"args\":{\"session\":\"1:5:4:1\"}");
     require_condition(audio.volume == 25, "duplicate end is harmless");
@@ -248,12 +253,13 @@ static void test_airplay_restart_recovery(void)
     int controller;
     char controller_path[128];
     const char *sender = "\"airplay_volume\",\"args\":{\"session\":\"1:22:100:1\",\"callback\":\"1:23:100:2\",\"volume\":0}";
-    char dir[] = "/tmp/libreecho-restart-XXXXXX", script[256];
+    char dir[] = "/tmp/libreecho-restart-XXXXXX", script[256], fail[256];
     require_condition(mkdtemp(dir) != NULL, "restart fixture");
     snprintf(script, sizeof(script), "%s/amixer", dir);
+    snprintf(fail, sizeof(fail), "%s/fail", dir);
     file = fopen(script, "w");
     require_condition(file != NULL, "restart amixer");
-    fprintf(file, "#!/bin/sh\nexit 0\n");
+    fprintf(file, "#!/bin/sh\nif [ -f %s ]; then exit 1; fi\nexit 0\n", fail);
     require_condition(fclose(file) == 0 && chmod(script, 0700) == 0, "restart amixer ready");
     require_condition(setenv("PATH", dir, 1) == 0, "restart PATH");
     unlink(LE_AIRPLAY_RESTORE_PATH);
@@ -292,6 +298,12 @@ static void test_airplay_restart_recovery(void)
     RESTART_REJECT(&restarted, sender);
     require_condition(restarted.volume == 42 && access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) != 0,
                       "orphan callback refused without republishing acknowledgment");
+    memset(&fresh, 0, sizeof(fresh)); fresh.ctl_fd = -1;
+    fresh.volume = fresh.requested_volume = 42;
+    airplay_restore_load(&fresh);
+    RESTART_REJECT(&fresh, sender);
+    require_condition(fresh.volume == 42 && access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) != 0,
+                      "orphan callback after audiod restart refused with marker present");
     /* Controller dies without an end; audiod's own clock must restore. */
     unlink(LE_AIRPLAY_ACTIVE_PATH);
     airplay_restore_poll(&restarted);
@@ -299,14 +311,14 @@ static void test_airplay_restart_recovery(void)
                       "restart plus controller death restores baseline");
     airplay_restore_poll(&audio);
     require_condition(audio.volume == 42 && !audio.airplay_session[0], "controller death restores baseline");
-    /* No snapshot/watermark survives an audiod restart after an end. The
-     * absent live marker, rather than volatile history, must reject the write. */
+    /* The ended watermark survives restart even without a live marker. */
     memset(&restarted, 0, sizeof(restarted)); restarted.ctl_fd = -1;
     restarted.volume = restarted.requested_volume = 42;
     airplay_restore_load(&restarted);
     RESTART_REJECT(&restarted, sender);
-    require_condition(restarted.volume == 42 && access(LE_AIRPLAY_RESTORE_PATH, F_OK) != 0,
-                      "late write after audiod restart cannot recreate snapshot");
+    require_condition(restarted.volume == 42 && restarted.airplay_newest_ended &&
+                      !restarted.airplay_session[0],
+                      "late write after audiod restart cannot recreate active snapshot");
     /* Restart while the original callback is acknowledged; local choice wins. */
     snprintf(controller_path, sizeof(controller_path), "%s/controller.sock", dir);
     controller = le_adapter_listen(controller_path);
@@ -333,10 +345,64 @@ static void test_airplay_restart_recovery(void)
     airplay_restore_poll(&restarted);
     require_condition(restarted.volume == 27 && !restarted.airplay_session[0],
                       "controller death preserves latest button with orphan marker");
+    memset(&fresh, 0, sizeof(fresh)); fresh.ctl_fd = -1;
+    fresh.volume = fresh.requested_volume = 27;
+    airplay_restore_load(&fresh);
+    RESTART_REJECT(&fresh, "\"airplay_volume\",\"args\":{\"session\":\"1:24:101:1\",\"callback\":\"1:26:101:3\",\"volume\":0}");
+    require_condition(fresh.volume == 27, "ended restart rejects late callback with marker present");
+    activate_marker("1:27:102:1");
+    RESTART_REQUEST(&fresh, "\"airplay_volume\",\"args\":{\"session\":\"1:27:102:1\",\"callback\":\"1:27:102:2\",\"volume\":60}");
+    require_condition(fresh.volume == 60, "newer marker works after persisted end");
+    file = fopen(LE_AIRPLAY_MASTER_ACK_PATH, "w");
+    require_condition(file != NULL && fclose(file) == 0, "live acknowledgment fixture");
+    RESTART_REQUEST(&fresh, "\"airplay_end\",\"args\":{\"session\":\"1:27:102:1\"}");
+    require_condition(access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) != 0,
+                      "explicit end revokes acknowledgment while marker remains live");
+    memset(&fresh, 0, sizeof(fresh)); fresh.ctl_fd = -1;
+    fresh.volume = fresh.requested_volume = 27;
+    airplay_restore_load(&fresh);
+    RESTART_REJECT(&fresh, "\"airplay_volume\",\"args\":{\"session\":\"1:27:102:1\",\"callback\":\"1:28:102:3\",\"volume\":0}");
+    require_condition(fresh.volume == 27 && fresh.airplay_newest_ended,
+                      "explicit end survives restart with marker present");
+    activate_marker("1:29:103:1");
+    RESTART_REQUEST(&fresh, "\"airplay_volume\",\"args\":{\"session\":\"1:29:103:1\",\"callback\":\"1:29:103:2\",\"volume\":55}");
+    require_condition(fresh.volume == 55, "newer session works after explicit end restart");
+    RESTART_REQUEST(&fresh, "\"airplay_end\",\"args\":{\"session\":\"1:29:103:1\"}");
     unlink(LE_AIRPLAY_ACTIVE_PATH);
     airplay_restore_poll(&restarted);
     require_condition(restarted.volume == 27, "restart stop restores local override");
     RESTART_REQUEST(&restarted, "\"airplay_end\",\"args\":{\"session\":\"1:24:101:1\"}");
+    /* A failed mixer restore must retain both the end and its baseline
+     * through another restart; no callback can replace pending restoration. */
+    activate_marker("1:30:104:1");
+    RESTART_REQUEST(&fresh, "\"airplay_volume\",\"args\":{\"session\":\"1:30:104:1\",\"callback\":\"1:30:104:2\",\"volume\":0}");
+    file = fopen(LE_AIRPLAY_MASTER_ACK_PATH, "w");
+    require_condition(file != NULL && fclose(file) == 0, "pending acknowledgment fixture");
+    file = fopen(fail, "w");
+    require_condition(file != NULL && fclose(file) == 0, "unavailable mixer fixture");
+    RESTART_REJECT(&fresh, "\"airplay_end\",\"args\":{\"session\":\"1:30:104:1\"}");
+    require_condition(fresh.airplay_restore_pending &&
+                      access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) != 0,
+                      "pending restoration revokes media acknowledgment");
+    memset(&fresh, 0, sizeof(fresh)); fresh.ctl_fd = -1;
+    fresh.volume = fresh.requested_volume = 0;
+    airplay_restore_load(&fresh);
+    require_condition(fresh.airplay_restore_pending && fresh.airplay_baseline == 27,
+                      "pending baseline survives restart during mixer outage");
+    RESTART_REJECT(&fresh, "\"airplay_volume\",\"args\":{\"session\":\"1:30:104:1\",\"callback\":\"1:31:104:3\",\"volume\":0}");
+    activate_marker("1:33:105:1");
+    RESTART_REJECT(&fresh, "\"airplay_volume\",\"args\":{\"session\":\"1:33:105:1\",\"callback\":\"1:33:105:2\",\"volume\":50}");
+    RESTART_REJECT(&fresh, "\"set_volume\",\"args\":{\"volume\":12}");
+    require_condition(fresh.airplay_restore_pending && fresh.airplay_baseline == 27,
+                      "pending restoration cannot lose its baseline");
+    require_condition(unlink(fail) == 0, "restore mixer fixture");
+    airplay_restore_poll(&fresh);
+    require_condition(fresh.volume == 27 && !fresh.airplay_restore_pending,
+                      "pending restoration completes when mixer returns");
+    RESTART_REJECT(&fresh, "\"airplay_volume\",\"args\":{\"session\":\"1:30:104:1\",\"callback\":\"1:32:104:4\",\"volume\":0}");
+    RESTART_REQUEST(&fresh, "\"airplay_volume\",\"args\":{\"session\":\"1:33:105:1\",\"callback\":\"1:33:105:2\",\"volume\":50}");
+    RESTART_REQUEST(&fresh, "\"airplay_end\",\"args\":{\"session\":\"1:33:105:1\"}");
+    unlink(LE_AIRPLAY_ACTIVE_PATH);
     /* Even a matching stat identity of a directory is not a live marker. */
     require_condition(mkdir(LE_AIRPLAY_ACTIVE_PATH, 0700) == 0,
                       "nonregular marker fixture");

@@ -240,6 +240,7 @@ struct audio_hw {
     long long airplay_newest_sec;
     long airplay_newest_nsec;
     int airplay_newest_ended;
+    int airplay_restore_pending;
     char airplay_callback[96];
     long long airplay_callback_sec;
     long airplay_callback_nsec;
@@ -1883,16 +1884,11 @@ static int airplay_session_time(const char *session, long long *sec, long *nsec)
 /* A single atomic runtime record survives either daemon restarting, but not a
  * boot. It is written BEFORE a sender mixer change so a lost process cannot
  * strand the codec at sender mute without the owner's restoration target. */
-static int airplay_restore_save(const struct audio_hw *audio)
+static int airplay_record_save(const char *record, int n)
 {
-    char temp[sizeof(LE_AIRPLAY_RESTORE_PATH) + 16], record[256];
-    int fd, n;
-    if (!audio->airplay_session[0]) return 0;
-    n = snprintf(record, sizeof(record), "1 %s %s %d %d %d\n",
-                 audio->airplay_session, audio->airplay_callback,
-                 audio->airplay_baseline, audio->airplay_sender_volume,
-                 audio->airplay_local_override);
-    if (n <= 0 || n >= (int)sizeof(record) ||
+    char temp[sizeof(LE_AIRPLAY_RESTORE_PATH) + 16];
+    int fd;
+    if (n <= 0 || n >= 256 ||
         snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_AIRPLAY_RESTORE_PATH) >= (int)sizeof(temp)) return -1;
     fd = mkstemp(temp);
     if (fd < 0) return -1;
@@ -1904,24 +1900,74 @@ static int airplay_restore_save(const struct audio_hw *audio)
     return 0;
 }
 
+static int airplay_restore_save(const struct audio_hw *audio)
+{
+    char record[256];
+    int n;
+    if (!audio->airplay_session[0]) return 0;
+    n = snprintf(record, sizeof(record), "1 %s %s %d %d %d\n",
+                 audio->airplay_session, audio->airplay_callback,
+                 audio->airplay_baseline, audio->airplay_sender_volume,
+                 audio->airplay_local_override);
+    return airplay_record_save(record, n);
+}
+
+/* v2 carries the ended high-water mark. Pending records retain the baseline
+ * across a crash before restoration, and refuse every sender write until it
+ * can be restored; finalized records retain only the ordering watermark. */
+static int airplay_ended_save(const char *session, int baseline, int pending)
+{
+    char record[256];
+    int n = snprintf(record, sizeof(record), "2 %s %d %d\n", session, baseline, pending);
+    return airplay_record_save(record, n);
+}
+
+static void airplay_set_ended(struct audio_hw *audio, const char *session,
+                              long long sec, long nsec, int pending)
+{
+    snprintf(audio->airplay_newest_session, sizeof(audio->airplay_newest_session), "%s", session);
+    audio->airplay_newest_sec = sec;
+    audio->airplay_newest_nsec = nsec;
+    audio->airplay_newest_ended = 1;
+    audio->airplay_restore_pending = pending;
+    audio->airplay_session[0] = audio->airplay_callback[0] = '\0';
+}
+
+static int airplay_finish_restore(struct audio_hw *audio)
+{
+    if (audio_set_volume(audio, audio->airplay_baseline) < 0) return -1;
+    audio->requested_volume = audio->airplay_baseline;
+    if (airplay_ended_save(audio->airplay_newest_session, audio->airplay_baseline, 0) < 0)
+        return -1;
+    audio->airplay_restore_pending = 0;
+    return 0;
+}
+
 static void airplay_restore_poll(struct audio_hw *audio)
 {
     struct le_adapter *controller = NULL;
+    if (audio->airplay_restore_pending) {
+        (void)unlink(LE_AIRPLAY_MASTER_ACK_PATH);
+        if (airplay_finish_restore(audio) < 0)
+            le_log_warn("audiod: AirPlay restoration pending: mixer or snapshot unavailable");
+        return;
+    }
     if (!audio->airplay_session[0]) return;
     if (airplay_media_active()) {
         if (!audio->airplay_controller_socket[0]) return; /* host fixture */
         controller = le_adapter_connect(audio->airplay_controller_socket, 25);
         if (controller) { le_adapter_close(controller); return; }
-        /* An orphan bridge must not leave acknowledged sender media running. */
-        (void)unlink(LE_AIRPLAY_MASTER_ACK_PATH);
     }
-    if (audio_set_volume(audio, audio->airplay_baseline) < 0) {
-        le_log_warn("audiod: AirPlay restoration pending: mixer unavailable");
+    /* Any orphaned or stopped session must revoke media before restoration. */
+    (void)unlink(LE_AIRPLAY_MASTER_ACK_PATH);
+    if (airplay_ended_save(audio->airplay_session, audio->airplay_baseline, 1) < 0) {
+        le_log_warn("audiod: AirPlay restoration pending: snapshot unavailable");
         return;
     }
-    audio->airplay_session[0] = audio->airplay_callback[0] = '\0';
-    audio->airplay_newest_ended = 1;
-    (void)unlink(LE_AIRPLAY_RESTORE_PATH);
+    airplay_set_ended(audio, audio->airplay_session,
+                      audio->airplay_newest_sec, audio->airplay_newest_nsec, 1);
+    if (airplay_finish_restore(audio) < 0)
+        le_log_warn("audiod: AirPlay restoration pending: mixer or snapshot unavailable");
 }
 
 static void airplay_restore_load(struct audio_hw *audio)
@@ -1940,6 +1986,20 @@ static void airplay_restore_load(struct audio_hw *audio)
     close(fd);
     if (size != st.st_size) return;
     record[size] = '\0';
+    if (sscanf(record, "%d", &version) == 1 && version == 2) {
+        int pending;
+        if (sscanf(record, "%d %95s %d %d%n", &version, session, &baseline,
+                   &pending, &end) != 4 || end != size - 1 || record[end] != '\n' ||
+            baseline < 0 || baseline > 100 || (pending != 0 && pending != 1) ||
+            airplay_session_time(session, &sec, &nsec) < 0) {
+            le_log_warn("audiod: invalid AirPlay ended snapshot");
+            return;
+        }
+        audio->airplay_baseline = baseline;
+        airplay_set_ended(audio, session, sec, nsec, pending);
+        if (pending) airplay_restore_poll(audio);
+        return;
+    }
     if (sscanf(record, "%d %95s %95s %d %d %d%n", &version, session, callback,
                &baseline, &sender, &override, &end) != 6 ||
         end != size - 1 || record[end] != '\n' || version != 1 ||
@@ -2013,6 +2073,11 @@ static int handle_request(struct audio_hw *audio, char *message,
         if (json_string(message, "session", session, sizeof(session)) < 0 ||
             airplay_session_time(session, &session_sec, &session_nsec) < 0)
             return response_error(response, response_size, id, "invalid AirPlay session");
+        if (audio->airplay_restore_pending) {
+            airplay_restore_poll(audio);
+            if (audio->airplay_restore_pending)
+                return response_error(response, response_size, id, "AirPlay restoration pending");
+        }
         /* Equal ctimes with different inode identities cannot be ordered:
          * refuse both directions rather than risk reverting newer intent.
          * A clock moving backwards likewise rejects sessions until ctime
@@ -2030,19 +2095,23 @@ static int handle_request(struct audio_hw *audio, char *message,
         if (!strcmp(command, "airplay_end")) {
             if (!newer && audio->airplay_newest_ended)
                 return response_ok(response, response_size, id, "{}");
+            /* The marker may outlive stop; never leave its old media ack usable. */
+            (void)unlink(LE_AIRPLAY_MASTER_ACK_PATH);
             if (audio->airplay_session[0]) {
-                if (audio_set_volume(audio, audio->airplay_baseline) < 0)
-                    return response_error(response, response_size, id, "volume unavailable");
-                audio->airplay_session[0] = '\0';
-                audio->airplay_callback[0] = '\0';
-                (void)unlink(LE_AIRPLAY_RESTORE_PATH);
+                /* Commit a pending tombstone before restoration: a crash or
+                 * mixer outage must preserve both the baseline and the end. */
+                if (airplay_ended_save(session, audio->airplay_baseline, 1) < 0)
+                    return response_error(response, response_size, id, "AirPlay restoration unavailable");
+                airplay_set_ended(audio, session, session_sec, session_nsec, 1);
+                if (airplay_finish_restore(audio) < 0)
+                    return response_error(response, response_size, id, "AirPlay restoration pending");
+            } else {
+                if (airplay_ended_save(session, audio->airplay_baseline, 0) < 0)
+                    return response_error(response, response_size, id, "AirPlay restoration unavailable");
+                airplay_set_ended(audio, session, session_sec, session_nsec, 0);
             }
             /* An end may arrive before the first volume (unknown IPC result).
              * Advance the watermark even if no callback was ever applied. */
-            snprintf(audio->airplay_newest_session, sizeof(audio->airplay_newest_session), "%s", session);
-            audio->airplay_newest_sec = session_sec;
-            audio->airplay_newest_nsec = session_nsec;
-            audio->airplay_newest_ended = 1;
             return response_ok(response, response_size, id, "{}");
         }
         if (json_string(message, "callback", callback, sizeof(callback)) < 0 ||
@@ -2105,6 +2174,11 @@ static int handle_request(struct audio_hw *audio, char *message,
     if (!strcmp(command, "set_volume")) {
         if (json_long(message, "volume", &value) < 0 || value < 0 || value > 100)
             return response_error(response, response_size, id, "volume must be 0-100");
+        if (audio->airplay_restore_pending) {
+            airplay_restore_poll(audio);
+            if (audio->airplay_restore_pending)
+                return response_error(response, response_size, id, "AirPlay restoration pending");
+        }
         le_log_info("audiod: set_volume %d -> %d", audio->volume, (int)value);
         if (audio->airplay_session[0]) {
             int previous = audio->airplay_baseline;
