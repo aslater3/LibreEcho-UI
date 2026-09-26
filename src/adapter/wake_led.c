@@ -50,10 +50,18 @@ int le_wake_led_trigger(struct le_wake_led *led, uint64_t now_ns)
      * than five seconds apart.
      */
     (void)stop_pattern(led);
+    /*
+     * "profile" takes the brightness from the Listening theme, so the wake
+     * indicator stays visible when the ring's master brightness is turned
+     * down to zero for idle, and its level is set by editing that theme.
+     * The literal brightness below remains the fallback for an LED daemon
+     * that does not understand the field.
+     */
     result = send_pattern(
         led,
         "{\"name\":\"pulse\",\"r\":255,\"g\":0,\"b\":0,"
-        "\"brightness\":70,\"repeats\":0,\"owner\":\""
+        "\"brightness\":70,\"repeats\":0,"
+        "\"profile\":\"listening\",\"owner\":\""
         WAKE_LED_OWNER "\"}");
     if (result != LE_ADAPTER_OK) {
         led->stop_ns = 0;

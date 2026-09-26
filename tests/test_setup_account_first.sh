@@ -40,12 +40,11 @@ assert "Account created. Please reload this page" in js
 assert "if(!setup.hardwareReady)" in js
 assert "The Wi-Fi connection could not be completed; check the access point and try again" in api
 assert "Setup settings could not be saved" in api
-assert '(!strcmp(q.path,"/api/v1/setup")&&!strcmp(q.method,"POST"))' in server
-assert '(!strcmp(q.path,"/api/v1/network/wifi/connect")&&!strcmp(q.method,"POST"))' in server
-assert "refresh_setup_completed(api);" in server
 assert "setup.scanAttempts++<8" in js
 assert "!/[\\u0000-\\u001f]/.test(n.ssid)" in js
 assert "!/^\\\\x(?:00)+$/i.test(n.ssid.trim())" in js
 assert "setup_failure_message(c)" in api
+# HTTP dispatch, state synchronisation and concurrency are exercised by
+# test-setup-workers, not by searching comments for executable fragments.
 print('setup account-first browser contract: ok')
 PY
