@@ -19,6 +19,7 @@
 #include "mdns_client.h"
 
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -56,6 +57,14 @@ struct airplay_ctx {
     char engine_path[128];
     char config_path[128];
     char mdns_socket[128];
+    char volume_root[128];
+    char master_socket[128];
+    char master_session[96];
+    dev_t applied_marker_dev, applied_volume_dev;
+    ino_t applied_marker_ino, applied_volume_ino;
+    struct timespec applied_marker_time, applied_volume_time;
+    int applied;
+    int write_confirmed;
     pid_t nqptp_pid;
     pid_t audio_pid;
     pid_t engine_pid;
@@ -76,6 +85,148 @@ static void on_signal(int signo)
 {
     if (signo == SIGTERM || signo == SIGINT)
         running = 0;
+}
+
+static int airplay_master_end(struct airplay_ctx *ctx)
+{
+    struct le_adapter *adapter;
+    char args[144], response[256];
+    int n;
+    if (!ctx->master_session[0]) return 0;
+    adapter = le_adapter_connect(ctx->master_socket, 100);
+    if (!adapter) return -1;
+    le_adapter_set_io_timeout(adapter, 100);
+    snprintf(args, sizeof(args), "{\"session\":\"%s\"}", ctx->master_session);
+    n = le_adapter_call(adapter, "airplay_end", args, response, sizeof(response));
+    le_adapter_close(adapter);
+    if (n != LE_ADAPTER_OK) return -1;
+    ctx->master_session[0] = '\0';
+    ctx->applied = ctx->write_confirmed = 0;
+    return 0;
+}
+
+/* Shairport's standard profile sends -30..0 dB for the slider and -144
+ * for mute. Reject corrupt callbacks rather than changing the shared master. */
+static int airplay_db_to_percent(const char *text, int *percent)
+{
+    char *end;
+    double db;
+    errno = 0;
+    db = strtod(text, &end);
+    if (end == text || errno == ERANGE || !isfinite(db) ||
+        (db != -144.0 && (db < -30.0 || db > 0.0)))
+        return -1;
+    while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') ++end;
+    if (*end) return -1;
+    if (db == -144.0) *percent = 0;
+    else {
+        *percent = (int)(((db + 30.0) * 99.0 / 30.0) + 1.5);
+        if (*percent > 100) *percent = 100;
+    }
+    return 0;
+}
+
+/* Acknowledgment names both immutable inodes. A new callback or session
+ * cannot inherit an old acknowledgment; media remains gated on IPC failure. */
+static void airplay_master_poll(struct airplay_ctx *ctx)
+{
+    char marker[256], volume[256], ack[256], temp[272], text[160], args[256], response[256];
+    char session[96], callback[96];
+    struct stat m, v, current;
+    struct le_adapter *adapter;
+    int fd, n, percent, length, same_callback;
+    long readback;
+    char *end, *field;
+    ssize_t size;
+    if (!ctx->enabled) { (void)airplay_master_end(ctx); return; }
+    if (snprintf(marker, sizeof(marker), "%s/airplay.active", ctx->volume_root) >= (int)sizeof(marker) ||
+        snprintf(volume, sizeof(volume), "%s/airplay.volume", ctx->volume_root) >= (int)sizeof(volume) ||
+        snprintf(ack, sizeof(ack), "%s/airplay.master", ctx->volume_root) >= (int)sizeof(ack) ||
+        snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", ack) >= (int)sizeof(temp)) return;
+    if (stat(marker, &m) < 0 || !S_ISREG(m.st_mode)) {
+        (void)airplay_master_end(ctx);
+        return;
+    }
+    snprintf(session, sizeof(session), "%llu:%llu:%lld:%ld",
+             (unsigned long long)m.st_dev, (unsigned long long)m.st_ino,
+             (long long)m.st_ctim.tv_sec, m.st_ctim.tv_nsec);
+    if (ctx->master_session[0] && strcmp(ctx->master_session, session) &&
+        airplay_master_end(ctx) < 0) return;
+    fd = open(volume, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    if (fstat(fd, &v) < 0 || !S_ISREG(v.st_mode)) { close(fd); return; }
+    size = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (size <= 0 || stat(volume, &current) < 0 ||
+        current.st_dev != v.st_dev || current.st_ino != v.st_ino) return;
+    text[size] = '\0';
+    if (airplay_db_to_percent(text, &percent) < 0) return;
+    n = snprintf(callback, sizeof(callback), "%llu:%llu:%lld:%ld",
+                 (unsigned long long)v.st_dev, (unsigned long long)v.st_ino,
+                 (long long)v.st_ctim.tv_sec, v.st_ctim.tv_nsec);
+    if (n <= 0 || n >= (int)sizeof(callback)) return;
+    same_callback = ctx->write_confirmed && ctx->applied_marker_dev == m.st_dev &&
+        ctx->applied_marker_ino == m.st_ino &&
+        ctx->applied_marker_time.tv_sec == m.st_ctim.tv_sec &&
+        ctx->applied_marker_time.tv_nsec == m.st_ctim.tv_nsec &&
+        ctx->applied_volume_dev == v.st_dev && ctx->applied_volume_ino == v.st_ino &&
+        ctx->applied_volume_time.tv_sec == v.st_ctim.tv_sec &&
+        ctx->applied_volume_time.tv_nsec == v.st_ctim.tv_nsec;
+    if (same_callback && ctx->applied) return;
+    adapter = le_adapter_connect(ctx->master_socket, 100);
+    if (!adapter) return;
+    le_adapter_set_io_timeout(adapter, 100);
+    if (!same_callback) {
+        snprintf(args, sizeof(args), "{\"session\":\"%s\",\"callback\":\"%s\",\"volume\":%d}", session, callback, percent);
+        /* A timed-out reply is unknown, not a failed write: end must still
+         * reach audiod even if the request already changed the mixer. */
+        snprintf(ctx->master_session, sizeof(ctx->master_session), "%s", session);
+        n = le_adapter_call(adapter, "airplay_volume", args, response, sizeof(response));
+        if (n != LE_ADAPTER_OK) { le_adapter_close(adapter); return; }
+        /* The write is confirmed independently of status/ack. On a retry of
+         * this same callback, only read status: a newer button choice wins. */
+        ctx->write_confirmed = 1;
+        ctx->applied = 0;
+        ctx->applied_marker_dev = m.st_dev; ctx->applied_marker_ino = m.st_ino;
+        ctx->applied_marker_time = m.st_ctim;
+        ctx->applied_volume_dev = v.st_dev; ctx->applied_volume_ino = v.st_ino;
+        ctx->applied_volume_time = v.st_ctim;
+    }
+    n = le_adapter_call(adapter, "status", "{}", response, sizeof(response));
+    le_adapter_close(adapter);
+    /* A failed status still leaves media gated, but never replays a confirmed
+     * write. A changed callback/session has a different identity and writes. */
+    if (n != LE_ADAPTER_OK) return;
+    field = strstr(response, "\"volume\":");
+    if (!field) return;
+    field += strlen("\"volume\":");
+    errno = 0;
+    readback = strtol(field, &end, 10);
+    if (errno || end == field || readback < 0 || readback > 100 ||
+        (*end != ',' && *end != '}')) return;
+    if (stat(marker, &current) < 0 || current.st_dev != m.st_dev || current.st_ino != m.st_ino ||
+        current.st_ctim.tv_sec != m.st_ctim.tv_sec || current.st_ctim.tv_nsec != m.st_ctim.tv_nsec ||
+        stat(volume, &current) < 0 || current.st_dev != v.st_dev || current.st_ino != v.st_ino ||
+        current.st_ctim.tv_sec != v.st_ctim.tv_sec || current.st_ctim.tv_nsec != v.st_ctim.tv_nsec) return;
+    length = snprintf(text, sizeof(text), "%llu %llu %lld %ld %llu %llu %lld %ld\n",
+                      (unsigned long long)m.st_dev, (unsigned long long)m.st_ino,
+                      (long long)m.st_ctim.tv_sec, m.st_ctim.tv_nsec,
+                      (unsigned long long)v.st_dev, (unsigned long long)v.st_ino,
+                      (long long)v.st_ctim.tv_sec, v.st_ctim.tv_nsec);
+    if (length <= 0 || length >= (int)sizeof(text)) return;
+    fd = mkstemp(temp);
+    if (fd < 0) return;
+    if (fchmod(fd, 0640) < 0 || write(fd, text, (size_t)length) != length ||
+        fsync(fd) < 0) {
+        close(fd); unlink(temp); return;
+    }
+    if (close(fd) < 0) { unlink(temp); return; }
+    if (rename(temp, ack) < 0) { unlink(temp); return; }
+    ctx->applied = 1;
+    ctx->applied_marker_dev = m.st_dev; ctx->applied_marker_ino = m.st_ino;
+    ctx->applied_marker_time = m.st_ctim;
+    ctx->applied_volume_dev = v.st_dev; ctx->applied_volume_ino = v.st_ino;
+    ctx->applied_volume_time = v.st_ctim;
 }
 
 static int json_bool(const char *json, const char *key, int *value)
@@ -1067,6 +1218,7 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
     if (!enabled) {
         stop_child(&ctx->shairport_pid);
         stop_child(&ctx->audio_pid);
+        (void)airplay_master_end(ctx);
         stop_child(&ctx->nqptp_pid);
         ctx->enabled = 0;
         metadata_fifo_close(ctx);
@@ -1244,6 +1396,8 @@ int main(int argc, char **argv)
     snprintf(ctx.engine_path, sizeof(ctx.engine_path), "/usr/local/sbin/libreecho-audio-engine");
     snprintf(ctx.config_path, sizeof(ctx.config_path), "/etc/libreecho/airplay2.conf");
     snprintf(ctx.mdns_socket, sizeof(ctx.mdns_socket), "%s", LE_MDNS_SOCKET);
+    snprintf(ctx.volume_root, sizeof(ctx.volume_root), "%s", "/run/libreecho-audio");
+    snprintf(ctx.master_socket, sizeof(ctx.master_socket), "%s", LE_ADAPTER_AUDIO_SOCK);
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--foreground")) foreground = 1;
         else if (!strcmp(argv[i], "--enable-on-start")) enable_on_start = 1;
@@ -1305,6 +1459,7 @@ int main(int argc, char **argv)
             le_log_warn("airplayd: AirPlay child exited; stopping remaining children");
             stop_child(&ctx.shairport_pid);
             stop_child(&ctx.audio_pid);
+            (void)airplay_master_end(&ctx);
             stop_child(&ctx.nqptp_pid);
             metadata_fifo_close(&ctx);
         }
@@ -1319,6 +1474,7 @@ int main(int argc, char **argv)
         }
         if (ctx.enabled && ctx.metadata_fd < 0)
             (void)metadata_fifo_open(&ctx);
+        airplay_master_poll(&ctx);
         pfd[0].fd = ctx.listener;
         pfd[0].events = POLLIN;
         pfd[0].revents = 0;
