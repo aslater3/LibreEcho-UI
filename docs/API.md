@@ -392,7 +392,25 @@ is a saved preference that nothing acts on yet.
 
 #### GET /api/v1/audio
 
-Returns current audio state. When the audio adapter is absent, this remains a
+Returns current audio state. `volume` and `notification_volume` are audiod's
+logical 0–100 master, not a readback of the physical PCM codec index. On Linux,
+audiod holds the codec at 0 dB (raw minimum + 127) and atomically publishes the
+logical level at `/run/libreecho-audio/master.volume` for pre-DSP gain on every
+playback bus. Sender callbacks can temporarily change that level; local API or
+button choices immediately publish their level and become the post-playback
+restoration target. A later sender callback may change playback again without
+changing that local restoration target.
+The physical index is guarded even during AirPlay; ordinary volume changes
+publish software gain without rewriting the codec. A valid runtime master level
+wins on audiod restart over the persisted `LE_AUDIO_VOLUME` configuration (which
+is a fallback only when the runtime level is absent or invalid, such as after a
+reboot clears `/run`). A pending AirPlay restoration retains its saved local
+baseline until it can publish it, before accepting new sender or local changes.
+audiod creates and verifies the runtime directory before publication and retries
+transient startup publication failure; missing or unknown PCM reference remains
+unavailable rather than using an unsafe mixer-percentage fallback.
+A failed output initialization is reported through `output_available: false`,
+not inferred from a default level. When the audio adapter is absent, this remains a
 successful `200` response with `data.available: false` and
 `data.unavailable: true`; the browser uses that explicit capability result to
 render the existing unsupported state without logging an HTTP error.

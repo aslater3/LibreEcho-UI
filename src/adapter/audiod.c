@@ -233,6 +233,9 @@ struct audio_hw {
        something asks.  Used to notice an outside writer changing the mixer. */
     int requested_volume;
     int volume_guard_warned;
+    int reference_ready;
+    int volume_publish_pending;
+    long long last_volume_retry_ms;
     char airplay_session[96];
     /* Fixed-size high-water mark: marker ctime orders sessions without an
      * ever-growing set of ended session IDs. */
@@ -795,30 +798,12 @@ static long long speaker_value_for_percent(long long min, long long max,
     long long floor = min + 67;
 
     if (unity > max)
-        unity = max;
+        return -1;
     if (percent <= 0)
         return min;
     if (floor > unity)
         floor = min;
     return floor + ((unity - floor) * (percent - 1) + 49) / 99;
-}
-
-static int speaker_percent_from_value(long long value, long long min,
-                                      long long max)
-{
-    long long unity = min + 127;
-    long long floor = min + 67;
-
-    if (unity > max)
-        unity = max;
-    if (value <= min)
-        return 0;
-    if (floor >= unity || value <= floor)
-        return 1;
-    if (value >= unity)
-        return 100;
-    return 1 + (int)(((value - floor) * 99 + (unity - floor) / 2) /
-                     (unity - floor));
 }
 
 static int write_percent_control(const struct audio_hw *audio,
@@ -846,9 +831,12 @@ static int write_percent_control(const struct audio_hw *audio,
     }
     if (max < min)
         return -1;
+    if (is_speaker_pcm_volume(control) && max - min < 127)
+        return -1;
     value = is_speaker_pcm_volume(control)
           ? speaker_value_for_percent(min, max, percent)
           : value_for_percent(min, max, percent);
+    if (value < min || value > max) return -1;
 
     memset(&elem, 0, sizeof(elem));
     elem.id = control->id;
@@ -918,9 +906,12 @@ static const char *control_name_or_default(const struct audio_control *control,
     return control->found && control->name[0] ? control->name : fallback;
 }
 
-/* Percent is not a round trip through the raw control, so ignore a point
-   of rounding rather than reacting to it. */
-#define VOLUME_GUARD_TOLERANCE 2
+#ifndef LE_MASTER_VOLUME_PATH
+#define LE_MASTER_VOLUME_PATH "/run/libreecho-audio/master.volume"
+#endif
+#ifndef LE_MASTER_VOLUME_DIR
+#define LE_MASTER_VOLUME_DIR "/run/libreecho-audio"
+#endif
 /* How often the guard re-reads the mixer while idle, in milliseconds. */
 #define VOLUME_GUARD_POLL_MS 250
 
@@ -930,6 +921,7 @@ static int airplay_media_active(void);
 static void refresh_state(struct audio_hw *audio)
 {
     long long value;
+    int reference_ok = 0;
 
     if (read_control_value(audio, &audio->master, &value) == 0) {
         long long min = audio->master.info.type == SNDRV_CTL_ELEM_TYPE_INTEGER64
@@ -938,57 +930,29 @@ static void refresh_state(struct audio_hw *audio)
         long long max = audio->master.info.type == SNDRV_CTL_ELEM_TYPE_INTEGER64
                       ? audio->master.info.value.integer64.max
                       : audio->master.info.value.integer.max;
-        audio->volume = is_speaker_pcm_volume(&audio->master)
-                      ? speaker_percent_from_value(value, min, max)
-                      : percent_from_range(value, min, max);
-        /*
-         * Something outside audiod writes this mixer.  Any playback -- a
-         * plain test tone is enough -- leaves the level at full, so a
-         * volume set through the API or the buttons does not survive a
-         * single spoken reply.  The writer has not been identified
-         * (aslater3/LibreEcho#57), and until it is, hold the line: audiod
-         * owns this control for the API and the physical buttons, so put
-         * back the level that was actually asked for.
-         *
-         * This is a guard, not a fix.  It restores only a level someone
-         * explicitly requested, so a device nobody has configured is left
-         * alone, and it logs the first divergence so the underlying writer
-         * stays visible instead of being silently papered over.
-         */
-        /*
-         * A tolerance, because the percentage is not a round trip: the
-         * control is a raw range and converting percent -> raw -> percent
-         * can land a point away.  Without it the guard fired on that
-         * rounding on every boot and, being one-shot, burned its warning on
-         * an artefact and hid the real event.
-         *
-         * The raw control value is logged alongside the percentages.  The
-         * percentage collapses the bottom of the range -- everything at or
-         * below min+67 reads as 1% -- so the raw number is what identifies
-         * an outside writer.
-         */
-        if (!airplay_media_active() && audio->requested_volume >= 0 &&
-            abs(audio->volume - audio->requested_volume) >
-                VOLUME_GUARD_TOLERANCE) {
-            /* One line, not one per playback. The flag was set here but never
-               tested, so an outside writer that fires on every stream -- which
-               is what this device does -- filled the log ring with this message
-               and evicted everything else, including the microphone and
-               wake-word lines needed to diagnose an unrelated fault. The
-               restore below still runs every time; only the warning is
-               one-shot, and setting the volume again re-arms it. */
-            if (!audio->volume_guard_warned)
-                le_log_warn("audiod: volume changed underneath us: requested "
-                            "%d%%, control now reads %d%% (raw %lld of %lld..%lld)"
-                            "; restoring",
-                            audio->requested_volume, audio->volume,
+        long long reference = is_speaker_pcm_volume(&audio->master)
+                            ? speaker_value_for_percent(min, max, 100) : max;
+        reference_ok = is_speaker_pcm_volume(&audio->master) &&
+                       reference >= min && reference <= max && value == reference;
+        /* Physical PCM remains at 0 dB even while sender media plays. */
+        if (!reference_ok && audio->requested_volume >= 0) {
+            int warn = !audio->volume_guard_warned;
+            if (warn)
+                le_log_warn("audiod: physical reference changed: raw %lld of %lld..%lld; restoring unity",
                             value, min, max);
             audio->volume_guard_warned = 1;
-            if (audio_set_volume(audio, audio->requested_volume) == 0)
-                audio->volume = audio->requested_volume;
+            if (!is_speaker_pcm_volume(&audio->master) ||
+                write_percent_control(audio, &audio->master, 100) < 0 ||
+                read_control_value(audio, &audio->master, &value) < 0 || value != reference) {
+                if (warn) le_log_warn("audiod: physical reference restoration unavailable");
+            } else reference_ok = 1;
         }
-        audio->notification_volume = audio->volume;
     }
+    audio->reference_ready = reference_ok;
+    if (audio->have_card_info)
+        audio->output_available = reference_ok && !audio->volume_publish_pending &&
+                                  audio->master.found &&
+                                  access(audio->pcm_path, F_OK) == 0;
     if (read_control_value(audio, &audio->capture, &value) == 0) {
         long long min = audio->capture.info.type == SNDRV_CTL_ELEM_TYPE_INTEGER64
                       ? audio->capture.info.value.integer64.min
@@ -1035,30 +999,64 @@ static int airplay_media_active(void)
            S_ISREG(state.st_mode);
 }
 
+static int ensure_physical_reference(struct audio_hw *audio)
+{
+    long long min, max, raw, unity;
+    struct audio_control *control = &audio->master;
+    /* Only the identified PCM control has a known raw 0 dB point. Never
+     * substitute an amixer percentage on an unknown control. */
+    if (!is_speaker_pcm_volume(control) || !control->writable ||
+        (control->info.type != SNDRV_CTL_ELEM_TYPE_INTEGER &&
+         control->info.type != SNDRV_CTL_ELEM_TYPE_INTEGER64)) return -1;
+    min = control->info.type == SNDRV_CTL_ELEM_TYPE_INTEGER64
+        ? control->info.value.integer64.min : control->info.value.integer.min;
+    max = control->info.type == SNDRV_CTL_ELEM_TYPE_INTEGER64
+        ? control->info.value.integer64.max : control->info.value.integer.max;
+    unity = speaker_value_for_percent(min, max, 100);
+    if (unity < min || unity > max || read_control_value(audio, control, &raw) < 0) {
+        audio->reference_ready = 0;
+        return -1;
+    }
+    if (raw == unity) {
+        audio->reference_ready = 1;
+        return 0;
+    }
+    audio->reference_ready = 0;
+    if (write_percent_control(audio, control, 100) < 0 ||
+        read_control_value(audio, control, &raw) < 0 || raw != unity)
+        return -1;
+    audio->reference_ready = 1;
+    return 0;
+}
+
+static int ensure_volume_directory(void)
+{
+    struct stat st;
+    if (mkdir(LE_MASTER_VOLUME_DIR, 0755) < 0 && errno != EEXIST) return -1;
+    if (lstat(LE_MASTER_VOLUME_DIR, &st) < 0 || !S_ISDIR(st.st_mode)) return -1;
+    return 0;
+}
+
 static int audio_set_volume(struct audio_hw *audio, int volume)
 {
-    char setting[16];
-    if (volume < 0 || volume > 100)
+    char temp[sizeof(LE_MASTER_VOLUME_PATH) + 16], text[8];
+    int fd, n;
+    if (volume < 0 || volume > 100) return -1;
+    if (ensure_physical_reference(audio) < 0 || ensure_volume_directory() < 0)
         return -1;
-    if (write_percent_control(audio, &audio->master, volume) < 0) {
-        /* Never let a percentage-based fallback address the codec's
-         * +24 dB region.  The direct control path above caps 100% at the
-         * PCM control's 0 dB/unity value. */
-        if (is_speaker_pcm_volume(&audio->master))
-            return -1;
-        (void)snprintf(setting, sizeof(setting), "%d%%", volume);
-        if (run_amixer(audio,
-                       control_name_or_default(&audio->master,
-                                               "Master Playback Volume"),
-                       setting) < 0)
-            return -1;
+    n = snprintf(text, sizeof(text), "%d\n", volume);
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_MASTER_VOLUME_PATH) >= (int)sizeof(temp)) return -1;
+    fd = mkstemp(temp);
+    if (fd < 0) return -1;
+    if (fchmod(fd, 0640) < 0 || write(fd, text, (size_t)n) != n || fsync(fd) < 0) {
+        close(fd); unlink(temp); return -1;
     }
+    if (close(fd) < 0) { unlink(temp); return -1; }
+    if (rename(temp, LE_MASTER_VOLUME_PATH) < 0) { unlink(temp); return -1; }
     audio->volume = volume;
     audio->notification_volume = volume;
     audio->requested_volume = volume;
-    /* A fresh request re-arms the guard warning: the next time an outside
-       writer overrides this level it is news again, rather than silence
-       because it was reported once hours ago. */
+    audio->volume_publish_pending = 0;
     audio->volume_guard_warned = 0;
     return 0;
 }
@@ -1130,9 +1128,37 @@ static int level_from_environment(const char *name, int *value)
     return 1;
 }
 
+static int audio_load_logical_volume(struct audio_hw *audio)
+{
+    char text[8], canonical[8];
+    struct stat st;
+    int fd, value, length;
+    char *end;
+    long parsed;
+    ssize_t size;
+    fd = open(LE_MASTER_VOLUME_PATH, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 2 ||
+        st.st_size >= (off_t)sizeof(text)) { close(fd); return -1; }
+    size = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (size != st.st_size) return -1;
+    text[size] = '\0';
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if (errno || end == text || parsed < 0 || parsed > 100) return -1;
+    value = (int)parsed;
+    length = snprintf(canonical, sizeof(canonical), "%d\n", value);
+    if (size != length || memcmp(text, canonical, (size_t)length)) return -1;
+    audio->volume = audio->notification_volume = value;
+    audio->requested_volume = value;
+    return 0;
+}
+
 static void apply_persisted_levels(struct audio_hw *audio)
 {
     int value;
+    int runtime_valid;
 
     if (!audio->have_card_info)
         return;
@@ -1142,11 +1168,13 @@ static void apply_persisted_levels(struct audio_hw *audio)
         else
             le_log_warn("audiod: unable to restore microphone gain %d", value);
     }
-    if (level_from_environment("LE_AUDIO_VOLUME", &value)) {
-        if (audio_set_volume(audio, value) == 0)
-            le_log_info("audiod: restored volume %d", value);
-        else
-            le_log_warn("audiod: unable to restore volume %d", value);
+    /* The runtime file is the last successful button/API choice. The config
+     * environment is a boot fallback, not a restart-time override. */
+    runtime_valid = audio_load_logical_volume(audio) == 0;
+    if (!runtime_valid && level_from_environment("LE_AUDIO_VOLUME", &value)) {
+        audio->volume = audio->notification_volume = value;
+        audio->requested_volume = value;
+        le_log_info("audiod: selected persisted volume %d", value);
     }
 }
 
@@ -1190,10 +1218,12 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->have_card_info = 1;
     (void)enumerate_controls(audio);
     refresh_state(audio);
-    audio->output_available = audio->have_card_info && audio->master.found &&
-                              access(audio->pcm_path, F_OK) == 0;
     audio->amplifier_on = 0;
+    /* Select without publishing: a pending AirPlay tombstone must be loaded
+     * and restored before stale persisted config can reach the DSP. */
     apply_persisted_levels(audio);
+    audio->volume_publish_pending = 1;
+    audio->output_available = 0;
 }
 
 static void stop_noise(struct audio_hw *audio);
@@ -2023,9 +2053,15 @@ static void airplay_restore_load(struct audio_hw *audio)
     else {
         /* A killed controller can leave the bridge and marker orphaned. */
         airplay_restore_poll(audio);
-        if (audio->airplay_session[0] &&
-            audio_set_volume(audio, override ? baseline : sender) == 0)
-            audio->requested_volume = baseline;
+        if (audio->airplay_session[0]) {
+            int selected = override ? baseline : sender;
+            if (audio_set_volume(audio, selected) == 0)
+                audio->requested_volume = baseline;
+            else {
+                audio->volume = audio->notification_volume = selected;
+                audio->volume_publish_pending = 1;
+            }
+        }
     }
 }
 
@@ -2495,6 +2531,16 @@ static void usage(const char *program)
             program);
 }
 
+static void retry_startup_volume(struct audio_hw *audio, long long now_ms)
+{
+    if (!audio->volume_publish_pending || audio->airplay_restore_pending ||
+        now_ms <= 0 || (audio->last_volume_retry_ms != 0 &&
+        now_ms - audio->last_volume_retry_ms < VOLUME_GUARD_POLL_MS)) return;
+    audio->last_volume_retry_ms = now_ms;
+    if (audio_set_volume(audio, audio->volume) == 0)
+        refresh_state(audio);
+}
+
 int main(int argc, char **argv)
 {
     const char *socket_path = LE_DEFAULT_SOCKET;
@@ -2554,6 +2600,12 @@ int main(int argc, char **argv)
     snprintf(audio.airplay_controller_socket, sizeof(audio.airplay_controller_socket),
              "%s", LE_ADAPTER_AIRPLAY_SOCK);
     airplay_restore_load(&audio);
+    if (audio.volume_publish_pending && !audio.airplay_restore_pending &&
+        !audio.airplay_session[0]) {
+        if (audio_set_volume(&audio, audio.volume) < 0)
+            audio.output_available = 0;
+        else refresh_state(&audio);
+    }
     if (snprintf(audio.system_audio_bus, sizeof(audio.system_audio_bus),
                  "%s", system_bus) >= (int)sizeof(audio.system_audio_bus)) {
         usage(argv[0]);
@@ -2575,6 +2627,9 @@ int main(int argc, char **argv)
 
         reap_children(&audio);
         airplay_restore_poll(&audio);
+        /* Startup can beat the audio-engine directory or codec. Retry at the
+         * bounded poll cadence; never override an outstanding AirPlay restore. */
+        retry_startup_volume(&audio, monotonic_millis());
 
         pollfds[0].fd = listen_fd;
         pollfds[0].events = POLLIN;

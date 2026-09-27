@@ -152,12 +152,13 @@ static void airplay_master_poll(struct airplay_ctx *ctx)
              (long long)m.st_ctim.tv_sec, m.st_ctim.tv_nsec);
     if (ctx->master_session[0] && strcmp(ctx->master_session, session) &&
         airplay_master_end(ctx) < 0) return;
-    fd = open(volume, O_RDONLY | O_CLOEXEC);
+    fd = open(volume, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
     if (fd < 0) return;
-    if (fstat(fd, &v) < 0 || !S_ISREG(v.st_mode)) { close(fd); return; }
+    if (fstat(fd, &v) < 0 || !S_ISREG(v.st_mode) ||
+        v.st_size <= 0 || v.st_size >= (off_t)sizeof(text)) { close(fd); return; }
     size = read(fd, text, sizeof(text) - 1);
     close(fd);
-    if (size <= 0 || stat(volume, &current) < 0 ||
+    if (size != v.st_size || stat(volume, &current) < 0 ||
         current.st_dev != v.st_dev || current.st_ino != v.st_ino) return;
     text[size] = '\0';
     if (airplay_db_to_percent(text, &percent) < 0) return;

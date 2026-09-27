@@ -11,9 +11,52 @@
 #include "../src/adapter/airplayd.c"
 #undef main
 
+/* Link the real controller poller and audiod request handler in one host
+ * fixture. Only the hardware codec ioctl is replaced. */
+static char integration_root[] = "/tmp/libreecho-airplay-audiod-XXXXXX";
+static char integration_active_path[128], integration_restore_path[128];
+static char integration_ack_path[128], integration_master_path[128];
+#define LE_AIRPLAY_ACTIVE_PATH integration_active_path
+#define LE_AIRPLAY_RESTORE_PATH integration_restore_path
+#define LE_AIRPLAY_MASTER_ACK_PATH integration_ack_path
+#define LE_MASTER_VOLUME_DIR integration_root
+#define LE_MASTER_VOLUME_PATH integration_master_path
+#include <sys/syscall.h>
+#include <stdarg.h>
+static int integration_ioctl(int fd, unsigned long request, ...);
+#define ioctl integration_ioctl
+#define json_bool audiod_json_bool
+#define main audiod_program_main
+#include "../src/adapter/audiod.c"
+#undef main
+#undef json_bool
+#undef ioctl
+
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
+
+static int integration_codec_raw, integration_codec_writes;
+static int integration_ioctl(int fd, unsigned long request, ...)
+{
+    va_list args;
+    void *value;
+    va_start(args, request);
+    value = va_arg(args, void *);
+    va_end(args);
+    if (fd != 100000) return (int)syscall(SYS_ioctl, fd, request, value);
+    if (request == SNDRV_CTL_IOCTL_ELEM_READ) {
+        ((struct snd_ctl_elem_value *)value)->value.integer.value[0] = integration_codec_raw;
+        return 0;
+    }
+    if (request == SNDRV_CTL_IOCTL_ELEM_WRITE) {
+        integration_codec_raw = (int)((struct snd_ctl_elem_value *)value)->value.integer.value[0];
+        ++integration_codec_writes;
+        return 0;
+    }
+    errno = ENOTTY;
+    return -1;
+}
 
 /* The shared supervisor is an external dependency. This fake answers one
  * readiness probe at a time and lets the tests assert both the ready and the
@@ -154,6 +197,15 @@ static void test_sender_master_poll(void)
     assert(stat(marker, &m) == 0 && stat(volume, &v) == 0 && access(ack, F_OK) == 0);
     assert(ctx.applied && ctx.applied_marker_ino == m.st_ino && ctx.applied_volume_ino == v.st_ino);
     airplay_master_poll(&ctx);
+    /* A symlinked callback is not a sender-owned regular file, even when it
+     * contains a valid decibel value. Keep the admitted session untouched. */
+    assert(unlink(volume) == 0);
+    assert(unlink(temp) == 0);
+    fd = open(temp, O_CREAT | O_WRONLY | O_TRUNC, 0600); assert(fd >= 0);
+    assert(write(fd, "-30\n", 4) == 4); close(fd);
+    assert(symlink(temp, volume) == 0);
+    airplay_master_poll(&ctx);
+    assert(ctx.applied && ctx.applied_volume_ino == v.st_ino);
     assert(unlink(marker) == 0);
     airplay_master_poll(&ctx);
     assert(!ctx.master_session[0]);
@@ -364,6 +416,246 @@ static void init_ctx(struct airplay_ctx *ctx)
     snprintf(ctx->mdns_socket, sizeof(ctx->mdns_socket), "%s",
              "/tmp/libreecho-airplay-mdns-test.sock");
     unlink(ctx->mdns_socket);
+}
+
+/* One live audiod state machine serves both sessions over a surviving Unix
+ * listener. The controller makes real adapter calls; the server dispatches
+ * every wire request through audiod's unmodified handle_request(). */
+static void integration_server(int listener, int done, int events)
+{
+    struct audio_hw audio;
+    int ends = 0, dropped = 0;
+    memset(&audio, 0, sizeof(audio));
+    audio.ctl_fd = 100000;
+    audio.master.found = audio.master.writable = 1;
+    audio.master.info.type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+    audio.master.info.value.integer.min = 0;
+    audio.master.info.value.integer.max = 151;
+    audio.master.info.count = 1;
+    snprintf(audio.master.name, sizeof(audio.master.name), "PCM Playback Volume");
+    audio.volume = audio.requested_volume = 42;
+    integration_codec_raw = 0;
+    assert(audio_set_volume(&audio, 42) == 0);
+    for (;;) {
+        struct pollfd fds[2] = {{listener, POLLIN, 0}, {done, POLLIN | POLLHUP, 0}};
+        assert(poll(fds, 2, 3000) > 0);
+        if (fds[1].revents) break;
+        if (fds[0].revents & POLLIN) {
+            int client = le_adapter_accept(listener);
+            char request[LE_ADAPTER_MSG_MAX], reply[LE_ADAPTER_MSG_MAX];
+            assert(client >= 0);
+            for (;;) {
+                ssize_t n = read(client, request, sizeof(request) - 1);
+                char event;
+                if (!n) break;
+                assert(n > 0);
+                request[n] = '\0';
+                event = strstr(request, "\"cmd\":\"airplay_volume\"") ? 'W' :
+                        strstr(request, "\"cmd\":\"airplay_end\"") ? 'E' :
+                        strstr(request, "\"cmd\":\"set_volume\"") ? 'B' : 'S';
+                n = handle_request(&audio, request, reply, sizeof(reply));
+                assert(n > 0);
+                if (event == 'W' && !dropped) {
+                    dropped = 1; /* apply A, lose its wire reply */
+                } else {
+                    assert(write(client, reply, (size_t)n) == n);
+                }
+                assert(write(events, &event, 1) == 1);
+                if (event == 'E' && ++ends == 1) {
+                    /* Recreate audiod from its runtime files before B, while
+                     * the socket listener and metadata FIFO both survive. */
+                    struct audio_hw restarted;
+                    memset(&restarted, 0, sizeof(restarted));
+                    restarted.ctl_fd = 100000;
+                    restarted.master.found = restarted.master.writable = 1;
+                    restarted.master.info.type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+                    restarted.master.info.value.integer.min = 0;
+                    restarted.master.info.value.integer.max = 151;
+                    restarted.master.info.count = 1;
+                    snprintf(restarted.master.name, sizeof(restarted.master.name),
+                             "PCM Playback Volume");
+                    restarted.volume = restarted.requested_volume = 50;
+                    restarted.have_card_info = 1;
+                    apply_persisted_levels(&restarted);
+                    airplay_restore_load(&restarted);
+                    assert(restarted.volume == 27 && restarted.airplay_newest_ended);
+                    audio = restarted;
+                }
+            }
+            close(client);
+        }
+    }
+    assert(dropped && ends == 2 && integration_codec_writes == 1 && integration_codec_raw == 127);
+    close(events); close(done); close(listener);
+}
+
+static void integration_call(const char *socket_path, const char *command,
+                             const char *args, int expected_ok, int expected_volume)
+{
+    struct le_adapter *adapter = le_adapter_connect(socket_path, 100);
+    char response[1024], expected[32];
+    int result;
+    assert(adapter);
+    le_adapter_set_io_timeout(adapter, 100);
+    result = le_adapter_call(adapter, command, args, response, sizeof(response));
+    le_adapter_close(adapter);
+    if (expected_ok) assert(result == LE_ADAPTER_OK);
+    else assert(result != LE_ADAPTER_OK);
+    if (expected_volume >= 0) {
+        snprintf(expected, sizeof(expected), "\"volume\":%d", expected_volume);
+        assert(strstr(response, expected));
+    }
+}
+
+static void integration_file(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0);
+    assert(write(fd, text, strlen(text)) == (ssize_t)strlen(text));
+    assert(close(fd) == 0);
+}
+
+static void integration_master_is(int volume)
+{
+    char text[16], expected[16];
+    int fd = open(LE_MASTER_VOLUME_PATH, O_RDONLY | O_NOFOLLOW);
+    ssize_t n;
+    assert(fd >= 0);
+    n = read(fd, text, sizeof(text) - 1);
+    assert(n > 0);
+    close(fd);
+    text[n] = '\0';
+    snprintf(expected, sizeof(expected), "%d\n", volume);
+    assert(!strcmp(text, expected));
+}
+
+static void integration_ack_matches(const char *volume_path)
+{
+    struct stat m, v;
+    char observed[192], expected[192];
+    int fd = open(LE_AIRPLAY_MASTER_ACK_PATH, O_RDONLY | O_NOFOLLOW);
+    ssize_t n;
+    assert(fd >= 0);
+    n = read(fd, observed, sizeof(observed) - 1);
+    assert(n > 0);
+    close(fd);
+    observed[n] = '\0';
+    assert(stat(LE_AIRPLAY_ACTIVE_PATH, &m) == 0 && stat(volume_path, &v) == 0);
+    snprintf(expected, sizeof(expected), "%llu %llu %lld %ld %llu %llu %lld %ld\n",
+             (unsigned long long)m.st_dev, (unsigned long long)m.st_ino,
+             (long long)m.st_ctim.tv_sec, m.st_ctim.tv_nsec,
+             (unsigned long long)v.st_dev, (unsigned long long)v.st_ino,
+             (long long)v.st_ctim.tv_sec, v.st_ctim.tv_nsec);
+    assert(!strcmp(observed, expected));
+}
+
+static void test_two_sessions_real_audiod_transport(void)
+{
+    static const char begin[] = "<item><type>ssnc</type><code>pbeg</code><length>0</length></item>";
+    static const char end[] = "<item><type>ssnc</type><code>pend</code><length>0</length></item>";
+    struct airplay_ctx ctx;
+    char socket_path[128], volume_path[128], ack_path[128], old_session[96], old_callback[96];
+    char args[256], event_log[32] = {0};
+    int listener, done[2], events[2], status;
+    pid_t server;
+    struct stat marker, callback;
+    struct timespec delay = {0, 2000000};
+    assert(mkdtemp(integration_root));
+    assert(snprintf(integration_active_path, sizeof(integration_active_path),
+                    "%s/airplay.active", integration_root) < (int)sizeof(integration_active_path));
+    assert(snprintf(integration_restore_path, sizeof(integration_restore_path),
+                    "%s/airplay.restore", integration_root) < (int)sizeof(integration_restore_path));
+    assert(snprintf(integration_ack_path, sizeof(integration_ack_path),
+                    "%s/airplay.master", integration_root) < (int)sizeof(integration_ack_path));
+    assert(snprintf(integration_master_path, sizeof(integration_master_path),
+                    "%s/master.volume", integration_root) < (int)sizeof(integration_master_path));
+    init_ctx(&ctx);
+    ctx.enabled = 1;
+    snprintf(ctx.volume_root, sizeof(ctx.volume_root), "%s", LE_MASTER_VOLUME_DIR);
+    snprintf(socket_path, sizeof(socket_path), "%s/audio.sock", LE_MASTER_VOLUME_DIR);
+    snprintf(ctx.master_socket, sizeof(ctx.master_socket), "%s", socket_path);
+    snprintf(ctx.metadata_path, sizeof(ctx.metadata_path), "%s/metadata", LE_MASTER_VOLUME_DIR);
+    snprintf(volume_path, sizeof(volume_path), "%s/airplay.volume", LE_MASTER_VOLUME_DIR);
+    snprintf(ack_path, sizeof(ack_path), "%s", LE_AIRPLAY_MASTER_ACK_PATH);
+    assert(metadata_fifo_open(&ctx) == 0);
+    listener = le_adapter_listen(socket_path);
+    assert(listener >= 0 && pipe(done) == 0 && pipe(events) == 0);
+    server = fork(); assert(server >= 0);
+    if (!server) {
+        close(done[1]); close(events[0]);
+        integration_server(listener, done[0], events[1]);
+        _exit(0);
+    }
+    close(done[0]); close(events[1]); close(listener);
+    integration_file(LE_AIRPLAY_ACTIVE_PATH, "");
+    integration_file(volume_path, "-144\n");
+    assert(stat(LE_AIRPLAY_ACTIVE_PATH, &marker) == 0 && stat(volume_path, &callback) == 0);
+    snprintf(old_session, sizeof(old_session), "%llu:%llu:%lld:%ld",
+             (unsigned long long)marker.st_dev, (unsigned long long)marker.st_ino,
+             (long long)marker.st_ctim.tv_sec, marker.st_ctim.tv_nsec);
+    snprintf(old_callback, sizeof(old_callback), "%llu:%llu:%lld:%ld",
+             (unsigned long long)callback.st_dev, (unsigned long long)callback.st_ino,
+             (long long)callback.st_ctim.tv_sec, callback.st_ctim.tv_nsec);
+    assert(write(ctx.metadata_fd, begin, sizeof(begin) - 1) == (ssize_t)(sizeof(begin) - 1));
+    metadata_fifo_drain(&ctx);
+    assert(ctx.playing);
+    airplay_master_poll(&ctx);
+    assert(!ctx.applied && access(ack_path, F_OK) != 0);
+    integration_master_is(0); /* audiod applied A, but its reply was lost */
+    airplay_master_poll(&ctx);
+    assert(ctx.applied && !strcmp(ctx.master_session, old_session));
+    integration_master_is(0);
+    integration_ack_matches(volume_path);
+    integration_call(socket_path, "status", "{}", 1, 0);
+    airplay_master_poll(&ctx); /* no duplicate sender write */
+    integration_call(socket_path, "set_volume", "{\"volume\":27}", 1, -1);
+    integration_master_is(27);
+    integration_call(socket_path, "status", "{}", 1, 27);
+    assert(write(ctx.metadata_fd, end, sizeof(end) - 1) == (ssize_t)(sizeof(end) - 1));
+    metadata_fifo_drain(&ctx);
+    assert(!ctx.playing && ctx.metadata_fd >= 0);
+    assert(unlink(LE_AIRPLAY_ACTIVE_PATH) == 0);
+    airplay_master_poll(&ctx);
+    assert(!ctx.master_session[0] && access(ack_path, F_OK) != 0);
+    integration_master_is(27);
+    integration_call(socket_path, "status", "{}", 1, 27);
+    airplay_master_poll(&ctx); /* one restoration only */
+    nanosleep(&delay, NULL);
+    integration_file(LE_AIRPLAY_ACTIVE_PATH, "");
+    assert(unlink(volume_path) == 0);
+    integration_file(volume_path, "-15\n");
+    assert(write(ctx.metadata_fd, begin, sizeof(begin) - 1) == (ssize_t)(sizeof(begin) - 1));
+    metadata_fifo_drain(&ctx);
+    airplay_master_poll(&ctx);
+    assert(ctx.applied && ctx.playing && strcmp(ctx.master_session, old_session));
+    integration_master_is(51);
+    integration_ack_matches(volume_path);
+    integration_call(socket_path, "status", "{}", 1, 51);
+    snprintf(args, sizeof(args), "{\"session\":\"%s\",\"callback\":\"%s\",\"volume\":0}",
+             old_session, old_callback);
+    integration_call(socket_path, "airplay_volume", args, 0, -1);
+    integration_master_is(51);
+    integration_call(socket_path, "status", "{}", 1, 51);
+    assert(write(ctx.metadata_fd, end, sizeof(end) - 1) == (ssize_t)(sizeof(end) - 1));
+    metadata_fifo_drain(&ctx);
+    assert(unlink(LE_AIRPLAY_ACTIVE_PATH) == 0);
+    airplay_master_poll(&ctx);
+    integration_master_is(27);
+    integration_call(socket_path, "status", "{}", 1, 27);
+    assert(!ctx.master_session[0] && access(ack_path, F_OK) != 0);
+    airplay_master_poll(&ctx);
+    close(done[1]);
+    assert(waitpid(server, &status, 0) == server && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(read(events[0], event_log, sizeof(event_log)) == 15);
+    assert(!memcmp(event_log, "WWSSBSESWSSWSES", 15));
+    close(events[0]);
+    metadata_fifo_close(&ctx);
+    assert(unlink(ctx.metadata_path) == 0);
+    assert(unlink(volume_path) == 0);
+    assert(unlink(LE_AIRPLAY_RESTORE_PATH) == 0);
+    assert(unlink(LE_MASTER_VOLUME_PATH) == 0);
+    assert(unlink(socket_path) == 0);
+    assert(rmdir(LE_MASTER_VOLUME_DIR) == 0);
 }
 
 static void feed_fragmented(struct airplay_ctx *ctx, const char *text,
@@ -716,6 +1008,7 @@ int main(void)
     test_master_status_timeout_preserves_button_change();
     test_master_write_timeout_still_ends();
     test_master_rejected_write_stays_gated();
+    test_two_sessions_real_audiod_transport();
     test_fragmented_base64_and_json();
     test_missing_metadata_and_session_clear();
     test_ap2_now_playing_plist();
