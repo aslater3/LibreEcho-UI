@@ -62,6 +62,24 @@ static void expect(int fd, int status, const char *text) {
     snprintf(expected,sizeof(expected),"HTTP/1.1 %d",status);
     if (!strstr(reply,expected) || (text && !strstr(reply,text))) { fprintf(stderr,"Unexpected response: %s\n",reply); abort(); }
 }
+static int raw_request(struct api_context *api,const char *request) {
+    int pair[2]; struct client c; struct http_options o; struct timeval limit={3,0};
+    assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);
+    assert(setsockopt(pair[1],SOL_SOCKET,SO_RCVTIMEO,&limit,sizeof(limit))==0);
+    memset(&c,0,sizeof(c)); memset(&o,0,sizeof(o)); c.fd=pair[0]; strcpy(o.web_root,"web");
+    c.used=strlen(request); assert(c.used<sizeof(c.buf)); memcpy(c.buf,request,c.used+1);
+    process(&c,&o,api,-1,-1,-1,NULL,0); assert(c.fd==-1); return pair[1];
+}
+static void expect_exact_error(int fd,int status,const char *body) {
+    char reply[40000],expected[32],length[64]; size_t used=0,body_len=strlen(body); ssize_t n; char *separator;
+    while((n=read(fd,reply+used,sizeof(reply)-1-used))>0){used+=(size_t)n;assert(used<sizeof(reply)-1);}
+    assert(n==0); reply[used]=0; close(fd);
+    snprintf(expected,sizeof(expected),"HTTP/1.1 %d",status);
+    snprintf(length,sizeof(length),"Content-Length: %zu",body_len);
+    separator=strstr(reply,"\r\n\r\n");
+    assert(strstr(reply,expected)); assert(strstr(reply,length)); assert(separator);
+    assert(strlen(separator+4)==body_len); assert(!memcmp(separator+4,body,body_len));
+}
 static void finish(struct api_context *api) {
     struct timespec pause={0,1000000L}; int i;
     for(i=0;i<200 && config_worker_pending;i++){sync_configuration_worker(api);nanosleep(&pause,NULL);}
@@ -82,6 +100,14 @@ int main(void) {
     ops=*backend->ops; ops.connect=delayed_connect; ops.airplay=airplay_state; ops.airplay_set=airplay_set;
     backend->ops=&ops; strcpy(backend->mode,"linux");
     assert(api_init(&api,backend,1,0,token,NULL,csrf,cfg,NULL)==0);
+    {
+        char oversized_headers[10000];
+        const char headers_error[]="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"headers_too_large\",\"message\":\"Request headers exceed 8 KiB\"}}";
+        const char body_error[]="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}";
+        assert(snprintf(oversized_headers,sizeof(oversized_headers),"GET / HTTP/1.1\r\nHost: local\r\nX-Pad: %09000d\r\n\r\n",0)>LE_HEADER_MAX);
+        expect_exact_error(raw_request(&api,oversized_headers),413,headers_error);
+        expect_exact_error(raw_request(&api,"POST /api/v1/test HTTP/1.1\r\nHost: local\r\nContent-Length: 16385\r\n\r\n"),413,body_error);
+    }
     api.integrations |= 2u; /* An unrelated existing choice must survive setup. */
     strcpy(auth,api.auth_token);
     /* Unauthorized or malformed operations never allocate a worker. */
