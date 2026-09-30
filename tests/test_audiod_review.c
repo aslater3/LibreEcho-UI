@@ -521,10 +521,13 @@ static void test_airplay_restart_recovery(void)
     file = fopen(LE_AIRPLAY_MASTER_ACK_PATH, "w");
     require_condition(file != NULL && fclose(file) == 0, "orphan ack fixture");
     airplay_restore_poll(&restarted);
-    require_condition(access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) != 0,
-                      "orphan sender media gate revoked");
+    require_condition(access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) != 0 &&
+                      restarted.airplay_session[0],
+                      "orphan sender media gated while controller loss is checked");
+    restarted.airplay_controller_missing_since_ms = monotonic_millis() - 1001;
+    airplay_restore_poll(&restarted);
     require_condition(restarted.volume == 42 && !restarted.airplay_session[0],
-                      "controller death with orphan marker restores alarms");
+                      "sustained controller death restores alarms");
     assert_published(42, "controller death publishes baseline");
     /* A controller restarted against the orphan marker must not get a success
      * response or publish a fresh master acknowledgment after restoration. */
@@ -575,10 +578,27 @@ static void test_airplay_restart_recovery(void)
     require_condition(restarted.volume == 27, "acknowledged callback not replayed");
     airplay_restore_poll(&restarted);
     require_condition(restarted.airplay_session[0], "live controller does not end session");
+    /* A single failed controller connect can coincide with a live callback.
+     * It must not permanently tombstone this still-active marker. */
+    file = fopen(LE_AIRPLAY_MASTER_ACK_PATH, "w");
+    require_condition(file != NULL && fclose(file) == 0, "transient ack fixture");
     close(controller); unlink(controller_path);
     airplay_restore_poll(&restarted);
+    require_condition(restarted.airplay_session[0] && restarted.volume == 27,
+                      "transient controller failure must not end live AirPlay");
+    controller = le_adapter_listen(controller_path);
+    require_condition(controller >= 0, "controller reconnect fixture");
+    airplay_restore_poll(&restarted);
+    require_condition(restarted.airplay_session[0], "controller reconnect retains session");
+    close(controller); unlink(controller_path);
+    airplay_restore_poll(&restarted);
+    require_condition(restarted.airplay_session[0] &&
+                      access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) != 0,
+                      "repeated controller loss stays gated during grace");
+    restarted.airplay_controller_missing_since_ms = monotonic_millis() - 1001;
+    airplay_restore_poll(&restarted);
     require_condition(restarted.volume == 27 && !restarted.airplay_session[0],
-                      "controller death preserves latest button with orphan marker");
+                      "sustained controller death preserves latest button with orphan marker");
     memset(&fresh, 0, sizeof(fresh)); fixture_restart_codec(&fresh);
     fresh.volume = fresh.requested_volume = 27;
     airplay_restore_load(&fresh);

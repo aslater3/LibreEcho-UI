@@ -244,6 +244,7 @@ struct audio_hw {
     long airplay_newest_nsec;
     int airplay_newest_ended;
     int airplay_restore_pending;
+    long long airplay_controller_missing_since_ms;
     char airplay_callback[96];
     long long airplay_callback_sec;
     long airplay_callback_nsec;
@@ -1960,6 +1961,7 @@ static void airplay_set_ended(struct audio_hw *audio, const char *session,
     audio->airplay_newest_nsec = nsec;
     audio->airplay_newest_ended = 1;
     audio->airplay_restore_pending = pending;
+    audio->airplay_controller_missing_since_ms = 0;
     audio->airplay_session[0] = audio->airplay_callback[0] = '\0';
 }
 
@@ -1984,9 +1986,25 @@ static void airplay_restore_poll(struct audio_hw *audio)
     }
     if (!audio->airplay_session[0]) return;
     if (airplay_media_active()) {
+        long long now;
         if (!audio->airplay_controller_socket[0]) return; /* host fixture */
         controller = le_adapter_connect(audio->airplay_controller_socket, 25);
-        if (controller) { le_adapter_close(controller); return; }
+        if (controller) {
+            le_adapter_close(controller);
+            audio->airplay_controller_missing_since_ms = 0;
+            return;
+        }
+        /* A single failed 25 ms connect is not proof that the controller or
+         * stream ended. Revoke admission immediately, but keep the snapshot
+         * long enough for a transiently busy listener to recover. */
+        (void)unlink(LE_AIRPLAY_MASTER_ACK_PATH);
+        now = monotonic_millis();
+        if (now > 0 && (!audio->airplay_controller_missing_since_ms ||
+                        now - audio->airplay_controller_missing_since_ms < 1000)) {
+            if (!audio->airplay_controller_missing_since_ms)
+                audio->airplay_controller_missing_since_ms = now;
+            return;
+        }
     }
     /* Any orphaned or stopped session must revoke media before restoration. */
     (void)unlink(LE_AIRPLAY_MASTER_ACK_PATH);

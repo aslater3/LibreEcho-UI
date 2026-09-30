@@ -158,6 +158,7 @@ static void test_sender_master_poll(void)
         int listener = le_adapter_listen(socket_path);
         int client;
         char input[512], response[128];
+        alarm(5);
         close(count[0]);
         if (listener < 0) _exit(1);
         client = le_adapter_accept(listener);
@@ -179,13 +180,26 @@ static void test_sender_master_poll(void)
         close(client);
         client = le_adapter_accept(listener);
         if (client < 0) _exit(6);
+        for (int i = 1; i <= 2; ++i) {
+            ssize_t length = read(client, input, sizeof(input) - 1);
+            if (length <= 0) _exit(7);
+            input[length] = '\0';
+            if (!strstr(input, i == 1 ? "\"cmd\":\"airplay_volume\"" : "\"cmd\":\"status\"")) _exit(8);
+            int n = snprintf(response, sizeof(response),
+                             "{\"v\":1,\"id\":%d,\"ok\":true,\"data\":{\"volume\":22}}\n", i);
+            if (write(client, response, (size_t)n) != n) _exit(9);
+            write(count[1], "r", 1);
+        }
+        close(client);
+        client = le_adapter_accept(listener);
+        if (client < 0) _exit(10);
         ssize_t length = read(client, input, sizeof(input) - 1);
-        if (length <= 0) _exit(7);
+        if (length <= 0) _exit(11);
         input[length] = '\0';
-        if (!strstr(input, "\"cmd\":\"airplay_end\"") || !strstr(input, "\"session\":")) _exit(8);
+        if (!strstr(input, "\"cmd\":\"airplay_end\"") || !strstr(input, "\"session\":")) _exit(12);
         int n = snprintf(response, sizeof(response),
                          "{\"v\":1,\"id\":1,\"ok\":true,\"data\":{}}\n");
-        if (write(client, response, (size_t)n) != n) _exit(9);
+        if (write(client, response, (size_t)n) != n) _exit(13);
         write(count[1], "e", 1);
         close(client); close(listener); _exit(0);
     }
@@ -196,7 +210,15 @@ static void test_sender_master_poll(void)
     assert(read(fd, sent, sizeof(sent)) == 4 && !memcmp(sent, "safe", 4)); close(fd);
     assert(stat(marker, &m) == 0 && stat(volume, &v) == 0 && access(ack, F_OK) == 0);
     assert(ctx.applied && ctx.applied_marker_ino == m.st_ino && ctx.applied_volume_ino == v.st_ino);
+    /* An owner that briefly loses the controller revokes admission. The
+     * cached callback must no longer count as acknowledged. */
+    assert(unlink(ack) == 0);
+    snprintf(ctx.master_socket, sizeof(ctx.master_socket), "%s/missing.sock", root);
     airplay_master_poll(&ctx);
+    assert(!ctx.applied && !ctx.write_confirmed);
+    snprintf(ctx.master_socket, sizeof(ctx.master_socket), "%s", socket_path);
+    airplay_master_poll(&ctx);
+    assert(ctx.applied && ctx.write_confirmed && access(ack, F_OK) == 0);
     /* A symlinked callback is not a sender-owned regular file, even when it
      * contains a valid decibel value. Keep the admitted session untouched. */
     assert(unlink(volume) == 0);
@@ -210,10 +232,12 @@ static void test_sender_master_poll(void)
     airplay_master_poll(&ctx);
     assert(!ctx.master_session[0]);
     airplay_master_poll(&ctx);
-    assert(read(count[0], sent, sizeof(sent)) == 3);
+    /* The stub server signals each exchange after replying, so the client can
+     * finish first. Reap the server before counting to avoid racing it. */
     int child_status;
     assert(waitpid(server, &child_status, 0) == server &&
            WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    assert(read(count[0], sent, sizeof(sent)) == 5);
     close(count[0]); unlink(temp); unlink(victim); unlink(ack); unlink(volume); unlink(marker); unlink(socket_path); rmdir(root);
 }
 

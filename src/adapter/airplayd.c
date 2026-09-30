@@ -126,6 +126,30 @@ static int airplay_db_to_percent(const char *text, int *percent)
     return 0;
 }
 
+/* A cached write cannot survive revocation of its on-disk admission token.
+ * Compare the whole token, not just its path, before skipping a retry. */
+static int airplay_ack_matches(const char *path, const struct stat *m, const struct stat *v)
+{
+    char expected[160], observed[160];
+    struct stat st;
+    int fd, length;
+    ssize_t size;
+    length = snprintf(expected, sizeof(expected), "%llu %llu %lld %ld %llu %llu %lld %ld\n",
+                      (unsigned long long)m->st_dev, (unsigned long long)m->st_ino,
+                      (long long)m->st_ctim.tv_sec, m->st_ctim.tv_nsec,
+                      (unsigned long long)v->st_dev, (unsigned long long)v->st_ino,
+                      (long long)v->st_ctim.tv_sec, v->st_ctim.tv_nsec);
+    if (length <= 0 || length >= (int)sizeof(expected)) return 0;
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size != length) {
+        close(fd); return 0;
+    }
+    size = read(fd, observed, sizeof(observed));
+    close(fd);
+    return size == length && !memcmp(observed, expected, (size_t)length);
+}
+
 /* Acknowledgment names both immutable inodes. A new callback or session
  * cannot inherit an old acknowledgment; media remains gated on IPC failure. */
 static void airplay_master_poll(struct airplay_ctx *ctx)
@@ -173,7 +197,13 @@ static void airplay_master_poll(struct airplay_ctx *ctx)
         ctx->applied_volume_dev == v.st_dev && ctx->applied_volume_ino == v.st_ino &&
         ctx->applied_volume_time.tv_sec == v.st_ctim.tv_sec &&
         ctx->applied_volume_time.tv_nsec == v.st_ctim.tv_nsec;
-    if (same_callback && ctx->applied) return;
+    if (same_callback && ctx->applied) {
+        if (airplay_ack_matches(ack, &m, &v)) return;
+        /* audiod revoked the token after a transient controller probe.
+         * Reconfirm with audiod before restoring media admission; an ended
+         * session must reject the retry instead of inheriting this cache. */
+        ctx->applied = ctx->write_confirmed = same_callback = 0;
+    }
     adapter = le_adapter_connect(ctx->master_socket, 100);
     if (!adapter) return;
     le_adapter_set_io_timeout(adapter, 100);
