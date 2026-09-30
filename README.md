@@ -206,6 +206,11 @@ For the size-optimised production daemon set:
 make release
 ```
 
+Internet radio plays MP3 and AAC streams and HLS (MPEG-TS, AAC-LC/HE-AAC v1,
+which covers BBC radio). AAC decoding uses the vendored Helix decoder in
+`third-party/helix-aac` (RPSL-1.0; see `THIRD_PARTY_NOTICES.md`). fMP4 and
+encrypted HLS, and HE-AAC v2, are not supported.
+
 The documented default build remains dependency-free. HTTPS and HTTPS radio
 fetching are enabled when both `WEB_TLS_LIBS` and `RADIOD_TLS_LIBS` are set,
 with matching mbedTLS include/library paths in `CPPFLAGS` and `LDFLAGS`; without
