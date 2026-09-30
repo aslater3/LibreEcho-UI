@@ -12,6 +12,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -22,7 +23,7 @@
 #define MDNS_CHROOT "/bin/busybox"
 #endif
 #ifndef MDNS_OWNER_EXE
-#define MDNS_OWNER_EXE "/usr/local/sbin/libreecho-wyomingd"
+#define MDNS_OWNER_EXE "/usr/local/sbin/libreecho-esphomed"
 #endif
 #define CLIENTS 4
 static volatile sig_atomic_t running = 1;
@@ -137,11 +138,39 @@ static int clear_stale(int fd)
     int result = 0;
     if (!dir) return -1;
     while ((entry = readdir(dir))) {
-        if (!strncmp(entry->d_name, "wyoming-", 8) &&
+        if ((!strncmp(entry->d_name, "wyoming-", 8) ||
+             !strncmp(entry->d_name, "esphome-", 8) ||
+             !strcmp(entry->d_name, "wyoming.service") ||
+             !strcmp(entry->d_name, "esphome.service")) &&
             unlinkat(fd, entry->d_name, 0) < 0) result = -1;
     }
     closedir(dir);
     return result;
+}
+/* Pin the actual connection creator, not a pidfile, argv[0], or inherited fd.
+ * Linux 6.1 supports pidfd_open. If unavailable, fail closed. */
+static int peer_pidfd(int fd)
+{
+#ifdef SYS_pidfd_open
+    struct ucred cred;
+    socklen_t length = sizeof(cred);
+    int pidfd;
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &length) < 0 ||
+        length != sizeof(cred) || cred.pid <= 0 || !peer_owner(fd)) return -1;
+    pidfd = (int)syscall(SYS_pidfd_open, cred.pid, 0);
+    if (pidfd < 0) return -1;
+    if (fcntl(pidfd, F_SETFD, FD_CLOEXEC) < 0 || !peer_owner(fd)) {
+        close(pidfd); return -1;
+    }
+    return pidfd;
+#else
+    (void)fd; return -1;
+#endif
+}
+static int peer_still_owner(int socket_fd, int pidfd)
+{
+    struct pollfd descriptor = { pidfd, POLLIN, 0 };
+    return pidfd >= 0 && poll(&descriptor, 1, 0) == 0 && peer_owner(socket_fd);
 }
 int main(int argc, char **argv)
 {
@@ -151,6 +180,7 @@ int main(int argc, char **argv)
     struct sockaddr_un address;
     struct le_mdns_lease lease;
     struct pollfd fds[CLIENTS + 1];
+    int owner_pidfds[CLIENTS];
     long deadlines[CLIENTS] = {0}, retry = 0, bus_started = 0;
     pid_t bus = 0, avahi = 0;
     int lock_fd, dir_fd, server, i, result = 0, status_only = 0;
@@ -182,6 +212,7 @@ int main(int argc, char **argv)
         listen(server, CLIENTS) < 0) return 1;
     signal(SIGTERM, stop_signal); signal(SIGINT, stop_signal); signal(SIGPIPE, SIG_IGN);
     for (i = 0; i <= CLIENTS; ++i) { fds[i].fd = -1; fds[i].events = POLLIN; }
+    for (i = 0; i < CLIENTS; ++i) owner_pidfds[i] = -1;
     fds[0].fd = server;
     while (running) {
         long now = now_ms();
@@ -202,30 +233,29 @@ int main(int argc, char **argv)
             }
         }
         for (i = 1; i <= CLIENTS; ++i) {
-            char message[64];
+            char message[LE_MDNS_ESPHOME_PACKET_MAX];
             ssize_t n;
             int close_client = 0;
             if (fds[i].fd < 0) continue;
             if (fds[i].revents & POLLIN) {
                 n = recv(fds[i].fd, message, sizeof(message) - 1, MSG_TRUNC);
-                if (n <= 0 || n >= (ssize_t)sizeof(message)) close_client = 1;
+                if (n <= 0 || n >= (ssize_t)sizeof(message)) {
+                    (void)send(fds[i].fd, "error\n", 6, MSG_NOSIGNAL); close_client = 1;
+                }
                 else {
-                    char *end;
-                    unsigned long port = 0;
+                    unsigned int port = 0;
+                    struct le_mdns_esphome_metadata metadata;
                     message[n] = 0;
-                    if (!strcmp(message, "STATUS/1\n")) {
+                    if (n == 9 && !memcmp(message, "STATUS/1\n", 9)) {
                         const char *status = runtime_ready(root, &bus, &avahi)
                             ? "running\n" : "degraded\n";
                         (void)send(fds[i].fd, status, strlen(status), MSG_NOSIGNAL);
                         close_client = 1;
                     } else {
-                        if (!strncmp(message, "WYOMING/1 ", 10) &&
-                            message[10] >= '1' && message[10] <= '9') {
-                            errno = 0; port = strtoul(message + 10, &end, 10);
-                            if (errno || strcmp(end, "\n")) port = 0;
-                        }
-                        if (port > 65535 || !peer_owner(fds[i].fd) ||
-                            le_mdns_lease_register(&lease, fds[i].fd, (unsigned int)port) < 0) {
+                        if (owner_pidfds[i - 1] < 0) owner_pidfds[i - 1] = peer_pidfd(fds[i].fd);
+                        if (le_mdns_esphome_decode(message, (size_t)n, &port, &metadata) < 0 ||
+                            !peer_still_owner(fds[i].fd, owner_pidfds[i - 1]) ||
+                            le_mdns_lease_register_esphome(&lease, fds[i].fd, port, &metadata) < 0) {
                             (void)send(fds[i].fd, "error\n", 6, MSG_NOSIGNAL); close_client = 1;
                         } else {
                             if (avahi > 0 && kill(avahi, SIGHUP) < 0) retire(&avahi);
@@ -235,6 +265,8 @@ int main(int argc, char **argv)
                 }
             }
             if (fds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) close_client = 1;
+            if (lease.owner_fd == fds[i].fd &&
+                !peer_still_owner(fds[i].fd, owner_pidfds[i - 1])) close_client = 1;
             if (lease.owner_fd != fds[i].fd && now >= deadlines[i - 1]) close_client = 1;
             if (close_client) {
                 if (lease.owner_fd == fds[i].fd) {
@@ -245,12 +277,15 @@ int main(int argc, char **argv)
                     if (avahi > 0 && kill(avahi, SIGHUP) < 0) retire(&avahi);
                 }
                 close(fds[i].fd); fds[i].fd = -1;
+                if (owner_pidfds[i - 1] >= 0) close(owner_pidfds[i - 1]);
+                owner_pidfds[i - 1] = -1;
             }
         }
     }
     if (lease.owner_fd >= 0) (void)le_mdns_lease_withdraw(&lease, lease.owner_fd);
     retire(&avahi); retire(&bus);
     for (i = 0; i <= CLIENTS; ++i) if (fds[i].fd >= 0) close(fds[i].fd);
+    for (i = 0; i < CLIENTS; ++i) if (owner_pidfds[i] >= 0) close(owner_pidfds[i]);
     (void)unlink(socket_path); close(dir_fd); close(lock_fd);
     return result;
 }

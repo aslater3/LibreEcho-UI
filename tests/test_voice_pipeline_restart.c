@@ -1,11 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
-#define LE_INIT_AGENTD "/tmp/libreecho-pr152-agentd.init"
-#define LE_INIT_STTD "/tmp/libreecho-pr152-sttd.init"
-#define LE_INIT_TTSD "/tmp/libreecho-pr152-ttsd.init"
-#define LE_INIT_WYOMINGD "/tmp/libreecho-pr152-wyomingd.init"
-#define static
+#define LE_INIT_AGENTD "build/libreecho-pr152-agentd.init"
+#define LE_INIT_STTD "build/libreecho-pr152-sttd.init"
+#define LE_INIT_TTSD "build/libreecho-pr152-ttsd.init"
+#define LE_INIT_MDNSD "build/test-control-no-mdns.init"
+#define LE_INIT_ESPHOMED "build/libreecho-pr152-esphomed.init"
 #include "../src/api.c"
-#undef static
 
 #include <assert.h>
 #include <stdio.h>
@@ -14,7 +13,7 @@
 #include <unistd.h>
 
 static const char *const init_paths[] = {
-    LE_INIT_AGENTD, LE_INIT_STTD, LE_INIT_TTSD, LE_INIT_WYOMINGD
+    LE_INIT_AGENTD, LE_INIT_STTD, LE_INIT_TTSD, LE_INIT_ESPHOMED
 };
 
 static void write_init_script(const char *path, int status)
@@ -71,7 +70,7 @@ int main(void)
     assert(apply_voice_pipeline_mode("local") == LE_IO);
 
     /* Home Assistant is rejected before any local daemon is stopped. */
-    unlink(LE_INIT_WYOMINGD);
+    unlink(LE_INIT_ESPHOMED);
     assert(apply_voice_pipeline_mode("home-assistant") == LE_NOT_SUPPORTED);
 
     remove_scripts();

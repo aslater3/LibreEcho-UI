@@ -7,6 +7,7 @@
 #include "voice_stream.h"
 #include "wake_led.h"
 #include "wake_worker.h"
+#include "../json.h"
 
 #include "wake_health.h"
 #include <errno.h>
@@ -473,12 +474,25 @@ static void handle_control_client(
             (void)respond(client_fd, id, 1, "{}");
         }
     } else if (!strcmp(command, "set_word")) {
-        if (!strstr(args, "\"Alexa\"") &&
-            !strstr(args, "\"alexa\""))
+        char word[16];
+        size_t length = args ? strnlen(args, LE_ADAPTER_MSG_MAX) : 0;
+
+        if (!args || length == LE_ADAPTER_MSG_MAX ||
+            !json_valid_object(args, length) ||
+            json_duplicate_key(args, length, "word") ||
+            json_get_string_top_level(args, "word", word, sizeof(word)) != 1 ||
+            (strcmp(word, "Alexa") && strcmp(word, "alexa")))
             (void)respond(client_fd, id, 0,
                           "only the Alexa development model is installed");
+#ifdef LE_WAKE_ENGINE_ONNX
+        else if (le_wake_worker_reload(wake_worker) < 0)
+            (void)respond(client_fd, id, 0, "wake model reload failed");
         else
             (void)respond(client_fd, id, 1, "{}");
+#else
+        else
+            (void)respond(client_fd, id, 0, "wake model runtime unavailable");
+#endif
     } else if (!strcmp(command, "test")) {
         const struct le_wake_event event = {
             metrics->processed_frames *

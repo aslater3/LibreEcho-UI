@@ -295,6 +295,21 @@ function bindHomeLocation(a) {
   };
 }
 
+function homeAssistantVoiceStatus(enabled,pipeline) {
+  const restart=pipeline?.restart?.state,ha=pipeline?.home_assistant;
+  let status='Not configured';
+  if(restart==='failed')status='Failed';
+  else if(restart==='pending')status=enabled?'Enabling':'Disabling';
+  else if(enabled) {
+    status='Configured — status unavailable';
+    if(pipeline?.mode==='home-assistant'&&restart==='ready'&&
+        typeof ha?.ready==='boolean'&&typeof ha?.connected==='boolean') {
+      status=!ha.ready?'Unavailable':ha.connected?'Connected':'Ready — awaiting Home Assistant';
+    }
+  }
+  return {status,okay:status==='Connected'};
+}
+
 async function integrationsPage() {
   const [d,a,pipeline,live]=await Promise.all([
     api('/integrations'),
@@ -308,17 +323,21 @@ async function integrationsPage() {
    * listed so the absence is visible, but renders no toggle or save button --
    * enabling it could only ever fail. The handler loop below skips those rows.
    */
+  const homeAssistantEnabled=d.items.some(x=>x.id==='home-assistant'&&x.enabled);
+  const homeAssistantState=homeAssistantVoiceStatus(homeAssistantEnabled,pipeline);
+  const transitionError=pipeline?.restart?.error
+    ?`<p class="notice" role="alert">Voice pipeline error: ${esc(pipeline.restart.error)}</p>`:'';
   const integrations=d.items.map(x=>collapsiblePanel(x.name,
     `<p class="muted">${integrationBlurb(x)}</p>
     ${x.installed===false?'':toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
-    <div class="status-line"><span class="status-dot ${x.enabled?'ok':''}"></span><span>${integrationStatus(x)}</span></div>
+    <div class="status-line"><span class="status-dot ${x.id==='home-assistant'?(homeAssistantState.okay?'ok':''):(x.enabled?'ok':'')}"></span><span>${esc(x.id==='home-assistant'&&x.installed!==false?homeAssistantState.status:integrationStatus(x))}</span></div>
+    ${x.id==='home-assistant'?transitionError:''}
     ${x.installed===false?'':saveButton('save-int-'+x.id)}`
   )).join('');
 
-  const homeAssistantEnabled=d.items.some(x=>x.id==='home-assistant'&&x.enabled);
   if(homeAssistantEnabled) {
     content.innerHTML=`<div class="integration-grid">
-      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${collapsiblePanel('Managed by Home Assistant',`<div class="assistant-heading"><div><span class="source-pill">Integration</span><h4>Home Assistant</h4><p class="muted">Voice is handled by Home Assistant over the local Wyoming connection. The on-device assistant (Local LLM and ChatGPT) stays stopped while the Home Assistant integration is enabled. Disable it on this page to use the on-device assistant.</p></div><div class="assistant-state"><span class="status-dot ok"></span>Enabled</div></div>`,'assistant-mode')}</section>
+      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${collapsiblePanel(homeAssistantState.okay?'Managed by Home Assistant':'Home Assistant voice',`<div class="assistant-heading"><div><span class="source-pill">Integration</span><h4>Home Assistant</h4><p class="muted">${homeAssistantState.okay?'Voice is handled by Home Assistant over the encrypted ESPHome connection (TCP 6053).':'Home Assistant is selected for voice using the encrypted ESPHome connection (TCP 6053).'} Your Local and Custom settings are kept for when you disable Home Assistant. The on-device assistant (Local LLM and ChatGPT) controls stay hidden while the Home Assistant integration is enabled. Disable it on this page to use the on-device assistant.</p></div><div class="assistant-state"><span class="status-dot ${homeAssistantState.okay?'ok':''}"></span>${esc(homeAssistantState.status)}</div></div>`,'assistant-mode')}</section>
       ${integrations}
     </div>`;
   } else if(a.unsupported) {

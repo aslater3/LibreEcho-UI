@@ -23,7 +23,26 @@ jobs:
     name: Full source checks
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      ESPHOMED_NOISE: '1'
+      ESPHOMED_CRYPTO_PYTHON: /usr/bin/python3
+
     steps:
+      - name: Configure private test paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/t"
+          # runner is unavailable in job-level env; export runtime paths here.
+          printf '%s\n' \
+            "TMPDIR=$RUNNER_TEMP/t" \
+            "ESPHOMED_TLS_PREFIX=$RUNNER_TEMP/mbedtls" \
+            "ESPHOMED_TEST_TLS_PREFIX=$RUNNER_TEMP/mbedtls" \
+            "ESPHOMED_TLS_LIBS=$RUNNER_TEMP/mbedtls/lib/libmbedtls.a $RUNNER_TEMP/mbedtls/lib/libmbedx509.a $RUNNER_TEMP/mbedtls/lib/libmbedcrypto.a" \
+            "CPPFLAGS=-I$RUNNER_TEMP/mbedtls/include" \
+            "ESPHOMED_AIO_PYTHON=$RUNNER_TEMP/esphome-client/bin/python" \
+            >> "$GITHUB_ENV"
+
       - name: Check out UI source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -33,6 +52,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p "$TMPDIR"
           git rev-parse HEAD > "$RUNNER_TEMP/ui-source-commit.txt"
           git archive --format=tar.gz HEAD > "$RUNNER_TEMP/ui-source.tar.gz"
 
@@ -52,7 +72,48 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential bubblewrap jq libspeexdsp-dev nodejs
+            build-essential bubblewrap jq libspeexdsp-dev nodejs \
+            cmake ninja-build python3-venv python3-cryptography python3-nacl \
+            curl ffmpeg openssl ca-certificates
+
+      - name: Build pinned mbedTLS runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          src="$RUNNER_TEMP/mbedtls-src"
+          prefix="$RUNNER_TEMP/mbedtls"
+          archive="$RUNNER_TEMP/mbedtls-3.6.4.tar.bz2"
+          # Same release archive and integrity pin as Platform SOURCE.lock.
+          curl --fail --location --retry 3 \
+            https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.4/mbedtls-3.6.4.tar.bz2 \
+            --output "$archive"
+          printf '%s  %s\n' \
+            ec35b18a6c593cf98c3e30db8b98ff93e8940a8c4e690e66b41dfc011d678110 \
+            "$archive" | sha256sum --check --strict
+          mkdir -p "$src"
+          tar -xjf "$archive" --strip-components=1 -C "$src"
+          python3 -m venv "$RUNNER_TEMP/mbedtls-build-python"
+          "$RUNNER_TEMP/mbedtls-build-python/bin/python" -m pip install \
+            Jinja2==3.1.6 jsonschema==4.25.1
+          cmake -S "$src" -B "$src/build" -G Ninja \
+            -DPython3_EXECUTABLE="$RUNNER_TEMP/mbedtls-build-python/bin/python" \
+            -DENABLE_PROGRAMS=OFF \
+            -DENABLE_TESTING=OFF \
+            -DUSE_SHARED_MBEDTLS_LIBRARY=OFF \
+            -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$prefix"
+          cmake --build "$src/build"
+          cmake --install "$src/build"
+
+      - name: Install pinned ESPHome native client
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/esphome-client"
+          "$RUNNER_TEMP/esphome-client/bin/python" -m pip install -r requirements-esphome.txt PyNaCl==1.5.0
+          "$RUNNER_TEMP/esphome-client/bin/python" -c 'from importlib.metadata import version; assert version("aioesphomeapi") == "46.2.0"'
 
       - name: Enable user namespaces for virtual service harness
         shell: bash
@@ -110,4 +171,31 @@ jobs:
           node --check web/js/integrations-ui.js
           jq -e . web/openapi.json >/dev/null
           make SPEEX_PREFIX="$RUNNER_TEMP/speexdsp" test
+          git diff --check
+
+      - name: Set up pinned real-HA Python runtime
+        id: ha_python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.14.7'
+          update-environment: false
+
+      - name: Install real Home Assistant acceptance dependencies
+        shell: bash
+        env:
+          HA_RUNTIME: ${{ steps.ha_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          "$HA_RUNTIME" -m venv "$RUNNER_TEMP/ha-acceptance"
+          "$RUNNER_TEMP/ha-acceptance/bin/python" -m pip install \
+            -r tests/test_ha_esphome_requirements.txt
+          "$RUNNER_TEMP/ha-acceptance/bin/python" -c 'from pathlib import Path; from importlib.metadata import version; rows=[line.split("==", 1) for line in Path("tests/test_ha_esphome_requirements.txt").read_text().splitlines() if line and not line.startswith("#")]; assert all(version(name) == pin for name, pin in rows)'
+
+      - name: Run real Home Assistant ESPHome acceptance
+        shell: bash
+        env:
+          ESPHOME_HA_PYTHON: ${{ runner.temp }}/ha-acceptance/bin/python
+        run: |
+          set -euo pipefail
+          make test-ha-esphome
           git diff --check

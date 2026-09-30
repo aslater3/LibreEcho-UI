@@ -4,7 +4,7 @@
 #   1. Enabling Home Assistant from a local, local-only configuration must
 #      clear the persisted local-only requirement in the same transition, so
 #      the device never claims network processing is forbidden while
-#      libreecho-wyomingd streams microphone audio to Home Assistant. The state
+#      libreecho-esphomed streams microphone audio to Home Assistant. The state
 #      the privacy endpoint refuses to author must not be reachable by toggling
 #      the integration either.
 #   2. A direct selection of home-assistant through PUT /api/v1/voice-pipeline
@@ -23,7 +23,7 @@ put() {
     curl -fsS -X PUT "$URL$1" -H "$CSRF" -H 'Content-Type: application/json' --data "$2"
 }
 status_of() {
-    curl -sS -o /tmp/le-ha-transition.out -w '%{http_code}' \
+    curl -sS -o "${CFG}.ha-transition.out" -w '%{http_code}' \
         -X PUT "$URL$1" -H "$CSRF" -H 'Content-Type: application/json' --data "$2"
 }
 
@@ -61,7 +61,10 @@ jq -e '.voice_pipeline_mode == "custom"' "$CFG" >/dev/null
 # --- 3. Home Assistant status exposes the satellite readiness field ---------
 put /api/v1/integrations/home-assistant '{"enabled":true}' >/dev/null
 curl -fsS "$URL/api/v1/voice-pipeline" | jq -e \
-    '.ok and (.data.home_assistant.ready | type) == "boolean" and
+    '.ok and .data.home_assistant.protocol == "esphome" and
+     .data.home_assistant.port == 6053 and
+     (.data.home_assistant.connected | type) == "boolean" and
+     (.data.home_assistant.ready | type) == "boolean" and
      .data.stt.reachable == false and .data.tts.reachable == false' >/dev/null
 put /api/v1/integrations/home-assistant '{"enabled":false}' >/dev/null
 

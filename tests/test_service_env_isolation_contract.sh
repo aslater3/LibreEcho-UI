@@ -45,7 +45,7 @@ echo "boundary: the init scripts still resolve their own identity"
 # The scripts keep `VAR=${VAR:-default}` -- that rule is what a caller's
 # environment used to win. Nothing here may pass another service's values;
 # that is the boundary's job, not theirs.
-for service in agentd sttd ttsd wyomingd; do
+for service in agentd sttd ttsd; do
     script="init/libreecho-$service.init"
     for name in ARGS DAEMON PIDFILE LOGFILE; do
         expect "$(has "$name=\${$name:-" "$script")" \
@@ -60,8 +60,22 @@ expect "$(has_fixed '--socket $SOCKET --model-dir $MODEL_ROOT --threads $THREADS
     "sttd's own argv"
 expect "$(has_fixed '--foreground --socket $SOCKET --model-dir $MODEL_DIR --voice $VOICE' init/libreecho-ttsd.init)" \
     "ttsd's own argv"
-expect "$(has_fixed '--foreground --port $PORT --wake-socket $WAKE_SOCKET --audio-bus $AUDIO_BUS --mdns-socket $MDNS_SOCKET' init/libreecho-wyomingd.init)" \
-    "wyomingd's own argv"
+# ESPHome constructs quoted argv directly: no inherited ARGS string is used.
+for name in DAEMON PIDFILE LOGFILE; do
+    expect "$(has "$name=\${$name:-" init/libreecho-esphomed.init)" \
+        "ESPHome resolves $name itself"
+done
+expect "$(lacks '\$ARGS' init/libreecho-esphomed.init)" "ESPHome never consumes caller ARGS"
+expect "$(has_fixed '--config "$CONFIG" --status-file "$STATUS_FILE" --port "$PORT" --bind "$BIND"' init/libreecho-esphomed.init)" \
+    "ESPHome's explicit configuration and listener argv"
+expect "$(has_fixed '--wake-socket "$WAKE_SOCKET" --audio-socket "$AUDIO_SOCKET" --audio-bus "$AUDIO_BUS"' init/libreecho-esphomed.init)" \
+    "ESPHome's own wake/audio argv"
+expect "$(has_fixed '--mdns-socket "$MDNS_SOCKET" --tls-ca "$TLS_CA"' init/libreecho-esphomed.init)" \
+    "ESPHome's discovery and verified TLS argv"
+expect "$(has_fixed '--radio-socket "$RADIO_SOCKET" --timer-socket "$TIMER_SOCKET" --led-socket "$LED_SOCKET"' init/libreecho-esphomed.init)" \
+    "ESPHome's control adapter argv"
+expect "$(has_fixed '--privacy-state "$PRIVACY_STATE" --idme-root "$IDME_ROOT"' init/libreecho-esphomed.init)" \
+    "ESPHome's privacy and identity argv"
 expect "$(has_fixed 'RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/assistant/root}' init/libreecho-agentd.init)" \
     "agentd's runtime root"
 expect "$(has_fixed 'RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/stt/root}' init/libreecho-sttd.init)" \
@@ -74,10 +88,10 @@ expect "$(has_fixed '/run/libreecho/features/stt/root/usr/local/sbin/libreecho-s
     "the fixture expands sttd's DAEMON the same way"
 expect "$(has_fixed '/run/libreecho/features/tts/root/usr/local/sbin/libreecho-ttsd' tests/test_voice_pipeline_env_isolation.c)" \
     "the fixture expands ttsd's DAEMON the same way"
-expect "$(has_fixed 'PIDFILE=${PIDFILE:-/var/run/libreecho-wyomingd.pid}' init/libreecho-wyomingd.init)" \
-    "wyomingd's pidfile default"
-expect "$(has_fixed '/var/run/libreecho-wyomingd.pid' tests/test_voice_pipeline_env_isolation.c)" \
-    "the fixture expects wyomingd's own pidfile"
+expect "$(has_fixed 'PIDFILE=${PIDFILE:-/var/run/libreecho-esphomed.pid}' init/libreecho-esphomed.init)" \
+    "esphomed's pidfile default"
+expect "$(has_fixed '/var/run/libreecho-esphomed.pid' tests/test_voice_pipeline_env_isolation.c)" \
+    "the fixture expects esphomed's own pidfile"
 
 echo
 if [ "$fails" -eq 0 ]; then

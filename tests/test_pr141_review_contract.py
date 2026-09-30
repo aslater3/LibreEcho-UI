@@ -139,7 +139,11 @@ assert "Ordinary names such as" in docs
 assert "501" in usb_play["responses"]
 assert openapi["paths"]["/storage/usb"]["get"]["parameters"][0]["schema"]["maxLength"] == 255
 assert "consecutive dots" in openapi["paths"]["/storage/usb"]["get"]["description"]
-assert "prctl(PR_SET_PDEATHSIG, SIGTERM)" in Path("src/adapter/radiod.c").read_text(encoding="utf-8")
+# Pause uses SIGSTOP, so parent death must also kill a stopped worker; SIGTERM
+# would stay pending. Keep the parent-race guard and require the real paused
+# parent-death regression in the native gate, not just this source assertion.
+assert "prctl(PR_SET_PDEATHSIG, SIGKILL)" in Path("src/adapter/radiod.c").read_text(encoding="utf-8")
+assert "test_esphome_radio_controls.py" in Path("Makefile").read_text(encoding="utf-8")
 assert "getppid() != parent" in Path("src/adapter/radiod.c").read_text(encoding="utf-8")
 assert "utf8_prefix" in Path("src/adapter/btd.c").read_text(encoding="utf-8")
 assert "bond_name_json" in Path("src/adapter/btd.c").read_text(encoding="utf-8")

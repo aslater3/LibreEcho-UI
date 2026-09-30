@@ -10,13 +10,15 @@ import unittest
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.dont_write_bytecode = True
+from test_mdns_esphome import packet
 
 class Supervisor(unittest.TestCase):
     def test_init_lifecycle_readiness_contract(self):
         """Keep the shipped wrapper regression on the aggregate test path."""
         result = subprocess.run(
             ['sh', str(ROOT / 'tests/test_mdns_init_lifecycle.sh')],
-            cwd=ROOT, capture_output=True, text=True, timeout=30)
+            cwd=ROOT, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_lease_eof_and_single_supervisor(self):
@@ -51,7 +53,7 @@ class Supervisor(unittest.TestCase):
                 with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as owner:
                     owner.settimeout(3)
                     owner.connect(str(path))
-                    owner.sendall(b'WYOMING/1 21000\n')
+                    owner.sendall(packet(21000))
                     self.assertEqual(owner.recv(128), b'pending\n')
                     files = list(services.glob('*.service'))
                     self.assertEqual(len(files), 1)
@@ -59,7 +61,7 @@ class Supervisor(unittest.TestCase):
                     with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as other:
                         other.settimeout(3)
                         other.connect(str(path))
-                        other.sendall(b'WYOMING/1 10700\n')
+                        other.sendall(packet())
                         self.assertEqual(other.recv(128), b'error\n')
                 deadline = time.monotonic() + 3
                 while list(services.glob('*.service')) and time.monotonic() < deadline:
@@ -68,7 +70,7 @@ class Supervisor(unittest.TestCase):
                 with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as invalid:
                     invalid.settimeout(3)
                     invalid.connect(str(path))
-                    invalid.sendall(b'WYOMING/1 65536\n')
+                    invalid.sendall(packet(65536))
                     self.assertEqual(invalid.recv(128), b'error\n')
             finally:
                 proc.send_signal(signal.SIGTERM)

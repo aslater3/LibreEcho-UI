@@ -368,8 +368,8 @@ static int setup_activate_installed_features(struct api_context *c)
 #ifndef LE_INIT_TTSD
 #define LE_INIT_TTSD      "/etc/init.d/libreecho-ttsd.init"
 #endif
-#ifndef LE_INIT_WYOMINGD
-#define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
+#ifndef LE_INIT_ESPHOMED
+#define LE_INIT_ESPHOMED  "/etc/init.d/libreecho-esphomed.init"
 #endif
 #ifndef LE_INIT_MDNSD
 #define LE_INIT_MDNSD     "/etc/init.d/libreecho-mdnsd.init"
@@ -393,7 +393,7 @@ static int refresh_home_assistant_discovery(void)
     return run_init_command(LE_INIT_MDNSD, "start");
 }
 /* Set when Home Assistant is enabled but the shared mDNS supervisor could not
- * refresh the Wyoming advertisement. The pipeline transition still succeeds;
+ * refresh the ESPHome advertisement. The pipeline transition still succeeds;
  * this lets the caller report the unavailable discovery instead of discarding
  * the controller result. */
 static int home_assistant_discovery_unavailable;
@@ -417,15 +417,15 @@ static int apply_home_assistant_mode(int enabled)
     static const char *const start_tts[] = {
         LE_INIT_TTSD, "start", NULL
     };
-    static const char *const stop_wyoming[] = {
-        LE_INIT_WYOMINGD, "stop", NULL
+    static const char *const stop_esphome[] = {
+        LE_INIT_ESPHOMED, "stop", NULL
     };
-    static const char *const start_wyoming[] = {
-        LE_INIT_WYOMINGD, "start", NULL
+    static const char *const start_esphome[] = {
+        LE_INIT_ESPHOMED, "start", NULL
     };
     int refresh;
 
-    if (access(LE_INIT_WYOMINGD, X_OK) < 0)
+    if (access(LE_INIT_ESPHOMED, X_OK) < 0)
         return LE_OK;
 
     home_assistant_discovery_unavailable = 0;
@@ -433,10 +433,10 @@ static int apply_home_assistant_mode(int enabled)
         if (run_init_command(stop_local[0], stop_local[1]) ||
             run_init_command(stop_stt[0], stop_stt[1]) ||
             run_init_command(stop_tts[0], stop_tts[1]) ||
-            run_init_command(start_wyoming[0], start_wyoming[1]))
+            run_init_command(start_esphome[0], start_esphome[1]))
             return LE_IO;
     } else {
-        if (run_init_command(stop_wyoming[0], stop_wyoming[1]) ||
+        if (run_init_command(stop_esphome[0], stop_esphome[1]) ||
             run_init_command(start_stt[0], start_stt[1]) ||
             run_init_command(start_tts[0], start_tts[1]) ||
             run_init_command(start_local[0], start_local[1]))
@@ -448,7 +448,7 @@ static int apply_home_assistant_mode(int enabled)
      * therefore attempted only after the requested pipeline state is restored.
      * Its failure never rolls back or fails that pipeline transition; when Home
      * Assistant was enabled it is recorded so the caller can report the missing
-     * Wyoming advertisement. */
+     * ESPHome advertisement. */
     refresh = refresh_home_assistant_discovery();
     if (enabled && refresh != LE_OK)
         home_assistant_discovery_unavailable = 1;
@@ -476,14 +476,14 @@ static int valid_pipeline_token(const char *value)
 #ifndef LE_INIT_TTSD
 #define LE_INIT_TTSD      "/etc/init.d/libreecho-ttsd.init"
 #endif
-#ifndef LE_INIT_WYOMINGD
-#define LE_INIT_WYOMINGD  "/etc/init.d/libreecho-wyomingd.init"
+#ifndef LE_INIT_ESPHOMED
+#define LE_INIT_ESPHOMED  "/etc/init.d/libreecho-esphomed.init"
 #endif
-/* Home Assistant mode is served by libreecho-wyomingd; its pidfile is one
-   readiness signal for the Wyoming satellite. The wake socket, the waked
-   daemon behind it, and the listening Wyoming port are the rest. */
-#ifndef LE_WYOMINGD_PIDFILE
-#define LE_WYOMINGD_PIDFILE "/var/run/libreecho-wyomingd.pid"
+/* Home Assistant mode is served by libreecho-esphomed; its pidfile is one
+   readiness signal for the ESPHome satellite. The wake socket, the waked
+   daemon behind it, and the listening ESPHome port are the rest. */
+#ifndef LE_ESPHOMED_PIDFILE
+#define LE_ESPHOMED_PIDFILE "/var/run/libreecho-esphomed.pid"
 #endif
 #ifndef LE_WAKED_PIDFILE
 #define LE_WAKED_PIDFILE "/var/run/libreecho-waked.pid"
@@ -491,8 +491,8 @@ static int valid_pipeline_token(const char *value)
 #ifndef LE_WAKEWORD_SOCK
 #define LE_WAKEWORD_SOCK "/run/libreecho/wakeword.sock"
 #endif
-#ifndef LE_WYOMING_PORT
-#define LE_WYOMING_PORT 10700
+#ifndef LE_ESPHOME_PORT
+#define LE_ESPHOME_PORT 6053
 #endif
 
 /* Only one pipeline restart may be outstanding. The child is deliberately
@@ -500,6 +500,51 @@ static int valid_pipeline_token(const char *value)
  * detached workers cannot be bounded or observed by the API process. */
 static pid_t voice_pipeline_restart_pid = -1;
 static int voice_pipeline_restart_result = LE_OK;
+/* Snapshot only voice-owned state. Restoring a whole api_context would lose
+ * unrelated API changes accepted while the tracked worker was running. */
+struct voice_transition_snapshot {
+    struct api_context *context;
+    char mode[24],previous[24],stt_uri[320],stt_model[128],tts_uri[320],tts_voice[128];
+    unsigned ha_bit;int previous_valid,local_only,max_utterance,end_silence,vad_floor;
+};
+static struct voice_transition_snapshot voice_transition;
+static int voice_pipeline_rolling_back;
+static int voice_pipeline_rollback_failed;
+static int voice_pipeline_restart(const char *mode);
+static int esphome_satellite_ready(void);
+static void voice_transition_capture(struct api_context *c)
+{
+    voice_transition.context=c;
+#define CAPTURE(field,member) snprintf(voice_transition.field,sizeof(voice_transition.field),"%s",c->member)
+    CAPTURE(mode,voice_pipeline_mode);CAPTURE(previous,voice_pipeline_previous_mode);
+    CAPTURE(stt_uri,stt_wyoming_uri);CAPTURE(stt_model,stt_wyoming_model);
+    CAPTURE(tts_uri,tts_wyoming_uri);CAPTURE(tts_voice,tts_wyoming_voice);
+#undef CAPTURE
+    voice_transition.ha_bit=c->integrations&1u;
+    voice_transition.previous_valid=c->voice_pipeline_previous_valid;
+    voice_transition.local_only=c->privacy_local_only;
+    voice_transition.max_utterance=c->stt_max_utterance_ms;
+    voice_transition.end_silence=c->stt_end_silence_ms;
+    voice_transition.vad_floor=c->stt_vad_floor_rms;
+    voice_pipeline_rollback_failed=0;
+}
+static void voice_transition_restore(void)
+{
+    struct api_context *c=voice_transition.context;
+    if(!c)return;
+#define RESTORE(field,member) snprintf(c->member,sizeof(c->member),"%s",voice_transition.field)
+    RESTORE(mode,voice_pipeline_mode);RESTORE(previous,voice_pipeline_previous_mode);
+    RESTORE(stt_uri,stt_wyoming_uri);RESTORE(stt_model,stt_wyoming_model);
+    RESTORE(tts_uri,tts_wyoming_uri);RESTORE(tts_voice,tts_wyoming_voice);
+#undef RESTORE
+    c->integrations=(c->integrations&~1u)|voice_transition.ha_bit;
+    c->voice_pipeline_previous_valid=voice_transition.previous_valid;
+    c->privacy_local_only=voice_transition.local_only;
+    c->stt_max_utterance_ms=voice_transition.max_utterance;
+    c->stt_end_silence_ms=voice_transition.end_silence;
+    c->stt_vad_floor_rms=voice_transition.vad_floor;
+}
+
 
 static int voice_pipeline_restart_reap(void)
 {
@@ -512,6 +557,13 @@ static int voice_pipeline_restart_reap(void)
     if (result == 0)
         return LE_BUSY;
     voice_pipeline_restart_pid = -1;
+    if (voice_pipeline_rolling_back) {
+        if(result<0||!WIFEXITED(status)||WEXITSTATUS(status)!=0)
+            voice_pipeline_rollback_failed=1;
+        voice_pipeline_rolling_back=0;
+        voice_transition.context=NULL;
+        return voice_pipeline_restart_result;
+    }
     if (result < 0 || !WIFEXITED(status)) {
         voice_pipeline_restart_result = LE_IO;
     } else if (WEXITSTATUS(status) == 0) {
@@ -521,6 +573,21 @@ static int voice_pipeline_restart_reap(void)
     } else {
         voice_pipeline_restart_result = LE_IO;
     }
+    if(voice_transition.context && voice_pipeline_restart_result!=LE_OK){
+        pid_t child;
+        voice_transition_restore();
+        if(persist_configuration(voice_transition.context)!=LE_OK){
+            voice_pipeline_rollback_failed=1;voice_transition.context=NULL;
+            return voice_pipeline_restart_result;
+        }
+        child=fork();
+        if(child==0){
+            if(voice_transition.context->config_path[0]&&setenv("LE_CONFIG_PATH",voice_transition.context->config_path,1))_exit(1);
+            _exit(voice_pipeline_restart(voice_transition.mode)==LE_OK?0:1);
+        }
+        if(child<0){voice_pipeline_rollback_failed=1;voice_transition.context=NULL;}
+        else{voice_pipeline_restart_pid=child;voice_pipeline_rolling_back=1;}
+    }else voice_transition.context=NULL;
     return voice_pipeline_restart_result;
 }
 
@@ -543,6 +610,8 @@ static const char *voice_pipeline_restart_error(void)
 {
     if (voice_pipeline_restart_pid > 0 || voice_pipeline_restart_result == LE_OK)
         return "";
+    if(voice_pipeline_rollback_failed)
+        return "Voice pipeline transition failed; previous pipeline could not be restored";
     return voice_pipeline_restart_result == LE_NOT_SUPPORTED
         ? "Home Assistant voice pipeline is not installed"
         : "Voice pipeline daemon restart failed";
@@ -562,28 +631,35 @@ static const char *voice_pipeline_restart_error(void)
  */
 static int voice_pipeline_restart(const char *mode)
 {
-    int failed = 0;
+    int failed = 0, satellite_stop_failed = 0;
 
-    if (run_init_command(LE_INIT_AGENTD, "stop"))
+    if (access(LE_INIT_AGENTD,X_OK)==0 && run_init_command(LE_INIT_AGENTD, "stop"))
         failed = 1;
-    if (run_init_command(LE_INIT_STTD, "stop"))
+    if (access(LE_INIT_STTD,X_OK)==0 && run_init_command(LE_INIT_STTD, "stop"))
         failed = 1;
-    if (run_init_command(LE_INIT_TTSD, "stop"))
+    if (access(LE_INIT_TTSD,X_OK)==0 && run_init_command(LE_INIT_TTSD, "stop"))
         failed = 1;
-    if (access(LE_INIT_WYOMINGD, X_OK) == 0 &&
-        run_init_command(LE_INIT_WYOMINGD, "stop"))
-        failed = 1;
+    if (access(LE_INIT_ESPHOMED, X_OK) == 0 &&
+        run_init_command(LE_INIT_ESPHOMED, "stop"))
+        failed = satellite_stop_failed = 1;
 
     if (!strcmp(mode, "home-assistant")) {
-        if (access(LE_INIT_WYOMINGD, X_OK) < 0)
+        unsigned tick;
+        if (access(LE_INIT_ESPHOMED, X_OK) < 0)
             return LE_NOT_SUPPORTED;
-        if (run_init_command(LE_INIT_WYOMINGD, "start"))
-            failed = 1;
-        /* The voice-pipeline route is a second way to select Home Assistant
-         * voice; keep the advertised discovery in step with it. */
-        (void)refresh_home_assistant_discovery();
-        return failed ? LE_IO : LE_OK;
+        if(failed)return LE_IO;
+        if (run_init_command(LE_INIT_ESPHOMED, "start"))
+            return LE_IO;
+        for(tick=0;tick<50;tick++){
+            if(esphome_satellite_ready()){
+                (void)refresh_home_assistant_discovery();return LE_OK;
+            }
+            {struct timespec delay={0,100000000L};nanosleep(&delay,NULL);}
+        }
+        return LE_IO;
     }
+    /* Never activate the local owner while HA may still own the audio path. */
+    if(satellite_stop_failed)return LE_IO;
     if (run_init_command(LE_INIT_STTD, "start"))
         failed = 1;
     if (run_init_command(LE_INIT_TTSD, "start"))
@@ -616,16 +692,19 @@ static int apply_voice_pipeline_mode(const char *mode)
         return result;
     }
     if (!strcmp(mode, "home-assistant") &&
-        access(LE_INIT_WYOMINGD, X_OK) < 0)
+        access(LE_INIT_ESPHOMED, X_OK) < 0)
         return LE_NOT_SUPPORTED;
-    if (access(LE_INIT_STTD, X_OK) < 0 || access(LE_INIT_TTSD, X_OK) < 0 ||
-        access(LE_INIT_AGENTD, X_OK) < 0)
-        return LE_OK;
+    if (strcmp(mode,"home-assistant") &&
+        (access(LE_INIT_STTD, X_OK) < 0 || access(LE_INIT_TTSD, X_OK) < 0 ||
+         access(LE_INIT_AGENTD, X_OK) < 0))
+        return LE_NOT_SUPPORTED;
 
     child = fork();
     if (child < 0)
         return LE_IO;
     if (child == 0) {
+        if(voice_transition.context && voice_transition.context->config_path[0] &&
+           setenv("LE_CONFIG_PATH",voice_transition.context->config_path,1))_exit(1);
         result = voice_pipeline_restart(mode);
         _exit(result == LE_OK ? 0 :
               result == LE_NOT_SUPPORTED ? 2 : 1);
@@ -695,6 +774,16 @@ static void ensure_voice_pipeline_config(struct api_context *c)
         valid_pipeline_token(value) &&
         strlen(value) < sizeof(c->tts_wyoming_voice))
         strcpy(c->tts_wyoming_voice, value);
+    {unsigned integrations=0;
+     if((json_get_uint(saved,"integrations",&integrations)==1&&(integrations&1u))||
+        !strcmp(c->voice_pipeline_mode,"home-assistant")){
+        if(strcmp(c->voice_pipeline_mode,"home-assistant")&&!c->voice_pipeline_previous_valid){
+            snprintf(c->voice_pipeline_previous_mode,sizeof(c->voice_pipeline_previous_mode),"%s",c->voice_pipeline_mode);
+            c->voice_pipeline_previous_valid=1;
+        }
+        snprintf(c->voice_pipeline_mode,sizeof(c->voice_pipeline_mode),"home-assistant");
+        c->integrations|=1u;c->privacy_local_only=0;
+     }}
 }
 /*
  * Endpointing tunables for libreecho-sttd.  The ranges mirror the ones
@@ -786,7 +875,8 @@ static const char *audio_retention_state(const struct api_context *c,
 }
 
 static int service_ready(const char *pidfile, const char *socket_path);
-static int wyoming_satellite_ready(void);
+static int esphome_satellite_ready(void);
+static int esphome_satellite_connected(void);
 
 static void voice_pipeline_json(struct api_context *c,
                                 struct api_response *r)
@@ -799,22 +889,22 @@ static void voice_pipeline_json(struct api_context *c,
     int satellite_ready;
     const char *restart_state;
 
+    restart_state = voice_pipeline_restart_state();
     ensure_voice_pipeline_config(c);
     custom = !strcmp(c->voice_pipeline_mode, "custom");
     home_assistant = !strcmp(c->voice_pipeline_mode, "home-assistant");
     /* The saved stt/tts endpoints belong to the custom pipeline. Probe them
-       only in custom mode: in Home Assistant mode libreecho-wyomingd is the
-       active Wyoming server and the local daemons are stopped, so probing the
+       only in custom mode: in Home Assistant mode libreecho-esphomed is the
+       active ESPHome server and the local daemons are stopped, so probing the
        dormant custom addresses reported unrelated custom-service health and
        added two connection waits without checking the service that actually
-       serves the device. Surface the Wyoming satellite's own readiness
+       serves the device. Surface the ESPHome satellite's own readiness
        instead. */
     stt_reachable = custom &&
         pipeline_endpoint_reachable(c, c->stt_wyoming_uri);
     tts_reachable = custom &&
         pipeline_endpoint_reachable(c, c->tts_wyoming_uri);
-    satellite_ready = home_assistant && wyoming_satellite_ready();
-    restart_state = voice_pipeline_restart_state();
+    satellite_ready = home_assistant && esphome_satellite_ready();
 
     json_escape(stt_uri, sizeof(stt_uri), c->stt_wyoming_uri);
     json_escape(stt_model, sizeof(stt_model), c->stt_wyoming_model);
@@ -822,7 +912,7 @@ static void voice_pipeline_json(struct api_context *c,
     json_escape(tts_voice, sizeof(tts_voice), c->tts_wyoming_voice);
     out(r, 200,
         "{\"ok\":true,\"data\":{\"mode\":\"%s\","
-        "\"home_assistant\":{\"ready\":%s},"
+        "\"home_assistant\":{\"protocol\":\"esphome\",\"port\":6053,\"ready\":%s,\"connected\":%s},"
         "\"stt\":{\"engine\":\"%s\",\"wyoming_uri\":\"%s\","
         "\"model\":\"%s\",\"configured\":%s,\"reachable\":%s},"
         "\"tts\":{\"engine\":\"%s\",\"wyoming_uri\":\"%s\","
@@ -837,6 +927,7 @@ static void voice_pipeline_json(struct api_context *c,
         "\"end_silence_ms\":%d,\"vad_floor_rms\":%d},"
         "\"restart\":{\"state\":\"%s\",\"error\":\"%s\"}},\"error\":null}",
         c->voice_pipeline_mode, satellite_ready ? "true" : "false",
+        home_assistant && esphome_satellite_connected() ? "true" : "false",
         custom ? "wyoming" : "sherpa",
         stt_uri, stt_model, c->stt_wyoming_uri[0] ? "true" : "false",
         stt_reachable ? "true" : "false",
@@ -925,10 +1016,10 @@ static int voice_pipeline_update(struct api_context *c, const char *json)
     snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
              "%s", mode);
     /* The selected mode and the Home Assistant integration bit are two signals
-     * for the same Wyoming daemon: this route starts or stops it, and the
+     * for the same ESPHome daemon: this route starts or stops it, and the
      * shared mDNS supervisor advertises the mDNS service from the integration
      * bit. Keep them in step, so a pipeline switch that stops the daemon can
-     * never leave a stale Wyoming advertisement pointing at a closed port. */
+     * never leave a stale ESPHome advertisement pointing at a closed port. */
     if (!strcmp(mode, "home-assistant"))
         c->integrations |= 1u;
     else
@@ -1450,12 +1541,15 @@ static int configuration_json(struct api_context*c,char*out,size_t size){struct 
 static int persist_configuration(struct api_context*c)
 {
     char config[8192];
+    struct le_esphome_config esphome;
     char mode[48], stt_uri[640], stt_model[256];
-    char tts_uri[640], tts_voice[256], previous_mode[48];
+    char tts_uri[640], tts_voice[256], previous_mode[48], esphome_wake[96];
     size_t length;
     int rc;
 
     ensure_voice_pipeline_config(c);
+    if (config_esphome_read(c->config_path, &esphome))
+        return LE_IO;
     rc = configuration_json(c, config, sizeof(config));
     if (rc)
         return rc;
@@ -1468,6 +1562,9 @@ static int persist_configuration(struct api_context*c)
     json_escape(tts_uri, sizeof(tts_uri), c->tts_wyoming_uri);
     json_escape(tts_voice, sizeof(tts_voice), c->tts_wyoming_voice);
     json_escape(previous_mode, sizeof(previous_mode), c->voice_pipeline_previous_mode);
+    esphome_wake[0]=0;
+    if(esphome.esphome_active_wake_word_present)
+        snprintf(esphome_wake,sizeof esphome_wake,",\n  \"esphome_active_wake_word\": \"%s\"",esphome.esphome_active_wake_word);
     --length;
     if (snprintf(
             config + length, sizeof(config) - length,
@@ -1476,8 +1573,10 @@ static int persist_configuration(struct api_context*c)
             "\n  \"stt_wyoming_uri\": \"%s\","
             "\n  \"stt_wyoming_model\": \"%s\","
             "\n  \"tts_wyoming_uri\": \"%s\","
-            "\n  \"tts_wyoming_voice\": \"%s\"\n}",
-            mode, previous_mode, stt_uri, stt_model, tts_uri, tts_voice) >=
+            "\n  \"tts_wyoming_voice\": \"%s\","
+            "\n  \"ha_protocol\": \"esphome\","
+            "\n  \"esphome_noise_key\": \"%s\"%s\n}",
+            mode, previous_mode, stt_uri, stt_model, tts_uri, tts_voice, esphome.esphome_noise_key, esphome_wake) >=
         (int)(sizeof(config) - length))
         return LE_IO;
     if (!c->config_path[0])
@@ -1609,50 +1708,14 @@ static int service_ready(const char*pidfile,const char*socket_path){FILE*f;long 
  * the shipped device paths; every override is opt-in and empty values fall back
  * to the shipped default.
  */
-static const char *wyomingd_pidfile_path(void){const char*p=getenv("LIBREECHO_WYOMINGD_PIDFILE");return p&&*p?p:LE_WYOMINGD_PIDFILE;}
-static const char *waked_pidfile_path(void){const char*p=getenv("LIBREECHO_WAKED_PIDFILE");return p&&*p?p:LE_WAKED_PIDFILE;}
-static const char *wakeword_socket_path(void){const char*p=getenv("LIBREECHO_WAKEWORD_SOCK");return p&&*p?p:LE_WAKEWORD_SOCK;}
-static const char *proc_net_tcp_path(void){const char*p=getenv("LIBREECHO_PROC_NET_TCP");return p&&*p?p:"/proc/net/tcp";}
-static int wyoming_listen_port(void){const char*p=getenv("LIBREECHO_WYOMING_PORT");long port=0;char*end;if(!p||!*p)return LE_WYOMING_PORT;errno=0;port=strtol(p,&end,10);if(errno||*end||port<=0||port>65535)return LE_WYOMING_PORT;return (int)port;}
-
-/*
- * A Wyoming satellite is usable only when its own daemon, the wake-word socket,
- * and the waked daemon behind that socket are live and it is accepting on the
- * Wyoming port. This mirrors the init readiness predicate in
- * init/libreecho-web.init (wyoming_service_ready), so GET /api/v1/voice-pipeline
- * never reports home_assistant.ready while a Home Assistant client cannot
- * connect to the satellite.
- */
-static int wyoming_satellite_listening(int port)
+static const char *esphomed_pidfile_path(void){const char*p=getenv("LIBREECHO_ESPHOMED_PIDFILE");return p&&*p?p:LE_ESPHOMED_PIDFILE;}
+#include "esphome_health.h"
+static int esphome_status_flag(const char *key)
 {
-    FILE *f;
-    char line[256];
-
-    f = fopen(proc_net_tcp_path(), "r");
-    if (!f)
-        return 0;
-    while (fgets(line, sizeof(line), f)) {
-        unsigned local_addr = 0;
-        unsigned listen_port = 0;
-        unsigned state = 0;
-
-        if (sscanf(line, " %*u: %x:%x %*x:%*x %x", &local_addr, &listen_port,
-                   &state) == 3 &&
-            listen_port == (unsigned)port && state == 0x0A) {
-            fclose(f);
-            return 1;
-        }
-    }
-    fclose(f);
-    return 0;
+    return le_esphome_health_default(esphomed_pidfile_path(),key);
 }
-
-static int wyoming_satellite_ready(void)
-{
-    return service_ready(wyomingd_pidfile_path(), NULL) &&
-        service_ready(waked_pidfile_path(), wakeword_socket_path()) &&
-        wyoming_satellite_listening(wyoming_listen_port());
-}
+static int esphome_satellite_ready(void){return esphome_status_flag("ready");}
+static int esphome_satellite_connected(void){return esphome_status_flag("connected");}
 static const char*time_status_path(void){const char*p=getenv("LIBREECHO_TIME_STATUS");return p&&*p?p:"/run/libreecho/time.status";}
 static int time_status_value(const char*key,char*value,size_t size){FILE*f;char line[1200],*equals;size_t key_len=strlen(key);if(!size)return 0;value[0]=0;f=fopen(time_status_path(),"r");if(!f)return 0;while(fgets(line,sizeof(line),f)){equals=strchr(line,'=');if(!equals)continue;if((size_t)(equals-line)!=key_len||strncmp(line,key,key_len))continue;equals++;equals[strcspn(equals,"\r\n")]=0;strncpy(value,equals,size-1);value[size-1]=0;fclose(f);return 1;}fclose(f);return 0;}
 static int time_status_int(const char*key,long*fallback){char value[64],*end;long parsed;if(!time_status_value(key,value,sizeof(value)))return 0;errno=0;parsed=strtol(value,&end,10);if(errno||*end)return 0;*fallback=parsed;return 1;}
@@ -2284,8 +2347,10 @@ static int handle_voice_pipeline(struct api_context *c,
             "Voice pipeline configuration is required");
         return 1;
     }
+    voice_transition_capture(c);
     rc = voice_pipeline_update(c, q->body);
     if (rc) {
+        voice_transition.context=NULL;
         err(r, 400, rc,
             "Voice pipeline mode, endpoints, model, or voice is invalid");
         return 1;
@@ -2314,6 +2379,7 @@ static int handle_voice_pipeline(struct api_context *c,
                  sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
         c->voice_pipeline_previous_valid = old_previous_valid;
         c->privacy_local_only = old_local_only;
+        voice_transition_restore();voice_transition.context=NULL;
         err(r, 503, rc, "Voice pipeline configuration could not be saved");
         return 1;
     }
@@ -2347,11 +2413,13 @@ static int handle_voice_pipeline(struct api_context *c,
                  sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
         c->voice_pipeline_previous_valid = old_previous_valid;
         c->privacy_local_only = old_local_only;
+        voice_transition_restore();voice_transition.context=NULL;
         (void)persist_configuration(c);
         err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc,
             "Voice pipeline configuration could not be applied");
         return 1;
     }
+    voice_transition.context=NULL;
     api_log(c, "info", "Voice pipeline configuration applied");
     voice_pipeline_json(c, r);
     return 1;
@@ -2453,7 +2521,15 @@ static void after_integration_change(struct api_context *c,
              c->voice_pipeline_previous_mode);
     old_previous_valid = c->voice_pipeline_previous_valid;
     old_local_only = c->privacy_local_only;
-    old_integrations = enabled ? c->integrations & ~1u : c->integrations | 1u;
+    /* The inner handler already changed bit 1. The old mode is authoritative;
+     * inverting the request corrupts a duplicate enable/disable while pending. */
+    old_integrations = (c->integrations & ~1u) |
+        (!strcmp(c->voice_pipeline_mode, "home-assistant") ? 1u : 0u);
+    if(voice_pipeline_restart_pending()){
+        c->integrations=old_integrations;
+        err(r,409,LE_BUSY,"A voice pipeline restart is already in progress");return;
+    }
+    voice_transition_capture(c);voice_transition.ha_bit=old_integrations&1u;
     if (enabled ? strcmp(c->voice_pipeline_mode, "home-assistant") != 0
                 : !strcmp(c->voice_pipeline_mode, "home-assistant")) {
         home_assistant_change = 1;
@@ -2499,7 +2575,7 @@ static void after_integration_change(struct api_context *c,
         return;
     }
     if (home_assistant_change && !strcmp(le_backend_mode(c->backend), "linux") &&
-        enabled && access(LE_INIT_WYOMINGD, X_OK) < 0) {
+        enabled && access(LE_INIT_ESPHOMED, X_OK) < 0) {
         c->integrations = old_integrations;
         snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
                  "%s", old_mode);
@@ -2507,10 +2583,12 @@ static void after_integration_change(struct api_context *c,
                  sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
         c->voice_pipeline_previous_valid = old_previous_valid;
         c->privacy_local_only = old_local_only;
+        voice_transition_restore();voice_transition.context=NULL;
         err(r, 501, LE_NOT_SUPPORTED,
             "Home Assistant voice pipeline is not installed");
         return;
     }
+    c->integrations = enabled ? c->integrations | 1u : c->integrations & ~1u;
     rc = persist_configuration(c);
     if (rc) {
         c->integrations = old_integrations;
@@ -2520,6 +2598,7 @@ static void after_integration_change(struct api_context *c,
                  sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
         c->voice_pipeline_previous_valid = old_previous_valid;
         c->privacy_local_only = old_local_only;
+        voice_transition_restore();voice_transition.context=NULL;
         err(r, 503, rc, "Integration configuration could not be saved");
         return;
     }
@@ -2539,11 +2618,13 @@ static void after_integration_change(struct api_context *c,
                      sizeof(c->voice_pipeline_previous_mode), "%s", old_previous);
             c->voice_pipeline_previous_valid = old_previous_valid;
             c->privacy_local_only = old_local_only;
+            voice_transition_restore();voice_transition.context=NULL;
             (void)persist_configuration(c);
             err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc,
                 "Integration configuration could not be applied");
         }
     }
+    voice_transition.context=NULL;
 }
 #define api_handle_inner(c,q,r) do { \
     if (!handle_voice_pipeline((c),(q),(r)) && \
@@ -2553,8 +2634,8 @@ static void after_integration_change(struct api_context *c,
     } \
 } while (0)
 int api_request_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){return security(c,q,r)&&(!changing(q->method)||!q->body_len||body_ok(q,r));}
-void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;if(!api_request_authorize(c,q,r))return;if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":setup_failure_message(c));return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"os_version\":\"%s\",\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\"},\"error\":null}",LE_OS_VERSION_STRING,c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false");return;}api_handle_inner(c,q,r);}
+void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;(void)voice_pipeline_restart_reap();if(!api_request_authorize(c,q,r))return;if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":setup_failure_message(c));return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"os_version\":\"%s\",\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\"},\"error\":null}",LE_OS_VERSION_STRING,c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false");return;}api_handle_inner(c,q,r);}
 
-int api_persist_configuration(struct api_context*c){return persist_configuration(c);}
+int api_persist_configuration(struct api_context*c){(void)voice_pipeline_restart_reap();return persist_configuration(c);}
 int api_diagnostics_kernel_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){if(strcmp(q->method,"GET")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;return 1;}
 int api_baby_monitor_stream_authorize(struct api_context*c,const struct api_request*q,struct api_response*r,int*card,int*device,int*channels,int*bits,int*channel){const char*prefix="/api/v1/baby-monitor/stream?source=";const char*value;char source[32],pcm[64],extra;size_t n;unsigned parsed_card,parsed_device,parsed_channel=0;if(!c||!q||!r||!card||!device||!channels||!bits||!channel)return 0;if(!security(c,q,r))return 0;if(strcmp(q->method,"GET")){method_not_allowed(r);return 0;}if(strncmp(q->path,prefix,strlen(prefix))){err(r,404,LE_INVALID,"Baby-monitor stream was not found");return 0;}value=q->path+strlen(prefix);n=strcspn(value,"&");if(n==0||query_component_decode(source,sizeof(source),value,n)){err(r,400,LE_INVALID,"A valid microphone source is required");return 0;}if(sscanf(source,"%u:%u%c",&parsed_card,&parsed_device,&extra)!=2||parsed_card>31||parsed_device>31){err(r,400,LE_INVALID,"A valid microphone source is required");return 0;}if(n&&value[n]){const char*ch=strstr(value+n,"&channel=");if(ch&&sscanf(ch+9,"%u%c",&parsed_channel,&extra)!=1){err(r,400,LE_INVALID,"A valid microphone channel is required");return 0;}}if(!strcmp(le_backend_mode(c->backend),"mock")){err(r,501,LE_NOT_SUPPORTED,"Microphone streaming is unavailable in the mock backend");return 0;}if(parsed_card!=0||parsed_device!=24||parsed_channel>6){err(r,400,LE_INVALID,"The selected Echo microphone channel is invalid");return 0;}snprintf(pcm,sizeof(pcm),"/dev/snd/pcmC%uD%uc",parsed_card,parsed_device);if(access(pcm,R_OK)){err(r,503,LE_NOT_SUPPORTED,"Selected microphone source is unavailable");return 0;}*card=(int)parsed_card;*device=(int)parsed_device;*channels=9;*bits=24;*channel=(int)parsed_channel;return 1;}

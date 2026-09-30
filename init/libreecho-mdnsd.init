@@ -32,9 +32,6 @@ SOCKET=${SOCKET:-/run/libreecho/mdns.sock}
 SOCKET_DIR=${SOCKET_DIR:-$(dirname "$SOCKET")}
 LOCKDIR=${LOCKDIR:-/run/libreecho-mdnsd.lock}
 MDNSD_OWNER_UID=${MDNSD_OWNER_UID:-0}
-CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}
-WYOMING_SERVICE_SOURCE=${WYOMING_SERVICE_SOURCE:-/etc/libreecho/avahi-services/wyoming.service}
-WYOMING_DEFAULTS=${WYOMING_DEFAULTS:-/etc/default/libreecho-wyomingd}
 MACHINE_ID=${MACHINE_ID:-$ROOT/var/lib/dbus/machine-id}
 MACHINE_ID_SOURCE=${MACHINE_ID_SOURCE:-/proc/sys/kernel/random/uuid}
 ARGS=${ARGS:---foreground --root $ROOT --socket $SOCKET}
@@ -71,74 +68,16 @@ ensure_machine_id() {
     return 0
 }
 
-# The voice-pipeline mode is the explicit signal and always wins; only legacy
-# configs without a mode fall back to the Home Assistant integration bit. A
-# retained bit must never advertise a Wyoming server that local/custom mode
-# has stopped.
-home_assistant_voice_mode() {
-    [ -r "$CONFIG" ] || return 1
-    mode=$(sed -n 's/.*"voice_pipeline_mode"[[:space:]]*:[[:space:]]*"\([a-z][a-z-]*\)".*/\1/p' "$CONFIG" | sed -n '1p')
-    [ "$mode" = "home-assistant" ]
-}
-
-resolve_discovery() {
-    HOME_ASSISTANT_ENABLED=0
-    if [ -r "$CONFIG" ]; then
-        integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
-        case "$integrations" in
-            ''|*[!0-9]*) ;;
-            *) if [ $((integrations & 1)) -ne 0 ]; then HOME_ASSISTANT_ENABLED=1; fi ;;
-        esac
-    fi
-    home_assistant_voice_mode && HOME_ASSISTANT_ENABLED=1
-    case "${mode:-}" in
-        local|custom) HOME_ASSISTANT_ENABLED=0 ;;
-    esac
-    return 0
-}
-
-# The advertised mDNS port must match the port the Wyoming daemon actually
-# listens on. That daemon takes its full argument string from the shared
-# defaults file when ARGS is overridden and only falls back to `--port $PORT`
-# otherwise, so an explicit --port in ARGS wins over PORT, which in turn wins
-# over the built-in default. Sourcing runs in a subshell so the defaults file
-# cannot leak unrelated variables into this script.
-wyoming_service_port() {
-    port=10700
-    if [ -r "$WYOMING_DEFAULTS" ]; then
-        port=$( . "$WYOMING_DEFAULTS" >/dev/null 2>&1
-                from_args=$(printf '%s\n' "${ARGS:-}" |
-                    sed -n 's/.*--port[[:space:]=]\{1,\}\([0-9][0-9]*\).*/\1/p' |
-                    sed -n '1p')
-                if [ -n "$from_args" ]; then
-                    printf '%s' "$from_args"
-                else
-                    printf '%s' "${PORT:-10700}"
-                fi )
-    fi
-    case "$port" in
-        ''|*[!0-9]*) port=10700 ;;
-    esac
-    printf '%s\n' "$port"
-}
-
-# Avahi reads this directory from the supervisor's runtime root. The record is
-# rendered from the effective Wyoming port rather than copied verbatim, and it
-# is withdrawn, not left stale, whenever Home Assistant voice is not selected.
-render_wyoming_service() {
+# The shared responder is independent of AirPlay and HA selection. The ESPHome
+# owner alone checks integration bit 1 and opens its listener before leasing
+# _esphomelib._tcp. Never render a static HA record from configuration: that
+# would advertise a stopped/disabled listener and duplicate the live lease.
+# Only call this during cold start, before launching the supervisor. Its own
+# startup sweep repeats the cleanup, including when started without this init.
+clear_ha_services() {
     services=${SERVICES_DIR:-$ROOT/etc/avahi/services}
-    if [ "${HOME_ASSISTANT_ENABLED:-0}" -ne 1 ]; then
-        rm -f "$services/wyoming.service"
-        return 0
-    fi
-    if [ ! -f "$WYOMING_SERVICE_SOURCE" ] || [ -L "$WYOMING_SERVICE_SOURCE" ]; then
-        echo "libreecho-mdnsd: Wyoming service definition unavailable" >&2
-        return 1
-    fi
-    port=$(wyoming_service_port)
-    sed "s#<port>[0-9][0-9]*</port>#<port>$port</port>#" \
-        "$WYOMING_SERVICE_SOURCE" >"$services/wyoming.service" || return 1
-    return 0
+    rm -f "$services/wyoming.service" "$services/esphome.service" \
+        "$services"/wyoming-* "$services"/esphome-*
 }
 
 # A directory the supervisor's own account owns that no other account can
@@ -320,9 +259,8 @@ start_service() {
         release_lock
         return 1
     }
-    resolve_discovery
-    render_wyoming_service || {
-        echo "libreecho-mdnsd: could not stage the Wyoming record" >&2
+    clear_ha_services || {
+        echo "libreecho-mdnsd: could not remove stale HA discovery records" >&2
         release_lock
         return 1
     }

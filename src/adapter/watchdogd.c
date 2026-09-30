@@ -52,7 +52,7 @@
 /*
  * Most daemons answer on a control socket, which is the better signal: it is
  * what their callers depend on, so it catches a wedged daemon as well as a
- * dead one. Some -- buttond, timed, logd, wyomingd -- serve no socket at all;
+ * dead one. Some -- buttond, timed, logd, esphomed -- serve no socket at all;
  * they read input events, poll the clock or talk outward. sttd, ttsd and
  * agentd do serve sockets, but their status path can be occupied by expected
  * voice work (recognition, synthesis or a provider response). Those three
@@ -147,8 +147,11 @@ static int probe_pidfile(const char *path)
     return kill((pid_t)pid, 0) == 0;
 }
 
+#include "../esphome_health.h"
 static int probe(const struct service_desc *service)
 {
+    if(!strcmp(service->name,"esphomed"))
+        return le_esphome_health_default(service->probe_path,"ready");
     if (service->kind == PROBE_PIDFILE)
         return probe_pidfile(service->probe_path);
     return probe_socket(service->probe_path);
@@ -283,8 +286,8 @@ int main(int argc, char **argv)
          "/etc/init.d/libreecho-timed.init", 1, NULL},
         {"logd", PROBE_PIDFILE, "/var/run/libreecho-logd.pid",
          "/etc/init.d/libreecho-logd.init", 1, NULL},
-        {"wyomingd", PROBE_PIDFILE, "/var/run/libreecho-wyomingd.pid",
-         "/etc/init.d/libreecho-wyomingd.init", 1, NULL},
+        {"esphomed", PROBE_PIDFILE, "/var/run/libreecho-esphomed.pid",
+         "/etc/init.d/libreecho-esphomed.init", 1, NULL},
         {"waked", PROBE_SOCKET, "/run/libreecho/wakeword.sock",
          "/etc/init.d/libreecho-waked.init", 1, "capture"},
     };

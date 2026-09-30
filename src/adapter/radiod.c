@@ -73,6 +73,7 @@
 
 static volatile sig_atomic_t running = 1;
 static pid_t player_pid = -1;
+static int player_paused;
 static char playing_url[URL_MAX];
 /*
  * What the stream said it is playing. The player runs in a forked child, so
@@ -103,7 +104,8 @@ static int player_parent_guard(void)
 #ifdef __linux__
     pid_t parent = getppid();
 
-    if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0 || getppid() != parent)
+    /* SIGTERM stays pending in a SIGSTOP-paused child; SIGKILL cannot. */
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0 || getppid() != parent)
         return -1;
 #endif
     return 0;
@@ -852,22 +854,13 @@ static void drain_metadata(void)
 static void forget_player(void)
 {
     player_pid = -1;
+    player_paused = 0;
     playing_url[0] = '\0';
     playing_title[0] = '\0';
     playing_station[0] = '\0';
     if (meta_fd >= 0)
         close(meta_fd);
     meta_fd = -1;
-}
-
-static void stop_player(void)
-{
-    if (player_pid <= 0)
-        return;
-    kill(player_pid, SIGTERM);
-    while (waitpid(player_pid, NULL, 0) < 0 && errno == EINTR)
-        ;
-    forget_player();
 }
 
 static void reap_player(void)
@@ -884,12 +877,83 @@ static void reap_player(void)
         forget_player();
 }
 
+/* A stopped worker retains decoder, resampler, socket/file offset and metadata.
+   Live servers may disconnect during a long pause; their existing reconnect
+   policy still applies on resume. Never re-open the stream merely to pause. */
+#define PLAYER_WAIT_STEPS 50
+#define PLAYER_WAIT_MS 4
+
+static int set_player_paused(int paused)
+{
+    unsigned int i;
+    int status;
+    pid_t done;
+
+    reap_player(); /* ECHILD clears stale IDs before any signal. */
+    if (player_pid <= 0)
+        return -1;
+    if (player_paused == paused)
+        return 0;
+    if (kill(player_pid, paused ? SIGSTOP : SIGCONT) < 0)
+        return -1;
+    for (i = 0; i < PLAYER_WAIT_STEPS; ++i) {
+        do {
+            done = waitpid(player_pid, &status,
+                           WNOHANG | WUNTRACED | WCONTINUED);
+        } while (done < 0 && errno == EINTR);
+        if (done < 0) {
+            if (errno == ECHILD)
+                forget_player();
+            return -1;
+        }
+        if (done > 0) {
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                forget_player();
+                return -1;
+            }
+            if ((paused && WIFSTOPPED(status)) ||
+                (!paused && WIFCONTINUED(status))) {
+                player_paused = paused;
+                return 0;
+            }
+        }
+        delay_ms(PLAYER_WAIT_MS);
+    }
+    return -1;
+}
+
+static int stop_player(void)
+{
+    unsigned int i;
+
+    reap_player();
+    if (player_pid <= 0)
+        return 0;
+    if (kill(player_pid, SIGTERM) < 0 && errno != ESRCH)
+        return -1;
+    /* A paused process cannot deliver SIGTERM until continued. */
+    if (player_paused && kill(player_pid, SIGCONT) < 0 && errno != ESRCH)
+        return -1;
+    for (i = 0; i < PLAYER_WAIT_STEPS * 2; ++i) {
+        reap_player();
+        if (player_pid <= 0)
+            return 0;
+        if (i == PLAYER_WAIT_STEPS && kill(player_pid, SIGKILL) < 0 &&
+            errno != ESRCH)
+            return -1;
+        delay_ms(PLAYER_WAIT_MS);
+    }
+    reap_player();
+    return player_pid <= 0 ? 0 : -1;
+}
+
 static int start_player(const char *url, const char *bus_path)
 {
     int fds[2];
     pid_t child;
 
-    stop_player();
+    if (stop_player() < 0)
+        return -1;
     if (pipe(fds) < 0)
         return -1;
     child = fork();
@@ -958,9 +1022,10 @@ static int handle(char *message, char *response, size_t response_size,
         escape_json(escaped_title, sizeof(escaped_title), playing_title);
         escape_json(escaped_station, sizeof(escaped_station), playing_station);
         snprintf(data, sizeof(data),
-                 "{\"playing\":%s,\"url\":\"%s\",\"title\":\"%s\","
+                 "{\"playing\":%s,\"paused\":%s,\"url\":\"%s\",\"title\":\"%s\","
                  "\"station\":\"%s\"}",
-                 player_pid > 0 ? "true" : "false", escaped_url,
+                 player_pid > 0 && !player_paused ? "true" : "false",
+                 player_pid > 0 && player_paused ? "true" : "false", escaped_url,
                  escaped_title, escaped_station);
         return le_adapter_respond_ok(response, response_size, id, data);
     }
@@ -979,8 +1044,16 @@ static int handle(char *message, char *response, size_t response_size,
         le_log_info("radiod: playing %s", url);
         return le_adapter_respond_ok(response, response_size, id, "{}");
     }
+    if (!strcmp(command, "pause") || !strcmp(command, "resume")) {
+        if (set_player_paused(!strcmp(command, "pause")) < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "playback control failed or no player");
+        return le_adapter_respond_ok(response, response_size, id, "{}");
+    }
     if (!strcmp(command, "stop")) {
-        stop_player();
+        if (stop_player() < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "playback could not stop");
         le_log_info("radiod: stopped");
         return le_adapter_respond_ok(response, response_size, id, "{}");
     }

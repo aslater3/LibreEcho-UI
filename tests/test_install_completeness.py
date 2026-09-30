@@ -21,7 +21,7 @@ INIT = os.path.join(ROOT, "init")
 NO_INIT_SCRIPT = {
     # micd spawns it as part of the capture chain.
     "libreecho-capture-mux",
-    # Selected by libreecho-wyomingd.init, not started directly.
+    # Selected by Custom STT/TTS init scripts, not the ESPHome satellite.
     "libreecho-sttd-wyoming",
     "libreecho-ttsd-wyoming",
 }

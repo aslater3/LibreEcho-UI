@@ -2000,7 +2000,7 @@
      "Integrations"
     ],
     "summary": "Enable or disable an integration",
-    "description": "The home-assistant integration also selects the voice pipeline: enabling it persists Home Assistant mode, while disabling it persists and restores the previously saved pipeline mode (the mode that was active when Home Assistant was enabled), falling back to local when none was recorded. On images with the Linux backend the pipeline transition is asynchronous, so a normal success may be 202 with a pending voice-pipeline document instead of 200. Enabling Home Assistant clears local-only processing in the same transition because microphone audio leaves the device.",
+    "description": "The home-assistant integration bit 1 selects only ESPHome native API on TCP 6053. Enabling saves the previous Local/Custom selection; disabling restores it (Local when none was saved). Local/Custom engine settings are preserved. Linux activation may return 202/pending; concurrent voice changes receive 409. Failures roll back persisted voice intent and the previous service graph; missing esphomed returns 501. HA clears local_only because microphone audio leaves the device after wake.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -3096,7 +3096,7 @@
      "Assistant"
     ],
     "summary": "Read speech pipeline configuration and endpoint health",
-    "description": "Reports local or remote speech recognition and synthesis engines, configured Wyoming endpoints, reachability, the on-device wake-word stage, persisted listening settings, and the state of the latest bounded voice-pipeline restart. `restart.state` is `ready`, `pending`, or `failed`; `restart.error` is non-empty when the last restart failed. max_utterance_ms is 2000–20000, end_silence_ms is 200–3000, and vad_floor_rms is 1–1024.",
+    "description": "Reports Local/Custom speech engines and saved Wyoming Whisper/Piper endpoints. Home Assistant uses only ESPHome native API on TCP 6053; ready and connected come from the live esphomed status file, not listening-port inference. Custom endpoints are not probed in HA mode. restart.state is ready, pending, or failed; restart.error reports transition or rollback failure.",
     "responses": {
      "200": {
       "description": "Speech pipeline and persisted listening settings",
@@ -3115,7 +3115,7 @@
      "Assistant"
     ],
     "summary": "Configure and activate the speech pipeline",
-    "description": "Persists and applies local, custom, or Home Assistant mode. Custom mode uses remote Wyoming Whisper and Piper services while wake-word detection remains on-device. Selecting local or custom stops the Wyoming daemon and clears the Home Assistant integration toggle, so the advertised `_wyoming._tcp` service can never point at a stopped daemon; selecting Home Assistant sets that toggle. When daemon init scripts are present, activation is bounded to one restart job: the successful response is 202 with `restart.state: pending`; concurrent updates return 409 until it completes. Poll GET /api/v1/voice-pipeline for `restart.state` and `restart.error`; asynchronous restart failures are reported as 503 on the next PUT and remain visible in GET state.",
+    "description": "Persists and applies Local, Custom, or Home Assistant mode. Custom Wyoming Whisper/Piper clients remain available. HA uses libreecho-esphomed on TCP 6053 and retains Local/Custom settings. Selecting HA records the prior Local/Custom mode; disabling the integration restores it. Linux activation returns 202/pending; concurrent voice changes receive 409. A failed transition restores prior persisted voice intent and the running service graph without reverting unrelated settings. Missing ESPHome daemon returns 501. All mutations require CSRF.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -3898,8 +3898,19 @@
        },
        "home_assistant": {
         "type": "object",
-        "description": "Readiness of the Home Assistant Wyoming satellite (libreecho-wyomingd). Only meaningful when mode is home-assistant; the saved custom stt/tts endpoints are not probed in this mode.",
+        "description": "ESPHome daemon readiness and authenticated HA connection status. Gated by the live esphomed pidfile and bounded status JSON; both false outside HA mode. Dormant Custom endpoints are preserved and not probed.",
         "properties": {
+         "protocol": {
+          "type": "string",
+          "enum": ["esphome"]
+         },
+         "port": {
+          "type": "integer",
+          "enum": [6053]
+         },
+         "connected": {
+          "type": "boolean"
+         },
          "ready": {
           "type": "boolean"
          }
