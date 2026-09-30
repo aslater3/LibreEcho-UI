@@ -261,6 +261,11 @@ make build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
 make test-mdns
+# Guard the nested-make provenance contract before the ESPHome section: its
+# strict radio-controls build is the first -Werror consumer of the augmented
+# CPPFLAGS, so a snapshot mismatch surfaces there. This reproduces the
+# parent+child make snapshot change in isolation and fails fast and clearly.
+python3 tests/test_ci_nested_make_provenance.py
 make test-esphome
 python3 tests/test_esphome_shipping.py
 python3 tests/test_ha_esphome_wiring.py

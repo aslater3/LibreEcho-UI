@@ -16,6 +16,12 @@ endif
 ifndef SOURCE_DIGEST
 SOURCE_DIGEST := $(shell sh tools/source-provenance.sh --field digest 2>/dev/null || printf unknown)
 endif
+# The snapshot is authoritative for this whole build. Export it so a nested make
+# (recursive $(MAKE), release, or the test runner) reuses these exact values.
+# Otherwise the nested make recomputes provenance; once the suite has changed
+# tracked sources its different -DLE_SOURCE_* macros redefine the inherited ones,
+# which -Werror turns into a hard failure (e.g. test-esphome-radio-controls).
+export SOURCE_COMMIT SOURCE_DIRTY SOURCE_DIGEST
 override CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Isrc/adapter -DLE_TLS_AVAILABLE=$(TLS_AVAILABLE) -DLE_OS_VERSION=\"$(OS_VERSION)\" \
     -DLE_SOURCE_COMMIT=\"$(SOURCE_COMMIT)\" -DLE_SOURCE_DIRTY=\"$(SOURCE_DIRTY)\" \
     -DLE_SOURCE_DIGEST=\"$(SOURCE_DIGEST)\"
