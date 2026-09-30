@@ -517,6 +517,18 @@ Use `POST /api/v1/audio/announce/stop` with `{}` to interrupt the active
 announcement. State-changing API calls require the normal CSRF header and,
 when configured, local API authentication.
 
+### Baby Monitor
+
+#### GET /api/v1/baby-monitor/stream
+
+Streams selected microphone PCM for local browser playback. The response is
+HTTP/1.1 chunked and intentionally has no `Content-Length` because it is live.
+The shared wake-word lane is returned as `audio/L16; rate=16000; channels=1`;
+the raw fallback is `audio/L24; rate=16000; channels=9`. Both responses include
+the `X-LibreEcho-Audio` format contract, `Cache-Control: no-store`, and
+`Accept-Ranges: none`. Authentication is applied when enabled, and the stream
+is aborted when the browser closes the connection.
+
 ### Timers and alarms
 
 #### GET /api/v1/timers
