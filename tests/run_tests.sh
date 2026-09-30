@@ -264,6 +264,7 @@ make test-mdns
 make test-esphome
 python3 tests/test_esphome_shipping.py
 python3 tests/test_ha_esphome_wiring.py
+python3 tests/test_ci_runtime_environment.py
 make test-wyoming-protocol
 python3 tests/test_wyoming_engines.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \

@@ -24,16 +24,25 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      TMPDIR: ${{ runner.temp }}/libreecho-tests
       ESPHOMED_NOISE: '1'
-      ESPHOMED_TLS_PREFIX: ${{ runner.temp }}/mbedtls
-      ESPHOMED_TEST_TLS_PREFIX: ${{ runner.temp }}/mbedtls
-      ESPHOMED_TLS_LIBS: ${{ runner.temp }}/mbedtls/lib/libmbedtls.a ${{ runner.temp }}/mbedtls/lib/libmbedx509.a ${{ runner.temp }}/mbedtls/lib/libmbedcrypto.a
-      CPPFLAGS: -I${{ runner.temp }}/mbedtls/include
       ESPHOMED_CRYPTO_PYTHON: /usr/bin/python3
-      ESPHOMED_AIO_PYTHON: ${{ runner.temp }}/esphome-client/bin/python
 
     steps:
+      - name: Configure private test paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/libreecho-tests"
+          # runner is unavailable in job-level env; export runtime paths here.
+          printf '%s\n' \
+            "TMPDIR=$RUNNER_TEMP/libreecho-tests" \
+            "ESPHOMED_TLS_PREFIX=$RUNNER_TEMP/mbedtls" \
+            "ESPHOMED_TEST_TLS_PREFIX=$RUNNER_TEMP/mbedtls" \
+            "ESPHOMED_TLS_LIBS=$RUNNER_TEMP/mbedtls/lib/libmbedtls.a $RUNNER_TEMP/mbedtls/lib/libmbedx509.a $RUNNER_TEMP/mbedtls/lib/libmbedcrypto.a" \
+            "CPPFLAGS=-I$RUNNER_TEMP/mbedtls/include" \
+            "ESPHOMED_AIO_PYTHON=$RUNNER_TEMP/esphome-client/bin/python" \
+            >> "$GITHUB_ENV"
+
       - name: Check out UI source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
