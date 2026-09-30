@@ -15,11 +15,22 @@
 int main(void)
 {
     char url[256];
-    const char request[] =
+    char response[512];
+    const char request_with_url[] =
         "{\"url\":\"/music/one\\\"two\\\\backslash.mp3\"}";
 
-    CHECK(json_string_field(request, "url", url, sizeof(url)) == 0);
+    CHECK(json_string_field(request_with_url, "url", url, sizeof(url)) == 0);
     CHECK(!strcmp(url, "/music/one\"two\\backslash.mp3"));
-    puts("radiod escaped URL parsing: ok");
+
+    /*
+     * The status document must publish the Opus capability so the HTTP layer
+     * can gate an Opus launch before it happens.  Whatever this build's value
+     * is, the field has to be present and boolean.
+     */
+    build_status_json(response, sizeof(response));
+    CHECK(strstr(response, "\"opus\":true") != NULL ||
+          strstr(response, "\"opus\":false") != NULL);
+
+    puts("radiod escaped URL parsing and status Opus capability: ok");
     return 0;
 }

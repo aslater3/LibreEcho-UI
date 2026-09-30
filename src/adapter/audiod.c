@@ -16,6 +16,7 @@
 
 #include "adapter.h"
 #include "log.h"
+#include "sleep_generator.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -186,23 +187,27 @@ struct snd_ctl_elem_value {
 #define LE_CUE_THROTTLED 1
 
 /*
- * Sleep-noise generator.
+ * Sleep/nursery source.
  *
  * Written to the media bus rather than the system bus, because this is
  * content the device is playing rather than a notification: it should duck
  * for an announcement and stop when something else takes over media, which
- * is what the media bus already gives us for free.
+ * is what the media bus already gives us for free.  The shared engine's
+ * mono programme feed (and therefore the AEC reference) carries it, so a
+ * wake word still sees the audio it must cancel.
  *
- * Synthesis is deliberately trivial -- a PRNG plus a one-pole filter -- so
- * it costs no image space and no network.  The whole point of this feature
- * is that it keeps working with the internet down and no account.
+ * The synthesis itself lives in the header-only sleep_generator unit, which
+ * keeps this daemon's explicit source list and build unchanged.  What stays
+ * here is the process plumbing: one child per stream, a bounded stop ramp,
+ * and the real media-bus write with the same EAGAIN/poll handling as the
+ * other generators.
  */
+#ifndef LE_MEDIA_AUDIO_BUS
 #define LE_MEDIA_AUDIO_BUS "/run/libreecho-audio/media.pcm"
-#define LE_NOISE_WHITE 0
-#define LE_NOISE_PINK 1
-#define LE_NOISE_BROWN 2
+#endif
 
 static volatile sig_atomic_t g_stop;
+static volatile sig_atomic_t g_sleep_stop;
 
 struct audio_control {
     int found;
@@ -266,8 +271,11 @@ struct audio_hw {
     pid_t cue_pid;
     long long cue_started_ms;
     unsigned long cue_throttled;
-    int noise_colour;
+    int noise_source;
+    int noise_bed;
+    int noise_tempo;
     long noise_seconds;
+    long noise_fade_seconds;
     int noise_level;
     /* CLOCK_MONOTONIC, so the sleep timer keeps counting correctly across an
        NTP step -- a wall-clock start would make the remaining time jump. */
@@ -301,6 +309,7 @@ static void clear_noise_state(struct audio_hw *audio)
 {
     audio->noise_pid = 0;
     audio->noise_seconds = 0;
+    audio->noise_fade_seconds = 0;
     audio->noise_level = 0;
     audio->noise_started = 0;
 }
@@ -1191,8 +1200,11 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->requested_volume = -1;
     audio->volume_guard_warned = 0;
     audio->noise_pid = 0;
-    audio->noise_colour = LE_NOISE_WHITE;
+    audio->noise_source = LE_SLEEP_SOURCE_WHITE;
+    audio->noise_bed = LE_SLEEP_BED_NONE;
+    audio->noise_tempo = LE_SLEEP_TEMPO_DEFAULT;
     audio->noise_seconds = 0;
+    audio->noise_fade_seconds = 0;
     audio->noise_level = 0;
     audio->noise_started = 0;
     audio->muted = 0;
@@ -1367,74 +1379,39 @@ static int write_chirp_fd(int fd, double first_hz, double second_hz,
     return 0;
 }
 
-static uint32_t noise_random(uint32_t *state)
+/*
+ * Sleep-source writer.  The generator is deterministic and pure; this is the
+ * only place that touches the media bus, and it keeps the same EAGAIN/poll
+ * contract as the other generators so a stalled reader cannot spin.
+ * g_sleep_stop is raised by SIGTERM -- the stop signal from stop_noise -- and
+ * asks the generator for a bounded, click-free ramp instead of cutting the
+ * stream off mid-sample.
+ */
+static void sleep_stop_signal(int signum)
 {
-    /* xorshift32: cheap, no libc dependency, and the spectral quality of
-       the PRNG is far below what matters once it is filtered. */
-    uint32_t x = *state;
-
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = x;
-    return x;
+    (void)signum;
+    g_sleep_stop = 1;
 }
 
-static int write_noise_fd(int fd, int colour, double amplitude,
-                          long seconds)
+static int write_sleep_fd(int fd, const struct le_sleep_gen *config)
 {
-    unsigned char buffer[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS *
-                         sizeof(int16_t)];
-    uint32_t state = 0x1234567u;
-    double brown = 0.0;
-    double pink_a = 0.0, pink_b = 0.0, pink_c = 0.0;
-    long frames_left = seconds > 0
-        ? (long)LE_PCM_RATE * seconds : -1;
+    int16_t buffer[LE_TONE_CHUNK_FRAMES * LE_SLEEP_CHANNELS];
+    struct le_sleep_gen gen = *config;
 
+    if (!le_sleep_gen_active(&gen))
+        return 0;
     for (;;) {
-        size_t frames = LE_TONE_CHUNK_FRAMES;
-        int16_t *samples = (int16_t *)buffer;
-        size_t bytes;
-        size_t sent = 0;
-        size_t i;
+        size_t frames, bytes, sent = 0;
 
-        if (frames_left >= 0) {
-            if (frames_left == 0)
-                return 0;
-            if ((long)frames > frames_left)
-                frames = (size_t)frames_left;
-        }
-        bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t);
-        for (i = 0; i < frames; ++i) {
-            /* -1..1 */
-            double white = (double)(int32_t)noise_random(&state) /
-                           2147483648.0;
-            double value;
-
-            if (colour == LE_NOISE_BROWN) {
-                /* Integrate with a leak so it cannot wander to the rails. */
-                brown = (brown + white * 0.05);
-                if (brown > 1.0) brown = 1.0;
-                if (brown < -1.0) brown = -1.0;
-                brown *= 0.995;
-                value = brown * 6.0;
-            } else if (colour == LE_NOISE_PINK) {
-                /* Three one-pole sections: a standard cheap approximation
-                   of -3 dB per octave, close enough to sound right. */
-                pink_a = 0.99765 * pink_a + white * 0.0990460;
-                pink_b = 0.96300 * pink_b + white * 0.2965164;
-                pink_c = 0.57000 * pink_c + white * 1.0526913;
-                value = (pink_a + pink_b + pink_c + white * 0.1848) * 0.25;
-            } else {
-                value = white;
-            }
-            if (value > 1.0) value = 1.0;
-            if (value < -1.0) value = -1.0;
-            samples[i * 2] = (int16_t)(value * amplitude);
-            samples[i * 2 + 1] = (int16_t)(value * amplitude);
-        }
+        if (g_sleep_stop)
+            le_sleep_gen_request_stop(&gen);
+        frames = le_sleep_gen_fill(&gen, buffer, LE_TONE_CHUNK_FRAMES);
+        if (!frames)
+            return 0;
+        bytes = frames * LE_SLEEP_CHANNELS * sizeof(int16_t);
         while (sent < bytes) {
-            ssize_t n = write(fd, buffer + sent, bytes - sent);
+            ssize_t n = write(fd, (unsigned char *)buffer + sent,
+                              bytes - sent);
 
             if (n < 0 && errno == EINTR)
                 continue;
@@ -1444,7 +1421,9 @@ static int write_noise_fd(int fd, int colour, double amplitude,
 
                 do {
                     rc = poll(&pfd, 1, 1000);
-                } while (rc < 0 && errno == EINTR);
+                } while (rc < 0 && errno == EINTR && !g_sleep_stop);
+                if (g_sleep_stop)
+                    return 0;     /* the bus is not draining; stop now */
                 if (rc > 0)
                     continue;
                 if (rc == 0)
@@ -1455,8 +1434,6 @@ static int write_noise_fd(int fd, int colour, double amplitude,
                 return 0;
             sent += (size_t)n;
         }
-        if (frames_left > 0)
-            frames_left -= (long)frames;
     }
 }
 
@@ -1554,30 +1531,34 @@ static void configure_noise_child(void)
     if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0 || getppid() != parent)
         _exit(1);
 #endif
-    signal(SIGTERM, SIG_DFL);
+    /* SIGTERM is the explicit stop: it asks for the bounded fade below, not
+       an immediate exit, so the stream never ends on a step. */
+    g_sleep_stop = 0;
+    signal(SIGTERM, sleep_stop_signal);
 }
 
-static int start_noise(struct audio_hw *audio, int colour, int level,
-                       long seconds)
+/*
+ * Start one sleep source.  `source`/`bed`/`tempo` come from the validated
+ * command handler; seconds == 0 means "until stopped" and fade_seconds is the
+ * pre-timer fade, already bounded to the timer by the caller.  The generator
+ * owns level clamping and the output cap.
+ */
+static int start_noise(struct audio_hw *audio, int source, int bed, int tempo,
+                       int level, long seconds, long fade_seconds)
 {
-    double amplitude;
+    struct le_sleep_gen config;
     int fd;
     pid_t pid;
 
     if (!audio->output_available ||
         access(LE_MEDIA_AUDIO_BUS, F_OK) < 0)
         return -1;
+    if (le_sleep_gen_init(&config, source, bed, tempo, level, seconds,
+                          fade_seconds, 0x1234567u) < 0)
+        return -1;                        /* no source: nothing to play */
     /* Replace rather than layer: two generators on one bus is noise in the
-       unhelpful sense. */
+       unhelpful sense.  stop_noise reaps the previous child. */
     stop_noise(audio);
-    if (level < 1)
-        level = 1;
-    if (level > 100)
-        level = 100;
-    /* Cap well below full scale.  This plays for hours next to someone
-       asleep; headroom matters more than loudness, and the device volume
-       is the control people will actually reach for. */
-    amplitude = 8000.0 * (double)level / 100.0;
     fd = open(LE_MEDIA_AUDIO_BUS, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
         return -1;
@@ -1590,15 +1571,18 @@ static int start_noise(struct audio_hw *audio, int colour, int level,
         int result;
 
         configure_noise_child();
-        result = write_noise_fd(fd, colour, amplitude, seconds);
+        result = write_sleep_fd(fd, &config);
         close(fd);
         _exit(result == 0 ? 0 : 1);
     }
     close(fd);
     audio->noise_pid = pid;
-    audio->noise_colour = colour;
+    audio->noise_source = source;
+    audio->noise_bed = bed;
+    audio->noise_tempo = config.tempo_bpm;
     audio->noise_seconds = seconds;
-    audio->noise_level = level;
+    audio->noise_fade_seconds = config.fade_out_frames / LE_SLEEP_RATE;
+    audio->noise_level = config.level;
     audio->noise_started = monotonic_seconds();
     return 0;
 }
@@ -1817,13 +1801,24 @@ static int start_test_tone(const struct audio_hw *audio)
     return 0;
 }
 
-static const char *noise_colour_name(int colour)
+static const char *noise_source_name(int source)
 {
-    if (colour == LE_NOISE_PINK)
+    if (source == LE_SLEEP_SOURCE_PINK)
         return "pink";
-    if (colour == LE_NOISE_BROWN)
+    if (source == LE_SLEEP_SOURCE_BROWN)
         return "brown";
+    if (source == LE_SLEEP_SOURCE_HEARTBEAT)
+        return "heartbeat";
     return "white";
+}
+
+static const char *noise_bed_name(int bed)
+{
+    if (bed == LE_SLEEP_BED_PINK)
+        return "pink";
+    if (bed == LE_SLEEP_BED_BROWN)
+        return "brown";
+    return "none";
 }
 
 /*
@@ -2106,6 +2101,8 @@ static int handle_request(struct audio_hw *audio, char *message,
                        "\"startup_sound\":%s,\"amplifier_on\":%s,"
                        "\"output_available\":%s,"
                        "\"noise_active\":%s,\"noise_colour\":\"%s\","
+                       "\"noise_source\":\"%s\",\"noise_bed\":\"%s\","
+                       "\"noise_tempo\":%d,\"noise_fade_seconds\":%ld,"
                        "\"noise_level\":%d,\"noise_remaining_seconds\":%ld}",
                        audio->volume, audio->gain, audio->notification_volume,
                        audio->muted ? "true" : "false",
@@ -2113,7 +2110,10 @@ static int handle_request(struct audio_hw *audio, char *message,
                        audio->amplifier_on ? "true" : "false",
                        audio->output_available ? "true" : "false",
                        audio->noise_pid > 0 ? "true" : "false",
-                       noise_colour_name(audio->noise_colour),
+                       noise_source_name(audio->noise_source),
+                       noise_source_name(audio->noise_source),
+                       noise_bed_name(audio->noise_bed),
+                       audio->noise_tempo, audio->noise_fade_seconds,
                        audio->noise_level, noise_remaining(audio));
         return response_ok(response, response_size, id, data);
     }
@@ -2270,27 +2270,63 @@ static int handle_request(struct audio_hw *audio, char *message,
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "noise_start")) {
-        char colour_name[16] = "white";
+        char source_name[16] = "white";
+        char bed_name[16] = "none";
+        char legacy_name[16] = "";
         long level = 40, minutes = 0;
-        int colour;
+        long tempo = LE_SLEEP_TEMPO_DEFAULT;
+        long fade = 30;                  /* sensible pre-timer default */
+        long seconds, fade_seconds;
+        int source, bed;
 
         reap_noise(audio);
-        (void)json_string(message, "colour", colour_name, sizeof(colour_name));
+        /*
+         * "source" is the current field; "colour" is the pre-heartbeat name
+         * and is still accepted so existing callers keep working unchanged.
+         */
+        (void)json_string(message, "source", source_name, sizeof(source_name));
+        if (json_string(message, "colour", legacy_name, sizeof(legacy_name)) == 0 &&
+            legacy_name[0])
+            (void)snprintf(source_name, sizeof(source_name), "%s", legacy_name);
+        (void)json_string(message, "bed", bed_name, sizeof(bed_name));
         (void)json_long(message, "level", &level);
         (void)json_long(message, "minutes", &minutes);
-        if (!strcmp(colour_name, "pink")) colour = LE_NOISE_PINK;
-        else if (!strcmp(colour_name, "brown")) colour = LE_NOISE_BROWN;
-        else if (!strcmp(colour_name, "white")) colour = LE_NOISE_WHITE;
+        (void)json_long(message, "tempo", &tempo);
+        (void)json_long(message, "fade_seconds", &fade);
+        if (!strcmp(source_name, "pink")) source = LE_SLEEP_SOURCE_PINK;
+        else if (!strcmp(source_name, "brown")) source = LE_SLEEP_SOURCE_BROWN;
+        else if (!strcmp(source_name, "heartbeat"))
+            source = LE_SLEEP_SOURCE_HEARTBEAT;
+        else if (!strcmp(source_name, "white")) source = LE_SLEEP_SOURCE_WHITE;
         else return response_error(response, response_size, id,
-                                   "colour must be white, pink or brown");
+                                   "source must be white, pink, brown or heartbeat");
+        if (!strcmp(bed_name, "pink")) bed = LE_SLEEP_BED_PINK;
+        else if (!strcmp(bed_name, "brown")) bed = LE_SLEEP_BED_BROWN;
+        else if (!strcmp(bed_name, "none")) bed = LE_SLEEP_BED_NONE;
+        else return response_error(response, response_size, id,
+                                   "bed must be none, pink or brown");
         if (level < 1 || level > 100 || minutes < 0 || minutes > 600)
             return response_error(response, response_size, id,
                                   "level must be 1-100 and minutes 0-600");
-        if (start_noise(audio, colour, (int)level, minutes * 60) < 0)
+        if (tempo < LE_SLEEP_TEMPO_MIN || tempo > LE_SLEEP_TEMPO_MAX)
+            return response_error(response, response_size, id,
+                                  "tempo must be 40-100");
+        if (fade < 0 || fade > LE_SLEEP_MAX_FADE_SECONDS)
+            return response_error(response, response_size, id,
+                                  "fade_seconds must be 0-3600");
+        seconds = minutes * 60;
+        /* The pre-timer fade can never outlast the timer it precedes. */
+        if (seconds == 0)
+            fade_seconds = 0;
+        else
+            fade_seconds = fade > seconds ? seconds : fade;
+        if (start_noise(audio, source, bed, (int)tempo, (int)level, seconds,
+                        fade_seconds) < 0)
             return response_error(response, response_size, id,
                                   "audio output unavailable");
-        le_log_info("audiod: %s noise started (level %d, %s)",
-                    colour_name, (int)level,
+        le_log_info("audiod: %s sleep source started (level %d, tempo %d, "
+                    "bed %s, fade %lds, %s)",
+                    source_name, (int)level, (int)tempo, bed_name, fade_seconds,
                     minutes ? "timed" : "until stopped");
         return response_ok(response, response_size, id, "{}");
     }
