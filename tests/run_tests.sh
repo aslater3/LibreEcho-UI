@@ -2,7 +2,7 @@
 set -eu
 # Tempfile-based children inherit a private directory, never a host /tmp path.
 mkdir -p "${TMPDIR:-$PWD/build}"
-SUITE_TMP=$(mktemp -d "${TMPDIR:-$PWD/build}/libreecho-suite-XXXXXX")
+SUITE_TMP=$(mktemp -d "${TMPDIR:-$PWD/build}/le-XXXXXX")
 TMPDIR=$SUITE_TMP
 export TMPDIR
 cleanup(){

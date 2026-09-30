@@ -32,10 +32,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/libreecho-tests"
+          mkdir -p "$RUNNER_TEMP/t"
           # runner is unavailable in job-level env; export runtime paths here.
           printf '%s\n' \
-            "TMPDIR=$RUNNER_TEMP/libreecho-tests" \
+            "TMPDIR=$RUNNER_TEMP/t" \
             "ESPHOMED_TLS_PREFIX=$RUNNER_TEMP/mbedtls" \
             "ESPHOMED_TEST_TLS_PREFIX=$RUNNER_TEMP/mbedtls" \
             "ESPHOMED_TLS_LIBS=$RUNNER_TEMP/mbedtls/lib/libmbedtls.a $RUNNER_TEMP/mbedtls/lib/libmbedx509.a $RUNNER_TEMP/mbedtls/lib/libmbedcrypto.a" \
