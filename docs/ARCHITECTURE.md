@@ -492,6 +492,31 @@ btd → airplayd → ttsd → agentd → lived → web
 
 **Shutdown order:** reverse startup order.
 
+## Home Assistant voice ownership
+
+Home Assistant mode uses only `libreecho-esphomed`, the C99 ESPHome native API
+satellite on TCP 6053. Integration bit 1 selects that mode. There is no Wyoming
+satellite service or protocol selector. Missing or old `ha_protocol` settings
+normalize to `esphome`; Wyoming Whisper/Piper **client** engines remain available
+for Custom mode.
+
+A bounded, tracked HTTP child stops the local STT/TTS/assistant owner before
+starting ESPHome. The accepted response is 202/pending; ordinary APIs continue
+to work. Only the voice-owned fields are snapshotted. If activation fails, the
+HTTP parent restores those fields and persisted intent before starting a tracked
+rollback worker for the previous service graph. Concurrent unrelated settings
+are not reverted. A failed HA stop never starts a competing local owner.
+Disabling HA restores the previously selected Local or Custom pipeline and its
+saved endpoints, model and voice; custom assistant settings are not rewritten.
+
+`GET /api/v1/voice-pipeline` separates daemon `ready` from authenticated HA
+`connected`, read from `/run/libreecho/esphome-status.json` and gated by the live
+ESPHome pidfile. A TCP listener alone is not a connection. The persistent
+`esphome_noise_key` holds a canonical base64-encoded 32-byte PSK; empty explicitly
+means the all-zero provisioning PSK until HA provisions one. The private key is
+preserved on ordinary config saves but absent from public config exports,
+voice status and diagnostics. Config and backups remain mode 0600.
+
 ## Service Control Boundary
 
 Services are controlled by running another daemon's init script
@@ -527,7 +552,7 @@ Each of those callers carries its own generic `ARGS`, `DAEMON`, `PIDFILE` and
 `LOGFILE`, and every init script resolves its settings with
 `VAR=${VAR:-default}`. An inherited value therefore wins inside the child
 script, which is how a voice-pipeline change used to start
-`libreecho-sttd`/`libreecho-ttsd`/`libreecho-agentd` and `libreecho-wyomingd`
+`libreecho-sttd`/`libreecho-ttsd`/`libreecho-agentd` and `libreecho-esphomed`
 with the Web daemon's own command line — usage on stderr, exit, and an API
 that reported "Voice assistant service is unavailable".
 

@@ -35,10 +35,10 @@ if grep -q 'for socket in network audio mic led bluetooth airplay' init/libreech
     echo 'unconditional Bluetooth readiness loop remains' >&2
     exit 1
 fi
-grep -q 'wyoming_service_ready()' init/libreecho-web.init
-! awk '/^wyoming_service_ready\(\)/,/^}/' init/libreecho-web.init | grep -q 'redistributable'
-grep -q '/proc/net/tcp' init/libreecho-web.init
-grep -q 'wyoming_service_ready' init/libreecho-web.init
+grep -q 'esphome_service_ready()' init/libreecho-web.init
+! awk '/^esphome_service_ready\(\)/,/^}/' init/libreecho-web.init | grep -q 'redistributable'
+grep -q 'ESPHOME_STATUS_FILE' init/libreecho-web.init
+grep -q 'esphome_service_ready' init/libreecho-web.init
 
 grep -q -- '--startup-animation' src/adapter/ledd.c
 grep -q -- '--startup-ready' src/adapter/ledd.c

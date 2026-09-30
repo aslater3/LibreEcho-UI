@@ -31,7 +31,7 @@ The project has several different evidence levels. They must not be confused:
 | Wi-Fi/network | Implemented and adapter-wired | Scan/liveness/recovery contracts and mock transitions | Requires `networkd`, `wpa_supplicant`, DHCP and target WLAN support |
 | Bluetooth | Implemented through `btd` and API contracts | MGMT, pairing, metadata, SDP/A2DP/AVRCP and startup contracts | Controller transport remains target-dependent; a later live attempt failed below the UI at HCI/MGMT bring-up |
 | Audio/microphone | Implemented through service boundaries | DSP, shared-capture, stream-format and API contracts | Requires target ALSA/Radar capture and companion services |
-| Voice pipeline | Implemented as local/custom/Home Assistant modes | Wyoming, assistant, latency and configuration contracts | Requires the selected STT/TTS/assistant services and credentials |
+| Voice pipeline | Local/Custom engines and ESPHome Home Assistant mode | ESPHome native API/Noise, Wyoming Whisper/Piper clients, assistant and configuration contracts | HA uses TCP 6053; Local/Custom settings remain saved while HA owns voice |
 | OTA/update | Implemented through the live Linux image path | API/channel/authorization contracts; mock deliberately returns unavailable | Requires the signed A/B helper set and image release policy |
 | Hardware acceptance | Separate gate | Never inferred from a host build | Must be recorded from the actual target and image |
 

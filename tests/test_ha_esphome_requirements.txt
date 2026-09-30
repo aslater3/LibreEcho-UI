@@ -1,0 +1,23 @@
+# Acceptance-only dependencies; never install these into device/runtime images.
+# Python 3.14.7 tested. Pins follow Home Assistant 2026.9.4 integration manifests.
+homeassistant==2026.9.4
+aioesphomeapi==46.2.0
+esphome-dashboard-api==1.4.0
+bleak-esphome==4.0.0
+pymicro-vad==1.0.1
+pyspeex-noise==1.0.2
+hassil==3.12.1
+bleak==3.0.2
+bleak-retry-connector==4.7.0
+bluetooth-adapters==2.4.0
+bluetooth-auto-recovery==1.6.4
+bluetooth-data-tools==1.29.24
+dbus-fast==5.0.22
+habluetooth==6.26.11
+aiousbwatcher==1.1.2
+serialx==1.10.0
+ha-ffmpeg==3.2.2
+zeroconf==0.151.1
+gazetteer-matcher==1.1.0
+home-assistant-intents==2026.8.28
+mutagen==1.48.1

@@ -134,7 +134,7 @@ static int read_key(const char *path, const char *key, char *out, size_t out_siz
 static int redact_text(char *out, size_t out_size, const char *input)
 {
     static const char *sensitive[] = {
-        "password", "passwd", "psk", "secret", "token", "cookie",
+        "esphome_noise_key", "password", "passwd", "psk", "secret", "token", "cookie",
         "authorization", "bearer", "ssid", "bssid", "username", "address",
         "mac", "hostname", "path", NULL
     };

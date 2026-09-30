@@ -13,6 +13,8 @@
 
 #define WAKE_BLOCK_SAMPLES 1280U
 #define WAKE_QUEUE_BLOCKS 8U
+#define WAKE_MODEL_DIRECTORY_BYTES 1024U
+#define WAKE_RELOAD_SECONDS 5
 /*
  * The bar a neighbouring frame must reach to corroborate a peak.
  *
@@ -55,6 +57,8 @@ struct wake_decoder {
 
 struct wake_worker_impl {
     struct le_wake_engine *engine;
+    char model_directory[WAKE_MODEL_DIRECTORY_BYTES];
+    unsigned int threads;
     pthread_t thread;
     pthread_mutex_t mutex;
     pthread_cond_t condition;
@@ -65,6 +69,9 @@ struct wake_worker_impl {
     int stopping;
     int thread_started;
     int inference_failed;
+    int reload_requested;
+    int reload_cancelled;
+    int reload_result;
     uint64_t last_inference_ns;
 
     int16_t accumulating[WAKE_BLOCK_SAMPLES];
@@ -204,9 +211,42 @@ static void *wake_thread(void *opaque)
         unsigned int inference_us;
 
         pthread_mutex_lock(&worker->mutex);
-        while (worker->queued == 0 && !worker->stopping)
+        while ((worker->queued == 0 || worker->inference_failed) &&
+               !worker->stopping && !worker->reload_requested)
             pthread_cond_wait(&worker->condition, &worker->mutex);
-        if (worker->queued == 0 && worker->stopping) {
+        if (worker->reload_requested) {
+            struct le_wake_engine *replacement, *retired;
+
+            /* No feed can compete with model initialization/warmup: this is
+             * the same inference thread. Retain the old engine until load
+             * succeeds, including on a cancelled/late initialization. */
+            pthread_mutex_unlock(&worker->mutex);
+            replacement = le_wake_engine_create(
+                worker->model_directory, worker->threads);
+            pthread_mutex_lock(&worker->mutex);
+            retired = replacement;
+            worker->reload_result = -1;
+            if (replacement && !worker->reload_cancelled && !worker->stopping) {
+                retired = worker->engine;
+                worker->engine = replacement;
+                worker->read_position = worker->write_position = worker->queued = 0;
+                worker->accumulated = 0;
+                memset(&worker->accumulated_observation, 0,
+                       sizeof(worker->accumulated_observation));
+                memset(&worker->decoder, 0, sizeof(worker->decoder));
+                worker->inference_failed = 0;
+                worker->last_inference_ns = 0;
+                worker->reload_result = 0;
+            }
+            pthread_mutex_unlock(&worker->mutex);
+            if (retired) le_wake_engine_destroy(retired);
+            pthread_mutex_lock(&worker->mutex);
+            worker->reload_requested = 0;
+            pthread_cond_broadcast(&worker->condition);
+            pthread_mutex_unlock(&worker->mutex);
+            continue;
+        }
+        if ((worker->queued == 0 || worker->inference_failed) && worker->stopping) {
             pthread_mutex_unlock(&worker->mutex);
             break;
         }
@@ -223,7 +263,10 @@ static void *wake_thread(void *opaque)
             pthread_mutex_lock(&worker->mutex);
             worker->inference_failed = 1;
             pthread_mutex_unlock(&worker->mutex);
-            break;
+            /* Keep the existing worker dormant so a later reload can recover
+             * without adding a second inference thread. No more PCM is fed
+             * to the failed engine unless reinitialization succeeds. */
+            continue;
         }
         pthread_mutex_lock(&worker->mutex);
         worker->last_inference_ns = wake_now_ns();
@@ -245,21 +288,35 @@ int le_wake_worker_start(struct le_wake_worker *worker,
                          void *callback_opaque)
 {
     struct wake_worker_impl *impl;
+    pthread_condattr_t condition_attributes;
 
     if (!worker || worker->implementation ||
-        !model_directory || accept_threshold <= 0.0f ||
+        !model_directory ||
+        strnlen(model_directory, WAKE_MODEL_DIRECTORY_BYTES) >= WAKE_MODEL_DIRECTORY_BYTES ||
+        accept_threshold <= 0.0f ||
         accept_threshold >= 1.0f)
         return -1;
     impl = calloc(1, sizeof(*impl));
     if (!impl)
         return -1;
+    memcpy(impl->model_directory, model_directory, strlen(model_directory) + 1);
+    impl->threads = threads;
     impl->accept_threshold = accept_threshold;
     impl->callback = callback;
     impl->callback_opaque = callback_opaque;
     if (pthread_mutex_init(&impl->mutex, NULL) != 0)
         goto fail;
-    if (pthread_cond_init(&impl->condition, NULL) != 0)
+    if (pthread_condattr_init(&condition_attributes) != 0)
         goto fail_mutex;
+    if (pthread_condattr_setclock(&condition_attributes, CLOCK_MONOTONIC) != 0) {
+        pthread_condattr_destroy(&condition_attributes);
+        goto fail_mutex;
+    }
+    if (pthread_cond_init(&impl->condition, &condition_attributes) != 0) {
+        pthread_condattr_destroy(&condition_attributes);
+        goto fail_mutex;
+    }
+    pthread_condattr_destroy(&condition_attributes);
     impl->engine = le_wake_engine_create(model_directory, threads);
     if (!impl->engine)
         goto fail_condition;
@@ -347,6 +404,48 @@ int le_wake_worker_set_threshold(
     impl->accept_threshold = accept_threshold;
     pthread_mutex_unlock(&impl->mutex);
     return 0;
+}
+
+int le_wake_worker_reload(struct le_wake_worker *worker)
+{
+    struct wake_worker_impl *impl;
+    struct timespec deadline;
+    int result;
+
+    if (!worker || !worker->implementation ||
+        clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+        return -1;
+    deadline.tv_sec += WAKE_RELOAD_SECONDS;
+    impl = worker->implementation;
+    pthread_mutex_lock(&impl->mutex);
+    if (!impl->thread_started || impl->stopping || impl->reload_requested) {
+        pthread_mutex_unlock(&impl->mutex);
+        return -1;
+    }
+    impl->reload_requested = 1;
+    impl->reload_cancelled = 0;
+    impl->reload_result = -1;
+    pthread_cond_signal(&impl->condition);
+    while (impl->reload_requested) {
+        if (pthread_cond_timedwait(&impl->condition, &impl->mutex, &deadline) != 0 &&
+            impl->reload_requested) {
+            /* Publication is already irrevocable once reload_result is zero.
+             * Slow retirement must not turn a committed success into a failure. */
+            if (impl->reload_result == 0) {
+                pthread_mutex_unlock(&impl->mutex);
+                return 0;
+            }
+            /* ONNX initialization itself cannot be interrupted. Cancel its
+             * publication, retain the current model and refuse another load
+             * until this one retires on the worker. */
+            impl->reload_cancelled = 1;
+            pthread_mutex_unlock(&impl->mutex);
+            return -1;
+        }
+    }
+    result = impl->reload_result;
+    pthread_mutex_unlock(&impl->mutex);
+    return result;
 }
 
 void le_wake_worker_stop(

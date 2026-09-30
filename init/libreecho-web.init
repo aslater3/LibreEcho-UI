@@ -30,8 +30,10 @@ STARTUP_READY=${STARTUP_READY:-/run/libreecho/startup-ready}
 STARTUP_READY_TIMEOUT_TICKS=${STARTUP_READY_TIMEOUT_TICKS:-600}
 BT_READY_PATH=${BT_READY_PATH:-/run/libreecho/bluetooth-ready}
 FEATURE_POLICY_FILE=${FEATURE_POLICY_FILE:-/etc/libreecho/feature-policy}
-PORT=10700
-[ -r /etc/default/libreecho-wyomingd ] && . /etc/default/libreecho-wyomingd
+ESPHOMED_PIDFILE=${LIBREECHO_ESPHOMED_PIDFILE:-/var/run/libreecho-esphomed.pid}
+ESPHOME_STATUS_FILE=${LIBREECHO_ESPHOME_STATUS_FILE:-/run/libreecho/esphome-status.json}
+ESPHOMED_DAEMON=${LIBREECHO_ESPHOMED_DAEMON:-/usr/local/sbin/libreecho-esphomed}
+ESPHOME_PORT=${LIBREECHO_ESPHOME_PORT:-6053}
 
 # Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life:
 # it goes stale when the daemon is started from a shell that then exits (the
@@ -191,25 +193,14 @@ startup_services_ready() {
         done
         return 0
     fi
-    wyoming_service_ready
+    esphome_service_ready
 }
 
-wyoming_service_ready() {
-    pidfile=/var/run/libreecho-wyomingd.pid
-    [ -s "$pidfile" ] || return 1
-    pid=$(sed -n '1p' "$pidfile")
-    case "$pid" in *[!0-9]*|'') return 1 ;; esac
-    kill -0 "$pid" 2>/dev/null || return 1
-    [ -S /run/libreecho/wakeword.sock ] || return 1
-    wake_pidfile=/var/run/libreecho-waked.pid
-    [ -s "$wake_pidfile" ] || return 1
-    wake_pid=$(sed -n '1p' "$wake_pidfile")
-    case "$wake_pid" in *[!0-9]*|'') return 1 ;; esac
-    kill -0 "$wake_pid" 2>/dev/null || return 1
-    port_hex=$(printf '%04X' "$PORT") || return 1
-    awk -v port="$port_hex" \
-        '$4 == "0A" && $2 ~ (":" port "$") { found = 1 }
-         END { exit found ? 0 : 1 }' /proc/net/tcp 2>/dev/null
+esphome_service_ready() {
+    # Shared C parser binds status to exact executable, PID/start/boot identity
+    # and the listener inode owned by that process. HA connection is separate.
+    "$ESPHOMED_DAEMON" --health-check "$ESPHOMED_PIDFILE" "$ESPHOME_STATUS_FILE" \
+        "$ESPHOME_PORT" "$ESPHOMED_DAEMON" ready
 }
 
 mark_startup_ready() {

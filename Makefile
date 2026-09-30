@@ -5,17 +5,25 @@ DESTDIR ?=
 CSTD ?= -std=c99
 WARN = -Wall -Wextra -Wpedantic
 OS_VERSION ?= $(shell tr -d '\r\n' < VERSION)
-SOURCE_COMMIT ?= $(shell sh tools/source-provenance.sh --field commit 2>/dev/null || printf unknown)
-SOURCE_DIRTY ?= $(shell sh tools/source-provenance.sh --field dirty 2>/dev/null || printf unknown)
-SOURCE_DIGEST ?= $(shell sh tools/source-provenance.sh --field digest 2>/dev/null || printf unknown)
-CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Isrc/adapter -DLE_TLS_AVAILABLE=$(TLS_AVAILABLE) -DLE_OS_VERSION=\"$(OS_VERSION)\" \
+# Snapshot provenance once per make invocation, not once per object recipe.
+# Command-line/environment values supplied by Platform remain authoritative.
+ifndef SOURCE_COMMIT
+SOURCE_COMMIT := $(shell sh tools/source-provenance.sh --field commit 2>/dev/null || printf unknown)
+endif
+ifndef SOURCE_DIRTY
+SOURCE_DIRTY := $(shell sh tools/source-provenance.sh --field dirty 2>/dev/null || printf unknown)
+endif
+ifndef SOURCE_DIGEST
+SOURCE_DIGEST := $(shell sh tools/source-provenance.sh --field digest 2>/dev/null || printf unknown)
+endif
+override CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Isrc/adapter -DLE_TLS_AVAILABLE=$(TLS_AVAILABLE) -DLE_OS_VERSION=\"$(OS_VERSION)\" \
     -DLE_SOURCE_COMMIT=\"$(SOURCE_COMMIT)\" -DLE_SOURCE_DIRTY=\"$(SOURCE_DIRTY)\" \
     -DLE_SOURCE_DIGEST=\"$(SOURCE_DIGEST)\"
 CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
-ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-watchdogd $(BUILD)/libreecho-timerd $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-lived $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming $(BUILD)/libreecho-mdnsd
+ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-watchdogd $(BUILD)/libreecho-timerd $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-esphomed $(BUILD)/libreecho-lived $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming $(BUILD)/libreecho-mdnsd
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
@@ -23,11 +31,11 @@ AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/a
 MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/adapter_server.c src/log.c
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
 BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
-WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/service_env.c src/adapter/adapter_client.c src/log.c
+WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/service_env.c src/adapter/adapter_client.c src/json.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
 RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
 BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
-AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/mdns_client.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
+AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TIMERD_SOURCES = src/adapter/timerd.c src/adapter/timer_schedule.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
 TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
@@ -41,9 +49,26 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/time
 	src/adapter/spoken_time.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c \
 	src/config_store.c src/json.c src/log.c
-WYOMINGD_SOURCES = src/adapter/wyomingd.c src/adapter/mdns_client.c src/adapter/wyoming_protocol.c \
-	src/adapter/voice_stream.c src/adapter/voice_listening_led.c \
-	src/adapter/adapter_client.c src/json.c src/log.c
+# ESPHome Noise is mandatory in every shipped build. Host developers may use
+# system mbedTLS 3.6 headers/libraries, or an already-staged static prefix:
+#   make ESPHOMED_TLS_PREFIX=/path/to/mbedtls all
+# Platform builds supply ESPHOMED_NOISE=1, explicit ESPHOMED_TLS_LIBS archives,
+# and CPPFLAGS=-I/path/to/include. Missing crypto is a build error, not a stub.
+ESPHOMED_NOISE ?= 1
+ESPHOMED_TLS_PREFIX ?=
+ESPHOMED_TLS_LIBS ?= $(if $(strip $(ESPHOMED_TLS_PREFIX)),$(ESPHOMED_TLS_PREFIX)/lib/libmbedtls.a $(ESPHOMED_TLS_PREFIX)/lib/libmbedx509.a $(ESPHOMED_TLS_PREFIX)/lib/libmbedcrypto.a,-lmbedtls -lmbedx509 -lmbedcrypto)
+ifneq ($(strip $(ESPHOMED_TLS_PREFIX)),)
+override CPPFLAGS += -I$(ESPHOMED_TLS_PREFIX)/include
+endif
+ESPHOMED_SOURCES = src/adapter/esphomed.c src/adapter/esphome_proto.c \
+	src/adapter/esphome_frame.c src/adapter/esphome_noise.c src/adapter/esphome_playback.c \
+	src/adapter/radio_resample.c src/adapter/mdns_client.c src/adapter/mdns_lease.c \
+	src/config_store.c src/json.c
+ESPHOMED_TEST_TLS_PREFIX ?= $(ESPHOMED_TLS_PREFIX)
+ESPHOMED_CRYPTO_PYTHON ?= python3
+ESPHOMED_AIO_PYTHON ?= python3
+# The real-HA gate is separate from native-client interoperability.
+ESPHOME_HA_PYTHON ?=
 LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 	src/adapter/live_ring.c src/adapter/live_transport_mock.c \
 	src/adapter/live_transport_realtime.c src/adapter/live_audio_out.c \
@@ -71,13 +96,13 @@ AIRPLAYD_OBJECTS = $(AIRPLAYD_SOURCES:src/%.c=$(BUILD)/%.o)
 TTSD_OBJECTS = $(TTSD_SOURCES:src/%.c=$(BUILD)/%.o)
 STTD_OBJECTS = $(STTD_SOURCES:src/%.c=$(BUILD)/%.o)
 AGENTD_OBJECTS = $(AGENTD_SOURCES:src/%.c=$(BUILD)/%.o)
-WYOMINGD_OBJECTS = $(WYOMINGD_SOURCES:src/%.c=$(BUILD)/%.o)
+ESPHOMED_OBJECTS = $(ESPHOMED_SOURCES:src/%.c=$(BUILD)/%.o)
 LIVED_OBJECTS = $(LIVED_SOURCES:src/%.c=$(BUILD)/%.o)
 LOGD_OBJECTS = $(LOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 comma := ,
 GC_LDFLAGS ?= $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections)
 
-.PHONY: all adapters clean release provenance test install test-wyoming-protocol test-wyomingd test-voice-listening-feedback
+.PHONY: all adapters clean release provenance test install test-wyoming-protocol test-esphome check-esphomed-crypto test-voice-listening-feedback
 all: CPPFLAGS += -DLE_DEV_CONTROLS=1
 all: $(TARGET) $(LOGD_TARGET) adapters
 
@@ -152,9 +177,54 @@ test-mdns:
 	python3 tests/test_mdns_supervisor.py
 	python3 tests/test_mdns_client.py
 	python3 tests/test_mdns_wyoming.py
+	python3 tests/test_mdns_esphome.py
 
-$(BUILD)/libreecho-wyomingd: $(WYOMINGD_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(WYOMINGD_OBJECTS) $(LDFLAGS) -lm -o $@
+# Run even when a binary is already present: disabling Noise must never install
+# a previously built fixture. The source itself requires the mbedTLS headers.
+check-esphomed-crypto:
+	@test "$(ESPHOMED_NOISE)" = 1 || { printf '%s\n' 'ESPHOMED_NOISE=1 is mandatory for production' >&2; exit 1; }
+	@for lib in mbedtls mbedx509 mbedcrypto; do \
+		case " $(ESPHOMED_TLS_LIBS) " in *"-l$$lib "*|*"/lib$$lib.a "*) ;; \
+		*) printf '%s\n' "ESPHOMED_TLS_LIBS must include $$lib (mbedTLS 3.6)" >&2; exit 1 ;; esac; \
+	done
+
+$(BUILD)/libreecho-esphomed: $(ESPHOMED_OBJECTS) | check-esphomed-crypto
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(ESPHOMED_OBJECTS) $(LDFLAGS) $(ESPHOMED_TLS_LIBS) -lm -o $@
+
+# Full pinned interoperability is mandatory here; --host-only is never a normal
+# repository test mode. The runner verifies the installed aioesphomeapi pin.
+test-esphome: $(BUILD)/libreecho-radiod $(BUILD)/test-esphome-radio-controls $(BUILD)/test-esphome-remote-timer
+	@test -n "$(ESPHOMED_TEST_TLS_PREFIX)" || { printf '%s\n' 'Set ESPHOMED_TEST_TLS_PREFIX to a staged mbedTLS 3.6.4 prefix' >&2; exit 1; }
+	python3 tests/test_esphomed_run.py --tls-prefix "$(ESPHOMED_TEST_TLS_PREFIX)" --crypto-python "$(ESPHOMED_CRYPTO_PYTHON)" --aio-python "$(ESPHOMED_AIO_PYTHON)"
+	ESPHOMED_TEST_TLS_PREFIX="$(ESPHOMED_TEST_TLS_PREFIX)" python3 tests/test_esphome_control.py
+	ESPHOMED_TEST_TLS_PREFIX="$(ESPHOMED_TEST_TLS_PREFIX)" python3 tests/test_esphome_control_http.py
+	ESPHOMED_TEST_TLS_PREFIX="$(ESPHOMED_TEST_TLS_PREFIX)" python3 tests/test_esphome_control_init.py
+	SPEEXDSP_PREFIX="$(SPEEX_PREFIX)" python3 tests/test_esphome_wake_reload.py
+	./$(BUILD)/test-esphome-radio-controls
+	python3 tests/test_esphome_radio_controls.py ./$(BUILD)/libreecho-radiod
+	./$(BUILD)/test-esphome-remote-timer
+	python3 tests/test_esphome_shipping.py
+
+# Execute real HA handlers, not merely the pinned native client.
+.PHONY: test-ha-esphome
+test-ha-esphome:
+	@test -n "$(ESPHOME_HA_PYTHON)" || { printf '%s\n' 'Set ESPHOME_HA_PYTHON to the pinned Python 3.14 HA environment' >&2; exit 1; }
+	@test -n "$(ESPHOMED_TEST_TLS_PREFIX)" || { printf '%s\n' 'Set ESPHOMED_TEST_TLS_PREFIX to the staged mbedTLS prefix' >&2; exit 1; }
+	ESPHOME_HA_PYTHON="$(ESPHOME_HA_PYTHON)" ESPHOME_TLS_PREFIX="$(ESPHOMED_TEST_TLS_PREFIX)" python3 tests/test_ha_esphome_integration.py
+
+$(BUILD)/test-esphome-radio-controls: tests/test_esphome_radio_controls.c src/adapter/radiod.c \
+		src/adapter/radio_resample.c src/adapter/adapter_server.c src/json.c src/log.c $(TLS_SOURCES)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections $(GC_LDFLAGS) -Isrc -Isrc/adapter \
+		$(filter-out src/adapter/radiod.c,$^) $(RADIOD_TLS_LIBS) -lm -o $@
+
+$(BUILD)/test-esphome-remote-timer: tests/test_esphome_remote_timer.c src/adapter/timerd.c \
+		src/adapter/timer_schedule.c src/adapter/adapter_server.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections $(GC_LDFLAGS) -Isrc -Isrc/adapter $< \
+		src/adapter/timer_schedule.c src/adapter/adapter_server.c src/json.c src/log.c -o $@
 
 $(BUILD)/libreecho-lived: $(LIVED_OBJECTS) $(TLS_SOURCES:src/%.c=$(BUILD)/%.o)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LIVED_OBJECTS) \
@@ -206,11 +276,6 @@ test-lived: $(BUILD)/test-live-ring $(BUILD)/test-live-session \
 	./$(BUILD)/test-live-dns
 	./$(BUILD)/test-lived
 	sh tests/run_live_transport_e2e.sh
-
-$(BUILD)/libreecho-wyomingd-test: $(WYOMINGD_SOURCES)
-	@mkdir -p $(BUILD)
-	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -DLE_WYOMING_PIPELINE_WATCHDOG_SECONDS=1 -Isrc \
-		$^ $(LDFLAGS) -lm -o $@
 
 $(BUILD)/libreecho-sttd-wyoming: src/adapter/sttd.c \
 		src/adapter/stt_engine_wyoming.c src/adapter/wyoming_client.c \
@@ -478,14 +543,6 @@ $(BUILD)/test-wyoming-protocol: tests/test_wyoming_protocol.c \
 
 test-wyoming-protocol: $(BUILD)/test-wyoming-protocol
 	./$(BUILD)/test-wyoming-protocol
-
-$(BUILD)/test-wyomingd: tests/test_wyomingd.c $(BUILD)/libreecho-wyomingd-test
-	$(CC) $(CSTD) $(WARN) -Werror -Isrc tests/test_wyomingd.c \
-		src/adapter/voice_stream.c src/adapter/wyoming_protocol.c src/json.c \
-		-o $@
-
-test-wyomingd: $(BUILD)/test-wyomingd
-	./$(BUILD)/test-wyomingd
 
 $(BUILD)/test-audiod-review: tests/test_audiod_review.c \
 		src/adapter/audiod.c src/adapter/adapter_client.c \
@@ -757,18 +814,18 @@ $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 		src/json.c src/log.c -lpthread -o $@
 
 $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
-	src/api.c src/backend.c src/json.c src/service_env.c
+	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/service_env.c -o $@
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c -o $@
 
 $(BUILD)/test-voice-pipeline-env-isolation: tests/test_voice_pipeline_env_isolation.c \
-	src/api.c src/backend.c src/json.c src/service_env.c
+	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/service_env.c -o $@
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c -o $@
 
 $(BUILD)/test-home-assistant-discovery: tests/test_home_assistant_discovery_lifecycle.c \
 	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c \
@@ -785,7 +842,7 @@ $(BUILD)/test-voice-listening-feedback: \
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
-test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback
+test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback $(BUILD)/libreecho-esphomed
 	./$(BUILD)/test-voice-listening-feedback
 	python3 tests/test_voice_listening_callers.py
 
@@ -793,20 +850,20 @@ $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c \
-		src/adapter/adapter_server.c src/log.c
+		src/adapter/adapter_server.c src/log.c src/json.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
-		$^ $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
+		$(filter %.c,$^) $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
 $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c \
-		src/adapter/wake_led.c src/adapter/adapter_client.c src/log.c
+		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 \
 		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
 		-ffunction-sections -fdata-sections -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(ARM_SPEEX_PREFIX)/include \
-		$^ $(ARM_SPEEX_PREFIX)/lib/libspeexdsp.a \
+		$(filter %.c,$^) $(ARM_SPEEX_PREFIX)/lib/libspeexdsp.a \
 		-static -Wl,--gc-sections -lm -o $@
 
 $(BUILD)/wake_engine_onnx.arm.o: src/adapter/wake_engine_onnx.cpp
@@ -852,7 +909,7 @@ $(BUILD)/waked.wake.arm.o: src/adapter/adapter.h \
 	src/adapter/voice_aec.h src/adapter/voice_dsp.h \
 	src/adapter/voice_reference.h src/adapter/voice_stream.h \
 	src/adapter/wake_led.h \
-	src/adapter/wake_worker.h
+	src/adapter/wake_worker.h src/json.h
 $(BUILD)/voice_aec.wake.arm.o: src/adapter/voice_aec.h
 $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
 $(BUILD)/voice_dsp.wake.arm.o: src/adapter/voice_dsp.h
@@ -861,6 +918,14 @@ $(BUILD)/wake_worker.wake.arm.o: src/adapter/wake_worker.h \
 $(BUILD)/wake_engine_onnx.arm.o: src/adapter/wake_engine.h
 
 $(BUILD)/log.wake.arm.o: src/log.c
+	@mkdir -p $(BUILD)
+	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L \
+		-DLE_WAKE_ENGINE_ONNX -std=c99 -O3 -march=armv7-a \
+		-mfpu=neon-vfpv4 -mfloat-abi=hard -ffunction-sections \
+		-fdata-sections -Wall -Wextra -Wpedantic -Werror \
+		-Isrc -Isrc/adapter -c $< -o $@
+
+$(BUILD)/json.wake.arm.o: src/json.c src/json.h
 	@mkdir -p $(BUILD)
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L \
 		-DLE_WAKE_ENGINE_ONNX -std=c99 -O3 -march=armv7-a \
@@ -878,6 +943,7 @@ WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/adapter_client.wake.arm.o \
 	$(BUILD)/adapter_server.wake.arm.o \
 	$(BUILD)/log.wake.arm.o \
+	$(BUILD)/json.wake.arm.o \
 	$(BUILD)/wake_engine_onnx.arm.o
 
 $(BUILD)/libreecho-waked-onnx-arm32: $(WAKE_DAEMON_ARM_OBJECTS)
@@ -889,6 +955,10 @@ $(BUILD)/libreecho-waked-onnx-arm32: $(WAKE_DAEMON_ARM_OBJECTS)
 		$(WAKE_ORT_ABSEIL) -Wl,--end-group -lpthread -ldl -lm
 
 adapters: $(ADAPTER_TARGETS)
+
+$(BUILD)/adapter/watchdogd.o $(BUILD)/adapter/esphomed.o $(BUILD)/api.o: src/esphome_health.h src/json.h
+$(BUILD)/test-voice-pipeline-restart $(BUILD)/test-voice-pipeline-env-isolation $(BUILD)/test-home-assistant-discovery: tests/esphome_process_fixture.h src/esphome_health.h | $(BUILD)/libreecho-esphomed
+$(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32: src/json.h src/adapter/wake_worker.h
 
 # -MMD -MP records which headers each object was built from, so editing a
 # header rebuilds what included it.  Without this the tree compiled
@@ -909,7 +979,7 @@ $(BUILD)/backend_linux.o $(BUILD)/backend_mock.o: VERSION src/version.h
 -include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
 release: clean
-	$(MAKE) CROSS_COMPILE="$(CROSS_COMPILE)" CC="$(CC)" CFLAGS="-Os -ffunction-sections -fdata-sections" LDFLAGS="$(GC_LDFLAGS)" $(TARGET) $(LOGD_TARGET) $(ADAPTER_TARGETS)
+	$(MAKE) CROSS_COMPILE="$(CROSS_COMPILE)" CC="$(CC)" CPPFLAGS='$(CPPFLAGS)' ESPHOMED_NOISE="$(ESPHOMED_NOISE)" ESPHOMED_TLS_PREFIX="$(ESPHOMED_TLS_PREFIX)" ESPHOMED_TLS_LIBS="$(ESPHOMED_TLS_LIBS)" WEB_TLS_LIBS="$(WEB_TLS_LIBS)" RADIOD_TLS_LIBS="$(RADIOD_TLS_LIBS)" CFLAGS="-Os -ffunction-sections -fdata-sections" LDFLAGS="$(GC_LDFLAGS)" $(TARGET) $(LOGD_TARGET) $(ADAPTER_TARGETS)
 	$(MAKE) provenance
 
 provenance:
@@ -919,7 +989,7 @@ provenance:
 test:
 	$(MAKE) clean
 	$(MAKE) all
-	sh tests/run_tests.sh
+	ESPHOMED_TEST_TLS_PREFIX="$(ESPHOMED_TEST_TLS_PREFIX)" ESPHOMED_CRYPTO_PYTHON="$(ESPHOMED_CRYPTO_PYTHON)" ESPHOMED_AIO_PYTHON="$(ESPHOMED_AIO_PYTHON)" sh tests/run_tests.sh
 
 install: $(TARGET) $(LOGD_TARGET) adapters
 	install -d $(DESTDIR)$(PREFIX)/sbin $(DESTDIR)$(PREFIX)/share/libreecho/web $(DESTDIR)/etc/libreecho $(DESTDIR)/etc/init.d $(DESTDIR)/var/log/libreecho
@@ -930,18 +1000,19 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -d $(DESTDIR)$(PREFIX)/share/libreecho/sounds
 	install -m 0644 sounds/*.raw $(DESTDIR)$(PREFIX)/share/libreecho/sounds/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
-	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-watchdogd.init init/libreecho-timerd.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-wyomingd.init init/libreecho-mdnsd.init init/libreecho-lived.init $(DESTDIR)/etc/init.d/
+	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-watchdogd.init init/libreecho-timerd.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-esphomed.init init/libreecho-mdnsd.init init/libreecho-lived.init $(DESTDIR)/etc/init.d/
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
 	install -d $(DESTDIR)/etc/libreecho/avahi-services
-	install -m 0644 config/wyoming.service $(DESTDIR)/etc/libreecho/avahi-services/wyoming.service
+	install -m 0644 config/esphome.service $(DESTDIR)/etc/libreecho/avahi-services/esphome.service
 
 clean:
+	rm -f $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-wyomingd-test $(BUILD)/test-wyomingd $(BUILD)/adapter/wyomingd.o
 	rm -f $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 	rm -f $(BUILD)/tls.o $(BUILD)/tls_stub.o
 	rm -f $(CAPTURE_MUX_OBJECTS) $(RADIOD_OBJECTS) $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
 		$(LOGD_OBJECTS) $(WATCHDOGD_OBJECTS) $(BTD_OBJECTS) $(AIRPLAYD_OBJECTS) $(TTSD_OBJECTS) \
 		$(TIMERD_OBJECTS) \
-		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(WYOMINGD_OBJECTS) $(LIVED_OBJECTS) \
+		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(ESPHOMED_OBJECTS) $(LIVED_OBJECTS) \
 		$(ADAPTER_TARGETS) \
 		$(TARGET) $(LOGD_TARGET)
 	rm -f $(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32 \
@@ -964,8 +1035,8 @@ clean:
 		$(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
-		$(BUILD)/test-wyoming-protocol $(BUILD)/test-wyomingd \
-		$(BUILD)/libreecho-wyomingd-test \
+		$(BUILD)/test-wyoming-protocol $(BUILD)/test-esphome-radio-controls \
+		$(BUILD)/test-esphome-remote-timer \
 		$(BUILD)/test-audiod-review $(BUILD)/test-led-night-review \
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \

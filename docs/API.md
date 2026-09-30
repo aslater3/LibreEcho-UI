@@ -620,22 +620,45 @@ are writable here and are validated before any setting is committed:
 Malformed or out-of-range listening fields return HTTP 400 and leave the
 previous configuration unchanged. The request requires `X-LibreEcho-CSRF`.
 
-The mode and the Home Assistant integration toggle are two signals for the same
-Wyoming daemon: this route starts or stops it, and the AirPlay controller's init
-script advertises the `_wyoming._tcp` service from the integration bit. Selecting
-`home-assistant` sets that bit; selecting `local` or `custom` clears it, so a
-pipeline switch that stops the daemon also withdraws the advertisement instead
-of leaving Home Assistant pointed at a closed port. Disabling the
-`home-assistant` integration switches a persisted `home-assistant` mode to
-`local` for the same reason.
+The mode and the Home Assistant integration bit 1 select the same ESPHome
+satellite on TCP 6053. Selecting `home-assistant` enables it; selecting `local`
+or `custom` disables it. Disabling the integration restores the previous Local
+or Custom selection (Local when none was saved). Custom Wyoming Whisper/Piper
+client settings and the local assistant configuration are kept while HA owns
+voice. There is no legacy satellite selector or compatibility state.
 
-When the image has voice-daemon init scripts, activation runs as one bounded
-restart job without blocking the HTTP loop. The accepted response is `202` and
-contains `restart.state: "pending"`; a second update while it is pending gets
-`409`. Poll this GET endpoint for completion. If the asynchronous restart fails,
-the state becomes `failed` and the next PUT reports `503` so the caller cannot
-mistake a persisted setting for a running pipeline. Home Assistant mode is
-rejected with `501` when its Wyoming service is not installed.
+On Linux, activation is a bounded tracked restart job without blocking normal
+APIs. The accepted response is `202` with `restart.state: "pending"`; a second
+voice update while pending receives `409`. Poll GET for completion. A failed
+transition restores persisted voice intent and the prior running service graph,
+then reports `failed` with a nonempty `restart.error`. Rollback failure is
+reported explicitly. The next PUT acknowledges the completed failure with `503`.
+HA activation is rejected with `501` if `libreecho-esphomed` is not installed.
+
+The response always includes:
+
+```json
+"home_assistant": {
+  "protocol": "esphome",
+  "port": 6053,
+  "ready": false,
+  "connected": false
+}
+```
+
+`ready` binds validated daemon status to the trusted executable, PID/start
+time/boot identity and ownership of the expected listening socket. `connected`
+additionally reflects a real native API session. Audio readiness remains
+separately gated by adapter/privacy state. An unrelated listener or pidfile is
+not evidence; missing, malformed, stale or mismatched status reports false.
+Both fields are false outside HA mode.
+
+The private `esphome_noise_key` is a validated, canonical base64 32-byte Noise
+PSK, stored in mode-0600 configuration and backups. Empty means unprovisioned:
+the daemon uses the all-zero PSK for HA provisioning. Missing or old
+`ha_protocol` normalizes to `esphome`. Ordinary config GET/export, voice status,
+logs and diagnostic exports must not reveal the key. This release does not
+expose a web key-reveal/rotation endpoint; HA provisioning owns that operation.
 
 #### GET /api/v1/assistant
 

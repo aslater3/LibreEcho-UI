@@ -1,5 +1,17 @@
 #!/bin/sh
 set -eu
+# Tempfile-based children inherit a private directory, never a host /tmp path.
+mkdir -p "${TMPDIR:-$PWD/build}"
+SUITE_TMP=$(mktemp -d "${TMPDIR:-$PWD/build}/libreecho-suite-XXXXXX")
+TMPDIR=$SUITE_TMP
+export TMPDIR
+cleanup(){
+    for child in "${pid:-0}" "${agent_pid:-0}"; do
+        if [ "$child" -gt 1 ]; then kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi
+    done
+    rm -rf "$SUITE_TMP"
+}
+trap cleanup EXIT INT TERM
 PORT=${LIBREECHO_TEST_PORT:-18082}
 URL="http://127.0.0.1:$PORT"
 CFG=./build/test-suite-config.json
@@ -203,7 +215,7 @@ python3 tests/test_airplay_premounted_runtime.py
 python3 tests/test_wyoming_discovery_port.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \
-    src/adapter/mdns_client.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+    src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
     -lm -o build/test-airplay-metadata
 ./build/test-airplay-metadata
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
@@ -249,9 +261,10 @@ make build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
 make test-mdns
-sh tests/test_wyomingd_test_recipe.sh
-make build/test-wyomingd
-./build/test-wyomingd
+make test-esphome
+python3 tests/test_esphome_shipping.py
+python3 tests/test_ha_esphome_wiring.py
+make test-wyoming-protocol
 python3 tests/test_wyoming_engines.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_ttsd.c \
@@ -293,8 +306,6 @@ sh tests/test_agentd_startup_readiness_contract.sh
 sh tests/test_agentd_timers.sh
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!
-cleanup(){ if [ "${pid:-0}" -gt 1 ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; if [ "${agent_pid:-0}" -gt 1 ]; then kill "$agent_pid" 2>/dev/null || true; wait "$agent_pid" 2>/dev/null || true; fi; }
-trap cleanup EXIT INT TERM
 i=0
 while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 30 ] || { cat ./build/test-server.log; exit 1; }; sleep 0.1; done
 # Timer HTTP cases require this ready, isolated mock server.
@@ -402,12 +413,12 @@ while ! curl --max-time 1 -fsS "$URL/api/v1/config" >/dev/null 2>&1; do
     fi
     sleep 0.1
 done
-code=$(curl -sS -o /tmp/le-linux-audio.out -w '%{http_code}' "$URL/api/v1/audio")
+code=$(curl -sS -o "$TMPDIR/le-linux-audio.out" -w '%{http_code}' "$URL/api/v1/audio")
 [ "$code" = 200 ]
-jq -e '.ok == true and .data.available == false and .data.unavailable == true' /tmp/le-linux-audio.out >/dev/null
-code=$(curl -sS -o /tmp/le-linux-config.out -w '%{http_code}' "$URL/api/v1/config/export")
+jq -e '.ok == true and .data.available == false and .data.unavailable == true' "$TMPDIR/le-linux-audio.out" >/dev/null
+code=$(curl -sS -o "$TMPDIR/le-linux-config.out" -w '%{http_code}' "$URL/api/v1/config/export")
 [ "$code" = 200 ]
-jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' /tmp/le-linux-config.out >/dev/null
+jq -e '.ok == true and .data.partial == true and (.data.unsupported | index("wake_word")) != null' "$TMPDIR/le-linux-config.out" >/dev/null
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export_linux.sh
 curl -fsS "$URL/api/v1/setup" | jq -e \
     '.data.vendor_firmware.state == "ready" and
@@ -452,10 +463,10 @@ pid=$!
 sleep 1
 curl -fsS "$URL/api/v1/config" | grep -q 'bearer-token'
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
-code=$(curl -sS -o /tmp/le-auth.out -w '%{http_code}' "$URL/api/v1/status")
+code=$(curl -sS -o "$TMPDIR/le-auth.out" -w '%{http_code}' "$URL/api/v1/status")
 [ "$code" = 401 ]
 curl -fsS "$URL/api/v1/status" -H 'Authorization: Bearer test-token-0123456789abcdef' >/dev/null
-code=$(curl -sS -o /tmp/le-origin.out -w '%{http_code}' -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H "$CSRF" -H 'Origin: http://evil.test' -H 'Content-Type: application/json' --data '{"hostname":"blocked"}')
+code=$(curl -sS -o "$TMPDIR/le-origin.out" -w '%{http_code}' -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H "$CSRF" -H 'Origin: http://evil.test' -H 'Content-Type: application/json' --data '{"hostname":"blocked"}')
 [ "$code" = 403 ]
 curl -fsS -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H "$CSRF" -H 'Origin: http://device.test' -H 'Content-Type: application/json' --data '{"hostname":"allowed"}' >/dev/null
 echo 'authentication and origin: ok'

@@ -13,15 +13,13 @@
  * controller, and that a failed refresh never fails the transition.
  */
 #define _POSIX_C_SOURCE 200809L
-#define LE_INIT_AGENTD    "/tmp/libreecho-ha-agentd.init"
-#define LE_INIT_STTD      "/tmp/libreecho-ha-sttd.init"
-#define LE_INIT_TTSD      "/tmp/libreecho-ha-ttsd.init"
-#define LE_INIT_WYOMINGD  "/tmp/libreecho-ha-wyomingd.init"
-#define LE_INIT_AIRPLAYD  "/tmp/libreecho-ha-airplayd.init"
-#define LE_INIT_MDNSD     "/tmp/libreecho-ha-mdnsd.init"
-#define static
+#define LE_INIT_AGENTD    "build/libreecho-ha-agentd.init"
+#define LE_INIT_STTD      "build/libreecho-ha-sttd.init"
+#define LE_INIT_TTSD      "build/libreecho-ha-ttsd.init"
+#define LE_INIT_ESPHOMED  "build/libreecho-ha-esphomed.init"
+#define LE_INIT_AIRPLAYD  "build/libreecho-ha-airplayd.init"
+#define LE_INIT_MDNSD     "build/libreecho-ha-mdnsd.init"
 #include "../src/api.c"
-#undef static
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,10 +27,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define LOG_PATH "/tmp/libreecho-ha-lifecycle.log"
+#define LOG_PATH "build/libreecho-ha-lifecycle.log"
 
 static const char *const all_paths[] = {
-    LE_INIT_AGENTD, LE_INIT_STTD, LE_INIT_TTSD, LE_INIT_WYOMINGD,
+    LE_INIT_AGENTD, LE_INIT_STTD, LE_INIT_TTSD, LE_INIT_ESPHOMED,
     LE_INIT_AIRPLAYD, LE_INIT_MDNSD
 };
 
@@ -152,9 +150,26 @@ static void expect_not_invoked(const char *script)
     fclose(file);
 }
 
+#include "esphome_process_fixture.h"
+static void cleanup_fixture(void)
+{
+    size_t i;
+    fixture_esphomed_stop();
+    for (i = 0; i < sizeof(all_paths) / sizeof(all_paths[0]); ++i)
+        unlink(all_paths[i]);
+    unlink(LOG_PATH);
+    unlink("build/libreecho-ha-esphomed.pid");
+    unlink("build/libreecho-ha-esphome-status.json");
+}
+
 int main(void)
 {
     int rc;
+    /* Readiness uses a genuine private daemon and its owned listener, never
+     * this fixture process's PID or a forged status file. */
+    fixture_esphomed_start();
+    if (atexit(cleanup_fixture) != 0)
+        return 1;
 
     reset_log();
     if (setenv("LE_HA_LOG", LOG_PATH, 1) != 0)
@@ -169,7 +184,7 @@ int main(void)
         fprintf(stderr, "disable returned %d, expected LE_OK\n", rc);
         return 1;
     }
-    expect_invoked("libreecho-ha-wyomingd.init", "stop");
+    expect_invoked("libreecho-ha-esphomed.init", "stop");
     expect_invoked("libreecho-ha-sttd.init", "start");
     expect_invoked("libreecho-ha-ttsd.init", "start");
     expect_invoked("libreecho-ha-agentd.init", "start");
@@ -191,7 +206,7 @@ int main(void)
     }
 
     /* Enable while the discovery refresh fails: the local pipeline is stopped,
-     * Wyoming is started, and the transition still succeeds. The failed
+     * ESPHome is started, and the transition still succeeds. The failed
      * refresh must be reported, not silently discarded. */
     reset_log();
     rc = apply_home_assistant_mode(1);
@@ -202,7 +217,7 @@ int main(void)
     expect_invoked("libreecho-ha-agentd.init", "stop");
     expect_invoked("libreecho-ha-sttd.init", "stop");
     expect_invoked("libreecho-ha-ttsd.init", "stop");
-    expect_invoked("libreecho-ha-wyomingd.init", "start");
+    expect_invoked("libreecho-ha-esphomed.init", "start");
     expect_invoked("libreecho-ha-mdnsd.init", "status");
     expect_invoked("libreecho-ha-mdnsd.init", "start");
     expect_not_invoked("libreecho-ha-airplayd.init");
@@ -274,7 +289,7 @@ int main(void)
         fprintf(stderr, "home-assistant voice pipeline restart must succeed\n");
         return 1;
     }
-    expect_invoked("libreecho-ha-wyomingd.init", "start");
+    expect_invoked("libreecho-ha-esphomed.init", "start");
     expect_invoked("libreecho-ha-mdnsd.init", "status");
     expect_not_invoked("libreecho-ha-airplayd.init");
 
@@ -288,10 +303,10 @@ int main(void)
     expect_not_invoked("libreecho-ha-airplayd.init");
 
     /* The pipeline mode and the Home Assistant integration bit are two signals
-     * for the same Wyoming daemon: this route starts or stops it, and the mDNS
+     * for the same ESPHome daemon: this route starts or stops it, and the mDNS
      * supervisor advertises the mDNS service from the bit. Keep them
      * synchronized, or a switch that stops the daemon would leave a stale
-     * Wyoming advertisement pointing at a closed port. */
+     * ESPHome advertisement pointing at a closed port. */
     {
         struct api_context context;
 

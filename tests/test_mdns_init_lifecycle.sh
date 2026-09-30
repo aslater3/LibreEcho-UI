@@ -68,7 +68,7 @@ EOF
 chmod 755 "$TMP/chroot"
 cc -std=c99 -Wall -Wextra -Werror \
     -DMDNS_CHROOT="\"$TMP/chroot\"" \
-    -DMDNS_OWNER_EXE="\"$TMP/libreecho-wyomingd\"" \
+    -DMDNS_OWNER_EXE="\"$TMP/libreecho-esphomed\"" \
     "$ROOT/src/adapter/mdnsd.c" "$ROOT/src/adapter/mdns_lease.c" -o "$TMP/mdnsd"
 
 PAYLOAD=$TMP/payload
@@ -79,10 +79,7 @@ LOGFILE=$TMP/mdnsd.log
 SOCKET=$RUNDIR/mdns.sock
 LOCKDIR=$TMP/lifecycle.lock
 CONFIG=$TMP/web-config.json
-DEFAULTS=$TMP/libreecho-wyomingd
-WYOMING_SOURCE=$TMP/wyoming.service
 UUID_SOURCE=$TMP/random-uuid
-cp "$ROOT/config/wyoming.service" "$WYOMING_SOURCE"
 printf '%s\n' '01234567-89ab-cdef-0123-456789abcdef' >"$UUID_SOURCE"
 
 # The wrapper requires the socket and runtime directories to be owned by the
@@ -94,7 +91,6 @@ init() {
     DAEMON="$1" \
     PIDFILE="$PIDFILE" LOGFILE="$LOGFILE" ROOT="$PAYLOAD" SOCKET="$SOCKET" \
     LOCKDIR="$LOCKDIR" CONFIG="$CONFIG" MACHINE_ID_SOURCE="$UUID_SOURCE" \
-    WYOMING_SERVICE_SOURCE="$WYOMING_SOURCE" WYOMING_DEFAULTS="$DEFAULTS" \
     MDNSD_OWNER_UID="$OWNER_UID" \
     sh "$SCRIPT" "$2"
 }
@@ -144,9 +140,13 @@ fi
 rm -rf "$TMP/shared"
 
 # 4. A normal start creates the D-Bus machine id, waits for the real child
-#    readiness contract, renders the Wyoming record and reports running.
+#    readiness contract, removes stale HA records and reports running. Config
+#    alone is never proof of an ESPHome listener; only its live lease advertises.
 printf '%s\n' '{"integrations": 1}' >"$CONFIG"
-printf '%s\n' 'PORT=12345' >"$DEFAULTS"
+for name in wyoming.service wyoming-3.service esphome.service esphome-2.service; do
+    printf 'stale\n' >"$PAYLOAD/etc/avahi/services/$name"
+done
+printf 'airplay preserved\n' >"$PAYLOAD/etc/avahi/services/airplay.service"
 if ! init "$TMP/mdnsd" start; then
     echo "start failed" >&2
     cat "$LOGFILE" >&2 || true
@@ -167,9 +167,11 @@ case "$(stat -c %a "$SOCKET")" in
     600|700) ;;
     *) echo "socket is not private: mode $(stat -c %a "$SOCKET")" >&2; exit 1 ;;
 esac
-service=$PAYLOAD/etc/avahi/services/wyoming.service
-[ -f "$service" ] || { echo "Wyoming service definition not rendered" >&2; exit 1; }
-grep -Fq '<port>12345</port>' "$service"
+service=$PAYLOAD/etc/avahi/services/esphome.service
+for name in wyoming.service wyoming-3.service esphome.service esphome-2.service; do
+    [ ! -e "$PAYLOAD/etc/avahi/services/$name" ] || { echo "stale HA record survived: $name" >&2; exit 1; }
+done
+grep -Fq 'airplay preserved' "$PAYLOAD/etc/avahi/services/airplay.service"
 [ "$(init "$TMP/mdnsd" status)" = "running" ]
 
 # 5. A second start is idempotent and does not add a second supervisor.
@@ -182,7 +184,15 @@ printf '%s\n' '{"integrations": 0}' >"$CONFIG"
 init "$TMP/mdnsd" restart >/dev/null
 [ -S "$SOCKET" ] || { echo "restart lost the socket" >&2; exit 1; }
 [ -S "$PAYLOAD/run/dbus/system_bus_socket" ] || { echo "restart lost the D-Bus socket" >&2; exit 1; }
-[ ! -e "$service" ] || { echo "Wyoming record survived a disable" >&2; exit 1; }
+[ ! -e "$service" ] || { echo "static ESPHome record survived a disable" >&2; exit 1; }
+grep -Fq 'airplay preserved' "$PAYLOAD/etc/avahi/services/airplay.service"
+# Off -> on, including retained voice mode, cannot synthesize discovery before
+# the actual owner opens its listener and registers the lease.
+printf '%s\n' '{"integrations": 17,"voice_pipeline_mode":"home-assistant"}' >"$CONFIG"
+init "$TMP/mdnsd" restart >/dev/null
+[ ! -e "$service" ]
+[ ! -e "$PAYLOAD/etc/avahi/services/wyoming.service" ]
+grep -Fq 'airplay preserved' "$PAYLOAD/etc/avahi/services/airplay.service"
 
 # 7. Status must fail if the D-Bus readiness socket disappears even while the
 #    supervisor process and its control socket are still alive.

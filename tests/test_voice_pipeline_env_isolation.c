@@ -9,7 +9,7 @@
  * libreecho-ttsd and libreecho-agentd were launched with the Web daemon's
  * argv (usage on stderr, exit, no /run/libreecho/agent.sock, so the API
  * answered 503 "Voice assistant service is unavailable"), and
- * libreecho-wyomingd failed the same way in Home Assistant mode (issue #249).
+ * libreecho-esphomed failed the same way in Home Assistant mode (issue #249).
  *
  * This runs the real api.c transition for both modes against fixture init
  * scripts with the Web daemon's environment set, and asserts every service
@@ -19,13 +19,12 @@
  * a test of itself.
  */
 #define _POSIX_C_SOURCE 200809L
-#define LE_INIT_AGENTD   "/tmp/libreecho-249-agentd.init"
-#define LE_INIT_STTD     "/tmp/libreecho-249-sttd.init"
-#define LE_INIT_TTSD     "/tmp/libreecho-249-ttsd.init"
-#define LE_INIT_WYOMINGD "/tmp/libreecho-249-wyomingd.init"
-#define static
+#define LE_INIT_AGENTD   "build/libreecho-249-agentd.init"
+#define LE_INIT_STTD     "build/libreecho-249-sttd.init"
+#define LE_INIT_TTSD     "build/libreecho-249-ttsd.init"
+#define LE_INIT_MDNSD "build/test-control-no-mdns.init"
+#define LE_INIT_ESPHOMED "build/libreecho-249-esphomed.init"
 #include "../src/api.c"
-#undef static
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +33,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define RECORD "/tmp/libreecho-249-pipeline.txt"
+#define RECORD "build/libreecho-249-pipeline.txt"
 #define WEB_ARGS "--backend linux --config /data/libreecho/config/web-config.json --web-root /usr/local/share/libreecho/web --listen 0.0.0.0:8080 --allow-insecure-lan"
 
 /* The shipped defaults each fixture resolves, fully expanded. */
@@ -44,11 +43,11 @@
 #define STTD_ARGS "--socket /run/libreecho/stt.sock --model-dir /run/libreecho/features/stt/root/usr/local/share/libreecho/stt --threads 2"
 #define TTSD_DAEMON "/run/libreecho/features/tts/root/usr/local/sbin/libreecho-ttsd"
 #define TTSD_ARGS "--foreground --socket /run/libreecho/tts.sock --model-dir /run/libreecho/features/tts/root/usr/local/share/libreecho/tts/models --voice northern-male"
-#define WYOMINGD_DAEMON "/usr/local/sbin/libreecho-wyomingd"
-#define WYOMINGD_ARGS "--foreground --port 10700 --wake-socket /run/libreecho/wakeword.sock --audio-bus /run/libreecho-audio/system.pcm --mdns-socket /run/libreecho/mdns.sock"
+#define ESPHOMED_DAEMON "/usr/local/sbin/libreecho-esphomed"
+#define ESPHOMED_ARGS "--config /etc/libreecho/web-config.json --status-file /run/libreecho/esphome-status.json --port 6053 --bind 0.0.0.0 --wake-socket /run/libreecho/wakeword.sock --audio-socket /run/libreecho/audio.sock --audio-bus /run/libreecho-audio/system.pcm --mdns-socket /run/libreecho/mdns.sock --tls-ca /etc/ssl/certs/ca-certificates.crt --radio-socket /run/libreecho/radio.sock --timer-socket /run/libreecho/timer.sock --led-socket /run/libreecho/led.sock --privacy-state /sys/devices/platform/amz_privacy/privacy_state --idme-root /sys/firmware/devicetree/base/idme"
 
 static const char *const fixture_paths[] = {
-    LE_INIT_AGENTD, LE_INIT_STTD, LE_INIT_TTSD, LE_INIT_WYOMINGD
+    LE_INIT_AGENTD, LE_INIT_STTD, LE_INIT_TTSD, LE_INIT_ESPHOMED
 };
 static char record[8192];
 static int failures;
@@ -107,9 +106,9 @@ static void write_fixtures(void)
     write_fixture(LE_INIT_TTSD, "ttsd", TTSD_DAEMON,
                   "/var/run/libreecho-ttsd.pid", "/var/log/libreecho-ttsd.log",
                   TTSD_ARGS);
-    write_fixture(LE_INIT_WYOMINGD, "wyomingd", WYOMINGD_DAEMON,
-                  "/var/run/libreecho-wyomingd.pid", "/var/log/libreecho-wyomingd.log",
-                  WYOMINGD_ARGS);
+    write_fixture(LE_INIT_ESPHOMED, "esphomed", ESPHOMED_DAEMON,
+                  "/var/run/libreecho-esphomed.pid", "/var/log/libreecho-esphomed.log",
+                  ESPHOMED_ARGS);
 }
 
 static void load_record(void)
@@ -170,8 +169,10 @@ static void wait_for_restart(void)
     check(0, "voice pipeline restart finished");
 }
 
+#include "esphome_process_fixture.h"
 int main(void)
 {
+    fixture_esphomed_start();
     write_fixtures();
     unlink(RECORD);
     setenv("LIBREECHO_249_RECORD", RECORD, 1);
@@ -194,7 +195,7 @@ int main(void)
                    "/var/log/libreecho-agentd.log", AGENTD_ARGS);
     expect_no_caller_leak();
 
-    printf("home-assistant mode: wyomingd keeps its own argv\n");
+    printf("home-assistant mode: esphomed keeps its own argv\n");
     unlink(RECORD);
     check(apply_voice_pipeline_mode("home-assistant") == LE_BUSY,
           "home-assistant restart accepted");
@@ -202,10 +203,13 @@ int main(void)
     check(!strcmp(voice_pipeline_restart_state(), "ready"),
           "home-assistant restart completed");
     load_record();
-    expect_service("wyomingd", WYOMINGD_DAEMON, "/var/run/libreecho-wyomingd.pid",
-                   "/var/log/libreecho-wyomingd.log", WYOMINGD_ARGS);
+    expect_service("esphomed", ESPHOMED_DAEMON, "/var/run/libreecho-esphomed.pid",
+                   "/var/log/libreecho-esphomed.log", ESPHOMED_ARGS);
     expect_no_caller_leak();
 
+    fixture_esphomed_stop();
+    {size_t i;for(i=0;i<sizeof(fixture_paths)/sizeof(fixture_paths[0]);i++)unlink(fixture_paths[i]);}
+    unlink(RECORD);
     if (failures) {
         printf("voice pipeline environment isolation: %d failure(s)\n", failures);
         return 1;

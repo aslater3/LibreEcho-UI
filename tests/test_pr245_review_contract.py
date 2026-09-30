@@ -8,7 +8,7 @@ Findings:
   * the integration description must describe restoration of the saved pipeline
     mode (local is only the fallback), matching docs/API.md and the handler;
   * the voice-pipeline status must probe the saved custom stt/tts endpoints only
-    in custom mode and surface the Wyoming satellite readiness separately, using
+    in custom mode and surface the ESPHome satellite readiness separately, using
     the same predicate the init script uses.
 """
 import json
@@ -26,28 +26,35 @@ end = api.index("static int voice_pipeline_update", start)
 body = api[start:end]
 assert "network_pipeline" not in body, "custom endpoints must not be probed in HA mode"
 assert body.count("custom &&") == 2
-assert body.index("wyoming_satellite_ready()") > body.index("home_assistant =")
-assert r'"\"home_assistant\":{\"ready\":%s},' in body
+assert body.index("esphome_satellite_ready()") > body.index("home_assistant =")
+assert r'\"home_assistant\":{\"protocol\":\"esphome\",\"port\":6053,\"ready\":%s,\"connected\":%s}' in body
 
-# The satellite readiness must mirror init/libreecho-web.init: the wyomingd and
-# waked pids, the shared wake-word socket, and the listening Wyoming port. A
-# pidfile-only check reported ready while Home Assistant could not connect.
-assert "wyoming_service_ready()" in init
-assert "wakeword.sock" in init and "/proc/net/tcp" in init
-assert "#define LE_WYOMINGD_PIDFILE" in api
-assert "#define LE_WAKED_PIDFILE" in api
-assert "#define LE_WAKEWORD_SOCK" in api
-assert "#define LE_WYOMING_PORT" in api
-# The predicate must read every input through the overridable getters so the
-# focused host test can drive the same shipped predicate positively and
-# negatively; a hardcoded path would be untestable off-device.
-assert "service_ready(wyomingd_pidfile_path(), NULL) &&" in api
-assert "service_ready(waked_pidfile_path(), wakeword_socket_path()) &&" in api
-assert "wyoming_satellite_listening(wyoming_listen_port())" in api
-for override in ("LIBREECHO_WYOMINGD_PIDFILE", "LIBREECHO_WAKED_PIDFILE",
-                 "LIBREECHO_WAKEWORD_SOCK", "LIBREECHO_WYOMING_PORT",
-                 "LIBREECHO_PROC_NET_TCP"):
-    assert override in api, f"missing readiness override {override}"
+# Readiness uses the shared bounded process/status/listener verifier. A pidfile
+# alone, forged argv[0], stale JSON or an unrelated listener is not readiness.
+health = Path("src/esphome_health.h").read_text(encoding="utf-8")
+native_runner = Path("tests/test_esphomed_run.py").read_text(encoding="utf-8")
+assert "esphome_service_ready()" in init
+assert '"$ESPHOMED_DAEMON" --health-check' in init
+assert "ESPHOMED_PIDFILE" in init and "ESPHOME_STATUS_FILE" in init
+assert "#define LE_ESPHOMED_PIDFILE" in api
+assert '#include "esphome_health.h"' in api
+assert "le_esphome_health_default(esphomed_pidfile_path(),key)" in api
+assert "service_ready(esphomed_pidfile_path(),NULL)" not in api
+assert "S_ISREG(st.st_mode)" in health and "data[2049]" in health
+for predicate in ("le_eh_executable", "le_eh_start", "le_eh_boot", "le_eh_listener"):
+    assert predicate in health
+assert 'esphome_status_flag("ready")' in api
+assert 'esphome_status_flag("connected")' in api
+assert "json_get_top_level_bool" in health and "json_duplicate_key" in health
+for override in ("LIBREECHO_ESPHOMED_PIDFILE", "LIBREECHO_ESPHOME_STATUS_FILE"):
+    assert override in api + health, f"missing readiness override {override}"
+# Real process/listener negative cases remain part of the normal gate; these
+# source assertions do not replace the behavioral health regression.
+assert "tests/test_esphome_health.py" in native_runner
+assert "\nmake test-esphome\n" in runner
+makefile = Path("Makefile").read_text(encoding="utf-8")
+gate = makefile.split("\ntest-esphome:", 1)[1].split("\n# Execute real HA", 1)[0]
+assert "python3 tests/test_esphomed_run.py" in gate
 
 # --- finding 3: declared statuses and documented pending shape --------------
 put = openapi["paths"]["/integrations/{id}"]["put"]
@@ -65,10 +72,10 @@ for marker in ("202", "409", "501", "503", "pending"):
 
 # --- finding 5: the description must match the restore behaviour ------------
 description = put["description"]
-assert "restores the previously saved pipeline mode" in description, (
+assert "previous Local/Custom selection" in description and "disabling restores it" in description, (
     "OpenAPI must describe restoring the saved mode, not always local"
 )
-assert "restores the saved pipeline" in docs, (
+assert "restores the previous Local" in docs, (
     "API guide must describe restoring the saved mode"
 )
 
