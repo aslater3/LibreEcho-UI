@@ -144,12 +144,17 @@ async def acceptance() -> None:
     error_handler = HAErrorCollector()
     logging.getLogger().addHandler(error_handler)
     patches = contextlib.ExitStack()
-    patches.enter_context(patch("homeassistant.components.bluetooth.async_setup", AsyncMock(return_value=True)))
-    patches.enter_context(patch("homeassistant.components.bluetooth.async_remove_scanner", return_value=None))
-    patches.enter_context(patch("homeassistant.components.usb.USBDiscovery.async_setup", AsyncMock(return_value=None)))
-    patches.enter_context(patch("homeassistant.components.zeroconf._async_get_zc_args",
-                                return_value={"interfaces": ["127.0.0.1"], "unicast": True}))
     try:
+        # Enter the patches inside the try: a missing or incompatible HA
+        # dependency here must still reach the finally that stops HA and tears
+        # the fixture down, instead of leaking daemon threads into the outer
+        # bubblewrap 180s timeout. See test_ha_esphome_wiring.py for the
+        # pinned bluetooth import-chain dependency.
+        patches.enter_context(patch("homeassistant.components.bluetooth.async_setup", AsyncMock(return_value=True)))
+        patches.enter_context(patch("homeassistant.components.bluetooth.async_remove_scanner", return_value=None))
+        patches.enter_context(patch("homeassistant.components.usb.USBDiscovery.async_setup", AsyncMock(return_value=None)))
+        patches.enter_context(patch("homeassistant.components.zeroconf._async_get_zc_args",
+                                    return_value={"interfaces": ["127.0.0.1"], "unicast": True}))
         provision = APIClient("127.0.0.1", fixture.port,
                               noise_psk=base64.b64encode(bytes(32)).decode(), provide_time=False)
         try:

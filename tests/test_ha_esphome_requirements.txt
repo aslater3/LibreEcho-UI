@@ -16,6 +16,10 @@ dbus-fast==5.0.22
 habluetooth==6.26.11
 aiousbwatcher==1.1.2
 serialx==1.10.0
+# Transitive manifest requirement of homeassistant.components.hassio, reached
+# from the bluetooth import chain (bluetooth -> usb -> usb.consumers). The gate
+# imports the bluetooth component directly, so it must be pinned explicitly.
+aiohasupervisor==0.6.0
 ha-ffmpeg==3.2.2
 zeroconf==0.151.1
 gazetteer-matcher==1.1.0

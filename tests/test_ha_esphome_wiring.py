@@ -35,6 +35,21 @@ class RealHAGateWiring(unittest.TestCase):
             if line and not line.startswith('#'):
                 self.assertRegex(line, r'^[A-Za-z0-9_.-]+==[^\s]+$')
 
+    def test_requirements_pin_bluetooth_import_chain_dependency(self):
+        """The acceptance runtime installs only this file (hass.config.skip_pip),
+        so every integration-manifest requirement on the import chain it drives
+        must be pinned here. `homeassistant.components.bluetooth` imports
+        `homeassistant.components.usb`, whose consumers module imports
+        `homeassistant.components.hassio`, which requires `aiohasupervisor`. A
+        miss is not an ImportError at the call site: pkgutil.resolve_name treats
+        an unimportable submodule as a missing attribute, so mock.patch raises
+        `AttributeError: module 'homeassistant.components' has no attribute
+        'bluetooth'` with no hint of the real cause."""
+        requirements = (ROOT / 'tests/test_ha_esphome_requirements.txt').read_text().splitlines()
+        # bluetooth -> usb -> usb.consumers -> hassio
+        self.assertIn('aiohasupervisor==0.6.0', requirements,
+                      'bluetooth import chain (usb -> hassio) needs aiohasupervisor pinned')
+
     def test_normal_runner_checks_gate_wiring(self):
         runner = (ROOT / 'tests/run_tests.sh').read_text()
         self.assertIn('python3 tests/test_ha_esphome_wiring.py', runner)
