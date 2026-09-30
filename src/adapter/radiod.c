@@ -10,7 +10,8 @@
  *   - http:// only. https:// needs a TLS library (~300 KB trimmed) and is a
  *     separate, larger decision; requests for it are refused with a clear
  *     message rather than silently failing to connect.
- *   - MP3 only. AAC-only stations will not play.
+ *   - MP3, AAC (ADTS) and HLS. HLS is MPEG-TS carrying AAC-LC or HE-AAC v1
+ *     (what BBC radio serves); fMP4, encrypted HLS and HE-AAC v2 are refused.
  *   - ICY (Shoutcast) stream metadata is read when the station sends it.
  *     Stations that do not send it have no track title and none is invented.
  *
@@ -18,6 +19,7 @@
  * the control socket, and so "stop" is a signal rather than cooperative
  * shutdown.
  */
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -40,7 +42,10 @@
 #include "../json.h"
 #include "../log.h"
 #include "../tls.h"
+#include "radio_aac.h"
+#include "radio_hls.h"
 #include "radio_resample.h"
+#include "radio_ts.h"
 
 #define MINIMP3_ONLY_MP3
 #define MINIMP3_NO_SIMD
@@ -307,6 +312,7 @@ struct icy_stream {
      */
     long content_length;            /* 0 when the server declares none */
     long body_read;
+    int playlist_type;              /* Content-Type says HLS playlist */
     struct le_tls *tls;             /* NULL for plain http */
 };
 
@@ -352,9 +358,11 @@ static int header_value(const char *headers, const char *name,
  * asked for now; a station that ignores it sends no icy-metaint and the reader
  * passes every byte straight through, exactly as before.
  */
+static char redirect_url[URL_MAX];      /* set by icy_open on an HLS 3xx */
+
 static int icy_open(struct icy_stream *st, int fd, const char *host,
                     const char *path, char *station, size_t station_size,
-                    int secure)
+                    int secure, int hls)
 {
     char request[HOST_MAX + PATH_MAX_LEN + 128];
     char headers[HEADER_MAX], value[64], name[TITLE_MAX * 2];
@@ -373,8 +381,9 @@ static int icy_open(struct icy_stream *st, int fd, const char *host,
     station[0] = '\0';
     n = snprintf(request, sizeof(request),
                  "GET %s HTTP/1.0\r\nHost: %s\r\n"
-                 "User-Agent: LibreEcho/1.0\r\nIcy-MetaData: 1\r\n"
-                 "Connection: close\r\n\r\n", path, host);
+                 "User-Agent: LibreEcho/1.0\r\n%s"
+                 "Connection: close\r\n\r\n", path, host,
+                 hls ? "" : "Icy-MetaData: 1\r\n");
     if (n < 0 || (size_t)n >= sizeof(request))
         return -1;
     if (st->tls ? le_tls_write(st->tls, request, (size_t)n) != n
@@ -410,6 +419,14 @@ static int icy_open(struct icy_stream *st, int fd, const char *host,
             char location[URL_MAX];
             if (!strncmp(headers, "HTTP/", 5) &&
                 sscanf(headers, "%*[^ ] %d", &status) == 1) {
+                if (hls && status >= 300 && status < 400) {
+                    redirect_url[0] = '\0';
+                    if (!header_value(headers, "location", location,
+                                      sizeof(location)))
+                        snprintf(redirect_url, sizeof(redirect_url), "%s",
+                                 location);
+                    return -2;           /* caller follows the redirect */
+                }
                 if (status >= 300 && status < 400) {
                     if (!header_value(headers, "location", location,
                                       sizeof(location)))
@@ -446,6 +463,13 @@ static int icy_open(struct icy_stream *st, int fd, const char *host,
     }
     st->body_read = 0;
     st->until_meta = st->metaint;
+    if (!header_value(headers, "content-type", value, sizeof(value))) {
+        size_t k;
+
+        for (k = 0; value[k]; ++k)
+            value[k] = (char)tolower((unsigned char)value[k]);
+        st->playlist_type = strstr(value, "mpegurl") != NULL;
+    }
     if (!header_value(headers, "icy-name", name, sizeof(name)))
         sanitise_text(station, station_size, name, strlen(name));
     return 0;
@@ -540,8 +564,222 @@ static int write_bus(int bus, const short *pcm, int frames, int channels,
                      LE_RADIO_RESAMPLE_CHANNELS * sizeof(int16_t));
 }
 
+
+/*
+ * ---- HLS ---------------------------------------------------------------
+ *
+ * An HLS station is a playlist plus a rolling window of MPEG-TS segments. The
+ * player child forks a fetcher that walks the playlist, downloads segments and
+ * demuxes them to a plain ADTS byte stream on a private pipe; the player child
+ * then decodes that pipe exactly as it decodes an Icecast stream. The pipe is
+ * what absorbs the gaps between bursty segment downloads, so the shared audio
+ * bus keeps the continuous-writer contract it has today.
+ */
+#define HLS_PLAYLIST_MAX (64 * 1024)
+#define HLS_REDIRECTS 3
+#define HLS_STALL_REFRESHES 6
+#define HLS_SEGMENT_FAILS 5
+#define HLS_PIPE_BYTES (256 * 1024)
+
+static int hls_mode;                    /* player child is decoding an HLS pipe */
+static void delay_ms(unsigned ms);
+
+static void http_close(int fd)
+{
+    if (stream.tls) {
+        le_tls_close(stream.tls);
+        stream.tls = NULL;
+    }
+    if (fd >= 0)
+        close(fd);
+}
+
+/*
+ * GET url, following up to HLS_REDIRECTS redirects. On success the response
+ * headers are consumed, the body is readable through icy_read(&stream) and the
+ * socket is returned; cur receives the final URL (the base for relative refs).
+ */
+static int hls_http_open(const char *url, char *cur, size_t cur_size)
+{
+    char host[HOST_MAX], port[16], path[PATH_MAX_LEN], station[TITLE_MAX];
+    char next[URL_MAX];
+    int hop;
+
+    snprintf(cur, cur_size, "%s", url);
+    for (hop = 0; hop <= HLS_REDIRECTS; ++hop) {
+        int secure = 0, net, rc;
+
+        if (split_url(cur, host, sizeof(host), port, sizeof(port), path,
+                      sizeof(path), &secure) < 0)
+            return -1;
+        net = connect_stream(host, port);
+        if (net < 0)
+            return -1;
+        rc = icy_open(&stream, net, host, path, station, sizeof(station),
+                      secure, 1);
+        if (rc == 0)
+            return net;
+        http_close(net);
+        if (rc != -2 || !redirect_url[0] ||
+            le_hls_resolve(cur, redirect_url, next, sizeof(next)) < 0)
+            return -1;
+        snprintf(cur, cur_size, "%s", next);
+    }
+    return -1;
+}
+
+/* Read a whole (small) body into buf; returns its length or -1. */
+static int hls_fetch_text(const char *url, char *cur, size_t cur_size,
+                          char *buf, size_t cap)
+{
+    size_t used = 0;
+    int net = hls_http_open(url, cur, cur_size);
+
+    if (net < 0)
+        return -1;
+    for (;;) {
+        int got;
+
+        if (used == cap) {
+            http_close(net);
+            return -1;                   /* playlist larger than the cap */
+        }
+        got = icy_read(&stream, (unsigned char *)buf + used,
+                       cap - used > NET_CHUNK ? NET_CHUNK : cap - used);
+        if (got <= 0)
+            break;
+        used += (size_t)got;
+    }
+    http_close(net);
+    return (int)used;
+}
+
+/* Stream one segment through the demuxer into the pipe. 0 ok, -1 failure,
+ * -2 the decoder side went away. */
+static int hls_fetch_segment(const char *url, int out_fd, struct le_radio_ts *ts)
+{
+    static unsigned char in[NET_CHUNK];
+    static unsigned char adts[NET_CHUNK + 2 * LE_RADIO_TS_PACKET];
+    char cur[URL_MAX];
+    int net = hls_http_open(url, cur, sizeof(cur));
+    int rc = 0;
+
+    if (net < 0)
+        return -1;
+    for (;;) {
+        size_t pos = 0;
+        int got = icy_read(&stream, in, sizeof(in));
+
+        if (got < 0)
+            break;
+        if (got == 0)
+            continue;
+        while (pos < (size_t)got) {
+            size_t taken = 0;
+            int made = le_radio_ts_feed(ts, in + pos, (size_t)got - pos, adts,
+                                        sizeof(adts), &taken);
+
+            if (made < 0) {
+                rc = -1;
+                goto out;
+            }
+            if (made > 0 && write_all(out_fd, adts, (size_t)made) < 0) {
+                rc = -2;
+                goto out;
+            }
+            if (!taken)
+                break;
+            pos += taken;
+        }
+    }
+out:
+    http_close(net);
+    return rc;
+}
+
+/* The fetcher process. Returns its exit status. */
+static int hls_fetcher(const char *url, int out_fd)
+{
+    static char text[HLS_PLAYLIST_MAX];
+    static struct le_hls_playlist pl;
+    struct le_radio_ts ts;
+    char media_url[URL_MAX], cur[URL_MAX];
+    long long next_seq = -1;
+    int stalled = 0, failures = 0, n;
+
+    le_radio_ts_reset(&ts);
+    snprintf(media_url, sizeof(media_url), "%s", url);
+    n = hls_fetch_text(media_url, cur, sizeof(cur), text, sizeof(text));
+    if (n < 0 || le_hls_parse(text, (size_t)n, cur, &pl) < 0)
+        return 1;
+    if (pl.is_master) {
+        snprintf(media_url, sizeof(media_url), "%s", pl.variant);
+        n = hls_fetch_text(media_url, cur, sizeof(cur), text, sizeof(text));
+        if (n < 0 || le_hls_parse(text, (size_t)n, cur, &pl) < 0 ||
+            pl.is_master)
+            return 1;
+    }
+    snprintf(media_url, sizeof(media_url), "%s", cur);   /* after redirects */
+    for (;;) {
+        int i, fetched = 0;
+
+        if (!pl.count)
+            return 1;
+        if (next_seq < 0) {                /* live edge minus ~3 segments */
+            i = pl.count > 3 ? pl.count - 3 : 0;
+            next_seq = pl.seq[i];
+        } else if (next_seq < pl.seq[0]) {
+            le_log_warn("radiod: hls fell behind, skipping to %lld",
+                        (long long)pl.seq[0]);
+            next_seq = pl.seq[0];
+        }
+        for (i = 0; i < pl.count; ++i) {
+            int rc;
+
+            if (pl.seq[i] < next_seq)
+                continue;
+            rc = hls_fetch_segment(pl.uri[i], out_fd, &ts);
+            if (rc == -2)
+                return 0;                  /* decoder gone */
+            next_seq = pl.seq[i] + 1;
+            if (rc < 0) {
+                le_log_warn("radiod: hls segment %lld failed",
+                            (long long)pl.seq[i]);
+                if (++failures >= HLS_SEGMENT_FAILS)
+                    return 1;
+                continue;
+            }
+            failures = 0;
+            ++fetched;
+        }
+        if (pl.endlist)
+            return 0;                      /* finished VOD */
+        if (fetched)
+            stalled = 0;
+        else if (++stalled >= HLS_STALL_REFRESHES)
+            return 1;                      /* stream stopped moving */
+        delay_ms(1000u * (unsigned)(pl.target_duration > 2
+                                        ? pl.target_duration / 2 : 1));
+        n = hls_fetch_text(media_url, cur, sizeof(cur), text, sizeof(text));
+        if (n < 0 || le_hls_parse(text, (size_t)n, cur, &pl) < 0) {
+            if (++failures >= HLS_SEGMENT_FAILS)
+                return 1;
+            continue;
+        }
+    }
+}
+
+static int is_hls_url(const char *url)
+{
+    size_t n = strcspn(url, "?#");
+
+    return n >= 5 && !strncasecmp(url + n - 5, ".m3u8", 5);
+}
+
 static int play_stream(const char *url, const char *bus_path, long *played,
                        int *complete);
+static int play_hls_stream(const char *url, const char *bus_path, long *played,
+                           int *complete);
 
 static int open_usb_file(const char *url)
 {
@@ -689,15 +927,152 @@ static int mp3_take_frame(mp3dec_t *decoder, unsigned char *in, size_t *filled,
     return *filled >= capacity ? -2 : -1;
 }
 
+/*
+ * Decode whatever arrives from the source onto the bus until it ends. The
+ * source is the icy stream, or the read end of the HLS pipe when pipe_fd >= 0.
+ * The codec is chosen once from the first bytes: an ADTS sync word means AAC,
+ * anything else is handed to minimp3 exactly as before.
+ */
+static void pump_audio(int bus, int pipe_fd, long *played)
+{
+    unsigned char in[IN_BUFFER];
+    short pcm[LE_RADIO_AAC_MAX_SAMPLES > MINIMP3_MAX_SAMPLES_PER_FRAME
+                  ? LE_RADIO_AAC_MAX_SAMPLES : MINIMP3_MAX_SAMPLES_PER_FRAME];
+    mp3dec_t decoder;
+    mp3dec_frame_info_t info;
+    size_t filled = 0;
+    int codec = -1;                          /* -1 undecided, 0 mp3, 1 aac */
+
+    mp3dec_init(&decoder);
+    le_radio_resample_reset(&resampler);
+    for (;;) {
+        int samples, frames, channels = 2, rate = BUS_RATE;
+
+        if (codec < 0 && filled >= 4) {
+            codec = le_radio_aac_is_adts(in, filled);
+            if (codec && le_radio_aac_open() < 0)
+                break;                       /* decoder state unavailable */
+        }
+        if (codec < 0) {
+            samples = -1;                    /* need bytes to choose */
+        } else if (codec) {
+            samples = le_radio_aac_take_frame(in, &filled, sizeof(in), pcm,
+                                              &channels, &rate);
+        } else {
+            samples = mp3_take_frame(&decoder, in, &filled, sizeof(in), pcm,
+                                     &info);
+            channels = info.channels;
+            rate = info.hz;
+        }
+        if (samples > 0) {
+            frames = codec ? samples / (channels > 0 ? channels : 1) : samples;
+            if (codec && rate == BUS_RATE && channels == BUS_CHANNELS) {
+                if (write_all(bus, pcm, (size_t)samples * sizeof(short)) < 0)
+                    break;                   /* the bus went away */
+            } else {
+                int off = 0, bad = 0;
+
+                /* le_radio_resample takes at most 1152 frames per call. */
+                while (off < frames && !bad) {
+                    int chunk = frames - off > 1152 ? 1152 : frames - off;
+
+                    bad = write_bus(bus, pcm + (size_t)off * (size_t)channels,
+                                    chunk, channels, rate) < 0;
+                    off += chunk;
+                }
+                if (bad)
+                    break;
+            }
+            if (played)
+                ++*played;
+            continue;
+        }
+        if (samples == -2)
+            break;                           /* no frame and no room to grow */
+        if (samples == 0)
+            continue;                        /* rejected frame dropped */
+        {
+            size_t want = sizeof(in) - filled;
+            int got;
+
+            if (want > NET_CHUNK)
+                want = NET_CHUNK;
+            if (pipe_fd >= 0) {
+                ssize_t r;
+
+                do
+                    r = read(pipe_fd, in + filled, want);
+                while (r < 0 && errno == EINTR);
+                got = r < 0 ? -1 : (int)r;
+            } else {
+                got = icy_read(&stream, in + filled, want);
+            }
+            if (got <= 0)
+                break;                       /* stream ended */
+            if (pipe_fd < 0)
+                stream.body_read += got;
+            filled += (size_t)got;
+        }
+    }
+    if (codec == 1)
+        le_radio_aac_close();
+}
+
+static int play_hls_stream(const char *url, const char *bus_path, long *played,
+                           int *complete)
+{
+    int fds[2], bus, status = 0;
+    pid_t fetcher;
+
+    if (pipe(fds) < 0)
+        return -1;
+#ifdef F_SETPIPE_SZ
+    (void)fcntl(fds[1], F_SETPIPE_SZ, HLS_PIPE_BYTES);
+#endif
+    bus = open(bus_path, O_WRONLY | O_CLOEXEC);
+    if (bus < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    fetcher = fork();
+    if (fetcher < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        close(bus);
+        return -1;
+    }
+    if (fetcher == 0) {
+        close(fds[0]);
+        close(bus);
+        if (player_parent_guard() < 0)
+            _exit(1);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGPIPE, SIG_IGN);
+        memset(&stream, 0, sizeof(stream));
+        _exit(hls_fetcher(url, fds[1]));
+    }
+    close(fds[1]);
+    memset(&stream, 0, sizeof(stream));
+    hls_mode = 1;
+    pump_audio(bus, fds[0], played);
+    hls_mode = 0;
+    close(fds[0]);                           /* EPIPE ends a live fetcher */
+    kill(fetcher, SIGTERM);
+    while (waitpid(fetcher, &status, 0) < 0 && errno == EINTR)
+        ;
+    close(bus);
+    /* Only ENDLIST with every segment delivered exits 0: a finished VOD. */
+    if (complete && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        played && *played > 0)
+        *complete = 1;
+    return 0;
+}
+
 static int play_stream(const char *url, const char *bus_path, long *played,
                        int *complete)
 {
     char host[HOST_MAX], port[16], path[PATH_MAX_LEN], station[TITLE_MAX];
-    unsigned char in[IN_BUFFER];
-    short pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
-    mp3dec_t decoder;
-    mp3dec_frame_info_t info;
-    size_t filled = 0;
     int net = -1, bus = -1, rc = -1;
 
     /*
@@ -707,6 +1082,8 @@ static int play_stream(const char *url, const char *bus_path, long *played,
      * refuses anything that is not an absolute path and lets open() enforce
      * the rest.
      */
+    if (url && url[0] != '/' && !hls_mode && is_hls_url(url))
+        return play_hls_stream(url, bus_path, played, complete);
     if (url && url[0] == '/') {
         net = open_usb_file(url);
         if (net < 0)
@@ -733,8 +1110,18 @@ static int play_stream(const char *url, const char *bus_path, long *played,
         if (net < 0)
             return -1;
         if (icy_open(&stream, net, host, path, station, sizeof(station),
-                     secure) < 0)
+                     secure, 0) < 0)
             goto done;
+        if (stream.playlist_type) {
+            /* An .m3u8 served from a URL that does not look like one. */
+            if (stream.tls) {
+                le_tls_close(stream.tls);
+                stream.tls = NULL;
+            }
+            close(net);
+            net = -1;
+            return play_hls_stream(url, bus_path, played, complete);
+        }
         if (secure)
             le_log_info("radiod: %s over TLS (peer not verified: no CA store "
                         "on this image)", host);
@@ -744,36 +1131,7 @@ static int play_stream(const char *url, const char *bus_path, long *played,
     bus = open(bus_path, O_WRONLY | O_CLOEXEC);
     if (bus < 0)
         goto done;
-    mp3dec_init(&decoder);
-    le_radio_resample_reset(&resampler);
-    for (;;) {
-        int samples = mp3_take_frame(&decoder, in, &filled, sizeof(in), pcm,
-                                     &info);
-
-        if (samples > 0) {
-            if (write_bus(bus, pcm, samples, info.channels, info.hz) < 0)
-                break;                        /* the bus went away */
-            if (played)
-                ++*played;
-            continue;
-        }
-        if (samples == -2)
-            break;                            /* no frame and no room to grow */
-        if (samples == 0)
-            continue;                         /* rejected frame dropped */
-        {
-            size_t want = sizeof(in) - filled;
-            int got;
-
-            if (want > NET_CHUNK)
-                want = NET_CHUNK;
-            got = icy_read(&stream, in + filled, want);
-            if (got <= 0)
-                break;                        /* stream ended */
-            stream.body_read += got;
-            filled += (size_t)got;
-        }
-    }
+    pump_audio(bus, -1, played);
     /*
      * A server that declared a length and delivered it served a file, and a
      * file that reached its end is finished -- reconnecting would replay it
@@ -1012,7 +1370,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "radiod: cannot listen on %s\n", socket_path);
         return 1;
     }
-    le_log_info("radiod: ready socket=%s (http, mp3, icy metadata)",
+    le_log_info("radiod: ready socket=%s (http, https, mp3, aac, hls, icy metadata)",
                 socket_path);
     while (running) {
         char message[LE_ADAPTER_MSG_MAX], response[LE_ADAPTER_MSG_MAX];

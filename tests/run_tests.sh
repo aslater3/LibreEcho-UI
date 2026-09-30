@@ -195,6 +195,21 @@ make build/test-radiod-json
 make build/test-radiod-mp3-frames
 ./build/test-radiod-mp3-frames
 sh tests/test_radio_icy_metadata.sh
+HELIX_OBJS="build/helix-aac/aacdec.o build/helix-aac/aactabs.o build/helix-aac/bitstream.o build/helix-aac/buffers.o build/helix-aac/dct4.o build/helix-aac/decelmnt.o build/helix-aac/dequant.o build/helix-aac/fft.o build/helix-aac/filefmt.o build/helix-aac/huffmanaac.o build/helix-aac/hufftabs.o build/helix-aac/imdct.o build/helix-aac/noiseless.o build/helix-aac/pns.o build/helix-aac/sbr.o build/helix-aac/sbrfft.o build/helix-aac/sbrfreq.o build/helix-aac/sbrhfadj.o build/helix-aac/sbrhfgen.o build/helix-aac/sbrhuff.o build/helix-aac/sbrimdct.o build/helix-aac/sbrmath.o build/helix-aac/sbrqmf.o build/helix-aac/sbrside.o build/helix-aac/sbrtabs.o build/helix-aac/stproc.o build/helix-aac/tns.o build/helix-aac/trigtabs.o"
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_radio_ts.c src/adapter/radio_ts.c \
+    -o build/test-radio-ts
+./build/test-radio-ts
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_radio_hls.c src/adapter/radio_hls.c \
+    -o build/test-radio-hls
+./build/test-radio-hls
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -DARDUINO -Ithird-party/helix-aac/shim -Ithird-party/helix-aac \
+    -Isrc -Isrc/adapter tests/test_radio_aac.c src/adapter/radio_aac.c \
+    $HELIX_OBJS -lm -o build/test-radio-aac
+./build/test-radio-aac
+sh tests/test_radio_hls_stream.sh
 sh tests/test_airplay_led_bridge.sh
 sh tests/test_home_assistant_discovery.sh
 sh tests/test_airplay_setup_persistence.sh

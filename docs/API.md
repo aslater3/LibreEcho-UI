@@ -2139,6 +2139,14 @@ Starts the station whose `word` matches, by its stored URL.
 The successful response has the same shape as `GET`, so `playing` and
 `playing_url` come back with it.
 
+Supported stream formats: MP3 and AAC (ADTS) over HTTP(S) in Icecast/Shoutcast
+style, and HLS playlists (`.m3u8`, or a playlist content type) whose segments
+are MPEG-TS carrying AAC-LC or HE-AAC v1 — this covers BBC radio. Not
+supported: fragmented-MP4 HLS, encrypted (AES-128) HLS and HE-AAC v2. HLS
+playlists may redirect up to three times and are restarted as a whole when the
+stream drops. No station name or now-playing title is invented for HLS: the
+fields stay empty unless the stream provides them.
+
 The assistant does not reach this endpoint. `agentd` has no radio path at all,
 so a spoken request for a station cannot start one; playback is started over the
 API today.

@@ -34,6 +34,34 @@ The SBC code is used as a separately licensed component; inclusion in this
 repository does not make it MIT-licensed. Changes to the SBC component must
 preserve its upstream notices and LGPL boundary.
 
+## Vendored Helix fixed-point AAC decoder
+
+The directory [`third-party/helix-aac/`](third-party/helix-aac/) contains the
+RealNetworks Helix fixed-point HE-AAC decoder (2005), compiled into
+`libreecho-radiod` to decode the AAC-LC and HE-AAC v1 audio in radio streams.
+It retains the upstream RealNetworks copyright and license header in every
+applicable source file and is distributed under the **RealNetworks Public
+Source License v1.0 (RPSL-1.0)**. The applicable license text ships with the
+source as `third-party/helix-aac/LICENSE-RPSL.txt` (in-tree).
+
+Provenance, the pinned upstream commit, the build flags, and the SHA-256 of
+every vendored file are recorded in
+`third-party/helix-aac/README.libreecho.md`.
+The vendored `*.c`, `*.h` and `readme.txt` files are copied byte-for-byte from
+`earlephilhower/ESP8266Audio` commit
+`10d929ac01436dfe8856e0a06fd9ec35a848c6e2` (path `src/libhelix-aac/`) and are
+**unmodified**; the two shim headers under
+[`third-party/helix-aac/shim/`](third-party/helix-aac/shim/) are
+LibreEcho-authored (MIT).
+
+The RPSL obligations are honoured: upstream license headers stay intact, the
+license text is shipped with the source, no file is modified (so no
+modification marker applies), and binary distributions must carry a notice that
+the source is available. MIT is on the RPSL's compatible-source-license list,
+so the static link into the MIT `radiod` is permitted. The Helix decoder is not
+MIT-licensed; do not describe it as such. AAC patent licensing is a
+distribution-time matter and is noted as an open item in the README only.
+
 ## Build-time and runtime integrations
 
 The following are referenced by the UI/service layer or supplied by the image

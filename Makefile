@@ -25,7 +25,7 @@ LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
 BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
 WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/service_env.c src/adapter/adapter_client.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
-RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
+RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
 BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/mdns_client.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TIMERD_SOURCES = src/adapter/timerd.c src/adapter/timer_schedule.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
@@ -65,7 +65,15 @@ BUTTOND_OBJECTS = $(BUTTOND_SOURCES:src/%.c=$(BUILD)/%.o)
 WATCHDOGD_OBJECTS = $(WATCHDOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMERD_OBJECTS = $(TIMERD_SOURCES:src/%.c=$(BUILD)/%.o)
 CAPTURE_MUX_OBJECTS = $(CAPTURE_MUX_SOURCES:src/%.c=$(BUILD)/%.o)
-RADIOD_OBJECTS = $(RADIOD_SOURCES:src/%.c=$(BUILD)/%.o)
+RADIOD_CODEC_SOURCES = src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/radio_resample.c
+RADIOD_OBJECTS = $(RADIOD_SOURCES:src/%.c=$(BUILD)/%.o) $(HELIX_AAC_OBJECTS)
+# Vendored Helix fixed-point AAC decoder (third-party/helix-aac). Upstream code
+# is built as shipped with its warnings off; LibreEcho's own wrapper
+# (src/adapter/radio_aac.c) keeps the strict flags and sees the decoder headers
+# through HELIX_AAC_CPPFLAGS only.
+HELIX_AAC_CPPFLAGS = -DARDUINO -Ithird-party/helix-aac/shim -Ithird-party/helix-aac
+HELIX_AAC_SOURCES = $(filter-out %/shim,$(wildcard third-party/helix-aac/*.c))
+HELIX_AAC_OBJECTS = $(HELIX_AAC_SOURCES:third-party/helix-aac/%.c=$(BUILD)/helix-aac/%.o)
 BTD_OBJECTS = $(BTD_SOURCES:src/%.c=$(BUILD)/%.o)
 AIRPLAYD_OBJECTS = $(AIRPLAYD_SOURCES:src/%.c=$(BUILD)/%.o)
 TTSD_OBJECTS = $(TTSD_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -432,17 +440,17 @@ $(BUILD)/test-diagnostic-export: tests/test_diagnostic_export.c src/json.c src/f
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc $^ -o $@
 
-$(BUILD)/test-radiod-json: tests/test_radiod_json.c src/adapter/radiod.c src/json.c
+$(BUILD)/test-radiod-json: tests/test_radiod_json.c src/adapter/radiod.c src/json.c $(RADIOD_CODEC_SOURCES) $(HELIX_AAC_OBJECTS)
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/json.c -lm -o $@
+		-Isrc -Isrc/adapter $(HELIX_AAC_CPPFLAGS) $< src/json.c $(RADIOD_CODEC_SOURCES) $(HELIX_AAC_OBJECTS) -lm -o $@
 
-$(BUILD)/test-radiod-mp3-frames: tests/test_radiod_mp3_frames.c tests/radiod_mp3_fixture.h src/adapter/radiod.c src/json.c
+$(BUILD)/test-radiod-mp3-frames: tests/test_radiod_mp3_frames.c tests/radiod_mp3_fixture.h src/adapter/radiod.c src/json.c $(RADIOD_CODEC_SOURCES) $(HELIX_AAC_OBJECTS)
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/json.c -lm -o $@
+		-Isrc -Isrc/adapter $(HELIX_AAC_CPPFLAGS) $< src/json.c $(RADIOD_CODEC_SOURCES) $(HELIX_AAC_OBJECTS) -lm -o $@
 
 $(BUILD)/test-factory-reset: tests/test_factory_reset.c src/factory_reset.c
 	@mkdir -p $(BUILD)
@@ -897,6 +905,12 @@ adapters: $(ADAPTER_TARGETS)
 # with "Unable to initialise authentication" for no visible reason.
 # -MP emits a phony target per header so a deleted or renamed header
 # does not wedge the build with "No rule to make target".
+$(BUILD)/helix-aac/%.o: third-party/helix-aac/%.c
+	@mkdir -p $(BUILD)/helix-aac
+	$(CROSS_COMPILE)$(CC) $(CSTD) $(CFLAGS) $(HELIX_AAC_CPPFLAGS) -w -MMD -MP -c $< -o $@
+
+$(BUILD)/adapter/radio_aac.o: CPPFLAGS += $(HELIX_AAC_CPPFLAGS)
+
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(BUILD) $(BUILD)/adapter $(BUILD)/adapter/bt-sbc
 	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -MMD -MP -Isrc -c $< -o $@
