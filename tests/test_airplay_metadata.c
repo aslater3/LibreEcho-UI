@@ -232,10 +232,12 @@ static void test_sender_master_poll(void)
     airplay_master_poll(&ctx);
     assert(!ctx.master_session[0]);
     airplay_master_poll(&ctx);
-    assert(read(count[0], sent, sizeof(sent)) == 5);
+    /* The stub server signals each exchange after replying, so the client can
+     * finish first. Reap the server before counting to avoid racing it. */
     int child_status;
     assert(waitpid(server, &child_status, 0) == server &&
            WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    assert(read(count[0], sent, sizeof(sent)) == 5);
     close(count[0]); unlink(temp); unlink(victim); unlink(ack); unlink(volume); unlink(marker); unlink(socket_path); rmdir(root);
 }
 
