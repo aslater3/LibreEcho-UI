@@ -19,7 +19,36 @@ INTERFACE=${INTERFACE:-wlan0}
 WPA_CTRL=${WPA_CTRL:-/tmp/wpa_ctrl/$INTERFACE}
 # networkd is an adapter entry point.  The existing image control plane owns
 # wpa_supplicant; this daemon only attaches to its control socket.
-ARGS=${ARGS:---foreground --socket $SOCKET --interface $INTERFACE --wpa-ctrl $WPA_CTRL}
+# Secure recovery access point (issue #96).  The physical boot marker is armed
+# by the platform button helper; the automatic fallback is opt-in only and is
+# enabled by setting RECOVERY_AUTO=1 in /etc/default/libreecho-networkd.
+RECOVERY_MARKER=${RECOVERY_MARKER:-/run/libreecho/recovery-mode}
+RECOVERY_PSK=${RECOVERY_PSK:-/run/libreecho/recovery-psk}
+RECOVERY_RUN_DIR=${RECOVERY_RUN_DIR:-/run/libreecho}
+RECOVERY_HOSTAPD=${RECOVERY_HOSTAPD:-/usr/local/sbin/hostapd}
+RECOVERY_DNSMASQ=${RECOVERY_DNSMASQ:-/usr/local/sbin/dnsmasq}
+RECOVERY_AP_PROBE=${RECOVERY_AP_PROBE:-/usr/local/sbin/libreecho-recovery-ap-probe}
+RECOVERY_NET_UP=${RECOVERY_NET_UP:-/usr/local/sbin/libreecho-recovery-net-up}
+RECOVERY_NET_DOWN=${RECOVERY_NET_DOWN:-/usr/local/sbin/libreecho-recovery-net-down}
+RECOVERY_AP_ADDRESS=${RECOVERY_AP_ADDRESS:-192.168.4.1}
+LED_SOCKET=${LED_SOCKET:-/run/libreecho/led.sock}
+RECOVERY_AUTO=${RECOVERY_AUTO:-0}
+RECOVERY_ENABLED=${RECOVERY_ENABLED:-1}
+RECOVERY_TIMEOUT_MS=${RECOVERY_TIMEOUT_MS:-120000}
+ARGS=${ARGS:---foreground --socket $SOCKET --interface $INTERFACE --wpa-ctrl $WPA_CTRL \
+    --recovery-marker $RECOVERY_MARKER --recovery-psk $RECOVERY_PSK \
+    --recovery-run-dir $RECOVERY_RUN_DIR --hostapd $RECOVERY_HOSTAPD \
+    --recovery-dhcp $RECOVERY_DNSMASQ --recovery-dns $RECOVERY_DNSMASQ \
+    --recovery-ap-probe $RECOVERY_AP_PROBE \
+    --recovery-net-up $RECOVERY_NET_UP --recovery-net-down $RECOVERY_NET_DOWN \
+    --recovery-address $RECOVERY_AP_ADDRESS \
+    --recovery-timeout $RECOVERY_TIMEOUT_MS --led-socket $LED_SOCKET}
+if [ "$RECOVERY_AUTO" = 1 ]; then
+    ARGS="$ARGS --recovery-auto"
+fi
+if [ "$RECOVERY_ENABLED" = 0 ]; then
+    ARGS="$ARGS --recovery-disabled"
+fi
 
 # Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life:
 # it goes stale when the daemon is started from a shell that then exits (the

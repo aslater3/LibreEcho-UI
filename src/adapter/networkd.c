@@ -14,6 +14,7 @@
 #include "gateway_probe.h"
 #include "log.h"
 #include "network_health.h"
+#include "network_recovery.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -156,6 +157,12 @@ struct daemon_ctx {
     struct pending_scan scan;
     struct pending_association association;
     struct pending_dhcp dhcp;
+    /* Secure recovery access point (issue #96). */
+    struct le_recovery_config recovery_config;
+    struct le_recovery recovery;
+    int recovery_configured;
+    int recovery_led_active;
+    int recovery_has_saved_network;
 };
 
 static volatile sig_atomic_t g_running = 1;
@@ -295,6 +302,30 @@ static int state_equal(const struct network_state *a,
            !strcmp(a->ssid, b->ssid) && !strcmp(a->ip, b->ip) &&
            !strcmp(a->gateway, b->gateway) && !strcmp(a->dns, b->dns) &&
            !strcmp(a->mac, b->mac);
+}
+
+/* Full daemon status: the network state plus the recovery mode object.  This
+ * is what /network consumes; the recovery block is defined in
+ * docs/recovery-core.md and must stay in sync with the integrator bindings. */
+static int status_data(struct daemon_ctx *ctx, char *out, size_t size)
+{
+    char base[LE_ADAPTER_MSG_MAX];
+    char recovery[1024];
+    size_t used = 0;
+    int n, r;
+
+    n = state_json(&ctx->state, base, sizeof(base));
+    if (n <= 1 || base[n - 1] != '}')
+        return -1;
+    base[n - 1] = '\0';
+    r = le_recovery_status_json(&ctx->recovery, recovery, sizeof(recovery));
+    if (append_text(out, size, &used, "%s,\"mode\":", base) < 0 ||
+        append_json_string(out, size, &used,
+                           le_recovery_mode_name(ctx->recovery.mode)) < 0 ||
+        append_text(out, size, &used, ",\"recovery\":%s}",
+                    r >= 0 ? recovery : "{}") < 0)
+        return -1;
+    return (int)used;
 }
 
 /* ----- Direct wpa_supplicant control protocol -------------------------- */
@@ -963,7 +994,7 @@ static void broadcast_state(struct daemon_ctx *ctx, const char *event_type)
 {
     char data[LE_ADAPTER_MSG_MAX], event[LE_ADAPTER_MSG_MAX];
     int i, n;
-    if (state_json(&ctx->state, data, sizeof(data)) < 0)
+    if (status_data(ctx, data, sizeof(data)) < 0)
         return;
     n = le_adapter_format_event(event, sizeof(event), event_type, data);
     if (n < 0)
@@ -981,6 +1012,153 @@ static void refresh_and_broadcast(struct daemon_ctx *ctx, const char *event_type
     refresh_state(ctx);
     if (!state_equal(&before, &ctx->state))
         broadcast_state(ctx, event_type);
+}
+
+/* ----- Recovery access point (issue #96) -------------------------------- */
+
+/* Send one best-effort request to a companion daemon using the documented
+ * adapter wire format.  networkd links only the server side of the adapter
+ * protocol, so it speaks the one line the LED owner needs directly. */
+static int recovery_led_request(const char *sock_path, const char *args_json)
+{
+    struct sockaddr_un address;
+    struct pollfd descriptor;
+    char request[512], response[256];
+    static unsigned long sequence;
+    int fd, length;
+
+    if (!sock_path || !sock_path[0] || !args_json)
+        return -1;
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    set_cloexec(fd);
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    if (strlen(sock_path) >= sizeof(address.sun_path)) {
+        close(fd);
+        return -1;
+    }
+    copy_string(address.sun_path, sizeof(address.sun_path), sock_path);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        close(fd);
+        return -1;
+    }
+    length = snprintf(request, sizeof(request),
+                      "{\"v\":1,\"id\":%lu,\"cmd\":\"pattern\",\"args\":%s}\n",
+                      ++sequence, args_json);
+    if (length < 0 || length >= (int)sizeof(request) ||
+        send_bytes(fd, request, (size_t)length) < 0) {
+        close(fd);
+        return -1;
+    }
+    descriptor.fd = fd;
+    descriptor.events = POLLIN;
+    descriptor.revents = 0;
+    if (poll(&descriptor, 1, 1000) > 0)
+        (void)recv(fd, response, sizeof(response), MSG_DONTWAIT);
+    close(fd);
+    return 0;
+}
+
+/* The distinct recovery LED is owned through ledd's existing pattern
+ * protocol.  Ownership is released with a matching stop so the normal base
+ * layer resumes; a failed LED call never blocks the network transition. */
+static void recovery_apply_led(struct daemon_ctx *ctx)
+{
+    char args[256];
+    int want = ctx->recovery.led_active;
+
+    if (want == ctx->recovery_led_active || !ctx->recovery_configured)
+        return;
+    if (want) {
+        if (snprintf(args, sizeof(args),
+                     "{\"name\":\"pulse\",\"owner\":\"%s\",\"r\":24,\"g\":96,"
+                     "\"b\":224,\"brightness\":45,\"repeats\":0}",
+                     LE_RECOVERY_LED_OWNER) < (int)sizeof(args))
+            (void)recovery_led_request(ctx->recovery.config.led_socket, args);
+    } else {
+        (void)recovery_led_request(ctx->recovery.config.led_socket,
+                                   "{\"name\":\"stop\",\"owner\":\""
+                                   LE_RECOVERY_LED_OWNER "\"}");
+    }
+    ctx->recovery_led_active = want;
+}
+
+/* Decide the boot trigger from the validated tmpfs marker.  Physical entry is
+ * enabled by default; a rejected or malformed marker never enters recovery. */
+static void recovery_boot(struct daemon_ctx *ctx, long long now_ms)
+{
+    char reason[LE_RECOVERY_REASON_MAX] = "";
+    int marker;
+
+    if (!ctx->recovery_configured)
+        return;
+    if (!ctx->recovery.config.enabled)
+        return;
+#ifdef LE_NETWORKD_TESTING
+    /* Host fixtures cannot create root-owned tmpfs files; strict marker policy
+     * stays in the shipped build. */
+    if (getenv("LIBREECHO_RECOVERY_TEST_MARKER_RELAX")) {
+        ctx->recovery.config.require_tmpfs = 0;
+        ctx->recovery.config.require_root_owner = 0;
+    }
+#endif
+    marker = le_recovery_marker_check(&ctx->recovery.config, reason,
+                                      sizeof(reason));
+    if (marker == 1) {
+        if (le_recovery_arm(&ctx->recovery, LE_RECOVERY_TRIGGER_PHYSICAL,
+                            now_ms) < 0)
+            le_log_error("networkd: recovery requested but unavailable: %s",
+                         ctx->recovery.last_error);
+        else
+            le_log_warn("networkd: physical recovery requested; starting recovery access point");
+    } else if (marker < 0) {
+        le_log_error("networkd: rejected recovery marker (%s); staying in client mode",
+                     reason);
+        copy_string(ctx->recovery.unavailable_reason,
+                    sizeof(ctx->recovery.unavailable_reason), reason);
+    }
+    /* Automatic fallback is opt-in and only for an already-provisioned device;
+     * a never-set-up unit belongs to the normal first-boot AP. */
+    if (!ctx->recovery_has_saved_network)
+        ctx->recovery.config.auto_enabled = 0;
+}
+
+static void recovery_tick(struct daemon_ctx *ctx, long long now_ms)
+{
+    enum le_recovery_mode before;
+    int associated;
+
+    if (!ctx->recovery_configured)
+        return;
+    associated = !strcmp(ctx->state.state, "connected") &&
+                 ctx->state.ssid[0] && ctx->state.link_up;
+    before = ctx->recovery.mode;
+    if (le_recovery_tick(&ctx->recovery, now_ms, associated) ||
+        ctx->recovery.mode != before) {
+        recovery_apply_led(ctx);
+        if (ctx->recovery.mode == LE_RECOVERY_MODE_ACTIVE)
+            le_log_warn("networkd: recovery access point active (ssid=%s)",
+                        ctx->recovery.ssid);
+        else if (before == LE_RECOVERY_MODE_ACTIVE &&
+                 ctx->recovery.mode != LE_RECOVERY_MODE_ACTIVE)
+            le_log_warn("networkd: recovery access point stopped");
+        broadcast_state(ctx, "network.recovery");
+    }
+}
+
+static void recovery_shutdown(struct daemon_ctx *ctx)
+{
+    if (!ctx->recovery_configured)
+        return;
+    if (ctx->recovery.mode == LE_RECOVERY_MODE_ACTIVE ||
+        ctx->recovery.mode == LE_RECOVERY_MODE_STARTING ||
+        ctx->recovery.mode == LE_RECOVERY_MODE_ARMED ||
+        ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+        le_recovery_stop(&ctx->recovery, monotonic_ms(), "shutdown");
+        recovery_apply_led(ctx);
+    }
 }
 
 #ifdef LE_NETWORKD_TESTING
@@ -1354,7 +1532,7 @@ static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
         int ci = client_index(ctx, fd);
         if (ci >= 0) {
             if (network_success)
-                (void)send_ok_fd(fd, id, state_json(&ctx->state, data, sizeof(data)) >= 0 ? data : "{}");
+                (void)send_ok_fd(fd, id, status_data(ctx, data, sizeof(data)) >= 0 ? data : "{}");
             else if (success && !release && !ctx->state.ip[0])
                 (void)send_err_fd(fd, id, "DHCP completed without an IPv4 address");
             else if (timed_out)
@@ -2756,6 +2934,25 @@ static int existing_network_id(struct daemon_ctx *ctx)
     return -1;
 }
 
+/* A device that already has a saved Wi-Fi profile is "set up"; a never-set-up
+ * unit must use the normal first-boot AP, not the recovery fallback. */
+static int wpa_has_saved_network(struct daemon_ctx *ctx)
+{
+    char reply[WPA_REPLY_MAX], *line, *next;
+    if (wpa_call(ctx, "LIST_NETWORKS\n", reply, sizeof(reply)) < 0)
+        return 0;
+    line = reply;
+    while (line && *line) {
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = '\0';
+        if (line[0] >= '0' && line[0] <= '9')
+            return 1;
+        line = next;
+    }
+    return 0;
+}
+
 static void remove_network_profile(struct daemon_ctx *ctx, int id)
 {
     char command[64], reply[WPA_REPLY_MAX];
@@ -2866,6 +3063,14 @@ static void finish_association(struct daemon_ctx *ctx, int success)
         le_log_error("networkd: Wi-Fi association did not complete for ssid=\"%s\"",
                      ctx->association.ssid);
         restore_previous_network(ctx);
+        /* The recovery AP released the radio for this attempt; rebuild it and
+         * keep the marker so the owner can retry with correct credentials. */
+        if (ctx->recovery_configured &&
+            ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+            le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 0);
+            recovery_apply_led(ctx);
+            broadcast_state(ctx, "network.recovery");
+        }
         if (ci >= 0) {
             (void)send_err_fd(fd, id, "Wi-Fi association did not complete");
             ctx->clients[ci].busy = 0;
@@ -2887,6 +3092,14 @@ static void finish_association(struct daemon_ctx *ctx, int success)
     }
     ctx->network_id = candidate;
     reset_network_health(ctx, monotonic_ms());
+    /* Association succeeded during recovery: end recovery, clear the marker
+     * and return the interface to normal client ownership. */
+    if (ctx->recovery_configured &&
+        ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+        le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 1);
+        recovery_apply_led(ctx);
+        broadcast_state(ctx, "network.recovery");
+    }
     copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ctx->association.ssid);
     copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
     ctx->association.active = 0;
@@ -2956,9 +3169,44 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
     if (!strcmp(cmd, "status")) {
         (void)ensure_wpa(ctx);
         refresh_state(ctx);
-        if (state_json(&ctx->state, data, sizeof(data)) < 0 ||
+        if (status_data(ctx, data, sizeof(data)) < 0 ||
             send_ok_fd(ctx->clients[ci].fd, id, data) < 0)
             remove_client(ctx, ci);
+    } else if (!strcmp(cmd, "recovery_status")) {
+        if (le_recovery_status_json(&ctx->recovery, data, sizeof(data)) < 0 ||
+            send_ok_fd(ctx->clients[ci].fd, id, data) < 0)
+            remove_client(ctx, ci);
+    } else if (!strcmp(cmd, "recovery_psk")) {
+        /* Owner-only reveal, saveable while client-connected so the owner can
+         * keep the password before it is needed.  The core refuses the reveal
+         * while the captive AP is serving, so an unauthenticated captive client
+         * can never obtain it.  The web layer must additionally require an
+         * authenticated owner session + CSRF; the value is never logged. */
+        if (!ctx->recovery_configured ||
+            le_recovery_secret_json(&ctx->recovery, data, sizeof(data)) < 0)
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "recovery password is unavailable in this mode");
+        else if (send_ok_fd(ctx->clients[ci].fd, id, data) < 0)
+            remove_client(ctx, ci);
+    } else if (!strcmp(cmd, "recovery_prepare")) {
+        /* Owner action: generate/retain the per-device password now without
+         * returning it, so a later reveal is stable. */
+        char reason[LE_RECOVERY_REASON_MAX] = "";
+        if (!ctx->recovery_configured ||
+            le_recovery_secret_prepare(&ctx->recovery, reason,
+                                       sizeof(reason)) < 0)
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              reason[0] ? reason : "recovery unavailable");
+        else if (send_ok_fd(ctx->clients[ci].fd, id,
+                            "{\"prepared\":true}") < 0)
+            remove_client(ctx, ci);
+    } else if (!strcmp(cmd, "recovery_stop")) {
+        if (ctx->recovery_configured) {
+            le_recovery_stop(&ctx->recovery, monotonic_ms(), "owner-stop");
+            recovery_apply_led(ctx);
+            refresh_and_broadcast(ctx, "network.recovery");
+        }
+        (void)send_ok_fd(ctx->clients[ci].fd, id, "{}");
     } else if (!strcmp(cmd, "scan")) {
         char reply[WPA_REPLY_MAX];
         int scan_state;
@@ -3024,7 +3272,25 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
                               "Wi-Fi association already in progress");
             return;
         }
+        /* Rate-limit credential submissions during recovery so the AP cannot
+         * be used to spray guesses at the home network or this daemon. */
+        if (ctx->recovery_configured &&
+            ctx->recovery.mode == LE_RECOVERY_MODE_ACTIVE &&
+            le_recovery_rate_limit(&ctx->recovery, monotonic_ms()) < 0) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "too many Wi-Fi attempts; wait and retry");
+            return;
+        }
         le_log_info("networkd: connect to ssid=\"%s\" security=%s", ssid, have_security == 1 ? security : "wpa2");
+        /* Single-radio handover: the recovery AP must release the interface
+         * (children down + portal IPv4 removed) before wpa_supplicant can try
+         * to associate.  The boot marker is kept so a failed attempt rebuilds
+         * the AP. */
+        if (ctx->recovery_configured && ctx->recovery.config.enabled &&
+            le_recovery_handover_begin(&ctx->recovery, monotonic_ms())) {
+            recovery_apply_led(ctx);
+            broadcast_state(ctx, "network.recovery");
+        }
         {
             int previous_id = -1;
             connect_result = connect_network(ctx, ssid, have_psk == 1 ? psk : "",
@@ -3047,6 +3313,12 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         }
         if (connect_result < 0) {
             le_log_error("networkd: wpa_supplicant rejected network \\\"%s\\\" at stage %d", ssid, connect_result);
+            if (ctx->recovery_configured &&
+                ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+                le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 0);
+                recovery_apply_led(ctx);
+                broadcast_state(ctx, "network.recovery");
+            }
             (void)send_err_fd(ctx->clients[ci].fd, id,
                               connect_result == -2 ? "wpa_supplicant unavailable" :
                               connect_result == -4 ? "SSID rejected by wpa_supplicant" :
@@ -3237,7 +3509,7 @@ static int daemonize_process(void)
 static void usage(const char *name)
 {
     fprintf(stderr,
-            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--reboot-request PATH] [--reboot-guard PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
+            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--reboot-request PATH] [--reboot-guard PATH] [--recovery-marker PATH] [--recovery-psk PATH] [--recovery-run-dir PATH] [--recovery-timeout MS] [--recovery-start-timeout MS] [--recovery-stop-timeout MS] [--recovery-auto] [--recovery-disabled] [--recovery-ap-probe PATH] [--recovery-ready-probe PATH] [--recovery-net-up PATH] [--recovery-net-down PATH] [--recovery-address ADDR] [--hostapd PATH] [--hostapd-conf PATH] [--recovery-dhcp PATH] [--recovery-dns PATH] [--recovery-conf PATH] [--led-socket PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
             name);
 }
 
@@ -3252,27 +3524,105 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
     copy_string(ctx->reboot_guard_path, sizeof(ctx->reboot_guard_path),
                 "/data/libreecho/network-recovery-reboot.guard");
     copy_string(ctx->interface, sizeof(ctx->interface), "wlan0");
+    le_recovery_config_default(&ctx->recovery_config, ctx->interface);
+    ctx->recovery_configured = 1;
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--foreground")) {
             ctx->foreground = 1;
+        } else if (!strcmp(argv[i], "--recovery-auto")) {
+            ctx->recovery_config.auto_enabled = 1;
+        } else if (!strcmp(argv[i], "--recovery-disabled")) {
+            ctx->recovery_config.enabled = 0;
         } else if ((!strcmp(argv[i], "--socket") ||
                     !strcmp(argv[i], "--wpa-ctrl") ||
                     !strcmp(argv[i], "--interface") ||
                     !strcmp(argv[i], "--reboot-request") ||
-                    !strcmp(argv[i], "--reboot-guard")) && i + 1 < argc) {
+                    !strcmp(argv[i], "--reboot-guard") ||
+                    !strcmp(argv[i], "--recovery-marker") ||
+                    !strcmp(argv[i], "--recovery-psk") ||
+                    !strcmp(argv[i], "--recovery-run-dir") ||
+                    !strcmp(argv[i], "--recovery-timeout") ||
+                    !strcmp(argv[i], "--recovery-start-timeout") ||
+                    !strcmp(argv[i], "--recovery-stop-timeout") ||
+                    !strcmp(argv[i], "--recovery-ap-probe") ||
+                    !strcmp(argv[i], "--recovery-ready-probe") ||
+                    !strcmp(argv[i], "--recovery-net-up") ||
+                    !strcmp(argv[i], "--recovery-net-down") ||
+                    !strcmp(argv[i], "--recovery-address") ||
+                    !strcmp(argv[i], "--hostapd") ||
+                    !strcmp(argv[i], "--hostapd-conf") ||
+                    !strcmp(argv[i], "--recovery-dhcp") ||
+                    !strcmp(argv[i], "--recovery-dns") ||
+                    !strcmp(argv[i], "--recovery-conf") ||
+                    !strcmp(argv[i], "--led-socket")) && i + 1 < argc) {
+            const char *option = argv[i];
             const char *value = argv[++i];
-            if (!strcmp(argv[i - 1], "--socket"))
+            if (!strcmp(option, "--socket"))
                 copy_string(ctx->socket_path, sizeof(ctx->socket_path), value);
-            else if (!strcmp(argv[i - 1], "--wpa-ctrl"))
+            else if (!strcmp(option, "--wpa-ctrl"))
                 copy_string(ctx->wpa_path, sizeof(ctx->wpa_path), value);
-            else if (!strcmp(argv[i - 1], "--reboot-request"))
+            else if (!strcmp(option, "--reboot-request"))
                 copy_string(ctx->reboot_request_path,
                             sizeof(ctx->reboot_request_path), value);
-            else if (!strcmp(argv[i - 1], "--reboot-guard"))
+            else if (!strcmp(option, "--reboot-guard"))
                 copy_string(ctx->reboot_guard_path,
                             sizeof(ctx->reboot_guard_path), value);
-            else
+            else if (!strcmp(option, "--interface")) {
                 copy_string(ctx->interface, sizeof(ctx->interface), value);
+                copy_string(ctx->recovery_config.interface,
+                            sizeof(ctx->recovery_config.interface), value);
+            } else if (!strcmp(option, "--recovery-marker"))
+                copy_string(ctx->recovery_config.marker_path,
+                            sizeof(ctx->recovery_config.marker_path), value);
+            else if (!strcmp(option, "--recovery-psk"))
+                copy_string(ctx->recovery_config.psk_path,
+                            sizeof(ctx->recovery_config.psk_path), value);
+            else if (!strcmp(option, "--recovery-run-dir"))
+                copy_string(ctx->recovery_config.run_dir,
+                            sizeof(ctx->recovery_config.run_dir), value);
+            else if (!strcmp(option, "--recovery-timeout"))
+                ctx->recovery_config.auto_timeout_ms =
+                    strtoll(value, NULL, 10);
+            else if (!strcmp(option, "--recovery-start-timeout"))
+                ctx->recovery_config.start_timeout_ms =
+                    strtoll(value, NULL, 10);
+            else if (!strcmp(option, "--recovery-stop-timeout"))
+                ctx->recovery_config.stop_timeout_ms =
+                    strtoll(value, NULL, 10);
+            else if (!strcmp(option, "--recovery-ap-probe"))
+                copy_string(ctx->recovery_config.ap_probe_cmd,
+                            sizeof(ctx->recovery_config.ap_probe_cmd), value);
+            else if (!strcmp(option, "--recovery-ready-probe"))
+                copy_string(ctx->recovery_config.ready_probe_cmd,
+                            sizeof(ctx->recovery_config.ready_probe_cmd),
+                            value);
+            else if (!strcmp(option, "--recovery-net-up"))
+                copy_string(ctx->recovery_config.net_up_cmd,
+                            sizeof(ctx->recovery_config.net_up_cmd), value);
+            else if (!strcmp(option, "--recovery-net-down"))
+                copy_string(ctx->recovery_config.net_down_cmd,
+                            sizeof(ctx->recovery_config.net_down_cmd), value);
+            else if (!strcmp(option, "--recovery-address"))
+                copy_string(ctx->recovery_config.ap_address,
+                            sizeof(ctx->recovery_config.ap_address), value);
+            else if (!strcmp(option, "--hostapd"))
+                copy_string(ctx->recovery_config.hostapd_bin,
+                            sizeof(ctx->recovery_config.hostapd_bin), value);
+            else if (!strcmp(option, "--hostapd-conf"))
+                copy_string(ctx->recovery_config.hostapd_conf,
+                            sizeof(ctx->recovery_config.hostapd_conf), value);
+            else if (!strcmp(option, "--recovery-dhcp"))
+                copy_string(ctx->recovery_config.dhcp_bin,
+                            sizeof(ctx->recovery_config.dhcp_bin), value);
+            else if (!strcmp(option, "--recovery-dns"))
+                copy_string(ctx->recovery_config.dns_bin,
+                            sizeof(ctx->recovery_config.dns_bin), value);
+            else if (!strcmp(option, "--recovery-conf"))
+                copy_string(ctx->recovery_config.dhcp_conf,
+                            sizeof(ctx->recovery_config.dhcp_conf), value);
+            else if (!strcmp(option, "--led-socket"))
+                copy_string(ctx->recovery_config.led_socket,
+                            sizeof(ctx->recovery_config.led_socket), value);
         } else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "--debug") ||
                    !strcmp(argv[i], "--quiet") || !strcmp(argv[i], "--syslog")) {
             /* handled by le_log_init */
@@ -3287,6 +3637,7 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
 static void cleanup(struct daemon_ctx *ctx)
 {
     int i;
+    recovery_shutdown(ctx);
     if (ctx->association.active)
         cancel_association(ctx);
     if (ctx->dhcp.active) {
@@ -3331,6 +3682,7 @@ int main(int argc, char **argv)
     if (parse_args(&ctx, argc, argv) < 0)
         return 2;
     le_network_health_init(&ctx.health, NULL, monotonic_ms());
+    le_recovery_init(&ctx.recovery, &ctx.recovery_config, NULL, monotonic_ms());
     le_log_info("networkd: starting (socket=%s, interface=%s, wpa=%s)",
                 ctx.socket_path, ctx.interface, ctx.wpa_path);
 
@@ -3361,6 +3713,8 @@ int main(int argc, char **argv)
     ctx.netlink_fd = open_netlink();
     (void)wpa_open(&ctx); /* Missing wpa_supplicant is a runtime state, not fatal. */
     refresh_state(&ctx);
+    ctx.recovery_has_saved_network = wpa_has_saved_network(&ctx);
+    recovery_boot(&ctx, monotonic_ms());
 
     while (g_running) {
         int nfds = 0;
@@ -3408,6 +3762,15 @@ int main(int argc, char **argv)
             ctx.gateway_probe.deadline_ms - now < timeout)
             timeout = (int)(ctx.gateway_probe.deadline_ms > now ?
                             ctx.gateway_probe.deadline_ms - now : 0);
+        if (ctx.recovery_configured && ctx.recovery.auto_counting &&
+            ctx.recovery.auto_deadline_ms - now < timeout)
+            timeout = (int)(ctx.recovery.auto_deadline_ms > now ?
+                            ctx.recovery.auto_deadline_ms - now : 0);
+        if (ctx.recovery_configured &&
+            ctx.recovery.mode == LE_RECOVERY_MODE_STARTING &&
+            ctx.recovery.start_deadline_ms - now < timeout)
+            timeout = (int)(ctx.recovery.start_deadline_ms > now ?
+                            ctx.recovery.start_deadline_ms - now : 0);
         if (poll(pfds, (nfds_t)nfds, timeout) < 0 && errno != EINTR)
             break;
         now = monotonic_ms();
@@ -3464,6 +3827,7 @@ int main(int argc, char **argv)
              * automatic recovery in this poll iteration. */
             check_association(&ctx, now);
             check_network_health(&ctx, now);
+            recovery_tick(&ctx, now);
         }
     }
     cleanup(&ctx);
