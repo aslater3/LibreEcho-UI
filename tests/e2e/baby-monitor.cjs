@@ -215,9 +215,10 @@ async function startDeviceProxy({ streamStatus = 200, intervalMs = 40, totalChun
         return;
       }
       response.writeHead(200, {
-        'content-type': 'application/octet-stream',
+        'content-type': 'audio/L16; rate=16000; channels=1',
         'X-LibreEcho-Audio': STREAM_HEADER,
-        'cache-control': 'no-store'
+        'cache-control': 'no-store',
+        'accept-ranges': 'none'
       });
       let sent = 0, finished = false, timer = null;
       /* A client that goes away mid-response leaves the response unfinished, so

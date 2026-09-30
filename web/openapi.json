@@ -947,7 +947,7 @@
      "Audio"
     ],
     "summary": "Stream selected microphone audio",
-    "description": "Streams microphone audio at 16 kHz using HTTP chunked transfer encoding. When the wake-word service is running, the endpoint subscribes to its shared calibrated mono stream (pcm_s16_le, one channel) so baby monitoring does not open a second ALSA capture. If wake-word is unavailable, it falls back to the selected verified raw microphone lane using the 9-channel packed signed 24-bit little-endian PCM container (pcm_s24_3le) carrying sign-extended 16-bit samples; lanes 7 and 8 are inactive or reserved. The source query value is card:device and channel selects 0 through 6. Authentication is applied when enabled.",
+    "description": "Streams microphone audio at 16 kHz using HTTP chunked transfer encoding. The shared calibrated lane is audio/L16 and the raw fallback is audio/L24; both also carry the X-LibreEcho-Audio contract header and omit Content-Length because the stream is live. When the wake-word service is running, the endpoint subscribes to its shared calibrated mono stream (pcm_s16_le, one channel) so baby monitoring does not open a second ALSA capture. If wake-word is unavailable, it falls back to the selected verified raw microphone lane using the 9-channel packed signed 24-bit little-endian PCM container (pcm_s24_3le) carrying sign-extended 16-bit samples; lanes 7 and 8 are inactive or reserved. The source query value is card:device and channel selects 0 through 6. Authentication is applied when enabled.",
     "parameters": [
      {
       "name": "source",
@@ -974,7 +974,13 @@
      "200": {
       "description": "Chunked PCM audio; format is declared by X-LibreEcho-Audio",
       "content": {
-       "application/octet-stream": {
+       "audio/L16": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       },
+       "audio/L24": {
         "schema": {
          "type": "string",
          "format": "binary"
