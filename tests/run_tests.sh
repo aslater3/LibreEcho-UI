@@ -27,8 +27,9 @@ python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
 python3 tests/test_pr244_review_contract.py
 python3 tests/test_pr245_review_contract.py
-make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
+make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-networkd-ap-scan build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
 ./build/test-networkd-scan-security
+./build/test-networkd-ap-scan
 ./build/test-network-health
 ./build/test-adapter-client-events
 ./build/test-gateway-probe

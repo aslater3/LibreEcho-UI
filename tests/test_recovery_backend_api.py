@@ -82,7 +82,7 @@ class Harness:
     """One networkd fixture + one web daemon sharing a single socket path."""
 
     def __init__(self, *, marker=False, config_blocker=False, start_networkd=True,
-                 net_down_fail_budget=0, silent_socket=False):
+                 net_down_fail_budget=0, silent_socket=False, scan_oracle=None):
         WORKSPACE.mkdir(parents=True, exist_ok=True)
         # Fresh name space: stale sockets from an earlier case would bind-collide.
         for path in list(WORKSPACE.glob("*.sock")):
@@ -111,7 +111,8 @@ class Harness:
         else:
             self.fixture = lc.RecoveryFixture(
                 WORKSPACE, marker=marker,
-                net_down_fail_budget=net_down_fail_budget)
+                net_down_fail_budget=net_down_fail_budget,
+                scan_oracle=scan_oracle)
         self.port = free_port()
         self.web_log = open(WORKSPACE / "web-api.log", "ab")
         self.web = None
@@ -431,6 +432,30 @@ def test_recovery_ap_serves_recovery_landing():
         assert 'id="recovery-login"' in body, body[:200]
 
 
+def test_recovery_ap_scan_serves_networks_through_the_api():
+    """GET /network/wifi/scan must work while the recovery AP owns the radio.
+
+    Regression (UI #288 review): the setup/recovery portal advertises automatic
+    and manual "Scan again" actions, but with the AP serving, wpa_supplicant has
+    been stopped, so the scan route used to answer 501 without trying another
+    scanner.  This drives the real HTTP route through backend_linux.c into a real
+    networkd in recovery-AP mode; the supplicant oracle is closed to model the
+    handover, and the driver-scan oracle supplies the rows (there is no radio).
+    """
+    rows = ("bssid / frequency / signal level / flags / ssid\n"
+            "00:11:22:33:44:55\t2412\t-42\t[WPA2-PSK-CCMP][ESS]\tRecoveryNet\n")
+    with Harness(marker=True, scan_oracle=rows) as h:
+        lc.wait_for(lambda: h.recovery()["mode"] == "recovery-ap",
+                    message="recovery AP active")
+        # Model the handover: net-up stopped the client supplicant.
+        assert h.fixture is not None
+        h.fixture.wpa.close()
+        status, text = h.http("GET", "/api/v1/network/wifi/scan")
+        assert status == 200, (status, text)
+        networks = json.loads(text)["data"]["networks"]
+        assert [entry["ssid"] for entry in networks] == ["RecoveryNet"], networks
+
+
 def test_stalled_networkd_does_not_block_static_serving():
     """A stalled networkd must not freeze static-file serving.
 
@@ -491,6 +516,7 @@ def main():
         test_stop_reports_failure_when_net_release_gave_up_through_the_backend,
         test_recovery_ap_redirects_captive_probe_to_login,
         test_recovery_ap_serves_recovery_landing,
+        test_recovery_ap_scan_serves_networks_through_the_api,
         test_stalled_networkd_does_not_block_static_serving,
         test_normal_mode_has_no_captive_redirect,
     ]

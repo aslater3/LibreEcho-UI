@@ -74,6 +74,14 @@
 #define NL80211_SCAN_TIMEOUT_MS 12000
 #define NL80211_SCAN_RETRY_MS 150
 #define NL80211_BUFFER_SIZE 65536
+/* AP-forced scan flag (uapi NL80211_SCAN_FLAG_AP = 1<<2): request a scan even
+ * while the interface is beaconing as an access point.  This is the flag
+ * `iw dev <iface> scan ap-force` sets and the only scan that can run while the
+ * recovery AP owns the radio and wpa_supplicant has been stopped.  Guarded so
+ * the value never depends on the headers of whatever host built the test. */
+#ifndef NL80211_SCAN_FLAG_AP
+#define NL80211_SCAN_FLAG_AP (1 << 2)
+#endif
 #ifdef LE_NETWORKD_TESTING
 #define NETWORKD_POLL_MAX_MS 5
 #define ASSOCIATION_TIMEOUT_MS 300
@@ -2354,26 +2362,51 @@ static int nl80211_send_request(int fd, int family, uint8_t command,
     return 0;
 }
 
-static int nl80211_trigger_scan(int fd, int family, unsigned int ifindex,
-                                unsigned char *buffer, size_t capacity)
+/* Build the NL80211_CMD_TRIGGER_SCAN request body in `buffer` and return its
+ * length, or 0 on failure.  Split from the send so the exact netlink message
+ * (including whether it carries NL80211_ATTR_SCAN_FLAGS) can be exercised
+ * without a radio. */
+static size_t nl80211_build_trigger_scan(unsigned char *buffer, size_t capacity,
+                                         unsigned int ifindex,
+                                         uint32_t scan_flags)
 {
     size_t used = NLMSG_LENGTH(GENL_HDRLEN);
     size_t nested_start;
     struct nlattr *nested;
-    int result;
 
+    if (!buffer || capacity < used)
+        return 0;
     memset(buffer, 0, capacity);
     if (nl_put_u32(buffer, capacity, &used, NL80211_ATTR_IFINDEX,
                    ifindex) < 0)
-        return -1;
+        return 0;
+    /* An AP-forced scan must declare the flag or the kernel refuses to scan
+     * while the interface is beaconing as an access point. */
+    if (scan_flags &&
+        nl_put_u32(buffer, capacity, &used, NL80211_ATTR_SCAN_FLAGS,
+                   scan_flags) < 0)
+        return 0;
     nested_start = used;
     nested = (struct nlattr *)(buffer + used);
     nested->nla_type = NL80211_ATTR_SCAN_SSIDS | NLA_F_NESTED;
     nested->nla_len = NLA_HDRLEN;
     used += NLA_ALIGN(NLA_HDRLEN);
     if (nl_put(buffer, capacity, &used, 1, NULL, 0) < 0)
-        return -1;
+        return 0;
     nested->nla_len = (uint16_t)(used - nested_start);
+    return used;
+}
+
+static int nl80211_trigger_scan(int fd, int family, unsigned int ifindex,
+                                unsigned char *buffer, size_t capacity,
+                                uint32_t scan_flags)
+{
+    size_t used = nl80211_build_trigger_scan(buffer, capacity, ifindex,
+                                             scan_flags);
+    int result;
+
+    if (!used)
+        return -1;
     result = nl80211_send_request(fd, family, NL80211_CMD_TRIGGER_SCAN,
                                   NLM_F_REQUEST | NLM_F_ACK, buffer,
                                   capacity, used);
@@ -2677,7 +2710,8 @@ static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
     }
 }
 
-static int nl80211_scan(const char *iface, char *data, size_t data_size)
+static int nl80211_scan(const char *iface, char *data, size_t data_size,
+                        uint32_t scan_flags)
 {
     unsigned char *buffer;
     struct sockaddr_nl address;
@@ -2707,7 +2741,8 @@ static int nl80211_scan(const char *iface, char *data, size_t data_size)
     }
     family = nl80211_family_id(fd, buffer, NL80211_BUFFER_SIZE);
     if (family < 0 || nl80211_trigger_scan(fd, family, ifindex, buffer,
-                                           NL80211_BUFFER_SIZE) < 0) {
+                                           NL80211_BUFFER_SIZE,
+                                           scan_flags) < 0) {
         result = -errno;
         goto done;
     }
@@ -2734,6 +2769,67 @@ done:
     free(buffer);
     close(fd);
     return result;
+}
+
+/* Scan flags for the current radio ownership.  While the recovery AP owns the
+ * interface the client supplicant has been stopped, so the scan must be the
+ * kernel AP-forced scan (NL80211_SCAN_FLAG_AP); in client mode no flag is set
+ * and the ordinary WEXT/nl80211 path is used. */
+static uint32_t scan_flags_for(const struct daemon_ctx *ctx)
+{
+    return ctx->recovery_configured && ctx->recovery.net_configured ?
+        (uint32_t)NL80211_SCAN_FLAG_AP : 0u;
+}
+
+#ifdef LE_NETWORKD_TESTING
+/* Host fixtures have no radio.  When the fixture supplies the rows a live
+ * supplicant would return, the driver branch parses them through the real scan
+ * parser so the AP-owned dispatch and the API mapping can be exercised without
+ * a wireless interface.  Never reachable in a production build. */
+static int scan_oracle_parse(const char *path, char *data, size_t data_size)
+{
+    char rows[4096];
+    FILE *file;
+    size_t length;
+
+    file = fopen(path, "r");
+    if (!file)
+        return -EIO;
+    length = fread(rows, 1, sizeof(rows) - 1, file);
+    fclose(file);
+    rows[length] = '\0';
+    return parse_scan_results(rows, data, data_size);
+}
+#endif
+
+/*
+ * Run the direct kernel scanners when wpa_supplicant cannot drive the scan:
+ * its SCAN command is unsupported, or it is deliberately not owning the radio
+ * because the recovery AP released the client plane (recovery_configured &&
+ * net_configured).  The WEXT compatibility ioctl cannot request an AP-forced
+ * scan, so an AP-owned radio goes straight to the nl80211 path with the flag.
+ * Returns a serialized scan payload length (>= 0) or a negative errno.
+ */
+static int driver_scan(struct daemon_ctx *ctx, char *data, size_t data_size)
+{
+    uint32_t flags = scan_flags_for(ctx);
+    int wext_result;
+
+#ifdef LE_NETWORKD_TESTING
+    {
+        const char *oracle = getenv("LIBREECHO_NETWORKD_SCAN_ORACLE");
+        if (oracle && oracle[0])
+            return scan_oracle_parse(oracle, data, data_size);
+    }
+#endif
+    if (!flags) {
+        wext_result = wext_scan(ctx->interface, data, data_size);
+        if (wext_result >= 0)
+            return wext_result;
+        if (wext_result != -EOPNOTSUPP && wext_result != -ENOTSUP)
+            return wext_result;
+    }
+    return nl80211_scan(ctx->interface, data, data_size, flags);
 }
 
 static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
@@ -3434,40 +3530,30 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         }
         le_log_info("networkd: scan requested");
         scan_state = wpa_scan_request(ctx, reply, sizeof(reply));
-        if (scan_state < 0) {
-            le_log_error("networkd: wpa_supplicant scan unavailable");
-            (void)send_err_fd(ctx->clients[ci].fd, id, "wpa_supplicant scan unavailable");
+        if (scan_state < 0 || scan_state == 2) {
+            /* wpa_supplicant cannot run the scan: the recovery AP owns the
+             * single radio and the supplicant has been stopped (scan_state < 0),
+             * or the supplicant does not implement SCAN (scan_state == 2).
+             * Both fall through to the direct kernel scanner, which is
+             * AP-forced while the portal owns the radio. */
+            int driver_result = driver_scan(ctx, data, sizeof(data));
+            if (scan_state == 2)
+                le_log_warn("networkd: wpa scan unsupported; using driver scan");
+            else if (scan_state < 0)
+                le_log_warn("networkd: wpa_supplicant scan unavailable; using driver scan");
+            if (driver_result < 0) {
+                le_log_error("networkd: driver scan unavailable: %s",
+                             strerror(-driver_result));
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "Wi-Fi scan is unavailable");
+            } else {
+                le_log_info("networkd: driver scan results ready");
+                (void)send_ok_fd(ctx->clients[ci].fd, id, data);
+            }
             return;
         }
         if (scan_state == 1)
             le_log_warn("networkd: scan already active; waiting for results");
-        else if (scan_state == 2) {
-            int wext_result;
-            le_log_warn("networkd: wpa scan unsupported; trying WEXT driver results");
-            wext_result = wext_scan(ctx->interface, data, sizeof(data));
-            if (wext_result >= 0) {
-                le_log_info("networkd: WEXT scan results ready");
-                (void)send_ok_fd(ctx->clients[ci].fd, id, data);
-            } else if (wext_result == -EOPNOTSUPP ||
-                       wext_result == -ENOTSUP) {
-                le_log_warn("networkd: WEXT scan returned EOPNOTSUPP; using nl80211");
-                if (nl80211_scan(ctx->interface, data, sizeof(data)) < 0) {
-                    le_log_error("networkd: nl80211 scan unavailable: %s",
-                                 strerror(errno));
-                    (void)send_err_fd(ctx->clients[ci].fd, id,
-                                      "Wi-Fi scan is unavailable");
-                } else {
-                    le_log_info("networkd: nl80211 scan results ready");
-                    (void)send_ok_fd(ctx->clients[ci].fd, id, data);
-                }
-            } else {
-                le_log_error("networkd: WEXT scan unavailable: %s",
-                             strerror(-wext_result));
-                (void)send_err_fd(ctx->clients[ci].fd, id,
-                                  "Wi-Fi scan is unavailable");
-            }
-            return;
-        }
         ctx->scan.active = 1;
         ctx->scan.client_fd = ctx->clients[ci].fd;
         ctx->scan.id = id;

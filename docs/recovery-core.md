@@ -50,7 +50,11 @@ such path, and `tests/test_network_recovery_lifecycle.py` pins each one.
 
 ## Adapter commands
 
-- `status`, `scan`, `connect`, `disconnect`, … unchanged.
+- `status`, `connect`, `disconnect`, … unchanged.
+- `scan` → the kernel scan path: wpa_supplicant while the client plane owns the
+  radio, and the AP-forced `NL80211_SCAN_FLAG_AP` scan while the recovery AP
+  owns it (wpa_supplicant is stopped by the net-up helper then), so the setup and
+  recovery portals' **Scan again** actions keep listing networks during recovery.
 - `recovery_status` → the `recovery` object (no secret, **no `psk_path`**).
 - `recovery_prepare` → ensure the per-device password exists; `{"prepared":true}`.
 - `recovery_psk` → owner reveal `{"ssid","psk"}`; **only while client-connected**

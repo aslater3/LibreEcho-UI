@@ -59,6 +59,21 @@ def test_scan_api_schema_documents_metadata_and_security_outcomes():
     assert "wpa3-only" in API_DOC
 
 
+def test_recovery_and_setup_scan_share_the_scan_api():
+    """Both scan entry points drive the same Wi-Fi scan route.
+
+    The recovery landing's manual/automatic "Scan again" action must not invent
+    a separate path; it calls the one route the daemon serves (and which is now
+    AP-compatible while the recovery AP owns the radio).
+    """
+    assert "/network/wifi/scan" in SETUP_JS
+    assert "async function recoveryScan" in SETUP_JS
+    assert 'id="recovery-scan"' in SETUP_HTML
+    assert "setupScan.onclick=recoveryScan" in SETUP_JS
+    assert "recoveryShowNetwork" in SETUP_JS
+    assert "$('#scan-wifi').onclick=scan" in SETUP_JS
+
+
 def test_unknown_owner_local_firmware_requires_explicit_setup_acceptance():
     assert "VENDOR_IMPORT_UNKNOWN_COMPATIBLE_SET" in SETUP_JS
     assert "Unrecognised Wi-Fi firmware detected" in SETUP_JS

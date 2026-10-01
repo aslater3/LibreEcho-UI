@@ -232,7 +232,8 @@ class RecoveryFixture:
                  association_fails=False, saved_network=True,
                  hostapd_hang=False, start_timeout_ms=300,
                  stop_timeout_ms=400, dhcp_oracle=None,
-                 net_down_fail_budget=0, save_config_failures=()):
+                 net_down_fail_budget=0, save_config_failures=(),
+                 scan_oracle=None):
         self.directory = directory
         self.wpa = FakeWpa(directory / "wpa.sock",
                            association_fails=association_fails,
@@ -264,6 +265,15 @@ class RecoveryFixture:
                 directory, "dhcp-oracle.sh",
                 f'echo "$@" >> "{self.dhcp_log}"\n'
                 f"exit {exit_code}\n")
+
+        # scan_oracle: rows in wpa_supplicant SCAN_RESULTS format that the
+        # host's driver-scan oracle parses through the real scan parser.  It
+        # substitutes for the radio (there is none) once networkd has decided to
+        # use a kernel scanner instead of the stopped supplicant.
+        self.scan_oracle = None
+        if scan_oracle is not None:
+            self.scan_oracle = directory / "scan-oracle.txt"
+            self.scan_oracle.write_text(scan_oracle)
 
         self.hostapd = write_script(
             directory, "hostapd.sh",
@@ -326,6 +336,8 @@ class RecoveryFixture:
         })
         if self.dhcp_oracle is not None:
             env["LIBREECHO_NETWORKD_DHCP_ORACLE"] = str(self.dhcp_oracle)
+        if self.scan_oracle is not None:
+            env["LIBREECHO_NETWORKD_SCAN_ORACLE"] = str(self.scan_oracle)
         args = [
             str(BINARY), "--foreground", "--quiet",
             "--socket", str(directory / "network.sock"),
@@ -806,6 +818,38 @@ def test_secret_refused_while_captive_ap_active():
             fixture.stop()
 
 
+def test_scan_runs_through_kernel_scanner_while_recovery_ap_owns_radio():
+    """A recovery-AP scan must not depend on the stopped wpa_supplicant.
+
+    Regression (UI #288 review): the recovery portal offers automatic and manual
+    "Scan again" actions, but while the AP owns the single radio its net-up
+    helper has stopped wpa_supplicant, so wpa_open() refuses and the scan
+    handler returned "wpa_supplicant scan unavailable" without ever trying
+    another scanner.  The scan now falls through to the kernel AP-forced scan
+    (NL80211_SCAN_FLAG_AP); the fixture supplies the rows a live supplicant
+    would return through the driver-scan oracle, because there is no radio.
+    """
+    rows = (
+        "bssid / frequency / signal level / flags / ssid\n"
+        "00:11:22:33:44:55\t2412\t-42\t[WPA2-PSK-CCMP][ESS]\tRecoveryNet\n")
+    with tempfile.TemporaryDirectory(prefix="le-recovery-scan-") as temp:
+        fixture = RecoveryFixture(Path(temp), scan_oracle=rows)
+        try:
+            wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
+                     message="recovery AP active")
+            # Model the handover: net-up stopped the supplicant this scan would
+            # otherwise have used.
+            fixture.wpa.close()
+            response = adapter_request(fixture.adapter, 60, "scan", timeout=5)
+            assert response["ok"] is True, response
+            networks = response["data"]["networks"]
+            assert [entry["ssid"] for entry in networks] == ["RecoveryNet"], networks
+            # The stopped supplicant was never asked to serve the scan.
+            assert "SCAN" not in fixture.wpa.commands
+        finally:
+            fixture.stop()
+
+
 def test_auto_fallback_is_opt_in_and_delayed():
     # Default (no --recovery-auto): never arms even with a saved network.
     with tempfile.TemporaryDirectory(prefix="le-recovery-auto-off-") as temp:
@@ -1060,6 +1104,7 @@ def main():
         test_hung_child_is_killed_within_bound,
         test_owner_saves_password_before_recovery,
         test_secret_refused_while_captive_ap_active,
+        test_scan_runs_through_kernel_scanner_while_recovery_ap_owns_radio,
         test_auto_fallback_is_opt_in_and_delayed,
         test_children_cleaned_up_on_shutdown,
         test_configure_persists_and_survives_restart,

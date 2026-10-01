@@ -1070,6 +1070,13 @@ response is bounded to the first 12 distinct results for the fixed adapter
 message size. Every result retains frequency_mhz, channel, band, rssi_dbm, and
 advertised security capabilities. WPA3/SAE advertisements remain visible.
 
+While the recovery access point owns the single radio its net-up helper has
+stopped wpa_supplicant, so this route serves the scan through the kernel's
+AP-forced scan (the `NL80211_SCAN_FLAG_AP` request `iw dev <iface> scan
+ap-force` makes) instead of the supplicant. The setup and recovery portals'
+automatic and manual **Scan again** actions therefore keep working in the exact
+flow that offers them.
+
 `security` is `open`, `wpa2`, `wpa3-transition` (WPA2-PSK and WPA3-SAE),
 `wpa3-only`, or `wpa`. `wpa2_attempt` is true only when the advertisement
 includes a WPA2/PSK path that the shipped client can explicitly try. A

@@ -496,6 +496,12 @@ $(BUILD)/test-networkd-scan-security: tests/test_networkd_scan_security.c \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter tests/test_networkd_scan_security.c -o $@
 
+$(BUILD)/test-networkd-ap-scan: tests/test_networkd_ap_scan.c \
+	src/adapter/networkd.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter tests/test_networkd_ap_scan.c -o $@
+
 $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emission.c \
 		src/backend_linux.c src/json.c src/log.c src/service_env.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
@@ -1113,7 +1119,8 @@ clean:
 		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \
 		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-timing \
 		$(BUILD)/test-action-sample \
-		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
+		$(BUILD)/test-networkd-health $(BUILD)/test-networkd-ap-scan \
+		$(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test_network_recovery $(BUILD)/test-networkd-recovery \
 		$(BUILD)/test-backend-linux-timers $(BUILD)/test-factory-reset \
 		$(BUILD)/test-update-identity \
