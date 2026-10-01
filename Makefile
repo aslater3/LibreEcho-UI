@@ -193,6 +193,103 @@ test-mdns:
 	python3 tests/test_mdns_wyoming.py
 	python3 tests/test_mdns_esphome.py
 
+# Sendspin adapter contract: dependency-free, safe for the default suite. It pins
+# the offline/player-only CMake shape and that the heavy SDK lane stays opt-in.
+.PHONY: test-sendspin-contract
+test-sendspin-contract:
+	python3 tests/test_sendspin_adapter_contract.py
+
+# Opt-in heavy lane: builds the real pinned Sendspin RC1 SDK + the adapter fixture
+# through the reviewed ARMHF runtime. Selected explicitly (SENDSPIN_PLATFORM_DIR);
+# fails closed when its pinned inputs are not provisioned. Never part of `make test`.
+.PHONY: test-sendspin-sdk
+test-sendspin-sdk:
+	@test -n "$(SENDSPIN_PLATFORM_DIR)" || { printf '%s\n' 'Set SENDSPIN_PLATFORM_DIR to the LibreEcho-Platform checkout' >&2; exit 1; }
+	@test -f "$(SENDSPIN_PLATFORM_DIR)/tools/mt8163-arm32/sendspin/test_sdk_build.py" || { printf '%s\n' "Sendspin SDK runner missing under: $(SENDSPIN_PLATFORM_DIR)" >&2; exit 1; }
+	python3 "$(SENDSPIN_PLATFORM_DIR)/tools/mt8163-arm32/sendspin/test_sdk_build.py" -v
+
+# Verified host SDK + production-engine-loop lane, distinct from ARM/QEMU.
+.PHONY: test-sendspin-host test-sendspin-host-sanitize
+test-sendspin-host:
+	SENDSPIN_PLATFORM_DIR="$(SENDSPIN_PLATFORM_DIR)" SENDSPIN_ARCHIVE_DIR="$(SENDSPIN_ARCHIVE_DIR)" python3 -B tests/test_sendspin_sdk_host.py
+test-sendspin-host-sanitize:
+	SENDSPIN_PLATFORM_DIR="$(SENDSPIN_PLATFORM_DIR)" SENDSPIN_ARCHIVE_DIR="$(SENDSPIN_ARCHIVE_DIR)" python3 -B tests/test_sendspin_sdk_host.py --sanitize
+
+# Sendspin native bridge: the C++20 companion's acknowledged, generation-fenced
+# engine client, tested offline against the real compiled C99 engine (the Platform
+# airplay audio_sink.c). Opt-in: it needs a C++20 compiler and the Platform
+# airplay sources (SENDSPIN_PLATFORM_DIR), and is never part of the
+# dependency-free default suite. `test-sendspin-sink-sanitize` runs the same lane
+# under AddressSanitizer + UndefinedBehaviorSanitizer.
+CXX ?= c++
+SENDPIN_AIRPLAY = $(SENDSPIN_PLATFORM_DIR)/tools/mt8163-arm32/airplay
+SENDPIN_CXXFLAGS = -std=c++20 -Wall -Wextra -Werror
+SENDPIN_C99FLAGS = $(CSTD) $(WARN) -Werror
+SENDPIN_LDLIBS = -lpthread
+
+.PHONY: test-sendspin-sink test-sendspin-sink-sanitize test-sendspin-sink-tsan
+test-sendspin-sink:
+	@test -n "$(SENDSPIN_PLATFORM_DIR)" || { printf '%s\n' 'Set SENDSPIN_PLATFORM_DIR to the LibreEcho-Platform checkout' >&2; exit 1; }
+	@test -f "$(SENDPIN_AIRPLAY)/audio_sink.c" || { printf '%s\n' "Sendspin airplay engine sources missing under: $(SENDPIN_AIRPLAY)" >&2; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CROSS_COMPILE)$(CC) $(SENDPIN_C99FLAGS) -I "$(SENDPIN_AIRPLAY)" -c "$(SENDPIN_AIRPLAY)/audio_sink.c" -o $(BUILD)/sendspin-audio_sink.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests -c src/adapter/sendspin/engine_sink.cpp -o $(BUILD)/sendspin-engine_sink.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests -c src/adapter/sendspin/engine_sink_session.cpp -o $(BUILD)/sendspin-engine_sink_session.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_sink.cpp $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-sink
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_lifecycle.cpp $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-lifecycle
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_ack_validation.cpp $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-ack-validation
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_session.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-session
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_session_concurrency.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-session-concurrency
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_late_credit.cpp $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-late-credit
+	$(BUILD)/test-sendspin-late-credit
+	$(BUILD)/test-sendspin-sink
+	$(BUILD)/test-sendspin-lifecycle
+	$(BUILD)/test-sendspin-ack-validation
+	$(BUILD)/test-sendspin-session
+	$(BUILD)/test-sendspin-session-concurrency
+
+test-sendspin-sink-sanitize: SENDPIN_CXXFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
+test-sendspin-sink-sanitize: SENDPIN_C99FLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
+test-sendspin-sink-sanitize: SENDPIN_LDLIBS += -fsanitize=address,undefined
+test-sendspin-sink-sanitize: test-sendspin-sink
+
+# ThreadSanitizer lane for the main-loop <-> sync-thread boundary. The SDK runs
+# on_audio_write() on the sync thread and control callbacks on the main loop, so
+# EngineSinkSession must synchronize its own state, not rely on EngineSink's
+# per-call mutex. Object files are kept in a separate directory so the TSan
+# build never mixes with the ASan/UBSan or plain objects. TSAN_OPTIONS makes any
+# race report a hard failure.
+SENDPIN_TSAN_BUILD = $(BUILD)/tsan
+test-sendspin-sink-tsan:
+	@test -n "$(SENDSPIN_PLATFORM_DIR)" || { printf '%s\n' 'Set SENDSPIN_PLATFORM_DIR to the LibreEcho-Platform checkout' >&2; exit 1; }
+	@test -f "$(SENDPIN_AIRPLAY)/audio_sink.c" || { printf '%s\n' "Sendspin airplay engine sources missing under: $(SENDPIN_AIRPLAY)" >&2; exit 1; }
+	@mkdir -p $(SENDPIN_TSAN_BUILD)
+	$(CROSS_COMPILE)$(CC) $(SENDPIN_C99FLAGS) -fsanitize=thread -fno-omit-frame-pointer -g -I "$(SENDPIN_AIRPLAY)" -c "$(SENDPIN_AIRPLAY)/audio_sink.c" -o $(SENDPIN_TSAN_BUILD)/audio_sink.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -fsanitize=thread -fno-omit-frame-pointer -g -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests -c src/adapter/sendspin/engine_sink.cpp -o $(SENDPIN_TSAN_BUILD)/engine_sink.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -fsanitize=thread -fno-omit-frame-pointer -g -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests -c src/adapter/sendspin/engine_sink_session.cpp -o $(SENDPIN_TSAN_BUILD)/engine_sink_session.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -fsanitize=thread -fno-omit-frame-pointer -g -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_session_concurrency.cpp $(SENDPIN_TSAN_BUILD)/engine_sink_session.o $(SENDPIN_TSAN_BUILD)/engine_sink.o $(SENDPIN_TSAN_BUILD)/audio_sink.o $(SENDPIN_LDLIBS) -fsanitize=thread -o $(SENDPIN_TSAN_BUILD)/test-sendspin-session-concurrency
+	TSAN_OPTIONS="halt_on_error=1 exitcode=66" $(SENDPIN_TSAN_BUILD)/test-sendspin-session-concurrency
+
+# The runnable companion CLI (src/adapter/sendspind.cpp). This is the
+# dependency-free build shape: --help and --check work against the real engine
+# over a private SOCK_SEQPACKET socket; --run (the Sendspin SDK path) is built by
+# the opt-in CMake target, not here. Never part of the default suite.
+.PHONY: build-sendspind
+build-sendspind:
+	@test -n "$(SENDSPIN_PLATFORM_DIR)" || { printf '%s\n' 'Set SENDSPIN_PLATFORM_DIR to the LibreEcho-Platform checkout' >&2; exit 1; }
+	@test -f "$(SENDPIN_AIRPLAY)/audio_sink.c" || { printf '%s\n' "Sendspin airplay engine sources missing under: $(SENDPIN_AIRPLAY)" >&2; exit 1; }
+	@mkdir -p $(BUILD)
+	$(CROSS_COMPILE)$(CC) $(SENDPIN_C99FLAGS) -I "$(SENDPIN_AIRPLAY)" -c "$(SENDPIN_AIRPLAY)/audio_sink.c" -o $(BUILD)/sendspin-audio_sink.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -c src/adapter/sendspin/engine_sink.cpp -o $(BUILD)/sendspin-engine_sink.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -c src/adapter/sendspin/engine_sink_session.cpp -o $(BUILD)/sendspin-engine_sink_session.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" src/adapter/sendspind.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/sendspind
+
+# Smoke-test the companion CLI against a real in-process engine listener.
+.PHONY: test-sendspin-companion
+test-sendspin-companion: build-sendspind
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_companion.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-companion
+	SENDPIN_COMPANION_BIN="$(abspath $(BUILD)/sendspind)" $(BUILD)/test-sendspin-companion
+
 # Run even when a binary is already present: disabling Noise must never install
 # a previously built fixture. The source itself requires the mbedTLS headers.
 check-esphomed-crypto:
