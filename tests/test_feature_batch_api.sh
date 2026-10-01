@@ -85,6 +85,13 @@ check "history POST method" 405 -X POST "$URL/api/v1/assistant/history" -H "$AUT
 check "history entry DELETE method" 405 -X DELETE "$URL/api/v1/assistant/history/1" -H "$AUTH" -H "$JSON" --data '{}'
 check "latency POST method" 405 -X POST "$URL/api/v1/assistant/latency" -H "$AUTH" -H "$JSON" --data '{}'
 check "network/recovery GET method" 405 -X GET "$URL/api/v1/network/recovery"
+# Regression (Codex review on a3be414): /api/v1/audio/noise only implemented
+# POST and DELETE, so GET/PUT/PATCH fell through to the generic 404. An
+# existing endpoint with a known method set must answer 405, not 404.
+check "noise GET method" 405 -X GET "$URL/api/v1/audio/noise" -H "$AUTH"
+check "noise PUT method" 405 -X PUT "$URL/api/v1/audio/noise" -H "$AUTH" -H "$JSON" --data '{}'
+check "noise PATCH method" 405 -X PATCH "$URL/api/v1/audio/noise" -H "$AUTH" -H "$JSON" --data '{}'
+check "noise HEAD-ish OPTIONS method" 405 -X OPTIONS "$URL/api/v1/audio/noise" -H "$AUTH"
 
 echo "== strict validation: led =="
 check "led/idle bad mode" 400 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data '{"mode":"bogus"}'
