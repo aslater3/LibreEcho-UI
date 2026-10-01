@@ -123,6 +123,15 @@ check "aac play refused" 415 -X POST "$URL/api/v1/storage/usb/play" -H "$AUTH" -
 check "play path escape" 400 -X POST "$URL/api/v1/storage/usb/play" -H "$AUTH" -H "$JSON" --data '{"path":"../etc/passwd"}'
 check "play path required" 400 -X POST "$URL/api/v1/storage/usb/play" -H "$AUTH" -H "$JSON" --data '{}'
 jcheck "playable_formats default mp3" '.data.playable_formats == ["mp3"]' "$URL/api/v1/storage/usb"
+check "ogg play refused without opus" 415 -X POST "$URL/api/v1/storage/usb/play" -H "$AUTH" -H "$JSON" --data '{"path":"music/song.ogg"}'
+# Codex review on 1f28b6c: with the Opus capability present, .ogg (Ogg Opus) must
+# pass the extension gate exactly like .opus; the file is absent so 404 follows.
+check "enable mock opus" 200 -X POST "$URL/api/v1/dev/mock" -H "$AUTH" -H "$JSON" --data '{"action":"set-opus","value":"true"}'
+jcheck "playable_formats with opus" '.data.playable_formats == ["mp3","opus","ogg"]' "$URL/api/v1/storage/usb"
+check "ogg passes opus gate" 404 -X POST "$URL/api/v1/storage/usb/play" -H "$AUTH" -H "$JSON" --data '{"path":"music/song.ogg"}'
+check "opus passes opus gate" 404 -X POST "$URL/api/v1/storage/usb/play" -H "$AUTH" -H "$JSON" --data '{"path":"music/song.opus"}'
+check "aac still refused with opus" 415 -X POST "$URL/api/v1/storage/usb/play" -H "$AUTH" -H "$JSON" --data '{"path":"music/song.aac"}'
+check "disable mock opus" 200 -X POST "$URL/api/v1/dev/mock" -H "$AUTH" -H "$JSON" --data '{"action":"set-opus","value":"false"}'
 
 echo "== success: led =="
 check "led/idle set" 200 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data '{"mode":"indicator"}'

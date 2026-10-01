@@ -2285,12 +2285,13 @@ recovery routes included) bypasses the management auth/CSRF gate.
 
 ### USB storage / playback
 - `GET /api/v1/storage/usb` — adds `playable_formats`: `["mp3"]`, or
-  `["mp3","opus"]` only when `radiod` reports a working Opus decoder. A missing or
+  `["mp3","opus","ogg"]` only when `radiod` reports a working Opus decoder. A missing or
   unknown capability reads as `["mp3"]`.
-- `POST /api/v1/storage/usb/play` — independently capability-gates `.opus`:
-  refused with `415` unless `radiod` reports the decoder, checked before the file
-  is opened so an unknown capability fails closed; the `playable_formats` hint is
-  not the enforcement. Path confinement unchanged.
+- `POST /api/v1/storage/usb/play` — independently capability-gates `.opus` and
+  `.ogg` (radiod sniffs the Ogg container, so either extension can carry Ogg
+  Opus): refused with `415` unless `radiod` reports the decoder, checked before
+  the file is opened so an unknown capability fails closed; the
+  `playable_formats` hint is not the enforcement. Path confinement unchanged.
 
 ### Voice history
 - `GET /api/v1/assistant/history` -> `voice_history` collection (capacity 10,

@@ -164,6 +164,10 @@ struct daemon_ctx {
     struct pending_dhcp dhcp;
     /* Secure recovery access point (issue #96). */
     struct le_recovery_config recovery_config;
+    /* --recovery-disabled is an operator hard override: it wins over the
+     * persisted owner configuration and the config API can never re-enable
+     * the AP while this boot was started with it. */
+    int recovery_cli_disabled;
     struct le_recovery recovery;
     int recovery_configured;
     int recovery_led_active;
@@ -3369,6 +3373,13 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
                 (void)send_err_fd(ctx->clients[ci].fd, id,
                                   "recovery_configure requires enabled, "
                                   "auto_enabled, auto_timeout_ms");
+            } else if (ctx->recovery_cli_disabled && enabled) {
+                /* The boot override is authoritative: the owner API must not
+                 * be able to re-enable the AP the operator disabled. */
+                le_log_warn("networkd: recovery_configure refused: disabled by "
+                            "--recovery-disabled override");
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "recovery is disabled by the boot override");
             } else if (le_recovery_configure(&ctx->recovery, enabled,
                                              auto_enabled, timeout_ms,
                                              reason, sizeof(reason)) < 0) {
@@ -3724,6 +3735,7 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
             ctx->recovery_config.auto_enabled = 1;
         } else if (!strcmp(argv[i], "--recovery-disabled")) {
             ctx->recovery_config.enabled = 0;
+            ctx->recovery_cli_disabled = 1;
         } else if ((!strcmp(argv[i], "--socket") ||
                     !strcmp(argv[i], "--wpa-ctrl") ||
                     !strcmp(argv[i], "--interface") ||
@@ -3890,6 +3902,15 @@ int main(int argc, char **argv)
                         config_reason);
         else if (loaded > 0)
             le_log_info("networkd: loaded persisted recovery config");
+    }
+    if (ctx.recovery_cli_disabled) {
+        /* The command line is authoritative for this boot: the load above
+         * replaces the whole config, so a persisted enabled/auto choice would
+         * otherwise silently re-arm an operator-disabled AP.  Re-apply the
+         * hard override after the load. */
+        ctx.recovery_config.enabled = 0;
+        ctx.recovery_config.auto_enabled = 0;
+        le_log_info("networkd: recovery disabled by --recovery-disabled override");
     }
     le_network_health_init(&ctx.health, NULL, monotonic_ms());
     le_recovery_init(&ctx.recovery, &ctx.recovery_config, NULL, monotonic_ms());

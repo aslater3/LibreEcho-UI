@@ -182,7 +182,7 @@ const NETWORK = {
 const USB = {
     present: true, mounted: true, device: 'sda', partition: 'sda1', filesystem: 'vfat',
     size_bytes: 1000, used_bytes: 100, free_bytes: 900, rel_path: '', playable_formats: ['mp3'],
-    entries: [{ name: 'song.mp3', directory: false, size_bytes: 10 }, { name: 'clip.opus', directory: false, size_bytes: 20 }]
+    entries: [{ name: 'song.mp3', directory: false, size_bytes: 10 }, { name: 'clip.opus', directory: false, size_bytes: 20 }, { name: 'tune.ogg', directory: false, size_bytes: 30 }]
 };
 
 function resetCalls() { apiCalls.length = 0; }
@@ -288,7 +288,7 @@ async function caseUsbCapabilityGate() {
     routes['/system/update'] = OTA;
     /* Opus advertised: .opus gets a Play button, .mp3 too. */
     resetDom(); resetCalls();
-    routes['/storage/usb'] = Object.assign({}, USB, { playable_formats: ['mp3', 'opus'] });
+    routes['/storage/usb'] = Object.assign({}, USB, { playable_formats: ['mp3', 'opus', 'ogg'] });
     state.data.status = { simulated: true };
     state.page = 'System'; state.renderGeneration++;
     $app('#feature-usb-host').checked = true;
@@ -300,6 +300,10 @@ async function caseUsbCapabilityGate() {
     check(/clip\.opus[\s\S]{0,80}Play/.test($app('#usb-storage').innerHTML),
         'with Opus advertised, a .opus file offers Play');
     has($app('#usb-storage').innerHTML, 'MP3, OPUS', 'the playable-formats line advertises MP3 and OPUS');
+    /* Ogg Opus is commonly named .ogg; radiod sniffs the container, so the
+       UI must offer Play for it exactly like .opus (Codex review on 1f28b6c). */
+    check(/tune\.ogg[\s\S]{0,80}Play/.test($app('#usb-storage').innerHTML),
+        'with Opus advertised, a .ogg file offers Play');
 
     /* Opus absent: .opus is listed but not playable; .mp3 still plays. */
     resetDom(); resetCalls();
@@ -312,6 +316,9 @@ async function caseUsbCapabilityGate() {
     check(/song\.mp3[\s\S]{0,80}Play/.test(gate), 'mp3 still offers Play without an Opus decoder');
     check(!/clip\.opus[\s\S]{0,80}Play/.test(gate), 'without Opus advertised, .opus offers no Play');
     has(gate, 'Opus decode is not available on this image', 'the .opus file explains why it is not playable');
+    check(!/tune\.ogg[\s\S]{0,80}Play/.test(gate), 'without Opus advertised, .ogg offers no Play');
+    check(/tune\.ogg[\s\S]{0,160}Opus decode is not available/.test(gate),
+        'the .ogg file explains the missing Opus decoder');
     has(gate, 'MP3', 'the playable-formats line reports MP3');
 
     /* Missing capability defaults to mp3-only (never optimistically opus). */

@@ -1971,10 +1971,13 @@ async function systemPage(){
    const crumbs=[];const parts=(d.rel_path||'').split('/').filter(Boolean);
    crumbs.push(`<button class="link-btn usb-crumb" data-rel="">Drive</button>`);
    parts.forEach((seg,i)=>crumbs.push(`<span class="usb-sep">/</span><button class="link-btn usb-crumb" data-rel="${esc(parts.slice(0,i+1).join('/'))}">${esc(seg)}</button>`));
-   /* radiod decodes Layer III only, so a Play button appears for .mp3 and
-      anything else audio-looking says why rather than failing silently. */
+   /* radiod decodes Layer III, and Ogg Opus when the image ships the decoder,
+      so a Play button appears for .mp3 and for .opus/.ogg when Opus is
+      advertised; anything else audio-looking says why rather than failing
+      silently. */
    const formats=Array.isArray(d.playable_formats)?d.playable_formats.map(v=>String(v).toLowerCase()):['mp3'];const canMp3=formats.includes('mp3'),canOpus=formats.includes('opus');
    const AUDIO=/\.(mp3|aac|m4a|flac|wav|ogg|opus|wma)$/i;
+   const OPUSEXT=/\.(opus|ogg)$/i;
    const rows=(d.entries||[]).slice().sort((a,b)=>(b.directory-a.directory)||a.name.localeCompare(b.name)).map(e=>{
     const sz=e.directory?'':bytes(e.size_bytes);
     const rel=(d.rel_path?d.rel_path+'/':'')+e.name;
@@ -1982,9 +1985,9 @@ async function systemPage(){
       ? `<button class="link-btn usb-open" data-rel="${esc(rel)}">${esc(e.name)}/</button>`
       : esc(e.name);
     let act='';
-    const playable=!e.directory&&(/\.mp3$/i.test(e.name)?canMp3:/\.opus$/i.test(e.name)?canOpus:false);
+    const playable=!e.directory&&(/\.mp3$/i.test(e.name)?canMp3:OPUSEXT.test(e.name)?canOpus:false);
     if(playable)act=`<button class="secondary-btn usb-play" data-rel="${esc(rel)}">Play</button>`;
-    else if(!e.directory&&AUDIO.test(e.name)){const why=/\.opus$/i.test(e.name)?'Opus decode is not available on this image':'This image decodes '+(canOpus?'MP3 and Opus':'MP3')+' only';act=`<span class="muted" title="${why}">not playable</span>`}
+    else if(!e.directory&&AUDIO.test(e.name)){const why=OPUSEXT.test(e.name)?'Opus decode is not available on this image':'This image decodes '+(canOpus?'MP3 and Opus':'MP3')+' only';act=`<span class="muted" title="${why}">not playable</span>`}
     return `<tr><td>${nm}</td><td class="num">${sz}</td><td class="usb-act">${act}</td></tr>`}).join('');
    /* Keep the open/closed state across re-renders: browsing into a folder
       re-renders, and a panel that snapped shut each time would be unusable. */
@@ -1997,7 +2000,7 @@ async function systemPage(){
     `<dl class="facts"><dt>Device</dt><dd>${esc(d.device||'')} · ${esc(d.partition||'')} · ${esc(d.filesystem||'')}</dd>`+
     `<dt>Capacity</dt><dd>${bytes(total)} total · ${bytes(used)} used · ${bytes(d.free_bytes)} free</dd></dl>`+
     `<div class="usb-bar"><span style="width:${pct}%"></span></div>`+
-    `<p class="muted">Playable formats: <strong>${formats.map(f=>esc(f.toUpperCase())).join(', ')||'none'}</strong>. ${canOpus?'This image advertises an Opus decoder, so .opus files can be played; other audio files are listed but cannot be decoded yet.':(canMp3?'Other audio files are listed but cannot be decoded on this image yet.':'No decoder is available on this image; audio files are listed but cannot be played.')}</p>`+
+    `<p class="muted">Playable formats: <strong>${formats.map(f=>esc(f.toUpperCase())).join(', ')||'none'}</strong>. ${canOpus?'This image advertises an Opus decoder, so .opus and .ogg files can be played; other audio files are listed but cannot be decoded yet.':(canMp3?'Other audio files are listed but cannot be decoded on this image yet.':'No decoder is available on this image; audio files are listed but cannot be played.')}</p>`+
     `<div class="usb-path">${crumbs.join('')}</div>`+
     (rows?`<table class="usb-list"><thead><tr><th>Name</th><th class="num">Size</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
          :'<p class="muted">This folder is empty.</p>')+

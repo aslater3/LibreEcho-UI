@@ -1947,9 +1947,11 @@ static int usb_open_file(const char*rel)
  return fd;
 }
 /*
- * Play a file from the mounted drive. radiod decodes MPEG-1/2 Layer III only,
- * so anything else is refused by extension with a reason rather than started
- * and left silent -- there is no AAC decoder on this image.
+ * Play a file from the mounted drive. radiod decodes MPEG-1/2 Layer III and,
+ * when this image was built with the decoder, Ogg Opus (the container is
+ * sniffed, so a .ogg file is tried just like a .opus one). Everything else is
+ * refused by extension with a reason rather than started and left silent --
+ * there is no AAC decoder on this image.
  */
 static void usb_play_json(struct api_context*c,const struct api_request*q,struct api_response*r)
 {
@@ -1958,11 +1960,11 @@ static void usb_play_json(struct api_context*c,const struct api_request*q,struct
  if(!usb_relative_path_valid(rel)||strchr(rel,'\\')||rel[0]=='/'){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
  if((size_t)snprintf(full,sizeof(full),"%s/%s",LE_USB_MOUNT,rel)>=sizeof(full)){err(r,400,LE_INVALID,"That path is too long");return;}
  /* Capability gate before the filesystem: an image without the decoder must
-    refuse .opus independently of whether the file happens to exist, and the
-    playable_formats hint in GET storage/usb is not the enforcement. */
+    refuse .opus/.ogg independently of whether the file happens to exist, and
+    the playable_formats hint in GET storage/usb is not the enforcement. */
  dot=strrchr(rel,'.');
  if(!dot){err(r,415,LE_NOT_SUPPORTED,"Only MP3 files can be played; this image has no AAC decoder");return;}
- if(!strcasecmp(dot,".opus")){
+ if(!strcasecmp(dot,".opus")||!strcasecmp(dot,".ogg")){
   struct le_radio_status radio;
   if(le_radio_playing(c->backend,&radio)!=LE_OK||!radio.opus){err(r,415,LE_NOT_SUPPORTED,"This image has no Ogg Opus decoder");return;}
  } else if(strcasecmp(dot,".mp3")){
@@ -1985,7 +1987,7 @@ static void usb_storage_json(struct api_context*c,const struct api_request*q,str
  DIR *d;struct dirent *e;struct stat st;struct statvfs vfs;
  (void)c;
  /* The opus decoder is a capability: advertise it only when radiod reports it. */
- if(le_radio_playing(c->backend,&radio)==LE_OK&&radio.opus)formats="[\"mp3\",\"opus\"]";
+ if(le_radio_playing(c->backend,&radio)==LE_OK&&radio.opus)formats="[\"mp3\",\"opus\",\"ogg\"]";
  if(usb_subpath(q?q->path:NULL,rel,sizeof(rel),dirpath,sizeof(dirpath))<0){err(r,400,LE_INVALID,"That path is not inside the drive");return;}
  if(!usb_disk_find(node,sizeof(node),part,sizeof(part))){usb_unmount_stale();out(r,200,"{\"ok\":true,\"data\":{\"present\":false,\"mounted\":false,\"playable_formats\":%s,\"message\":\"No USB disk is attached. The OTG port must be in host mode.\"},\"error\":null}",formats);return;}
  fs=usb_mount_try(part);

@@ -915,6 +915,51 @@ def test_disabled_config_blocks_boot_and_auto():
             fixture.stop()
 
 
+def test_cli_recovery_disabled_overrides_persisted_config():
+    """--recovery-disabled is a hard override over persisted owner config.
+
+    Regression (Codex review on 1f28b6c): parse_args() applied
+    --recovery-disabled, but main() then loaded recovery.json, which replaced
+    the whole config.  A persisted enabled+auto choice therefore re-armed the
+    AP on a boot the operator had disabled (RECOVERY_ENABLED=0).  The override
+    must survive the load, and the owner API must not re-enable it.
+    """
+    with tempfile.TemporaryDirectory(prefix="le-recovery-cli-off-") as temp:
+        fixture = RecoveryFixture(Path(temp), marker=False, auto=False,
+                                  auto_timeout_ms=30000)
+        try:
+            response = adapter_request(
+                fixture.adapter, 50, "recovery_configure",
+                {"enabled": True, "auto_enabled": True,
+                 "auto_timeout_ms": 30000})
+            assert response["ok"] is True, response
+            assert fixture.config_path.exists()
+
+            # Reboot with the operator override and a valid physical marker.
+            fixture.args.append("--recovery-disabled")
+            fixture.marker_path.write_text(MARKER_TAG + "\nhold_ms=5000\n")
+            fixture.marker_path.chmod(0o600)
+            fixture.restart()
+            recovery = fixture.recovery()
+            assert recovery["enabled"] is False, recovery
+            assert recovery["auto_enabled"] is False, recovery
+            time.sleep(0.8)
+            assert fixture.status()["mode"] == "client"
+            assert not fixture.hostapd_pid_file.exists()
+
+            # The owner API cannot re-enable what the boot override disabled.
+            response = adapter_request(
+                fixture.adapter, 51, "recovery_configure",
+                {"enabled": True, "auto_enabled": True,
+                 "auto_timeout_ms": 30000})
+            assert response["ok"] is False, response
+            assert fixture.recovery()["enabled"] is False
+            time.sleep(0.3)
+            assert not fixture.hostapd_pid_file.exists()
+        finally:
+            fixture.stop()
+
+
 def test_handover_rebuilds_ap_when_profile_save_fails():
     """A failed profile save must also re-arm the recovery AP.
 
@@ -975,6 +1020,7 @@ def main():
         test_configure_persists_and_survives_restart,
         test_configure_rejects_out_of_range_and_malformed,
         test_disabled_config_blocks_boot_and_auto,
+        test_cli_recovery_disabled_overrides_persisted_config,
     ]
     failed = 0
     for test in tests:
