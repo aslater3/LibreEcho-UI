@@ -24,12 +24,19 @@
 #endif
 
 #define main ledd_program_main
+/* Redirect the persisted state at a scratch path this harness owns, so the
+   success path can actually write and a persist failure can be injected. */
+#define LED_STATE_DIR "/tmp/libreecho-ledd-state-test"
+#define STATE_PATH LED_STATE_DIR "/led-state.json"
+#define STATE_TMP_PATH LED_STATE_DIR "/led-state.json.tmp"
 #include "../src/adapter/ledd.c"
 #undef main
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static void require_condition(int condition, const char *message)
@@ -118,6 +125,10 @@ int main(void)
 {
     struct daemon_context ctx;
     char frame[1024];
+
+    (void)rmdir(STATE_TMP_PATH);
+    require_condition(mkdir(LED_STATE_DIR, 0700) == 0 || errno == EEXIST,
+                      "the ledd state directory must be creatable");
     double t0;
     unsigned int peak_a, peak_b;
 
@@ -275,7 +286,42 @@ int main(void)
         require_condition(response_ok(), "in-range bounds must be accepted");
     }
 
-    /* ---- 8. Real v2 packet path: accept, stale rejection, legacy parity. */
+    /* ---- 8. A persist failure is reported and the in-memory state stays put
+       (Codex review on bcfef3e): the handler used to ignore persist_state()
+       and reply success, so a change such as restore_on_boot could be lost on
+       the next boot while the owner had been told it was saved. -------------- */
+    reset(&ctx);
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
+               "{\"mode\":\"solid\",\"brightness\":7,\"timer_minutes\":0}}");
+    require_condition(response_ok(),
+                      "a writable state path must accept the sleep change");
+    {
+        struct led_state before = ctx.state;
+        int before_active = ctx.sleep_active;
+
+        /* A directory where the atomic temp file belongs makes persist_state()
+           fail for real -- no simulated return code, and it holds even as root. */
+        require_condition(mkdir(STATE_TMP_PATH, 0700) == 0,
+                          "blocking the state temp path must succeed");
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
+                   "{\"mode\":\"pulse\",\"brightness\":20,\"period_ms\":9000,"
+                   "\"timer_minutes\":45,\"restore_on_boot\":true}}");
+        require_condition(!response_ok(),
+                          "a persist failure must be reported, not success");
+        require_condition(
+            ctx.state.sleep_mode == before.sleep_mode &&
+            ctx.state.sleep_brightness == before.sleep_brightness &&
+            ctx.state.sleep_period_ms == before.sleep_period_ms &&
+            ctx.state.sleep_timer_minutes == before.sleep_timer_minutes &&
+            ctx.state.sleep_restore_on_boot == before.sleep_restore_on_boot,
+            "a persist failure must revert the in-memory sleep settings");
+        require_condition(ctx.sleep_active == before_active,
+                          "a persist failure must revert the in-memory activation");
+        require_condition(rmdir(STATE_TMP_PATH) == 0,
+                          "unblocking the state temp path must succeed");
+    }
+
+    /* ---- 9. Real v2 packet path: accept, stale rejection, legacy parity. */
     reset(&ctx);
     ctx.visualizer_enabled = 1;
     build_v2(frame, sizeof(frame), 1U, 1000U, 42U);

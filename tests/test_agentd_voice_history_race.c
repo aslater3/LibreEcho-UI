@@ -131,13 +131,17 @@ static void millisleep(unsigned milliseconds)
  * mode 'o': close the recogniser with no transcript -> an STT_FAILED outcome.
  * mode 't': deliver a transcript -> a transcript-bearing turn.
  */
+/* A per-turn timer daemon stand-in. A parsed timer intent asks it before it
+   speaks, so the harness answers the status/add calls; playback itself has no
+   audio daemon here, which is what makes the spoken confirmation fail. */
 static int mock_server(char mode, const char *wake_path,
-                       const char *stt_path, int ready_fd, int release_fd)
+                       const char *stt_path, const char *timer_path,
+                       int ready_fd, int release_fd)
 {
     char event[LE_ADAPTER_MSG_MAX];
     char data[512];
     char release;
-    int wake_listener, stt_listener;
+    int wake_listener, stt_listener, timer_listener;
     int wake, audio, stt;
     int length;
 
@@ -147,6 +151,9 @@ static int mock_server(char mode, const char *wake_path,
         return 1;
     stt_listener = le_adapter_listen(stt_path);
     if (stt_listener < 0)
+        return 1;
+    timer_listener = le_adapter_listen(timer_path);
+    if (timer_listener < 0)
         return 1;
     wake = accept_command(wake_listener, "\"cmd\":\"subscribe\"",
                           "{\"subscribed\":true}");
@@ -175,10 +182,11 @@ static int mock_server(char mode, const char *wake_path,
     if (read(release_fd, &release, 1) != 1)
         return 1;
     close(release_fd);
-    if (mode == 't') {
+    if (mode == 't' || mode == 'T') {
         snprintf(data, sizeof(data),
-                 "{\"text\":\"hello\",\"final\":true,\"endpoint\":true,"
-                 "\"audio_ms\":200,\"processing_ms\":10,\"total_ms\":210}");
+                 "{\"text\":\"%s\",\"final\":true,\"endpoint\":true,"
+                 "\"audio_ms\":200,\"processing_ms\":10,\"total_ms\":210}",
+                 mode == 'T' ? "set a timer for 5 minutes" : "hello");
         length = le_adapter_format_event(event, sizeof(event), "transcript",
                                          data);
         if (length < 0 || write_all(stt, event, (size_t)length) < 0)
@@ -187,6 +195,12 @@ static int mock_server(char mode, const char *wake_path,
         close(stt);
         stt = -1;
     }
+    if (mode == 'T') {
+        (void)accept_command(timer_listener, "\"cmd\":\"status\"",
+                             "{\"ringing\":0,\"count\":0}");
+        (void)accept_command(timer_listener, "\"cmd\":\"add\"",
+                             "{\"ok\":true,\"id\":1}");
+    }
     millisleep(400);
     if (stt >= 0)
         close(stt);
@@ -194,8 +208,10 @@ static int mock_server(char mode, const char *wake_path,
     close(audio);
     close(wake_listener);
     close(stt_listener);
+    close(timer_listener);
     unlink(wake_path);
     unlink(stt_path);
+    unlink(timer_path);
     return 0;
 }
 
@@ -212,6 +228,7 @@ int main(void)
     char audio_socket[256];
     char wake_socket[256];
     char stt_socket[256];
+    char timer_socket[256];
     char response[LE_ADAPTER_MSG_MAX];
     struct timespec delay = {0, 10000000L};
     const struct {
@@ -221,7 +238,8 @@ int main(void)
     } cases[] = {
         { 'o', 1, "outcome" },
         { 't', 1, "transcript" },
-        { 't', 0, "transcript without clear" }
+        { 't', 0, "transcript without clear" },
+        { 'T', 0, "timer intent with failing tts" }
     };
     pid_t mock_child = -1;
     pid_t agentd_child = -1;
@@ -247,6 +265,7 @@ int main(void)
              "%s/audio.sock", directory);
     snprintf(wake_socket, sizeof(wake_socket), "%s/wake.sock", directory);
     snprintf(stt_socket, sizeof(stt_socket), "%s/stt.sock", directory);
+    snprintf(timer_socket, sizeof(timer_socket), "%s/timer.sock", directory);
     CHECK(setenv("LE_TEST_CURL_CAPTURE", capture_path, 1) == 0);
     CHECK(setenv("LE_AGENT_AUTH_POLL_MIN_SECONDS", "0", 1) == 0);
 
@@ -258,6 +277,7 @@ int main(void)
         unlink(socket_path);
         unlink(wake_socket);
         unlink(stt_socket);
+        unlink(timer_socket);
         CHECK(pipe(ready_pipe) == 0);
         CHECK(pipe(release_pipe) == 0);
         mock_child = fork();
@@ -266,7 +286,7 @@ int main(void)
             close(ready_pipe[0]);
             close(release_pipe[1]);
             _exit(mock_server(cases[m].mode, wake_socket, stt_socket,
-                              ready_pipe[1], release_pipe[0]));
+                              timer_socket, ready_pipe[1], release_pipe[0]));
         }
         close(ready_pipe[1]);
         ready_pipe[1] = -1;
@@ -291,6 +311,7 @@ int main(void)
                   "--tts-socket", audio_socket,
                   "--wake-socket", wake_socket,
                   "--stt-socket", stt_socket,
+                  "--timer-socket", timer_socket,
                   (char *)NULL);
             _exit(127);
         }
@@ -339,6 +360,22 @@ int main(void)
                 result = 1;
                 goto cleanup;
             }
+        } else if (cases[m].mode == 'T') {
+            /*
+             * A timer intent answered by the daemon but never heard: the turn
+             * must be recorded as tts_failed, not completed (Codex review on
+             * bcfef3e). The transcript is the spoken request, the reply is the
+             * timer confirmation.
+             */
+            CHECK(strstr(response, "\"history_generation\":1") != NULL);
+            if (strstr(response, "\"status\":\"tts_failed\"") == NULL ||
+                strstr(response, "\"transcript_preview\":\"set a timer") == NULL) {
+                fprintf(stderr,
+                        "check failed: a timer intent whose spoken reply "
+                        "failed must be recorded tts_failed: %s\n", response);
+                result = 1;
+                goto cleanup;
+            }
         } else {
             /*
              * Control: without a clear the same turn must be recorded, so a
@@ -383,6 +420,7 @@ cleanup:
     unlink(capture_path);
     unlink(wake_socket);
     unlink(stt_socket);
+    unlink(timer_socket);
     rmdir(directory);
     return result;
 }

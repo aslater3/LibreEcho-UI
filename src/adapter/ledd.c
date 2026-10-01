@@ -55,7 +55,9 @@
  * that survives, and is where the web and assistant configuration already
  * live.
  */
+#ifndef STATE_PATH
 #define STATE_PATH "/data/libreecho/config/led-state.json"
+#endif
 #define LEGACY_STATE_PATH "/etc/libreecho/led-state.json"
 #define SYSFS_LED_DIR "/sys/class/leds"
 #define SYSFS_I2C_DIR "/sys/bus/i2c/devices"
@@ -2945,25 +2947,46 @@ static int handle_request(struct daemon_context *ctx, int fd,
             return send_response(fd, request.id, 0, NULL,
                                  "sleep_light restore_on_boot must be true or false");
 
-        ctx->state.sleep_mode = new_mode;
-        ctx->state.sleep_brightness = new_brightness;
-        ctx->state.sleep_period_ms = new_period;
-        ctx->state.sleep_timer_minutes = new_timer;
-        ctx->state.sleep_restore_on_boot = new_restore ? 1 : 0;
-        if (new_mode == SLEEP_MODE_OFF) {
-            ctx->sleep_active = 0;
-            ctx->sleep_expires = 0.0;
-        } else {
-            /* A fresh activation restarts the absolute pulse phase; a
-               pre-emption/resume does not (that is handled by the base
-               layer redrawing from the same start time). */
-            if (!ctx->sleep_active)
-                ctx->sleep_started = now;
-            ctx->sleep_active = 1;
-            ctx->sleep_expires = new_timer > 0
-                               ? now + (double)new_timer * 60.0 : 0.0;
+        {
+            struct led_state previous = ctx->state;
+            int previous_sleep_active = ctx->sleep_active;
+            double previous_sleep_expires = ctx->sleep_expires;
+            double previous_sleep_started = ctx->sleep_started;
+
+            ctx->state.sleep_mode = new_mode;
+            ctx->state.sleep_brightness = new_brightness;
+            ctx->state.sleep_period_ms = new_period;
+            ctx->state.sleep_timer_minutes = new_timer;
+            ctx->state.sleep_restore_on_boot = new_restore ? 1 : 0;
+            if (new_mode == SLEEP_MODE_OFF) {
+                ctx->sleep_active = 0;
+                ctx->sleep_expires = 0.0;
+            } else {
+                /* A fresh activation restarts the absolute pulse phase; a
+                   pre-emption/resume does not (that is handled by the base
+                   layer redrawing from the same start time). */
+                if (!ctx->sleep_active)
+                    ctx->sleep_started = now;
+                ctx->sleep_active = 1;
+                ctx->sleep_expires = new_timer > 0
+                                   ? now + (double)new_timer * 60.0 : 0.0;
+            }
+            /*
+             * Persist before reporting success.  If the state cannot be saved,
+             * revert the in-memory change so the daemon keeps the settings it
+             * will actually restore on the next boot -- reporting success left
+             * the owner believing a setting (e.g. restore_on_boot) had stuck
+             * when the next restart silently dropped it.
+             */
+            if (persist_state(&ctx->state) != 0) {
+                ctx->state = previous;
+                ctx->sleep_active = previous_sleep_active;
+                ctx->sleep_expires = previous_sleep_expires;
+                ctx->sleep_started = previous_sleep_started;
+                return send_response(fd, request.id, 0, NULL,
+                                     "cannot persist sleep light state");
+            }
         }
-        persist_state(&ctx->state);
         if (!ctx->visualizer_active && !ctx->animation_active &&
             !ctx->pattern_active && !ctx->test_active && !ctx->meter_active &&
             !ctx->startup_animation_active)

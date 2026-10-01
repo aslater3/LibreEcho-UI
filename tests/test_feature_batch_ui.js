@@ -91,9 +91,27 @@ globalThis.confirm = () => true;
 globalThis.prompt = () => 'secret';
 globalThis.Blob = function (parts) { this.parts = parts; };
 globalThis.URL = { createObjectURL: () => 'blob:unused', revokeObjectURL() {} };
-/* Leave the dashboard startup fetch pending so no startup error view can
-   overwrite the page under test; every request goes through api() below. */
-globalThis.fetch = () => new Promise(() => {});
+/* Every request runs through the shipped api() helper, which calls this
+   recording fetch, so the tests assert the exact fetch options (method, headers,
+   body) the helper builds. The dashboard's own startup fetch is left pending
+   until the route fixtures exist so no startup view can overwrite the page. */
+const fetchCalls = [];
+let routes = {};
+let requestsReady = false;
+globalThis.fetch = (url, opt = {}) => {
+    if (!requestsReady) return new Promise(() => {});
+    const path = String(url).replace(/^\/api\/v1/, '');
+    const method = (opt && opt.method) || 'GET';
+    fetchCalls.push({
+        path, method, headers: Object.assign({}, opt && opt.headers),
+        body: opt && opt.body ? String(opt.body) : null
+    });
+    const route = routes[path] ? routes[path] : defaultRoute(path, method);
+    const data = typeof route === 'function' ? route(method, opt) : route;
+    return Promise.resolve(data).then(value => ({
+        ok: true, status: 200, json: async () => ({ ok: true, data: value })
+    }));
+};
 
 function runApp() {
     vm.runInThisContext('state', { filename: 'app.js' });
@@ -119,8 +137,6 @@ const recoveryPanel = vm.runInThisContext('recoveryPanel');
 
 /* ------------------------------------------------------------- api recorder */
 
-const apiCalls = [];
-let routes = {};
 function defaultRoute(path, method) {
     if (path === '/led') return LED;
     if (path === '/buttons') return BUTTONS;
@@ -137,18 +153,11 @@ function defaultRoute(path, method) {
     if (path === '/voice-pipeline') return {};
     return {};
 }
-globalThis.api = async (path, opt = {}) => {
-    const method = (opt && opt.method) || 'GET';
-    apiCalls.push({ path, method, body: opt && opt.body ? JSON.parse(opt.body) : null });
-    if (routes[path]) {
-        const r = routes[path];
-        if (typeof r === 'function') return r(method, opt);
-        return r;
-    }
-    return defaultRoute(path, method);
-};
+/* The recording fetch above is the request log: path, method, parsed body and
+   the headers the shipped api() helper built (this is where CSRF is checked). */
+const apiCalls = fetchCalls;
 function callsFor(path, method) { return apiCalls.filter(c => c.path === path && (!method || c.method === method)); }
-function lastBody(path, method) { const c = callsFor(path, method); return c.length ? c[c.length - 1].body : null; }
+function lastBody(path, method) { const c = callsFor(path, method); return c.length ? (c[c.length - 1].body ? JSON.parse(c[c.length - 1].body) : null) : null; }
 
 /* --------------------------------------------------------------- fixtures */
 
@@ -184,6 +193,11 @@ const USB = {
     size_bytes: 1000, used_bytes: 100, free_bytes: 900, rel_path: '', playable_formats: ['mp3'],
     entries: [{ name: 'song.mp3', directory: false, size_bytes: 10 }, { name: 'clip.opus', directory: false, size_bytes: 20 }, { name: 'tune.ogg', directory: false, size_bytes: 30 }]
 };
+
+/* The route fixtures above exist now; let the recording fetch answer requests
+   the page tests make. The dashboard's startup fetch stays pending (it was
+   issued before this flag flipped), as before. */
+requestsReady = true;
 
 function resetCalls() { apiCalls.length = 0; }
 function resetDom() { elements.clear(); content.innerHTML = ''; }
@@ -292,10 +306,10 @@ async function caseUsbCapabilityGate() {
     state.data.status = { simulated: true };
     state.page = 'System'; state.renderGeneration++;
     $app('#feature-usb-host').checked = true;
-    await systemPage(); clearTimers();
+    await systemPage(); await settle(5); clearTimers();
     $app('#feature-usb-host').checked = true;
     state.features = { usb_host: true };
-    await systemPage(); clearTimers();
+    await systemPage(); await settle(5); clearTimers();
     has($app('#usb-storage').innerHTML, 'clip.opus', 'USB listing shows the opus file');
     check(/clip\.opus[\s\S]{0,80}Play/.test($app('#usb-storage').innerHTML),
         'with Opus advertised, a .opus file offers Play');
@@ -311,7 +325,7 @@ async function caseUsbCapabilityGate() {
     state.page = 'System'; state.renderGeneration++;
     $app('#feature-usb-host').checked = true;
     state.features = { usb_host: true };
-    await systemPage(); clearTimers();
+    await systemPage(); await settle(5); clearTimers();
     const gate = $app('#usb-storage').innerHTML;
     check(/song\.mp3[\s\S]{0,80}Play/.test(gate), 'mp3 still offers Play without an Opus decoder');
     check(!/clip\.opus[\s\S]{0,80}Play/.test(gate), 'without Opus advertised, .opus offers no Play');
@@ -328,7 +342,7 @@ async function caseUsbCapabilityGate() {
     state.page = 'System'; state.renderGeneration++;
     $app('#feature-usb-host').checked = true;
     state.features = { usb_host: true };
-    await systemPage(); clearTimers();
+    await systemPage(); await settle(5); clearTimers();
     check(!/clip\.opus[\s\S]{0,80}Play/.test($app('#usb-storage').innerHTML),
         'a missing capability is treated as mp3-only, never opus');
 }
@@ -451,6 +465,28 @@ async function caseRecentVoiceStaleDetail() {
     release({ id: 5, transcript: 'stale transcript', response: 'stale', status: 'complete' });
     await pending;
     check(!body.innerHTML.includes('stale transcript'), 'a detail response superseded by clear does not overwrite the list');
+}
+
+/* Regression (Codex review on bcfef3e): the shared api() helper only attached
+ * the CSRF header when a body was present, so the bodyless DELETE the Recent
+ * voice Clear button sends was refused with 403 and history was never cleared.
+ * Assert on the fetch options the shipped helper actually built. */
+async function caseVoiceClearSendsCsrf() {
+    resetDom(); resetCalls();
+    state.csrf = 'csrf-token';
+    routes['/assistant/history'] = { turns: [], history_generation: 2 };
+    await voiceHistoryClear();
+    const del = callsFor('/assistant/history', 'DELETE');
+    checkEqual(del.length, 1, 'Clear issues a DELETE for the voice history');
+    checkEqual(del[0].headers['X-LibreEcho-CSRF'], 'csrf-token',
+        'the bodyless DELETE carries the CSRF header');
+    check(!('Content-Type' in del[0].headers), 'a bodyless DELETE sends no Content-Type');
+    resetCalls();
+    await voiceHistoryLoad();
+    const get = callsFor('/assistant/history', 'GET');
+    checkEqual(get.length, 1, 'Refresh GETs the voice history');
+    check(!('X-LibreEcho-CSRF' in get[0].headers), 'a GET is not sent a CSRF header');
+    delete routes['/assistant/history'];
 }
 
 async function caseRecentVoiceLoadRace() {
@@ -731,6 +767,7 @@ async function main() {
         ['recent voice legacy at_ms ordering preserved', caseRecentVoiceLegacyOrderingPreserved],
         ['recent voice detail fetch and escaping', caseRecentVoiceDetailEscaped],
         ['recent voice stale detail after clear', caseRecentVoiceStaleDetail],
+        ['recent voice Clear sends the CSRF header', caseVoiceClearSendsCsrf],
         ['recent voice stale collection race', caseRecentVoiceLoadRace],
         ['Simulation history uses the latency alias', caseSimulationLatencyAlias],
         ['network recovery save/validate', caseNetworkRecovery],

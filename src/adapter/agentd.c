@@ -1876,8 +1876,16 @@ static void voice_transcript(
         state->follow_up_armed = 0;
         state->follow_up_depth = 0;
         pthread_mutex_lock(&state->metrics_mutex);
-        record_voice_turn(state, LE_VOICE_TURN_COMPLETED, generation, text,
-                          reply, stt_ms, 0, 0);
+        /*
+         * handle_timer_intent() speaks its own confirmation through
+         * play_sentence(); a failed playback calls note_tts_failure(). Reflect
+         * that in the recorded turn instead of always claiming completion, so
+         * a timer reply that never reached the speaker is visible as tts_failed.
+         */
+        record_voice_turn(state,
+                          state->turn_tts_failed ? LE_VOICE_TURN_TTS_FAILED
+                                                 : LE_VOICE_TURN_COMPLETED,
+                          generation, text, reply, stt_ms, 0, 0);
         pthread_mutex_unlock(&state->metrics_mutex);
         pthread_mutex_unlock(&state->control_mutex);
         return;

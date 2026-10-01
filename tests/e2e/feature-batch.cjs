@@ -78,7 +78,7 @@ function recordRequests(page) {
     if (at < 0) return;
     /* Store the API-relative path (/led/idle), matching the path literals the
        checks below pass to calls()/lastBody(). */
-    requests.push({ method: request.method(), path: url.slice(at + '/api/v1'.length), body: request.postData() });
+    requests.push({ method: request.method(), path: url.slice(at + '/api/v1'.length), body: request.postData(), headers: request.headers() });
   });
   return requests;
 }
@@ -395,6 +395,13 @@ async function caseVoiceHistory(browser) {
   await page.click('#voice-history .voice-turn[data-id="3"] .voice-detail');
   await page.click('#voice-clear');
   await page.waitForResponse(r => r.url().includes('/api/v1/assistant/history') && r.request().method() === 'DELETE', { timeout: 5000 });
+  /* Regression (Codex review on bcfef3e): Clear sends a bodyless DELETE, and
+     the shared api() helper used to attach the CSRF header only when there was
+     a body, so the device refused it with 403. Assert the outbound header. */
+  const clearDelete = calls(requests, '/assistant/history', 'DELETE');
+  checkEqual(clearDelete.length, 1, 'Clear issues a DELETE for the voice history');
+  check(!!(clearDelete[0] && clearDelete[0].headers['x-libreecho-csrf']),
+    'the bodyless DELETE carries the CSRF header');
   await page.waitForTimeout(1200);
   const afterClear = await page.locator('#voice-history').innerText();
   check(afterClear.includes('No voice turns recorded yet'), 'Clear empties the recent-voice list');
