@@ -27,9 +27,10 @@ python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
 python3 tests/test_pr244_review_contract.py
 python3 tests/test_pr245_review_contract.py
-make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-networkd-ap-scan build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
+make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-networkd-ap-scan build/test-nl80211-scan-transport build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
 ./build/test-networkd-scan-security
 ./build/test-networkd-ap-scan
+./build/test-nl80211-scan-transport
 ./build/test-network-health
 ./build/test-adapter-client-events
 ./build/test-gateway-probe
@@ -220,6 +221,7 @@ make build/libreecho-agentd build/libreecho-networkd
 make build/test_network_recovery build/test-networkd-recovery
 ./build/test_network_recovery
 python3 tests/test_network_recovery_lifecycle.py
+python3 tests/test_history_worker_responsiveness.py
 sh tests/run_recovery_backend_integration.sh
 sh tests/test_feature_batch_api.sh
 sh tests/test_feature_batch_noise_heartbeat.sh

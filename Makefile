@@ -502,6 +502,16 @@ $(BUILD)/test-networkd-ap-scan: tests/test_networkd_ap_scan.c \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter tests/test_networkd_ap_scan.c -o $@
 
+# The asynchronous recovery-scan transport (UI #288 review): nested family and
+# multicast-group reply parsing, a live kernel group subscription, completion
+# and dump datagram parsing, and the bounded async dispatch.
+$(BUILD)/test-nl80211-scan-transport: tests/test_nl80211_scan_transport.c \
+	src/adapter/networkd.c src/adapter/adapter_server.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_NETWORKD_TESTING $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter tests/test_nl80211_scan_transport.c \
+		src/adapter/adapter_server.c src/log.c -o $@
+
 $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emission.c \
 		src/backend_linux.c src/json.c src/log.c src/service_env.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \

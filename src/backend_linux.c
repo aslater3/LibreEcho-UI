@@ -1692,8 +1692,10 @@ static int scan(struct le_backend *b, struct le_wifi_scan *o)
     int rc;
     (void)b;
 
-    rc = adapter_command(LE_ADAPTER_NETWORK_SOCK, "scan", NULL,
-                         response, sizeof(response));
+    /* The kernel scanner has a 12 s total deadline; keep the reply budget
+       above it while HTTP handles scans in a bounded API worker. */
+    rc = adapter_command_timeout(LE_ADAPTER_NETWORK_SOCK, "scan", NULL,
+                                 response, sizeof(response), 15000);
     if (rc != LE_OK)
         return rc;
     memset(o, 0, sizeof(*o));

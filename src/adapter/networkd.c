@@ -71,9 +71,29 @@
 #define WPA_TIMEOUT_MS 2500
 #define WEXT_SCAN_BUFFER_SIZE 65535
 #define WEXT_SCAN_RETRY_MS 100
+/* Overall deadline for a direct kernel scan.  The adapter client that carries
+ * the portal's scan request waits longer than this (the scan-specific
+ * LE_ADAPTER_SCAN_TIMEOUT_MS in src/backend_linux.c), so this daemon's bounded
+ * result or timeout always reaches the client before the client gives up. */
 #define NL80211_SCAN_TIMEOUT_MS 12000
 #define NL80211_SCAN_RETRY_MS 150
 #define NL80211_BUFFER_SIZE 65536
+/* One scan command is outstanding at a time, so the fixed sequences of the
+ * three netlink exchanges cannot collide. */
+#define NL80211_FAMILY_SEQ 1u
+#define NL80211_TRIGGER_SEQ 2u
+#define NL80211_DUMP_SEQ 3u
+/* Bound how much received data one readable scan event may add to a poll
+ * iteration; a large scan dump is drained across several iterations. */
+#define NL80211_STEP_MAX_DATAGRAMS 16
+/* Older headers may not carry the netlink socket option used to subscribe to a
+ * generic-netlink family's multicast group. */
+#ifndef SOL_NETLINK
+#define SOL_NETLINK 270
+#endif
+#ifndef NETLINK_ADD_MEMBERSHIP
+#define NETLINK_ADD_MEMBERSHIP 1
+#endif
 /* AP-forced scan flag (uapi NL80211_SCAN_FLAG_AP = 1<<2): request a scan even
  * while the interface is beaconing as an access point.  This is the flag
  * `iw dev <iface> scan ap-force` sets and the only scan that can run while the
@@ -124,12 +144,47 @@ struct client {
     int busy;
 };
 
+struct scan_result {
+    char ssid[IW_ESSID_MAX_SIZE + 1];
+    char flags[128];
+    int signal;
+    int signal_percent;
+    int rssi_dbm;
+    int frequency;
+    int channel;
+    int five_ghz;
+};
+
+/* A direct kernel (nl80211) scan is driven by the daemon's poll loop: the scan
+ * command only starts the exchange (driver_scan_begin) and every later state is
+ * advanced from readable events, so a slow AP-forced recovery scan can never
+ * stall other clients, the recovery portal, or the AP children. */
+enum driver_scan_state {
+    DRIVER_SCAN_NONE = 0,
+    DRIVER_SCAN_FAMILY,
+    DRIVER_SCAN_TRIGGER,
+    DRIVER_SCAN_DUMP,
+    DRIVER_SCAN_ORACLE
+};
+
 struct pending_scan {
     int active;
     int client_fd;
     unsigned long id;
     long long deadline;
     long long poll_at;
+    /* Direct kernel scan state (enum driver_scan_state). */
+    int driver;
+    int state;
+    int fd;
+    uint16_t family;
+    uint32_t group;
+    unsigned int ifindex;
+    uint32_t flags;
+    int result_count;
+    int dump_retry;
+    struct scan_result results[SCAN_MAX];
+    unsigned char *buffer;
 };
 
 struct pending_dhcp {
@@ -1707,17 +1762,6 @@ static const char *scan_band(int frequency)
     return "unknown";
 }
 
-struct scan_result {
-    char ssid[IW_ESSID_MAX_SIZE + 1];
-    char flags[128];
-    int signal;
-    int signal_percent;
-    int rssi_dbm;
-    int frequency;
-    int channel;
-    int five_ghz;
-};
-
 static int scan_result_strength(const struct scan_result *result)
 {
     if (result->signal_percent >= 0)
@@ -2229,95 +2273,77 @@ static const struct nlattr *nl_find(const void *payload, size_t length,
     return NULL;
 }
 
-static int nl_wait_ack(int fd, unsigned char *buffer, size_t capacity,
-                       int timeout_ms)
+/* Send a fully built generic-netlink message to the kernel.  The scan engine
+ * never waits here: every reply is read back from the daemon's poll loop. */
+static int nl80211_send_kernel(int fd, const unsigned char *buffer, size_t used)
 {
-    struct pollfd descriptor = { fd, POLLIN, 0 };
-    long long deadline = monotonic_ms() + timeout_ms;
-
-    for (;;) {
-        ssize_t received;
-        struct nlmsghdr *header;
-        int remaining;
-        int wait_ms = (int)(deadline - monotonic_ms());
-        if (wait_ms <= 0) {
-            errno = ETIMEDOUT;
-            return -1;
-        }
-        if (poll(&descriptor, 1, wait_ms) <= 0) {
-            errno = errno == EINTR ? EINTR : ETIMEDOUT;
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        received = recv(fd, buffer, capacity, 0);
-        if (received < 0 && errno == EINTR)
-            continue;
-        if (received < 0)
-            return -1;
-        remaining = (int)received;
-        for (header = (struct nlmsghdr *)buffer;
-             NLMSG_OK(header, remaining);
-             header = NLMSG_NEXT(header, remaining)) {
-            if (header->nlmsg_type == NLMSG_ERROR) {
-                struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
-                if (header->nlmsg_len < NLMSG_LENGTH(sizeof(*error))) {
-                    errno = EPROTO;
-                    return -1;
-                }
-                if (!error->error)
-                    return 0;
-                errno = -error->error;
-                return -1;
-            }
-        }
-    }
-}
-
-static int nl80211_family_id(int fd, unsigned char *buffer, size_t capacity)
-{
-    struct nlmsghdr *header = (struct nlmsghdr *)buffer;
-    struct genlmsghdr *generic;
     struct sockaddr_nl address;
-    size_t used = NLMSG_LENGTH(GENL_HDRLEN);
-    uint32_t sequence = 1;
-    int remaining;
-    ssize_t received;
-    struct pollfd descriptor = { fd, POLLIN, 0 };
 
-    memset(buffer, 0, capacity);
-    header->nlmsg_len = (uint32_t)used;
-    header->nlmsg_type = GENL_ID_CTRL;
-    header->nlmsg_flags = NLM_F_REQUEST;
-    header->nlmsg_seq = sequence;
-    generic = (struct genlmsghdr *)NLMSG_DATA(header);
-    generic->cmd = CTRL_CMD_GETFAMILY;
-    generic->version = 1;
-    if (nl_put(buffer, capacity, &used, CTRL_ATTR_FAMILY_NAME,
-               "nl80211", sizeof("nl80211")) < 0)
-        return -1;
-    header->nlmsg_len = (uint32_t)used;
     memset(&address, 0, sizeof(address));
     address.nl_family = AF_NETLINK;
     if (sendto(fd, buffer, used, 0, (struct sockaddr *)&address,
                sizeof(address)) < 0)
         return -1;
-    if (poll(&descriptor, 1, NL80211_SCAN_TIMEOUT_MS) <= 0) {
-        errno = ETIMEDOUT;
-        return -1;
-    }
-    received = recv(fd, buffer, capacity, 0);
-    if (received < 0)
-        return -1;
-    remaining = (int)received;
-    for (header = (struct nlmsghdr *)buffer;
+    return 0;
+}
+
+/* Build a CTRL_CMD_GETFAMILY request for `family_name`.  The reply names the
+ * generic-netlink family id and, nested one level deeper, its multicast
+ * groups; the "scan" group is what carries NEW_SCAN_RESULTS/SCAN_ABORTED. */
+static size_t nl80211_build_family_request(unsigned char *buffer, size_t capacity,
+                                           const char *family_name)
+{
+    struct nlmsghdr *header;
+    struct genlmsghdr *generic;
+    size_t used = NLMSG_LENGTH(GENL_HDRLEN);
+
+    if (!buffer || !family_name || !family_name[0] || capacity < used)
+        return 0;
+    memset(buffer, 0, capacity);
+    header = (struct nlmsghdr *)buffer;
+    header->nlmsg_len = (uint32_t)used;
+    header->nlmsg_type = GENL_ID_CTRL;
+    header->nlmsg_flags = NLM_F_REQUEST;
+    header->nlmsg_seq = NL80211_FAMILY_SEQ;
+    generic = (struct genlmsghdr *)NLMSG_DATA(header);
+    generic->cmd = CTRL_CMD_GETFAMILY;
+    generic->version = 1;
+    if (nl_put(buffer, capacity, &used, CTRL_ATTR_FAMILY_NAME, family_name,
+               strlen(family_name) + 1) < 0)
+        return 0;
+    header->nlmsg_len = (uint32_t)used;
+    return used;
+}
+
+/*
+ * Parse a CTRL_CMD_GETFAMILY reply for the family id and the id of the
+ * multicast group called `group_name` (e.g. "scan" for nl80211).  The group
+ * list is nested twice -- CTRL_ATTR_MCAST_GROUPS holds one container per group,
+ * and each container carries CTRL_ATTR_MCAST_GRP_NAME/ID -- so both levels are
+ * walked with aligned, length-checked bounds.  Returns 0 when the family id was
+ * found (*group_id stays 0 when the family has no such group); -1 with errno
+ * set when the reply carries an error or no family id.
+ */
+static int nl80211_parse_family_reply(const unsigned char *buffer, size_t length,
+                                      uint32_t sequence, const char *group_name,
+                                      uint16_t *family_id, uint32_t *group_id)
+{
+    struct nlmsghdr *header;
+    int remaining = (int)length;
+
+    *family_id = 0;
+    *group_id = 0;
+    for (header = (struct nlmsghdr *)(void *)buffer;
          NLMSG_OK(header, remaining);
          header = NLMSG_NEXT(header, remaining)) {
+        struct genlmsghdr *generic;
         const struct nlattr *attribute;
         size_t payload_length;
+
         if (header->nlmsg_type == NLMSG_ERROR) {
             struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
-            errno = error->error ? -error->error : EPROTO;
+            errno = (header->nlmsg_len >= NLMSG_LENGTH(sizeof(*error)) &&
+                     error->error) ? -error->error : EPROTO;
             return -1;
         }
         if (header->nlmsg_seq != sequence ||
@@ -2327,38 +2353,76 @@ static int nl80211_family_id(int fd, unsigned char *buffer, size_t capacity)
         payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
         attribute = nl_find((unsigned char *)generic + GENL_HDRLEN,
                             payload_length, CTRL_ATTR_FAMILY_ID);
-        if (attribute && attribute->nla_len >= NLA_HDRLEN + sizeof(uint16_t)) {
-            uint16_t family;
-            memcpy(&family, (unsigned char *)attribute + NLA_HDRLEN,
-                   sizeof(family));
-            return (int)family;
+        if (attribute && attribute->nla_len >= NLA_HDRLEN + sizeof(uint16_t))
+            memcpy(family_id, (unsigned char *)attribute + NLA_HDRLEN,
+                   sizeof(*family_id));
+        attribute = nl_find((unsigned char *)generic + GENL_HDRLEN,
+                            payload_length, CTRL_ATTR_MCAST_GROUPS);
+        if (attribute && !*group_id && attribute->nla_len > NLA_HDRLEN) {
+            const unsigned char *cursor =
+                (const unsigned char *)attribute + NLA_HDRLEN;
+            size_t groups_length = attribute->nla_len - NLA_HDRLEN;
+
+            while (groups_length >= NLA_HDRLEN) {
+                const struct nlattr *group = (const struct nlattr *)cursor;
+                size_t aligned;
+
+                if (group->nla_len < NLA_HDRLEN)
+                    break;
+                aligned = nl_align(group->nla_len);
+                if (aligned > groups_length)
+                    break; /* truncated tail: stop instead of over-reading */
+                {
+                    const struct nlattr *name = nl_find(
+                        cursor + NLA_HDRLEN, group->nla_len - NLA_HDRLEN,
+                        CTRL_ATTR_MCAST_GRP_NAME);
+                    const struct nlattr *id = nl_find(
+                        cursor + NLA_HDRLEN, group->nla_len - NLA_HDRLEN,
+                        CTRL_ATTR_MCAST_GRP_ID);
+                    if (name && id && group_name && group_name[0] &&
+                        id->nla_len >= NLA_HDRLEN + sizeof(uint32_t)) {
+                        const char *value = (const char *)name + NLA_HDRLEN;
+                        size_t value_length = name->nla_len - NLA_HDRLEN;
+                        size_t wanted = strlen(group_name);
+                        if ((value_length == wanted ||
+                             (value_length == wanted + 1 &&
+                              value[wanted] == '\0')) &&
+                            !memcmp(value, group_name, wanted)) {
+                            memcpy(group_id,
+                                   (const unsigned char *)id + NLA_HDRLEN,
+                                   sizeof(*group_id));
+                            break;
+                        }
+                    }
+                }
+                cursor += aligned;
+                groups_length -= aligned;
+            }
         }
+        if (*family_id && *group_id)
+            return 0;
     }
-    errno = EPROTO;
-    return -1;
+    if (!*family_id) {
+        errno = EPROTO;
+        return -1;
+    }
+    return 0;
 }
 
-static int nl80211_send_request(int fd, int family, uint8_t command,
-                                uint16_t flags, unsigned char *buffer,
-                                size_t capacity, size_t used)
+/*
+ * NEW_SCAN_RESULTS and SCAN_ABORTED are multicast notifications: they are only
+ * delivered to a socket that joined the family's "scan" group.  Subscribe
+ * before TRIGGER_SCAN or the scan waits out its whole deadline in silence.
+ */
+static int nl80211_join_group(int fd, uint32_t group)
 {
-    struct nlmsghdr *header = (struct nlmsghdr *)buffer;
-    struct genlmsghdr *generic = (struct genlmsghdr *)NLMSG_DATA(header);
-    struct sockaddr_nl address;
-
-    header->nlmsg_len = (uint32_t)used;
-    header->nlmsg_type = (uint16_t)family;
-    header->nlmsg_flags = flags;
-    header->nlmsg_seq = 2;
-    generic->cmd = command;
-    generic->version = 1;
-    memset(&address, 0, sizeof(address));
-    address.nl_family = AF_NETLINK;
-    if (sendto(fd, buffer, used, 0, (struct sockaddr *)&address,
-               sizeof(address)) < 0)
+    if (!group) {
+        errno = EPROTO;
         return -1;
-    if (flags & NLM_F_ACK)
-        return nl_wait_ack(fd, buffer, capacity, NL80211_SCAN_TIMEOUT_MS);
+    }
+    if (setsockopt(fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, &group,
+                   sizeof(group)) < 0)
+        return -1;
     return 0;
 }
 
@@ -2395,24 +2459,6 @@ static size_t nl80211_build_trigger_scan(unsigned char *buffer, size_t capacity,
         return 0;
     nested->nla_len = (uint16_t)(used - nested_start);
     return used;
-}
-
-static int nl80211_trigger_scan(int fd, int family, unsigned int ifindex,
-                                unsigned char *buffer, size_t capacity,
-                                uint32_t scan_flags)
-{
-    size_t used = nl80211_build_trigger_scan(buffer, capacity, ifindex,
-                                             scan_flags);
-    int result;
-
-    if (!used)
-        return -1;
-    result = nl80211_send_request(fd, family, NL80211_CMD_TRIGGER_SCAN,
-                                  NLM_F_REQUEST | NLM_F_ACK, buffer,
-                                  capacity, used);
-    if (result < 0 && errno == EBUSY)
-        return 0;
-    return result;
 }
 
 static void nl80211_parse_ies(const unsigned char *ies, size_t length,
@@ -2566,209 +2612,345 @@ static int nl80211_append_bss(const struct nlattr *bss,
     return 1;
 }
 
-static int nl80211_wait_for_scan_event(int fd, unsigned char *buffer,
-                                       size_t capacity, long long deadline)
+/*
+ * Scan completion arrives as a multicast event, never as a reply to the
+ * trigger request: NEW_SCAN_RESULTS means the results may now be dumped, and
+ * SCAN_ABORTED means there is nothing to report.  Returns 1/2 for those, 0 when
+ * the datagram carried something else, and -1 with errno set on a kernel error
+ * (SCAN_ABORTED reports ECANCELED).
+ */
+static int nl80211_parse_scan_event(const unsigned char *buffer, size_t length)
 {
-    struct pollfd descriptor = { fd, POLLIN, 0 };
+    struct nlmsghdr *header;
+    int remaining = (int)length;
+    int result = 0;
 
-    for (;;) {
-        struct nlmsghdr *header;
-        int remaining;
-        ssize_t received;
-        int wait_ms = (int)(deadline - monotonic_ms());
+    for (header = (struct nlmsghdr *)(void *)buffer;
+         NLMSG_OK(header, remaining);
+         header = NLMSG_NEXT(header, remaining)) {
+        struct genlmsghdr *generic;
 
-        if (wait_ms <= 0) {
-            errno = ETIMEDOUT;
+        if (header->nlmsg_type == NLMSG_ERROR) {
+            struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
+            int status;
+            if (header->nlmsg_len < NLMSG_LENGTH(sizeof(*error)))
+                status = EPROTO;
+            else if (error->error == 0 || error->error == -EBUSY)
+                continue; /* trigger acknowledgement, not an event */
+            else
+                status = -error->error;
+            errno = status;
             return -1;
         }
-        if (poll(&descriptor, 1, wait_ms) <= 0) {
-            if (errno == EINTR)
-                continue;
-            errno = ETIMEDOUT;
-            return -1;
-        }
-        received = recv(fd, buffer, capacity, 0);
-        if (received < 0 && errno == EINTR)
+        if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
             continue;
-        if (received < 0)
+        generic = (struct genlmsghdr *)NLMSG_DATA(header);
+        if (generic->cmd == NL80211_CMD_NEW_SCAN_RESULTS)
+            result = 1;
+        else if (generic->cmd == NL80211_CMD_SCAN_ABORTED) {
+            errno = ECANCELED;
             return -1;
-        remaining = (int)received;
-        for (header = (struct nlmsghdr *)buffer;
-             NLMSG_OK(header, remaining);
-             header = NLMSG_NEXT(header, remaining)) {
-            struct genlmsghdr *generic;
-            const struct nlattr *attrs;
-            size_t payload_length;
-
-            if (header->nlmsg_type == NLMSG_ERROR) {
-                struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
-                errno = error->error ? -error->error : EPROTO;
-                return -1;
-            }
-            if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
-                continue;
-            generic = (struct genlmsghdr *)NLMSG_DATA(header);
-            payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
-            attrs = (const struct nlattr *)((unsigned char *)generic + GENL_HDRLEN);
-            if (generic->cmd == NL80211_CMD_NEW_SCAN_RESULTS)
-                return 0;
-            if (generic->cmd == NL80211_CMD_SCAN_ABORTED) {
-                errno = ECANCELED;
-                return -1;
-            }
-            (void)attrs;
-            (void)payload_length;
         }
     }
+    return result;
 }
 
-static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
-                             unsigned char *buffer, size_t capacity,
-                             char *data, size_t data_size)
+/*
+ * Parse one received NL80211_CMD_GET_SCAN dump datagram: each dumped message
+ * carries one NL80211_ATTR_BSS, and the kernel ends the dump with NLMSG_DONE.
+ * Results accumulate across datagrams up to the fixed SCAN_MAX bound.  Returns
+ * 0 normally (with *done set after NLMSG_DONE); -1 with errno set on a kernel
+ * error, where EBUSY/EAGAIN mean "results not ready yet, ask again".
+ */
+static int nl80211_parse_dump_message(struct scan_result *results, int *count,
+                                      const unsigned char *buffer, size_t length,
+                                      int *done)
+{
+    struct nlmsghdr *header;
+    int remaining = (int)length;
+
+    *done = 0;
+    for (header = (struct nlmsghdr *)(void *)buffer;
+         NLMSG_OK(header, remaining);
+         header = NLMSG_NEXT(header, remaining)) {
+        struct genlmsghdr *generic;
+        const struct nlattr *bss;
+        size_t payload_length;
+
+        if (header->nlmsg_type == NLMSG_DONE) {
+            *done = 1;
+            return 0;
+        }
+        if (header->nlmsg_type == NLMSG_ERROR) {
+            struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
+            if (header->nlmsg_len >= NLMSG_LENGTH(sizeof(*error)) &&
+                error->error == 0)
+                continue; /* late trigger acknowledgement, not a dump error */
+            errno = (header->nlmsg_len >= NLMSG_LENGTH(sizeof(*error)) &&
+                     error->error) ? -error->error : EPROTO;
+            return -1;
+        }
+        if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
+            continue;
+        generic = (struct genlmsghdr *)NLMSG_DATA(header);
+        payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+        bss = nl_find((unsigned char *)generic + GENL_HDRLEN, payload_length,
+                      NL80211_ATTR_BSS);
+        if (bss && *count < SCAN_MAX) {
+            int parsed = nl80211_append_bss(bss, &results[*count]);
+            if (parsed < 0)
+                return -1;
+            if (parsed > 0)
+                ++*count;
+        }
+    }
+    return 0;
+}
+
+static int nl80211_send_trigger_scan(struct daemon_ctx *ctx)
+{
+    struct nlmsghdr *header;
+    size_t used = nl80211_build_trigger_scan(ctx->scan.buffer,
+                                             NL80211_BUFFER_SIZE,
+                                             ctx->scan.ifindex, ctx->scan.flags);
+
+    if (!used)
+        return -1;
+    header = (struct nlmsghdr *)ctx->scan.buffer;
+    header->nlmsg_len = (uint32_t)used;
+    header->nlmsg_type = ctx->scan.family;
+    ((struct genlmsghdr *)NLMSG_DATA(header))->cmd = NL80211_CMD_TRIGGER_SCAN;
+    ((struct genlmsghdr *)NLMSG_DATA(header))->version = 1;
+    header->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    header->nlmsg_seq = NL80211_TRIGGER_SEQ;
+    return nl80211_send_kernel(ctx->scan.fd, ctx->scan.buffer, used);
+}
+
+static int nl80211_send_dump_request(struct daemon_ctx *ctx)
 {
     struct nlmsghdr *header;
     struct genlmsghdr *generic;
     size_t used = NLMSG_LENGTH(GENL_HDRLEN);
-    long long deadline = monotonic_ms() + NL80211_SCAN_RETRY_MS;
-    int remaining, result_count = 0;
-    struct scan_result results[SCAN_MAX];
-    ssize_t received;
-    struct pollfd descriptor = { fd, POLLIN, 0 };
 
-    memset(buffer, 0, capacity);
-    if (nl_put_u32(buffer, capacity, &used, NL80211_ATTR_IFINDEX,
-                   ifindex) < 0)
+    if (nl_put_u32(ctx->scan.buffer, NL80211_BUFFER_SIZE, &used,
+                   NL80211_ATTR_IFINDEX, ctx->scan.ifindex) < 0)
         return -1;
-    header = (struct nlmsghdr *)buffer;
+    header = (struct nlmsghdr *)ctx->scan.buffer;
     header->nlmsg_len = (uint32_t)used;
-    header->nlmsg_type = (uint16_t)family;
+    header->nlmsg_type = ctx->scan.family;
     header->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-    header->nlmsg_seq = 3;
+    header->nlmsg_seq = NL80211_DUMP_SEQ;
     generic = (struct genlmsghdr *)NLMSG_DATA(header);
     generic->cmd = NL80211_CMD_GET_SCAN;
     generic->version = 1;
-    if (send(fd, buffer, used, 0) < 0)
-        return -1;
-    for (;;) {
-        int wait_ms = (int)(deadline - monotonic_ms());
-        if (wait_ms <= 0) {
-            errno = EAGAIN;
-            return -1;
-        }
-        if (poll(&descriptor, 1, wait_ms) <= 0) {
-            errno = errno == EINTR ? EINTR : EAGAIN;
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        received = recv(fd, buffer, capacity, 0);
-        if (received < 0 && errno == EINTR)
-            continue;
-        if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            errno = EAGAIN;
-            continue;
-        }
-        if (received < 0)
-            return -1;
-        remaining = (int)received;
-        for (header = (struct nlmsghdr *)buffer;
-             NLMSG_OK(header, remaining);
-             header = NLMSG_NEXT(header, remaining)) {
-            size_t payload_length;
-            const struct nlattr *bss;
-            if (header->nlmsg_type == NLMSG_DONE) {
-                int i, j;
-                for (i = 0; i < result_count; ++i)
-                    for (j = i + 1; j < result_count; ++j)
-                        if (scan_result_better(&results[j], &results[i])) {
-                            struct scan_result swap = results[i];
-                            results[i] = results[j];
-                            results[j] = swap;
-                        }
-                return serialize_scan_results(results, result_count,
-                                               data, data_size);
-            }
-            if (header->nlmsg_type == NLMSG_ERROR) {
-                struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
-                errno = error->error ? -error->error : EPROTO;
-                return -1;
-            }
-            if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
-                continue;
-            generic = (struct genlmsghdr *)NLMSG_DATA(header);
-            payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
-            bss = nl_find((unsigned char *)generic + GENL_HDRLEN,
-                          payload_length, NL80211_ATTR_BSS);
-            if (bss && result_count < SCAN_MAX) {
-                int parsed = nl80211_append_bss(bss, &results[result_count]);
-                if (parsed < 0)
-                    return -1;
-                if (parsed > 0)
-                    ++result_count;
-            }
-        }
-    }
+    return nl80211_send_kernel(ctx->scan.fd, ctx->scan.buffer, used);
 }
 
-static int nl80211_scan(const char *iface, char *data, size_t data_size,
-                        uint32_t scan_flags)
+/*
+ * Start an asynchronous direct kernel scan.  Only the socket setup and the
+ * family request happen here, and none of them block: the reply, the
+ * multicast-group subscription, the trigger, the completion event, and the
+ * results dump are all advanced by driver_scan_step() from the poll loop.
+ * That keeps the portal and every other adapter client responsive while an
+ * AP-forced recovery scan runs, and lets results reach the requesting client
+ * as soon as the kernel delivers them instead of at the end of one long call.
+ */
+static int driver_scan_begin(struct daemon_ctx *ctx)
 {
-    unsigned char *buffer;
     struct sockaddr_nl address;
-    unsigned int ifindex;
-    long long deadline;
-    int fd, family, result;
+    size_t used;
+    int fd;
 
-    if (!iface || !data || data_size < 16)
-        return -EINVAL;
-    ifindex = if_nametoindex(iface);
-    if (!ifindex)
-        return -errno;
+    ctx->scan.fd = -1;
+    ctx->scan.buffer = NULL;
+    ctx->scan.family = 0;
+    ctx->scan.group = 0;
+    ctx->scan.result_count = 0;
+    ctx->scan.dump_retry = 0;
+#ifdef LE_NETWORKD_TESTING
+    {
+        const char *oracle = getenv("LIBREECHO_NETWORKD_SCAN_ORACLE");
+        if (oracle && oracle[0]) {
+            ctx->scan.driver = 1;
+            ctx->scan.state = DRIVER_SCAN_ORACLE;
+            return 0;
+        }
+    }
+#endif
+    ctx->scan.ifindex = if_nametoindex(ctx->interface);
+    if (!ctx->scan.ifindex) {
+        errno = ENODEV;
+        return -1;
+    }
     fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
     if (fd < 0)
-        return -errno;
+        return -1;
     memset(&address, 0, sizeof(address));
     address.nl_family = AF_NETLINK;
     if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        result = -errno;
+        int saved = errno;
         close(fd);
-        return result;
+        errno = saved;
+        return -1;
     }
-    buffer = malloc(NL80211_BUFFER_SIZE);
-    if (!buffer) {
+    (void)set_nonblock(fd);
+    ctx->scan.buffer = malloc(NL80211_BUFFER_SIZE);
+    if (!ctx->scan.buffer) {
         close(fd);
-        return -ENOMEM;
+        errno = ENOMEM;
+        return -1;
     }
-    family = nl80211_family_id(fd, buffer, NL80211_BUFFER_SIZE);
-    if (family < 0 || nl80211_trigger_scan(fd, family, ifindex, buffer,
-                                           NL80211_BUFFER_SIZE,
-                                           scan_flags) < 0) {
-        result = -errno;
-        goto done;
+    ctx->scan.fd = fd;
+    used = nl80211_build_family_request(ctx->scan.buffer, NL80211_BUFFER_SIZE,
+                                        "nl80211");
+    if (!used || nl80211_send_kernel(ctx->scan.fd, ctx->scan.buffer, used) < 0) {
+        int saved = errno ? errno : EIO;
+        close(ctx->scan.fd);
+        free(ctx->scan.buffer);
+        ctx->scan.fd = -1;
+        ctx->scan.buffer = NULL;
+        errno = saved;
+        return -1;
     }
-    deadline = monotonic_ms() + NL80211_SCAN_TIMEOUT_MS;
-    if (nl80211_wait_for_scan_event(fd, buffer, NL80211_BUFFER_SIZE,
-                                    deadline) < 0) {
-        result = -errno;
-        goto done;
-    }
-    for (;;) {
-        result = nl80211_dump_scan(fd, family, ifindex, buffer,
-                                   NL80211_BUFFER_SIZE, data, data_size);
-        if (result >= 0)
-            break;
-        if (errno != EAGAIN && errno != EBUSY)
-            break;
-        if (monotonic_ms() >= deadline) {
-            result = -ETIMEDOUT;
-            break;
+    ctx->scan.driver = 1;
+    ctx->scan.state = DRIVER_SCAN_FAMILY;
+    return 0;
+}
+
+static void finish_driver_scan(struct daemon_ctx *ctx, int failed,
+                               const char *error, const char *data);
+
+/*
+ * Handle one received driver-scan datagram for the current state.  Returns 0 to
+ * keep waiting, -1 when the scan reached a terminal state (the reply has
+ * already been sent by finish_driver_scan).
+ */
+static int driver_scan_message(struct daemon_ctx *ctx,
+                               const unsigned char *buffer, size_t length)
+{
+    switch (ctx->scan.state) {
+    case DRIVER_SCAN_FAMILY: {
+        uint16_t family;
+        uint32_t group;
+
+        if (nl80211_parse_family_reply(buffer, length, NL80211_FAMILY_SEQ,
+                                       "scan", &family, &group) < 0) {
+            le_log_warn("networkd: nl80211 family lookup failed: %s",
+                        strerror(errno));
+            finish_driver_scan(ctx, 1, "Wi-Fi scan is unavailable", NULL);
+            return -1;
         }
-        (void)poll(NULL, 0, NL80211_SCAN_RETRY_MS);
+        if (!group) {
+            /* An unsubscribed socket never receives NEW_SCAN_RESULTS, so
+             * waiting out the deadline would only delay the same failure. */
+            le_log_warn("networkd: nl80211 scan multicast group unavailable");
+            finish_driver_scan(ctx, 1, "Wi-Fi scan is unavailable", NULL);
+            return -1;
+        }
+        if (nl80211_join_group(ctx->scan.fd, group) < 0) {
+            le_log_warn("networkd: scan multicast group join failed: %s",
+                        strerror(errno));
+            finish_driver_scan(ctx, 1, "Wi-Fi scan is unavailable", NULL);
+            return -1;
+        }
+        ctx->scan.family = family;
+        ctx->scan.group = group;
+        if (nl80211_send_trigger_scan(ctx) < 0) {
+            le_log_warn("networkd: scan trigger failed: %s", strerror(errno));
+            finish_driver_scan(ctx, 1, "Wi-Fi scan is unavailable", NULL);
+            return -1;
+        }
+        ctx->scan.state = DRIVER_SCAN_TRIGGER;
+        return 0;
     }
-done:
-    free(buffer);
-    close(fd);
-    return result;
+    case DRIVER_SCAN_TRIGGER: {
+        int event = nl80211_parse_scan_event(buffer, length);
+
+        if (event < 0) {
+            le_log_warn("networkd: scan trigger rejected or aborted: %s",
+                        strerror(errno));
+            finish_driver_scan(ctx, 1, errno == ECANCELED ? "scan aborted"
+                                                          : "Wi-Fi scan is unavailable",
+                               NULL);
+            return -1;
+        }
+        if (event == 1) {
+            /* The completion event can arrive before the trigger
+             * acknowledgement only in a merged datagram; either order works. */
+            ctx->scan.result_count = 0;
+            ctx->scan.dump_retry = 0;
+            if (nl80211_send_dump_request(ctx) < 0) {
+                le_log_warn("networkd: scan dump request failed: %s",
+                            strerror(errno));
+                finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+                return -1;
+            }
+            ctx->scan.state = DRIVER_SCAN_DUMP;
+        }
+        return 0;
+    }
+    case DRIVER_SCAN_DUMP: {
+        char data[LE_ADAPTER_MSG_MAX];
+        int done = 0;
+
+        if (nl80211_parse_dump_message(ctx->scan.results,
+                                       &ctx->scan.result_count,
+                                       buffer, length, &done) < 0) {
+            if (errno == EBUSY || errno == EAGAIN) {
+                /* The kernel accepted the dump before the results were ready;
+                 * check_scan_timeout asks again at the retry interval. */
+                ctx->scan.dump_retry = 1;
+                ctx->scan.poll_at = monotonic_ms() + NL80211_SCAN_RETRY_MS;
+                return 0;
+            }
+            le_log_warn("networkd: scan dump failed: %s", strerror(errno));
+            finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+            return -1;
+        }
+        if (!done)
+            return 0;
+        if (serialize_scan_results(ctx->scan.results, ctx->scan.result_count,
+                                   data, sizeof(data)) < 0) {
+            finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+            return -1;
+        }
+        le_log_info("networkd: kernel scan results ready");
+        finish_driver_scan(ctx, 0, NULL, data);
+        return -1;
+    }
+    default:
+        return 0;
+    }
+}
+
+/*
+ * Advance one readable event of the direct kernel scan.  Bounded per call: at
+ * most NL80211_STEP_MAX_DATAGRAMS datagrams are drained and nothing blocks, so
+ * the poll loop keeps serving the portal, the adapter clients, and the AP
+ * children while the scan runs.
+ */
+static void driver_scan_step(struct daemon_ctx *ctx)
+{
+    int datagrams = 0;
+
+    while (datagrams < NL80211_STEP_MAX_DATAGRAMS) {
+        ssize_t received;
+
+        received = recv(ctx->scan.fd, ctx->scan.buffer, NL80211_BUFFER_SIZE,
+                        MSG_DONTWAIT);
+        if (received < 0) {
+            if (errno == EINTR)
+                continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return;
+            le_log_warn("networkd: scan receive failed: %s", strerror(errno));
+            finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+            return;
+        }
+        ++datagrams;
+        if (driver_scan_message(ctx, ctx->scan.buffer, (size_t)received) < 0)
+            return;
+    }
 }
 
 /* Scan flags for the current radio ownership.  While the recovery AP owns the
@@ -2800,37 +2982,25 @@ static int scan_oracle_parse(const char *path, char *data, size_t data_size)
     rows[length] = '\0';
     return parse_scan_results(rows, data, data_size);
 }
-#endif
 
-/*
- * Run the direct kernel scanners when wpa_supplicant cannot drive the scan:
- * its SCAN command is unsupported, or it is deliberately not owning the radio
- * because the recovery AP released the client plane (recovery_configured &&
- * net_configured).  The WEXT compatibility ioctl cannot request an AP-forced
- * scan, so an AP-owned radio goes straight to the nl80211 path with the flag.
- * Returns a serialized scan payload length (>= 0) or a negative errno.
- */
-static int driver_scan(struct daemon_ctx *ctx, char *data, size_t data_size)
+/* The oracle can be told to answer later than the scan command, so the
+ * lifecycle fixture can prove the daemon keeps serving other clients while a
+ * kernel scan is still pending.  Never reachable in a production build. */
+static long long scan_oracle_delay_ms(void)
 {
-    uint32_t flags = scan_flags_for(ctx);
-    int wext_result;
+    const char *value = getenv("LIBREECHO_NETWORKD_SCAN_ORACLE_DELAY_MS");
+    long parsed;
 
-#ifdef LE_NETWORKD_TESTING
-    {
-        const char *oracle = getenv("LIBREECHO_NETWORKD_SCAN_ORACLE");
-        if (oracle && oracle[0])
-            return scan_oracle_parse(oracle, data, data_size);
-    }
-#endif
-    if (!flags) {
-        wext_result = wext_scan(ctx->interface, data, data_size);
-        if (wext_result >= 0)
-            return wext_result;
-        if (wext_result != -EOPNOTSUPP && wext_result != -ENOTSUP)
-            return wext_result;
-    }
-    return nl80211_scan(ctx->interface, data, data_size, flags);
+    if (!value || !value[0])
+        return 0;
+    parsed = strtol(value, NULL, 10);
+    if (parsed < 0)
+        parsed = 0;
+    if (parsed > 5000)
+        parsed = 5000;
+    return (long long)parsed;
 }
+#endif
 
 static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
 {
@@ -2867,11 +3037,69 @@ static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
     ctx->clients[ci].busy = 0;
 }
 
+/* Complete an asynchronous driver scan: report the outcome, release the
+ * netlink socket, and clear the pending state.  Safe to call once the client
+ * has gone away (fd < 0: nothing to answer, resources are still released). */
+static void finish_driver_scan(struct daemon_ctx *ctx, int failed,
+                               const char *error, const char *data)
+{
+    int fd = ctx->scan.client_fd;
+    unsigned long id = ctx->scan.id;
+    int ci;
+
+    if (ctx->scan.fd >= 0)
+        close(ctx->scan.fd);
+    free(ctx->scan.buffer);
+    ctx->scan.buffer = NULL;
+    ctx->scan.fd = -1;
+    ctx->scan.driver = 0;
+    ctx->scan.state = DRIVER_SCAN_NONE;
+    ctx->scan.active = 0;
+    ctx->scan.client_fd = -1;
+    if (fd < 0)
+        return;
+    ci = client_index(ctx, fd);
+    if (ci < 0)
+        return;
+    if (failed)
+        (void)send_err_fd(fd, id, error ? error : "scan failed");
+    else
+        (void)send_ok_fd(fd, id, data ? data : "{}");
+    ctx->clients[ci].busy = 0;
+}
+
 static void check_scan_timeout(struct daemon_ctx *ctx)
 {
     long long now = monotonic_ms();
     if (!ctx->scan.active)
         return;
+    if (ctx->scan.driver) {
+        /* A driver scan is completed by its own socket events.  Only its
+         * bounded timers are serviced here: the oracle/retry wake-up, and the
+         * overall deadline that answers the waiting client before the aligned
+         * adapter timeout expires. */
+#ifdef LE_NETWORKD_TESTING
+        if (ctx->scan.state == DRIVER_SCAN_ORACLE && now >= ctx->scan.poll_at) {
+            const char *oracle = getenv("LIBREECHO_NETWORKD_SCAN_ORACLE");
+            char data[LE_ADAPTER_MSG_MAX];
+            if (!oracle || !oracle[0] ||
+                scan_oracle_parse(oracle, data, sizeof(data)) < 0)
+                finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+            else
+                finish_driver_scan(ctx, 0, NULL, data);
+            return;
+        }
+#endif
+        if (ctx->scan.state == DRIVER_SCAN_DUMP && ctx->scan.dump_retry &&
+            now >= ctx->scan.poll_at) {
+            ctx->scan.dump_retry = 0;
+            if (nl80211_send_dump_request(ctx) < 0)
+                finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+        }
+        if (now >= ctx->scan.deadline)
+            finish_driver_scan(ctx, 1, "scan timed out", NULL);
+        return;
+    }
     if (ctx->wpa.monitor.fd < 0 && now >= ctx->scan.poll_at) {
         finish_scan(ctx, 0, NULL);
         return;
@@ -2885,7 +3113,7 @@ static void handle_wpa_event(struct daemon_ctx *ctx, const char *event)
     struct network_state before;
     le_log_debug("networkd: wpa event: %.80s", event);
     if (strstr(event, "CTRL-EVENT-SCAN-RESULTS")) {
-        if (ctx->scan.active)
+        if (ctx->scan.active && !ctx->scan.driver)
             finish_scan(ctx, 0, NULL);
         return;
     }
@@ -3534,22 +3762,47 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             /* wpa_supplicant cannot run the scan: the recovery AP owns the
              * single radio and the supplicant has been stopped (scan_state < 0),
              * or the supplicant does not implement SCAN (scan_state == 2).
-             * Both fall through to the direct kernel scanner, which is
-             * AP-forced while the portal owns the radio. */
-            int driver_result = driver_scan(ctx, data, sizeof(data));
+             * Both run the kernel scanner asynchronously: the WEXT
+             * compatibility ioctl first when the client plane owns the radio
+             * and offers it, otherwise the nl80211 engine (AP-forced while the
+             * portal owns the radio) whose every step is driven from the poll
+             * loop.  The waiting client is answered by the engine's completion
+             * or by its bounded deadline, whichever comes first. */
             if (scan_state == 2)
-                le_log_warn("networkd: wpa scan unsupported; using driver scan");
-            else if (scan_state < 0)
-                le_log_warn("networkd: wpa_supplicant scan unavailable; using driver scan");
-            if (driver_result < 0) {
-                le_log_error("networkd: driver scan unavailable: %s",
-                             strerror(-driver_result));
+                le_log_warn("networkd: wpa scan unsupported; using kernel scan");
+            else
+                le_log_warn("networkd: wpa_supplicant scan unavailable; using kernel scan");
+            if (!scan_flags_for(ctx)) {
+                int wext_result = wext_scan(ctx->interface, data, sizeof(data));
+                if (wext_result >= 0) {
+                    (void)send_ok_fd(ctx->clients[ci].fd, id, data);
+                    return;
+                }
+                if (wext_result != -EOPNOTSUPP && wext_result != -ENOTSUP) {
+                    le_log_error("networkd: driver scan unavailable: %s",
+                                 strerror(-wext_result));
+                    (void)send_err_fd(ctx->clients[ci].fd, id,
+                                      "Wi-Fi scan is unavailable");
+                    return;
+                }
+            }
+            if (driver_scan_begin(ctx) < 0) {
+                le_log_error("networkd: kernel scan unavailable: %s",
+                             strerror(errno));
                 (void)send_err_fd(ctx->clients[ci].fd, id,
                                   "Wi-Fi scan is unavailable");
-            } else {
-                le_log_info("networkd: driver scan results ready");
-                (void)send_ok_fd(ctx->clients[ci].fd, id, data);
+                return;
             }
+            ctx->scan.active = 1;
+            ctx->scan.client_fd = ctx->clients[ci].fd;
+            ctx->scan.id = id;
+            ctx->scan.deadline = monotonic_ms() + NL80211_SCAN_TIMEOUT_MS;
+            ctx->scan.poll_at = monotonic_ms() + NL80211_SCAN_RETRY_MS;
+#ifdef LE_NETWORKD_TESTING
+            if (ctx->scan.state == DRIVER_SCAN_ORACLE)
+                ctx->scan.poll_at = monotonic_ms() + scan_oracle_delay_ms();
+#endif
+            ctx->clients[ci].busy = 1;
             return;
         }
         if (scan_state == 1)
@@ -3971,7 +4224,7 @@ int main(int argc, char **argv)
 {
     struct daemon_ctx ctx;
     struct sigaction action;
-    struct pollfd pfds[4 + CLIENT_MAX];
+    struct pollfd pfds[5 + CLIENT_MAX];
     int i;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -4076,6 +4329,12 @@ int main(int argc, char **argv)
             pfds[nfds].revents = 0;
             ++nfds;
         }
+        if (ctx.scan.active && ctx.scan.driver && ctx.scan.fd >= 0) {
+            pfds[nfds].fd = ctx.scan.fd;
+            pfds[nfds].events = POLLIN;
+            pfds[nfds].revents = 0;
+            ++nfds;
+        }
         for (i = 0; i < CLIENT_MAX; ++i) {
             if (ctx.clients[i].fd >= 0) {
                 pfds[nfds].fd = ctx.clients[i].fd;
@@ -4086,6 +4345,11 @@ int main(int argc, char **argv)
         }
         if (ctx.scan.active && ctx.scan.deadline - now < timeout)
             timeout = (int)(ctx.scan.deadline > now ? ctx.scan.deadline - now : 0);
+        /* Driver-scan retry/oracle timers are separate from the deadline. */
+        if (ctx.scan.active && ctx.scan.driver &&
+            (ctx.scan.dump_retry || ctx.scan.state == DRIVER_SCAN_ORACLE) &&
+            ctx.scan.poll_at - now < timeout)
+            timeout = (int)(ctx.scan.poll_at > now ? ctx.scan.poll_at - now : 0);
         if (ctx.association.active && ctx.association.poll_at - now < timeout)
             timeout = (int)(ctx.association.poll_at > now ?
                             ctx.association.poll_at - now : 0);
@@ -4132,6 +4396,16 @@ int main(int argc, char **argv)
                 if (pfds[pos].revents & (POLLIN | POLLERR | POLLHUP))
                     handle_netlink(&ctx);
                 ++pos;
+            }
+            if (ctx.scan.active && ctx.scan.driver && ctx.scan.fd >= 0) {
+                int scan_index;
+                for (scan_index = 0; scan_index < nfds; ++scan_index)
+                    if (pfds[scan_index].fd == ctx.scan.fd) {
+                        if (pfds[scan_index].revents &
+                            (POLLIN | POLLERR | POLLHUP | POLLNVAL))
+                            driver_scan_step(&ctx);
+                        break;
+                    }
             }
             for (i = 0; i < CLIENT_MAX; ++i) {
                 int j;
