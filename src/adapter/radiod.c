@@ -44,6 +44,7 @@
 #include "../tls.h"
 #include "radio_aac.h"
 #include "radio_hls.h"
+#include "radio_opus.h"
 #include "radio_resample.h"
 #include "radio_ts.h"
 
@@ -1076,6 +1077,7 @@ static int play_stream(const char *url, const char *bus_path, long *played,
 {
     char host[HOST_MAX], port[16], path[PATH_MAX_LEN], station[TITLE_MAX];
     int net = -1, bus = -1, rc = -1;
+    int is_ogg = 0;
 
     /*
      * A local file is played by the same decoder as a stream: open it instead
@@ -1087,6 +1089,9 @@ static int play_stream(const char *url, const char *bus_path, long *played,
     if (url && url[0] != '/' && !hls_mode && is_hls_url(url))
         return play_hls_stream(url, bus_path, played, complete);
     if (url && url[0] == '/') {
+        unsigned char magic[4];
+        ssize_t got;
+
         net = open_usb_file(url);
         if (net < 0)
             return -1;
@@ -1098,6 +1103,18 @@ static int play_stream(const char *url, const char *bus_path, long *played,
         stream.content_length = (long)lseek(net, 0, SEEK_END);
         if (stream.content_length < 0)
             stream.content_length = 0;
+        if (lseek(net, 0, SEEK_SET) < 0)
+            goto done;
+        /*
+         * Sniff the container before choosing a decoder: Ogg Opus and MP3 do
+         * not share one. The four-byte Ogg capture pattern routes the file,
+         * and libopusfile then confirms it really is Opus (OpusHead) rather
+         * than, say, Ogg Vorbis.
+         */
+        got = read(net, magic, sizeof(magic));
+        if (got < 0)
+            goto done;
+        is_ogg = le_radio_opus_is_ogg(magic, (size_t)got);
         if (lseek(net, 0, SEEK_SET) < 0)
             goto done;
         stream.body_read = 0;
@@ -1133,6 +1150,33 @@ static int play_stream(const char *url, const char *bus_path, long *played,
     bus = open(bus_path, O_WRONLY | O_CLOEXEC);
     if (bus < 0)
         goto done;
+    if (is_ogg) {
+        /*
+         * Ogg Opus is natively 48 kHz stereo, exactly the media bus rate, so
+         * the decoded block is written with no resampler. A local file is
+         * finite: however the decode ends -- clean EOF, truncation, or no
+         * decoder in this build -- it is complete, because reconnecting would
+         * just replay the file for ever.
+         */
+#ifdef LE_RADIOD_ENABLE_OPUS
+        int opus_rc = le_radio_opus_play_fd(bus, net, played, complete);
+
+        if (opus_rc == LE_RADIO_OPUS_NOT_OPUS)
+            le_log_warn("radiod: %s is Ogg but not a decodable Opus stream",
+                        url);
+        else if (opus_rc == LE_RADIO_OPUS_BUS)
+            le_log_warn("radiod: media bus closed during Opus playback of %s",
+                        url);
+        rc = opus_rc == LE_RADIO_OPUS_OK ? 0 : -1;
+#else
+        le_log_warn("radiod: %s is an Ogg Opus file but this image was built "
+                    "without an Opus decoder", url);
+        rc = -1;
+#endif
+        if (complete)
+            *complete = 1;
+        goto done;
+    }
     pump_audio(bus, -1, played);
     /*
      * A server that declared a length and delivered it served a file, and a
@@ -1359,6 +1403,39 @@ static void escape_json(char *out, size_t size, const char *in)
     out[j] = '\0';
 }
 
+/*
+ * Build the "status" payload.  This is its own function so the JSON contract
+ * -- in particular the Opus capability field the HTTP layer gates on -- can be
+ * tested without pulling in the whole streaming stack.
+ */
+static void build_status_json(char *data, size_t size)
+{
+    char escaped_url[URL_MAX * 2], escaped_title[TITLE_MAX * 2];
+    char escaped_station[TITLE_MAX * 2];
+    const char *opus_capability;
+
+    escape_json(escaped_url, sizeof(escaped_url), playing_url);
+    escape_json(escaped_title, sizeof(escaped_title), playing_title);
+    escape_json(escaped_station, sizeof(escaped_station), playing_station);
+    /*
+     * Publish the Opus decode capability so the HTTP layer can gate an Opus
+     * launch before it happens.  It is gated on the same build macro as the
+     * decode path itself: a build without an Opus decoder reports false and
+     * links no Opus objects at all.
+     */
+#ifdef LE_RADIOD_ENABLE_OPUS
+    opus_capability = le_radio_opus_available() ? "true" : "false";
+#else
+    opus_capability = "false";
+#endif
+    snprintf(data, size,
+             "{\"playing\":%s,\"paused\":%s,\"url\":\"%s\",\"title\":\"%s\","
+             "\"station\":\"%s\",\"opus\":%s}",
+             player_pid > 0 && !player_paused ? "true" : "false",
+             player_pid > 0 && player_paused ? "true" : "false", escaped_url,
+             escaped_title, escaped_station, opus_capability);
+}
+
 static int handle(char *message, char *response, size_t response_size,
                   const char *bus_path)
 {
@@ -1373,18 +1450,8 @@ static int handle(char *message, char *response, size_t response_size,
     reap_player();
     if (!strcmp(command, "status")) {
         char data[URL_MAX * 2 + TITLE_MAX * 4 + 96];
-        char escaped_url[URL_MAX * 2], escaped_title[TITLE_MAX * 2];
-        char escaped_station[TITLE_MAX * 2];
 
-        escape_json(escaped_url, sizeof(escaped_url), playing_url);
-        escape_json(escaped_title, sizeof(escaped_title), playing_title);
-        escape_json(escaped_station, sizeof(escaped_station), playing_station);
-        snprintf(data, sizeof(data),
-                 "{\"playing\":%s,\"paused\":%s,\"url\":\"%s\",\"title\":\"%s\","
-                 "\"station\":\"%s\"}",
-                 player_pid > 0 && !player_paused ? "true" : "false",
-                 player_pid > 0 && player_paused ? "true" : "false", escaped_url,
-                 escaped_title, escaped_station);
+        build_status_json(data, sizeof(data));
         return le_adapter_respond_ok(response, response_size, id, data);
     }
     if (!strcmp(command, "play")) {

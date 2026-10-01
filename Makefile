@@ -31,15 +31,28 @@ TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
 ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-watchdogd $(BUILD)/libreecho-timerd $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-esphomed $(BUILD)/libreecho-lived $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming $(BUILD)/libreecho-mdnsd
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
-	src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c
+	src/adapter/gateway_probe.c src/adapter/network_recovery.c \
+	src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/adapter_server.c src/log.c
-LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
+LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
+	src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
+	src/adapter/led_music_director.c src/adapter/led_music_render.c
 BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
 WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/service_env.c src/adapter/adapter_client.c src/json.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
-RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
+RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/radio_opus.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
+# Optional Ogg Opus decode. The default build keeps radio_opus.c as its honest
+# stub and links nothing extra; supplying RADIOD_OPUS_PREFIX -- the pinned
+# static prefix built by the Platform tool build_opus.sh -- defines
+# LE_RADIOD_ENABLE_OPUS for radiod.c and radio_opus.c together and links the
+# three archives. The default make never fetches or builds the stack.
+RADIOD_OPUS_PREFIX ?=
+RADIOD_OPUS_LIBS ?= $(if $(strip $(RADIOD_OPUS_PREFIX)),\
+	$(RADIOD_OPUS_PREFIX)/lib/libopusfile.a $(RADIOD_OPUS_PREFIX)/lib/libopus.a $(RADIOD_OPUS_PREFIX)/lib/libogg.a)
+RADIOD_OPUS_CPPFLAGS = $(if $(strip $(RADIOD_OPUS_PREFIX)),\
+	-DLE_RADIOD_ENABLE_OPUS -I$(RADIOD_OPUS_PREFIX)/include/opus -I$(RADIOD_OPUS_PREFIX)/include)
 BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TIMERD_SOURCES = src/adapter/timerd.c src/adapter/timer_schedule.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
@@ -51,6 +64,7 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/time
 	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+	src/adapter/voice_history.c \
 	src/adapter/voice_listening_led.c \
 	src/adapter/spoken_time.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c \
@@ -157,7 +171,7 @@ $(BUILD)/libreecho-capture-mux: $(CAPTURE_MUX_OBJECTS)
 # RADIOD_TLS_LIBS is empty unless a TLS build supplies it; the libraries must
 # follow the objects so a static link resolves in one pass.
 $(BUILD)/libreecho-radiod: $(RADIOD_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(RADIOD_OBJECTS) $(LDFLAGS) -lm $(RADIOD_TLS_LIBS) -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(RADIOD_OBJECTS) $(RADIOD_OPUS_LIBS) $(LDFLAGS) -lm $(RADIOD_TLS_LIBS) -o $@
 
 $(BUILD)/libreecho-btd: $(BTD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(BTD_OBJECTS) $(LDFLAGS) -o $@
@@ -227,10 +241,10 @@ test-ha-esphome:
 	ESPHOME_HA_PYTHON="$(ESPHOME_HA_PYTHON)" ESPHOME_TLS_PREFIX="$(ESPHOMED_TEST_TLS_PREFIX)" python3 tests/test_ha_esphome_integration.py
 
 $(BUILD)/test-esphome-radio-controls: tests/test_esphome_radio_controls.c src/adapter/radiod.c \
-		src/adapter/radio_resample.c src/adapter/adapter_server.c src/json.c src/log.c $(TLS_SOURCES)
+		$(RADIOD_CODEC_SOURCES) src/adapter/adapter_server.c src/json.c src/log.c $(TLS_SOURCES) $(HELIX_AAC_OBJECTS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CSTD) $(WARN) -Werror \
-		-ffunction-sections -fdata-sections $(GC_LDFLAGS) -Isrc -Isrc/adapter \
+		-ffunction-sections -fdata-sections $(GC_LDFLAGS) -Isrc -Isrc/adapter $(HELIX_AAC_CPPFLAGS) \
 		$(filter-out src/adapter/radiod.c,$^) $(RADIOD_TLS_LIBS) -lm -o $@
 
 $(BUILD)/test-esphome-remote-timer: tests/test_esphome_remote_timer.c src/adapter/timerd.c \
@@ -456,11 +470,47 @@ $(BUILD)/test-networkd-health: $(NETWORKD_SOURCES)
 	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_NETWORKD_TESTING $(CSTD) \
 		$(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
+# Recovery AP lifecycle unit and daemon harness (#96). The unit links only the
+# portable core; the daemon harness compiles the real networkd.c in
+# LE_NETWORKD_TESTING mode and is driven by tests/test_network_recovery_lifecycle.py
+# against isolated hostapd/dnsmasq/net-up/net-down oracles.
+$(BUILD)/test_network_recovery: tests/test_network_recovery.c \
+		src/adapter/network_recovery.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_RECOVERY_UNIT_TESTING $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-networkd-recovery: src/adapter/networkd.c src/adapter/network_health.c \
+		src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c \
+		src/adapter/network_recovery.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_NETWORKD_TESTING $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter \
+		src/adapter/networkd.c src/adapter/network_health.c \
+		src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c \
+		src/adapter/network_recovery.c -o $@
+
 $(BUILD)/test-networkd-scan-security: tests/test_networkd_scan_security.c \
 	src/adapter/networkd.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter tests/test_networkd_scan_security.c -o $@
+
+$(BUILD)/test-networkd-ap-scan: tests/test_networkd_ap_scan.c \
+	src/adapter/networkd.c
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter tests/test_networkd_ap_scan.c -o $@
+
+# The asynchronous recovery-scan transport (UI #288 review): nested family and
+# multicast-group reply parsing, a live kernel group subscription, completion
+# and dump datagram parsing, and the bounded async dispatch.
+$(BUILD)/test-nl80211-scan-transport: tests/test_nl80211_scan_transport.c \
+	src/adapter/networkd.c src/adapter/adapter_server.c src/log.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_NETWORKD_TESTING $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter tests/test_nl80211_scan_transport.c \
+		src/adapter/adapter_server.c src/log.c -o $@
 
 $(BUILD)/test-backend-linux-wifi-emission: tests/test_backend_linux_wifi_emission.c \
 		src/backend_linux.c src/json.c src/log.c src/service_env.c
@@ -566,15 +616,23 @@ $(BUILD)/test-audiod-review: tests/test_audiod_review.c \
 		-lm -o $@
 
 $(BUILD)/test-led-night-review: tests/test_led_night_review.c \
-		src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
+	src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
+	src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
+	src/adapter/led_music_director.c src/adapter/led_music_render.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
+		src/adapter/led_music_director.c src/adapter/led_music_render.c \
 		src/adapter/adapter_server.c src/log.c -o $@
 
 # Compiles ledd.c into the test so the real request handler runs: the wake
 # indicator's brightness has to be resolved by the daemon, not asserted about.
 $(BUILD)/test-wake-led-profile: tests/test_wake_led_profile.c \
-		src/adapter/ledd.c src/adapter/adapter_server.c src/log.c
+	src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
+	src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
+	src/adapter/led_music_director.c src/adapter/led_music_render.c
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
+		src/adapter/led_music_director.c src/adapter/led_music_render.c \
 		src/adapter/adapter_server.c src/log.c -o $@
 
 # sherpa-onnx backed ttsd (cross-compiled ARM32, static).  Uses the real
@@ -798,6 +856,15 @@ $(BUILD)/test-agentd: tests/test_agentd.c src/adapter/adapter_client.c \
 		-Wpedantic -Werror -Isrc tests/test_agentd.c \
 		src/adapter/adapter_client.c src/log.c -lpthread -o $@
 
+$(BUILD)/test-agentd-voice-history-race: \
+		tests/test_agentd_voice_history_race.c \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/log.c $(BUILD)/libreecho-agentd $(BUILD)/mock-llm-curl
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_agentd_voice_history_race.c \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/log.c -lpthread -o $@
+
 $(BUILD)/test-stop-intent: tests/test_stop_intent.c src/adapter/stop_intent.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc $^ -o $@
@@ -987,6 +1054,24 @@ $(BUILD)/helix-aac/%.o: third-party/helix-aac/%.c
 
 $(BUILD)/adapter/radio_aac.o: CPPFLAGS += $(HELIX_AAC_CPPFLAGS)
 
+# Opus flag stamp. radiod.c and radio_opus.c must always be compiled with the
+# same LE_RADIOD_ENABLE_OPUS state, and switching RADIOD_OPUS_PREFIX on or off
+# must rebuild both objects rather than reusing one built for the other state
+# (a stale `opus:false` after enabling, or a stale `opus:true` after removing
+# the prefix). The stamp's content encodes the exact compile flags; it is
+# rewritten only when they change, so an unchanged invocation rebuilds nothing.
+RADIOD_OPUS_STAMP = $(BUILD)/.radiod-opus-flags
+$(RADIOD_OPUS_STAMP): FORCE
+	@mkdir -p $(BUILD)
+	@printf '%s\n' '$(RADIOD_OPUS_CPPFLAGS)' | cmp -s - $@ || \
+		printf '%s\n' '$(RADIOD_OPUS_CPPFLAGS)' > $@
+
+$(BUILD)/adapter/radiod.o $(BUILD)/adapter/radio_opus.o: CPPFLAGS += $(RADIOD_OPUS_CPPFLAGS)
+$(BUILD)/adapter/radiod.o $(BUILD)/adapter/radio_opus.o: $(RADIOD_OPUS_STAMP)
+
+.PHONY: FORCE
+FORCE:
+
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(BUILD) $(BUILD)/adapter $(BUILD)/adapter/bt-sbc
 	$(CROSS_COMPILE)$(CC) $(CPPFLAGS) $(CSTD) $(WARN) $(CFLAGS) -MMD -MP -Isrc -c $< -o $@
@@ -1028,6 +1113,8 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 clean:
 	rm -f $(BUILD)/libreecho-wyomingd $(BUILD)/libreecho-wyomingd-test $(BUILD)/test-wyomingd $(BUILD)/adapter/wyomingd.o
 	rm -f $(shell find $(BUILD) -name '*.d' 2>/dev/null)
+	rm -f $(BUILD)/.radiod-opus-flags
+	rm -rf $(BUILD)/opus-host-prefix $(BUILD)/led-core $(BUILD)/voice-history-harness
 	rm -f $(BUILD)/tls.o $(BUILD)/tls_stub.o
 	rm -f $(CAPTURE_MUX_OBJECTS) $(RADIOD_OBJECTS) $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
 		$(LOGD_OBJECTS) $(WATCHDOGD_OBJECTS) $(BTD_OBJECTS) $(AIRPLAYD_OBJECTS) $(TTSD_OBJECTS) \
@@ -1042,7 +1129,9 @@ clean:
 		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \
 		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-timing \
 		$(BUILD)/test-action-sample \
-		$(BUILD)/test-networkd-health $(BUILD)/test-backend-linux-wifi-emission \
+		$(BUILD)/test-networkd-health $(BUILD)/test-networkd-ap-scan \
+		$(BUILD)/test-backend-linux-wifi-emission \
+		$(BUILD)/test_network_recovery $(BUILD)/test-networkd-recovery \
 		$(BUILD)/test-backend-linux-timers $(BUILD)/test-factory-reset \
 		$(BUILD)/test-update-identity \
 		$(BUILD)/test-thermal-zone-selection \
@@ -1061,6 +1150,7 @@ clean:
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \
 		$(BUILD)/test-agentd \
+		$(BUILD)/test-agentd-voice-history-race \
 		$(BUILD)/test-live-ring $(BUILD)/test-live-session \
 		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
 		$(BUILD)/test-ws-client $(BUILD)/test-live-dns $(BUILD)/test-lived \

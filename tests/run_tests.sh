@@ -27,8 +27,10 @@ python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
 python3 tests/test_pr244_review_contract.py
 python3 tests/test_pr245_review_contract.py
-make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
+make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-networkd-ap-scan build/test-nl80211-scan-transport build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
 ./build/test-networkd-scan-security
+./build/test-networkd-ap-scan
+./build/test-nl80211-scan-transport
 ./build/test-network-health
 ./build/test-adapter-client-events
 ./build/test-gateway-probe
@@ -206,6 +208,25 @@ make build/test-radiod-json
 ./build/test-radiod-json
 make build/test-radiod-mp3-frames
 ./build/test-radiod-mp3-frames
+# 0.14 feature batch: LED output/music core, sleep/nursery audio, private voice
+# history, recovery AP lifecycle, and the optional pinned Opus decoder. The
+# Opus arm needs a complete static prefix; tests/test_feature_batch_build.sh
+# stages one from the host static development packages when OPUS_PREFIX is not
+# supplied.
+sh tests/test_led_core.sh
+sh tests/test_led_no_timer_fx.sh
+sh tests/run_sleep_audio_tests.sh
+sh tests/voice_history_harness.sh
+make build/libreecho-agentd build/libreecho-networkd
+make build/test_network_recovery build/test-networkd-recovery
+./build/test_network_recovery
+python3 tests/test_network_recovery_lifecycle.py
+python3 tests/test_history_worker_responsiveness.py
+sh tests/run_recovery_backend_integration.sh
+sh tests/test_feature_batch_api.sh
+sh tests/test_feature_batch_noise_heartbeat.sh
+node tests/test_feature_batch_ui.js
+sh tests/test_feature_batch_build.sh
 sh tests/test_radio_icy_metadata.sh
 HELIX_OBJS="build/helix-aac/aacdec.o build/helix-aac/aactabs.o build/helix-aac/bitstream.o build/helix-aac/buffers.o build/helix-aac/dct4.o build/helix-aac/decelmnt.o build/helix-aac/dequant.o build/helix-aac/fft.o build/helix-aac/filefmt.o build/helix-aac/huffmanaac.o build/helix-aac/hufftabs.o build/helix-aac/imdct.o build/helix-aac/noiseless.o build/helix-aac/pns.o build/helix-aac/sbr.o build/helix-aac/sbrfft.o build/helix-aac/sbrfreq.o build/helix-aac/sbrhfadj.o build/helix-aac/sbrhfgen.o build/helix-aac/sbrhuff.o build/helix-aac/sbrimdct.o build/helix-aac/sbrmath.o build/helix-aac/sbrqmf.o build/helix-aac/sbrside.o build/helix-aac/sbrtabs.o build/helix-aac/stproc.o build/helix-aac/tns.o build/helix-aac/trigtabs.o"
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
@@ -264,6 +285,10 @@ make build/test-voice-listening-feedback
 ./build/test-llm-http
 ./build/test-llm-store
 ./build/test-agentd
+# The voice-history clear/generation race: a clear during in-flight
+# recognition must not let the cleared transcript or failure reappear.
+make build/test-agentd-voice-history-race
+./build/test-agentd-voice-history-race
 ./build/test-voice-reply
 ./build/test-voice-playback
 # The silent-wake feedback regressions exist in the test-voice-listening-feedback

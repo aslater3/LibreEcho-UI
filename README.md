@@ -211,6 +211,16 @@ which covers BBC radio). AAC decoding uses the vendored Helix decoder in
 `third-party/helix-aac` (RPSL-1.0; see `THIRD_PARTY_NOTICES.md`). fMP4 and
 encrypted HLS, and HE-AAC v2, are not supported.
 
+Ogg Opus local files (`.ogg`/`.opus` on the mounted USB store) are decoded
+when the build defines `LE_RADIOD_ENABLE_OPUS` and links the pinned static
+libogg/libopus/libopusfile prefix produced by the image build helper
+`tools/mt8163-arm32/ui/build_opus.sh`; see `THIRD_PARTY_NOTICES.md` and
+`tests/run_radiod_opus_tests.sh`. Without the macro the default build stays
+dependency-free and reports the capability as unavailable: `radiod`'s status
+document carries an `"opus"` boolean so the API can gate an Opus launch before
+asking for playback, and an Opus file is refused with a clear reason instead of
+a silent station.
+
 The documented default build remains dependency-free. HTTPS and HTTPS radio
 fetching are enabled when both `WEB_TLS_LIBS` and `RADIOD_TLS_LIBS` are set,
 with matching mbedTLS include/library paths in `CPPFLAGS` and `LDFLAGS`; without

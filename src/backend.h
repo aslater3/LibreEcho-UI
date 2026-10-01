@@ -23,7 +23,11 @@ struct le_device_info { char name[LE_TEXT], hostname[LE_TEXT], model[LE_TEXT], s
 struct le_audio_state { int volume, microphone_gain, notification_volume, muted, startup_sound, amplifier_on, output_available; char tts_voice[32];
  /* Sleep-noise generator. noise_remaining_seconds is -1 when it is
     running untimed, otherwise the seconds left on the sleep timer. */
- int noise_active, noise_level; long noise_remaining_seconds; char noise_colour[8]; };
+ int noise_active, noise_level; long noise_remaining_seconds; char noise_colour[8];
+ /* Additive sleep-source fields. noise_source is the selected generator
+    (white/pink/brown/heartbeat); noise_colour remains its legacy alias. These
+    are display state only and never touch the master volume. */
+ char noise_source[16], noise_bed[8]; int noise_tempo, noise_fade_seconds; };
 /*
  * Spotify Connect. installed is 0 when the librespot-based daemon is not in
  * the image, which is different from being switched off: the UI must be able
@@ -34,6 +38,34 @@ struct le_spotify_state { int installed, enabled, playing; char device_name[64],
 struct le_light_state { int available, lux, calibrated_lux, ch0, ch1, gain, integration_us, auto_gain, powered; char bus[32]; };
 struct le_led_profile { uint8_t r,g,b; int brightness, animation_speed; };
 struct le_led_pixel { uint8_t r,g,b; };
+/* Sleep/nursery lighting and the portable output stage. idle_mode is the
+   dark/idle policy; sleep_light is the light the sleep timer drives. output
+   and music mirror what ledd reports so the API never invents values. */
+struct le_led_sleep {
+    char mode[8];
+    int active, brightness, period_ms, timer_minutes, remaining_ms, restore_on_boot;
+};
+struct le_led_output {
+    int effective_brightness, frame_load, max_load, limited, slew_limited;
+};
+struct le_led_music {
+    char grammar[24], effect[24];
+    int active;
+    unsigned session;
+};
+/* A sleep/nursery noise request. An empty source/bed and a negative numeric
+   field are omitted from the adapter call, so the daemon keeps its current
+   value rather than being forced to a default. */
+struct le_noise_request {
+    char source[16], bed[8];
+    int level, minutes, tempo, fade_seconds;
+};
+/* A sleep-light update. `mode` is mandatory; a negative numeric field means
+   "not supplied", which is distinct from a supplied-but-invalid value. */
+struct le_led_sleep_request {
+    char mode[8];
+    int brightness, period_ms, timer_minutes, restore_on_boot;
+};
 struct le_led_state {
     struct le_led_profile current, boot, listening, thinking, error, dnd;
     /* Night is a cap applied on a local-time schedule, not an animation the
@@ -45,6 +77,10 @@ struct le_led_state {
     char pattern[16], visualizer_owner[32], visualizer_mood[16];
     uint8_t visualizer_levels[LE_LED_PIXELS];
     struct le_led_pixel pixels[LE_LED_PIXELS];
+    int idle_mode;
+    struct le_led_sleep sleep_light;
+    struct le_led_output output;
+    struct le_led_music music;
 };
 struct le_wifi_network {
     char ssid[LE_TEXT], security[32], capabilities[128], band[16];
@@ -52,6 +88,18 @@ struct le_wifi_network {
 };
 struct le_wifi_scan { struct le_wifi_network networks[LE_MAX_WIFI]; size_t count; };
 struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };
+/* Recovery AP status mirrored from networkd. psk_path is deliberately absent:
+   it is an internal path and must never reach public status, and the PSK
+   itself is never stored here. */
+struct le_recovery_status {
+    char mode[24], trigger[24], ssid[LE_TEXT], reason[64], error[64], led_owner[32];
+    /* Portal IPv4 of the recovery AP. Not a secret: the address captive clients
+       are leased and resolved to; the web layer builds its redirect from it. */
+    char ap_address[32];
+    int available, secret_available, enabled, net_configured;
+    int auto_enabled, auto_pending, rate_count, children;
+    long long auto_timeout_ms, auto_countdown_ms;
+};
 struct le_network_state {
     char state[24], connectivity[24], recovery_stage[24];
     /* factory_* is what idme records for this board; the plain field is what
@@ -62,6 +110,8 @@ struct le_network_state {
     char ssid[LE_TEXT], ip[48], gateway[48], dns[96], hostname[LE_TEXT];
     int signal, rssi_dbm, internet, dhcp, ssh, api_lan;
     int gateway_reachable, liveness_failures;
+    char mode[24];
+    struct le_recovery_status recovery;
 };
 struct le_wake_word_state { char wake_word[LE_TEXT], model_status[24]; int enabled, sensitivity, cooldown_ms, detected_count, cpu_cost, memory_cost_mb; int health_available, model_loaded, capture_active, capture_age_ms, inference_active, inference_age_ms; unsigned long long processed_frames; };
 struct le_bluetooth_device { char address[18], name[LE_TEXT]; int type, rssi, rssi_valid, paired, connected; };
@@ -92,6 +142,9 @@ struct le_airplay_state {
    invents a substitute. */
 struct le_radio_status {
     int playing;
+    /* True only when radiod was built with the Opus decoder. The API gates an
+       Opus launch on this; a status that omits it reads as false. */
+    int opus;
     char url[512];
     char title[LE_MEDIA_TEXT+1], station[LE_MEDIA_TEXT+1];
 };
@@ -122,8 +175,17 @@ const char *le_backend_mode(struct le_backend *b);
 const char *le_result_code(int rc);
 int le_get_system_status(struct le_backend*,struct le_system_status*); int le_get_device_info(struct le_backend*,struct le_device_info*);
 int le_get_audio_state(struct le_backend*,struct le_audio_state*); int le_set_volume(struct le_backend*,int); int le_set_microphone_gain(struct le_backend*,int); int le_set_microphone_muted(struct le_backend*,int); int le_play_test_tone(struct le_backend*); int le_set_tts_voice(struct le_backend*,const char*); int le_announce(struct le_backend*,const char*); int le_stop_speech(struct le_backend*); int le_start_noise(struct le_backend*,const char*,int,int); int le_stop_noise(struct le_backend*); int le_simulate_audio(struct le_backend*,const char*); int le_radio_play(struct le_backend*,const char*); int le_radio_stop(struct le_backend*); int le_radio_playing(struct le_backend*,struct le_radio_status*);
+int le_start_noise_ex(struct le_backend*,const struct le_noise_request*);
 int le_get_led_state(struct le_backend*,struct le_led_state*); int le_set_led_colour(struct le_backend*,uint8_t,uint8_t,uint8_t); int le_set_led_brightness(struct le_backend*,int); int le_set_led_visualizer_enabled(struct le_backend*,int); int le_set_boot_led(struct le_backend*,const struct le_led_profile*); int le_set_led_profile(struct le_backend*,const char*,const struct le_led_profile*); int le_set_led_night(struct le_backend*,int,int,int); int le_run_led_test(struct le_backend*); int le_get_spotify_state(struct le_backend*,struct le_spotify_state*); int le_set_spotify_enabled(struct le_backend*,int); int le_get_light_state(struct le_backend*,struct le_light_state*);
+int le_set_led_idle_mode(struct le_backend*,const char*);
+int le_set_led_sleep(struct le_backend*,const struct le_led_sleep_request*);
  int le_play_sound_sample(struct le_backend*,const char*);int le_get_network_state(struct le_backend*,struct le_network_state*); int le_scan_wifi(struct le_backend*,struct le_wifi_scan*); int le_connect_wifi(struct le_backend*,const struct le_wifi_credentials*); int le_disconnect_wifi(struct le_backend*); int le_set_hostname(struct le_backend*,const char*);
+/* Portal probe with a bounded adapter I/O timeout (falls back to the normal
+   network op on a backend that does not implement it). */
+int le_network_portal(struct le_backend*,struct le_network_state*);
+int le_recovery_configure(struct le_backend*,int,int,int);
+int le_recovery_prepare(struct le_backend*,char*,size_t);
+int le_recovery_stop(struct le_backend*);
 int le_get_wake_word_state(struct le_backend*,struct le_wake_word_state*); int le_set_wake_word(struct le_backend*,const char*); int le_set_wake_word_sensitivity(struct le_backend*,int); int le_test_wake_word(struct le_backend*);
 int le_get_bluetooth_state(struct le_backend*,struct le_bluetooth_state*); int le_set_bluetooth_enabled(struct le_backend*,int);
 int le_bluetooth_scan(struct le_backend*,int); int le_bluetooth_pair(struct le_backend*,const char*,int,int); int le_bluetooth_unpair(struct le_backend*,const char*,int); int le_bluetooth_disconnect(struct le_backend*,const char*,int); int le_bluetooth_pairing_response(struct le_backend*,const char*,int,const char*,unsigned int,const char*); int le_bluetooth_set_discoverable(struct le_backend*,int); int le_bluetooth_set_connectable(struct le_backend*,int); int le_bluetooth_set_pairing_mode(struct le_backend*,int);

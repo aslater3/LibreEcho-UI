@@ -6,6 +6,7 @@
 #include "llm_provider.h"
 #include "llm_store.h"
 #include "voice_pipeline.h"
+#include "voice_history.h"
 #include "voice_playback.h"
 #include "timer_intent.h"
 #include "stop_intent.h"
@@ -127,6 +128,16 @@ struct agent_state {
         int follow_up;
     } turn_history[LE_AGENT_TURN_HISTORY];
     unsigned turn_history_next, turn_history_count;
+    /*
+     * Canonical private voice-turn history: the ten most recent turns with the
+     * recognised transcript and the final human-facing reply. RAM only; the
+     * transcript text is never written through the persisted latency history
+     * above. Guarded by metrics_mutex.
+     */
+    struct le_voice_history voice_history;
+    unsigned long long turn_history_generation;   /* captured at turn start */
+    uint64_t turn_history_id;                     /* current record id, 0 none */
+    int turn_tts_failed;
     unsigned long latency_violations;
     char turn_request_id[64];
     unsigned long completed_turns;
@@ -397,6 +408,24 @@ static int adapter_call(const char *socket_path, int timeout_ms,
     return result;
 }
 
+/*
+ * The local speech path failed for the turn currently being answered. Mark the
+ * turn so its canonical history record is classified tts_failed, and upgrade a
+ * record that has already been stored. The stored generation is checked by the
+ * history unit, so a failure that races a clear cannot revive a scrubbed turn.
+ * Playback is single-flight, so this always belongs to the in-flight turn.
+ */
+static void note_tts_failure(struct agent_state *state)
+{
+    pthread_mutex_lock(&state->metrics_mutex);
+    state->turn_tts_failed = 1;
+    if (state->turn_history_id)
+        (void)le_voice_history_set_status(
+            &state->voice_history, state->turn_history_generation,
+            state->turn_history_id, LE_VOICE_TURN_TTS_FAILED, NULL);
+    pthread_mutex_unlock(&state->metrics_mutex);
+}
+
 static int play_sentence_internal(void *context, const char *text, int queued)
 {
     struct agent_state *state = context;
@@ -410,8 +439,10 @@ static int play_sentence_internal(void *context, const char *text, int queued)
 
     if (queued && le_voice_playback_cancelled(&state->playback))
         return 0;
-    if (escape_json(escaped, sizeof(escaped), text) < 0)
+    if (escape_json(escaped, sizeof(escaped), text) < 0) {
+        note_tts_failure(state);
         return -1;
+    }
     pthread_mutex_lock(&state->metrics_mutex);
     snprintf(request_id, sizeof(request_id), "%s",
              state->turn_request_id);
@@ -422,8 +453,10 @@ static int play_sentence_internal(void *context, const char *text, int queued)
         escaped, request_id);
     if (length <= 0 || length >= (int)sizeof(args) ||
         adapter_call(state->audio_socket, 1000, "speak", args,
-                     response, sizeof(response)) != LE_ADAPTER_OK)
+                     response, sizeof(response)) != LE_ADAPTER_OK) {
+        note_tts_failure(state);
         return -1;
+    }
     pthread_mutex_lock(&state->metrics_mutex);
     if (!state->first_announce_ms)
         state->first_announce_ms =
@@ -497,6 +530,7 @@ static int play_sentence_internal(void *context, const char *text, int queued)
             return 0;
         nanosleep(&delay, NULL);
     }
+    note_tts_failure(state);
     return -1;
 }
 
@@ -823,6 +857,62 @@ static int command_history_clear(struct agent_state *state, int client_fd,
     state->history_generation = next;
     state->turn_history_next = 0;
     state->turn_history_count = 0;
+    /* The same clear action scrubs the private canonical transcript ring
+     * immediately; the generation bump makes any in-flight completion stale. */
+    le_voice_history_clear(&state->voice_history);
+    state->turn_history_id = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
+    return respond(client_fd, id, 1, "{}");
+}
+
+/*
+ * Canonical private voice history. Newest first, at most ten records, bounded
+ * so the collection always fits the adapter message; the full bounded text of
+ * one record is returned by voice_history_entry. Read-only, so it only takes
+ * metrics_mutex.
+ */
+static int command_voice_history(struct agent_state *state, int client_fd,
+                                 unsigned long id)
+{
+    char body[LE_ADAPTER_MSG_MAX];
+    int length;
+
+    pthread_mutex_lock(&state->metrics_mutex);
+    length = le_voice_history_serialize(
+        &state->voice_history, body, sizeof(body));
+    pthread_mutex_unlock(&state->metrics_mutex);
+    if (length < 0)
+        return respond(client_fd, id, 0, "voice history too large");
+    return respond(client_fd, id, 1, body);
+}
+
+static int command_voice_history_entry(struct agent_state *state,
+                                       const char *args, int client_fd,
+                                       unsigned long id)
+{
+    char body[LE_ADAPTER_MSG_MAX];
+    long long requested;
+    int length;
+
+    if (!args || json_get_int64(args, "id", &requested) < 1 || requested <= 0)
+        return respond(client_fd, id, 0, "id is required");
+    pthread_mutex_lock(&state->metrics_mutex);
+    length = le_voice_history_serialize_entry(
+        &state->voice_history, (uint64_t)requested, body, sizeof(body));
+    pthread_mutex_unlock(&state->metrics_mutex);
+    if (length == -1)
+        return respond(client_fd, id, 0, "history entry not found");
+    if (length < 0)
+        return respond(client_fd, id, 0, "history entry too large");
+    return respond(client_fd, id, 1, body);
+}
+
+static int command_voice_history_clear(struct agent_state *state, int client_fd,
+                                       unsigned long id)
+{
+    pthread_mutex_lock(&state->metrics_mutex);
+    le_voice_history_clear(&state->voice_history);
+    state->turn_history_id = 0;
     pthread_mutex_unlock(&state->metrics_mutex);
     return respond(client_fd, id, 1, "{}");
 }
@@ -1658,6 +1748,97 @@ static int command_respond(struct agent_state *state, const char *args,
         : respond(fd, id, 0, "response is too large");
 }
 
+/*
+ * Store one canonical voice turn. Called with metrics_mutex held. The caller's
+ * generation is the value captured before the turn started, so a clear that
+ * lands mid-turn makes this completion stale and it is dropped instead of
+ * repopulating a scrubbed ring. Only human-facing text is stored: the
+ * recognised transcript and the final reply, never the augmented prompt.
+ */
+static void record_voice_turn(struct agent_state *state, int status,
+                              unsigned long long generation, const char *text,
+                              const char *reply, uint32_t stt_ms,
+                              uint32_t assistant_ms, uint32_t tts_ms)
+{
+    struct le_voice_turn_record record;
+    int added;
+
+    memset(&record, 0, sizeof(record));
+    snprintf(record.request_id, sizeof(record.request_id), "%s",
+             state->turn_request_id);
+    record.status = status;
+    record.stt_ms = stt_ms;
+    record.assistant_ms = assistant_ms;
+    record.tts_ms = tts_ms;
+    if (text && text[0]) {
+        snprintf(record.transcript, sizeof(record.transcript), "%s", text);
+        if (strlen(text) >= sizeof(record.transcript))
+            record.transcript_truncated = 1;
+    }
+    if (reply && reply[0]) {
+        snprintf(record.response, sizeof(record.response), "%s", reply);
+        if (strlen(reply) >= sizeof(record.response))
+            record.response_truncated = 1;
+    }
+    added = le_voice_history_add(&state->voice_history, generation, &record);
+    state->turn_history_generation = generation;
+    state->turn_history_id = added == 1
+        ? le_voice_history_at(&state->voice_history, 0)->id : 0;
+    if (added != 1)
+        le_log_warn("agentd: voice history turn dropped (stale generation)");
+}
+
+/*
+ * Turn-begin sink. Recognition started for a turn, so snapshot the voice
+ * history generation now. A clear that lands while the turn is still in
+ * flight bumps the generation, which makes the eventual transcript or
+ * pre-transcript failure stale: it is dropped instead of repopulating the
+ * scrubbed ring. Capturing only at the terminal event (or when the transcript
+ * callback starts) let a cleared in-flight turn reappear, which is a privacy
+ * bug. Playback is single-flight, so one captured value covers the turn.
+ */
+static void voice_turn_begin(void *context, uint64_t detection_sample)
+{
+    struct agent_state *state = context;
+
+    (void)detection_sample;
+    pthread_mutex_lock(&state->metrics_mutex);
+    state->turn_history_generation =
+        le_voice_history_generation(&state->voice_history);
+    state->turn_history_id = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
+}
+
+/*
+ * Pre-transcript outcome sink. A recognition failure, a superseded wake or a
+ * recognition deadline now leaves a bounded record instead of disappearing.
+ * Transcript-bearing turns arrive through voice_transcript.
+ */
+static void voice_outcome(void *context,
+                          const struct le_voice_pipeline_outcome *outcome)
+{
+    struct agent_state *state = context;
+    struct le_voice_turn_record record;
+
+    memset(&record, 0, sizeof(record));
+    record.status = outcome->status;
+    record.stt_ms = outcome->stt_total_ms > 0xFFFFFFFFULL
+        ? 0xFFFFFFFFU : (uint32_t)outcome->stt_total_ms;
+    pthread_mutex_lock(&state->metrics_mutex);
+    /*
+     * The generation captured at turn start, never the live value: a clear
+     * that landed while the turn was in flight must keep its failure out of
+     * the freshly cleared ring.
+     */
+    (void)le_voice_history_add(
+        &state->voice_history,
+        state->turn_history_generation, &record);
+    pthread_mutex_unlock(&state->metrics_mutex);
+    le_log_info("agentd: voice turn %s before transcript follow_up=%s",
+                le_voice_turn_status_name(outcome->status),
+                outcome->follow_up ? "true" : "false");
+}
+
 static void voice_transcript(
     void *context, const char *text,
     const struct le_voice_pipeline_turn *turn)
@@ -1666,10 +1847,25 @@ static void voice_transcript(
     char input[LE_LLM_TEXT_MAX];
     char reply[LE_LLM_TEXT_MAX];
     char error[256];
+    unsigned long long generation;
+    uint32_t stt_ms;
     int continuation;
     int generated = 0;
 
     pthread_mutex_lock(&state->control_mutex);
+    stt_ms = turn->stt_total_ms > 0xFFFFFFFFULL
+        ? 0xFFFFFFFFU : (uint32_t)turn->stt_total_ms;
+    pthread_mutex_lock(&state->metrics_mutex);
+    /*
+     * The generation captured when recognition began, not the live value: a
+     * clear that landed after this turn's recognition started but before the
+     * transcript arrived must drop this record rather than let the cleared
+     * transcript reappear.
+     */
+    generation = state->turn_history_generation;
+    state->turn_history_id = 0;
+    state->turn_tts_failed = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
     /*
      * Timers are handled before the sign-in gate below, deliberately. They
      * need no language model, so a device with no LLM configured -- or no
@@ -1679,6 +1875,18 @@ static void voice_transcript(
     if (handle_timer_intent(state, text, reply, sizeof(reply))) {
         state->follow_up_armed = 0;
         state->follow_up_depth = 0;
+        pthread_mutex_lock(&state->metrics_mutex);
+        /*
+         * handle_timer_intent() speaks its own confirmation through
+         * play_sentence(); a failed playback calls note_tts_failure(). Reflect
+         * that in the recorded turn instead of always claiming completion, so
+         * a timer reply that never reached the speaker is visible as tts_failed.
+         */
+        record_voice_turn(state,
+                          state->turn_tts_failed ? LE_VOICE_TURN_TTS_FAILED
+                                                 : LE_VOICE_TURN_COMPLETED,
+                          generation, text, reply, stt_ms, 0, 0);
+        pthread_mutex_unlock(&state->metrics_mutex);
         pthread_mutex_unlock(&state->control_mutex);
         return;
     }
@@ -1689,6 +1897,13 @@ static void voice_transcript(
             state->follow_up_depth = 0;
             if (stopped < 0)
                 (void)play_sentence(state, reply);
+            pthread_mutex_lock(&state->metrics_mutex);
+            record_voice_turn(
+                state,
+                stopped < 0 ? LE_VOICE_TURN_ASSISTANT_FAILED
+                            : LE_VOICE_TURN_COMPLETED,
+                generation, text, stopped < 0 ? "" : reply, stt_ms, 0, 0);
+            pthread_mutex_unlock(&state->metrics_mutex);
             pthread_mutex_unlock(&state->control_mutex);
             return;
         }
@@ -1758,6 +1973,31 @@ static void voice_transcript(
         }
         pthread_mutex_unlock(&state->metrics_mutex);
         }
+        /*
+         * Canonical private record. The transcript is what was recognised and
+         * the response is the final reply actually spoken/displayed -- never
+         * the augmented prompt or a raw provider error. A failed local speech
+         * path is reported as tts_failed, an abandoned reply as cancelled, and
+         * a response that could not be generated as assistant_failed.
+         */
+        pthread_mutex_lock(&state->metrics_mutex);
+        if (generated) {
+            int status = state->turn_tts_failed
+                ? LE_VOICE_TURN_TTS_FAILED
+                : (le_voice_playback_cancelled(&state->playback)
+                       ? LE_VOICE_TURN_CANCELLED : LE_VOICE_TURN_COMPLETED);
+
+            record_voice_turn(
+                state, status, generation, text, reply, stt_ms,
+                state->first_text_ms > 0xFFFFFFFFULL
+                    ? 0xFFFFFFFFU : (uint32_t)state->first_text_ms,
+                state->first_announce_ms > 0xFFFFFFFFULL
+                    ? 0xFFFFFFFFU : (uint32_t)state->first_announce_ms);
+        } else {
+            record_voice_turn(state, LE_VOICE_TURN_ASSISTANT_FAILED, generation,
+                              text, "", stt_ms, 0, 0);
+        }
+        pthread_mutex_unlock(&state->metrics_mutex);
         if (generated) {
             snprintf(state->previous_voice_user,
                      sizeof(state->previous_voice_user), "%.*s",
@@ -2011,6 +2251,17 @@ static void handle_client(struct agent_state *state, int client_fd)
             (void)command_history(state, client_fd, id);
         return;
     }
+    if (!strcmp(command, "voice_history") ||
+        !strcmp(command, "voice_history_entry") ||
+        !strcmp(command, "voice_history_clear")) {
+        if (!strcmp(command, "voice_history_clear"))
+            (void)command_voice_history_clear(state, client_fd, id);
+        else if (!strcmp(command, "voice_history_entry"))
+            (void)command_voice_history_entry(state, args, client_fd, id);
+        else
+            (void)command_voice_history(state, client_fd, id);
+        return;
+    }
     pthread_mutex_lock(&state->control_mutex);
     if (!strcmp(command, "status"))
         (void)command_status(state, client_fd, id);
@@ -2065,6 +2316,7 @@ int main(int argc, char **argv)
     sem_t client_slots;
 
     memset(&state, 0, sizeof(state));
+    le_voice_history_init(&state.voice_history);
     strcpy(state.socket_path, DEFAULT_AGENT_SOCKET);
     strcpy(state.config_path, DEFAULT_AGENT_CONFIG);
     strcpy(state.credentials_path, DEFAULT_AGENT_CREDENTIALS);
@@ -2224,6 +2476,10 @@ int main(int argc, char **argv)
         le_voice_playback_stop(&state.playback);
         goto fail_mutex;
     }
+    le_voice_pipeline_set_outcome_callback(
+        state.voice_pipeline, voice_outcome, &state);
+    le_voice_pipeline_set_turn_begin_callback(
+        state.voice_pipeline, voice_turn_begin, &state);
     le_log_info("agentd: ready socket=%s provider=%s",
                 state.socket_path, state.provider->id);
     while (running) {

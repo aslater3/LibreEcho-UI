@@ -625,6 +625,14 @@ static void test_two_sessions_real_audiod_transport(void)
     assert(ctx.playing);
     airplay_master_poll(&ctx);
     assert(!ctx.applied && access(ack_path, F_OK) != 0);
+    /* The server applies A but drops the reply, so the client only returns
+     * on its IO timeout; wait for the server's applied-event before
+     * observing the master file instead of racing a slow server. */
+    {
+        struct pollfd applied = {events[0], POLLIN, 0};
+        assert(poll(&applied, 1, 5000) == 1);
+        assert(read(events[0], event_log, 1) == 1 && event_log[0] == 'W');
+    }
     integration_master_is(0); /* audiod applied A, but its reply was lost */
     airplay_master_poll(&ctx);
     assert(ctx.applied && !strcmp(ctx.master_session, old_session));
@@ -670,7 +678,7 @@ static void test_two_sessions_real_audiod_transport(void)
     airplay_master_poll(&ctx);
     close(done[1]);
     assert(waitpid(server, &status, 0) == server && WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    assert(read(events[0], event_log, sizeof(event_log)) == 15);
+    assert(read(events[0], event_log + 1, sizeof(event_log) - 1) == 14);
     assert(!memcmp(event_log, "WWSSBSESWSSWSES", 15));
     close(events[0]);
     metadata_fifo_close(&ctx);
