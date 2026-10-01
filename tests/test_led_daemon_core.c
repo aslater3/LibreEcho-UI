@@ -374,6 +374,42 @@ int main(void)
                           "unblocking the state temp path must succeed");
     }
 
+    /* ---- 8b. The idle-mode change reports a persist failure and reverts
+       (Codex review on a3be414): like the sleep-light handler before it, the
+       idle-mode handler ignored persist_state() and replied success, so the
+       mode silently reverted to the on-disk value on the next boot while the
+       owner had been told it was saved. ------------------------------------ */
+    reset(&ctx);
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
+               "{\"mode\":\"indicator\"}}");
+    require_condition(response_ok() && ctx.state.idle_mode == IDLE_MODE_INDICATOR,
+                      "a writable state path must accept the idle-mode change");
+    require_condition(state_file_contains("\"idle\":{\"mode\":1"),
+                      "the accepted idle mode must be persisted");
+    {
+        int before_idle_mode = ctx.state.idle_mode;
+
+        /* A directory where the atomic temp file belongs makes persist_state()
+           fail for real -- no simulated return code, and it holds even as root. */
+        require_condition(mkdir(STATE_TMP_PATH, 0700) == 0,
+                          "blocking the state temp path must succeed");
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
+                   "{\"mode\":\"always\"}}");
+        require_condition(!response_ok(),
+                          "an idle-mode persist failure must be reported, not success");
+        require_condition(ctx.state.idle_mode == before_idle_mode,
+                          "an idle-mode persist failure must revert the in-memory mode");
+        require_condition(rmdir(STATE_TMP_PATH) == 0,
+                          "unblocking the state temp path must succeed");
+        /* With the path writable again, the mode change succeeds and persists. */
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
+                   "{\"mode\":\"always\"}}");
+        require_condition(response_ok() && ctx.state.idle_mode == IDLE_MODE_ALWAYS,
+                          "the idle-mode change must work again once writable");
+        require_condition(state_file_contains("\"idle\":{\"mode\":2"),
+                          "the recovered idle mode must be persisted");
+    }
+
     /* ---- 9. Real v2 packet path: accept, stale rejection, legacy parity. */
     reset(&ctx);
     ctx.visualizer_enabled = 1;

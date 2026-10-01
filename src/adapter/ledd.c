@@ -2900,6 +2900,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
 
     if (strcmp(request.command, "set_idle_mode") == 0) {
         char mode[16];
+        int previous_idle_mode = ctx->state.idle_mode;
 
         if (!request.have_args ||
             json_get_string(request.args, "mode", mode, sizeof(mode)) != 0)
@@ -2914,7 +2915,17 @@ static int handle_request(struct daemon_context *ctx, int fd,
         else
             return send_response(fd, request.id, 0, NULL,
                                  "idle mode must be off, indicator or always");
-        persist_state(&ctx->state);
+        /*
+         * Persist before reporting success.  If the state cannot be saved,
+         * revert the in-memory mode so the daemon keeps the idle behaviour it
+         * will actually restore on the next boot -- reporting success left the
+         * owner believing the mode had stuck when the next restart dropped it.
+         */
+        if (persist_state(&ctx->state) != 0) {
+            ctx->state.idle_mode = previous_idle_mode;
+            return send_response(fd, request.id, 0, NULL,
+                                 "cannot persist idle mode");
+        }
         if (!ctx->visualizer_active && !ctx->animation_active &&
             !ctx->pattern_active && !ctx->test_active && !ctx->meter_active &&
             !ctx->startup_animation_active)
