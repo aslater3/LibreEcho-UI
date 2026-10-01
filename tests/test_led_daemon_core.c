@@ -103,6 +103,22 @@ static void reset(struct daemon_context *ctx)
     ctx->hw.kind = HW_STUB;
 }
 
+/* Read the persisted state file and test for a substring. */
+static int state_file_contains(const char *needle)
+{
+    char buf[8192];
+    ssize_t n;
+    int fd = open(STATE_PATH, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
+}
+
 /* Encode the frozen v2 frame with a legacy 24-hex-character levels field. */
 static void build_v2(char *out, size_t out_size, unsigned int seq,
                      unsigned int timestamp_ms, unsigned int session)
@@ -240,6 +256,43 @@ int main(void)
     require_condition(ctx.state.sleep_mode == SLEEP_MODE_OFF,
                       "expiry must select off");
     require_condition(all_dark(&ctx), "expiry must return to the dark base");
+
+    /* ---- 6b. A timed sleep light that expires while persistence fails keeps
+       the OFF state owed on disk and retries it (Codex review on d650caf): the
+       ring went dark in memory but the stale file still said the light was
+       active, so a restart turned it back on. ---------------------------- */
+    reset(&ctx);
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
+               "{\"mode\":\"solid\",\"brightness\":20,\"timer_minutes\":1,"
+               "\"restore_on_boot\":true}}");
+    require_condition(response_ok() && ctx.sleep_active &&
+                          ctx.sleep_expires > 0.0,
+                      "a timed sleep light must arm its expiry");
+    require_condition(state_file_contains("\"sleep\":{\"mode\":1"),
+                      "the active sleep light must persist before expiry");
+    {
+        /* A directory where the atomic temp file belongs makes persist_state()
+           fail for real, exactly as section 8 does for the handler path. */
+        require_condition(mkdir(STATE_TMP_PATH, 0700) == 0,
+                          "blocking the sleep-state temp path must succeed");
+        sleep_tick(&ctx, ctx.sleep_expires + 0.01);
+        require_condition(!ctx.sleep_active,
+                          "a persist failure must not keep the light on");
+        require_condition(ctx.state.sleep_mode == SLEEP_MODE_OFF,
+                          "expiry must select off in memory");
+        require_condition(ctx.sleep_persist_pending == 1,
+                          "the failed expiry write must stay owed to disk");
+        require_condition(state_file_contains("\"sleep\":{\"mode\":1"),
+                          "the stale on-disk state still restores the light");
+        require_condition(rmdir(STATE_TMP_PATH) == 0,
+                          "unblocking the sleep-state temp path must succeed");
+        /* The next tick retries and lands the OFF state. */
+        sleep_tick(&ctx, ctx.sleep_persist_next + 0.5);
+        require_condition(ctx.sleep_persist_pending == 0,
+                          "a successful retry must clear the owed write");
+        require_condition(state_file_contains("\"sleep\":{\"mode\":0"),
+                          "the OFF state must be persisted after the retry");
+    }
 
     /* ---- 7. Malformed sleep bounds are rejected, never clamped. --------- */
     reset(&ctx);

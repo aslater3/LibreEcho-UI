@@ -439,6 +439,30 @@ async function caseRecentVoiceLegacyOrderingPreserved() {
     check(!/—/.test(html), 'legacy at_ms fixtures still render a time, not a dash');
 }
 
+/* Regression (Codex review on d650caf): the row status pill used a
+   `not error|fail -> success` test, so a timed_out or cancelled turn rendered
+   green. Only the canonical `completed` status may read as success; timed_out
+   (and the stt/tts failures) are failures and a cancelled turn is neutral. */
+async function caseRecentVoiceStatusClasses() {
+    resetDom(); resetCalls();
+    routes['/assistant/history'] = { history_generation: 9, capacity: 10, turns: [
+        { id: 5, timestamp: canonicalStamp(5), status: 'completed', transcript_preview: 'done' },
+        { id: 4, timestamp: canonicalStamp(4), status: 'timed_out', transcript_preview: 'late' },
+        { id: 3, timestamp: canonicalStamp(3), status: 'cancelled', transcript_preview: 'stopped' },
+        { id: 2, timestamp: canonicalStamp(2), status: 'stt_failed', transcript_preview: '' },
+        { id: 1, timestamp: canonicalStamp(1), status: 'tts_failed', transcript_preview: 'heard' }
+    ] };
+    bindVoiceHistory();
+    await settle(8);
+    const html = $app('#voice-history').innerHTML;
+    check(/<span class="status ok">completed<\/span>/.test(html), 'a completed turn is styled success');
+    check(/<span class="status error">timed_out<\/span>/.test(html), 'a timed_out turn is styled as a failure');
+    check(/<span class="status neutral">cancelled<\/span>/.test(html), 'a cancelled turn is neutral, never success');
+    check(/<span class="status error">stt_failed<\/span>/.test(html), 'an stt_failed turn is styled as a failure');
+    check(/<span class="status error">tts_failed<\/span>/.test(html), 'a tts_failed turn is styled as a failure');
+    check(!/class="status ok">(timed_out|cancelled|stt_failed|tts_failed)/.test(html), 'no non-completed status is ever styled success');
+}
+
 async function caseRecentVoiceDetailEscaped() {
     resetDom();
     const body = makeElement('detail-body'); body.innerHTML = ''; body.hidden = true;
@@ -765,6 +789,7 @@ async function main() {
         ['recent voice newest-first cap of 10', caseRecentVoiceCollection],
         ['recent voice canonical ISO timestamp rendering', caseRecentVoiceCanonicalTimestamp],
         ['recent voice legacy at_ms ordering preserved', caseRecentVoiceLegacyOrderingPreserved],
+        ['recent voice status classes are truthful', caseRecentVoiceStatusClasses],
         ['recent voice detail fetch and escaping', caseRecentVoiceDetailEscaped],
         ['recent voice stale detail after clear', caseRecentVoiceStaleDetail],
         ['recent voice Clear sends the CSRF header', caseVoiceClearSendsCsrf],

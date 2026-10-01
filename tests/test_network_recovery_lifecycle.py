@@ -690,6 +690,50 @@ def test_net_down_failure_releases_after_retry():
             fixture.stop()
 
 
+def test_owner_stop_reports_failure_when_net_release_gave_up():
+    """A stop whose net-down never succeeds is reported, not claimed clean.
+
+    Codex review on d650caf: le_recovery_stop() left net_configured set (the
+    platform still owned the portal) yet the handler replied success, so the
+    owner was told a still-owned interface had been released.  Once every
+    bounded attempt has failed the debt is stuck and no automatic retry is
+    scheduled, so stop must return ok:false while the state stays truthful; the
+    helper recovering later lets an explicit stop retry clear the debt.
+    """
+    with tempfile.TemporaryDirectory(prefix="le-recovery-netdown-giveup-") as temp:
+        # The first three net-down invocations fail: the first stop's attempt,
+        # one automatic retry, and the explicit stop that empties the budget.
+        fixture = RecoveryFixture(Path(temp), net_down_fail_budget=3)
+        try:
+            wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
+                     message="recovery AP active")
+            # First stop: one attempt fails and a bounded retry is scheduled,
+            # so the stop is not yet a terminal failure.
+            first = adapter_request(fixture.adapter, 6, "recovery_stop",
+                                    timeout=4)
+            assert first["ok"] is True, first
+            assert fixture.recovery()["net_configured"] is True
+            # The automatic retry fires once (attempt 2), still failing.
+            wait_for(lambda: fixture.read_net_down().count("--interface test0") >= 2,
+                     timeout=5, message="automatic net-down retry")
+            # A stop while the budget is one short: attempt 3 exhausts it, every
+            # bounded attempt has failed, and the interface is still owned.
+            second = adapter_request(fixture.adapter, 7, "recovery_stop",
+                                     timeout=4)
+            assert second["ok"] is False, second
+            assert "recovery stop incomplete" in second["error"], second
+            assert fixture.recovery()["net_configured"] is True
+            assert fixture.recovery()["error"] == "net-down-gave-up"
+            # The helper now succeeds (budget spent); an explicit retry starts a
+            # fresh bounded budget and clears the debt.
+            third = adapter_request(fixture.adapter, 8, "recovery_stop",
+                                    timeout=4)
+            assert third["ok"] is True, third
+            assert fixture.recovery()["net_configured"] is False
+        finally:
+            fixture.stop()
+
+
 def test_hung_child_is_killed_within_bound():
     with tempfile.TemporaryDirectory(prefix="le-recovery-hang-") as temp:
         fixture = RecoveryFixture(Path(temp), hostapd_hang=True,
@@ -1012,6 +1056,7 @@ def main():
         test_handover_completes_only_after_dhcp_address,
         test_owner_stop_releases_ap_marker_and_led,
         test_net_down_failure_releases_after_retry,
+        test_owner_stop_reports_failure_when_net_release_gave_up,
         test_hung_child_is_killed_within_bound,
         test_owner_saves_password_before_recovery,
         test_secret_refused_while_captive_ap_active,

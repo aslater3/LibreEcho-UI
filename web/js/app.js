@@ -2306,6 +2306,11 @@ function voiceTurnStamp(t){
 function voiceTurnTime(t){const v=voiceTurnStamp(t);return Number.isFinite(v)&&v>0?new Date(v).toLocaleTimeString():'—'}
 function voiceTurnPreview(t){return String(t.preview||t.transcript_preview||'').slice(0,80)}
 function voiceTurnStatus(t){return String(t.status||'complete')}
+/* Only the canonical terminal success status reads as success; every other
+   status (stt_failed, assistant_failed, tts_failed, timed_out) is a failure and
+   a cancelled turn is neutral -- an unrecognised status must never be styled
+   green just because it does not match a failure regex. */
+function voiceTurnStatusClass(status){return status==='completed'?'ok':(status==='cancelled'?'neutral':'error')}
 function voiceHistoryRows(turns){
  const list=Array.isArray(turns)?turns.slice():[];
  list.sort((a,b)=>{const av=voiceTurnStamp(a),bv=voiceTurnStamp(b);return (Number.isFinite(bv)?bv:0)-(Number.isFinite(av)?av:0)});
@@ -2325,7 +2330,7 @@ async function voiceHistoryLoad(){
  if(generation!==voiceHistorySeq||state.renderGeneration!==renderGen)return;
  const b=$('#voice-history');if(!b)return;
  const turns=voiceHistoryRows(h&&h.turns);
- b.innerHTML=turns.length?turns.map(t=>{const id=esc(t.id);return `<div class="voice-turn" role="listitem" data-id="${id}"><div class="voice-turn-head"><time>${esc(voiceTurnTime(t))}</time><span class="status ${/error|fail/i.test(voiceTurnStatus(t))?'error':'ok'}">${esc(voiceTurnStatus(t))}</span><button class="secondary-btn voice-detail" data-id="${id}">Details</button></div><p class="voice-preview">${esc(voiceTurnPreview(t))||'<span class="muted">No transcript</span>'}</p><div class="voice-detail-body" hidden></div></div>`}).join(''):'<p class="muted">No voice turns recorded yet.</p>';
+ b.innerHTML=turns.length?turns.map(t=>{const id=esc(t.id);return `<div class="voice-turn" role="listitem" data-id="${id}"><div class="voice-turn-head"><time>${esc(voiceTurnTime(t))}</time><span class="status ${voiceTurnStatusClass(voiceTurnStatus(t))}">${esc(voiceTurnStatus(t))}</span><button class="secondary-btn voice-detail" data-id="${id}">Details</button></div><p class="voice-preview">${esc(voiceTurnPreview(t))||'<span class="muted">No transcript</span>'}</p><div class="voice-detail-body" hidden></div></div>`}).join(''):'<p class="muted">No voice turns recorded yet.</p>';
  $$('.voice-detail',b).forEach(btn=>btn.onclick=()=>voiceHistoryDetail(btn.dataset.id,btn));
 }
 async function voiceHistoryDetail(id,btn){

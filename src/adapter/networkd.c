@@ -3407,7 +3407,23 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
                 recovery_apply_led(ctx);
                 refresh_and_broadcast(ctx, "network.recovery");
             }
-            (void)send_ok_fd(ctx->clients[ci].fd, id, "{}");
+            /* le_recovery_stop() reports success even when the platform
+             * net-down helper has given up: the interface is still
+             * recovery-owned (net_configured stays set) and no automatic retry
+             * is scheduled (net_release_pending is clear).  Reply with a
+             * truthful error so the owner retries instead of being told a
+             * still-owned interface was released.  A stop that merely
+             * scheduled a bounded retry is not a failure, so that case still
+             * reports success; an explicit stop retry starts a fresh bounded
+             * budget (see release_net_ownership) and succeeds once net-down
+             * works. */
+            if (ctx->recovery.net_configured &&
+                !ctx->recovery.net_release_pending) {
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "recovery stop incomplete: network release failed; retry");
+            } else {
+                (void)send_ok_fd(ctx->clients[ci].fd, id, "{}");
+            }
         }
     } else if (!strcmp(cmd, "scan")) {
         char reply[WPA_REPLY_MAX];

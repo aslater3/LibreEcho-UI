@@ -81,13 +81,15 @@ def free_port():
 class Harness:
     """One networkd fixture + one web daemon sharing a single socket path."""
 
-    def __init__(self, *, marker=False, config_blocker=False, start_networkd=True):
+    def __init__(self, *, marker=False, config_blocker=False, start_networkd=True,
+                 net_down_fail_budget=0):
         WORKSPACE.mkdir(parents=True, exist_ok=True)
         # Fresh name space: stale sockets from an earlier case would bind-collide.
         for path in list(WORKSPACE.glob("*.sock")):
             path.unlink()
         for name in ("recovery.json", "recovery.json.bak", "recovery-psk",
-                     "recovery-mode"):
+                     "recovery-mode", "net-down.log", "net-down.calls",
+                     "net-up.log"):
             path = WORKSPACE / name
             if path.is_dir():
                 shutil.rmtree(path)
@@ -98,7 +100,9 @@ class Harness:
             # networkd's atomic write fail ("config-rename-failed") -- a real
             # persist failure, not a simulated return code.
             (WORKSPACE / "recovery.json").mkdir()
-        self.fixture = lc.RecoveryFixture(WORKSPACE, marker=marker)
+        self.fixture = lc.RecoveryFixture(
+            WORKSPACE, marker=marker,
+            net_down_fail_budget=net_down_fail_budget)
         self.port = free_port()
         self.web_log = open(WORKSPACE / "web-api.log", "ab")
         self.web = None
@@ -329,6 +333,28 @@ def test_stop_succeeds_through_the_backend():
                     message="recovery stopped")
 
 
+def test_stop_reports_failure_when_net_release_gave_up_through_the_backend():
+    """The stop route maps a stuck net-down to a non-2xx, not 200.
+
+    Codex review on d650caf: networkd now replies ok:false when every bounded
+    net-down attempt has failed and no retry is scheduled; the API must surface
+    that as a server error instead of claiming a still-owned interface was
+    released.  The state stays truthful so the owner can retry.
+    """
+    with Harness(marker=True, net_down_fail_budget=3) as h:
+        lc.wait_for(lambda: h.recovery()["mode"] == "recovery-ap",
+                    message="recovery AP active")
+        status, text = h.http("POST", "/api/v1/network/recovery/stop", "")
+        assert status == 200, (status, text)
+        lc.wait_for(
+            lambda: h.fixture.read_net_down().count("--interface test0") >= 2,
+            message="automatic net-down retry")
+        status, text = h.http("POST", "/api/v1/network/recovery/stop", "")
+        assert status == 503, (status, text)
+        assert json.loads(text)["error"]["code"] == "io_error", text
+        assert h.recovery()["net_configured"] is True
+
+
 def test_recovery_ap_redirects_captive_probe_to_login():
     """While the recovery AP serves, a captive probe is sent to the login page.
 
@@ -382,6 +408,7 @@ def main():
         test_persist_failure_is_server_error_and_changes_nothing,
         test_backend_unavailable_maps_to_not_supported,
         test_stop_succeeds_through_the_backend,
+        test_stop_reports_failure_when_net_release_gave_up_through_the_backend,
         test_recovery_ap_redirects_captive_probe_to_login,
         test_recovery_ap_serves_recovery_landing,
         test_normal_mode_has_no_captive_redirect,

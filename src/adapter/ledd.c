@@ -93,6 +93,10 @@
 #define SLEEP_PERIOD_MAX_MS 15000U
 #define SLEEP_TIMER_MAX_MINUTES 720
 #define SLEEP_PULSE_FLOOR_PERCENT 15U
+/* A timed sleep light that expires while the state write fails must retry that
+   write; it is owed to disk or a restart restores the sleep light from the
+   stale file.  Retried on a bounded cadence, not once a frame. */
+#define SLEEP_PERSIST_RETRY_S 1.0
 
 struct colour {
     unsigned int r;
@@ -257,6 +261,9 @@ struct daemon_context {
     int sleep_active;
     double sleep_started;
     double sleep_expires;      /* absolute monotonic seconds, 0 = no timer */
+    int sleep_persist_pending; /* expiry applied in memory; disk write owed */
+    int sleep_persist_logged;  /* one warning per failure streak */
+    double sleep_persist_next; /* earliest retry, monotonic seconds */
     /* Music director and renderer state (#64, #65). */
     int music_active;
     unsigned int music_session;
@@ -1939,13 +1946,35 @@ static void apply_sleep_light(struct daemon_context *ctx, double now)
 
 static void sleep_tick(struct daemon_context *ctx, double now)
 {
+    /* A timed sleep light that expired while persist_state() failed still owes
+     * the OFF state to disk: the in-memory light is off but the file would
+     * restore it on the next boot.  Retry on a bounded cadence until the write
+     * lands, logging once per failure streak. */
+    if (ctx->sleep_persist_pending && now >= ctx->sleep_persist_next) {
+        if (persist_state(&ctx->state) == 0) {
+            ctx->sleep_persist_pending = 0;
+            ctx->sleep_persist_logged = 0;
+        } else {
+            ctx->sleep_persist_next = now + SLEEP_PERSIST_RETRY_S;
+        }
+    }
     if (!ctx->sleep_active)
         return;
     if (ctx->sleep_expires > 0.0 && now >= ctx->sleep_expires) {
         ctx->sleep_active = 0;
         ctx->sleep_expires = 0.0;
         ctx->state.sleep_mode = SLEEP_MODE_OFF;
-        persist_state(&ctx->state);
+        if (persist_state(&ctx->state) != 0) {
+            ctx->sleep_persist_pending = 1;
+            ctx->sleep_persist_next = now + SLEEP_PERSIST_RETRY_S;
+            if (!ctx->sleep_persist_logged) {
+                ctx->sleep_persist_logged = 1;
+                le_log_warn("ledd: sleep-light expiry not yet persisted; retrying");
+            }
+        } else {
+            ctx->sleep_persist_pending = 0;
+            ctx->sleep_persist_logged = 0;
+        }
         apply_base_layer(ctx, now);
     }
 }
@@ -3363,6 +3392,10 @@ int main(int argc, char **argv)
             timeout = FRAME_MS;
         else if (ctx.sleep_active && ctx.sleep_expires > 0.0) {
             double remaining = (ctx.sleep_expires - now) * 1000.0;
+            timeout = remaining <= 1.0 ? 1 : (int)remaining;
+        } else if (ctx.sleep_persist_pending) {
+            /* Wake for the owed sleep-state write instead of blocking. */
+            double remaining = (ctx.sleep_persist_next - now) * 1000.0;
             timeout = remaining <= 1.0 ? 1 : (int)remaining;
         } else if (ctx.state.night_enabled)
             timeout = night_schedule_timeout(&ctx, now);
