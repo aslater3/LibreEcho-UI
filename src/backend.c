@@ -21,3 +21,9 @@ int le_get_airplay_state(struct le_backend*b,struct le_airplay_state*o){return b
 int le_get_playback_state(struct le_backend*b,struct le_playback_state*o){return b&&b->ops->playback?b->ops->playback(b,o):LE_NOT_SUPPORTED;}
 int le_get_timers(struct le_backend*b,struct le_timer_list*o){return b&&b->ops->timers?b->ops->timers(b,o):LE_NOT_SUPPORTED;} int le_add_timer(struct le_backend*b,int s,const char*l,unsigned*id){return b&&b->ops->timer_add?b->ops->timer_add(b,s,l,id):LE_NOT_SUPPORTED;} int le_cancel_timer(struct le_backend*b,unsigned id){return b&&b->ops->timer_cancel?b->ops->timer_cancel(b,id):LE_NOT_SUPPORTED;} int le_dismiss_timers(struct le_backend*b,int*n){return b&&b->ops->timer_dismiss?b->ops->timer_dismiss(b,n):LE_NOT_SUPPORTED;}
 int le_backend_mock_control(struct le_backend*b,const char*a,const char*v){return b&&b->ops->control?b->ops->control(b,a,v):LE_NOT_SUPPORTED;}
+int le_start_noise_ex(struct le_backend*b,const struct le_noise_request*r){return b&&b->ops->noise_start_ex?b->ops->noise_start_ex(b,r):LE_NOT_SUPPORTED;}
+int le_set_led_idle_mode(struct le_backend*b,const char*m){return b&&b->ops->led_idle_mode?b->ops->led_idle_mode(b,m):LE_NOT_SUPPORTED;}
+int le_set_led_sleep(struct le_backend*b,const struct le_led_sleep_request*r){return b&&b->ops->led_sleep?b->ops->led_sleep(b,r):LE_NOT_SUPPORTED;}
+int le_recovery_configure(struct le_backend*b,int e,int a,int t){return b&&b->ops->recovery_configure?b->ops->recovery_configure(b,e,a,t):LE_NOT_SUPPORTED;}
+int le_recovery_prepare(struct le_backend*b,char*out,size_t n){return b&&b->ops->recovery_prepare?b->ops->recovery_prepare(b,out,n):LE_NOT_SUPPORTED;}
+int le_recovery_stop(struct le_backend*b){return b&&b->ops->recovery_stop?b->ops->recovery_stop(b):LE_NOT_SUPPORTED;}

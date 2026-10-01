@@ -44,8 +44,14 @@ network_schema = openapi["components"]["requestBodies"]["NetworkUpdate"]["conten
     "application/json"]["schema"]
 assert network_schema["properties"]["wifi_mac"]["pattern"].startswith("^$")
 assert network_schema["properties"]["bt_mac"]["pattern"].startswith("^$")
-assert "restored after restart" in openapi["paths"]["/assistant/history"]["get"][
+# 0.14 moves the persisted restart-surviving ring to the preserved
+# /assistant/latency alias. The canonical /assistant/history is now the
+# RAM-only voice-turn ring and must not claim restart persistence.
+assert "restored after restart" in openapi["paths"]["/assistant/latency"]["get"][
     "description"]
+history_desc = openapi["paths"]["/assistant/history"]["get"]["description"]
+assert "RAM-only" in history_desc
+assert "restored after restart" not in history_desc
 assert "restored after that daemon restarts" in docs
 
 start = api.index("static void auth_login_json")

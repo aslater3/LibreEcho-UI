@@ -235,7 +235,9 @@ void le_recovery_config_default(struct le_recovery_config *config,
     copy_string(config->marker_path, sizeof(config->marker_path),
                 "/run/libreecho/recovery-mode");
     copy_string(config->psk_path, sizeof(config->psk_path),
-                "/run/libreecho/recovery-psk");
+                LE_RECOVERY_PSK_PATH_DEFAULT);
+    copy_string(config->config_path, sizeof(config->config_path),
+                LE_RECOVERY_CONFIG_PATH_DEFAULT);
     copy_string(config->run_dir, sizeof(config->run_dir), "/run/libreecho");
     copy_string(config->interface, sizeof(config->interface),
                 interface && interface[0] ? interface : "wlan0");
@@ -267,6 +269,7 @@ void le_recovery_config_default(struct le_recovery_config *config,
     config->rate_max = LE_RECOVERY_RATE_MAX_DEFAULT;
     config->require_tmpfs = 1;
     config->require_root_owner = 1;
+    config->require_root_peer = 1;
 }
 
 void le_recovery_config_bound(struct le_recovery_config *config)
@@ -462,6 +465,99 @@ static int ensure_parent_dir(const char *path)
     return 0;
 }
 
+/*
+ * Create and validate the directory that owns a persistent secret/config file.
+ * Every missing component is created root-only (0700); no component may be a
+ * symlink, and the immediate parent must be a real directory that is neither
+ * group- nor world-accessible (and root-owned in production).  This is the
+ * "protected parent" the persisted recovery password and configuration live
+ * under, so a pre-planted writable directory can never redirect or expose them.
+ */
+static int ensure_secure_parent_dir(const struct le_recovery_config *config,
+                                    const char *path, char *reason,
+                                    size_t reason_size)
+{
+    char parent[PATH_MAX];
+    char *slash, *cursor;
+    struct stat status;
+
+    if (!path || !path[0] || strlen(path) >= sizeof(parent)) {
+        copy_string(reason, reason_size, "psk-path-too-long");
+        return -1;
+    }
+    copy_string(parent, sizeof(parent), path);
+    slash = strrchr(parent, '/');
+    if (!slash || slash == parent)
+        return 0;   /* no parent component to guard */
+    *slash = '\0';
+    for (cursor = parent + 1; *cursor; ++cursor) {
+        if (*cursor != '/')
+            continue;
+        *cursor = '\0';
+        if (lstat(parent, &status) < 0) {
+            if (errno != ENOENT ||
+                (mkdir(parent, 0700) < 0 && errno != EEXIST)) {
+                copy_string(reason, reason_size, "config-dir-failed");
+                *cursor = '/';
+                return -1;
+            }
+        } else if (S_ISLNK(status.st_mode)) {
+            copy_string(reason, reason_size, "config-dir-symlink");
+            *cursor = '/';
+            return -1;
+        }
+        *cursor = '/';
+    }
+    if (lstat(parent, &status) < 0) {
+        if (errno != ENOENT || mkdir(parent, 0700) < 0) {
+            copy_string(reason, reason_size, "config-dir-failed");
+            return -1;
+        }
+        if (lstat(parent, &status) < 0) {
+            copy_string(reason, reason_size, "config-dir-failed");
+            return -1;
+        }
+    }
+    if (S_ISLNK(status.st_mode)) {
+        copy_string(reason, reason_size, "config-dir-symlink");
+        return -1;
+    }
+    if (!S_ISDIR(status.st_mode)) {
+        copy_string(reason, reason_size, "config-dir-not-dir");
+        return -1;
+    }
+    if (config->require_root_owner && status.st_uid != 0) {
+        copy_string(reason, reason_size, "config-dir-owner");
+        return -1;
+    }
+    if (status.st_mode & 077) {
+        copy_string(reason, reason_size, "config-dir-permissions");
+        return -1;
+    }
+    return 0;
+}
+
+/* fsync a file's parent directory so a rename is durable across power loss. */
+static void fsync_parent_dir(const char *path)
+{
+    char parent[PATH_MAX];
+    char *slash;
+    int fd;
+
+    if (!path || strlen(path) >= sizeof(parent))
+        return;
+    copy_string(parent, sizeof(parent), path);
+    slash = strrchr(parent, '/');
+    if (!slash || slash == parent)
+        return;
+    *slash = '\0';
+    fd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd >= 0) {
+        (void)fsync(fd);
+        close(fd);
+    }
+}
+
 int le_recovery_psk_ensure(const struct le_recovery_config *config,
                            char *out, size_t out_size,
                            char *reason, size_t reason_size)
@@ -508,10 +604,9 @@ int le_recovery_psk_ensure(const struct le_recovery_config *config,
         copy_string(reason, reason_size, "psk-generation-failed");
         return -1;
     }
-    if (ensure_parent_dir(config->psk_path) < 0) {
-        copy_string(reason, reason_size, "psk-dir-failed");
+    if (ensure_secure_parent_dir(config, config->psk_path, reason,
+                                 reason_size) < 0)
         return -1;
-    }
     if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld",
                  config->psk_path, (long)getpid()) >= (int)sizeof(temporary)) {
         copy_string(reason, reason_size, "psk-path-too-long");
@@ -538,6 +633,7 @@ int le_recovery_psk_ensure(const struct le_recovery_config *config,
         errno = saved;
         return -1;
     }
+    fsync_parent_dir(config->psk_path);
     copy_string(out, out_size, buffer);
     return 0;
 }
@@ -1170,6 +1266,184 @@ void le_recovery_stop(struct le_recovery *recovery, long long now_ms,
                     reason);
 }
 
+int le_recovery_config_validate(const struct le_recovery_config *config,
+                                char *reason, size_t reason_size)
+{
+    if (reason && reason_size)
+        reason[0] = '\0';
+    if (!config) {
+        copy_string(reason, reason_size, "config-missing");
+        return -1;
+    }
+    if (config->enabled != 0 && config->enabled != 1) {
+        copy_string(reason, reason_size, "enabled-invalid");
+        return -1;
+    }
+    if (config->auto_enabled != 0 && config->auto_enabled != 1) {
+        copy_string(reason, reason_size, "auto-enabled-invalid");
+        return -1;
+    }
+    if (config->auto_timeout_ms < LE_RECOVERY_TIMEOUT_MIN_MS ||
+        config->auto_timeout_ms > LE_RECOVERY_TIMEOUT_MAX_MS) {
+        /* Strict: an out-of-range owner value is rejected, never clamped. */
+        copy_string(reason, reason_size, "auto-timeout-range");
+        return -1;
+    }
+    return 0;
+}
+
+int le_recovery_config_persist(const struct le_recovery_config *config,
+                               char *reason, size_t reason_size)
+{
+    char content[256];
+    int n;
+
+    if (reason && reason_size)
+        reason[0] = '\0';
+    if (!config || !config->config_path[0]) {
+        copy_string(reason, reason_size, "config-path-missing");
+        return -1;
+    }
+    if (le_recovery_config_validate(config, reason, reason_size) < 0)
+        return -1;
+    n = snprintf(content, sizeof(content),
+                 "enabled=%d\nauto_enabled=%d\nauto_timeout_ms=%lld\n",
+                 config->enabled, config->auto_enabled,
+                 config->auto_timeout_ms);
+    if (n < 0 || n >= (int)sizeof(content)) {
+        copy_string(reason, reason_size, "config-overflow");
+        return -1;
+    }
+    if (ensure_secure_parent_dir(config, config->config_path, reason,
+                                 reason_size) < 0)
+        return -1;
+    if (write_locked_file(config->config_path, content, reason,
+                          reason_size) < 0)
+        return -1;
+    fsync_parent_dir(config->config_path);
+    return 0;
+}
+
+int le_recovery_config_load(struct le_recovery_config *config,
+                            char *reason, size_t reason_size)
+{
+    char buffer[512];
+    char *line, *save = NULL;
+    long long timeout = config ? config->auto_timeout_ms : 0;
+    int enabled = config ? config->enabled : 1;
+    int auto_enabled = config ? config->auto_enabled : 0;
+    int seen_enabled = 0, seen_auto = 0, seen_timeout = 0;
+    struct stat status;
+    ssize_t length;
+    int fd;
+
+    if (reason && reason_size)
+        reason[0] = '\0';
+    if (!config || !config->config_path[0]) {
+        copy_string(reason, reason_size, "config-path-missing");
+        return -1;
+    }
+    fd = open(config->config_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        if (errno == ENOENT)
+            return 0;   /* no persisted configuration yet */
+        copy_string(reason, reason_size,
+                    errno == ELOOP ? "config-symlink" : "config-open-failed");
+        return -1;
+    }
+    if (fstat(fd, &status) < 0 || !S_ISREG(status.st_mode)) {
+        close(fd);
+        copy_string(reason, reason_size, "config-not-regular");
+        return -1;
+    }
+    if (status.st_mode & 077) {
+        close(fd);
+        copy_string(reason, reason_size, "config-permissions");
+        return -1;
+    }
+    length = read(fd, buffer, sizeof(buffer) - 1);
+    close(fd);
+    if (length <= 0) {
+        copy_string(reason, reason_size, "config-empty");
+        return -1;
+    }
+    buffer[length] = '\0';
+    for (line = strtok_r(buffer, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *value = strchr(line, '=');
+        if (!value) {
+            copy_string(reason, reason_size, "config-malformed");
+            return -1;
+        }
+        *value++ = '\0';
+        if (!strcmp(line, "enabled")) {
+            if (strcmp(value, "0") && strcmp(value, "1"))
+                goto malformed;
+            enabled = value[0] - '0';
+            seen_enabled = 1;
+        } else if (!strcmp(line, "auto_enabled")) {
+            if (strcmp(value, "0") && strcmp(value, "1"))
+                goto malformed;
+            auto_enabled = value[0] - '0';
+            seen_auto = 1;
+        } else if (!strcmp(line, "auto_timeout_ms")) {
+            char *end = NULL;
+            timeout = strtoll(value, &end, 10);
+            if (!end || *end || timeout < LE_RECOVERY_TIMEOUT_MIN_MS ||
+                timeout > LE_RECOVERY_TIMEOUT_MAX_MS)
+                goto malformed;
+            seen_timeout = 1;
+        } else {
+            copy_string(reason, reason_size, "config-unknown-key");
+            return -1;
+        }
+    }
+    if (!seen_enabled && !seen_auto && !seen_timeout) {
+        copy_string(reason, reason_size, "config-empty");
+        return -1;
+    }
+    config->enabled = enabled;
+    config->auto_enabled = auto_enabled;
+    config->auto_timeout_ms = timeout;
+    copy_string(reason, reason_size, "config-loaded");
+    return 1;
+
+malformed:
+    copy_string(reason, reason_size, "config-malformed");
+    return -1;
+}
+
+int le_recovery_configure(struct le_recovery *recovery, int enabled,
+                          int auto_enabled, long long auto_timeout_ms,
+                          char *reason, size_t reason_size)
+{
+    struct le_recovery_config candidate;
+
+    if (reason && reason_size)
+        reason[0] = '\0';
+    if (!recovery) {
+        copy_string(reason, reason_size, "config-missing");
+        return -1;
+    }
+    candidate = recovery->config;
+    candidate.enabled = enabled;
+    candidate.auto_enabled = auto_enabled;
+    candidate.auto_timeout_ms = auto_timeout_ms;
+    if (le_recovery_config_validate(&candidate, reason, reason_size) < 0)
+        return -1;
+    /* Persist first; a failed write must not change the running configuration
+     * (rollback) so an owner request that cannot be stored never takes partial
+     * effect for this boot. */
+    if (le_recovery_config_persist(&candidate, reason, reason_size) < 0)
+        return -1;
+    recovery->config.enabled = candidate.enabled;
+    recovery->config.auto_enabled = candidate.auto_enabled;
+    recovery->config.auto_timeout_ms = candidate.auto_timeout_ms;
+    if (!recovery->config.enabled)
+        le_recovery_stop(recovery, recovery->last_now_ms, "disabled");
+    return 0;
+}
+
 int le_recovery_handover_begin(struct le_recovery *recovery, long long now_ms)
 {
     if (!recovery || !recovery->config.enabled)
@@ -1301,17 +1575,14 @@ int le_recovery_status_json(const struct le_recovery *recovery,
                     ",\"enabled\":%s,\"net_configured\":%s,"
                     "\"auto_enabled\":%s,\"auto_timeout_ms\":%lld,"
                     "\"auto_pending\":%s,\"auto_countdown_ms\":%lld,"
-                    "\"rate_count\":%d,\"children\":%d,"
-                    "\"psk_path\":",
+                    "\"rate_count\":%d,\"children\":%d}",
                     recovery->config.enabled ? "true" : "false",
                     recovery->net_configured ? "true" : "false",
                     recovery->config.auto_enabled ? "true" : "false",
                     recovery->config.auto_timeout_ms,
                     recovery->auto_counting ? "true" : "false",
                     countdown,
-                    recovery->rate_count, recovery->child_count) < 0 ||
-        append_json_string(out, out_size, &n, recovery->config.psk_path) < 0 ||
-        append_text(out, out_size, &n, "}") < 0)
+                    recovery->rate_count, recovery->child_count) < 0)
         return -1;
     return (int)n;
 }

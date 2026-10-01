@@ -17,8 +17,16 @@ curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy"
 expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
 curl -fsS "$URL/api/v1/config" | jq -e --arg version "LibreEcho OS $OS_VERSION" '.ok and .data.os_version == $version' >/dev/null
 expect "$(curl -fsS "$URL/api/v1")" '"swagger":"/swagger.html"'
+# 0.14 split the old assistant history ring in two: the canonical private
+# voice-turn collection stays on /assistant/history, while the legacy latency
+# shape used by the Simulation page moved to /assistant/latency.
+latency=$(curl -fsS "$URL/api/v1/assistant/latency")
+printf '%s' "$latency" | jq -e '.ok and .data.history_generation == 1 and (.data.turns | length == 1) and .data.turns[0].first_pcm_ms == 3100' >/dev/null
 history=$(curl -fsS "$URL/api/v1/assistant/history")
-printf '%s' "$history" | jq -e '.ok and .data.history_generation == 1 and (.data.turns | length == 1) and .data.turns[0].first_pcm_ms == 3100' >/dev/null
+printf '%s' "$history" | jq -e '.ok and .data.capacity == 10 and .data.history_generation == 1 and (.data.turns | length == 1) and .data.turns[0].id == 4242 and (.data.turns[0].transcript_preview | type == "string")' >/dev/null
+curl -fsS "$URL/api/v1/assistant/history/4242" | jq -e '.ok and .data.id == 4242 and (.data.transcript | type == "string")' >/dev/null
+code=$(curl -sS -o /tmp/le-voice-entry-unknown.out -w '%{http_code}' "$URL/api/v1/assistant/history/999")
+[ "$code" = 404 ]
 code=$(curl -sS -o /tmp/le-live-get.out -w '%{http_code}' "$URL/api/v1/live")
 [ "$code" = 503 ]
 code=$(curl -sS -o /tmp/le-live-post.out -w '%{http_code}' -X POST "$URL/api/v1/live" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
@@ -31,14 +39,21 @@ for body in '{"enabled":"true"}' '{"nested":{"enabled":true}}' '{"note":"\"enabl
 done
 code=$(curl -sS -o /tmp/le-history-method.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 405 ]
+# DELETE clears the canonical voice ring only; the latency ring is untouched.
+code=$(curl -sS -o /tmp/le-voice-delete.out -w '%{http_code}' -X DELETE "$URL/api/v1/assistant/history" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 200 ]
+curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and .data.history_generation == 2 and (.data.turns | length == 0)' >/dev/null
+curl -fsS "$URL/api/v1/assistant/latency" | jq -e '.ok and .data.history_generation == 1 and (.data.turns | length == 1)' >/dev/null
 clear_code=$(curl -fsS -o /tmp/le-history-clear.out -w '%{http_code}' -X POST "$URL/api/v1/assistant/history/clear" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$clear_code" = 200 ]
-curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and .data.history_generation == 2 and (.data.turns | length == 0)' >/dev/null
+# The POST /assistant/history/clear route scrubs both rings.
+curl -fsS "$URL/api/v1/assistant/latency" | jq -e '.ok and .data.history_generation == 2 and (.data.turns | length == 0)' >/dev/null
+curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and .data.history_generation == 3 and (.data.turns | length == 0)' >/dev/null
 code=$(curl -sS -o /tmp/le-usb-nul.out -w '%{http_code}' "$URL/api/v1/storage/usb?path=Music%00/Other")
 [ "$code" = 400 ]
 curl -sS -X POST "$URL/api/v1/assistant/respond" -H "$CSRF" -H 'Content-Type: application/json' --data '{"text":"slow test"}' >/tmp/le-assistant-respond.out &
 respond_pid=$!
-timeout 1 curl -fsS "$URL/api/v1/assistant/history" | jq -e '.ok and (.data.turns | length == 0)' >/dev/null
+timeout 1 curl -fsS "$URL/api/v1/assistant/latency" | jq -e '.ok and (.data.turns | length == 0)' >/dev/null
 wait "$respond_pid"
 expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
 expect "$(curl -fsS "$URL/")" 'First-boot setup'

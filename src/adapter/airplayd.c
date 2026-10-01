@@ -154,7 +154,8 @@ static int airplay_ack_matches(const char *path, const struct stat *m, const str
  * cannot inherit an old acknowledgment; media remains gated on IPC failure. */
 static void airplay_master_poll(struct airplay_ctx *ctx)
 {
-    char marker[256], volume[256], ack[256], temp[272], text[160], args[256], response[256];
+    char marker[256], volume[256], ack[256], temp[272], text[160], args[256];
+    char response[LE_ADAPTER_MSG_MAX];
     char session[96], callback[96];
     struct stat m, v, current;
     struct le_adapter *adapter;

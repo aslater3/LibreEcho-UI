@@ -229,6 +229,7 @@ class RecoveryFixture:
         self.led = FakeLed(directory / "led.sock")
         self.marker_path = directory / "recovery-mode"
         self.psk_path = directory / "recovery-psk"
+        self.config_path = directory / "recovery.json"
         self.run_dir = directory / "run"
         self.run_dir.mkdir(exist_ok=True)
         self.log = directory / "daemon.log"
@@ -298,6 +299,7 @@ class RecoveryFixture:
             "--reboot-guard", str(directory / "reboot.guard"),
             "--recovery-marker", str(self.marker_path),
             "--recovery-psk", str(self.psk_path),
+            "--recovery-config", str(self.config_path),
             "--recovery-run-dir", str(self.run_dir),
             "--recovery-timeout", str(auto_timeout_ms),
             "--recovery-start-timeout", str(start_timeout_ms),
@@ -317,13 +319,45 @@ class RecoveryFixture:
                  "--recovery-address", "192.168.4.1"]
         if auto:
             args.append("--recovery-auto")
-        log = open(self.log, "wb")
+        self.env = env
+        self.args = args
+        self.log_handle = None
+        self.process = None
+        self.adapter = directory / "network.sock"
+        self._start()
+
+    def _start(self):
+        log = open(self.log, "ab")
         self.log_handle = log
         self.process = subprocess.Popen(
-            args, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+            self.args, cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
             stdout=log, stderr=log)
-        self.adapter = directory / "network.sock"
         wait_for(lambda: self.adapter.exists(), message="networkd socket")
+
+    def restart(self):
+        """Stop and relaunch the daemon with the same paths, simulating a reboot
+        so persisted recovery state (password + owner configuration) is reloaded
+        from disk rather than memory."""
+        proc = self.process
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        handle = self.log_handle
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
+            self.log_handle = None
+        try:
+            self.adapter.unlink()
+        except FileNotFoundError:
+            pass
+        self._start()
 
     def status(self):
         return adapter_request(self.adapter, 1, "status")["data"]
@@ -332,18 +366,20 @@ class RecoveryFixture:
         return self.status()["recovery"]
 
     def stop(self):
-        for child in (self.process,):
-            if child.poll() is None:
-                child.terminate()
-                try:
-                    child.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait(timeout=2)
-        try:
-            self.log_handle.close()
-        except OSError:
-            pass
+        proc = self.process
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        handle = self.log_handle
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
         self.wpa.close()
         self.led.close()
 
@@ -647,6 +683,104 @@ def test_children_cleaned_up_on_shutdown():
             fixture.stop()
 
 
+def test_configure_persists_and_survives_restart():
+    """Owner configuration is persisted under protected storage and reloaded.
+
+    The password path and the owner enable/auto choices must survive a reboot:
+    the daemon reloads them before it evaluates the boot trigger.
+    """
+    with tempfile.TemporaryDirectory(prefix="le-recovery-config-") as temp:
+        fixture = RecoveryFixture(Path(temp), marker=False)
+        try:
+            assert fixture.status()["mode"] == "client"
+            response = adapter_request(
+                fixture.adapter, 30, "recovery_configure",
+                {"enabled": True, "auto_enabled": True,
+                 "auto_timeout_ms": 60000})
+            assert response["ok"] is True, response
+            recovery = fixture.recovery()
+            assert recovery["enabled"] is True
+            assert recovery["auto_enabled"] is True
+            assert recovery["auto_timeout_ms"] == 60000
+            assert "psk_path" not in recovery
+            config = fixture.config_path
+            assert config.exists()
+            assert stat.S_IMODE(config.stat().st_mode) == 0o600
+
+            # Reboot: the owner choice is reloaded from disk, not memory.
+            fixture.restart()
+            recovery = fixture.recovery()
+            assert recovery["enabled"] is True, recovery
+            assert recovery["auto_enabled"] is True, recovery
+            assert recovery["auto_timeout_ms"] == 60000, recovery
+            time.sleep(0.2)
+            # A 60 s window has not elapsed, so the AP stays down.
+            assert fixture.status()["mode"] == "client"
+            assert not fixture.hostapd_pid_file.exists()
+        finally:
+            fixture.stop()
+
+
+def test_configure_rejects_out_of_range_and_malformed():
+    with tempfile.TemporaryDirectory(prefix="le-recovery-config-bad-") as temp:
+        fixture = RecoveryFixture(Path(temp), marker=False)
+        try:
+            before = fixture.recovery()["auto_timeout_ms"]
+            # Below the 30 s floor: rejected, never silently clamped.
+            response = adapter_request(
+                fixture.adapter, 31, "recovery_configure",
+                {"enabled": True, "auto_enabled": False,
+                 "auto_timeout_ms": 1000})
+            assert response["ok"] is False, response
+            assert "auto-timeout-range" in response["error"], response
+            # Above the 600 s ceiling.
+            response = adapter_request(
+                fixture.adapter, 32, "recovery_configure",
+                {"enabled": True, "auto_enabled": False,
+                 "auto_timeout_ms": 600001})
+            assert response["ok"] is False, response
+            assert "auto-timeout-range" in response["error"], response
+            # A non-boolean field is rejected.
+            response = adapter_request(
+                fixture.adapter, 33, "recovery_configure",
+                {"enabled": "yes", "auto_enabled": False,
+                 "auto_timeout_ms": 60000})
+            assert response["ok"] is False, response
+            # The running configuration is unchanged and nothing was persisted.
+            recovery = fixture.recovery()
+            assert recovery["auto_timeout_ms"] == before, recovery
+            assert not fixture.config_path.exists()
+        finally:
+            fixture.stop()
+
+
+def test_disabled_config_blocks_boot_and_auto():
+    """An owner-disabled feature stays disabled across reboot for both entries."""
+    with tempfile.TemporaryDirectory(prefix="le-recovery-disabled-") as temp:
+        fixture = RecoveryFixture(Path(temp), marker=False, auto=False,
+                                  auto_timeout_ms=30000)
+        try:
+            response = adapter_request(
+                fixture.adapter, 40, "recovery_configure",
+                {"enabled": False, "auto_enabled": True,
+                 "auto_timeout_ms": 30000})
+            assert response["ok"] is True, response
+            assert fixture.recovery()["enabled"] is False
+
+            # A valid physical marker plus an opt-in auto, then a reboot: the
+            # persisted owner choice must block both entries.
+            fixture.marker_path.write_text(MARKER_TAG + "\nhold_ms=5000\n")
+            fixture.marker_path.chmod(0o600)
+            fixture.restart()
+            recovery = fixture.recovery()
+            assert recovery["enabled"] is False, recovery
+            time.sleep(0.8)
+            assert fixture.status()["mode"] == "client"
+            assert not fixture.hostapd_pid_file.exists()
+        finally:
+            fixture.stop()
+
+
 def main():
     tests = [
         test_physical_entry_starts_ap,
@@ -661,6 +795,9 @@ def main():
         test_secret_refused_while_captive_ap_active,
         test_auto_fallback_is_opt_in_and_delayed,
         test_children_cleaned_up_on_shutdown,
+        test_configure_persists_and_survives_restart,
+        test_configure_rejects_out_of_range_and_malformed,
+        test_disabled_config_blocks_boot_and_auto,
     ]
     failed = 0
     for test in tests:

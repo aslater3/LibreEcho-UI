@@ -512,6 +512,21 @@ static int adapter_command_timeout(const char *socket_path, const char *command,
     if (rc == LE_ADAPTER_ERR_REJECTED && command && response &&
         !strcmp(command, "add") && !strcmp(response, "no free timer slots"))
         return LE_BUSY;
+    /*
+     * The recovery secret commands carry a semantic refusal from networkd --
+     * "recovery password is unavailable in this mode" while the captive AP
+     * serves, or "recovery-disabled" -- which the API reports as 409 with its
+     * own "unavailable in this mode" message. adapter_result() collapses the
+     * daemon's ok:false into LE_IO, so on a real backend that refusal surfaced
+     * as 503/io_error and the API's 409 branch was unreachable (the mock
+     * backend already answers 409). Scoped to the secret commands on purpose:
+     * a recovery_configure rejection may be a persist failure, which really is
+     * a server-side condition and must stay 503.
+     */
+    if (rc == LE_ADAPTER_ERR_REJECTED && command &&
+        (!strcmp(command, "recovery_prepare") ||
+         !strcmp(command, "recovery_psk")))
+        return LE_INVALID;
     result = adapter_result(rc);
     if (result != LE_OK)
         le_log_debug("backend: adapter %s failed (rc=%d)", command, rc);
@@ -1096,6 +1111,46 @@ static int networkd_status(struct le_backend *b, struct le_network_state *o)
             connectivity = "degraded";
         copy_string(o->connectivity, sizeof(o->connectivity), connectivity);
     }
+    (void)json_get_string(response, "mode", o->mode, sizeof(o->mode));
+    if (!o->mode[0])
+        copy_string(o->mode, sizeof(o->mode), "client");
+    {
+        char object[LE_ADAPTER_MSG_MAX];
+        if (json_object(response, "recovery", object, sizeof(object))) {
+            (void)json_get_string(object, "mode", o->recovery.mode,
+                                  sizeof(o->recovery.mode));
+            (void)json_get_string(object, "trigger", o->recovery.trigger,
+                                  sizeof(o->recovery.trigger));
+            (void)json_get_string(object, "ssid", o->recovery.ssid,
+                                  sizeof(o->recovery.ssid));
+            (void)json_get_string(object, "reason", o->recovery.reason,
+                                  sizeof(o->recovery.reason));
+            (void)json_get_string(object, "error", o->recovery.error,
+                                  sizeof(o->recovery.error));
+            (void)json_get_string(object, "led_owner", o->recovery.led_owner,
+                                  sizeof(o->recovery.led_owner));
+            (void)json_get_bool(object, "available", &o->recovery.available);
+            (void)json_get_bool(object, "secret_available",
+                                &o->recovery.secret_available);
+            (void)json_get_bool(object, "enabled", &o->recovery.enabled);
+            (void)json_get_bool(object, "net_configured",
+                                &o->recovery.net_configured);
+            (void)json_get_bool(object, "auto_enabled",
+                                &o->recovery.auto_enabled);
+            (void)json_get_bool(object, "auto_pending",
+                                &o->recovery.auto_pending);
+            (void)json_get_int(object, "rate_count",
+                               &o->recovery.rate_count);
+            (void)json_get_int(object, "children", &o->recovery.children);
+            (void)json_get_int64(object, "auto_timeout_ms",
+                                 &o->recovery.auto_timeout_ms);
+            (void)json_get_int64(object, "auto_countdown_ms",
+                                 &o->recovery.auto_countdown_ms);
+            /* psk_path is intentionally not copied: it is internal. */
+        } else {
+            strcpy(o->recovery.mode, "off");
+        }
+    }
     o->dhcp = o->ip[0] && (!strcmp(o->state, "connected") || o->gateway[0]);
     o->internet = o->gateway[0] && !strcmp(o->state, "connected") &&
                   !strcmp(o->connectivity, "healthy");
@@ -1136,6 +1191,8 @@ static int network(struct le_backend *b, struct le_network_state *o)
     o->rssi_dbm = -1;
     o->gateway_reachable = -1;
     strcpy(o->recovery_stage, "none");
+    strcpy(o->mode, "client");
+    strcpy(o->recovery.mode, "off");
     read_hostname(o->hostname, sizeof(o->hostname));
 
     snprintf(path, sizeof(path), "/sys/class/net/wlan0/operstate");
@@ -1202,6 +1259,15 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
     if (json_get_int(response, "noise_level", &v) > 0) o->noise_level = v;
     if (json_get_int(response, "noise_remaining_seconds", &v) > 0) o->noise_remaining_seconds = v;
     (void)json_get_string(response, "noise_colour", o->noise_colour, sizeof(o->noise_colour));
+    if (json_get_string(response, "noise_source", o->noise_source,
+                        sizeof(o->noise_source)) < 1)
+        copy_string(o->noise_source, sizeof(o->noise_source),
+                    o->noise_colour[0] ? o->noise_colour : "white");
+    if (json_get_string(response, "noise_bed", o->noise_bed,
+                        sizeof(o->noise_bed)) < 1)
+        strcpy(o->noise_bed, "none");
+    (void)json_get_int(response, "noise_tempo", &o->noise_tempo);
+    (void)json_get_int(response, "noise_fade_seconds", &o->noise_fade_seconds);
     {
         const char *path = getenv("LE_TTS_VOICE_FILE");
         FILE *voice_file;
@@ -1449,6 +1515,53 @@ static int led(struct le_backend *b, struct le_led_state *o)
             o->pixels[i].b = (uint8_t)((o->current.b *
                                       o->current.brightness + 50) / 100);
         }
+    }
+    /* Sleep/idle/output/music mirror ledd's status exactly; absent keys keep
+       the zeroed defaults the memset above already set. */
+    if (json_get_string(response, "idle_mode", object, sizeof(object)) > 0) {
+        if (!strcmp(object, "indicator"))
+            o->idle_mode = 1;
+        else if (!strcmp(object, "always"))
+            o->idle_mode = 2;
+        else
+            o->idle_mode = 0;
+    }
+    if (json_object(response, "sleep_light", object, sizeof(object))) {
+        if (json_get_string(object, "mode", o->sleep_light.mode,
+                            sizeof(o->sleep_light.mode)) < 1)
+            strcpy(o->sleep_light.mode, "off");
+        (void)json_get_bool(object, "active", &o->sleep_light.active);
+        (void)json_get_int(object, "brightness", &o->sleep_light.brightness);
+        (void)json_get_int(object, "period_ms", &o->sleep_light.period_ms);
+        (void)json_get_int(object, "timer_minutes",
+                           &o->sleep_light.timer_minutes);
+        (void)json_get_int(object, "remaining_ms",
+                           &o->sleep_light.remaining_ms);
+        (void)json_get_bool(object, "restore_on_boot",
+                            &o->sleep_light.restore_on_boot);
+    } else {
+        strcpy(o->sleep_light.mode, "off");
+    }
+    if (json_object(response, "output", object, sizeof(object))) {
+        (void)json_get_int(object, "effective_brightness",
+                           &o->output.effective_brightness);
+        (void)json_get_int(object, "frame_load", &o->output.frame_load);
+        (void)json_get_int(object, "max_load", &o->output.max_load);
+        (void)json_get_bool(object, "limited", &o->output.limited);
+        (void)json_get_bool(object, "slew_limited", &o->output.slew_limited);
+    }
+    if (json_object(response, "music", object, sizeof(object))) {
+        (void)json_get_bool(object, "active", &o->music.active);
+        if (json_get_string(object, "grammar", o->music.grammar,
+                            sizeof(o->music.grammar)) < 1)
+            strcpy(o->music.grammar, "none");
+        if (json_get_string(object, "effect", o->music.effect,
+                            sizeof(o->music.effect)) < 1)
+            strcpy(o->music.effect, "none");
+        (void)json_get_uint(object, "session", &o->music.session);
+    } else {
+        strcpy(o->music.grammar, "none");
+        strcpy(o->music.effect, "none");
     }
     return LE_OK;
 }
@@ -1773,6 +1886,8 @@ static int radio_playing(struct le_backend *b, struct le_radio_status *o)
     (void)json_get_string(response, "title", o->title, sizeof(o->title));
     (void)json_get_string(response, "station", o->station,
                           sizeof(o->station));
+    if (json_get_bool(response, "opus", &v) > 0)
+        o->opus = v;
     return LE_OK;
 }
 
@@ -2746,6 +2861,136 @@ static void destroy(struct le_backend *b)
     free(b->data);
 }
 
+/*
+ * Extended noise. Only the fields the caller actually supplied are put on the
+ * wire: a negative number or an empty string means "not supplied", so the
+ * daemon keeps its current value instead of being forced to a default. The
+ * same discipline applies to sleep_light below.
+ */
+#define LE_JSON_FIELD(...)                                                     \
+    do {                                                                       \
+        n = snprintf(args + used, sizeof(args) - used, "%s",                   \
+                     first ? "" : ",");                                        \
+        if (n < 0 || (size_t)n >= sizeof(args) - used)                         \
+            return LE_IO;                                                      \
+        used += (size_t)n;                                                     \
+        first = 0;                                                             \
+        n = snprintf(args + used, sizeof(args) - used, __VA_ARGS__);           \
+        if (n < 0 || (size_t)n >= sizeof(args) - used)                         \
+            return LE_IO;                                                      \
+        used += (size_t)n;                                                     \
+    } while (0)
+
+static int noise_start_ex(struct le_backend *b, const struct le_noise_request *r)
+{
+    char args[320];
+    size_t used = 0;
+    int first = 1, n;
+
+    (void)b;
+    if (!r)
+        return LE_INVALID;
+    args[used++] = '{';
+    if (r->source[0])
+        LE_JSON_FIELD("\"source\":\"%s\"", r->source);
+    if (r->bed[0])
+        LE_JSON_FIELD("\"bed\":\"%s\"", r->bed);
+    if (r->level >= 0)
+        LE_JSON_FIELD("\"level\":%d", r->level);
+    if (r->minutes >= 0)
+        LE_JSON_FIELD("\"minutes\":%d", r->minutes);
+    if (r->tempo >= 0)
+        LE_JSON_FIELD("\"tempo\":%d", r->tempo);
+    if (r->fade_seconds >= 0)
+        LE_JSON_FIELD("\"fade_seconds\":%d", r->fade_seconds);
+    args[used++] = '}';
+    args[used] = '\0';
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "noise_start", args);
+}
+
+static int led_idle_mode(struct le_backend *b, const char *mode)
+{
+    char args[64];
+
+    (void)b;
+    if (!mode || (strcmp(mode, "off") && strcmp(mode, "indicator") &&
+                  strcmp(mode, "always")))
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
+    return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_idle_mode", args);
+}
+
+static int led_sleep(struct le_backend *b, const struct le_led_sleep_request *r)
+{
+    char args[256];
+    size_t used = 0;
+    int first = 1, n;
+
+    (void)b;
+    if (!r || !r->mode[0])
+        return LE_INVALID;
+    args[used++] = '{';
+    LE_JSON_FIELD("\"mode\":\"%s\"", r->mode);
+    if (r->brightness >= 0)
+        LE_JSON_FIELD("\"brightness\":%d", r->brightness);
+    if (r->period_ms >= 0)
+        LE_JSON_FIELD("\"period_ms\":%d", r->period_ms);
+    if (r->timer_minutes >= 0)
+        LE_JSON_FIELD("\"timer_minutes\":%d", r->timer_minutes);
+    if (r->restore_on_boot >= 0)
+        LE_JSON_FIELD("\"restore_on_boot\":%s",
+                      r->restore_on_boot ? "true" : "false");
+    args[used++] = '}';
+    args[used] = '\0';
+    return adapter_json_command(LE_ADAPTER_LED_SOCK, "sleep_light", args);
+}
+
+#undef LE_JSON_FIELD
+
+static int recovery_configure(struct le_backend *b, int enabled,
+                              int auto_enabled, int timeout_ms)
+{
+    char args[96];
+
+    (void)b;
+    if (timeout_ms < 30000 || timeout_ms > 600000)
+        return LE_INVALID;
+    snprintf(args, sizeof(args),
+             "{\"enabled\":%s,\"auto_enabled\":%s,\"auto_timeout_ms\":%d}",
+             enabled ? "true" : "false", auto_enabled ? "true" : "false",
+             timeout_ms);
+    return adapter_json_command(LE_ADAPTER_NETWORK_SOCK, "recovery_configure",
+                                args);
+}
+
+/*
+ * Owner prepare/reveal. recovery_prepare ensures the per-device secret exists;
+ * recovery_psk reveals {ssid,psk}. The core refuses the reveal while the
+ * captive AP is serving, so a captive client can never obtain it. The web layer
+ * additionally requires an authenticated owner session and CSRF.
+ */
+static int recovery_prepare(struct le_backend *b, char *out, size_t size)
+{
+    char prepared[LE_ADAPTER_MSG_MAX];
+    int rc;
+
+    (void)b;
+    if (out && size)
+        out[0] = '\0';
+    rc = adapter_command(LE_ADAPTER_NETWORK_SOCK, "recovery_prepare", NULL,
+                         prepared, sizeof(prepared));
+    if (rc != LE_OK)
+        return rc;
+    return adapter_command(LE_ADAPTER_NETWORK_SOCK, "recovery_psk", NULL, out,
+                           size);
+}
+
+static int recovery_stop(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_NETWORK_SOCK, "recovery_stop", NULL);
+}
+
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
@@ -2762,7 +3007,9 @@ static const struct le_backend_ops ops = {
     spotify, spotify_set,
     light,
     sound_sample,
-    timers, timer_add, timer_cancel, timer_dismiss
+    timers, timer_add, timer_cancel, timer_dismiss,
+    noise_start_ex, led_idle_mode, led_sleep,
+    recovery_configure, recovery_prepare, recovery_stop
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

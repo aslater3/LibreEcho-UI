@@ -9,6 +9,11 @@
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
+/* SO_PEERCRED / struct ucred: the adapter owner gate validates the caller's
+ * credentials on the socket as well as the HTTP layer's session + CSRF. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
 #include "adapter.h"
 #include "gateway_probe.h"
@@ -478,6 +483,14 @@ static int wpa_open(struct daemon_ctx *ctx)
 {
     if (ctx->wpa.command.fd >= 0)
         return 0;
+    /* Single-radio handover: while the recovery AP owns the interface the
+     * platform net-up helper has stopped wpa_supplicant, so its control socket
+     * cannot answer until net-down restarts the control plane.  Do not spin
+     * reopening it mid-AP; the channel is re-established after handover. */
+    if (ctx->recovery_configured && ctx->recovery.net_configured) {
+        copy_string(ctx->state.state, sizeof(ctx->state.state), "unavailable");
+        return -1;
+    }
     wpa_close(ctx);
     if (wpa_ctrl_open_one(&ctx->wpa.command, ctx->wpa_path, 0) < 0) {
         wpa_close(ctx);
@@ -2887,6 +2900,96 @@ static int json_string_arg(const char *args, const char *key, char *out,
     return 1;
 }
 
+/* Parse a JSON boolean member.  Returns 1 (found, *out set), 0 (absent), or
+ * -1 (present but not the literal true/false). */
+static int json_bool_arg(const char *args, const char *key, int *out)
+{
+    const char *p;
+    char needle[64];
+
+    if (!args || !out)
+        return -1;
+    if (snprintf(needle, sizeof(needle), "\"%s\"", key) >= (int)sizeof(needle))
+        return -1;
+    p = strstr(args, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    if (*p++ != ':')
+        return -1;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    if (!strncmp(p, "true", 4)) {
+        *out = 1;
+        return 1;
+    }
+    if (!strncmp(p, "false", 5)) {
+        *out = 0;
+        return 1;
+    }
+    return -1;
+}
+
+/* Parse a JSON integer member.  Returns 1 (found, *out set), 0 (absent), or
+ * -1 (present but malformed).  Values are not range-checked here; the recovery
+ * core validates the assembled configuration strictly. */
+static int json_int_arg(const char *args, const char *key, long long *out)
+{
+    const char *p, *end;
+    char needle[64];
+    long long value;
+
+    if (!args || !out)
+        return -1;
+    if (snprintf(needle, sizeof(needle), "\"%s\"", key) >= (int)sizeof(needle))
+        return -1;
+    p = strstr(args, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    if (*p++ != ':')
+        return -1;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    errno = 0;
+    value = strtoll(p, (char **)&end, 10);
+    if (end == p || errno != 0)
+        return -1;
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')
+        ++end;
+    if (*end != ',' && *end != '}')
+        return -1;
+    *out = value;
+    return 1;
+}
+
+/*
+ * Owner-caller gate for the secret-bearing adapter commands.  The web layer
+ * enforces the authenticated owner session + CSRF; on the local socket we
+ * additionally require a root peer so only the (root) control plane can reveal
+ * or re-key the provisioning password.  Host fixtures build with
+ * LE_NETWORKD_TESTING and are exempt.
+ */
+static int recovery_peer_authorized(int fd)
+{
+#ifdef LE_NETWORKD_TESTING
+    (void)fd;
+    return 1;
+#else
+    struct ucred cred;
+    socklen_t length = sizeof(cred);
+
+    if (fd < 0 ||
+        getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &length) < 0)
+        return 0;
+    return cred.uid == 0;
+#endif
+}
+
 static int wpa_quote(char *out, size_t size, const char *value)
 {
     size_t n = 0;
@@ -3181,8 +3284,12 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
          * keep the password before it is needed.  The core refuses the reveal
          * while the captive AP is serving, so an unauthenticated captive client
          * can never obtain it.  The web layer must additionally require an
-         * authenticated owner session + CSRF; the value is never logged. */
-        if (!ctx->recovery_configured ||
+         * authenticated owner session + CSRF, and the socket additionally
+         * requires a root peer; the value is never logged. */
+        if (!recovery_peer_authorized(ctx->clients[ci].fd)) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "owner authorization required");
+        } else if (!ctx->recovery_configured ||
             le_recovery_secret_json(&ctx->recovery, data, sizeof(data)) < 0)
             (void)send_err_fd(ctx->clients[ci].fd, id,
                               "recovery password is unavailable in this mode");
@@ -3190,9 +3297,12 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
             remove_client(ctx, ci);
     } else if (!strcmp(cmd, "recovery_prepare")) {
         /* Owner action: generate/retain the per-device password now without
-         * returning it, so a later reveal is stable. */
+         * returning it, so a later reveal is stable and it survives reboot. */
         char reason[LE_RECOVERY_REASON_MAX] = "";
-        if (!ctx->recovery_configured ||
+        if (!recovery_peer_authorized(ctx->clients[ci].fd)) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "owner authorization required");
+        } else if (!ctx->recovery_configured ||
             le_recovery_secret_prepare(&ctx->recovery, reason,
                                        sizeof(reason)) < 0)
             (void)send_err_fd(ctx->clients[ci].fd, id,
@@ -3200,13 +3310,58 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         else if (send_ok_fd(ctx->clients[ci].fd, id,
                             "{\"prepared\":true}") < 0)
             remove_client(ctx, ci);
-    } else if (!strcmp(cmd, "recovery_stop")) {
-        if (ctx->recovery_configured) {
-            le_recovery_stop(&ctx->recovery, monotonic_ms(), "owner-stop");
-            recovery_apply_led(ctx);
-            refresh_and_broadcast(ctx, "network.recovery");
+    } else if (!strcmp(cmd, "recovery_configure")) {
+        /* Owner configuration: {enabled:bool, auto_enabled:bool,
+         * auto_timeout_ms:int 30000..600000}.  Strictly validated (never
+         * silently clamped) and persisted under protected /data storage; the
+         * runtime config only changes after the write succeeds. */
+        int enabled = 0, auto_enabled = 0;
+        long long timeout_ms = 0;
+        int have_enabled, have_auto, have_timeout;
+        char reason[LE_RECOVERY_REASON_MAX] = "";
+        if (!recovery_peer_authorized(ctx->clients[ci].fd)) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "owner authorization required");
+        } else if (!ctx->recovery_configured) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "recovery is not configured");
+        } else {
+            have_enabled = json_bool_arg(args, "enabled", &enabled);
+            have_auto = json_bool_arg(args, "auto_enabled", &auto_enabled);
+            have_timeout = json_int_arg(args, "auto_timeout_ms", &timeout_ms);
+            if (have_enabled != 1 || have_auto != 1 || have_timeout != 1) {
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "recovery_configure requires enabled, "
+                                  "auto_enabled, auto_timeout_ms");
+            } else if (le_recovery_configure(&ctx->recovery, enabled,
+                                             auto_enabled, timeout_ms,
+                                             reason, sizeof(reason)) < 0) {
+                le_log_warn("networkd: recovery_configure rejected: %s", reason);
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  reason[0] ? reason :
+                                  "recovery configuration rejected");
+            } else {
+                le_log_info("networkd: recovery configured (enabled=%d, auto=%d, timeout_ms=%lld)",
+                            enabled, auto_enabled, timeout_ms);
+                recovery_apply_led(ctx);
+                if (status_data(ctx, data, sizeof(data)) < 0 ||
+                    send_ok_fd(ctx->clients[ci].fd, id, data) < 0)
+                    remove_client(ctx, ci);
+                refresh_and_broadcast(ctx, "network.recovery");
+            }
         }
-        (void)send_ok_fd(ctx->clients[ci].fd, id, "{}");
+    } else if (!strcmp(cmd, "recovery_stop")) {
+        if (!recovery_peer_authorized(ctx->clients[ci].fd)) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "owner authorization required");
+        } else {
+            if (ctx->recovery_configured) {
+                le_recovery_stop(&ctx->recovery, monotonic_ms(), "owner-stop");
+                recovery_apply_led(ctx);
+                refresh_and_broadcast(ctx, "network.recovery");
+            }
+            (void)send_ok_fd(ctx->clients[ci].fd, id, "{}");
+        }
     } else if (!strcmp(cmd, "scan")) {
         char reply[WPA_REPLY_MAX];
         int scan_state;
@@ -3509,7 +3664,7 @@ static int daemonize_process(void)
 static void usage(const char *name)
 {
     fprintf(stderr,
-            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--reboot-request PATH] [--reboot-guard PATH] [--recovery-marker PATH] [--recovery-psk PATH] [--recovery-run-dir PATH] [--recovery-timeout MS] [--recovery-start-timeout MS] [--recovery-stop-timeout MS] [--recovery-auto] [--recovery-disabled] [--recovery-ap-probe PATH] [--recovery-ready-probe PATH] [--recovery-net-up PATH] [--recovery-net-down PATH] [--recovery-address ADDR] [--hostapd PATH] [--hostapd-conf PATH] [--recovery-dhcp PATH] [--recovery-dns PATH] [--recovery-conf PATH] [--led-socket PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
+            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--reboot-request PATH] [--reboot-guard PATH] [--recovery-marker PATH] [--recovery-psk PATH] [--recovery-config PATH] [--recovery-run-dir PATH] [--recovery-timeout MS] [--recovery-start-timeout MS] [--recovery-stop-timeout MS] [--recovery-auto] [--recovery-disabled] [--recovery-ap-probe PATH] [--recovery-ready-probe PATH] [--recovery-net-up PATH] [--recovery-net-down PATH] [--recovery-address ADDR] [--hostapd PATH] [--hostapd-conf PATH] [--recovery-dhcp PATH] [--recovery-dns PATH] [--recovery-conf PATH] [--led-socket PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
             name);
 }
 
@@ -3540,6 +3695,7 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
                     !strcmp(argv[i], "--reboot-guard") ||
                     !strcmp(argv[i], "--recovery-marker") ||
                     !strcmp(argv[i], "--recovery-psk") ||
+                    !strcmp(argv[i], "--recovery-config") ||
                     !strcmp(argv[i], "--recovery-run-dir") ||
                     !strcmp(argv[i], "--recovery-timeout") ||
                     !strcmp(argv[i], "--recovery-start-timeout") ||
@@ -3577,6 +3733,9 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
             else if (!strcmp(option, "--recovery-psk"))
                 copy_string(ctx->recovery_config.psk_path,
                             sizeof(ctx->recovery_config.psk_path), value);
+            else if (!strcmp(option, "--recovery-config"))
+                copy_string(ctx->recovery_config.config_path,
+                            sizeof(ctx->recovery_config.config_path), value);
             else if (!strcmp(option, "--recovery-run-dir"))
                 copy_string(ctx->recovery_config.run_dir,
                             sizeof(ctx->recovery_config.run_dir), value);
@@ -3681,6 +3840,21 @@ int main(int argc, char **argv)
     le_log_init("networkd", argc, argv);
     if (parse_args(&ctx, argc, argv) < 0)
         return 2;
+    /* Load the owner's persisted recovery configuration before the boot trigger
+     * is evaluated, so an owner-disabled feature stays disabled across reboot
+     * and the saved auto/timeout choice survives.  An unreadable/invalid file
+     * is ignored (defaults apply) rather than trusted. */
+    {
+        char config_reason[LE_RECOVERY_REASON_MAX] = "";
+        int loaded = le_recovery_config_load(&ctx.recovery_config,
+                                             config_reason,
+                                             sizeof(config_reason));
+        if (loaded < 0)
+            le_log_warn("networkd: ignoring persisted recovery config: %s",
+                        config_reason);
+        else if (loaded > 0)
+            le_log_info("networkd: loaded persisted recovery config");
+    }
     le_network_health_init(&ctx.health, NULL, monotonic_ms());
     le_recovery_init(&ctx.recovery, &ctx.recovery_config, NULL, monotonic_ms());
     le_log_info("networkd: starting (socket=%s, interface=%s, wpa=%s)",

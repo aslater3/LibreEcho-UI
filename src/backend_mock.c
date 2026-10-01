@@ -46,7 +46,25 @@ static void mock_sync_led(struct mock_state*m){size_t i;for(i=0;i<LE_LED_PIXELS;
 /* The API owns the canonical configuration document. Mock controls may update
  * runtime state, but must never replace that document with a partial snapshot. */
 static int save(struct mock_state*m){(void)m;return 0;}
-static void defaults(struct mock_state*m,unsigned seed){static const char*ssids[]={"LibreNet-5G","LibreNet-IoT","Neighbourhood WiFi","Open Test Network"};static const char*secs[]={"wpa2","wpa2","wpa3","open"};size_t i;memset(m,0,sizeof(*m));m->rng=seed?seed:0x4c454348;m->next_timer_id=1;m->started=time(0);m->temp_base=47;m->wake_available=1;strcpy(m->power,"online");strcpy(m->device_name,"Kitchen LibreEcho");strcpy(m->spotify_device_name,"LibreEcho (mock)");strcpy(m->net.hostname,"libreecho-dev");strcpy(m->net.state,"connected");strcpy(m->net.connectivity,"healthy");strcpy(m->net.recovery_stage,"none");strcpy(m->net.ssid,"LibreNet-5G");strcpy(m->net.ip,"198.51.100.42");strcpy(m->net.gateway,"198.51.100.1");strcpy(m->net.dns,"198.51.100.1");m->net.signal=82;m->net.gateway_reachable=1;m->net.liveness_failures=0;m->net.internet=1;m->net.dhcp=1;m->scan.count=4;for(i=0;i<m->scan.count;i++){strcpy(m->scan.networks[i].ssid,ssids[i]);strcpy(m->scan.networks[i].security,secs[i]);m->scan.networks[i].signal=88-(int)i*17;}m->audio.volume=64;m->audio.microphone_gain=70;m->audio.notification_volume=55;m->audio.startup_sound=1;m->audio.amplifier_on=1;m->audio.output_available=1;m->audio.noise_remaining_seconds=-1;strcpy(m->audio.noise_colour,"white");strcpy(m->audio.tts_voice,"southern-female");m->led.current=(struct le_led_profile){72,216,118,72,50};m->led.boot=m->led.current;m->led.listening=(struct le_led_profile){72,185,255,80,50};m->led.thinking=(struct le_led_profile){168,115,239,80,70};m->led.error=(struct le_led_profile){239,80,80,90,40};m->led.dnd=(struct le_led_profile){190,35,35,45,20};m->led.night=(struct le_led_profile){255,40,0,12,50};m->led.night_enabled=0;m->led.night_start_minute=22*60;m->led.night_end_minute=7*60;m->led.visualizer_enabled=1;strcpy(m->wake.wake_word,"LibreEcho");strcpy(m->wake.model_status,"ready");m->wake.enabled=1;m->wake.health_available=1;m->wake.model_loaded=1;m->wake.capture_active=1;m->wake.inference_active=1;m->wake.processed_frames=1;m->wake.sensitivity=68;m->wake.cooldown_ms=1500;m->wake.cpu_cost=8;m->wake.memory_cost_mb=34;m->bluetooth.available=1;m->bluetooth.classic=1;m->bluetooth.le=1;m->bluetooth.ssp=1;m->bluetooth.secure_connection=1;m->bluetooth.connectable=1;m->bluetooth.bondable=1;strcpy(m->bluetooth.state,"off");strcpy(m->bluetooth.transport,"mock");strcpy(m->bluetooth.hci,"none");strcpy(m->bluetooth.local_name,"Kitchen LibreEcho");strcpy(m->bluetooth.profile_state,"pairing-only");strcpy(m->bluetooth.profile_error,"No userspace Bluetooth profile service is registered");strcpy(m->playback.state,"playing");strcpy(m->playback.source,"airplay2");m->playback.media_active=1;m->playback.metadata_available=1;strcpy(m->playback.title,"Open Source Radio");strcpy(m->playback.artist,"LibreEcho");strcpy(m->playback.album,"Development Sessions");}
+static void defaults(struct mock_state*m,unsigned seed){static const char*ssids[]={"LibreNet-5G","LibreNet-IoT","Neighbourhood WiFi","Open Test Network"};static const char*secs[]={"wpa2","wpa2","wpa3","open"};size_t i;memset(m,0,sizeof(*m));m->rng=seed?seed:0x4c454348;m->next_timer_id=1;m->started=time(0);m->temp_base=47;m->wake_available=1;strcpy(m->power,"online");strcpy(m->device_name,"Kitchen LibreEcho");strcpy(m->spotify_device_name,"LibreEcho (mock)");strcpy(m->net.hostname,"libreecho-dev");strcpy(m->net.state,"connected");strcpy(m->net.connectivity,"healthy");strcpy(m->net.recovery_stage,"none");strcpy(m->net.ssid,"LibreNet-5G");strcpy(m->net.ip,"198.51.100.42");strcpy(m->net.gateway,"198.51.100.1");strcpy(m->net.dns,"198.51.100.1");m->net.signal=82;m->net.gateway_reachable=1;m->net.liveness_failures=0;m->net.internet=1;m->net.dhcp=1;m->scan.count=4;for(i=0;i<m->scan.count;i++){strcpy(m->scan.networks[i].ssid,ssids[i]);strcpy(m->scan.networks[i].security,secs[i]);m->scan.networks[i].signal=88-(int)i*17;}m->audio.volume=64;m->audio.microphone_gain=70;m->audio.notification_volume=55;m->audio.startup_sound=1;m->audio.amplifier_on=1;m->audio.output_available=1;m->audio.noise_remaining_seconds=-1;strcpy(m->audio.noise_colour,"white");strcpy(m->audio.tts_voice,"southern-female");m->led.current=(struct le_led_profile){72,216,118,72,50};m->led.boot=m->led.current;m->led.listening=(struct le_led_profile){72,185,255,80,50};m->led.thinking=(struct le_led_profile){168,115,239,80,70};m->led.error=(struct le_led_profile){239,80,80,90,40};m->led.dnd=(struct le_led_profile){190,35,35,45,20};m->led.night=(struct le_led_profile){255,40,0,12,50};m->led.night_enabled=0;m->led.night_start_minute=22*60;m->led.night_end_minute=7*60;m->led.visualizer_enabled=1;strcpy(m->wake.wake_word,"LibreEcho");strcpy(m->wake.model_status,"ready");m->wake.enabled=1;m->wake.health_available=1;m->wake.model_loaded=1;m->wake.capture_active=1;m->wake.inference_active=1;m->wake.processed_frames=1;m->wake.sensitivity=68;m->wake.cooldown_ms=1500;m->wake.cpu_cost=8;m->wake.memory_cost_mb=34;m->bluetooth.available=1;m->bluetooth.classic=1;m->bluetooth.le=1;m->bluetooth.ssp=1;m->bluetooth.secure_connection=1;m->bluetooth.connectable=1;m->bluetooth.bondable=1;strcpy(m->bluetooth.state,"off");strcpy(m->bluetooth.transport,"mock");strcpy(m->bluetooth.hci,"none");strcpy(m->bluetooth.local_name,"Kitchen LibreEcho");strcpy(m->bluetooth.profile_state,"pairing-only");strcpy(m->bluetooth.profile_error,"No userspace Bluetooth profile service is registered");strcpy(m->playback.state,"playing");strcpy(m->playback.source,"airplay2");m->playback.media_active=1;m->playback.metadata_available=1;strcpy(m->playback.title,"Open Source Radio");strcpy(m->playback.artist,"LibreEcho");strcpy(m->playback.album,"Development Sessions");
+/* Portable idle/sleep lighting, the output stage and recovery status. The mock
+   tracks fields and the sleep timer deterministically; it never claims a live
+   hardware capability, so output.frame_load is a fixed model value and the
+   recovery PSK is a clearly synthetic mock string. */
+strcpy(m->net.mode,"client");
+strcpy(m->net.recovery.mode,"off");
+strcpy(m->net.recovery.trigger,"none");
+strcpy(m->net.recovery.ssid,"LibreEcho-Setup-MOCK");
+m->net.recovery.available=1;m->net.recovery.enabled=1;m->net.recovery.net_configured=1;
+m->net.recovery.auto_timeout_ms=120000;
+m->led.idle_mode=0;
+strcpy(m->led.sleep_light.mode,"off");
+m->led.sleep_light.period_ms=6000;
+m->led.output.effective_brightness=m->led.current.brightness;
+m->led.output.frame_load=200;m->led.output.max_load=1000;
+strcpy(m->led.music.grammar,"none");strcpy(m->led.music.effect,"none");
+strcpy(m->audio.noise_source,"white");strcpy(m->audio.noise_bed,"none");
+m->audio.noise_tempo=60;m->audio.noise_fade_seconds=30;}
 static void load_profile(struct mock_state*m,const char*p,unsigned cli_seed){char j[16384],*at;int v;size_t count=0;if(!p||config_read(p,j,sizeof(j))<0||!json_valid_object(j,strlen(j)))return;if(json_get_int(j,"temperature_c",&v)>0&&v>=0&&v<=120)m->temp_base=v;if(!cli_seed&&json_get_int(j,"seed",&v)>0)m->rng=(unsigned)v;at=j;while(count<LE_MAX_WIFI&&(at=strstr(at,"\"ssid\""))){char object[512],*end=strchr(at,'}');size_t n;if(!end)break;n=(size_t)(end-at+1);if(n>=sizeof(object)){at=end+1;continue;}memcpy(object,at,n);object[n]=0;if(json_get_string(object,"ssid",m->scan.networks[count].ssid,sizeof(m->scan.networks[count].ssid))>0){if(json_get_string(object,"security",m->scan.networks[count].security,sizeof(m->scan.networks[count].security))<1)strcpy(m->scan.networks[count].security,"wpa2");if(json_get_int(object,"signal",&v)<1)v=60;m->scan.networks[count].signal=v<0?0:v>100?100:v;count++;}at=end+1;}if(count)m->scan.count=count;}
 static void load(struct mock_state*m,const char*p){char j[16384],s[128];int v;if(!p||config_read(p,j,sizeof(j))<0||!json_valid_object(j,strlen(j)))return;if(json_get_string(j,"device_name",s,sizeof(s))>0)strcpy(m->device_name,s);if(json_get_string(j,"hostname",s,sizeof(s))>0)strcpy(m->net.hostname,s);if(json_get_int(j,"volume",&v)>0&&v>=0&&v<=100)m->audio.volume=v;if(json_get_int(j,"microphone_gain",&v)>0&&v>=0&&v<=100)m->audio.microphone_gain=v;if(json_get_bool(j,"microphone_muted",&v)>0)m->audio.muted=v;if(json_get_int(j,"led_r",&v)>0&&v>=0&&v<=255)m->led.current.r=(uint8_t)v;if(json_get_int(j,"led_g",&v)>0&&v>=0&&v<=255)m->led.current.g=(uint8_t)v;if(json_get_int(j,"led_b",&v)>0&&v>=0&&v<=255)m->led.current.b=(uint8_t)v;if(json_get_int(j,"led_brightness",&v)>0&&v>=0&&v<=100)m->led.current.brightness=v;if(json_get_bool(j,"led_visualizer_enabled",&v)>0)m->led.visualizer_enabled=v;if(json_get_string(j,"wake_word",s,sizeof(s))>0)strcpy(m->wake.wake_word,s);if(json_get_bool(j,"wake_enabled",&v)>0)m->wake.enabled=v;if(json_get_bool(j,"wake_model_loaded",&v)>0)m->wake.model_loaded=v;if(json_get_int(j,"wake_capture_age_ms",&v)>0&&v>=-1)m->wake.capture_age_ms=v;if(json_get_int(j,"wake_inference_age_ms",&v)>0&&v>=-1)m->wake.inference_age_ms=v;if(json_get_int(j,"wake_sensitivity",&v)>0&&v>=0&&v<=100)m->wake.sensitivity=v;if(json_get_int(j,"integrations",&v)>0&&v>=0)m->integrations_spotify=(v&32)!=0;}
 static int fail(struct mock_state*m,const char*op){if(!strcmp(m->fail_next,op)){m->fail_next[0]=0;return 1;}return 0;}
@@ -154,6 +172,86 @@ static int radio_playing_mock(struct le_backend*b,struct le_radio_status*o){(voi
  o->playing=mock_radio_playing_flag;snprintf(o->url,sizeof(o->url),"%s",mock_radio_url);
  if(mock_radio_playing_flag){snprintf(o->title,sizeof(o->title),"Simulated Artist - Simulated Track");
   snprintf(o->station,sizeof(o->station),"Simulated ICY station name");}
+ /* The mock has no Opus decoder, so a missing capability must read as false. */
+ o->opus=0;
+ return LE_OK;}
+static int noise_start_ex_mock(struct le_backend*b,const struct le_noise_request*r){
+ struct mock_state*m=M(b);
+ if(!r)return LE_INVALID;
+ if(r->source[0]&&strcmp(r->source,"white")&&strcmp(r->source,"pink")&&
+    strcmp(r->source,"brown")&&strcmp(r->source,"heartbeat"))return LE_INVALID;
+ if(r->bed[0]&&strcmp(r->bed,"none")&&strcmp(r->bed,"pink")&&
+    strcmp(r->bed,"brown"))return LE_INVALID;
+ if(r->level>=0&&(r->level<1||r->level>100))return LE_INVALID;
+ if(r->minutes>600)return LE_INVALID;
+ if(r->tempo>=0&&(r->tempo<40||r->tempo>100))return LE_INVALID;
+ if(r->fade_seconds>600)return LE_INVALID;
+ if(r->source[0])strcpy(m->audio.noise_source,r->source);
+ if(r->bed[0])strcpy(m->audio.noise_bed,r->bed);
+ if(r->tempo>=0)m->audio.noise_tempo=r->tempo;
+ if(r->fade_seconds>=0)m->audio.noise_fade_seconds=r->fade_seconds;
+ if(r->level>=0)m->audio.noise_level=r->level;
+ m->audio.noise_active=1;
+ /* noise_colour is only the legacy white/pink/brown alias; the additive
+    generator selection is carried by noise_source. A source such as
+    "heartbeat" is ten bytes and cannot be copied into the eight-byte alias
+    (that overflowed it and aborted the daemon), so map it onto the colour it
+    has always reported as: pink/brown keep their own alias, everything else
+    reads as white. The literals are copied, never the source, so the alias
+    can never be overrun. */
+ if(!strcmp(m->audio.noise_source,"pink"))strcpy(m->audio.noise_colour,"pink");
+ else if(!strcmp(m->audio.noise_source,"brown"))strcpy(m->audio.noise_colour,"brown");
+ else strcpy(m->audio.noise_colour,"white");
+ if(r->minutes>=0)
+  m->audio.noise_remaining_seconds=r->minutes?(long)r->minutes*60:-1;
+ return LE_OK;}
+static int led_idle_mode_mock(struct le_backend*b,const char*mode){
+ struct mock_state*m=M(b);
+ if(!mode||(strcmp(mode,"off")&&strcmp(mode,"indicator")&&strcmp(mode,"always")))
+  return LE_INVALID;
+ m->led.idle_mode=!strcmp(mode,"indicator")?1:!strcmp(mode,"always")?2:0;
+ return LE_OK;}
+static int led_sleep_mock(struct le_backend*b,const struct le_led_sleep_request*r){
+ struct mock_state*m=M(b);
+ if(!r||!r->mode[0])return LE_INVALID;
+ if(strcmp(r->mode,"off")&&strcmp(r->mode,"solid")&&strcmp(r->mode,"pulse"))
+  return LE_INVALID;
+ if(r->brightness>=0&&r->brightness>20)return LE_INVALID;
+ if(r->period_ms>=0&&(r->period_ms<3000||r->period_ms>15000))return LE_INVALID;
+ if(r->timer_minutes>=0&&r->timer_minutes>720)return LE_INVALID;
+ strcpy(m->led.sleep_light.mode,r->mode);
+ m->led.sleep_light.active=strcmp(r->mode,"off")!=0;
+ if(r->brightness>=0)m->led.sleep_light.brightness=r->brightness;
+ if(r->period_ms>=0)m->led.sleep_light.period_ms=r->period_ms;
+ if(r->timer_minutes>=0){
+  m->led.sleep_light.timer_minutes=r->timer_minutes;
+  m->led.sleep_light.remaining_ms=r->timer_minutes?(r->timer_minutes*60000):0;}
+ if(r->restore_on_boot>=0)m->led.sleep_light.restore_on_boot=r->restore_on_boot?1:0;
+ if(!m->led.sleep_light.active)m->led.sleep_light.remaining_ms=0;
+ return LE_OK;}
+static int recovery_configure_mock(struct le_backend*b,int enabled,int auto_enabled,int timeout_ms){
+ struct mock_state*m=M(b);
+ if(timeout_ms<30000||timeout_ms>600000)return LE_INVALID;
+ m->net.recovery.enabled=enabled?1:0;
+ m->net.recovery.auto_enabled=auto_enabled?1:0;
+ m->net.recovery.auto_timeout_ms=timeout_ms;
+ strcpy(m->net.recovery.mode,enabled?(auto_enabled?"armed":"client"):"off");
+ return LE_OK;}
+/* The reveal is refused whenever the mock models the captive AP as serving,
+   matching the core's client-connected-only rule. */
+static int recovery_prepare_mock(struct le_backend*b,char*out,size_t size){
+ struct mock_state*m=M(b);
+ if(!m->net.recovery.enabled)return LE_INVALID;
+ if(!strcmp(m->net.recovery.mode,"active"))return LE_INVALID;
+ m->net.recovery.secret_available=1;
+ if(out&&size)
+  snprintf(out,size,"{\"ssid\":\"%s\",\"psk\":\"%s\"}",m->net.recovery.ssid,
+           "MOCK-PSK-0000-0000-0000-0000-0000");
+ return LE_OK;}
+static int recovery_stop_mock(struct le_backend*b){
+ struct mock_state*m=M(b);
+ strcpy(m->net.recovery.mode,"off");
+ m->net.recovery.auto_pending=0;m->net.recovery.auto_countdown_ms=0;
  return LE_OK;}
 static int spotify_mock(struct le_backend*b,struct le_spotify_state*o){struct mock_state*m=M(b);memset(o,0,sizeof(*o));o->installed=1;o->enabled=(m->integrations_spotify!=0);strcpy(o->device_name,m->spotify_device_name);strcpy(o->status,o->enabled?"ready":"stopped");return LE_OK;}
 static int spotify_set_mock(struct le_backend*b,int e){struct mock_state*m=M(b);if(e!=0&&e!=1)return LE_INVALID;m->integrations_spotify=e;return LE_OK;}
@@ -169,5 +267,7 @@ static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,
  0,
  /* sound_sample: the mock has no speaker; preview reports unsupported. */
  0,
- timers_mock, timer_add_mock, timer_cancel_mock, timer_dismiss_mock};
+ timers_mock, timer_add_mock, timer_cancel_mock, timer_dismiss_mock,
+ noise_start_ex_mock, led_idle_mode_mock, led_sleep_mock,
+ recovery_configure_mock, recovery_prepare_mock, recovery_stop_mock};
 int le_mock_create(struct le_backend*b,const char*mock,const char*cfg,unsigned seed){struct mock_state*m=calloc(1,sizeof(*m));if(!m)return LE_IO;defaults(m,seed);load_profile(m,mock,seed);if(cfg){strncpy(m->config_path,cfg,sizeof(m->config_path)-1);load(m,cfg);}b->data=m;b->ops=&ops;return LE_OK;}

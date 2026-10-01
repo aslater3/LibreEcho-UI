@@ -381,24 +381,7 @@ function hardwareCard(d){
 async function devicePage(){const d=await api('/device');const light=await api('/light').catch(()=>null);content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${hardwareCard(d)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}</div>`,'wide')}${lightPanel(light)}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
 const NOISE_COLOURS=[['white','White'],['pink','Pink'],['brown','Brown']];
 const NOISE_TIMERS=[[0,'No timer'],[15,'15 minutes'],[30,'30 minutes'],[45,'45 minutes'],[60,'1 hour'],[90,'1.5 hours'],[120,'2 hours'],[480,'8 hours']];
-function noiseRemainingText(n){
- if(!n.active)return 'Not playing';
- const name=(NOISE_COLOURS.find(c=>c[0]===n.colour)||['','White'])[1];
- if(n.remaining_seconds<0)return `${name} noise at ${n.level}% — until stopped`;
- const m=Math.ceil(n.remaining_seconds/60);
- return `${name} noise at ${n.level}% — ${m} minute${m===1?'':'s'} left`;}
-function noisePanel(n){
- const colour=n.active?n.colour:'brown',level=n.active?n.level:40;
- return panel('Sleep sounds',
-  `<label class="field"><span>Sound</span><select id="noise-colour">${NOISE_COLOURS.map(([v,l])=>`<option value="${v}" ${v===colour?'selected':''}>${l}</option>`).join('')}</select></label>`+
-  range('Level',level,'noise-level')+
-  `<label class="field"><span>Sleep timer</span><select id="noise-minutes">${NOISE_TIMERS.map(([v,l])=>`<option value="${v}" ${v===30?'selected':''}>${l}</option>`).join('')}</select></label>`+
-  `<dl class="facts"><dt>Status</dt><dd class="${n.active?'connected':''}">${esc(noiseRemainingText(n))}</dd></dl>`+
-  `<p class="muted">Generated on the device, so it keeps playing with the internet down. The sleep timer stops it on its own.</p>`+
-  `<div class="button-row">${action(n.active?'Restart':'Start','noise-start','primary-btn')}${action('Stop','noise-stop')}</div>`);}
-function bindNoise(n){
- const stop=$('#noise-stop');if(stop){stop.disabled=!n.active;stop.onclick=()=>del('/audio/noise','Sleep sounds stopped')}
- const start=$('#noise-start');if(start)start.onclick=()=>post('/audio/noise',{colour:$('#noise-colour').value,level:Math.max(1,+$('#noise-level').value),minutes:+$('#noise-minutes').value},'Sleep sounds playing')}
+/* Nursery sounds live in the feature-batch block near the end of this file. */
 /*
  * The mute button's lamp is wired to the kernel's hardware privacy latch. An
  * image whose kernel also exposes the mute_lamp control lets software light it
@@ -808,7 +791,7 @@ function simDeviceRow(t){
   queue_to_first_audio_ms:t.first_pcm_ms};}
 async function simHistoryLoad(){
  try{
-  const h=await api('/assistant/history');
+  const h=await api('/assistant/latency');
   const turns=Array.isArray(h&&h.turns)?h.turns:[];
   const generation=Number(h&&h.history_generation);
   const previousGeneration=Number(localStorage.getItem(SIM_DEVICE_GENERATION_KEY)||0);
@@ -1242,11 +1225,13 @@ async function simulationPage(){
    </div>
    ${panel('History',`<div class="button-row"><span class="muted" id="sim-count-runs">0 of ${SIM_HISTORY_MAX}</span>`+
      action('Download JSON','sim-download')+action('Clear','sim-clear')+`</div><div id="sim-history"></div>`,'sim-history-panel')}
+   ${voiceHistoryPanel()}
    ${specSection()}`;
  const preset=$('#sim-preset'),text=$('#sim-text');
  preset.onchange=()=>{ if(preset.value!=='custom') text.value=SIM_PHRASES[+preset.value][1]; };
  text.oninput=()=>{ preset.value='custom'; };
  simRender();
+ bindVoiceHistory();
  $('#sim-download').onclick=()=>{
   const blob=new Blob([JSON.stringify({exported:new Date().toISOString(),
     device:location.host,max_utterance_ms:cap,runs:simHistory()},null,2)],
@@ -1394,7 +1379,7 @@ function bindActionSounds(){
 function actionSoundSelection(){
  return $$('#content input[data-sound]').filter(x=>x.checked).map(x=>x.dataset.sound).join(',');
 }
-async function ledPage(){const [l,b,a]=await Promise.all([api('/led'),api('/buttons'),api('/audio').catch(()=>({}))]);const hex='#'+[l.colour.r,l.colour.g,l.colour.b].map(n=>n.toString(16).padStart(2,'0')).join('');const names={listening:'Listening',thinking:'Thinking',error:'Error',dnd:'Do not disturb',night:'Night'};const n=l.night||{enabled:false,active:false,start_minute:1320,end_minute:420};const hhmm=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');const mins=t=>{const p=String(t||'').split(':');return p.length===2?(+p[0])*60+(+p[1]):NaN};const profiles=Object.entries(l.profiles||{}).map(([k,v])=>{const colour=typeof v==='string'?v:'#'+[v.r,v.g,v.b].map(n=>Number(n).toString(16).padStart(2,'0')).join('');const brightness=typeof v==='object'&&v?Number(v.brightness??l.brightness):l.brightness;return `<div class="led-profile"><label class="field"><span>${names[k]||k}</span><input id="led-profile-${k}" data-profile="${k}" type="color" value="${colour}"></label><div class="swatch-row"><code id="led-profile-hex-${k}">${esc(colour)}</code></div>${range('Brightness',brightness,`led-profile-brightness-${k}`)}<button class="secondary-btn profile-save" data-profile="${k}">Save ${names[k]||k}</button></div>`}).join('');content.innerHTML=`<div class="settings-grid">${panel('Light ring',`<label class="field"><span>Current colour</span><input id="led-colour" type="color" value="${hex}"></label>`+range('Brightness',l.brightness,'led-brightness')+toggle('Music visualizer',l.visualizer_enabled!==false,'led-visualizer')+`<p class="muted">Show reactive equalizer animations on the ring while music is playing.</p>`+ledRing(l)+`<div class="led-preview" data-led="${rgb(l.colour)}"><i></i><span>Live preview</span></div><div class="button-row">${saveButton('save-led')}${action('Run LED test','led-test')}</div>`)}${panel('State themes',`<p class="muted">Choose the ring colour and brightness used while LibreEcho is listening, thinking, reporting an error, or in do-not-disturb mode.</p><div class="led-profiles">${profiles}</div>`)}${panel('Night mode',`<p class="muted">Between these times the ring is capped to the night brightness. Colours are kept, so the device still shows what it is doing -- just dimly. Times are the device's local time.</p>${toggle('Enable night mode',n.enabled,'night-enabled')}<div class="settings-grid">${field('Starts','','night-start','time')}${field('Ends','','night-end','time')}</div><div class="status-line"><span class="status-dot ${n.active?'ok':''}"></span><span>${n.active?'Night mode is active now':'Not active right now'}</span></div>${saveButton('save-night')}`)}${panel('Buttons',select('Short press',b.short_press,'short-action',['Start listening','Play / pause','Run automation','Disabled'])+select('Long press',b.long_press,'long-action',['Open pairing mode','Toggle privacy mode','Reboot device'])+toggle('Hardware mute button present',b.hardware_mute,'hw-mute',true)+select('Action button',{sound:'Play a sound',listen:'Start listening',playpause:'Play / pause',disabled:'Do nothing'}[b.action||'sound'],'action-behaviour',['Play a sound','Start listening','Play / pause','Do nothing'])+range('Action flash brightness',b.action_brightness??70,'action-brightness')+range('Mute ring brightness',b.mute_brightness??60,'mute-brightness')+`<p class="muted">Only <strong>Play a sound</strong> is wired up so far; the others are placeholders and will say so in the log if chosen. The flash is on the light ring &mdash; the action button has no lamp of its own. ${muteLampHardwareNote(b)}</p>`+muteLampNote(a,b)+toggle('Press tones',b.tones!==false,'button-tones')+`<p class="muted">A short rising or falling pair when a button is pressed. The buttons are on top of the device where the ring cannot be seen, so the tone is how you know a press registered &mdash; rising for volume up and for leaving mute, falling for the opposite.</p>`+saveButton('save-buttons'),'wide')}${actionSoundPanel(b)}</div>`;bindRange();if($('#night-start')){$('#night-start').value=hhmm(n.start_minute);$('#night-end').value=hhmm(n.end_minute);bindDirty(['#night-enabled','#night-start','#night-end'],'#save-night');$('#save-night').onclick=()=>{const s2=mins($('#night-start').value),e2=mins($('#night-end').value);if(!Number.isFinite(s2)||!Number.isFinite(e2)){toast('Enter both times as HH:MM',true);return}mutate('/led/night',{enabled:$('#night-enabled').checked,start_minute:s2,end_minute:e2},'Night mode saved')}}
+async function ledPage(){const [l,b,a]=await Promise.all([api('/led'),api('/buttons'),api('/audio').catch(()=>({}))]);const hex='#'+[l.colour.r,l.colour.g,l.colour.b].map(n=>n.toString(16).padStart(2,'0')).join('');const names={listening:'Listening',thinking:'Thinking',error:'Error',dnd:'Do not disturb',night:'Night'};const n=l.night||{enabled:false,active:false,start_minute:1320,end_minute:420};const hhmm=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');const mins=t=>{const p=String(t||'').split(':');return p.length===2?(+p[0])*60+(+p[1]):NaN};const profiles=Object.entries(l.profiles||{}).map(([k,v])=>{const colour=typeof v==='string'?v:'#'+[v.r,v.g,v.b].map(n=>Number(n).toString(16).padStart(2,'0')).join('');const brightness=typeof v==='object'&&v?Number(v.brightness??l.brightness):l.brightness;return `<div class="led-profile"><label class="field"><span>${names[k]||k}</span><input id="led-profile-${k}" data-profile="${k}" type="color" value="${colour}"></label><div class="swatch-row"><code id="led-profile-hex-${k}">${esc(colour)}</code></div>${range('Brightness',brightness,`led-profile-brightness-${k}`)}<button class="secondary-btn profile-save" data-profile="${k}">Save ${names[k]||k}</button></div>`}).join('');content.innerHTML=`<div class="settings-grid">${panel('Light ring',`<label class="field"><span>Current colour</span><input id="led-colour" type="color" value="${hex}"></label>`+range('Brightness',l.brightness,'led-brightness')+toggle('Music visualizer',l.visualizer_enabled!==false,'led-visualizer')+`<p class="muted">Show reactive equalizer animations on the ring while music is playing.</p>`+ledRing(l)+`<div class="led-preview" data-led="${rgb(l.colour)}"><i></i><span>Live preview</span></div><div class="button-row">${saveButton('save-led')}${action('Run LED test','led-test')}</div>`)}${panel('State themes',`<p class="muted">Choose the ring colour and brightness used while LibreEcho is listening, thinking, reporting an error, or in do-not-disturb mode.</p><div class="led-profiles">${profiles}</div>`)}${panel('Night mode',`<p class="muted">Between these times the ring is capped to the night brightness. Colours are kept, so the device still shows what it is doing -- just dimly. Times are the device's local time.</p>${toggle('Enable night mode',n.enabled,'night-enabled')}<div class="settings-grid">${field('Starts','','night-start','time')}${field('Ends','','night-end','time')}</div><div class="status-line"><span class="status-dot ${n.active?'ok':''}"></span><span>${n.active?'Night mode is active now':'Not active right now'}</span></div>${saveButton('save-night')}`)}${panel('Buttons',select('Short press',b.short_press,'short-action',['Start listening','Play / pause','Run automation','Disabled'])+select('Long press',b.long_press,'long-action',['Open pairing mode','Toggle privacy mode','Reboot device'])+toggle('Hardware mute button present',b.hardware_mute,'hw-mute',true)+select('Action button',{sound:'Play a sound',listen:'Start listening',playpause:'Play / pause',disabled:'Do nothing'}[b.action||'sound'],'action-behaviour',['Play a sound','Start listening','Play / pause','Do nothing'])+range('Action flash brightness',b.action_brightness??70,'action-brightness')+range('Mute ring brightness',b.mute_brightness??60,'mute-brightness')+`<p class="muted">Only <strong>Play a sound</strong> is wired up so far; the others are placeholders and will say so in the log if chosen. The flash is on the light ring &mdash; the action button has no lamp of its own. ${muteLampHardwareNote(b)}</p>`+muteLampNote(a,b)+toggle('Press tones',b.tones!==false,'button-tones')+`<p class="muted">A short rising or falling pair when a button is pressed. The buttons are on top of the device where the ring cannot be seen, so the tone is how you know a press registered &mdash; rising for volume up and for leaving mute, falling for the opposite.</p>`+saveButton('save-buttons'),'wide')}${actionSoundPanel(b)}${ledBasePanels(l)}</div>`;bindRange();if($('#night-start')){$('#night-start').value=hhmm(n.start_minute);$('#night-end').value=hhmm(n.end_minute);bindDirty(['#night-enabled','#night-start','#night-end'],'#save-night');$('#save-night').onclick=()=>{const s2=mins($('#night-start').value),e2=mins($('#night-end').value);if(!Number.isFinite(s2)||!Number.isFinite(e2)){toast('Enter both times as HH:MM',true);return}mutate('/led/night',{enabled:$('#night-enabled').checked,start_minute:s2,end_minute:e2},'Night mode saved')}}
 bindActionSounds();bindDirty(['#led-colour','#led-brightness','#led-visualizer'],'#save-led');bindDirty(['#short-action','#long-action','#button-tones','#action-behaviour','#action-brightness','#mute-brightness'],'#save-buttons');$('#save-led').onclick=()=>{const h=$('#led-colour').value;mutate('/led',{r:parseInt(h.slice(1,3),16),g:parseInt(h.slice(3,5),16),b:parseInt(h.slice(5,7),16),brightness:+$('#led-brightness').value,visualizer_enabled:$('#led-visualizer').checked},'LED changes saved')};$$('input[type=color][data-profile]').forEach(i=>{const out=$('#led-profile-hex-'+i.dataset.profile);if(out)i.oninput=()=>{out.textContent=i.value}});
 $$('.profile-save').forEach(button=>button.onclick=()=>{const k=button.dataset.profile;const h=$(`#led-profile-${k}`).value;const brightnessInput=$(`#led-profile-brightness-${k}`);mutate('/led/profile',{name:k,r:parseInt(h.slice(1,3),16),g:parseInt(h.slice(3,5),16),b:parseInt(h.slice(5,7),16),brightness:+brightnessInput.value},`${names[k]||k} theme saved`)});$('#save-buttons').onclick=()=>mutate('/buttons',{short_press:$('#short-action').value,long_press:$('#long-action').value,tones:$('#button-tones').checked,action:{'Play a sound':'sound','Start listening':'listen','Play / pause':'playpause','Do nothing':'disabled'}[$('#action-behaviour').value]||'sound',action_sounds:actionSoundSelection(),action_brightness:parseInt($('#action-brightness').value,10),mute_brightness:parseInt($('#mute-brightness').value,10)},'Button changes saved');/* The ring test paints at the ring's own brightness, so with brightness at 0
      it runs invisibly and still reports success -- which reads as a dead
@@ -1408,7 +1393,7 @@ $$('.profile-save').forEach(button=>button.onclick=()=>{const k=button.dataset.p
      testBtn.title='Ring brightness is 0%. The test would run with the ring dark \u2014 raise the brightness, save, then try again.';
     }else testBtn.title='Cycle the ring through red, green, blue and white';
    }}
-  $('#led-test').onclick=()=>post('/led/test',{},'LED test started');state.timer=setTimeout(refreshLed,1000)}
+  $('#led-test').onclick=()=>post('/led/test',{},'LED test started');bindLedBase();state.timer=setTimeout(refreshLed,1000)}
 /* Board address beside the one in use, with the override that decides it.
    They differ when the driver has generated an address instead of taking the
    board's, which is worth being able to see rather than guess at. */
@@ -1420,7 +1405,7 @@ function macRow(label,id,live,factory,configured){
 }
 function networkWifiDetails(network){return [network.band,network.frequency_mhz?`${network.frequency_mhz} MHz`:'',network.channel?`channel ${network.channel}`:'',Number.isFinite(Number(network.rssi_dbm))&&Number(network.rssi_dbm)!==0?`${network.rssi_dbm} dBm`:'',`${Number(network.signal)||0}%`].filter(Boolean).join(' · ')}
 function networkWifiCard(network){const security=String(network.security||'unknown'),wpa3Only=security==='wpa3-only',capabilities=String(network.capabilities||'unknown'),fallback=!wpa3Only&&network.wpa2_attempt&&security==='wpa3-transition'?`<button class="secondary-btn wifi-wpa2" data-ssid="${esc(network.ssid)}" type="button">Try WPA2</button>`:'';return `<div class="wifi-network-card"><button class="wifi-network" data-ssid="${esc(network.ssid)}" data-security="${esc(security)}"><span><strong>${esc(network.ssid)}</strong><small>${esc(security)} · ${esc(capabilities)}</small><small>${esc(networkWifiDetails(network))}</small></span><span>${Number(network.signal)||0}%</span></button>${fallback}</div>`}
-async function networkPage(){const n=await api('/network'),lanEffective=n.api_lan_effective??n.api_lan,lanForced=!!n.api_lan_forced,healthy=n.connectivity==='healthy',healthDetail=n.recovery_stage&&n.recovery_stage!=='none'?`Recovery: ${n.recovery_stage}`:`Gateway: ${n.gateway_reachable===true?'reachable':n.gateway_reachable===false?'unreachable':'not yet verified'}`;content.innerHTML=`<div class="settings-grid">${panel('Wireless network',`<div class="status-line"><span class="status-dot ${healthy?'ok':''}"></span><div><strong>${esc(n.state)} · ${esc(n.connectivity||'unknown')}</strong><small>${esc(n.ssid||'No network')} · ${esc(healthDetail)}</small></div><span>${n.signal||0}%</span></div><div id="wifi-results" class="wifi-results"><p class="muted">Scan to discover nearby networks.</p></div><div class="button-row">${action('Scan Wi-Fi','wifi-scan','primary-btn')}${action('Disconnect','wifi-disconnect')}</div>`)}${panel('Addressing',field('Hostname',n.hostname,'net-hostname')+toggle('Use DHCP',n.dhcp,'dhcp',true)+`<dl class="facts"><dt>IP address</dt><dd>${esc(n.ip||'—')}</dd><dt>Gateway</dt><dd>${esc(n.gateway||'—')}</dd><dt>DNS</dt><dd>${esc(n.dns||'—')}</dd><dt>Internet</dt><dd class="${n.internet?'connected':''}">${n.internet?'Reachable':'Unavailable'}</dd></dl>`+saveButton('save-network'))}${panel('Wi-Fi address',macRow('Wi-Fi','wifi',n.wifi_mac,n.wifi_mac_factory,n.wifi_mac_configured)+`<p class="muted">Leave a field empty to use the address built into the board. A change is written now and applied on the next restart &mdash; changing the address of a connected interface would drop the connection making the change.</p>`+'')}${panel('Local access',toggle('LAN API access',lanEffective,'api-lan',lanForced)+toggle('SSH',n.ssh,'ssh')+`<p class="muted">${lanForced?'LAN API access is forced by the development image binding. Authentication is intentionally disabled for this development build.':'Enabling LAN access exposes the API beyond loopback. Configure authentication before using this on an untrusted network.'}</p>`+saveButton('save-access'),'wide')}</div>`;bindDirty(['#net-hostname'],'#save-network');bindDirty(['#api-lan','#ssh'],'#save-access');$('#save-network').onclick=()=>mutate('/network',{hostname:$('#net-hostname').value},'Network changes saved');$('#save-access').onclick=()=>mutate('/network',{api_lan:$('#api-lan').checked,ssh:$('#ssh').checked},'Local access changes saved');$('#wifi-scan').onclick=async()=>{const box=$('#wifi-results');box.innerHTML='<p class="muted">Scanning…</p>';try{const s=await api('/network/wifi/scan');box.innerHTML=s.networks.length?s.networks.map(networkWifiCard).join(''):'<p class="muted">No networks found.</p>';$$('.wifi-network').forEach(b=>b.onclick=()=>{if(b.dataset.security==='open'||b.dataset.security==='wpa2')connectWifi(b.dataset.ssid,b.dataset.security)});$$('.wifi-wpa2').forEach(b=>b.onclick=()=>connectWifi(b.dataset.ssid,'wpa2'))}catch(e){box.innerHTML=unsupported(e.message)}};$('#wifi-disconnect').onclick=()=>post('/network/wifi/disconnect',{},'Wi-Fi disconnected');if($('#clear-wifi-mac'))$('#clear-wifi-mac').onclick=()=>mutate('/network',{wifi_mac:''},'Saved Wi-Fi override cleared')}
+async function networkPage(){const n=await api('/network'),lanEffective=n.api_lan_effective??n.api_lan,lanForced=!!n.api_lan_forced,healthy=n.connectivity==='healthy',healthDetail=n.recovery_stage&&n.recovery_stage!=='none'?`Recovery: ${n.recovery_stage}`:`Gateway: ${n.gateway_reachable===true?'reachable':n.gateway_reachable===false?'unreachable':'not yet verified'}`;content.innerHTML=`<div class="settings-grid">${panel('Wireless network',`<div class="status-line"><span class="status-dot ${healthy?'ok':''}"></span><div><strong>${esc(n.state)} · ${esc(n.connectivity||'unknown')}</strong><small>${esc(n.ssid||'No network')} · ${esc(healthDetail)}</small></div><span>${n.signal||0}%</span></div><div id="wifi-results" class="wifi-results"><p class="muted">Scan to discover nearby networks.</p></div><div class="button-row">${action('Scan Wi-Fi','wifi-scan','primary-btn')}${action('Disconnect','wifi-disconnect')}</div>`)}${panel('Addressing',field('Hostname',n.hostname,'net-hostname')+toggle('Use DHCP',n.dhcp,'dhcp',true)+`<dl class="facts"><dt>IP address</dt><dd>${esc(n.ip||'—')}</dd><dt>Gateway</dt><dd>${esc(n.gateway||'—')}</dd><dt>DNS</dt><dd>${esc(n.dns||'—')}</dd><dt>Internet</dt><dd class="${n.internet?'connected':''}">${n.internet?'Reachable':'Unavailable'}</dd></dl>`+saveButton('save-network'))}${panel('Wi-Fi address',macRow('Wi-Fi','wifi',n.wifi_mac,n.wifi_mac_factory,n.wifi_mac_configured)+`<p class="muted">Leave a field empty to use the address built into the board. A change is written now and applied on the next restart &mdash; changing the address of a connected interface would drop the connection making the change.</p>`+'')}${panel('Local access',toggle('LAN API access',lanEffective,'api-lan',lanForced)+toggle('SSH',n.ssh,'ssh')+`<p class="muted">${lanForced?'LAN API access is forced by the development image binding. Authentication is intentionally disabled for this development build.':'Enabling LAN access exposes the API beyond loopback. Configure authentication before using this on an untrusted network.'}</p>`+saveButton('save-access'),'wide')}${recoveryPanel(n)}</div>`;bindDirty(['#net-hostname'],'#save-network');bindDirty(['#api-lan','#ssh'],'#save-access');$('#save-network').onclick=()=>mutate('/network',{hostname:$('#net-hostname').value},'Network changes saved');$('#save-access').onclick=()=>mutate('/network',{api_lan:$('#api-lan').checked,ssh:$('#ssh').checked},'Local access changes saved');$('#wifi-scan').onclick=async()=>{const box=$('#wifi-results');box.innerHTML='<p class="muted">Scanning…</p>';try{const s=await api('/network/wifi/scan');box.innerHTML=s.networks.length?s.networks.map(networkWifiCard).join(''):'<p class="muted">No networks found.</p>';$$('.wifi-network').forEach(b=>b.onclick=()=>{if(b.dataset.security==='open'||b.dataset.security==='wpa2')connectWifi(b.dataset.ssid,b.dataset.security)});$$('.wifi-wpa2').forEach(b=>b.onclick=()=>connectWifi(b.dataset.ssid,'wpa2'))}catch(e){box.innerHTML=unsupported(e.message)}};$('#wifi-disconnect').onclick=()=>post('/network/wifi/disconnect',{},'Wi-Fi disconnected');if($('#clear-wifi-mac'))$('#clear-wifi-mac').onclick=()=>mutate('/network',{wifi_mac:''},'Saved Wi-Fi override cleared');bindRecovery()}
 async function connectWifi(ssid,security){let password='';if(security!=='open'){password=prompt(`Password for ${ssid}`)||'';if(!password)return}await post('/network/wifi/connect',{ssid,password,security},`Connecting to ${ssid}`)}
 async function privacyPage(){const p=await api('/privacy');content.innerHTML=`<div class="settings-grid">${panel('Processing',toggle('Local speech recognition only',p.local_only,'local-only')+toggle('Retain microphone audio',p.audio_retention!=='none','audio-retention')+toggle('Diagnostic telemetry',p.diagnostic_telemetry,'telemetry')+toggle('Crash reports',p.crash_reports,'crash-reports')+saveButton('save-privacy'))}${panel('Retention',select('Log retention',String(p.log_retention_hours)+' hours','retention',['24 hours','168 hours','720 hours'])+`<div class="privacy-callout">No cloud dependency is enabled by default.</div><div class="button-row">${saveButton('save-retention')}${action('Reset privacy settings','privacy-reset','danger-btn')}</div>`)}</div>`;bindDirty(['#local-only','#audio-retention','#telemetry','#crash-reports'],'#save-privacy');bindDirty(['#retention'],'#save-retention');$('#save-privacy').onclick=()=>mutate('/privacy',{local_only:$('#local-only').checked,audio_retention:$('#audio-retention').checked?'24h':'none',diagnostic_telemetry:$('#telemetry').checked,crash_reports:$('#crash-reports').checked},'Privacy changes saved');$('#save-retention').onclick=()=>mutate('/privacy',{log_retention_hours:parseInt($('#retention').value,10)},'Retention changes saved');$('#privacy-reset').onclick=()=>confirm('Reset privacy settings?')&&toast('Privacy defaults restored')}
 function assistantCard(a){if(a.unsupported)return `<section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${collapsiblePanel('Local LLM',unsupported(a.unsupported),'assistant-provider')}${collapsiblePanel('ChatGPT',unsupported(a.unsupported),'assistant-provider')}</section>`;
@@ -1988,6 +1973,7 @@ async function systemPage(){
    parts.forEach((seg,i)=>crumbs.push(`<span class="usb-sep">/</span><button class="link-btn usb-crumb" data-rel="${esc(parts.slice(0,i+1).join('/'))}">${esc(seg)}</button>`));
    /* radiod decodes Layer III only, so a Play button appears for .mp3 and
       anything else audio-looking says why rather than failing silently. */
+   const formats=Array.isArray(d.playable_formats)?d.playable_formats.map(v=>String(v).toLowerCase()):['mp3'];const canMp3=formats.includes('mp3'),canOpus=formats.includes('opus');
    const AUDIO=/\.(mp3|aac|m4a|flac|wav|ogg|opus|wma)$/i;
    const rows=(d.entries||[]).slice().sort((a,b)=>(b.directory-a.directory)||a.name.localeCompare(b.name)).map(e=>{
     const sz=e.directory?'':bytes(e.size_bytes);
@@ -1996,8 +1982,9 @@ async function systemPage(){
       ? `<button class="link-btn usb-open" data-rel="${esc(rel)}">${esc(e.name)}/</button>`
       : esc(e.name);
     let act='';
-    if(!e.directory&&/\.mp3$/i.test(e.name))act=`<button class="secondary-btn usb-play" data-rel="${esc(rel)}">Play</button>`;
-    else if(!e.directory&&AUDIO.test(e.name))act=`<span class="muted" title="This image decodes MP3 only">not playable</span>`;
+    const playable=!e.directory&&(/\.mp3$/i.test(e.name)?canMp3:/\.opus$/i.test(e.name)?canOpus:false);
+    if(playable)act=`<button class="secondary-btn usb-play" data-rel="${esc(rel)}">Play</button>`;
+    else if(!e.directory&&AUDIO.test(e.name)){const why=/\.opus$/i.test(e.name)?'Opus decode is not available on this image':'This image decodes '+(canOpus?'MP3 and Opus':'MP3')+' only';act=`<span class="muted" title="${why}">not playable</span>`}
     return `<tr><td>${nm}</td><td class="num">${sz}</td><td class="usb-act">${act}</td></tr>`}).join('');
    /* Keep the open/closed state across re-renders: browsing into a folder
       re-renders, and a panel that snapped shut each time would be unusable. */
@@ -2010,7 +1997,7 @@ async function systemPage(){
     `<dl class="facts"><dt>Device</dt><dd>${esc(d.device||'')} · ${esc(d.partition||'')} · ${esc(d.filesystem||'')}</dd>`+
     `<dt>Capacity</dt><dd>${bytes(total)} total · ${bytes(used)} used · ${bytes(d.free_bytes)} free</dd></dl>`+
     `<div class="usb-bar"><span style="width:${pct}%"></span></div>`+
-    `<p class="muted">Playable format: <strong>MP3</strong>. Other audio files are listed but cannot be decoded on this image yet.</p>`+
+    `<p class="muted">Playable formats: <strong>${formats.map(f=>esc(f.toUpperCase())).join(', ')||'none'}</strong>. ${canOpus?'This image advertises an Opus decoder, so .opus files can be played; other audio files are listed but cannot be decoded yet.':(canMp3?'Other audio files are listed but cannot be decoded on this image yet.':'No decoder is available on this image; audio files are listed but cannot be played.')}</p>`+
     `<div class="usb-path">${crumbs.join('')}</div>`+
     (rows?`<table class="usb-list"><thead><tr><th>Name</th><th class="num">Size</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
          :'<p class="muted">This folder is empty.</p>')+
@@ -2138,5 +2125,212 @@ function redirectToLogin(){clearSession();if(location.pathname!=='/login')locati
 async function ensureAuth(c){state.authMode=c.authentication;updateAuthControl();if(c.authentication!=='users'&&c.authentication!=='bearer-token'){return}if(!state.token){redirectToLogin();throw new Error('Sign in is required')}try{const current=await api('/auth');state.username=current.username||state.username||'token';sessionStorage.setItem('libreecho-username',state.username);updateAuthControl()}catch(_){redirectToLogin();throw new Error('Your session is no longer valid')}}
 async function signOut(){if(!state.token){redirectToLogin();return}try{await api('/auth/logout',{method:'POST',body:'{}'})}catch(_){/* The local session is cleared even if the server is unreachable. */}finally{redirectToLogin()}}
 $('#auth-control').onclick=()=>state.token?signOut():redirectToLogin();
+/* =========================================================================
+ * 0.14 feature batch: LED idle/sleep, nursery sounds, USB Opus, recent voice,
+ * network recovery. Every dynamic value is rendered through esc(); the
+ * asynchronous history collection/detail/clear requests are generation-scoped
+ * so a stale response can never overwrite a newer page.
+ * ========================================================================= */
+const IDLE_MODES=[['off','Off'],['indicator','Indicator only'],['always','Always on']];
+const SLEEP_MODES=[['off','Off'],['solid','Solid dim'],['pulse','Slow pulse']];
+const NOISE_SOURCES=[['white','White noise'],['pink','Pink noise'],['brown','Brown noise'],['heartbeat','Heartbeat']];
+const NOISE_BEDS=[['none','None'],['pink','Pink bed'],['brown','Brown bed']];
+const SLEEP_PERIODS=[[3000,'3 s'],[5000,'5 s'],[8000,'8 s'],[12000,'12 s'],[15000,'15 s']];
+const SLEEP_TIMERS=[[0,'No timer'],[15,'15 min'],[30,'30 min'],[60,'1 hour'],[120,'2 hours'],[480,'8 hours'],[720,'12 hours']];
+function opt(value,label,current){return `<option value="${esc(value)}" ${String(value)===String(current)?'selected':''}>${esc(label)}</option>`}
+function sleepLightHtml(sl){
+ const s=sl||{},mode=s.mode||'off';
+ const activeLine=s.active?(Number(s.remaining_ms)>0?`Active · ${Math.ceil(Number(s.remaining_ms)/60000)} minute(s) left`:'Active'):'Not active';
+ return panel('Sleep light',
+  `<p class="muted">A very dim light while you sleep. The brightness ceiling is deliberately low so it never lights the room. This drives the light ring only — the master volume is untouched.</p>`+
+  `<label class="field"><span>Sleep light</span><select id="led-sleep-mode">${SLEEP_MODES.map(([v,l])=>opt(v,l,mode)).join('')}</select></label>`+
+  `<label class="field range-field"><span>Brightness: <output>${Number(s.brightness??6)}%</output></span><input id="led-sleep-brightness" type="range" min="0" max="20" value="${Number(s.brightness??6)}"></label>`+
+  `<label class="field"><span>Pulse period</span><select id="led-sleep-period">${SLEEP_PERIODS.map(([v,l])=>opt(v,l,s.period_ms??6000)).join('')}</select></label>`+
+  `<label class="field"><span>Sleep timer</span><select id="led-sleep-timer">${SLEEP_TIMERS.map(([v,l])=>opt(v,l,s.timer_minutes??0)).join('')}</select></label>`+
+  toggle('Restore sleep light after a restart',!!s.restore_on_boot,'led-sleep-restore')+
+  `<dl class="facts"><dt>Status</dt><dd class="${s.active?'connected':''}">${esc(activeLine)}</dd></dl>`+
+  saveButton('save-led-sleep'),'wide');
+}
+function outputDiagHtml(o){
+ o=o||{};
+ const pct=Number(o.max_load)>0?Math.round(Number(o.frame_load||0)/Number(o.max_load)*100):null;
+ return panel('Output limiting',
+  `<p class="muted">The ring spends a bounded amount of power on each animation frame. When a scene would exceed that budget the output is limited rather than driving the ring harder.</p>`+
+  `<dl class="facts"><dt>Effective brightness</dt><dd>${Number(o.effective_brightness??0)}%</dd>`+
+  `<dt>Frame load</dt><dd>${Number(o.frame_load??0)}${pct===null?'':' of '+Number(o.max_load)+' ('+pct+'%)'}</dd>`+
+  `<dt>Frame limited</dt><dd class="${o.limited?'warn':''}">${o.limited?'Yes — output reduced to fit the budget':'No'}</dd>`+
+  `<dt>Slew limited</dt><dd class="${o.slew_limited?'warn':''}">${o.slew_limited?'Yes — bright transitions are ramped':'No'}</dd></dl>`);
+}
+function musicDiagHtml(m){
+ m=m||{};
+ return panel('Music visualiser',
+  `<dl class="facts"><dt>Scene active</dt><dd class="${m.active?'connected':''}">${m.active?'Yes':'No'}</dd>`+
+  `<dt>Grammar</dt><dd>${esc(m.grammar||'none')}</dd>`+
+  `<dt>Effect</dt><dd>${esc(m.effect||'none')}</dd>`+
+  `<dt>Producer session</dt><dd>${Number(m.session??0)}</dd></dl>`);
+}
+function ledBasePanels(l){
+ const idle=l.idle_mode||'off';
+ return panel('Idle behaviour',
+  `<label class="field"><span>When the ring is idle</span><select id="led-idle-mode">${IDLE_MODES.map(([v,lab])=>opt(v,lab,idle)).join('')}</select></label>`+
+  `<p class="muted">Off is fully dark. Indicator shows one dim pixel so the device can be found in the dark. Always on keeps the ring dimly lit.</p>`+
+  saveButton('save-led-idle'))+
+  sleepLightHtml(l.sleep_light)+
+  outputDiagHtml(l.output)+
+  musicDiagHtml(l.music);
+}
+function bindLedBase(){
+ const idle=$('#save-led-idle');
+ if(idle){bindDirty(['#led-idle-mode'],'#save-led-idle');idle.onclick=()=>mutate('/led/idle',{mode:$('#led-idle-mode').value},'Idle behaviour saved')}
+ const sleep=$('#save-led-sleep');
+ if(sleep){bindDirty(['#led-sleep-mode','#led-sleep-brightness','#led-sleep-period','#led-sleep-timer','#led-sleep-restore'],'#save-led-sleep');sleep.onclick=()=>{
+  const brightness=Number($('#led-sleep-brightness').value);
+  if(!Number.isFinite(brightness)||brightness<0||brightness>20){toast('Sleep brightness must be between 0 and 20',true);return}
+  return mutate('/led/sleep',{mode:$('#led-sleep-mode').value,brightness,period_ms:Number($('#led-sleep-period').value),timer_minutes:Number($('#led-sleep-timer').value),restore_on_boot:$('#led-sleep-restore').checked},'Sleep light saved');
+ }}
+ bindRange();
+}
+/* Nursery sounds. Played through the normal audio output at the master volume,
+   which this control never changes: the sleep level is a separate sound-effect
+   level, not a volume setting. */
+function noiseSourceOf(n){const s=(n&&(n.source||n.colour))||'white';return NOISE_SOURCES.some(x=>x[0]===s)?s:'white'}
+function noiseRemainingText(n){
+ if(!n.active)return 'Not playing';
+ const src=(NOISE_SOURCES.find(c=>c[0]===noiseSourceOf(n))||['','White noise'])[1];
+ const bed=n.bed&&n.bed!=='none'?` over a ${n.bed} bed`:'';
+ if(n.remaining_seconds<0)return `${src} at ${n.level}%${bed} — until stopped`;
+ const m=Math.ceil(n.remaining_seconds/60);
+ return `${src} at ${n.level}%${bed} — ${m} minute${m===1?'':'s'} left`;
+}
+function noisePanel(n){
+ n=n||{};
+ const source=noiseSourceOf(n),level=n.active?n.level:40,bed=n.bed||'none',tempo=Number(n.tempo??60),fade=Number(n.fade_seconds??0);
+ return panel('Nursery sounds',
+  `<p class="muted">Played through the normal audio output at the master volume — the sleep-sound level never changes your volume setting. This is a settling sound effect, not a medical device.</p>`+
+  `<label class="field"><span>Sound</span><select id="noise-colour">${NOISE_SOURCES.map(([v,l])=>opt(v,l,source)).join('')}</select></label>`+
+  `<label class="field"><span>Bed</span><select id="noise-bed">${NOISE_BEDS.map(([v,l])=>opt(v,l,bed)).join('')}</select></label>`+
+  `<label class="field"><span>Heartbeat tempo (40&ndash;100 bpm)</span><input id="noise-tempo" type="number" min="40" max="100" value="${tempo}"></label>`+
+  range('Level',level,'noise-level')+
+  `<label class="field"><span>Fade out (seconds, up to the timer)</span><input id="noise-fade" type="number" min="0" max="600" value="${fade}"></label>`+
+  `<label class="field"><span>Sleep timer</span><select id="noise-minutes">${NOISE_TIMERS.map(([v,l])=>opt(v,l,30)).join('')}</select></label>`+
+  `<dl class="facts"><dt>Status</dt><dd class="${n.active?'connected':''}">${esc(noiseRemainingText(n))}</dd></dl>`+
+  `<div class="button-row">${action(n.active?'Restart':'Start','noise-start','primary-btn')}${action('Stop','noise-stop')}</div>`);
+}
+function bindNoise(n){
+ const stop=$('#noise-stop');if(stop){stop.disabled=!n.active;stop.onclick=()=>del('/audio/noise','Nursery sounds stopped')}
+ const start=$('#noise-start');if(start)start.onclick=()=>{
+  const source=$('#noise-colour').value,minutes=Number($('#noise-minutes').value),tempo=Number($('#noise-tempo').value),fade=Number($('#noise-fade').value);
+  if(!Number.isFinite(tempo)||tempo<40||tempo>100){toast('Tempo must be between 40 and 100 bpm',true);return}
+  if(!Number.isFinite(fade)||fade<0||fade>600){toast('Fade must be between 0 and 600 seconds',true);return}
+  if(minutes>0&&fade>minutes*60){toast('The fade cannot be longer than the sleep timer',true);return}
+  return post('/audio/noise',{colour:source,source,bed:$('#noise-bed').value,level:Math.max(1,+$('#noise-level').value),minutes,tempo,fade_seconds:fade},'Nursery sounds playing');
+ };
+}
+/* Network recovery access point (issue #96). Automatic fallback is opt-in and
+   off by default. The recovery password is only ever rendered after the owner
+   explicitly asks for it, and is never written to localStorage, sessionStorage
+   or the log. */
+const RECOVERY_PHASES={client:'Client Wi-Fi',armed:'Armed — waiting for Wi-Fi to fail',starting:'Starting recovery access point', 'recovery-ap':'Recovery access point is active',handover:'Handover — rejoining your Wi-Fi',unavailable:'Recovery unavailable',stopping:'Stopping recovery access point',stopped:'Recovery access point stopped'};
+function recoveryPanel(n){
+ const r=n&&n.recovery;
+ if(!r)return '';
+ const mode=String(r.mode||'unavailable'),reason=r.error||r.reason||'';
+ /* The dot means "the recovery access point is serving right now". Only the
+    networkd mode recovery-ap is that state: client, armed, stopping, stopped
+    and unavailable are not serving, and handover has already released the AP
+    while the station reassociates, so it gets its own label instead of an
+    active dot. */
+ const active=mode==='recovery-ap';
+ const phase=RECOVERY_PHASES[mode]||mode;
+ const autoInfo=r.auto_pending?` · switching in ${Math.ceil(Number(r.auto_countdown_ms||0)/1000)} s`:'';
+ const secret=r.secret_available?'A recovery password has already been prepared on the device.':'No recovery password has been prepared yet. Prepare one now so you have it before connectivity fails.';
+ const timeout=Math.min(600,Math.max(30,Math.round(Number(r.auto_timeout_ms||120000)/1000)));
+ return panel('Recovery access point',
+  `<div class="status-line" data-recovery-mode="${esc(mode)}"><span class="status-dot ${active?'ok':'warn'}"></span><div><strong>${esc(phase)}</strong><small>${esc(reason||r.trigger||'—')}${esc(autoInfo)}</small></div></div>`+
+  `<dl class="facts"><dt>Recovery SSID</dt><dd>${esc(r.ssid||'—')}</dd><dt>Automatic fallback</dt><dd>${r.auto_enabled?'On (opt-in)':'Off'}</dd><dt>Recovery enabled</dt><dd class="${r.enabled?'connected':''}">${r.enabled?'Yes':'No'}</dd></dl>`+
+  `<p class="muted">If LibreEcho cannot reach Wi-Fi, a recovery access point lets you reconnect from a phone and set the network up again. Automatic fallback is opt-in and off by default. While the recovery access point is up your phone leaves your home Wi-Fi and joins the recovery network; when LibreEcho tries to switch to your Wi-Fi your phone briefly disconnects — if the handover fails, reconnect to the same recovery network and try again.</p>`+
+  toggle('Allow recovery access point',!!r.enabled,'recovery-enabled')+
+  toggle('Arm automatic fallback when Wi-Fi fails (opt-in)',!!r.auto_enabled,'recovery-auto')+
+  `<label class="field"><span>Automatic fallback timeout (seconds)</span><input id="recovery-timeout" type="number" min="30" max="600" value="${timeout}"></label>`+
+  `<div class="button-row">${saveButton('save-recovery')}${action('Prepare recovery password','recovery-prepare')}${action('Stop recovery access point','recovery-stop','danger-btn')}</div>`+
+  `<div id="recovery-secret" hidden></div>`+
+  `<p class="muted">${esc(secret)}</p>`);
+}
+function bindRecovery(){
+ const save=$('#save-recovery');
+ if(save){bindDirty(['#recovery-enabled','#recovery-auto','#recovery-timeout'],'#save-recovery');save.onclick=()=>{
+  const timeout=Number($('#recovery-timeout').value);
+  if(!Number.isFinite(timeout)||timeout<30||timeout>600){toast('Timeout must be between 30 and 600 seconds',true);return}
+  return mutate('/network/recovery',{enabled:$('#recovery-enabled').checked,auto_enabled:$('#recovery-auto').checked,timeout_seconds:timeout},'Recovery settings saved');
+ }}
+ const prep=$('#recovery-prepare');
+ if(prep)prep.onclick=async()=>{
+  const box=$('#recovery-secret');if(!box)return;
+  box.hidden=false;box.innerHTML='<p class="muted">Preparing…</p>';
+  try{
+   const s=await api('/network/recovery/prepare',{method:'POST',body:'{}'});
+   /* Rendered once, only after the owner explicitly asked. Kept in this DOM
+      until the page is left — never persisted in the browser or logged. */
+   box.innerHTML=`<div class="notice unsupported"><strong>Save this now — it is shown only once</strong><span>Recovery network: ${esc(s.ssid||'—')}</span><code class="recovery-psk">${esc(s.psk||'')}</code><span>Write it down or store it somewhere safe before connectivity fails. The control centre does not keep this password and it is never written to logs.</span></div>`;
+  }catch(e){box.innerHTML=`<p class="error-text">${esc(e.message)}</p>`}
+ };
+ const stop=$('#recovery-stop');
+ if(stop)stop.onclick=()=>post('/network/recovery/stop',{},'Recovery access point stopped');
+}
+/* Recent voice: a short, private, newest-first ring kept on the device. The
+   transcript and reply are fetched only when a turn is opened, and every
+   collection/detail/clear request is generation-scoped so a late response can
+   never overwrite a newer page or a cleared list. */
+const VOICE_HISTORY_MAX=10;
+let voiceHistorySeq=0;
+function voiceTurnTime(t){const v=Number(t.at_ms??t.at);return Number.isFinite(v)&&v>0?new Date(v).toLocaleTimeString():'—'}
+function voiceTurnPreview(t){return String(t.preview||t.transcript_preview||'').slice(0,80)}
+function voiceTurnStatus(t){return String(t.status||'complete')}
+function voiceHistoryRows(turns){
+ const list=Array.isArray(turns)?turns.slice():[];
+ list.sort((a,b)=>Number(b.at_ms??b.at??0)-Number(a.at_ms??a.at??0));
+ return list.slice(0,VOICE_HISTORY_MAX);
+}
+function voiceHistoryPanel(){
+ return panel('Recent voice',
+  `<p class="muted">Newest first. This is a short, private ring of the last ${VOICE_HISTORY_MAX} voice turns kept on the device; the transcript and reply are fetched only when you open a turn.</p>`+
+  `<div class="button-row">${action('Refresh','voice-refresh')}${action('Clear','voice-clear','danger-btn')}</div>`+
+  `<div id="voice-history" class="voice-history" role="list"><p class="muted">Loading recent voice turns…</p></div>`,'voice-history-panel');
+}
+async function voiceHistoryLoad(){
+ const generation=++voiceHistorySeq,renderGen=state.renderGeneration;
+ let h;
+ try{h=await api('/assistant/history')}
+ catch(e){if(generation!==voiceHistorySeq||state.renderGeneration!==renderGen)return;const b=$('#voice-history');if(b)b.innerHTML=`<p class="error-text">${esc(e.message)}</p>`;return}
+ if(generation!==voiceHistorySeq||state.renderGeneration!==renderGen)return;
+ const b=$('#voice-history');if(!b)return;
+ const turns=voiceHistoryRows(h&&h.turns);
+ b.innerHTML=turns.length?turns.map(t=>{const id=esc(t.id);return `<div class="voice-turn" role="listitem" data-id="${id}"><div class="voice-turn-head"><time>${esc(voiceTurnTime(t))}</time><span class="status ${/error|fail/i.test(voiceTurnStatus(t))?'error':'ok'}">${esc(voiceTurnStatus(t))}</span><button class="secondary-btn voice-detail" data-id="${id}">Details</button></div><p class="voice-preview">${esc(voiceTurnPreview(t))||'<span class="muted">No transcript</span>'}</p><div class="voice-detail-body" hidden></div></div>`}).join(''):'<p class="muted">No voice turns recorded yet.</p>';
+ $$('.voice-detail',b).forEach(btn=>btn.onclick=()=>voiceHistoryDetail(btn.dataset.id,btn));
+}
+async function voiceHistoryDetail(id,btn){
+ const box=btn&&btn.closest?btn.closest('.voice-turn'):null,body=box&&box.querySelector?box.querySelector('.voice-detail-body'):null;
+ if(!body)return;
+ const generation=voiceHistorySeq,renderGen=state.renderGeneration;
+ body.hidden=false;body.innerHTML='<p class="muted">Loading…</p>';
+ let d;
+ try{d=await api('/assistant/history/'+encodeURIComponent(id))}
+ catch(e){if(generation===voiceHistorySeq&&state.renderGeneration===renderGen&&body.isConnected!==false)body.innerHTML=`<p class="error-text">${esc(e.message)}</p>`;return}
+ if(generation!==voiceHistorySeq||state.renderGeneration!==renderGen||body.isConnected===false)return;
+ body.innerHTML=`<dl class="facts"><dt>Transcript</dt><dd>${esc(d.transcript||'—')}</dd><dt>Response</dt><dd>${esc(d.response||'—')}</dd><dt>Status</dt><dd>${esc(d.status||'complete')}</dd></dl>`;
+}
+async function voiceHistoryClear(){
+ const renderGen=state.renderGeneration;voiceHistorySeq++;   /* invalidate in-flight loads and details */
+ try{await api('/assistant/history',{method:'DELETE'})}
+ catch(e){toast(e.message,true);return}
+ if(state.renderGeneration!==renderGen)return;
+ const b=$('#voice-history');if(b)b.innerHTML='<p class="muted">No voice turns recorded yet.</p>';
+ toast('Recent voice cleared');
+}
+function bindVoiceHistory(){
+ const refresh=$('#voice-refresh');if(refresh)refresh.onclick=()=>voiceHistoryLoad();
+ const clear=$('#voice-clear');if(clear)clear.onclick=()=>voiceHistoryClear();
+ voiceHistoryLoad();
+}
 if(location.hash.length>1){const legacy=decodeURIComponent(location.hash.slice(1));if(items.some(([n])=>pageSlug(n)===legacy))history.replaceState(null,'','/'+legacy);}
 api('/config').then(async c=>{state.csrf=c.csrf_token;await ensureAuth(c);return Promise.all([api('/status'),api('/device'),api('/system/update').catch(()=>({supported:false,check_status:'not-checked'})),api('/system/features').catch(()=>({simulation:false}))])}).then(async([s,d,ota,features])=>{applyFeatures(features);updateVersionDisplay(d,ota);/* The widget is shell state, so a deep link gets it from this response rather than from a second request or from a later visit to Overview. */renderSidebarStatus(s);await showPage(pageFromLocation(),false);document.body.classList.remove('auth-pending')}).catch(error=>{if(state.authMode==='users'||state.authMode==='bearer-token')redirectToLogin();else{markStartupUnavailable();document.body.classList.remove('auth-pending');errorView(error)}});

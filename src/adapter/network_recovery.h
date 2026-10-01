@@ -49,6 +49,17 @@
 
 #define LE_RECOVERY_LED_OWNER "recovery-ap"
 
+/*
+ * Owner-controlled persistence.  The per-device provisioning secret and the
+ * owner's enable/auto configuration live under protected /data storage so a
+ * password the owner saved survives a reboot; only the boot marker stays on
+ * the per-boot tmpfs (/run).
+ */
+#define LE_RECOVERY_PSK_PATH_DEFAULT \
+    "/data/libreecho/config/recovery-psk"
+#define LE_RECOVERY_CONFIG_PATH_DEFAULT \
+    "/data/libreecho/config/recovery.json"
+
 enum le_recovery_mode {
     LE_RECOVERY_MODE_CLIENT = 0,   /* normal client Wi-Fi */
     LE_RECOVERY_MODE_ARMED,        /* trigger seen, AP not started yet */
@@ -98,6 +109,7 @@ struct le_recovery_backend {
 struct le_recovery_config {
     char marker_path[PATH_MAX];
     char psk_path[PATH_MAX];
+    char config_path[PATH_MAX];    /* persisted owner configuration */
     char run_dir[PATH_MAX];
     char interface[64];
     char serial_path[PATH_MAX];
@@ -121,6 +133,7 @@ struct le_recovery_config {
     int rate_max;
     int require_tmpfs;             /* production: 1 */
     int require_root_owner;        /* production: 1 */
+    int require_root_peer;         /* production: 1; adapter owner gate */
 };
 
 struct le_recovery {
@@ -156,6 +169,28 @@ void le_recovery_config_default(struct le_recovery_config *config,
 void le_recovery_config_bound(struct le_recovery_config *config);
 /* Real fork/exec/kill/wait backend. */
 struct le_recovery_backend le_recovery_backend_real(void);
+
+/*
+ * Owner configuration (adapter `recovery_configure`).  The three owner-settable
+ * fields are validated strictly: enabled/auto_enabled must be exactly 0 or 1 and
+ * auto_timeout_ms must lie inside [LE_RECOVERY_TIMEOUT_MIN_MS,
+ * LE_RECOVERY_TIMEOUT_MAX_MS].  Out-of-range values are rejected with a reason,
+ * never silently clamped.  The candidate is persisted atomically under the
+ * protected data directory first; only after the write succeeds is it committed
+ * to the running configuration, so a persistence failure leaves the previous
+ * configuration untouched (rollback).
+ */
+int le_recovery_config_validate(const struct le_recovery_config *config,
+                                char *reason, size_t reason_size);
+int le_recovery_config_persist(const struct le_recovery_config *config,
+                               char *reason, size_t reason_size);
+/* Read a persisted configuration if present.  Returns 1 (loaded), 0 (none), or
+ * -1 (present but invalid/unreadable; the caller keeps its current config). */
+int le_recovery_config_load(struct le_recovery_config *config,
+                            char *reason, size_t reason_size);
+int le_recovery_configure(struct le_recovery *recovery, int enabled,
+                          int auto_enabled, long long auto_timeout_ms,
+                          char *reason, size_t reason_size);
 
 void le_recovery_init(struct le_recovery *recovery,
                       const struct le_recovery_config *config,

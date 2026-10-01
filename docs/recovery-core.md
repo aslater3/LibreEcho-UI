@@ -18,7 +18,7 @@ running and (optionally) a readiness probe.
 ## Adapter commands
 
 - `status`, `scan`, `connect`, `disconnect`, … unchanged.
-- `recovery_status` → the `recovery` object (no secret).
+- `recovery_status` → the `recovery` object (no secret, **no `psk_path`**).
 - `recovery_prepare` → ensure the per-device password exists; `{"prepared":true}`.
 - `recovery_psk` → owner reveal `{"ssid","psk"}`; **only while client-connected**
   (refused in `starting`/`recovery-ap`, so an unauthenticated captive client can
@@ -26,32 +26,54 @@ running and (optionally) a readiness probe.
   CSRF before proxying either command; the value is never logged.
 - `recovery_stop` → owner stop: children down, portal address removed, marker
   cleared, LED ownership released.
+- `recovery_configure` → owner configuration
+  `{"enabled":bool,"auto_enabled":bool,"auto_timeout_ms":30000..600000}`. Strictly
+  validated (out-of-range values are rejected, never silently clamped) and
+  persisted **before** the running config changes; a persistence failure rolls
+  back. On success returns the full status object. See
+  `evidence/recovery-runtime-contract.md` for the frozen API mapping.
+
+`recovery_psk`, `recovery_prepare`, `recovery_stop` and `recovery_configure` also
+require a root peer (`SO_PEERCRED` uid 0) on the adapter socket, in addition to
+the web layer's owner session + CSRF.
 
 ## Config (adapter flags / `/etc/default/libreecho-networkd`)
 
-`--recovery-marker --recovery-psk --recovery-run-dir --recovery-timeout
---recovery-start-timeout --recovery-stop-timeout --recovery-auto
---recovery-disabled --recovery-ap-probe --recovery-ready-probe --recovery-net-up
---recovery-net-down --recovery-address --hostapd --hostapd-conf --recovery-dhcp
---recovery-dns --recovery-conf --led-socket`.
+`--recovery-marker --recovery-psk --recovery-config --recovery-run-dir
+--recovery-timeout --recovery-start-timeout --recovery-stop-timeout
+--recovery-auto --recovery-disabled --recovery-ap-probe --recovery-ready-probe
+--recovery-net-up --recovery-net-down --recovery-address --hostapd --hostapd-conf
+--recovery-dhcp --recovery-dns --recovery-conf --led-socket`.
 
 Physical entry is on by default; `--recovery-auto` (opt-in) arms only on a unit
 with a saved Wi-Fi profile; `--recovery-disabled` turns the feature off entirely.
-`recovery_ap_timeout` is bounded to 30 s–600 s (default 120 s).
+`--recovery-timeout` (auto window) is bounded to 30 s–600 s (default 120 s); an
+owner value through `recovery_configure` outside that range is rejected rather
+than clamped. `--recovery-psk` defaults to the persistent
+`/data/libreecho/config/recovery-psk`, `--recovery-config` to the persistent
+`/data/libreecho/config/recovery.json`; both parents must be protected
+(real directory, root-owned in production, not group/world-accessible, no
+symlinks). The persisted config is loaded before the boot trigger is evaluated.
 
 ## Platform helper contract
 
 The daemon invokes bounded platform helpers and gates on their exit status:
 
-- `libreecho-recovery-ap-probe` → exit 0 iff the driver advertises AP mode.
+- `libreecho-recovery-ap-probe` → exit 0 iff the driver advertises AP mode
+  (`--recovery-ap-probe`).
+- `libreecho-recovery-ap-ready` → readiness delegate; exit 0 iff the AP is
+  actually serving (interface in AP mode, hostapd control surface up, live
+  DHCP/DNS, portal address present). Passed as `--recovery-ready-probe` by
+  `init/libreecho-networkd.init`.
 - `libreecho-recovery-net-up --interface <iface> --address <addr>/24` → assign
   the portal IPv4 and release the radio from client STA management.
 - `libreecho-recovery-net-down --interface <iface>` → remove the address and
   return the interface to client management.
 
-A missing/failing net helper or capability probe fails **closed**
-(`ap-net-unconfigured`, `ap-net-up-failed`, `ap-driver-unverified`, …) with no
-child left running and no false `recovery-ap`.
+The helper names/paths match the Platform sibling's packaged overlay helpers
+(`platform-recovery`). A missing/failing net helper or capability probe fails
+**closed** (`ap-net-unconfigured`, `ap-net-up-failed`, `ap-driver-unverified`,
+`not-serving`, …) with no child left running and no false `recovery-ap`.
 
 ## Single-interface handover
 
@@ -61,11 +83,19 @@ children down and runs net-down, then wpa_supplicant attempts association. On
 success recovery ends (marker cleared); on failure the AP is rebuilt
 (`net-up` + respawn) and the marker is kept so the owner can retry.
 
+While the AP owns the interface, `net-up` has **stopped wpa_supplicant**: every
+`wpa_ctrl` call fails until `net-down` restarts the control plane. The daemon
+therefore does not (re)open the supplicant socket mid-AP (`wpa_open()` returns
+early while `net_configured`), and only attempts association after `net-down`.
+
 ## Provisioning secret
 
-Random 32-char WPA2 passphrase from `/dev/urandom`, stored mode 0600 at
-`/run/libreecho/recovery-psk`, never serial-derived, never logged, never in
-`status`. The owner must save it from the Network page **before** it is needed;
+Random 32-char WPA2 passphrase from `/dev/urandom`, stored mode 0600 at the
+persistent path `/data/libreecho/config/recovery-psk` under a protected parent
+(atomic `O_EXCL|O_NOFOLLOW` temp + `fsync` + `rename`; never follows a symlink),
+never serial-derived, never logged, never in `status`. Because it is persistent,
+a password the owner saved during normal client operation stays valid across
+reboots. The owner must save it from the Network page **before** it is needed;
 the SSID (`LibreEcho-Setup-<last4-serial>`) is included with the reveal.
 
 ## Building the focused tests

@@ -99,8 +99,12 @@ def assert_chase(status):
     pixels = status["pixels"]
     assert len(pixels) == 12, status
     assert all(pixel["r"] == 0 and pixel["b"] == 0 for pixel in pixels), status
+    # 0.14 routes the ring through the portable output pipeline, which applies
+    # the gamma-2 perceptual transfer (ceil(v^2/255), led_output.c, asserted by
+    # test_led_output_core). The logic value 255 stays 255; the trail value 64
+    # drives 17, not 64. The status frame is the physical drive output.
     assert sum(pixel["g"] == 255 for pixel in pixels) == 1, status
-    assert sum(pixel["g"] == 64 for pixel in pixels) == 11, status
+    assert sum(pixel["g"] == 17 for pixel in pixels) == 11, status
 
 assert_chase(call("status"))
 time.sleep(0.12)
@@ -118,7 +122,12 @@ else:
 
 status = call("status")
 assert status["startup_animation_active"] is False, status
-assert status["pixels"] == [{"r": 0, "g": 96, "b": 255}] * 12, status
+# #110 dark idle: the boot animation is an event that lights the ring, and with
+# the default idle mode "off" the ring returns to the dark base once readiness
+# stops it (ledd apply_base_state IDLE_MODE_OFF). It does not hold the boot
+# colour. Proven by tests/test_led_daemon_core.c ("the ring must return to the
+# dark base after an event").
+assert status["pixels"] == [{"r": 0, "g": 0, "b": 0}] * 12, status
 PY
 
 echo "startup LED animation readiness hand-off: ok"

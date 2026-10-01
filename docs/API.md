@@ -690,7 +690,17 @@ audio leaves the device only during an active conversation. The request requires
 
 #### GET /api/v1/assistant/history
 
-Returns the newest bounded turn records measured by `agentd` itself:
+> **Changed in 0.14.** This route now returns the canonical voice-turn history
+> collection (`voice_history`), not the legacy latency shape. See
+> "Feature-batch additions (0.14)" for `{id}`, `DELETE` and the preserved
+> latency alias at `GET /api/v1/assistant/latency`.
+
+Returns the canonical private voice-turn ring from `agentd`: at most `capacity`
+(10) newest records with `history_generation`, `count`, `preview_chars` and
+per-turn `id`, `timestamp`, `status`, `transcript_preview`, `response_preview`,
+truncation flags, stored lengths, timings and a fixed `error` reason. Transcripts
+and replies are RAM only. The JSON below is the **legacy latency shape**, still
+served unchanged at `GET /api/v1/assistant/latency`:
 
 ```json
 {
@@ -807,6 +817,12 @@ text, warm local TTS, then `audiod` announcement playback.
 Starts the built-in sleep-noise generator. `colour` is `white`, `pink` or
 `brown`; `level` is 1-100; `minutes` is a sleep timer, 0 to play until stopped.
 Synthesis is on-device, so it keeps playing with no network.
+
+0.14 also accepts the additive `source` (`white|pink|brown|heartbeat`, supersedes
+`colour`), `bed` (`none|pink|brown`), `tempo` (40..100) and `fade_seconds`
+(0..600, must not exceed a positive `minutes` timer) fields; a duplicated,
+malformed or out-of-range field is `400`. `GET /api/v1/audio` reports the same
+fields under `noise`.
 
 ```json
 { "colour": "brown", "level": 40, "minutes": 30 }
@@ -2243,6 +2259,70 @@ data: {"changed":true}
 event: status
 data: {"refresh":true}
 ```
+
+## Feature-batch additions (0.14)
+
+Endpoints added or extended for the 0.14 feature batch. All responses keep the
+`{ok,data,error}` envelope; auth and CSRF are unchanged, and no route here (the
+recovery routes included) bypasses the management auth/CSRF gate.
+
+### LED
+- `GET /api/v1/led` — `data` now also carries `idle_mode` and the `sleep_light`,
+  `output` and `music` objects matching `ledd` status. Existing controls
+  (`colour`/`brightness`/`visualizer_enabled`/`night`/`profiles`) are preserved.
+- `PUT /api/v1/led/idle` — `{"mode":"off"|"indicator"|"always"}` (required) ->
+  `set_idle_mode`; a missing or unknown mode is `400`.
+- `PUT /api/v1/led/sleep` — `{"mode":"off"|"solid"|"pulse"}` (required) with
+  optional `brightness` (0..20), `period_ms` (3000..15000), `timer_minutes`
+  (0..720) and `restore_on_boot` (bool). A missing field keeps the current daemon
+  value; a malformed, out-of-range or duplicated field is `400`. Returns the
+  extended LED state.
+
+### Audio / sleep noise
+- `POST /api/v1/audio/noise` — see above; additive `source`/`bed`/`tempo`/
+  `fade_seconds`, existing `colour`/`level`/`minutes` retained, `DELETE`
+  unchanged. Sound effect only, no medical claim; master volume untouched.
+
+### USB storage / playback
+- `GET /api/v1/storage/usb` — adds `playable_formats`: `["mp3"]`, or
+  `["mp3","opus"]` only when `radiod` reports a working Opus decoder. A missing or
+  unknown capability reads as `["mp3"]`.
+- `POST /api/v1/storage/usb/play` — independently capability-gates `.opus`:
+  refused with `415` unless `radiod` reports the decoder, checked before the file
+  is opened so an unknown capability fails closed; the `playable_formats` hint is
+  not the enforcement. Path confinement unchanged.
+
+### Voice history
+- `GET /api/v1/assistant/history` -> `voice_history` collection (capacity 10,
+  `history_generation`, bounded previews).
+- `GET /api/v1/assistant/history/{id}` -> `voice_history_entry` (bounded full
+  transcript/response); a non-numeric or unknown id is `404`.
+- `DELETE /api/v1/assistant/history` -> `voice_history_clear` (requires CSRF).
+- `POST /api/v1/assistant/history/clear` -> `history_clear` (clears both rings).
+- `GET /api/v1/assistant/latency` -> the unchanged legacy latency history
+  (twelve timing-only records) the Simulation page depends on.
+
+### Network / recovery
+- `GET /api/v1/network` — adds `mode` and a `recovery` object matching `networkd`
+  (`mode`, `trigger`, `available`, `ssid`, `reason`, `error`, `secret_available`,
+  `led_owner`, `enabled`, `net_configured`, `auto_enabled`, `auto_timeout_ms`,
+  `auto_pending`, `auto_countdown_ms`, `rate_count`, `children`). No Wi-Fi PSK or
+  internal `psk_path` is exposed in this status.
+- `PUT /api/v1/network/recovery` — `{"enabled":bool,"auto_enabled":bool,
+  "timeout_seconds":30..600}` (all required). The API maps `timeout_seconds` to the
+  daemon `auto_timeout_ms`. The getter is `GET /api/v1/network`.
+- `POST /api/v1/network/recovery/prepare` — authenticated owner plus CSRF,
+  client-connected only; returns `{ssid,psk}` with `Cache-Control: no-store`. The
+  secret is rendered only on an explicit user action and never stored in
+  `localStorage` or logs; the persistent PSK lives in
+  `/data/libreecho/config/recovery-psk`, not tmpfs. Refused (`409`/`501`) rather
+  than returning a fake secret.
+- `POST /api/v1/network/recovery/stop` — auth/CSRF; stops recovery mode.
+
+Contract tests: `tests/test_feature_batch_api.sh` drives every route above over a
+real mock-backend server, with `tests/test_feature_batch_api_agent.py` standing
+in for `agentd` (validation, auth/CSRF denial, capability gating, recovery secret
+handling and the voice-history routes).
 
 ## Error Codes
 

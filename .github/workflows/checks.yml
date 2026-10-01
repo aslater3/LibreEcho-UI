@@ -74,7 +74,8 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             build-essential bubblewrap jq libspeexdsp-dev nodejs \
             cmake ninja-build python3-venv python3-cryptography python3-nacl \
-            curl ffmpeg openssl ca-certificates
+            curl ffmpeg openssl ca-certificates \
+            libogg-dev libopus-dev libopusfile-dev
 
       - name: Build pinned mbedTLS runtime
         shell: bash
@@ -134,6 +135,38 @@ jobs:
           cp -a /usr/include/speex "$RUNNER_TEMP/speexdsp/include/"
           cp "$(gcc -print-file-name=libspeexdsp.a)" \
             "$RUNNER_TEMP/speexdsp/lib/libspeexdsp.a"
+
+      - name: Verify pinned static Opus development stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The radiod Ogg Opus decoder is built and tested against the pinned
+          # static stack recorded in the Platform tool
+          # tools/mt8163-arm32/ui/opus/SOURCE.lock (libogg 1.3.5, opus 1.4,
+          # opusfile 0.12). Ubuntu 24.04 ships exactly those upstream versions.
+          # Refuse to run the enabled decoder test against anything else, so it
+          # is never silently skipped nor rebuilt against a substitute.
+          python3 - <<'PY'
+          import subprocess, sys
+          pins = {"libogg-dev": "1.3.5", "libopus-dev": "1.4", "libopusfile-dev": "0.12"}
+          bad = []
+          for pkg, pin in pins.items():
+              ver = subprocess.run(
+                  ["dpkg-query", "-W", "-f", "${Version}", pkg],
+                  capture_output=True, text=True, check=True).stdout
+              if not ver.startswith(pin):
+                  bad.append(f"{pkg}: installed {ver!r} != pinned {pin}")
+          for name in ("libopusfile.a", "libopus.a", "libogg.a"):
+              path = subprocess.run(
+                  ["cc", "-print-file-name", name],
+                  capture_output=True, text=True, check=True).stdout.strip()
+              if not path.startswith("/"):
+                  bad.append(f"static archive not found: {name}")
+          if bad:
+              print("pinned Opus stack mismatch:", *bad, sep="\n", file=sys.stderr)
+              sys.exit(1)
+          print("pinned static Opus stack: ok")
+          PY
 
       - name: Verify button settings persistence regression
         shell: bash

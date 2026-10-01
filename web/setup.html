@@ -117,6 +117,32 @@
         <p id="mdns-warning" class="notice unsupported">The .local name is an mDNS alternative. It depends on AirPlay 2/Avahi being enabled on LibreEcho and supported by your client; the LAN IP above remains the reliable link when mDNS is disabled or unavailable.</p>
       </section>
 
+      <section class="setup-page" id="recovery-login">
+        <span class="eyebrow">Recovery</span>
+        <h1>Sign in to reconnect.</h1>
+        <p class="lead">This LibreEcho has already been set up, so there is no account to create here — the one-time setup wizard will not run again. Sign in with your local account to reconnect it to Wi-Fi.</p>
+        <div class="form-card">
+          <label><span>Username</span><input id="recovery-username" autocomplete="username" maxlength="31"></label>
+          <label><span>Password</span><input id="recovery-password" type="password" autocomplete="current-password" maxlength="128"></label>
+        </div>
+        <div class="button-row"><button class="primary" id="recovery-signin" type="button">Sign in</button></div>
+      </section>
+
+      <section class="setup-page" id="recovery-network">
+        <span class="eyebrow">Network</span>
+        <h1>Reconnect <span class="no-wrap">Wi-Fi</span>.</h1>
+        <p class="lead">Choose the network LibreEcho should join. Your phone stays on the recovery access point while this is sent, then the recovery access point closes so the device can join your Wi-Fi. Your phone will briefly disconnect — if the handover fails, reconnect to the same recovery network and try again.</p>
+        <div class="section-heading"><h2>Networks</h2><button class="text-button" id="recovery-scan" type="button">Scan again</button></div>
+        <div id="recovery-wifi-list" class="wifi-list" aria-live="polite"><p class="muted">Scanning for networks…</p></div>
+        <div class="form-grid">
+          <label><span>Network name (SSID)</span><input id="recovery-ssid" maxlength="63" autocomplete="off"></label>
+          <label><span>Security</span><select id="recovery-security"><option value="wpa2">WPA2</option><option value="open">Open</option></select></label>
+          <label class="wide"><span>Wi-Fi password</span><input id="recovery-wifi-password" type="password" maxlength="127" autocomplete="new-password"><small>At least 8 characters. It will not be exposed through the web API.</small></label>
+        </div>
+        <div class="button-row"><button class="primary" id="recovery-connect" type="button">Connect LibreEcho</button></div>
+        <p id="recovery-status" class="muted"></p>
+      </section>
+
       <footer class="setup-actions" id="setup-actions">
         <button id="setup-back" class="secondary" type="button" hidden>Back</button>
         <span id="step-count">Step 1 of 5</span>

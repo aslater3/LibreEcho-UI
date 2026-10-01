@@ -211,6 +211,8 @@ static void make_config(struct le_recovery_config *config, const char *dir)
     snprintf(config->marker_path, sizeof(config->marker_path), "%s", path);
     snprintf(path, sizeof(path), "%s/recovery-psk", dir);
     snprintf(config->psk_path, sizeof(config->psk_path), "%s", path);
+    snprintf(path, sizeof(path), "%s/recovery.json", dir);
+    snprintf(config->config_path, sizeof(config->config_path), "%s", path);
     snprintf(config->run_dir, sizeof(config->run_dir), "%s", dir);
     snprintf(config->hostapd_bin, sizeof(config->hostapd_bin),
              "%s/hostapd", dir);
@@ -768,6 +770,189 @@ static void test_single_interface_handover(const char *tmpdir)
     CHECK(access(config.marker_path, F_OK) != 0);
 }
 
+static void test_persistent_paths_and_psk_survives_reinit(const char *tmpdir)
+{
+    struct le_recovery_config defaults;
+    char dir[512];
+    char psk_first[LE_RECOVERY_PSK_MAX], psk_again[LE_RECOVERY_PSK_MAX];
+    char reason[LE_RECOVERY_REASON_MAX];
+    struct le_recovery_config config;
+
+    /* Boot marker stays on the per-boot tmpfs; the password and the owner
+     * configuration live under protected /data so they survive a reboot. */
+    le_recovery_config_default(&defaults, "wlan0");
+    CHECK(strncmp(defaults.marker_path, "/run/", 5) == 0);
+    CHECK(strstr(defaults.psk_path, "/data/libreecho/config/recovery-psk") != NULL);
+    CHECK(strstr(defaults.config_path,
+                 "/data/libreecho/config/recovery.json") != NULL);
+    CHECK(defaults.require_root_peer == 1);
+
+    snprintf(dir, sizeof(dir), "%s/persist", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+    CHECK(le_recovery_psk_ensure(&config, psk_first, sizeof(psk_first),
+                                 reason, sizeof(reason)) == 0);
+
+    /* Simulate a reboot: a fresh configuration pointing at the same persisted
+     * paths must recover the identical password, not generate a new one. */
+    {
+        struct le_recovery_config rebooted;
+        make_config(&rebooted, dir);
+        CHECK(le_recovery_psk_ensure(&rebooted, psk_again, sizeof(psk_again),
+                                     reason, sizeof(reason)) == 0);
+        CHECK_STR_EQ(psk_first, psk_again);
+    }
+}
+
+static void test_configure_persists_validates_and_rolls_back(const char *tmpdir)
+{
+    char dir[512];
+    struct le_recovery_config config, reloaded;
+    struct le_recovery recovery;
+    char reason[LE_RECOVERY_REASON_MAX];
+    struct stat status;
+
+    snprintf(dir, sizeof(dir), "%s/configure", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+    reset_fake();
+    init_fake(&recovery, &config, 1000);
+
+    CHECK(recovery.config.enabled == 1);
+    CHECK(recovery.config.auto_enabled == 0);
+
+    /* A valid owner configuration is persisted atomically, mode 0600, and
+     * committed to the running configuration. */
+    CHECK(le_recovery_configure(&recovery, 1, 1, 60000, reason,
+                                sizeof(reason)) == 0);
+    CHECK(recovery.config.enabled == 1);
+    CHECK(recovery.config.auto_enabled == 1);
+    CHECK(recovery.config.auto_timeout_ms == 60000);
+    CHECK(stat(config.config_path, &status) == 0);
+    CHECK(S_ISREG(status.st_mode));
+    CHECK((status.st_mode & 077) == 0);
+
+    /* It survives a reload (reboot). */
+    make_config(&reloaded, dir);
+    CHECK(le_recovery_config_load(&reloaded, reason, sizeof(reason)) == 1);
+    CHECK(reloaded.enabled == 1);
+    CHECK(reloaded.auto_enabled == 1);
+    CHECK(reloaded.auto_timeout_ms == 60000);
+
+    /* Out-of-range values are rejected with a reason, never silently clamped,
+     * and the running configuration is unchanged. */
+    CHECK(le_recovery_configure(&recovery, 1, 1, 1000, reason,
+                                sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "auto-timeout-range");
+    CHECK(recovery.config.auto_timeout_ms == 60000);
+    CHECK(le_recovery_configure(&recovery, 1, 1, 600001, reason,
+                                sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "auto-timeout-range");
+    CHECK(recovery.config.auto_timeout_ms == 60000);
+    /* A non-boolean flag is rejected too. */
+    CHECK(le_recovery_configure(&recovery, 2, 1, 60000, reason,
+                                sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "enabled-invalid");
+
+    /* Persistence failure rolls back: the runtime configuration must not take
+     * a partial effect when it cannot be stored. */
+    {
+        char bad_parent[700];
+        snprintf(bad_parent, sizeof(bad_parent), "%s/notadir", dir);
+        write_file(bad_parent, "x", 0600);   /* a file where a directory is needed */
+        snprintf(recovery.config.config_path,
+                 sizeof(recovery.config.config_path), "%s/recovery.json",
+                 bad_parent);
+        CHECK(le_recovery_configure(&recovery, 1, 0, 60000, reason,
+                                    sizeof(reason)) == -1);
+        CHECK_STR_EQ(reason, "config-dir-not-dir");
+        CHECK(recovery.config.enabled == 1);
+        CHECK(recovery.config.auto_enabled == 1);   /* unchanged */
+        CHECK(recovery.config.auto_timeout_ms == 60000);
+    }
+}
+
+static void test_disabled_config_blocks_both_entries(const char *tmpdir)
+{
+    char dir[512];
+    struct le_recovery_config config;
+    struct le_recovery recovery;
+    int i;
+
+    snprintf(dir, sizeof(dir), "%s/disabled-config", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+    config.enabled = 0;
+    config.auto_enabled = 1;   /* even an opt-in auto must stay blocked */
+    write_file(config.marker_path, LE_RECOVERY_MARKER_TAG "\n", 0600);
+
+    reset_fake();
+    init_fake(&recovery, &config, 0);
+    /* Physical entry (boot marker) is blocked. */
+    CHECK(le_recovery_arm(&recovery, LE_RECOVERY_TRIGGER_PHYSICAL, 0) == -1);
+    CHECK(recovery.mode == LE_RECOVERY_MODE_CLIENT);
+    /* Automatic entry never arms, no matter how long the window runs. */
+    for (i = 0; i < 8; ++i)
+        le_recovery_tick(&recovery, 1000 + (long long)i * 60000, 0);
+    CHECK(recovery.mode == LE_RECOVERY_MODE_CLIENT);
+    CHECK(recovery.trigger == LE_RECOVERY_TRIGGER_NONE);
+    CHECK(fake.spawn_count == 0);
+}
+
+static void test_status_hides_secret_and_paths(const char *tmpdir)
+{
+    char dir[512], status[2048];
+    struct le_recovery_config config;
+    struct le_recovery recovery;
+
+    snprintf(dir, sizeof(dir), "%s/status", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+    reset_fake();
+    init_fake(&recovery, &config, 0);
+    CHECK(le_recovery_status_json(&recovery, status, sizeof(status)) > 0);
+    /* The public status never carries the secret path or filesystem paths. */
+    CHECK(strstr(status, "psk_path") == NULL);
+    CHECK(strstr(status, "/data/") == NULL);
+    CHECK(strstr(status, "recovery-psk") == NULL);
+    CHECK(strstr(status, "\"enabled\":true") != NULL);
+    CHECK(strstr(status, "\"auto_enabled\":false") != NULL);
+    CHECK(strstr(status, "\"auto_timeout_ms\":120000") != NULL);
+}
+
+static void test_secure_parent_dir(const char *tmpdir)
+{
+    char dir[512], open_dir[600], link_dir[600], target[600];
+    char reason[LE_RECOVERY_REASON_MAX];
+    char psk[LE_RECOVERY_PSK_MAX];
+    struct le_recovery_config config;
+
+    snprintf(dir, sizeof(dir), "%s/secure", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+
+    /* A group/world-accessible parent is refused. */
+    snprintf(open_dir, sizeof(open_dir), "%s/open", dir);
+    (void)mkdir(open_dir, 0777);
+    (void)chmod(open_dir, 0777);
+    snprintf(config.psk_path, sizeof(config.psk_path), "%s/recovery-psk",
+             open_dir);
+    CHECK(le_recovery_psk_ensure(&config, psk, sizeof(psk), reason,
+                                 sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "config-dir-permissions");
+
+    /* A symlinked parent is never followed. */
+    snprintf(target, sizeof(target), "%s/real", dir);
+    (void)mkdir(target, 0700);
+    snprintf(link_dir, sizeof(link_dir), "%s/link", dir);
+    CHECK(symlink(target, link_dir) == 0);
+    snprintf(config.psk_path, sizeof(config.psk_path), "%s/recovery-psk",
+             link_dir);
+    CHECK(le_recovery_psk_ensure(&config, psk, sizeof(psk), reason,
+                                 sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "config-dir-symlink");
+}
+
 int main(void)
 {
     const char *scratch = getenv("LE_RECOVERY_TEST_SCRATCH");
@@ -794,6 +979,11 @@ int main(void)
     test_disabled_feature(tmpdir);
     test_net_helper_fails_closed(tmpdir);
     test_single_interface_handover(tmpdir);
+    test_persistent_paths_and_psk_survives_reinit(tmpdir);
+    test_configure_persists_validates_and_rolls_back(tmpdir);
+    test_disabled_config_blocks_both_entries(tmpdir);
+    test_status_hides_secret_and_paths(tmpdir);
+    test_secure_parent_dir(tmpdir);
     fprintf(stderr, "recovery unit: %d checks, %d failures\n", checks, failures);
     if (failures) {
         printf("recovery-unit-failures=%d\n", failures);

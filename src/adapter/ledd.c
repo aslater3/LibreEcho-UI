@@ -223,11 +223,15 @@ struct daemon_context {
     unsigned int visualizer_rhythm_step;
     unsigned int visualizer_rhythm_pulse;
     unsigned int visualizer_rhythm_cooldown;
+    /*
+     * Legacy v1 major music FX is disabled (UI#65).  These stay zero because
+     * the compatibility path may never select a timer- or transient-driven
+     * overlay; only the v2 director/render path owns major transitions.  They
+     * are retained so the regression harness can assert the invariant.
+     */
     unsigned int visualizer_fx_kind;
     unsigned int visualizer_fx_frames;
     unsigned int visualizer_fx_phase;
-    unsigned int visualizer_fx_cooldown;
-    double visualizer_periodic_fx_next;
     unsigned int visualizer_energy_ema;
     unsigned int visualizer_flux_ema;
     int visualizer_mood;
@@ -1568,62 +1572,17 @@ static void trigger_visualizer_rhythm(struct daemon_context *ctx,
     ctx->visualizer_rhythm_cooldown = 2U;
 }
 
-static void trigger_visualizer_fx(struct daemon_context *ctx,
-                                  double now,
-                                  unsigned int onset,
-                                  unsigned int peak_jump,
-                                  unsigned int low_delta,
-                                  unsigned int mid_delta,
-                                  unsigned int high_delta)
-{
-    unsigned int dominant = low_delta;
-    unsigned int kind = 1;
-
-    if (mid_delta >= dominant) {
-        dominant = mid_delta;
-        kind = 2U;
-    }
-    if (high_delta >= dominant) {
-        dominant = high_delta;
-        kind = 3U;
-    }
-
-    if (ctx->visualizer_fx_cooldown > 0 ||
-        (onset < 76U && peak_jump < 118U && dominant < 66U))
-        return;
-
-    ctx->visualizer_fx_kind = kind;
-    ctx->visualizer_fx_frames = 5U;
-    ctx->visualizer_fx_phase = ctx->visualizer_rhythm_step;
-    ctx->visualizer_fx_cooldown = 36U;
-    ctx->visualizer_periodic_fx_next = now + 10.0;
-}
-
-static void trigger_visualizer_periodic_comet(struct daemon_context *ctx,
-                                              double now,
-                                              unsigned int onset)
-{
-    if (ctx->visualizer_periodic_fx_next <= 0.0)
-        ctx->visualizer_periodic_fx_next = now + 8.0;
-    if (now < ctx->visualizer_periodic_fx_next ||
-        ctx->visualizer_fx_frames > 0 ||
-        ctx->visualizer_fx_cooldown > 0)
-        return;
-
-    if (ctx->visualizer_mood == VISUALIZER_MOOD_CALM ||
-        (ctx->visualizer_energy_ema < 58U && onset < 28U)) {
-        ctx->visualizer_periodic_fx_next = now + 5.0;
-        return;
-    }
-
-    ctx->visualizer_fx_kind = 4U;
-    ctx->visualizer_fx_frames = 10U;
-    ctx->visualizer_fx_phase = ctx->visualizer_rhythm_step;
-    ctx->visualizer_fx_cooldown = 44U;
-    ctx->visualizer_periodic_fx_next =
-        now + 12.0 + (double)(ctx->visualizer_rhythm_step % 5U);
-}
-
+/*
+ * Legacy v1 major music FX triggers are intentionally absent (UI#65).
+ *
+ * The compatibility path keeps compatible rendering -- the twelve-level
+ * spectrum, the rhythm step/pulse, the beat halo, mood palettes and output
+ * priority -- but it may not start a major overlay.  A generic transient
+ * overlay cannot meet the structural (feature-vector) confidence bar the v2
+ * director requires, and a purely elapsed-time or cooldown-expiry effect is
+ * exactly the forbidden decoration.  Major transitions therefore live only in
+ * the v2 director/render path (#64, #65).
+ */
 static int classify_visualizer_mood(unsigned int energy, unsigned int flux,
                                     unsigned int low, unsigned int mid,
                                     unsigned int high)
@@ -1885,8 +1844,6 @@ static void expire_visualizer(struct daemon_context *ctx, double now)
         ctx->visualizer_rhythm_cooldown = 0;
         ctx->visualizer_fx_kind = 0;
         ctx->visualizer_fx_frames = 0;
-        ctx->visualizer_fx_cooldown = 0;
-        ctx->visualizer_periodic_fx_next = 0.0;
         /* An expired stream releases the v2 session so a resumed producer is
            treated as a fresh start rather than as stale/reordered frames. */
         ctx->music_active = 0;
@@ -2228,8 +2185,6 @@ static void start_visualizer(struct daemon_context *ctx,
         ctx->visualizer_fx_kind = 0;
         ctx->visualizer_fx_frames = 0;
         ctx->visualizer_fx_phase = 0;
-        ctx->visualizer_fx_cooldown = 0;
-        ctx->visualizer_periodic_fx_next = now + 8.0;
         for (i = 0; i < RING_PIXELS; i++)
             ctx->visualizer_smoothed[i] = levels[i];
     } else {
@@ -2283,9 +2238,11 @@ static void start_visualizer(struct daemon_context *ctx,
                 (low_delta + mid_delta + high_delta + 1U) / 3U;
         trigger_visualizer_rhythm(ctx, onset, low_delta, mid_delta,
                                   high_delta);
-        trigger_visualizer_fx(ctx, now, onset, peak_jump, low_delta,
-                              mid_delta, high_delta);
-        trigger_visualizer_periodic_comet(ctx, now, onset);
+        /*
+         * No major FX transition here: legacy compatibility may not start a
+         * timer- or transient-driven overlay (UI#65).  Ordinary beat, rhythm
+         * and spectrum motion below is preserved for the v1 path.
+         */
         if (onset > 22U) {
             unsigned int accent = onset * 2U;
             if (high_delta > low_delta && high_delta >= mid_delta)
@@ -2299,8 +2256,6 @@ static void start_visualizer(struct daemon_context *ctx,
         }
         if (ctx->visualizer_rhythm_cooldown > 0)
             ctx->visualizer_rhythm_cooldown--;
-        if (ctx->visualizer_fx_cooldown > 0)
-            ctx->visualizer_fx_cooldown--;
     }
     if (bass > ctx->visualizer_bass_floor + 24U && bass > 64U) {
         unsigned int beat = (bass - ctx->visualizer_bass_floor) * 2U;
@@ -2366,8 +2321,6 @@ static void stop_visualizer(struct daemon_context *ctx, const char *owner,
     ctx->visualizer_rhythm_cooldown = 0;
     ctx->visualizer_fx_kind = 0;
     ctx->visualizer_fx_frames = 0;
-    ctx->visualizer_fx_cooldown = 0;
-    ctx->visualizer_periodic_fx_next = 0.0;
     ctx->music_active = 0;
     le_music_stream_reset(&ctx->music_stream);
     if (!ctx->test_active && !ctx->pattern_active)
@@ -2391,8 +2344,6 @@ static void set_visualizer_enabled(struct daemon_context *ctx, int enabled,
     ctx->visualizer_fx_kind = 0;
     ctx->visualizer_fx_frames = 0;
     ctx->visualizer_fx_phase = 0;
-    ctx->visualizer_fx_cooldown = 0;
-    ctx->visualizer_periodic_fx_next = 0.0;
     ctx->visualizer_energy_ema = 0;
     ctx->visualizer_flux_ema = 0;
     ctx->music_active = 0;

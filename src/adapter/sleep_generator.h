@@ -77,6 +77,7 @@ struct le_sleep_gen {
     int active;
     int stopping;
     long stop_left;              /* frames left of the stop ramp */
+    double stop_start_gain;      /* programme gain captured at the stop request */
     uint32_t rng;
     /* Programme and bed filter state, kept separate so a bed cannot colour
        the main noise and vice versa. */
@@ -170,14 +171,24 @@ static inline double le_sleep_heartbeat(const struct le_sleep_gen *g)
     return value;
 }
 
-/* Gain applied to one absolute frame position. Stop always wins over end. */
+/*
+ * Gain applied to one absolute frame position.  The stop ramp is an upper
+ * bound, not a replacement for the programme envelope, and it is scaled by the
+ * gain captured when the stop was requested (stop_start_gain): the ramp is a
+ * fade-*out* from wherever the programme is, so it is non-increasing from the
+ * request and can never exceed the gain in force at the request.  Returning
+ * the stop ramp alone snapped the gain up to ~1.0 for the first frame (the
+ * reviewed click), and taking min() against a bare 1.0-scaled ramp still let
+ * the rising fade-in term win until it crossed the ramp, so the envelope kept
+ * rising after a stop during the fade-in.  Scaling by stop_start_gain closes
+ * that: the ramp starts exactly at the programme gain and only descends, so
+ * the minimum is monotone non-increasing after the stop.  An earlier timer
+ * expiry or a decaying timer fade still applies via the same minimum.
+ */
 static inline double le_sleep_gain(const struct le_sleep_gen *g, long pos)
 {
     double gain = 1.0;
 
-    if (g->stopping)
-        return g->stop_left <= 0 ? 0.0
-             : (double)g->stop_left / (double)LE_SLEEP_FADE_OUT_FRAMES;
     if (pos < LE_SLEEP_FADE_IN_FRAMES)
         gain = (double)pos / (double)LE_SLEEP_FADE_IN_FRAMES;
     if (g->fade_out_frames > 0 && g->total_frames > 0) {
@@ -189,6 +200,14 @@ static inline double le_sleep_gain(const struct le_sleep_gen *g, long pos)
             if (f < gain)
                 gain = f;
         }
+    }
+    if (g->stopping) {
+        double stop = g->stop_left <= 0 ? 0.0
+                    : g->stop_start_gain * (double)g->stop_left
+                      / (double)LE_SLEEP_FADE_OUT_FRAMES;
+
+        if (stop < gain)
+            gain = stop;
     }
     if (gain < 0.0)
         gain = 0.0;
@@ -255,6 +274,11 @@ static inline int le_sleep_gen_init(struct le_sleep_gen *g, int source, int bed,
 static inline void le_sleep_gen_request_stop(struct le_sleep_gen *g)
 {
     if (!g->stopping) {
+        /* Snapshot the gain in force *before* arming the stop, so the ramp is
+           a fade-out from where the programme actually is (mid fade-in or mid
+           timer fade), not a ramp from full scale that would let the envelope
+           rise until it crossed the ramp. */
+        g->stop_start_gain = le_sleep_gain(g, g->frames_done);
         g->stopping = 1;
         g->stop_left = LE_SLEEP_FADE_OUT_FRAMES;
     }

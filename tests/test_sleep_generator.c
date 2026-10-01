@@ -277,6 +277,194 @@ static void test_stop_ramp(void)
     CHECK(worst_step < 1500);                        /* and smoothly */
 }
 
+/*
+ * Reviewed defect (F1): a stop requested while the programme was still inside
+ * its fade-in discarded the current gain and armed the stop ramp from 1.0, so
+ * the first frame after the request jumped to full amplitude (the review probe
+ * saw 751 -> 6863) before ramping down.  The stop must instead begin from the
+ * gain in force at the request.  This stops 0.06 s into the 0.5 s fade-in.
+ */
+static void test_stop_continuity_inside_fade_in(void)
+{
+    struct le_sleep_gen g;
+    double before, after;
+    int prev, first_after, worst_step = 0;
+    long produced = 0;
+    size_t n, i;
+    int guard = 0;
+
+    CHECK(le_sleep_gen_init(&g, LE_SLEEP_SOURCE_HEARTBEAT, LE_SLEEP_BED_NONE, 60,
+                            100, 0, 0, 13) == 0);
+    CHECK(le_sleep_gen_fill(&g, block, 2880) == 2880);
+    before = le_sleep_gain(&g, g.frames_done);
+    CHECK(before > 0.0 && before < 0.2);             /* still fading in */
+    prev = block[(2880 - 1) * LE_SLEEP_CHANNELS];
+
+    le_sleep_gen_request_stop(&g);
+    after = le_sleep_gain(&g, g.frames_done);
+    /* The envelope is continuous across the request: no upward snap. */
+    CHECK(fabs(after - before) <= 1.0 / (double)LE_SLEEP_FADE_OUT_FRAMES);
+
+    CHECK(le_sleep_gen_fill(&g, block, 1) == 1);
+    first_after = block[0];
+    produced = 1;
+    CHECK(abs(first_after - prev) < 1500);           /* no click at the edge */
+
+    prev = first_after;
+    for (;;) {
+        n = le_sleep_gen_fill(&g, block, 1024);
+        if (!n)
+            break;
+        produced += (long)n;
+        for (i = 0; i < n; ++i) {
+            int v = block[i * LE_SLEEP_CHANNELS];
+
+            if (abs(v - prev) > worst_step)
+                worst_step = abs(v - prev);
+            prev = v;
+        }
+        CHECK(++guard < 1000);
+    }
+    CHECK(produced <= LE_SLEEP_FADE_OUT_FRAMES);     /* bounded */
+    CHECK(worst_step < 1500);                        /* smooth all the way */
+}
+
+/*
+ * Same rule when a stop interrupts a timer fade that is already running: the
+ * stop ramp starts from the mid-fade gain (~0.5 here), never from 1.0.
+ */
+static void test_stop_continuity_inside_timer_fade(void)
+{
+    struct le_sleep_gen g;
+    double before, after;
+
+    CHECK(le_sleep_gen_init(&g, LE_SLEEP_SOURCE_HEARTBEAT, LE_SLEEP_BED_NONE, 60,
+                            100, 10, 2, 17) == 0);
+    while (g.frames_done < g.total_frames - g.fade_out_frames / 2) {
+        size_t want = (size_t)(g.total_frames - g.fade_out_frames / 2 -
+                               g.frames_done);
+        size_t n;
+
+        if (want > BLOCK)
+            want = BLOCK;
+        n = le_sleep_gen_fill(&g, block, want);
+        CHECK(n == want);
+    }
+    CHECK(g.frames_done == g.total_frames - g.fade_out_frames / 2);
+    before = le_sleep_gain(&g, g.frames_done);
+    CHECK(before > 0.4 && before < 0.6);             /* mid timer fade */
+
+    le_sleep_gen_request_stop(&g);
+    after = le_sleep_gain(&g, g.frames_done);
+    CHECK(fabs(after - before) <= 1.0 / (double)LE_SLEEP_FADE_OUT_FRAMES);
+}
+
+/* A repeated stop is a no-op and cannot extend the already-running ramp. */
+static void test_stop_repeated_is_idempotent(void)
+{
+    struct le_sleep_gen g;
+    int16_t last[LE_SLEEP_CHANNELS];
+    long produced = 0;
+    size_t n;
+    int guard = 0;
+
+    CHECK(le_sleep_gen_init(&g, LE_SLEEP_SOURCE_HEARTBEAT, LE_SLEEP_BED_NONE, 60,
+                            100, 0, 0, 19) == 0);
+    CHECK(le_sleep_gen_fill(&g, block, 2000) == 2000);
+    le_sleep_gen_request_stop(&g);
+    CHECK(g.stop_left == LE_SLEEP_FADE_OUT_FRAMES);
+    le_sleep_gen_request_stop(&g);
+    le_sleep_gen_request_stop(&g);
+    CHECK(g.stop_left == LE_SLEEP_FADE_OUT_FRAMES);  /* not re-armed */
+    CHECK(g.stopping == 1);
+
+    for (;;) {
+        n = le_sleep_gen_fill(&g, block, 4096);
+        if (!n)
+            break;
+        produced += (long)n;
+        memcpy(last, block + (n - 1) * LE_SLEEP_CHANNELS, sizeof(last));
+        CHECK(++guard < 1000);
+    }
+    CHECK(produced == LE_SLEEP_FADE_OUT_FRAMES);     /* bounded, once */
+    CHECK(last[0] == 0 && last[1] == 0);
+}
+
+/*
+ * Regression (F1 follow-up): removing the initial upward snap is not enough.
+ * When a stop arrives inside the fade-in, min() still lets the rising
+ * programme term win until it crosses the descending stop ramp, so the applied
+ * envelope keeps rising after the request.  A stop is a fade-*out*: from the
+ * request onwards the gain must never exceed the gain in force at the request,
+ * and must never rise, frame by frame.  This stops 0.06 s into the 0.5 s
+ * fade-in, then walks the whole stop ramp one frame at a time.
+ */
+static void test_stop_envelope_never_rises(void)
+{
+    struct le_sleep_gen g;
+    double at_stop, prev_gain, gain;
+    long pos, span;
+    int guard = 0;
+
+    CHECK(le_sleep_gen_init(&g, LE_SLEEP_SOURCE_HEARTBEAT, LE_SLEEP_BED_NONE, 60,
+                            100, 0, 0, 23) == 0);
+    CHECK(le_sleep_gen_fill(&g, block, 2880) == 2880);   /* 0.06 s in */
+    CHECK(g.frames_done == 2880);
+    at_stop = le_sleep_gain(&g, g.frames_done);
+    CHECK(at_stop > 0.0 && at_stop < 0.2);               /* still fading in */
+
+    le_sleep_gen_request_stop(&g);
+    CHECK(g.stop_start_gain == at_stop);                 /* gain captured */
+    CHECK(g.stop_left == LE_SLEEP_FADE_OUT_FRAMES);
+
+    prev_gain = at_stop;
+    pos = g.frames_done;
+    span = LE_SLEEP_FADE_OUT_FRAMES;
+    while (pos < 2880 + span) {
+        gain = le_sleep_gain(&g, pos);
+        CHECK(gain <= at_stop + 1e-12);      /* never above the stop-time gain */
+        CHECK(gain <= prev_gain + 1e-12);    /* never rises after the stop */
+        prev_gain = gain;
+        CHECK(le_sleep_gen_fill(&g, block, 1) == 1);
+        ++pos;
+        CHECK(++guard < 2 * LE_SLEEP_FADE_OUT_FRAMES);
+    }
+    CHECK(prev_gain < 1e-3);                 /* has faded towards silence */
+}
+
+/*
+ * Same rule at the midpoint of a timer fade: the first stop snapshots the
+ * mid-fade gain and arms the ramp; a repeated stop must not re-arm it or
+ * re-read a gain that would rise again.
+ */
+static void test_stop_repeated_at_timer_midpoint(void)
+{
+    struct le_sleep_gen g;
+    double stop_gain;
+
+    CHECK(le_sleep_gen_init(&g, LE_SLEEP_SOURCE_HEARTBEAT, LE_SLEEP_BED_NONE, 60,
+                            100, 10, 2, 29) == 0);
+    while (g.frames_done < g.total_frames - g.fade_out_frames / 2) {
+        size_t want = (size_t)(g.total_frames - g.fade_out_frames / 2 -
+                               g.frames_done);
+        size_t n;
+
+        if (want > BLOCK)
+            want = BLOCK;
+        n = le_sleep_gen_fill(&g, block, want);
+        CHECK(n == want);
+    }
+    le_sleep_gen_request_stop(&g);
+    stop_gain = g.stop_start_gain;
+    CHECK(stop_gain > 0.4 && stop_gain < 0.6);       /* mid timer fade */
+    CHECK(g.stop_left == LE_SLEEP_FADE_OUT_FRAMES);
+
+    CHECK(le_sleep_gen_fill(&g, block, 100) == 100);
+    le_sleep_gen_request_stop(&g);                   /* repeated */
+    CHECK(g.stop_left == LE_SLEEP_FADE_OUT_FRAMES - 100);  /* same ramp */
+    CHECK(g.stop_start_gain == stop_gain);           /* gain not re-read */
+}
+
 int main(void)
 {
     test_amplitude_cap();
@@ -288,7 +476,12 @@ int main(void)
     test_input_validation();
     test_heartbeat_with_bed();
     test_stop_ramp();
+    test_stop_continuity_inside_fade_in();
+    test_stop_continuity_inside_timer_fade();
+    test_stop_repeated_is_idempotent();
+    test_stop_envelope_never_rises();
+    test_stop_repeated_at_timer_midpoint();
     puts("sleep generator: cap, determinism, duration, fades, heartbeat "
-         "envelope, validation and stop ramp: ok");
+         "envelope, validation, stop ramp and stop-from-current-gain: ok");
     return 0;
 }

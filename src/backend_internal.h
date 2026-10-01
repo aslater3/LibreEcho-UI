@@ -29,6 +29,15 @@ struct le_backend_ops {
     feature unsupported, which is the right answer for the mock. */
  int (*sound_sample)(struct le_backend*,const char*);
  int (*timers)(struct le_backend*,struct le_timer_list*); int (*timer_add)(struct le_backend*,int,const char*,unsigned*); int (*timer_cancel)(struct le_backend*,unsigned); int (*timer_dismiss)(struct le_backend*,int*);
+ /* Extended noise, sleep lighting and recovery. Appended last for the same
+    positional-init reason as everything above; a backend that leaves one null
+    reports the feature unsupported. */
+ int (*noise_start_ex)(struct le_backend*,const struct le_noise_request*);
+ int (*led_idle_mode)(struct le_backend*,const char*);
+ int (*led_sleep)(struct le_backend*,const struct le_led_sleep_request*);
+ int (*recovery_configure)(struct le_backend*,int,int,int);
+ int (*recovery_prepare)(struct le_backend*,char*,size_t);
+ int (*recovery_stop)(struct le_backend*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);
