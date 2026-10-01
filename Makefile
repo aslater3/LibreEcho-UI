@@ -840,6 +840,15 @@ $(BUILD)/test-agentd: tests/test_agentd.c src/adapter/adapter_client.c \
 		-Wpedantic -Werror -Isrc tests/test_agentd.c \
 		src/adapter/adapter_client.c src/log.c -lpthread -o $@
 
+$(BUILD)/test-agentd-voice-history-race: \
+		tests/test_agentd_voice_history_race.c \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/log.c $(BUILD)/libreecho-agentd $(BUILD)/mock-llm-curl
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_agentd_voice_history_race.c \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/log.c -lpthread -o $@
+
 $(BUILD)/test-stop-intent: tests/test_stop_intent.c src/adapter/stop_intent.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc $^ -o $@
@@ -1124,6 +1133,7 @@ clean:
 		$(BUILD)/mock-audio-adapter \
 		$(BUILD)/test-llm-store \
 		$(BUILD)/test-agentd \
+		$(BUILD)/test-agentd-voice-history-race \
 		$(BUILD)/test-live-ring $(BUILD)/test-live-session \
 		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
 		$(BUILD)/test-ws-client $(BUILD)/test-live-dns $(BUILD)/test-lived \

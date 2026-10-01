@@ -60,6 +60,17 @@ typedef void (*le_voice_pipeline_transcript_fn)(
 typedef void (*le_voice_pipeline_outcome_fn)(
     void *context, const struct le_voice_pipeline_outcome *outcome);
 
+/*
+ * Reported once when a turn's recognition begins, before any terminal callback
+ * for that turn (transcript or outcome). The embedder snapshots per-turn
+ * context here -- the private voice-history generation in particular -- so it
+ * stays stable even if the owner clears the history while the turn is still
+ * in flight. Without this a clear during recognition is only observed when the
+ * delayed terminal event arrives, and a cleared in-flight turn reappears.
+ */
+typedef void (*le_voice_pipeline_turn_begin_fn)(void *context,
+                                                uint64_t detection_sample);
+
 struct le_voice_pipeline *le_voice_pipeline_start(
     const char *wake_socket, const char *stt_socket,
     le_voice_pipeline_transcript_fn transcript, void *context);
@@ -69,6 +80,12 @@ struct le_voice_pipeline *le_voice_pipeline_start(
 void le_voice_pipeline_set_outcome_callback(
     struct le_voice_pipeline *pipeline,
     le_voice_pipeline_outcome_fn outcome, void *context);
+
+/* Register the turn-begin hook. Safe to call before any wake; NULL disables
+ * it. It is invoked once per turn attempt, before recognition can fail. */
+void le_voice_pipeline_set_turn_begin_callback(
+    struct le_voice_pipeline *pipeline,
+    le_voice_pipeline_turn_begin_fn turn_begin, void *context);
 
 int le_voice_pipeline_request_follow_up(
     struct le_voice_pipeline *pipeline);

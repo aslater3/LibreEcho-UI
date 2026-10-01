@@ -1789,6 +1789,27 @@ static void record_voice_turn(struct agent_state *state, int status,
 }
 
 /*
+ * Turn-begin sink. Recognition started for a turn, so snapshot the voice
+ * history generation now. A clear that lands while the turn is still in
+ * flight bumps the generation, which makes the eventual transcript or
+ * pre-transcript failure stale: it is dropped instead of repopulating the
+ * scrubbed ring. Capturing only at the terminal event (or when the transcript
+ * callback starts) let a cleared in-flight turn reappear, which is a privacy
+ * bug. Playback is single-flight, so one captured value covers the turn.
+ */
+static void voice_turn_begin(void *context, uint64_t detection_sample)
+{
+    struct agent_state *state = context;
+
+    (void)detection_sample;
+    pthread_mutex_lock(&state->metrics_mutex);
+    state->turn_history_generation =
+        le_voice_history_generation(&state->voice_history);
+    state->turn_history_id = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
+}
+
+/*
  * Pre-transcript outcome sink. A recognition failure, a superseded wake or a
  * recognition deadline now leaves a bounded record instead of disappearing.
  * Transcript-bearing turns arrive through voice_transcript.
@@ -1804,9 +1825,14 @@ static void voice_outcome(void *context,
     record.stt_ms = outcome->stt_total_ms > 0xFFFFFFFFULL
         ? 0xFFFFFFFFU : (uint32_t)outcome->stt_total_ms;
     pthread_mutex_lock(&state->metrics_mutex);
+    /*
+     * The generation captured at turn start, never the live value: a clear
+     * that landed while the turn was in flight must keep its failure out of
+     * the freshly cleared ring.
+     */
     (void)le_voice_history_add(
         &state->voice_history,
-        le_voice_history_generation(&state->voice_history), &record);
+        state->turn_history_generation, &record);
     pthread_mutex_unlock(&state->metrics_mutex);
     le_log_info("agentd: voice turn %s before transcript follow_up=%s",
                 le_voice_turn_status_name(outcome->status),
@@ -1830,8 +1856,13 @@ static void voice_transcript(
     stt_ms = turn->stt_total_ms > 0xFFFFFFFFULL
         ? 0xFFFFFFFFU : (uint32_t)turn->stt_total_ms;
     pthread_mutex_lock(&state->metrics_mutex);
-    generation = le_voice_history_generation(&state->voice_history);
-    state->turn_history_generation = generation;
+    /*
+     * The generation captured when recognition began, not the live value: a
+     * clear that landed after this turn's recognition started but before the
+     * transcript arrived must drop this record rather than let the cleared
+     * transcript reappear.
+     */
+    generation = state->turn_history_generation;
     state->turn_history_id = 0;
     state->turn_tts_failed = 0;
     pthread_mutex_unlock(&state->metrics_mutex);
@@ -2439,6 +2470,8 @@ int main(int argc, char **argv)
     }
     le_voice_pipeline_set_outcome_callback(
         state.voice_pipeline, voice_outcome, &state);
+    le_voice_pipeline_set_turn_begin_callback(
+        state.voice_pipeline, voice_turn_begin, &state);
     le_log_info("agentd: ready socket=%s provider=%s",
                 state.socket_path, state.provider->id);
     while (running) {

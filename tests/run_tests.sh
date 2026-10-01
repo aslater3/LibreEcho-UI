@@ -282,6 +282,10 @@ make build/test-voice-listening-feedback
 ./build/test-llm-http
 ./build/test-llm-store
 ./build/test-agentd
+# The voice-history clear/generation race: a clear during in-flight
+# recognition must not let the cleared transcript or failure reappear.
+make build/test-agentd-voice-history-race
+./build/test-agentd-voice-history-race
 ./build/test-voice-reply
 ./build/test-voice-playback
 # The silent-wake feedback regressions exist in the test-voice-listening-feedback

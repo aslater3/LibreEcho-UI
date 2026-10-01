@@ -41,6 +41,8 @@ struct le_voice_pipeline {
     void *callback_context;
     le_voice_pipeline_outcome_fn outcome_callback;
     void *outcome_context;
+    le_voice_pipeline_turn_begin_fn turn_begin_callback;
+    void *turn_begin_context;
     uint64_t recognition_timeout_ms;
     int16_t pcm_ring[PCM_RING_SAMPLES];
     uint64_t ring_first_sample;
@@ -104,6 +106,25 @@ static void emit_outcome(struct le_voice_pipeline *pipeline, int status,
     outcome.stt_processing_ms = stt_processing_ms;
     outcome.stt_total_ms = stt_total_ms;
     callback(context, &outcome);
+}
+
+/*
+ * Notify the embedder that a turn's recognition is beginning, before any
+ * terminal event for that turn can be emitted. The callback runs outside the
+ * pipeline mutex so it may take its own locks.
+ */
+static void emit_turn_begin(struct le_voice_pipeline *pipeline,
+                            uint64_t detection_sample)
+{
+    le_voice_pipeline_turn_begin_fn callback;
+    void *context;
+
+    pthread_mutex_lock(&pipeline->mutex);
+    callback = pipeline->turn_begin_callback;
+    context = pipeline->turn_begin_context;
+    pthread_mutex_unlock(&pipeline->mutex);
+    if (callback)
+        callback(context, detection_sample);
 }
 
 static int write_all(int fd, const void *buffer, size_t size)
@@ -315,7 +336,15 @@ static int queue_transcript(
 static int start_recognition(struct le_voice_pipeline *pipeline,
                              uint64_t detection_sample)
 {
-    int fd = subscribe(pipeline->stt_socket, "recognize_stream");
+    int fd;
+
+    /*
+     * The turn begins here. Notify before recognition can fail so the embedder
+     * captures per-turn context (the voice-history generation) ahead of any
+     * clear that might land mid-turn.
+     */
+    emit_turn_begin(pipeline, detection_sample);
+    fd = subscribe(pipeline->stt_socket, "recognize_stream");
 
     /* Non-blocking: while sttd is busy transcribing it stops reading, and a
        blocking write here would stall the loop that has to collect the
@@ -781,6 +810,18 @@ void le_voice_pipeline_set_outcome_callback(
     pthread_mutex_lock(&pipeline->mutex);
     pipeline->outcome_callback = outcome;
     pipeline->outcome_context = context;
+    pthread_mutex_unlock(&pipeline->mutex);
+}
+
+void le_voice_pipeline_set_turn_begin_callback(
+    struct le_voice_pipeline *pipeline,
+    le_voice_pipeline_turn_begin_fn turn_begin, void *context)
+{
+    if (!pipeline)
+        return;
+    pthread_mutex_lock(&pipeline->mutex);
+    pipeline->turn_begin_callback = turn_begin;
+    pipeline->turn_begin_context = context;
     pthread_mutex_unlock(&pipeline->mutex);
 }
 
