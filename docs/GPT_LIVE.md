@@ -191,6 +191,27 @@ machine against every mock scenario, the delegation allow-list, the playback
 path (bus format, missing bus, stalled bus, refused rates, barge-in reset) and
 the whole daemon end-to-end against a stand-in `waked`.
 
+## Browser controls
+
+GPT-Live and the On Device Voice Assistant are two providers over one ChatGPT
+account, and the control centre keeps the two failure axes apart:
+
+| Reported state | What it means | Switch |
+| --- | --- | --- |
+| `Unavailable` | `libreecho-lived` is not in this image (`GET /api/v1/live` fails) | off |
+| `Sign in required` | the service is there, the shared account is not signed in | off |
+| `Waiting for sign-in` | device login started; the code and verification link are shown | off |
+| `Disabled` | account signed in, provider not selected or not enabled | usable |
+| `Enabled` | provider selected and enabled | usable |
+
+The account is shared, so the Connect/Check-sign-in controls are rendered and
+bound on both panels whenever the account needs attention -- including while
+another provider is selected -- and those panels stay open until sign-in
+succeeds or is cancelled. The browser sends no enable request for a
+subscription-backed assistant before `GET /api/v1/assistant` reports
+`authenticated: true`. Local LLM is an OpenAI-compatible LAN endpoint and is
+never gated on the subscription account.
+
 ## Privacy
 
 Selecting GPT-Live means post-AEC speech audio leaves the device for the

@@ -64,7 +64,7 @@ int main(void)
     CHECK(strstr(request.body, "refresh_token=refresh-one") != NULL);
 
     CHECK(provider->response_request(
-              &credentials, "gpt-5.4",
+              &credentials, "gpt-5.6-luna",
               le_llm_default_voice_prompt(),
               "What's the weather?", &request) == 0);
     CHECK(!strcmp(request.url,

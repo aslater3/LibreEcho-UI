@@ -55,7 +55,9 @@ curl -fsS -X POST "$URL/api/v1/setup" \
 #
 # LIBREECHO_E2E_SUITES narrows the list (the WebKit job runs baby-monitor on its
 # own) and LIBREECHO_E2E_BROWSER selects the engine inside baby-monitor.cjs.
-SUITES=${LIBREECHO_E2E_SUITES:-"smoke features-radio baby-monitor"}
+# chatgpt-auth-gate runs last: it simulates the voice-assistant daemon through
+# route interception, so it changes no device state the other suites depend on.
+SUITES=${LIBREECHO_E2E_SUITES:-"smoke features-radio baby-monitor chatgpt-auth-gate"}
 for suite in $SUITES; do
   if ! LIBREECHO_E2E_URL="$URL" node "tests/e2e/$suite.cjs"; then
     echo "--- libreecho-web E2E server log ($suite) ---" >&2
