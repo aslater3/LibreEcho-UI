@@ -323,19 +323,23 @@ function voiceTurns() {
     transcript_truncated: false, response_truncated: false,
     transcript_length: 0, response_length: 0, stt_ms: 0, assistant_ms: 0, tts_ms: 0, error: null,
   });
+  /* Canonical status vocabulary (src/adapter/voice_history.c): a success turn
+     is `completed`; failures are `stt_failed`/`assistant_failed`/`tts_failed`/
+     `timed_out`; `cancelled` is neutral. The fixture must use these real values
+     so the success-styling rule is exercised against the API, not a lookalike. */
   return [
-    row(6, 'complete', 'sixth'),
-    row(12, 'complete', 'twelfth'),
-    row(3, 'complete', 'third'),
-    row(11, 'error', 'eleventh'),
-    row(1, 'complete', 'first'),
-    row(10, 'complete', 'tenth'),
-    row(2, 'complete', 'second'),
-    row(9, 'complete', 'ninth'),
-    row(4, 'complete', 'fourth'),
-    row(8, 'complete', 'eighth'),
-    row(5, 'complete', 'fifth'),
-    row(7, 'complete', 'seventh'),
+    row(6, 'completed', 'sixth'),
+    row(12, 'completed', 'twelfth'),
+    row(3, 'completed', 'third'),
+    row(11, 'assistant_failed', 'eleventh'),
+    row(1, 'completed', 'first'),
+    row(10, 'completed', 'tenth'),
+    row(2, 'completed', 'second'),
+    row(9, 'completed', 'ninth'),
+    row(4, 'completed', 'fourth'),
+    row(8, 'completed', 'eighth'),
+    row(5, 'completed', 'fifth'),
+    row(7, 'completed', 'seventh'),
   ];
 }
 
@@ -358,7 +362,7 @@ async function caseVoiceHistory(browser) {
     /* The ring is newest-first capped at 10, so the rendered ids are
        12,11,...,3; ids 1 and 2 fall outside the cap and are never painted. */
     const transcript = id === '4' ? '<b>hello</b>' : (id === '3' ? STALE : 'transcript ' + id);
-    return route.fulfill({ contentType: 'application/json', body: envelope({ id: Number(id), transcript, response: 'reply ' + id, status: 'complete' }) });
+    return route.fulfill({ contentType: 'application/json', body: envelope({ id: Number(id), transcript, response: 'reply ' + id, status: 'completed' }) });
   });
 
   await page.goto(`${baseURL}/simulation`);
@@ -377,8 +381,19 @@ async function caseVoiceHistory(browser) {
   const newestTime = await page.locator('#voice-history .voice-turn[data-id="12"] time').innerText();
   const expectedNewest = await page.evaluate(iso => new Date(iso).toLocaleTimeString(), voiceStamp(12));
   checkEqual(newestTime, expectedNewest, 'the newest row shows its canonical ISO timestamp');
-  const errorStatus = await page.locator('#voice-history .status.error').first().innerText().catch(() => '');
-  check(errorStatus.toLowerCase() === 'error', 'a failed turn renders its error status');
+  /* Only a canonical `completed` turn may be styled success. The failed turn
+     must carry the error class *and* render its own failure status text — the
+     old regex styling passed a lookalike `complete`/`error` vocabulary that the
+     real API never emits (regression caught by CI on a3be414). */
+  const failedStatus = page.locator('#voice-history .voice-turn[data-id="11"] .status');
+  checkEqual((await failedStatus.getAttribute('class')).trim(), 'status error',
+    'a failed turn is styled as an error, never success');
+  checkEqual((await failedStatus.innerText()).trim().toLowerCase(), 'assistant_failed',
+    'a failed turn renders its failure status text');
+  const successTexts = await page.$$eval('#voice-history .status.ok', nodes => nodes.map(n => n.textContent.trim()));
+  checkEqual(successTexts.length, 9, 'only the nine completed turns are styled success');
+  check(successTexts.every(v => v === 'completed'),
+    'no non-completed status is ever styled success');
 
   /* Detail fetch and escaping (id 4 is inside the painted cap). */
   await page.click('#voice-history .voice-turn[data-id="4"] .voice-detail');
