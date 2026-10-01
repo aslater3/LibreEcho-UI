@@ -206,6 +206,9 @@ int main(void)
     char config_path[256];
     char credentials_path[256];
     char capture_path[256];
+    char config_backup_path[300];
+    char history_generation_path[384];
+    char history_generation_backup_path[400];
     char audio_socket[256];
     char wake_socket[256];
     char stt_socket[256];
@@ -230,6 +233,13 @@ int main(void)
     CHECK(mkdtemp(directory) != NULL);
     snprintf(socket_path, sizeof(socket_path), "%s/agent.sock", directory);
     snprintf(config_path, sizeof(config_path), "%s/agent.json", directory);
+    snprintf(config_backup_path, sizeof(config_backup_path), "%s.bak",
+             config_path);
+    snprintf(history_generation_path, sizeof(history_generation_path),
+             "%s.history-generation", config_path);
+    snprintf(history_generation_backup_path,
+             sizeof(history_generation_backup_path), "%s.bak",
+             history_generation_path);
     snprintf(credentials_path, sizeof(credentials_path),
              "%s/oauth.json", directory);
     snprintf(capture_path, sizeof(capture_path), "%s/curl.conf", directory);
@@ -354,17 +364,25 @@ int main(void)
 
     puts("agentd voice history clear race: cleared in-flight turn stayed "
          "clear while an uncleared turn was kept");
-    return 0;
 
 cleanup:
-    if (agentd_child > 0)
+    if (agentd_child > 0) {
         kill(agentd_child, SIGKILL);
-    if (mock_child > 0)
+        waitpid(agentd_child, NULL, 0);
+    }
+    if (mock_child > 0) {
         kill(mock_child, SIGKILL);
+        waitpid(mock_child, NULL, 0);
+    }
+    unlink(socket_path);
+    unlink(config_path);
+    unlink(config_backup_path);
+    unlink(history_generation_path);
+    unlink(history_generation_backup_path);
+    unlink(credentials_path);
+    unlink(capture_path);
     unlink(wake_socket);
     unlink(stt_socket);
-    unlink(socket_path);
-    if (rmdir(directory) != 0)
-        result = 1;
+    rmdir(directory);
     return result;
 }
