@@ -2304,10 +2304,11 @@ recovery routes included) bypasses the management auth/CSRF gate.
 
 ### Network / recovery
 - `GET /api/v1/network` — adds `mode` and a `recovery` object matching `networkd`
-  (`mode`, `trigger`, `available`, `ssid`, `reason`, `error`, `secret_available`,
-  `led_owner`, `enabled`, `net_configured`, `auto_enabled`, `auto_timeout_ms`,
-  `auto_pending`, `auto_countdown_ms`, `rate_count`, `children`). No Wi-Fi PSK or
-  internal `psk_path` is exposed in this status.
+  (`mode`, `trigger`, `available`, `ssid`, `address`, `reason`, `error`,
+  `secret_available`, `led_owner`, `enabled`, `net_configured`, `auto_enabled`,
+  `auto_timeout_ms`, `auto_pending`, `auto_countdown_ms`, `rate_count`,
+  `children`). `address` is the recovery AP's portal IPv4 (not a secret). No
+  Wi-Fi PSK or internal `psk_path` is exposed in this status.
 - `PUT /api/v1/network/recovery` — `{"enabled":bool,"auto_enabled":bool,
   "timeout_seconds":30..600}` (all required). The API maps `timeout_seconds` to the
   daemon `auto_timeout_ms`. The getter is `GET /api/v1/network`.
@@ -2319,10 +2320,30 @@ recovery routes included) bypasses the management auth/CSRF gate.
   than returning a fake secret.
 - `POST /api/v1/network/recovery/stop` — auth/CSRF; stops recovery mode.
 
+#### Captive portal (recovery AP only)
+While `networkd` reports the recovery AP actively serving (`recovery.mode ==
+"recovery-ap"`), the web layer makes joining the AP land on the recovery
+sign-in page, and only then:
+- a captive-probe path (`/generate_204`, `/gen_204`, `/hotspot-detect.html`,
+  `/library/test/success.html`, `/connecttest.txt`, `/ncsi.txt`,
+  `/canonical.html`, `/success.txt`), a request whose `Host` is not the portal
+  address, or a bare `GET /` all answer `302` with
+  `Location: http://<portal-address>/?recovery=1`;
+- `GET /?recovery=1` (and any hinted root) is served as `setup.html`, the
+  recovery sign-in landing.
+
+The redirect target is the unauthenticated login landing, so no authenticated
+surface or secret is exposed by it. Outside recovery mode every request is
+served exactly as before (no redirect). The generated dnsmasq config also
+advertises RFC 8910 DHCP option `114` pointing at the same recovery page so a
+joining client is directed there without a probe round-trip.
+
 Contract tests: `tests/test_feature_batch_api.sh` drives every route above over a
 real mock-backend server, with `tests/test_feature_batch_api_agent.py` standing
 in for `agentd` (validation, auth/CSRF denial, capability gating, recovery secret
-handling and the voice-history routes).
+handling and the voice-history routes). `tests/run_recovery_backend_integration.sh`
+drives the same routes through a real `networkd` and additionally proves the
+captive redirect fires only while the recovery AP is active.
 
 ## Error Codes
 

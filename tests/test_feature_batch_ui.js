@@ -571,8 +571,10 @@ async function caseRecoveryModeDisplay() {
 
 /* ---------------------------------------------------------- setup.js (captive) */
 
-function setupSandbox(config, search = '') {
+function setupSandbox(config, search = '', options = {}) {
     const store = {};
+    if (options.token) store['libreecho-token'] = options.token;
+    const unauthorized = new Set(options.unauthorized || []);
     const setupCalls = [];
     function classes() { const s = new Set(); return { add: c => s.add(c), remove: c => s.delete(c), toggle: (c, on) => on ? s.add(c) : s.delete(c), contains: c => s.has(c), _set: s }; }
     function el(id) { return { id, innerHTML: '', textContent: '', value: '', checked: false, disabled: false, hidden: id === 'recovery-login' || id === 'recovery-network', type: '', classList: classes(), dataset: {}, style: {}, scrollIntoView() {}, addEventListener() {}, focus() {}, onclick: null, onchange: null, oninput: null }; }
@@ -598,19 +600,21 @@ function setupSandbox(config, search = '') {
         fetch: async (url, opts = {}) => {
             const p = String(url).replace('/api/v1', '');
             setupCalls.push({ path: p, method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null });
+            if (unauthorized.has(p)) return { ok: false, status: 401, json: async () => ({ ok: false, data: null, error: { code: 'auth_required', message: 'Authentication is required' } }) };
             let data = {};
             if (p === '/config') data = Object.assign({ csrf_token: 'csrf-x', os_version: '0.14.0' }, config);
             else if (p === '/network/wifi/scan') data = { networks: [{ ssid: 'HomeNet', security: 'wpa2', signal: 80, capabilities: 'WPA2' }] };
+            else if (p === '/auth') data = { authenticated: true, username: 'owner' };
             else if (p === '/auth/login') data = { token: 'tok-recovery', username: 'owner' };
             return { ok: true, status: 200, json: async () => ({ ok: true, data }) };
         }
     };
     sandbox.window = sandbox; sandbox.globalThis = sandbox;
     vm.createContext(sandbox);
-    return { sandbox, setupCalls, map };
+    return { sandbox, setupCalls, map, store };
 }
-async function runSetup(config, search) {
-    const ctx = setupSandbox(config, search || '');
+async function runSetup(config, search, options) {
+    const ctx = setupSandbox(config, search || '', options || {});
     vm.runInContext(fs.readFileSync(path.join(ROOT, 'web/js/setup.js'), 'utf8'), ctx.sandbox, { filename: 'setup.js' });
     await settle(8);
     return ctx;
@@ -663,6 +667,49 @@ async function caseConfiguredPlainVisitRedirectsToLogin() {
     checkEqual(ctx.setupCalls.filter(c => c.path === '/setup').length, 0, 'a configured device is not sent through the setup wizard');
 }
 
+/* Regression (Codex review on 5660cc2): the captive recovery flow trusted any
+ * sessionStorage token by truthiness, so an expired/revoked session skipped
+ * sign-in and the owner landed on a Wi-Fi page whose requests all 401'd. The
+ * stored token is now validated against /api/v1/auth, and any 401 from the
+ * recovery scan or connect returns to sign-in with the token cleared. */
+
+async function caseRecoveryExpiredSessionShowsSignin() {
+    const ctx = await runSetup({ bootstrap_required: false, authentication: 'users' }, '?recovery=1',
+        { token: 'expired-token', unauthorized: ['/auth'] });
+    const q = sel => ctx.sandbox.document.querySelector(sel);
+    checkEqual(ctx.setupCalls.filter(c => c.path === '/auth').length, 1, 'the stored recovery token is validated against the auth endpoint');
+    checkEqual(q('#recovery-login').hidden, false, 'an expired recovery session shows the sign-in page');
+    checkEqual(q('#recovery-network').hidden, true, 'the Wi-Fi page is hidden for an expired session');
+    check(!('libreecho-token' in ctx.store), 'the expired token is cleared from sessionStorage');
+    checkEqual(ctx.setupCalls.filter(c => c.path === '/network/wifi/scan').length, 0, 'the Wi-Fi page is not reached with an expired session');
+    checkEqual(ctx.setupCalls.filter(c => c.path === '/auth/bootstrap').length, 0, 'no account is created for an expired session');
+}
+
+async function caseRecoveryScanUnauthorizedReturnsToSignin() {
+    const ctx = await runSetup({ bootstrap_required: false, authentication: 'users' }, '?recovery=1',
+        { token: 'live-token', unauthorized: ['/network/wifi/scan'] });
+    const q = sel => ctx.sandbox.document.querySelector(sel);
+    checkEqual(ctx.setupCalls.filter(c => c.path === '/auth').length, 1, 'a live token is validated before the Wi-Fi page');
+    checkEqual(ctx.setupCalls.filter(c => c.path === '/network/wifi/scan').length, 1, 'the recovery scan is attempted for a live session');
+    checkEqual(q('#recovery-login').hidden, false, 'a 401 from the recovery scan returns to sign-in');
+    checkEqual(q('#recovery-network').hidden, true, 'the Wi-Fi page is hidden after a scan 401');
+    check(!('libreecho-token' in ctx.store), 'the rejected token is cleared after a scan 401');
+}
+
+async function caseRecoveryConnectUnauthorizedReturnsToSignin() {
+    const ctx = await runSetup({ bootstrap_required: false, authentication: 'users' }, '?recovery=1',
+        { token: 'live-token', unauthorized: ['/network/wifi/connect'] });
+    const q = sel => ctx.sandbox.document.querySelector(sel);
+    checkEqual(q('#recovery-network').hidden, false, 'a live session reaches the Wi-Fi page');
+    q('#recovery-ssid').value = 'HomeNet';
+    q('#recovery-security').value = 'wpa2';
+    q('#recovery-wifi-password').value = 'super-secret';
+    await q('#recovery-connect').onclick();
+    checkEqual(ctx.setupCalls.filter(c => c.path === '/network/wifi/connect').length, 1, 'the connect is attempted for a live session');
+    checkEqual(q('#recovery-login').hidden, false, 'a 401 from the recovery connect returns to sign-in');
+    check(!('libreecho-token' in ctx.store), 'the rejected token is cleared after a connect 401');
+}
+
 /* ------------------------------------------------------------------- main */
 
 async function main() {
@@ -685,6 +732,9 @@ async function main() {
         ['recovery panel reflects actual networkd modes', caseRecoveryModeDisplay],
         ['configured device captive recovery', caseCaptiveRecoveryConfigured],
         ['configured device plain visit redirects to login', caseConfiguredPlainVisitRedirectsToLogin],
+        ['recovery expired session returns to sign-in', caseRecoveryExpiredSessionShowsSignin],
+        ['recovery scan 401 returns to sign-in', caseRecoveryScanUnauthorizedReturnsToSignin],
+        ['recovery connect 401 returns to sign-in', caseRecoveryConnectUnauthorizedReturnsToSignin],
         ['first-boot wizard unchanged', caseFirstBootWizardUnchanged]
     ];
     for (const [name, run] of cases) {

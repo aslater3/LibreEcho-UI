@@ -33,6 +33,7 @@ Environment (set by tests/run_recovery_backend_integration.sh):
 Exits non-zero on any failure.
 """
 
+import http.client
 import json
 import os
 from pathlib import Path
@@ -148,6 +149,20 @@ class Harness:
                 return response.status, response.read().decode()
         except urllib.error.HTTPError as error:
             return error.code, error.read().decode()
+
+    def raw(self, method, path, host=None, timeout=5):
+        """Raw HTTP that does not follow redirects and lets the Host be set."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        headers = {}
+        if host is not None:
+            headers["Host"] = host
+        conn.request(method, path, headers=headers)
+        response = conn.getresponse()
+        status = response.status
+        location = response.getheader("Location")
+        body = response.read().decode(errors="replace")
+        conn.close()
+        return status, location, body
 
     def network(self):
         status, text = self.http("GET", "/api/v1/network")
@@ -314,6 +329,50 @@ def test_stop_succeeds_through_the_backend():
                     message="recovery stopped")
 
 
+def test_recovery_ap_redirects_captive_probe_to_login():
+    """While the recovery AP serves, a captive probe is sent to the login page.
+
+    Regression (Codex review on 5660cc2): joining the recovery AP only ever
+    produced the generic index (and only entered the recovery flow with an
+    explicit ?recovery=1), so the owner had no way to reach sign-in by simply
+    joining.  A probe path or a foreign Host now 302s to the recovery landing.
+    """
+    with Harness(marker=True) as h:
+        lc.wait_for(lambda: h.recovery()["mode"] == "recovery-ap",
+                    message="recovery AP active")
+        status, location, body = h.raw("GET", "/generate_204",
+                                       host="connectivitycheck.gstatic.com")
+        assert status == 302, (status, location, body)
+        assert location == "http://192.168.4.1/?recovery=1", location
+        # A bare portal root (same host, no hint) is handed the recovery hint.
+        status, location, body = h.raw("GET", "/", host="192.168.4.1")
+        assert status == 302, (status, location, body)
+        assert location == "http://192.168.4.1/?recovery=1", location
+
+
+def test_recovery_ap_serves_recovery_landing():
+    """The hinted portal root is served as setup.html (the sign-in landing)."""
+    with Harness(marker=True) as h:
+        lc.wait_for(lambda: h.recovery()["mode"] == "recovery-ap",
+                    message="recovery AP active")
+        status, location, body = h.raw("GET", "/?recovery=1", host="192.168.4.1")
+        assert status == 200, (status, location, body)
+        assert 'id="recovery-login"' in body, body[:200]
+
+
+def test_normal_mode_has_no_captive_redirect():
+    """Outside recovery the same requests are served normally, never 302'd."""
+    with Harness() as h:
+        assert h.recovery()["mode"] == "client"
+        status, location, body = h.raw("GET", "/generate_204",
+                                       host="connectivitycheck.gstatic.com")
+        assert status != 302, (status, location, body)
+        assert location is None, location
+        status, location, body = h.raw("GET", "/", host="127.0.0.1")
+        assert status == 200, (status, location, body)
+        assert location is None, location
+
+
 def main():
     tests = [
         test_configure_success_scales_timeout_seconds_to_ms,
@@ -323,6 +382,9 @@ def main():
         test_persist_failure_is_server_error_and_changes_nothing,
         test_backend_unavailable_maps_to_not_supported,
         test_stop_succeeds_through_the_backend,
+        test_recovery_ap_redirects_captive_probe_to_login,
+        test_recovery_ap_serves_recovery_landing,
+        test_normal_mode_has_no_captive_redirect,
     ]
     failed = 0
     for test in tests:

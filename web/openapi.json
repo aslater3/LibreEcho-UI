@@ -2457,7 +2457,7 @@
      "Network"
     ],
     "summary": "Read association, gateway liveness, mode and recovery state",
-    "description": "data.mode is the operating mode and data.recovery is the networkd recovery object (mode, trigger, available, ssid, reason, error, secret_available, led_owner, enabled, net_configured, auto_enabled, auto_timeout_ms, auto_pending, auto_countdown_ms, rate_count, children). No Wi-Fi PSK or internal psk_path is ever present in this public status; the recovery secret is only revealed by POST /network/recovery/prepare.",
+    "description": "data.mode is the operating mode and data.recovery is the networkd recovery object (mode, trigger, available, ssid, address, reason, error, secret_available, led_owner, enabled, net_configured, auto_enabled, auto_timeout_ms, auto_pending, auto_countdown_ms, rate_count, children). address is the recovery AP portal IPv4 (not a secret). While recovery.mode is 'recovery-ap' the web layer 302-redirects captive probes and foreign-Host requests to http://<address>/?recovery=1 and serves that hinted root as setup.html; no redirect happens otherwise. No Wi-Fi PSK or internal psk_path is ever present in this public status; the recovery secret is only revealed by POST /network/recovery/prepare.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/NetworkState"

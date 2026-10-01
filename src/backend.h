@@ -93,6 +93,9 @@ struct le_wifi_credentials { char ssid[LE_TEXT], password[128], security[16]; };
    itself is never stored here. */
 struct le_recovery_status {
     char mode[24], trigger[24], ssid[LE_TEXT], reason[64], error[64], led_owner[32];
+    /* Portal IPv4 of the recovery AP. Not a secret: the address captive clients
+       are leased and resolved to; the web layer builds its redirect from it. */
+    char ap_address[32];
     int available, secret_available, enabled, net_configured;
     int auto_enabled, auto_pending, rate_count, children;
     long long auto_timeout_ms, auto_countdown_ms;

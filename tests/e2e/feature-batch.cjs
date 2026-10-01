@@ -527,6 +527,31 @@ async function caseLoginOnlySetup(browser) {
   await context.close();
 }
 
+/* Regression (Codex review on 5660cc2): a stale sessionStorage token used to
+   skip recovery sign-in by truthiness alone. It is now validated against
+   /api/v1/auth; an expired session lands on sign-in with the token cleared. */
+async function caseRecoveryExpiredSession(browser) {
+  if (!authURL) {
+    check(false, 'LIBREECHO_E2E_AUTH_URL is required to verify the expired recovery session');
+    return;
+  }
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const requests = recordRequests(page);
+  await page.goto(`${authURL}/login`);
+  await page.evaluate(() => sessionStorage.setItem('libreecho-token', 'expired-e2e-token'));
+  await page.goto(`${authURL}/setup.html?recovery=1`);
+  await page.waitForSelector('#recovery-login.active', { timeout: 8000 });
+  check(calls(requests, '/auth', 'GET').length >= 1, 'an expired recovery token is validated against /auth');
+  checkEqual(await page.evaluate(() => sessionStorage.getItem('libreecho-token')), null,
+    'the expired recovery token is cleared from sessionStorage');
+  checkEqual(calls(requests, '/network/wifi/scan', 'GET').length, 0,
+    'the expired session never reaches the Wi-Fi scan');
+  check(await page.evaluate(() => document.querySelector('#recovery-network').hidden),
+    'the Wi-Fi page stays hidden for the expired session');
+  await context.close();
+}
+
 /* ------------------------------------------------------------------- main */
 
 async function main() {
@@ -540,6 +565,7 @@ async function main() {
     ['recovery owner prepare no-store / no storage', caseRecoverySecret],
     ['recovery settings save is usable', caseRecoverySave],
     ['login-only setup never reopens bootstrap', caseLoginOnlySetup],
+    ['recovery expired session returns to sign-in', caseRecoveryExpiredSession],
     /* Nursery sounds runs last: its POST /audio/noise currently aborts the mock
        daemon (server-side buffer overflow owned by the server change), which
        would otherwise knock the server out from under the cases above. */

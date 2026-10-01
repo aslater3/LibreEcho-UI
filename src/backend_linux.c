@@ -1123,6 +1123,8 @@ static int networkd_status(struct le_backend *b, struct le_network_state *o)
                                   sizeof(o->recovery.trigger));
             (void)json_get_string(object, "ssid", o->recovery.ssid,
                                   sizeof(o->recovery.ssid));
+            (void)json_get_string(object, "address", o->recovery.ap_address,
+                                  sizeof(o->recovery.ap_address));
             (void)json_get_string(object, "reason", o->recovery.reason,
                                   sizeof(o->recovery.reason));
             (void)json_get_string(object, "error", o->recovery.error,

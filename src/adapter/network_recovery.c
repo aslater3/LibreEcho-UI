@@ -1261,10 +1261,15 @@ static int write_recovery_configs(struct le_recovery *recovery,
         "dhcp-range=%s\n"
         "dhcp-option=3,%s\n"
         "dhcp-option=6,%s\n"
+        /* RFC 8910 option 114: advertise the captive-portal URI so a joining
+         * client is sent to the recovery sign-in page instead of a generic
+         * index.  Fail-closed: the target is the login page only. */
+        "dhcp-option=114,http://%s/?recovery=1\n"
         "address=/#/%s\n"
         "log-dhcp\n",
         recovery->config.interface, range, recovery->config.ap_address,
-        recovery->config.ap_address, recovery->config.ap_address);
+        recovery->config.ap_address, recovery->config.ap_address,
+        recovery->config.ap_address);
     if (written < 0 || written >= (int)sizeof(content)) {
         copy_string(reason, reason_size, "dnsmasq-config-overflow");
         return -1;
@@ -1801,6 +1806,12 @@ int le_recovery_status_json(const struct le_recovery *recovery,
                     ",\"available\":%s,\"ssid\":",
                     recovery->available ? "true" : "false") < 0 ||
         append_json_string(out, out_size, &n, recovery->ssid) < 0 ||
+        /* The portal IPv4 the AP assigns itself.  Not a secret: it is the
+         * address every captive client is leased and DNS-resolved to.  The web
+         * layer uses it to build the captive-portal redirect target. */
+        append_text(out, out_size, &n, ",\"address\":") < 0 ||
+        append_json_string(out, out_size, &n,
+                           recovery->config.ap_address) < 0 ||
         append_text(out, out_size, &n,
                     ",\"reason\":") < 0 ||
         append_json_string(out, out_size, &n,

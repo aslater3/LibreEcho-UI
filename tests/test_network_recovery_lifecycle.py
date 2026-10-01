@@ -26,10 +26,16 @@ MARKER_TAG = "libreecho-recovery-v1"
 class FakeWpa:
     """Minimal wpa_supplicant control oracle."""
 
-    def __init__(self, path, association_fails=False, saved_network=True):
+    def __init__(self, path, association_fails=False, saved_network=True,
+                 save_config_failures=()):
         self.path = path
         self.association_fails = association_fails
         self.saved_network = saved_network
+        # 1-based SAVE_CONFIG call indices that should answer FAIL instead of
+        # OK.  Callers use this to drive the profile-persist failure path
+        # without disturbing the surrounding restore/revert commands.
+        self.save_config_failures = set(save_config_failures)
+        self.save_config_calls = 0
         self.connected = False
         self.network_id = 0
         self.next_network_id = 1
@@ -84,6 +90,10 @@ class FakeWpa:
                 response = "OK\n"
             elif command == "SCAN_RESULTS":
                 response = "bssid / frequency / signal level / flags / ssid\n"
+            elif command == "SAVE_CONFIG":
+                self.save_config_calls += 1
+                response = "FAIL\n" if self.save_config_calls in \
+                    self.save_config_failures else "OK\n"
             else:
                 response = "OK\n"
             try:
@@ -222,11 +232,12 @@ class RecoveryFixture:
                  association_fails=False, saved_network=True,
                  hostapd_hang=False, start_timeout_ms=300,
                  stop_timeout_ms=400, dhcp_oracle=None,
-                 net_down_fail_budget=0):
+                 net_down_fail_budget=0, save_config_failures=()):
         self.directory = directory
         self.wpa = FakeWpa(directory / "wpa.sock",
                            association_fails=association_fails,
-                           saved_network=saved_network)
+                           saved_network=saved_network,
+                           save_config_failures=save_config_failures)
         self.led = FakeLed(directory / "led.sock")
         self.marker_path = directory / "recovery-mode"
         self.psk_path = directory / "recovery-psk"
@@ -461,6 +472,8 @@ def test_physical_entry_starts_ap():
             assert recovery["net_configured"] is True
             assert "--interface test0" in fixture.read_net_up()
             assert "--address 192.168.4.1/24" in fixture.read_net_up()
+            # RFC 8910 option 114 points a joining client at the recovery page.
+            assert "dhcp-option=114,http://192.168.4.1/?recovery=1" in dns_conf
             # The LED owner was taken through the existing pattern protocol.
             wait_for(lambda: ("recovery-ap", "pulse")
                      in fixture.led.pattern_owners(),
@@ -902,6 +915,45 @@ def test_disabled_config_blocks_boot_and_auto():
             fixture.stop()
 
 
+def test_handover_rebuilds_ap_when_profile_save_fails():
+    """A failed profile save must also re-arm the recovery AP.
+
+    Regression (Codex review on 5660cc2): when the candidate Wi-Fi association
+    completed but SAVE_CONFIG failed, finish_association() rolled back to the
+    previous WPA profile and returned without calling
+    le_recovery_handover_result(...,0).  The recovery state stayed in
+    LE_RECOVERY_MODE_HANDOVER, where le_recovery_tick() does nothing, so no AP
+    was ever rebuilt and the owner was stranded with no portal.  The failed
+    association, DHCP-start failure and DHCP-lease failure paths all already
+    re-armed; this profile-save path did not.
+    """
+    with tempfile.TemporaryDirectory(prefix="le-recovery-savefail-") as temp:
+        # No saved fallback network: the only existing profile is the candidate
+        # that just failed to persist, so a correct implementation must rebuild
+        # the AP rather than silently fall through to a disconnected state.
+        fixture = RecoveryFixture(Path(temp), association_fails=False,
+                                  saved_network=False, save_config_failures=(1,))
+        try:
+            wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
+                     message="recovery AP active")
+            response = adapter_request(
+                fixture.adapter, 17, "connect",
+                {"ssid": "HomeNet", "psk": "correcthorsebattery",
+                 "security": "wpa2"}, timeout=6)
+            # Association completed but the profile could not be saved.
+            assert response["ok"] is False, response
+            assert "profile could not be saved" in response["error"], response
+            # The WPA profile was rolled back and the AP rebuilt with the
+            # marker kept, so the owner can retry.
+            assert fixture.marker_path.exists(), "marker must survive"
+            wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
+                     timeout=5, message="AP rebuilt after profile save failure")
+            assert fixture.recovery()["net_configured"] is True
+            assert fixture.read_net_up().count("--address") >= 2
+        finally:
+            fixture.stop()
+
+
 def main():
     tests = [
         test_physical_entry_starts_ap,
@@ -911,6 +963,7 @@ def main():
         test_invalid_credentials_keep_ap_and_surface_error,
         test_association_without_dhcp_keeps_portal,
         test_handover_rebuilds_ap_when_dhcp_exits_without_address,
+        test_handover_rebuilds_ap_when_profile_save_fails,
         test_handover_completes_only_after_dhcp_address,
         test_owner_stop_releases_ap_marker_and_led,
         test_net_down_failure_releases_after_retry,

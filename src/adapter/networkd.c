@@ -3207,6 +3207,16 @@ static void finish_association(struct daemon_ctx *ctx, int success)
 
     if (wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0) {
         restore_previous_network(ctx);
+        /* The profile could not be saved, so the handover cannot proceed: the
+         * candidate config was rolled back.  Re-arm the recovery AP exactly as
+         * for a failed association, otherwise the state machine is left in
+         * HANDOVER with no AP and le_recovery_tick() can never rebuild one. */
+        if (ctx->recovery_configured &&
+            ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+            le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 0);
+            recovery_apply_led(ctx);
+            broadcast_state(ctx, "network.recovery");
+        }
         if (ci >= 0) {
             (void)send_err_fd(fd, id, "Wi-Fi profile could not be saved");
             ctx->clients[ci].busy = 0;

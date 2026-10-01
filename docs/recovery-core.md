@@ -15,6 +15,39 @@ the captive web layer still authenticates the owner before any state change.
 requires a capability probe, the portal address applied, hostapd + dnsmasq
 running and (optionally) a readiness probe.
 
+The `recovery` object also carries `address`, the portal IPv4 (`config.ap_address`).
+It is not a secret: it is the address the AP leases and DNS-resolves captive
+clients to, and the web layer uses it to build the captive-portal redirect.
+
+## Captive portal
+
+Joining the recovery AP must land the owner on the recovery sign-in page, not a
+generic index. Two mechanisms do that, both only while `mode == "recovery-ap"`:
+
+- the generated dnsmasq config advertises RFC 8910 DHCP option `114`
+  (`dhcp-option=114,http://<address>/?recovery=1`) so a joining client is
+  directed to the page without a probe round-trip;
+- the web layer answers a captive-probe path (`/generate_204`, `/gen_204`,
+  `/hotspot-detect.html`, `/library/test/success.html`, `/connecttest.txt`,
+  `/ncsi.txt`, `/canonical.html`, `/success.txt`), a request whose `Host` is not
+  the portal address, or a bare `GET /` with `302 Location:
+  http://<address>/?recovery=1`, and serves the hinted root as `setup.html`.
+
+The redirect target is the unauthenticated login landing, so it never exposes an
+authenticated surface or a secret, and outside `recovery-ap` every request is
+served unchanged. `docs/API.md` documents the HTTP contract; the redirect is
+proven end-to-end (real `networkd`) by
+`tests/run_recovery_backend_integration.sh`.
+
+## Handover re-arm invariant
+
+Any failure on the single-radio handover path — a failed association, a
+`SAVE_CONFIG` failure after association, or DHCP that cannot start or lease —
+must call `le_recovery_handover_result(...,0)`, which rebuilds the AP and keeps
+the marker. Leaving the state machine in `handover` with no AP is unrecoverable:
+`le_recovery_tick()` does nothing in that mode. `networkd.c` re-arms on every
+such path, and `tests/test_network_recovery_lifecycle.py` pins each one.
+
 ## Adapter commands
 
 - `status`, `scan`, `connect`, `disconnect`, … unchanged.

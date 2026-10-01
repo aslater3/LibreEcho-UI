@@ -55,6 +55,7 @@ strcpy(m->net.mode,"client");
 strcpy(m->net.recovery.mode,"off");
 strcpy(m->net.recovery.trigger,"none");
 strcpy(m->net.recovery.ssid,"LibreEcho-Setup-MOCK");
+strcpy(m->net.recovery.ap_address,"192.168.4.1");
 m->net.recovery.available=1;m->net.recovery.enabled=1;m->net.recovery.net_configured=1;
 m->net.recovery.auto_timeout_ms=120000;
 m->led.idle_mode=0;
