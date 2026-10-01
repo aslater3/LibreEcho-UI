@@ -477,7 +477,7 @@ $(BUILD)/test-networkd-health: $(NETWORKD_SOURCES)
 $(BUILD)/test_network_recovery: tests/test_network_recovery.c \
 		src/adapter/network_recovery.c
 	@mkdir -p $(BUILD)
-	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_RECOVERY_UNIT_TESTING $(CSTD) $(WARN) -Werror \
 		-Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-networkd-recovery: src/adapter/networkd.c src/adapter/network_health.c \

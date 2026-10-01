@@ -33,6 +33,72 @@
 
 #define RECOVERY_SETTLE_MS 400LL
 
+/*
+ * Durability syscall wrappers.  In a shipped build the fault helper is a no-op
+ * and these are plain passthroughs, so injection cannot slow or alter the real
+ * path.  The recovery unit harness defines LE_RECOVERY_UNIT_TESTING and can make
+ * exactly one matching fsync()/close()/rename() fail, so the error and rollback
+ * branches are exercised directly instead of being assumed to succeed.
+ */
+#ifdef LE_RECOVERY_UNIT_TESTING
+static int le_recovery_faults[LE_RECOVERY_FAULT_COUNT];
+
+void le_recovery_test_fault(int which, int count)
+{
+    if (which >= 0 && which < LE_RECOVERY_FAULT_COUNT)
+        le_recovery_faults[which] = count;
+}
+
+void le_recovery_test_fault_reset(void)
+{
+    memset(le_recovery_faults, 0, sizeof(le_recovery_faults));
+}
+
+static int fault_pending(int which)
+{
+    if (which >= 0 && which < LE_RECOVERY_FAULT_COUNT &&
+        le_recovery_faults[which] > 0) {
+        --le_recovery_faults[which];
+        return 1;
+    }
+    return 0;
+}
+#else
+static int fault_pending(int which)
+{
+    (void)which;
+    return 0;
+}
+#endif
+
+static int durability_fsync(int fd, int fault)
+{
+    if (fault_pending(fault)) {
+        errno = EIO;
+        return -1;
+    }
+    return fsync(fd);
+}
+
+static int durability_close(int fd, int fault)
+{
+    if (fault_pending(fault)) {
+        (void)close(fd);   /* still release the descriptor, only report it */
+        errno = EIO;
+        return -1;
+    }
+    return close(fd);
+}
+
+static int durability_rename(const char *from, const char *to, int fault)
+{
+    if (fault_pending(fault)) {
+        errno = EIO;
+        return -1;
+    }
+    return rename(from, to);
+}
+
 static void copy_string(char *dst, size_t size, const char *src)
 {
     size_t length;
@@ -537,25 +603,45 @@ static int ensure_secure_parent_dir(const struct le_recovery_config *config,
     return 0;
 }
 
-/* fsync a file's parent directory so a rename is durable across power loss. */
-static void fsync_parent_dir(const char *path)
+/* fsync a file's parent directory so a rename is durable across power loss.
+ * Returns 0 when there is nothing to sync, when the filesystem does not support
+ * directory fsync (EINVAL/ENOTSUP), or on success; -1 on a real open/fsync/close
+ * failure.  Callers must not claim a durable write when this fails. */
+static int fsync_parent_dir(const char *path)
 {
     char parent[PATH_MAX];
     char *slash;
     int fd;
 
     if (!path || strlen(path) >= sizeof(parent))
-        return;
+        return 0;
     copy_string(parent, sizeof(parent), path);
     slash = strrchr(parent, '/');
     if (!slash || slash == parent)
-        return;
+        return 0;
     *slash = '\0';
     fd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd >= 0) {
-        (void)fsync(fd);
-        close(fd);
+#ifdef LE_RECOVERY_UNIT_TESTING
+    if (fd >= 0 && fault_pending(LE_RECOVERY_FAULT_PARENT_OPEN)) {
+        (void)close(fd);
+        errno = EIO;
+        return -1;
     }
+#endif
+    if (fd < 0)
+        return -1;
+    if (durability_fsync(fd, LE_RECOVERY_FAULT_PARENT_FSYNC) < 0) {
+        int saved = errno;
+        (void)close(fd);
+        /* Some filesystems reject directory fsync; that is not a durability
+         * failure of the write itself. */
+        if (saved == EINVAL || saved == ENOTSUP)
+            return 0;
+        return -1;
+    }
+    if (durability_close(fd, LE_RECOVERY_FAULT_PARENT_CLOSE) < 0)
+        return -1;
+    return 0;
 }
 
 int le_recovery_psk_ensure(const struct le_recovery_config *config,
@@ -633,7 +719,14 @@ int le_recovery_psk_ensure(const struct le_recovery_config *config,
         errno = saved;
         return -1;
     }
-    fsync_parent_dir(config->psk_path);
+    /* The secret only counts once its rename is durable.  On a real parent
+     * fsync failure undo the write rather than leave a secret whose presence
+     * the caller was told failed. */
+    if (fsync_parent_dir(config->psk_path) < 0) {
+        (void)unlink(config->psk_path);
+        copy_string(reason, reason_size, "psk-parent-fsync-failed");
+        return -1;
+    }
     copy_string(out, out_size, buffer);
     return 0;
 }
@@ -769,26 +862,46 @@ static int spawn_services(struct le_recovery *recovery)
 {
     const struct le_recovery_config *config = &recovery->config;
 
+    /* The packaged DHCP/DNS daemon is dnsmasq (see the config default and
+     * init/libreecho-networkd.init).  dnsmasq selects its configuration with
+     * "-C, --conf-file=<file>"; a bare positional pathname is rejected and the
+     * child exits, which would make recovery unavailable.  Always pass the
+     * explicit option, never the bare path. */
     if (config->dns_bin[0] &&
         (!config->dhcp_bin[0] || !strcmp(config->dhcp_bin, config->dns_bin))) {
         char *argv[4];
-        char program[PATH_MAX], conf[PATH_MAX], noguard[32];
+        char program[PATH_MAX], conf[PATH_MAX], conf_file[PATH_MAX],
+             noguard[32];
         copy_string(program, sizeof(program), config->dns_bin);
         copy_string(conf, sizeof(conf), config->dhcp_conf);
         copy_string(noguard, sizeof(noguard), "--no-daemon");
+        if (conf[0] &&
+            snprintf(conf_file, sizeof(conf_file), "--conf-file=%s", conf) >=
+                (int)sizeof(conf_file)) {
+            copy_string(recovery->last_error, sizeof(recovery->last_error),
+                        "dnsmasq-conf-too-long");
+            return -1;
+        }
         argv[0] = program;
         argv[1] = noguard;
-        argv[2] = conf[0] ? conf : NULL;
+        argv[2] = conf[0] ? conf_file : NULL;
         argv[3] = NULL;
         return spawn_child(recovery, "dnsmasq", config->dns_bin, argv);
     }
     if (config->dhcp_bin[0]) {
         char *argv[3];
-        char program[PATH_MAX], conf[PATH_MAX];
+        char program[PATH_MAX], conf[PATH_MAX], conf_file[PATH_MAX];
         copy_string(program, sizeof(program), config->dhcp_bin);
         copy_string(conf, sizeof(conf), config->dhcp_conf);
+        if (conf[0] &&
+            snprintf(conf_file, sizeof(conf_file), "--conf-file=%s", conf) >=
+                (int)sizeof(conf_file)) {
+            copy_string(recovery->last_error, sizeof(recovery->last_error),
+                        "dnsmasq-conf-too-long");
+            return -1;
+        }
         argv[0] = program;
-        argv[1] = conf[0] ? conf : NULL;
+        argv[1] = conf[0] ? conf_file : NULL;
         argv[2] = NULL;
         if (spawn_child(recovery, "dhcp", config->dhcp_bin, argv) < 0)
             return -1;
@@ -864,6 +977,55 @@ static int run_net_helper(struct le_recovery *recovery, const char *path, int up
     return recovery->backend.probe(recovery->backend.ctx, argv);
 }
 
+#define LE_RECOVERY_NET_DOWN_MAX_ATTEMPTS 3
+#define LE_RECOVERY_NET_DOWN_RETRY_MS 500
+
+/*
+ * Retry or retain the net-down obligation.  net-up succeeded (net_configured)
+ * but the platform net-down helper failed: the platform keeps portal ownership
+ * until the Wi-Fi restart succeeds, so a failure must not be reported as a
+ * released interface.  Retry on a bounded schedule; when the automatic budget
+ * is spent, stop the tick-driven retries but RETAIN the obligation
+ * (net_configured stays set) and record "net-down-gave-up", so the interface is
+ * never silently reported as clean while the platform still owns it.  An
+ * explicit owner stop (or handover) calls this outside the retry schedule and
+ * starts a fresh bounded budget, so the debt can still be cleared once the
+ * helper recovers -- without the tick ever looping on its own.
+ */
+static int release_net_ownership(struct le_recovery *recovery, long long now_ms)
+{
+    if (!recovery->net_configured)
+        return 0;
+    /* A call outside the automatic retry schedule (a fresh explicit stop or
+     * handover) gets a new bounded budget; a scheduled retry keeps its count so
+     * the automatic path stays bounded. */
+    if (!recovery->net_release_pending)
+        recovery->net_release_attempts = 0;
+    if (run_net_helper(recovery, recovery->config.net_down_cmd, 0) == 0) {
+        recovery->net_configured = 0;
+        recovery->net_release_pending = 0;
+        recovery->net_release_attempts = 0;
+        recovery->net_error[0] = '\0';
+        return 0;
+    }
+    ++recovery->net_release_attempts;
+    recovery->net_release_pending = 1;
+    copy_string(recovery->net_error, sizeof(recovery->net_error),
+                "net-down-failed");
+    if (recovery->net_release_attempts >= LE_RECOVERY_NET_DOWN_MAX_ATTEMPTS) {
+        /* Bounded: stop the automatic retries but keep the obligation and the
+         * recorded error, so the debt is not forgotten and an explicit stop can
+         * retry it once the platform helper recovers. */
+        recovery->net_release_pending = 0;
+        recovery->net_release_next_ms = 0;
+        copy_string(recovery->net_error, sizeof(recovery->net_error),
+                    "net-down-gave-up");
+        return -1;
+    }
+    recovery->net_release_next_ms = now_ms + LE_RECOVERY_NET_DOWN_RETRY_MS;
+    return -1;
+}
+
 static void teardown_children(struct le_recovery *recovery, long long now_ms)
 {
     const long long stop_ms = recovery->config.stop_timeout_ms;
@@ -906,11 +1068,10 @@ static void teardown_children(struct le_recovery *recovery, long long now_ms)
     }
     recovery->child_count = 0;
     /* The portal IPv4 and radio ownership are only ours between net-up and
-     * net-down; restore them exactly once whenever net-up succeeded. */
-    if (recovery->net_configured) {
-        (void)run_net_helper(recovery, recovery->config.net_down_cmd, 0);
-        recovery->net_configured = 0;
-    }
+     * net-down.  net-down can fail (the platform keeps ownership until the
+     * Wi-Fi restart succeeds), so a failure must not drop the obligation: the
+     * cleanup is retried a bounded number of times from the tick. */
+    (void)release_net_ownership(recovery, now_ms);
 }
 
 /* ----- Lifecycle -------------------------------------------------------- */
@@ -920,12 +1081,24 @@ static void build_ssid(struct le_recovery *recovery);
 /* Atomically write a root-only configuration/secret file.  The temporary file
  * is created in the destination directory with O_NOFOLLOW so a pre-planted
  * symlink can never redirect the write, fsynced, then renamed over the target.
- * Returns 0 on success; the caller owns the reason text. */
-static int write_locked_file(const char *path, const char *data,
+ * Durability is part of the contract: a failed fsync()/close() is reported, not
+ * ignored, because the caller may not claim success for bytes that would not
+ * survive a crash; the destination directory is fsynced too, and a real failure
+ * there undoes the rename so on-disk state never diverges from what the caller
+ * was told.  When keep_backup is set, the previous known-good regular file is
+ * first renamed aside to "<path>.bak" (retaining its mode 0600) so a lost or
+ * corrupt replacement can be rolled back; only a backup created by *this* call
+ * is ever restored, so a stale .bak is never resurrected as the live file.  A
+ * non-regular existing target is refused rather than renamed over.  Returns 0
+ * on success; the caller owns the reason text. */
+static int write_locked_file(const char *path, const char *data, int keep_backup,
                              char *reason, size_t reason_size)
 {
     char temporary[PATH_MAX];
+    char backup[PATH_MAX];
+    struct stat status;
     int fd, n, length = (int)strlen(data);
+    int backed_up = 0;
 
     if (!path || !path[0]) {
         copy_string(reason, reason_size, "missing-config-path");
@@ -937,6 +1110,12 @@ static int write_locked_file(const char *path, const char *data,
     }
     if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", path,
                  (long)getpid()) >= (int)sizeof(temporary)) {
+        copy_string(reason, reason_size, "config-path-too-long");
+        return -1;
+    }
+    if (keep_backup &&
+        snprintf(backup, sizeof(backup), "%s.bak", path) >=
+            (int)sizeof(backup)) {
         copy_string(reason, reason_size, "config-path-too-long");
         return -1;
     }
@@ -954,11 +1133,62 @@ static int write_locked_file(const char *path, const char *data,
         copy_string(reason, reason_size, "config-write-failed");
         return -1;
     }
-    (void)fsync(fd);
-    close(fd);
-    if (rename(temporary, path) < 0) {
+    if (durability_fsync(fd, LE_RECOVERY_FAULT_FSYNC) < 0) {
+        close(fd);
         (void)unlink(temporary);
-        copy_string(reason, reason_size, "config-rename-failed");
+        copy_string(reason, reason_size, "config-fsync-failed");
+        return -1;
+    }
+    if (durability_close(fd, LE_RECOVERY_FAULT_CLOSE) < 0) {
+        (void)unlink(temporary);
+        copy_string(reason, reason_size, "config-close-failed");
+        return -1;
+    }
+    if (keep_backup) {
+        if (lstat(path, &status) == 0) {
+            if (!S_ISREG(status.st_mode)) {
+                (void)unlink(temporary);
+                copy_string(reason, reason_size, "config-not-regular");
+                return -1;
+            }
+            if (durability_rename(path, backup,
+                                  LE_RECOVERY_FAULT_BACKUP_RENAME) < 0) {
+                (void)unlink(temporary);
+                copy_string(reason, reason_size, "config-backup-failed");
+                return -1;
+            }
+            backed_up = 1;
+        } else if (errno != ENOENT) {
+            (void)unlink(temporary);
+            copy_string(reason, reason_size, "config-stat-failed");
+            return -1;
+        }
+    }
+    if (durability_rename(temporary, path,
+                          LE_RECOVERY_FAULT_FINAL_RENAME) < 0) {
+        int restored = 0;
+        if (backed_up)
+            restored = durability_rename(backup, path,
+                                         LE_RECOVERY_FAULT_ROLLBACK_RENAME) == 0;
+        (void)unlink(temporary);
+        copy_string(reason, reason_size,
+                    (backed_up && !restored) ? "config-rollback-failed"
+                                             : "config-rename-failed");
+        return -1;
+    }
+    /* The rename is only durable once the directory entry is synced.  A real
+     * failure here must not be reported as a durable write, so undo it: restore
+     * the backup, or remove the file entirely when there was no previous one. */
+    if (fsync_parent_dir(path) < 0) {
+        int undone = 0;
+        if (backed_up)
+            undone = durability_rename(backup, path,
+                                       LE_RECOVERY_FAULT_ROLLBACK_RENAME) == 0;
+        else
+            undone = unlink(path) == 0;
+        copy_string(reason, reason_size,
+                    undone ? "config-parent-fsync-failed"
+                           : "config-rollback-failed");
         return -1;
     }
     return 0;
@@ -1017,7 +1247,7 @@ static int write_recovery_configs(struct le_recovery *recovery,
         copy_string(reason, reason_size, "hostapd-config-overflow");
         return -1;
     }
-    if (write_locked_file(recovery->config.hostapd_conf, content,
+    if (write_locked_file(recovery->config.hostapd_conf, content, 0,
                           reason, reason_size) < 0)
         return -1;
     written = snprintf(
@@ -1039,7 +1269,7 @@ static int write_recovery_configs(struct le_recovery *recovery,
         copy_string(reason, reason_size, "dnsmasq-config-overflow");
         return -1;
     }
-    return write_locked_file(recovery->config.dhcp_conf, content,
+    return write_locked_file(recovery->config.dhcp_conf, content, 0,
                              reason, reason_size);
 }
 
@@ -1081,6 +1311,11 @@ static int start_services(struct le_recovery *recovery, long long now_ms)
         return -1;
     }
     recovery->net_configured = 1;
+    /* Re-acquiring the interface supersedes any owed net-down cleanup. */
+    recovery->net_release_pending = 0;
+    recovery->net_release_attempts = 0;
+    recovery->net_release_next_ms = 0;
+    recovery->net_error[0] = '\0';
     if (spawn_hostapd(recovery) < 0 || spawn_services(recovery) < 0) {
         teardown_children(recovery, now_ms);
         recovery->mode = LE_RECOVERY_MODE_UNAVAILABLE;
@@ -1193,6 +1428,13 @@ int le_recovery_tick(struct le_recovery *recovery, long long now_ms,
                        recovery->mode == LE_RECOVERY_MODE_STARTING)) {
         le_recovery_stop(recovery, now_ms, "associated");
         return 1;
+    }
+    /* Owed net-down cleanup: retried on a bounded schedule until it succeeds
+     * or the attempt budget is exhausted. */
+    if (recovery->net_release_pending &&
+        now_ms >= recovery->net_release_next_ms) {
+        (void)release_net_ownership(recovery, now_ms);
+        transitioned = 1;
     }
     switch (recovery->mode) {
     case LE_RECOVERY_MODE_ARMED:
@@ -1317,11 +1559,12 @@ int le_recovery_config_persist(const struct le_recovery_config *config,
     if (ensure_secure_parent_dir(config, config->config_path, reason,
                                  reason_size) < 0)
         return -1;
-    if (write_locked_file(config->config_path, content, reason,
-                          reason_size) < 0)
-        return -1;
-    fsync_parent_dir(config->config_path);
-    return 0;
+    /* keep_backup: the persisted owner configuration must leave the previous
+     * known-good version at <config_path>.bak before it is replaced.
+     * write_locked_file also fsyncs the parent directory before it reports
+     * success, so a caller that gets 0 may treat the write as durable. */
+    return write_locked_file(config->config_path, content, 1, reason,
+                             reason_size);
 }
 
 int le_recovery_config_load(struct le_recovery_config *config,
@@ -1565,7 +1808,9 @@ int le_recovery_status_json(const struct le_recovery *recovery,
                            recovery->unavailable_reason : recovery->last_error) < 0 ||
         append_text(out, out_size, &n,
                     ",\"error\":") < 0 ||
-        append_json_string(out, out_size, &n, recovery->last_error) < 0 ||
+        append_json_string(out, out_size, &n,
+                           recovery->net_error[0] ? recovery->net_error
+                                                  : recovery->last_error) < 0 ||
         append_text(out, out_size, &n,
                     ",\"secret_available\":%s,\"led_owner\":",
                     recovery->secret_available ? "true" : "false") < 0 ||

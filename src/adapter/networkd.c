@@ -1541,6 +1541,16 @@ static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
         memset(&ctx->association, 0, sizeof(ctx->association));
         ctx->association.client_fd = -1;
     }
+    /* A recovery handover only completes once DHCP confirms a usable address.
+     * A failed or timed-out lease re-arms the AP (marker kept) so the owner
+     * keeps a portal to retry from.  The release path never runs in handover. */
+    if (ctx->recovery_configured &&
+        ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+        le_recovery_handover_result(&ctx->recovery, monotonic_ms(),
+                                    network_success);
+        recovery_apply_led(ctx);
+        broadcast_state(ctx, "network.recovery");
+    }
     if (fd >= 0) {
         int ci = client_index(ctx, fd);
         if (ci >= 0) {
@@ -1565,7 +1575,11 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
     if (ctx->dhcp.active)
         return -1;
 #ifdef LE_NETWORKD_TESTING
-    if (getenv("LIBREECHO_NETWORKD_TEST_FIXTURE")) {
+    /* The fixture normally has no DHCP server: starting one would touch the
+     * host network.  A test that needs a real DHCP child (to prove the handover
+     * waits for a lease) supplies an oracle binary explicitly. */
+    if (getenv("LIBREECHO_NETWORKD_TEST_FIXTURE") &&
+        !getenv("LIBREECHO_NETWORKD_DHCP_ORACLE")) {
         errno = EOPNOTSUPP;
         return -1;
     }
@@ -1574,6 +1588,14 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
     if (pid < 0)
         return -1;
     if (pid == 0) {
+#ifdef LE_NETWORKD_TESTING
+        const char *oracle = getenv("LIBREECHO_NETWORKD_DHCP_ORACLE");
+        if (oracle && oracle[0]) {
+            execl(oracle, "udhcpc", "-i", ctx->interface, "-n", "-q",
+                  "-s", "/etc/udhcpc.script", (char *)NULL);
+            _exit(127);
+        }
+#endif
         if (release)
             execl("/bin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
                   "-R", "-s", "/etc/udhcpc.script", (char *)NULL);
@@ -3195,18 +3217,22 @@ static void finish_association(struct daemon_ctx *ctx, int success)
     }
     ctx->network_id = candidate;
     reset_network_health(ctx, monotonic_ms());
-    /* Association succeeded during recovery: end recovery, clear the marker
-     * and return the interface to normal client ownership. */
-    if (ctx->recovery_configured &&
-        ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
-        le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 1);
-        recovery_apply_led(ctx);
-        broadcast_state(ctx, "network.recovery");
-    }
+    /* Association succeeded during recovery, but the single-radio handover is
+     * NOT complete yet: the interface is only returned to normal client
+     * ownership once DHCP confirms a usable address (see finish_dhcp).  Until
+     * then the boot marker is kept, so a failed or absent DHCP lease rebuilds
+     * the recovery AP and leaves the owner a portal to retry from. */
     copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ctx->association.ssid);
     copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
     ctx->association.active = 0;
     if (start_dhcp(ctx, 0, fd, id) < 0) {
+        /* DHCP could not even start: re-arm the recovery AP immediately. */
+        if (ctx->recovery_configured &&
+            ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+            le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 0);
+            recovery_apply_led(ctx);
+            broadcast_state(ctx, "network.recovery");
+        }
         restore_previous_network(ctx);
         if (ci >= 0) {
             ctx->clients[ci].busy = 0;
@@ -3945,6 +3971,11 @@ int main(int argc, char **argv)
             ctx.recovery.start_deadline_ms - now < timeout)
             timeout = (int)(ctx.recovery.start_deadline_ms > now ?
                             ctx.recovery.start_deadline_ms - now : 0);
+        /* An owed net-down retry must not wait out a full poll interval. */
+        if (ctx.recovery_configured && ctx.recovery.net_release_pending &&
+            ctx.recovery.net_release_next_ms - now < timeout)
+            timeout = (int)(ctx.recovery.net_release_next_ms > now ?
+                            ctx.recovery.net_release_next_ms - now : 0);
         if (poll(pfds, (nfds_t)nfds, timeout) < 0 && errno != EINTR)
             break;
         now = monotonic_ms();

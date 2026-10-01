@@ -311,20 +311,31 @@ async function caseUsbCapability(browser) {
 
 /* ------------------------------------------------------------ case: voice history */
 
+function voiceStamp(id) {
+  /* Matches the canonical voice_history.c serialization: ISO 8601 with a
+     numeric offset, e.g. 2026-09-30T21:00:12+00:00 (no milliseconds). */
+  return new Date(Date.UTC(2026, 8, 30, 21, 0, id)).toISOString().replace(/\.000Z$/, '+00:00');
+}
 function voiceTurns() {
+  const row = (id, status, preview) => ({
+    id, timestamp: voiceStamp(id), status,
+    transcript_preview: preview, response_preview: '',
+    transcript_truncated: false, response_truncated: false,
+    transcript_length: 0, response_length: 0, stt_ms: 0, assistant_ms: 0, tts_ms: 0, error: null,
+  });
   return [
-    { id: 6, at_ms: 6000, status: 'complete', preview: 'sixth' },
-    { id: 12, at_ms: 12000, status: 'complete', preview: 'twelfth' },
-    { id: 3, at_ms: 3000, status: 'complete', preview: 'third' },
-    { id: 11, at_ms: 11000, status: 'error', preview: 'eleventh' },
-    { id: 1, at_ms: 1000, status: 'complete', preview: 'first' },
-    { id: 10, at_ms: 10000, status: 'complete', preview: 'tenth' },
-    { id: 2, at_ms: 2000, status: 'complete', preview: 'second' },
-    { id: 9, at_ms: 9000, status: 'complete', preview: 'ninth' },
-    { id: 4, at_ms: 4000, status: 'complete', preview: 'fourth' },
-    { id: 8, at_ms: 8000, status: 'complete', preview: 'eighth' },
-    { id: 5, at_ms: 5000, status: 'complete', preview: 'fifth' },
-    { id: 7, at_ms: 7000, status: 'complete', preview: 'seventh' },
+    row(6, 'complete', 'sixth'),
+    row(12, 'complete', 'twelfth'),
+    row(3, 'complete', 'third'),
+    row(11, 'error', 'eleventh'),
+    row(1, 'complete', 'first'),
+    row(10, 'complete', 'tenth'),
+    row(2, 'complete', 'second'),
+    row(9, 'complete', 'ninth'),
+    row(4, 'complete', 'fourth'),
+    row(8, 'complete', 'eighth'),
+    row(5, 'complete', 'fifth'),
+    row(7, 'complete', 'seventh'),
   ];
 }
 
@@ -358,6 +369,14 @@ async function caseVoiceHistory(browser) {
   checkEqual(order.length, 10, 'the recent-voice ring is capped at 10 rows');
   checkEqual(order[0], 12, 'recent voice is newest-first');
   check(order.includes(3) && !order.includes(2), 'only the newest 10 turns are painted (older turns are dropped)');
+  /* Prove the canonical ISO timestamp is actually rendered: a formatter that
+     only reads the legacy at_ms/at fields paints — for every canonical row. */
+  const times = await page.$$eval('#voice-history .voice-turn time', nodes => nodes.map(n => n.textContent.trim()));
+  checkEqual(times.length, 10, 'every canonical row renders a <time>');
+  check(times.every(v => v && v !== '—'), 'no canonical row shows the placeholder dash for a valid timestamp');
+  const newestTime = await page.locator('#voice-history .voice-turn[data-id="12"] time').innerText();
+  const expectedNewest = await page.evaluate(iso => new Date(iso).toLocaleTimeString(), voiceStamp(12));
+  checkEqual(newestTime, expectedNewest, 'the newest row shows its canonical ISO timestamp');
   const errorStatus = await page.locator('#voice-history .status.error').first().innerText().catch(() => '');
   check(errorStatus.toLowerCase() === 'error', 'a failed turn renders its error status');
 

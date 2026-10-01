@@ -221,7 +221,8 @@ class RecoveryFixture:
                  auto=False, auto_timeout_ms=400, ap_probe=True,
                  association_fails=False, saved_network=True,
                  hostapd_hang=False, start_timeout_ms=300,
-                 stop_timeout_ms=400):
+                 stop_timeout_ms=400, dhcp_oracle=None,
+                 net_down_fail_budget=0):
         self.directory = directory
         self.wpa = FakeWpa(directory / "wpa.sock",
                            association_fails=association_fails,
@@ -240,6 +241,18 @@ class RecoveryFixture:
         self.dns_pid_file = directory / "dns.pid"
         self.net_up_log = directory / "net-up.log"
         self.net_down_log = directory / "net-down.log"
+        self.dhcp_log = directory / "dhcp.log"
+        # dhcp_oracle: None -> the fixture has no DHCP server (starting one
+        # would touch the host network).  "success"/"failure" supply a real
+        # fork/exec'd DHCP child that records its argument vector and exits 0
+        # or 1, so the single-radio handover can be driven past the lease step.
+        self.dhcp_oracle = None
+        if dhcp_oracle is not None:
+            exit_code = 0 if dhcp_oracle == "success" else 1
+            self.dhcp_oracle = write_script(
+                directory, "dhcp-oracle.sh",
+                f'echo "$@" >> "{self.dhcp_log}"\n'
+                f"exit {exit_code}\n")
 
         self.hostapd = write_script(
             directory, "hostapd.sh",
@@ -266,9 +279,19 @@ class RecoveryFixture:
         self.net_up = write_script(
             directory, "net-up.sh",
             f'echo "$@" >> "{self.net_up_log}"\nexit 0\n')
-        self.net_down = write_script(
-            directory, "net-down.sh",
-            f'echo "$@" >> "{self.net_down_log}"\nexit 0\n')
+        # net-down can fail while the platform still owns the interface (its
+        # Wi-Fi restart has not succeeded yet); net_down_fail_budget makes the
+        # first N invocations exit 1 so the retry path can be exercised.
+        self.net_down_calls = directory / "net-down.calls"
+        net_down_body = f'echo "$@" >> "{self.net_down_log}"\n'
+        if net_down_fail_budget:
+            net_down_body += (
+                f'n=$(cat "{self.net_down_calls}" 2>/dev/null || echo 0)\n'
+                f'n=$((n+1))\n'
+                f'echo $n > "{self.net_down_calls}"\n'
+                f'[ "$n" -le {int(net_down_fail_budget)} ] && exit 1\n')
+        net_down_body += "exit 0\n"
+        self.net_down = write_script(directory, "net-down.sh", net_down_body)
 
         if marker:
             if marker_kind == "valid":
@@ -290,6 +313,8 @@ class RecoveryFixture:
             "LIBREECHO_NETWORKD_TEST_FIXTURE": "1",
             "LIBREECHO_RECOVERY_TEST_MARKER_RELAX": "1",
         })
+        if self.dhcp_oracle is not None:
+            env["LIBREECHO_NETWORKD_DHCP_ORACLE"] = str(self.dhcp_oracle)
         args = [
             str(BINARY), "--foreground", "--quiet",
             "--socket", str(directory / "network.sock"),
@@ -399,6 +424,10 @@ class RecoveryFixture:
         return self.net_down_log.read_text(errors="replace") \
             if self.net_down_log.exists() else ""
 
+    def read_dhcp(self):
+        return self.dhcp_log.read_text(errors="replace") \
+            if self.dhcp_log.exists() else ""
+
 
 def test_physical_entry_starts_ap():
     with tempfile.TemporaryDirectory(prefix="le-recovery-physical-") as temp:
@@ -507,27 +536,89 @@ def test_invalid_credentials_keep_ap_and_surface_error():
             fixture.stop()
 
 
-def test_successful_association_ends_recovery():
-    with tempfile.TemporaryDirectory(prefix="le-recovery-success-") as temp:
-        fixture = RecoveryFixture(Path(temp), association_fails=False)
+def test_association_without_dhcp_keeps_portal():
+    """Association alone must not end recovery.
+
+    Regression (review 4150910677): the daemon used to transition recovery to
+    stopped and delete the boot marker as soon as wpa_supplicant reported
+    COMPLETED, before DHCP was even started.  If DHCP could not start (or later
+    exits without a lease) the owner was left disconnected with no portal.  The
+    handover must instead rebuild the AP and keep the marker.
+    """
+    with tempfile.TemporaryDirectory(prefix="le-recovery-nodhcp-") as temp:
+        # No saved network to fall back to (the owner's only known network is
+        # the one that just failed DHCP), so a failed handover must rebuild the
+        # AP rather than leave the device disconnected with no portal.
+        fixture = RecoveryFixture(Path(temp), association_fails=False,
+                                  saved_network=False)
+        try:
+            wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
+                     message="recovery AP active")
+            response = adapter_request(
+                fixture.adapter, 11, "connect",
+                {"ssid": "HomeNet", "psk": "correcthorsebattery",
+                 "security": "wpa2"}, timeout=6)
+            # The association completed but DHCP cannot start in this fixture,
+            # so the command reports the DHCP failure; the recovery AP must be
+            # rebuilt with the marker kept so the owner can retry.
+            assert response["ok"] is False, response
+            assert "DHCP" in response["error"], response
+            assert fixture.marker_path.exists(), "marker must survive"
+            wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
+                     timeout=5, message="AP rebuilt after DHCP failure")
+            assert fixture.recovery()["net_configured"] is True
+            assert fixture.read_net_up().count("--address") >= 2
+        finally:
+            fixture.stop()
+
+
+def test_handover_rebuilds_ap_when_dhcp_exits_without_address():
+    """A DHCP child that exits without an address also rebuilds the AP."""
+    with tempfile.TemporaryDirectory(prefix="le-recovery-dhcpfail-") as temp:
+        fixture = RecoveryFixture(Path(temp), association_fails=False,
+                                  saved_network=False, dhcp_oracle="failure")
+        try:
+            wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
+                     message="recovery AP active")
+            response = adapter_request(
+                fixture.adapter, 13, "connect",
+                {"ssid": "HomeNet", "psk": "correcthorsebattery",
+                 "security": "wpa2"}, timeout=6)
+            assert response["ok"] is False, response
+            assert fixture.marker_path.exists(), "marker must survive"
+            wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
+                     timeout=5, message="AP rebuilt after DHCP failure")
+            # The real DHCP child ran with the interface argument.
+            assert "-i test0" in fixture.read_dhcp()
+        finally:
+            fixture.stop()
+
+
+def test_handover_completes_only_after_dhcp_address():
+    """With a DHCP child that delivers an address the handover completes.
+
+    Success path of review 4150910677: only once DHCP confirms a usable address
+    is the marker cleared and the interface returned to client ownership.
+    """
+    with tempfile.TemporaryDirectory(prefix="le-recovery-dhcpok-") as temp:
+        fixture = RecoveryFixture(Path(temp), association_fails=False,
+                                  dhcp_oracle="success")
         try:
             wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
                      message="recovery AP active")
             first_hostapd = int(fixture.hostapd_pid_file.read_text().strip())
             response = adapter_request(
-                fixture.adapter, 11, "connect",
+                fixture.adapter, 12, "connect",
                 {"ssid": "HomeNet", "psk": "correcthorsebattery",
                  "security": "wpa2"}, timeout=6)
-            # DHCP cannot run in the fixture, so the command reports an error,
-            # but the recovery state must already have ended: marker removed,
-            # AP down and interface released.
-            assert response["ok"] is False, response
+            assert response["ok"] is True, response
             assert not fixture.marker_path.exists()
             wait_for(lambda: fixture.recovery()["mode"] != "recovery-ap",
-                     message="recovery ended")
+                     message="recovery ended after lease")
             assert "--interface test0" in fixture.read_net_down()
             wait_for(lambda: not pid_alive(first_hostapd),
-                     message="AP hostapd torn down on success")
+                     message="AP hostapd torn down after lease")
+            assert "-i test0" in fixture.read_dhcp()
         finally:
             fixture.stop()
 
@@ -552,6 +643,36 @@ def test_owner_stop_releases_ap_marker_and_led():
             # The portal address was removed on teardown.
             assert "--interface test0" in fixture.read_net_down()
             assert fixture.recovery()["net_configured"] is False
+        finally:
+            fixture.stop()
+
+
+def test_net_down_failure_releases_after_retry():
+    """A failed net-down is retained and released by the bounded daemon retry.
+
+    Review 4150910677's handover counterpart on the platform side (4150905840):
+    the platform keeps portal ownership until the Wi-Fi restart succeeds, so a
+    single net-down failure must not drop the cleanup obligation.  The daemon
+    keeps net-down owed (bounded to 500 ms spacing, at most three attempts) and
+    returns the interface to client ownership once a retry succeeds.
+    """
+    with tempfile.TemporaryDirectory(prefix="le-recovery-netdown-") as temp:
+        # The first net-down invocation exits non-zero; the retry must succeed.
+        fixture = RecoveryFixture(Path(temp), net_down_fail_budget=1)
+        try:
+            wait_for(lambda: fixture.recovery()["mode"] == "recovery-ap",
+                     message="recovery AP active")
+            response = adapter_request(fixture.adapter, 5, "recovery_stop",
+                                       timeout=4)
+            assert response["ok"] is True
+            assert not fixture.marker_path.exists()
+            # The first net-down failed, so ownership is retained, not dropped.
+            assert fixture.recovery()["net_configured"] is True
+            assert fixture.read_net_down().count("--interface test0") == 1
+            # The bounded retry then succeeds and releases ownership.
+            wait_for(lambda: fixture.recovery()["net_configured"] is False,
+                     timeout=5, message="net-down retry released ownership")
+            assert fixture.read_net_down().count("--interface test0") >= 2
         finally:
             fixture.stop()
 
@@ -788,8 +909,11 @@ def main():
         test_rejected_markers_never_enter_recovery,
         test_capability_failure_fails_closed,
         test_invalid_credentials_keep_ap_and_surface_error,
-        test_successful_association_ends_recovery,
+        test_association_without_dhcp_keeps_portal,
+        test_handover_rebuilds_ap_when_dhcp_exits_without_address,
+        test_handover_completes_only_after_dhcp_address,
         test_owner_stop_releases_ap_marker_and_led,
+        test_net_down_failure_releases_after_retry,
         test_hung_child_is_killed_within_bound,
         test_owner_saves_password_before_recovery,
         test_secret_refused_while_captive_ap_active,

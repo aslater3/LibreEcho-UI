@@ -2283,12 +2283,29 @@ function bindRecovery(){
    never overwrite a newer page or a cleared list. */
 const VOICE_HISTORY_MAX=10;
 let voiceHistorySeq=0;
-function voiceTurnTime(t){const v=Number(t.at_ms??t.at);return Number.isFinite(v)&&v>0?new Date(v).toLocaleTimeString():'—'}
+/* The canonical ring (voice_history.c) serializes each turn's moment as an ISO
+   8601 `timestamp` with a numeric offset, e.g. "2026-09-30T21:00:12+00:00";
+   the pre-0.14 latency alias used `at_ms` (epoch milliseconds) and the local
+   Simulation cache uses `at`. Resolve all three to epoch milliseconds, and
+   return NaN for a missing or unparseable value so callers can fall back
+   instead of printing "Invalid Date" or NaN. */
+function voiceTurnStamp(t){
+ if(!t)return NaN;
+ let raw=t.timestamp;
+ if(raw==null||raw==='')raw=t.at_ms!=null?t.at_ms:t.at;
+ if(raw==null||raw==='')return NaN;
+ if(typeof raw==='number')return Number.isFinite(raw)?raw:NaN;
+ const text=String(raw).trim();
+ if(/^-?\d+(\.\d+)?$/.test(text)){const n=Number(text);return Number.isFinite(n)?n:NaN}   /* legacy numeric or numeric string */
+ const parsed=Date.parse(text);   /* canonical ISO 8601 timestamp */
+ return Number.isFinite(parsed)?parsed:NaN;
+}
+function voiceTurnTime(t){const v=voiceTurnStamp(t);return Number.isFinite(v)&&v>0?new Date(v).toLocaleTimeString():'—'}
 function voiceTurnPreview(t){return String(t.preview||t.transcript_preview||'').slice(0,80)}
 function voiceTurnStatus(t){return String(t.status||'complete')}
 function voiceHistoryRows(turns){
  const list=Array.isArray(turns)?turns.slice():[];
- list.sort((a,b)=>Number(b.at_ms??b.at??0)-Number(a.at_ms??a.at??0));
+ list.sort((a,b)=>{const av=voiceTurnStamp(a),bv=voiceTurnStamp(b);return (Number.isFinite(bv)?bv:0)-(Number.isFinite(av)?av:0)});
  return list.slice(0,VOICE_HISTORY_MAX);
 }
 function voiceHistoryPanel(){

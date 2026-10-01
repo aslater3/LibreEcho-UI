@@ -85,7 +85,8 @@ class Harness:
         # Fresh name space: stale sockets from an earlier case would bind-collide.
         for path in list(WORKSPACE.glob("*.sock")):
             path.unlink()
-        for name in ("recovery.json", "recovery-psk", "recovery-mode"):
+        for name in ("recovery.json", "recovery.json.bak", "recovery-psk",
+                     "recovery-mode"):
             path = WORKSPACE / name
             if path.is_dir():
                 shutil.rmtree(path)
@@ -211,6 +212,11 @@ def test_configure_success_scales_timeout_seconds_to_ms():
             status, text = h.configure(True, False, seconds)
             assert status == 200, (seconds, status, text)
             assert h.recovery()["auto_timeout_ms"] == expected, h.recovery()
+        # Replacing the persisted config retains a mode-0600 backup of the
+        # previous known-good version (AGENTS.md atomic write contract).
+        backup = WORKSPACE / "recovery.json.bak"
+        assert backup.is_file(), "no backup of the previous config"
+        assert (backup.stat().st_mode & 0o777) == 0o600, oct(backup.stat().st_mode)
         # Out of range is refused by the API before the backend is reached.
         for seconds in (29, 601):
             status, _ = h.configure(True, False, seconds)

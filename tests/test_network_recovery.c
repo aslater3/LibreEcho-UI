@@ -58,6 +58,8 @@ struct fake_backend {
     int spawn_count;
     pid_t next_pid;
     char spawned[8][PATH_MAX];
+    char spawn_argv[8][6][PATH_MAX];   /* strict argument oracle, per child */
+    int spawn_argc[8];
     int spawn_fail;
     int probe_result;
     int available_result;
@@ -70,6 +72,7 @@ struct fake_backend {
     int probe_count;
     char probe_argv[24][256];
     char probe_fail_path[PATH_MAX];
+    int probe_fail_budget;     /* -1 = always fail, 0 = never, N = fail N times */
 };
 
 static struct fake_backend fake;
@@ -77,6 +80,7 @@ static struct fake_backend fake;
 static pid_t fake_spawn(void *ctx, char *const argv[], char *err, size_t err_size)
 {
     struct fake_backend *f = ctx;
+    int i;
     (void)err;
     (void)err_size;
     if (f->spawn_fail)
@@ -84,6 +88,15 @@ static pid_t fake_spawn(void *ctx, char *const argv[], char *err, size_t err_siz
     if (f->spawn_count >= 8)
         return -1;
     snprintf(f->spawned[f->spawn_count], sizeof(f->spawned[0]), "%s", argv[0]);
+    /* Record the whole vector so a test can assert the exact arguments a child
+     * is launched with (a shell oracle that ignores argv would hide a wrong
+     * config flag). */
+    f->spawn_argc[f->spawn_count] = 0;
+    for (i = 0; argv[i] && i < 6; ++i) {
+        snprintf(f->spawn_argv[f->spawn_count][i],
+                 sizeof(f->spawn_argv[0][0]), "%s", argv[i]);
+        f->spawn_argc[f->spawn_count] = i + 1;
+    }
     ++f->spawn_count;
     return f->next_pid++;
 }
@@ -129,9 +142,12 @@ static int fake_probe(void *ctx, char *const argv[])
         ++f->probe_count;
     }
     fail = f->probe_fail_path[0] && argv[0] &&
-           !strcmp(argv[0], f->probe_fail_path);
-    if (fail)
+           !strcmp(argv[0], f->probe_fail_path) && f->probe_fail_budget != 0;
+    if (fail) {
+        if (f->probe_fail_budget > 0)
+            --f->probe_fail_budget;
         return -1;
+    }
     return f->probe_result;
 }
 
@@ -188,6 +204,7 @@ static void reset_fake(void)
     fake.probe_result = 0;
     fake.available_result = 1;
     fake.alive = 1;
+    fake.probe_fail_budget = -1;   /* a set probe_fail_path fails by default */
 }
 
 static void write_file(const char *path, const char *content, mode_t mode)
@@ -452,6 +469,16 @@ static void test_lifecycle(const char *tmpdir)
     CHECK(fake.spawn_count == 2);   /* hostapd + dnsmasq */
     CHECK_STR_EQ(fake.spawned[0], config.hostapd_bin);
     CHECK_STR_EQ(fake.spawned[1], config.dns_bin);
+    /* Strict argument oracle: dnsmasq must select its configuration with
+     * --conf-file=<path>.  A bare positional pathname is rejected by the real
+     * dnsmasq (it exits), which would leave recovery unavailable; the daemon
+     * oracle scripts used elsewhere accept and ignore every argument and so
+     * cannot catch this. */
+    CHECK(fake.spawn_argc[1] == 3);
+    CHECK_STR_EQ(fake.spawn_argv[1][0], config.dns_bin);
+    CHECK_STR_EQ(fake.spawn_argv[1][1], "--no-daemon");
+    CHECK(strncmp(fake.spawn_argv[1][2], "--conf-file=", 12) == 0);
+    CHECK_STR_EQ(fake.spawn_argv[1][2] + 12, config.dhcp_conf);
     /* The portal address was assigned before the children started. */
     CHECK(recovery.net_configured == 1);
     CHECK(probe_recorded(config.net_up_cmd));
@@ -721,6 +748,110 @@ static void test_net_helper_fails_closed(const char *tmpdir)
     CHECK(fake.spawn_count == 0);
 }
 
+static void test_net_down_failure_is_retried_bounded(const char *tmpdir)
+{
+    char dir[512];
+    struct le_recovery_config config;
+    struct le_recovery recovery;
+    char status[2048];
+    long long t;
+    int guard;
+
+    snprintf(dir, sizeof(dir), "%s/netdown", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+    write_file(config.marker_path, LE_RECOVERY_MARKER_TAG "\n", 0600);
+    reset_fake();
+    init_fake(&recovery, &config, 1000);
+    CHECK(le_recovery_arm(&recovery, LE_RECOVERY_TRIGGER_PHYSICAL, 1000) == 0);
+    le_recovery_tick(&recovery, 1001, 0);
+    le_recovery_tick(&recovery, 1200, 0);
+    CHECK(recovery.mode == LE_RECOVERY_MODE_ACTIVE);
+    CHECK(recovery.net_configured == 1);
+
+    /* net-down fails once: the obligation must be kept and retried, never
+     * dropped after a single attempt (the platform retains ownership until the
+     * Wi-Fi restart succeeds). */
+    snprintf(fake.probe_fail_path, sizeof(fake.probe_fail_path), "%s",
+             config.net_down_cmd);
+    fake.probe_fail_budget = 1;
+    le_recovery_stop(&recovery, 1300, "owner");
+    CHECK(recovery.mode == LE_RECOVERY_MODE_STOPPED);
+    CHECK(recovery.net_configured == 1);
+    CHECK(recovery.net_release_pending == 1);
+    CHECK(recovery.net_release_attempts == 1);
+    CHECK_STR_EQ(recovery.net_error, "net-down-failed");
+
+    /* Before the retry deadline elapses there is no extra attempt.  The
+     * deadline is at or after the stop time (teardown may advance it while it
+     * drains children). */
+    le_recovery_tick(&recovery, recovery.net_release_next_ms - 1, 0);
+    CHECK(recovery.net_release_attempts == 1);
+
+    /* After the deadline the retry succeeds and ownership is released. */
+    le_recovery_tick(&recovery, recovery.net_release_next_ms, 0);
+    CHECK(recovery.net_configured == 0);
+    CHECK(recovery.net_release_pending == 0);
+    CHECK(recovery.net_release_attempts == 0);
+    CHECK(recovery.net_error[0] == '\0');
+
+    /* A permanently failing net-down is retried a bounded number of times and
+     * then the AUTOMATIC retries stop -- but the ownership obligation is
+     * RETAINED (net_configured stays set), so the platform is never falsely
+     * reported as released and an explicit stop can still attempt the cleanup
+     * once the helper recovers. */
+    reset_fake();
+    init_fake(&recovery, &config, 5000);
+    CHECK(le_recovery_arm(&recovery, LE_RECOVERY_TRIGGER_PHYSICAL, 5000) == 0);
+    le_recovery_tick(&recovery, 5001, 0);
+    le_recovery_tick(&recovery, 5200, 0);
+    CHECK(recovery.mode == LE_RECOVERY_MODE_ACTIVE);
+    CHECK(recovery.net_configured == 1);
+    snprintf(fake.probe_fail_path, sizeof(fake.probe_fail_path), "%s",
+             config.net_down_cmd);
+    fake.probe_fail_budget = -1;   /* never succeeds */
+    le_recovery_stop(&recovery, 5300, "owner");
+    CHECK(recovery.net_release_attempts == 1);
+    CHECK(recovery.net_configured == 1);
+    t = recovery.net_release_next_ms;
+    for (guard = 0; guard < 60 && recovery.net_release_pending; ++guard) {
+        le_recovery_tick(&recovery, t, 0);
+        t += 500;
+    }
+    /* Budget spent: automatic retries stop (bounded) but the debt is retained
+     * and the give-up is recorded.  3 == LE_RECOVERY_NET_DOWN_MAX_ATTEMPTS,
+     * which is unit-local to network_recovery.c. */
+    CHECK(recovery.net_release_pending == 0);
+    CHECK(recovery.net_configured == 1);            /* obligation retained */
+    CHECK(recovery.net_release_attempts == 3);
+    CHECK_STR_EQ(recovery.net_error, "net-down-gave-up");
+
+    /* The abandoned cleanup is observable in the bounded status object: the
+     * interface still reports itself as recovery-owned and the give-up shows in
+     * the error field, so an operator is not told the radio was restored. */
+    CHECK(le_recovery_status_json(&recovery, status, sizeof(status)) > 0);
+    CHECK(strstr(status, "\"net_configured\":true") != NULL);
+    CHECK(strstr(status, "net-down-gave-up") != NULL);
+
+    /* Further ticks are inert: pending is cleared so the tick never loops, and
+     * neither the obligation nor the attempt budget changes. */
+    le_recovery_tick(&recovery, t + 5000, 0);
+    le_recovery_tick(&recovery, t + 100000, 0);
+    CHECK(recovery.net_release_pending == 0);
+    CHECK(recovery.net_configured == 1);
+    CHECK(recovery.net_release_attempts == 3);
+
+    /* The platform helper recovers: an explicit owner stop attempts the release
+     * again and now succeeds, clearing the retained debt. */
+    fake.probe_fail_budget = 0;   /* net-down now succeeds */
+    le_recovery_stop(&recovery, t + 200000, "owner-stop");
+    CHECK(recovery.mode == LE_RECOVERY_MODE_STOPPED);
+    CHECK(recovery.net_configured == 0);
+    CHECK(recovery.net_release_pending == 0);
+    CHECK(recovery.net_release_attempts == 0);
+    CHECK(recovery.net_error[0] == '\0');
+}
+
 static void test_single_interface_handover(const char *tmpdir)
 {
     char dir[512];
@@ -872,6 +1003,209 @@ static void test_configure_persists_validates_and_rolls_back(const char *tmpdir)
     }
 }
 
+static void test_separate_dhcp_gets_conf_file(const char *tmpdir)
+{
+    char dir[512];
+    struct le_recovery_config config;
+    struct le_recovery recovery;
+
+    snprintf(dir, sizeof(dir), "%s/dhcp-only", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+    config.dns_bin[0] = '\0';   /* force the separate "dhcp" daemon branch */
+    write_file(config.marker_path, LE_RECOVERY_MARKER_TAG "\n", 0600);
+
+    reset_fake();
+    init_fake(&recovery, &config, 1000);
+    CHECK(le_recovery_arm(&recovery, LE_RECOVERY_TRIGGER_PHYSICAL, 1000) == 0);
+    le_recovery_tick(&recovery, 1001, 0);
+    CHECK(recovery.mode == LE_RECOVERY_MODE_STARTING);
+    CHECK(fake.spawn_count == 2);   /* hostapd + dhcp */
+    CHECK_STR_EQ(fake.spawned[1], config.dhcp_bin);
+    /* Same strict oracle: the separate DHCP daemon is the packaged dnsmasq, so
+     * it must also receive --conf-file=<path>. */
+    CHECK(fake.spawn_argc[1] == 2);
+    CHECK(strncmp(fake.spawn_argv[1][1], "--conf-file=", 12) == 0);
+    CHECK_STR_EQ(fake.spawn_argv[1][1] + 12, config.dhcp_conf);
+}
+
+static void test_persist_backup_keeps_previous_known_good(const char *tmpdir)
+{
+    char dir[512], backup[PATH_MAX + 8], target[PATH_MAX], content[512];
+    struct le_recovery_config config, reloaded;
+    struct le_recovery recovery;
+    char reason[LE_RECOVERY_REASON_MAX];
+    struct stat status;
+    int fd;
+    ssize_t n;
+
+    snprintf(dir, sizeof(dir), "%s/backup", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+    reset_fake();
+    init_fake(&recovery, &config, 0);
+    snprintf(backup, sizeof(backup), "%s.bak", config.config_path);
+
+    /* First write: there is no previous version to keep. */
+    CHECK(le_recovery_configure(&recovery, 1, 0, 60000, reason,
+                                sizeof(reason)) == 0);
+    CHECK(access(backup, F_OK) != 0);
+
+    /* Replacing the persisted configuration must retain the previous known-good
+     * copy as a mode-0600 backup (AGENTS.md: temp + fsync + rename + backup). */
+    CHECK(le_recovery_configure(&recovery, 1, 1, 120000, reason,
+                                sizeof(reason)) == 0);
+    CHECK(stat(backup, &status) == 0);
+    CHECK(S_ISREG(status.st_mode));
+    CHECK((status.st_mode & 077) == 0);
+    fd = open(backup, O_RDONLY | O_CLOEXEC);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        n = read(fd, content, sizeof(content) - 1);
+        close(fd);
+        CHECK(n > 0);
+        content[n > 0 ? n : 0] = '\0';
+        CHECK(strstr(content, "auto_enabled=0") != NULL);
+        CHECK(strstr(content, "auto_timeout_ms=60000") != NULL);
+    }
+    /* The live file carries the replacement, and it survives a reload. */
+    make_config(&reloaded, dir);
+    CHECK(le_recovery_config_load(&reloaded, reason, sizeof(reason)) == 1);
+    CHECK(reloaded.auto_enabled == 1);
+    CHECK(reloaded.auto_timeout_ms == 120000);
+
+    /* A non-regular target (here a symlink) is refused rather than renamed
+     * over, so the backup step can never redirect a config write. */
+    snprintf(target, sizeof(target), "%s/target.json", dir);
+    write_file(target, "sentinel\n", 0600);
+    (void)unlink(config.config_path);
+    CHECK(symlink(target, config.config_path) == 0);
+    CHECK(le_recovery_configure(&recovery, 1, 0, 60000, reason,
+                                sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "config-not-regular");
+    CHECK(stat(target, &status) == 0);
+    CHECK(status.st_size == (off_t)strlen("sentinel\n"));
+}
+
+static int read_all(const char *path, char *out, size_t size)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t n;
+    if (fd < 0)
+        return -1;
+    n = read(fd, out, size - 1);
+    close(fd);
+    if (n < 0)
+        return -1;
+    out[n] = '\0';
+    return (int)n;
+}
+
+/*
+ * Durability is part of the atomic-write contract (ui-audio/AGENTS.md:
+ * temp file + fsync + rename + backup, mode 0600).  Each syscall is injected to
+ * fail on its own so the error and rollback paths are exercised directly rather
+ * than assumed to succeed.
+ */
+static void test_write_durability_faults_fail_closed(const char *tmpdir)
+{
+    char dir[512], backup[PATH_MAX + 8], content[512];
+    char reason[LE_RECOVERY_REASON_MAX];
+    struct le_recovery_config config;
+    struct le_recovery recovery;
+
+    snprintf(dir, sizeof(dir), "%s/durability", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+    reset_fake();
+    init_fake(&recovery, &config, 0);
+    snprintf(backup, sizeof(backup), "%s.bak", config.config_path);
+    le_recovery_test_fault_reset();
+
+    /* Baseline durable write: succeeds and leaves no backup (nothing prior). */
+    CHECK(le_recovery_configure(&recovery, 1, 0, 60000, reason,
+                                sizeof(reason)) == 0);
+    CHECK(access(backup, F_OK) != 0);
+    CHECK(read_all(config.config_path, content, sizeof(content)) > 0);
+    CHECK(strstr(content, "auto_timeout_ms=60000") != NULL);
+
+    /* temp-file fsync fails: reported, previous value intact, no backup made. */
+    le_recovery_test_fault(LE_RECOVERY_FAULT_FSYNC, 1);
+    CHECK(le_recovery_configure(&recovery, 1, 0, 120000, reason,
+                                sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "config-fsync-failed");
+    CHECK(read_all(config.config_path, content, sizeof(content)) > 0);
+    CHECK(strstr(content, "auto_timeout_ms=60000") != NULL);
+    CHECK(read_all(backup, content, sizeof(content)) < 0);
+
+    /* temp-file close fails: reported, previous value intact. */
+    le_recovery_test_fault(LE_RECOVERY_FAULT_CLOSE, 1);
+    CHECK(le_recovery_configure(&recovery, 1, 0, 120000, reason,
+                                sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "config-close-failed");
+    CHECK(read_all(config.config_path, content, sizeof(content)) > 0);
+    CHECK(strstr(content, "auto_timeout_ms=60000") != NULL);
+
+    /* backup rename fails: reported, live file untouched. */
+    le_recovery_test_fault(LE_RECOVERY_FAULT_BACKUP_RENAME, 1);
+    CHECK(le_recovery_configure(&recovery, 1, 0, 120000, reason,
+                                sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "config-backup-failed");
+    CHECK(read_all(config.config_path, content, sizeof(content)) > 0);
+    CHECK(strstr(content, "auto_timeout_ms=60000") != NULL);
+
+    /* final rename fails: the backup created by this call is restored, so the
+     * previous known-good value survives and no half-written file is left. */
+    le_recovery_test_fault(LE_RECOVERY_FAULT_FINAL_RENAME, 1);
+    CHECK(le_recovery_configure(&recovery, 1, 0, 120000, reason,
+                                sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "config-rename-failed");
+    CHECK(read_all(config.config_path, content, sizeof(content)) > 0);
+    CHECK(strstr(content, "auto_timeout_ms=60000") != NULL);
+    CHECK(read_all(backup, content, sizeof(content)) < 0);   /* consumed */
+
+    /* parent-directory fsync fails: reported and undone, so on-disk state
+     * matches the failure and the running config is not half-updated. */
+    le_recovery_test_fault(LE_RECOVERY_FAULT_PARENT_FSYNC, 1);
+    CHECK(le_recovery_configure(&recovery, 1, 0, 120000, reason,
+                                sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "config-parent-fsync-failed");
+    CHECK(read_all(config.config_path, content, sizeof(content)) > 0);
+    CHECK(strstr(content, "auto_timeout_ms=60000") != NULL);
+    CHECK(recovery.config.auto_timeout_ms == 60000);
+    le_recovery_test_fault_reset();
+}
+
+/*
+ * A leftover .bak from an older successful write must never be restored as the
+ * live configuration by a failed replacement (regression: the rollback used to
+ * fire on keep_backup alone, resurrecting the stale file).
+ */
+static void test_stale_backup_is_not_resurrected(const char *tmpdir)
+{
+    char dir[512], backup[PATH_MAX + 8], content[512];
+    char reason[LE_RECOVERY_REASON_MAX];
+    struct le_recovery_config config;
+    struct le_recovery recovery;
+
+    snprintf(dir, sizeof(dir), "%s/stale-bak", tmpdir);
+    (void)mkdir(dir, 0700);
+    make_config(&config, dir);
+    reset_fake();
+    init_fake(&recovery, &config, 0);
+    snprintf(backup, sizeof(backup), "%s.bak", config.config_path);
+    write_file(backup, "stale\n", 0600);
+
+    le_recovery_test_fault_reset();
+    le_recovery_test_fault(LE_RECOVERY_FAULT_FINAL_RENAME, 1);
+    CHECK(le_recovery_config_persist(&config, reason, sizeof(reason)) == -1);
+    CHECK_STR_EQ(reason, "config-rename-failed");
+    CHECK(access(config.config_path, F_OK) != 0);   /* not resurrected */
+    CHECK(read_all(backup, content, sizeof(content)) > 0);
+    CHECK_STR_EQ(content, "stale\n");
+    le_recovery_test_fault_reset();
+}
+
 static void test_disabled_config_blocks_both_entries(const char *tmpdir)
 {
     char dir[512];
@@ -978,9 +1312,14 @@ int main(void)
     test_secret_gating(tmpdir);
     test_disabled_feature(tmpdir);
     test_net_helper_fails_closed(tmpdir);
+    test_net_down_failure_is_retried_bounded(tmpdir);
     test_single_interface_handover(tmpdir);
     test_persistent_paths_and_psk_survives_reinit(tmpdir);
     test_configure_persists_validates_and_rolls_back(tmpdir);
+    test_separate_dhcp_gets_conf_file(tmpdir);
+    test_persist_backup_keeps_previous_known_good(tmpdir);
+    test_write_durability_faults_fail_closed(tmpdir);
+    test_stale_backup_is_not_resurrected(tmpdir);
     test_disabled_config_blocks_both_entries(tmpdir);
     test_status_hides_secret_and_paths(tmpdir);
     test_secure_parent_dir(tmpdir);

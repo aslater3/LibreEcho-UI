@@ -113,6 +113,7 @@ const bindVoiceHistory = vm.runInThisContext('bindVoiceHistory');
 const voiceHistoryLoad = vm.runInThisContext('voiceHistoryLoad');
 const voiceHistoryDetail = vm.runInThisContext('voiceHistoryDetail');
 const voiceHistoryClear = vm.runInThisContext('voiceHistoryClear');
+const voiceTurnTime = vm.runInThisContext('voiceTurnTime');
 const simHistoryLoad = vm.runInThisContext('simHistoryLoad');
 const recoveryPanel = vm.runInThisContext('recoveryPanel');
 
@@ -356,6 +357,65 @@ async function caseRecentVoiceCollection() {
     check(html.indexOf('twelfth') < html.indexOf('sixth'), 'the newest preview precedes older previews');
     check(!/role="listitem" data-id="1"/.test(html), 'older turns beyond the cap are omitted');
     has(html, 'error', 'a failed turn renders its error status');
+}
+
+/* Canonical schema. voice_history.c serializes each turn's moment as an ISO
+   8601 `timestamp` with a numeric offset (e.g. 2026-09-30T21:00:12+00:00), not
+   the pre-0.14 latency `at_ms`. The panel must render that time, order by it,
+   and never print "—" for a valid canonical record; a missing or unparseable
+   value must still degrade to "—" rather than "Invalid Date"/NaN. */
+function canonicalStamp(id) {
+    return new Date(Date.UTC(2026, 8, 30, 21, 0, id)).toISOString().replace(/\.000Z$/, '+00:00');
+}
+function canonicalVoiceTurns() {
+    return voiceTurns().map(t => ({
+        id: t.id, timestamp: canonicalStamp(t.id), status: t.status,
+        transcript_preview: t.preview, response_preview: '',
+        transcript_truncated: false, response_truncated: false,
+        transcript_length: 0, response_length: 0, stt_ms: 0, assistant_ms: 0, tts_ms: 0, error: null
+    }));
+}
+
+async function caseRecentVoiceCanonicalTimestamp() {
+    resetDom(); resetCalls();
+    routes['/assistant/history'] = { history_generation: 7, capacity: 10, count: 12, preview_chars: 64, turns: canonicalVoiceTurns() };
+    bindVoiceHistory();
+    await settle(8);
+    const html = $app('#voice-history').innerHTML;
+    const order = [...html.matchAll(/class="voice-turn" role="listitem" data-id="(\d+)"/g)].map(m => Number(m[1]));
+    checkEqual(order.length, 10, 'the canonical ring is capped at 10 rows');
+    checkEqual(order[0], 12, 'canonical turns are ordered newest-first by their ISO timestamp');
+    checkEqual(order[1], 11, 'canonical newest-first ordering continues');
+    const times = [...html.matchAll(/<time>([^<]*)<\/time>/g)].map(m => m[1]);
+    checkEqual(times.length, 10, 'every canonical row renders a <time>');
+    check(times.every(v => v && v !== '—'), 'no canonical row shows a placeholder dash for a valid timestamp');
+    checkEqual(times[0], new Date(canonicalStamp(12)).toLocaleTimeString(), 'the newest canonical row renders its ISO timestamp');
+    /* transcript_preview (not the legacy `preview`) is the canonical text field. */
+    has(html, 'twelfth', 'the canonical transcript_preview is rendered');
+    check(!/—/.test(html), 'no placeholder dash leaks into the canonical list');
+
+    /* Safe fallback: missing, empty or unparseable times degrade to "—". */
+    checkEqual(voiceTurnTime({}), '—', 'a turn with no time field falls back to a dash');
+    checkEqual(voiceTurnTime({ timestamp: '' }), '—', 'an empty timestamp falls back to a dash');
+    checkEqual(voiceTurnTime({ timestamp: 'not-a-date' }), '—', 'an unparseable timestamp falls back to a dash');
+    checkEqual(voiceTurnTime({ timestamp: '1970-01-01T00:00:00+00:00' }), '—', 'the device epoch fallback stamp still reads as unknown');
+
+    /* Legacy at_ms/at is preserved for the pre-0.14 shape. */
+    checkEqual(voiceTurnTime({ at_ms: 9000 }), new Date(9000).toLocaleTimeString(), 'legacy at_ms still renders its time');
+    checkEqual(voiceTurnTime({ at: 12000 }), new Date(12000).toLocaleTimeString(), 'legacy at still renders its time');
+    checkEqual(voiceTurnTime({ at_ms: 9000, timestamp: canonicalStamp(12) }), new Date(canonicalStamp(12)).toLocaleTimeString(),
+        'the canonical timestamp wins over a stale legacy at_ms');
+}
+
+async function caseRecentVoiceLegacyOrderingPreserved() {
+    resetDom(); resetCalls();
+    routes['/assistant/history'] = { history_generation: 4, turns: voiceTurns() };
+    bindVoiceHistory();
+    await settle(8);
+    const html = $app('#voice-history').innerHTML;
+    const order = [...html.matchAll(/class="voice-turn" role="listitem" data-id="(\d+)"/g)].map(m => Number(m[1]));
+    checkEqual(order[0], 12, 'legacy at_ms fixtures still order newest-first');
+    check(!/—/.test(html), 'legacy at_ms fixtures still render a time, not a dash');
 }
 
 async function caseRecentVoiceDetailEscaped() {
@@ -613,6 +673,8 @@ async function main() {
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],
         ['recent voice newest-first cap of 10', caseRecentVoiceCollection],
+        ['recent voice canonical ISO timestamp rendering', caseRecentVoiceCanonicalTimestamp],
+        ['recent voice legacy at_ms ordering preserved', caseRecentVoiceLegacyOrderingPreserved],
         ['recent voice detail fetch and escaping', caseRecentVoiceDetailEscaped],
         ['recent voice stale detail after clear', caseRecentVoiceStaleDetail],
         ['recent voice stale collection race', caseRecentVoiceLoadRace],

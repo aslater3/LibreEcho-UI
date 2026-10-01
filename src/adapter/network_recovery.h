@@ -147,6 +147,10 @@ struct le_recovery {
     struct le_recovery_process children[LE_RECOVERY_CHILD_MAX];
     int child_count;
     int net_configured;            /* net-up succeeded; net-down still owed */
+    int net_release_pending;       /* net-down failed; cleanup still owed */
+    int net_release_attempts;      /* bounded retry counter for net-down */
+    long long net_release_next_ms; /* earliest next net-down retry */
+    char net_error[LE_RECOVERY_REASON_MAX]; /* last net-down failure reason */
     int led_active;
     int secret_available;
     char ssid[LE_RECOVERY_SSID_MAX];
@@ -257,5 +261,29 @@ int le_recovery_secret_json(const struct le_recovery *recovery,
                             char *out, size_t out_size);
 const char *le_recovery_mode_name(enum le_recovery_mode mode);
 const char *le_recovery_trigger_name(enum le_recovery_trigger trigger);
+
+/*
+ * Durability fault identifiers for the recovery unit harness.  They are always
+ * declared so the wrappers compile identically everywhere, but the injection
+ * functions exist only when the unit build defines LE_RECOVERY_UNIT_TESTING, so
+ * a shipped binary can never fail a durability syscall on purpose.
+ */
+enum le_recovery_durability_fault {
+    LE_RECOVERY_FAULT_FSYNC = 0,      /* temp file fsync() */
+    LE_RECOVERY_FAULT_CLOSE,          /* temp file close() */
+    LE_RECOVERY_FAULT_BACKUP_RENAME,  /* rename(path, path.bak) */
+    LE_RECOVERY_FAULT_FINAL_RENAME,   /* rename(temp, path) */
+    LE_RECOVERY_FAULT_ROLLBACK_RENAME,/* restore path.bak over path */
+    LE_RECOVERY_FAULT_PARENT_FSYNC,   /* parent directory fsync() */
+    LE_RECOVERY_FAULT_PARENT_OPEN,    /* parent directory open() */
+    LE_RECOVERY_FAULT_PARENT_CLOSE,   /* parent directory close() */
+    LE_RECOVERY_FAULT_COUNT
+};
+
+#ifdef LE_RECOVERY_UNIT_TESTING
+/* Fail the next `count` matching durability syscalls; count < 0 clears. */
+void le_recovery_test_fault(int which, int count);
+void le_recovery_test_fault_reset(void);
+#endif
 
 #endif /* LIBREECHO_NETWORK_RECOVERY_H */
