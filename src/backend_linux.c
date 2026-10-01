@@ -1068,15 +1068,24 @@ static int device(struct le_backend *b, struct le_device_info *o)
     return LE_OK;
 }
 
-static int networkd_status(struct le_backend *b, struct le_network_state *o)
+/*
+ * Ask networkd for its status. io_timeout_ms bounds the adapter I/O wait; 0
+ * keeps the adapter client's default. The static-file path probes the recovery
+ * portal on every request through network_portal(), so that one must use a
+ * short bound: a stalled networkd (socket accepted, no reply) would otherwise
+ * freeze the single event loop for the whole default timeout on every request.
+ */
+static int networkd_status_timeout(struct le_backend *b,
+                                   struct le_network_state *o,
+                                   int io_timeout_ms)
 {
     char response[LE_ADAPTER_MSG_MAX];
     int found = 0;
     int rc;
 
     (void)b;
-    rc = adapter_command(LE_ADAPTER_NETWORK_SOCK, "status", NULL,
-                         response, sizeof(response));
+    rc = adapter_command_timeout(LE_ADAPTER_NETWORK_SOCK, "status", NULL,
+                                 response, sizeof(response), io_timeout_ms);
     if (rc != LE_OK)
         return rc;
 
@@ -1157,6 +1166,20 @@ static int networkd_status(struct le_backend *b, struct le_network_state *o)
     o->internet = o->gateway[0] && !strcmp(o->state, "connected") &&
                   !strcmp(o->connectivity, "healthy");
     return found ? LE_OK : LE_IO;
+}
+
+static int networkd_status(struct le_backend *b, struct le_network_state *o)
+{
+    return networkd_status_timeout(b, o, 0);
+}
+
+/* Bounded recovery-portal probe. 250 ms of adapter I/O on top of the 100 ms
+   connect bound keeps a stalled networkd's worst-case cost well under one
+   second; the API layer backs off before probing again. */
+#define LE_RECOVERY_PORTAL_IO_TIMEOUT_MS 250
+static int network_portal(struct le_backend *b, struct le_network_state *o)
+{
+    return networkd_status_timeout(b, o, LE_RECOVERY_PORTAL_IO_TIMEOUT_MS);
 }
 
 /*
@@ -3011,7 +3034,8 @@ static const struct le_backend_ops ops = {
     sound_sample,
     timers, timer_add, timer_cancel, timer_dismiss,
     noise_start_ex, led_idle_mode, led_sleep,
-    recovery_configure, recovery_prepare, recovery_stop
+    recovery_configure, recovery_prepare, recovery_stop,
+    network_portal
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

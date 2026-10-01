@@ -43,11 +43,15 @@ char mac_wifi[24],mac_bt[24];char sessions_path[384];int https_active;struct le_
    persisted: after a reboot nothing is playing and nothing was interrupted, so
    offering to resume something would be a guess. */
 char radio_last_word[32];char logs[LE_MAX_LOGS][256];size_t log_count,log_next;
-/* Cached captive-portal state.  Refreshed at most once per second by
-   api_recovery_portal() so the HTTP layer can decide a redirect without a
-   networkd round-trip on every request.  0 unless networkd reports the
-   recovery AP actively serving. */
-int recovery_portal_active;char recovery_portal_address[32];long recovery_portal_checked;};
+/* Cached captive-portal state.  api_recovery_portal() probes networkd through
+   a short, bounded adapter timeout at most once a second after a confirmed
+   answer, or once per LE_RECOVERY_PORTAL_BACKOFF_S after a failed probe (so a
+   stalled daemon costs at most one short stall per window).  The timestamp is
+   recorded AFTER the probe, so a probe that spans a second boundary is still
+   treated as fresh.  recovery_portal_active is 0 unless networkd reports the
+   recovery AP actively serving; recovery_portal_ok records whether the last
+   probe was answered at all. */
+int recovery_portal_active;char recovery_portal_address[32];long recovery_portal_checked;int recovery_portal_ok;};
 int api_request_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_bootstrap_required(const struct api_context*);
 void api_set_https_active(struct api_context*,int);

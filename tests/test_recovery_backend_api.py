@@ -82,7 +82,7 @@ class Harness:
     """One networkd fixture + one web daemon sharing a single socket path."""
 
     def __init__(self, *, marker=False, config_blocker=False, start_networkd=True,
-                 net_down_fail_budget=0):
+                 net_down_fail_budget=0, silent_socket=False):
         WORKSPACE.mkdir(parents=True, exist_ok=True)
         # Fresh name space: stale sockets from an earlier case would bind-collide.
         for path in list(WORKSPACE.glob("*.sock")):
@@ -100,9 +100,18 @@ class Harness:
             # networkd's atomic write fail ("config-rename-failed") -- a real
             # persist failure, not a simulated return code.
             (WORKSPACE / "recovery.json").mkdir()
-        self.fixture = lc.RecoveryFixture(
-            WORKSPACE, marker=marker,
-            net_down_fail_budget=net_down_fail_budget)
+        self.silent_server = None
+        self.silent_held = []
+        self.silent_thread = None
+        if silent_socket:
+            # No networkd: bind a listener that accepts but never answers, so
+            # the web daemon's adapter I/O is exercised against a stalled peer.
+            self.fixture = None
+            self._start_silent_socket()
+        else:
+            self.fixture = lc.RecoveryFixture(
+                WORKSPACE, marker=marker,
+                net_down_fail_budget=net_down_fail_budget)
         self.port = free_port()
         self.web_log = open(WORKSPACE / "web-api.log", "ab")
         self.web = None
@@ -121,6 +130,30 @@ class Harness:
             # Never leak the fixture/web if startup fails partway.
             self.close()
             raise
+
+    def _start_silent_socket(self):
+        """Bind network.sock and accept -- but never reply.
+
+        Models a stalled networkd: connect() succeeds (the kernel completes the
+        handshake into the backlog), the request is written, and the read blocks
+        until the client's own timeout.  A static GET must stay bounded anyway.
+        """
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(WORKSPACE / "network.sock"))
+        server.listen(32)
+        held = self.silent_held
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    return
+                held.append(conn)  # keep open, never answer
+
+        self.silent_server = server
+        self.silent_thread = threading.Thread(target=serve, daemon=True)
+        self.silent_thread.start()
 
     def _await_csrf(self, timeout=15.0):
         deadline = time.monotonic() + timeout
@@ -196,7 +229,19 @@ class Harness:
             self.web_log.close()
         except OSError:
             pass
-        self.fixture.stop()
+        fixture = getattr(self, "fixture", None)
+        if fixture is not None:
+            fixture.stop()
+        if self.silent_server is not None:
+            try:
+                self.silent_server.close()
+            except OSError:
+                pass
+            for conn in self.silent_held:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
 
     def __enter__(self):
         return self
@@ -386,6 +431,41 @@ def test_recovery_ap_serves_recovery_landing():
         assert 'id="recovery-login"' in body, body[:200]
 
 
+def test_stalled_networkd_does_not_block_static_serving():
+    """A stalled networkd must not freeze static-file serving.
+
+    Regression (Codex review on a3be414): api_recovery_portal() ran a blocking
+    networkd round-trip (adapter default timeout 5 s) on every GET/HEAD, and
+    stamped its cache time *before* the call, so a daemon that accepted but
+    never replied made every CSS/JS request stall ~5 s and re-probed on every
+    second boundary.  The probe is now bounded (~250 ms of adapter I/O) and the
+    result is cached/backed-off, so a static request stays well under a second
+    and a burst costs at most one bounded stall.
+    """
+    with Harness(silent_socket=True) as h:
+        # First static GET: one bounded probe may run (~0.35 s worst case at
+        # the 100 ms connect + 250 ms I/O bound).  Far below the ~5 s default.
+        start = time.monotonic()
+        status, location, body = h.raw("GET", "/css/app.css",
+                                       host="127.0.0.1", timeout=6)
+        first = time.monotonic() - start
+        assert status == 200, (status, location, body[:80])
+        assert location is None, (status, location)  # fail-closed: no redirect
+        assert first < 1.0, (
+            f"first static GET stalled {first:.3f}s on a stalled networkd")
+
+        # A burst inside the back-off window must be served without probing.
+        for _ in range(5):
+            start = time.monotonic()
+            status, location, body = h.raw("GET", "/css/app.css",
+                                           host="127.0.0.1", timeout=6)
+            elapsed = time.monotonic() - start
+            assert status == 200, (status, elapsed)
+            assert elapsed < 0.3, (
+                f"cached static GET stalled {elapsed:.3f}s -- each request "
+                "re-probed the stalled daemon")
+
+
 def test_normal_mode_has_no_captive_redirect():
     """Outside recovery the same requests are served normally, never 302'd."""
     with Harness() as h:
@@ -411,6 +491,7 @@ def main():
         test_stop_reports_failure_when_net_release_gave_up_through_the_backend,
         test_recovery_ap_redirects_captive_probe_to_login,
         test_recovery_ap_serves_recovery_landing,
+        test_stalled_networkd_does_not_block_static_serving,
         test_normal_mode_has_no_captive_redirect,
     ]
     failed = 0

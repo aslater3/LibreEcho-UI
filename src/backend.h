@@ -180,6 +180,9 @@ int le_get_led_state(struct le_backend*,struct le_led_state*); int le_set_led_co
 int le_set_led_idle_mode(struct le_backend*,const char*);
 int le_set_led_sleep(struct le_backend*,const struct le_led_sleep_request*);
  int le_play_sound_sample(struct le_backend*,const char*);int le_get_network_state(struct le_backend*,struct le_network_state*); int le_scan_wifi(struct le_backend*,struct le_wifi_scan*); int le_connect_wifi(struct le_backend*,const struct le_wifi_credentials*); int le_disconnect_wifi(struct le_backend*); int le_set_hostname(struct le_backend*,const char*);
+/* Portal probe with a bounded adapter I/O timeout (falls back to the normal
+   network op on a backend that does not implement it). */
+int le_network_portal(struct le_backend*,struct le_network_state*);
 int le_recovery_configure(struct le_backend*,int,int,int);
 int le_recovery_prepare(struct le_backend*,char*,size_t);
 int le_recovery_stop(struct le_backend*);

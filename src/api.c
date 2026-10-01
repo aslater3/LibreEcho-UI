@@ -1535,27 +1535,46 @@ static void led_json(struct api_context*c,struct api_response*r){struct le_led_s
     gateway_reachable=n.gateway_reachable<0?"null":n.gateway_reachable?"true":"false";
     out(r,200,"{\"ok\":true,\"data\":{\"state\":\"%s\",\"connectivity\":\"%s\",\"recovery_stage\":\"%s\",\"gateway_reachable\":%s,\"liveness_failures\":%d,\"ssid\":\"%s\",\"signal\":%d,\"rssi_dbm\":%d,\"ip\":\"%s\",\"gateway\":\"%s\",\"dns\":\"%s\",\"hostname\":\"%s\",\"wifi_mac\":\"%s\",\"wifi_mac_factory\":\"%s\",\"wifi_mac_configured\":\"%s\",\"bt_mac\":\"%s\",\"bt_mac_factory\":\"%s\",\"bt_mac_configured\":\"%s\",\"internet\":%s,\"dhcp\":%s,\"ssh\":%s,\"api_lan\":%s,\"api_lan_effective\":%s,\"api_lan_forced\":%s,\"mode\":\"%s\",\"recovery\":{\"mode\":\"%s\",\"trigger\":\"%s\",\"available\":%s,\"ssid\":\"%s\",\"reason\":\"%s\",\"error\":\"%s\",\"secret_available\":%s,\"led_owner\":\"%s\",\"enabled\":%s,\"net_configured\":%s,\"auto_enabled\":%s,\"auto_timeout_ms\":%lld,\"auto_pending\":%s,\"auto_countdown_ms\":%lld,\"rate_count\":%d,\"children\":%d}},\"error\":null}",state,connectivity,recovery_stage,gateway_reachable,n.liveness_failures,ssid,n.signal,n.rssi_dbm,ip,gateway,dns,hostname,n.wifi_mac,n.wifi_mac_factory,cfg_wifi,n.bt_mac,n.bt_mac_factory,cfg_bt,n.internet?"true":"false",n.dhcp?"true":"false",n.ssh?"true":"false",n.api_lan?"true":"false",(c->allow_insecure_lan||n.api_lan)?"true":"false",c->allow_insecure_lan?"true":"false",nmode,rmode,rtrig,n.recovery.available?"true":"false",rssid,rreason,rerror,n.recovery.secret_available?"true":"false",rled,n.recovery.enabled?"true":"false",n.recovery.net_configured?"true":"false",n.recovery.auto_enabled?"true":"false",(long long)n.recovery.auto_timeout_ms,n.recovery.auto_pending?"true":"false",(long long)n.recovery.auto_countdown_ms,n.recovery.rate_count,n.recovery.children);
 }
-/* Captive-portal state for the HTTP layer.  Returns 1 only while networkd
-   reports the recovery AP actually serving, and fills address with the portal
-   IPv4 to redirect to.  Cached for at most one second: a captive client sends
-   many requests in a burst and each must not cost a networkd round-trip, while
-   a stale timer must not keep redirecting after the AP is gone.  Fail-closed:
-   any backend error or unexpected mode returns 0 (normal serving). */
+/*
+ * Captive-portal state for the HTTP layer.  Returns 1 only while networkd
+ * reports the recovery AP actually serving, and fills address with the portal
+ * IPv4 to redirect to.
+ *
+ * Every GET/HEAD reaches this, so the probe must never block the single event
+ * loop on a stalled networkd: it goes through le_network_portal(), whose Linux
+ * backend bounds the adapter I/O (a stalled daemon that accepts but never
+ * replies costs ~250 ms, not the 5 s default).  The result is cached for at
+ * least a second after a confirmed answer, and for LE_RECOVERY_PORTAL_BACKOFF_S
+ * after a failed one, so a burst of requests costs at most one bounded probe
+ * per window.  The timestamp is recorded AFTER the probe returns: a probe that
+ * itself spans a second boundary therefore stays fresh instead of retriggering
+ * on the next request.  Fail-closed: any backend error or unexpected mode
+ * returns 0 (normal serving).
+ */
+#define LE_RECOVERY_PORTAL_FRESH_S 1
+#define LE_RECOVERY_PORTAL_BACKOFF_S 2
 int api_recovery_portal(struct api_context*c,char*address,size_t address_size){
     struct le_network_state n;
-    time_t now;
+    long now,window;
+    int rc;
     if(address&&address_size)address[0]='\0';
     if(!c||!c->backend)return 0;
-    now=time(0);
-    if(c->recovery_portal_checked!=(long)now){
-        c->recovery_portal_checked=(long)now;
-        c->recovery_portal_active=0;
-        c->recovery_portal_address[0]='\0';
-        if(!le_get_network_state(c->backend,&n)&&
-           !strcmp(n.recovery.mode,"recovery-ap")&&n.recovery.ap_address[0]){
+    now=(long)time(0);
+    window=c->recovery_portal_ok?LE_RECOVERY_PORTAL_FRESH_S:LE_RECOVERY_PORTAL_BACKOFF_S;
+    if(!c->recovery_portal_checked||now-c->recovery_portal_checked>=window){
+        rc=le_network_portal(c->backend,&n);
+        /* Record the probe time AFTER it returns, not before: the probe itself
+           is bounded but may still cross a second boundary. */
+        c->recovery_portal_checked=(long)time(0);
+        if(!rc&&!strcmp(n.recovery.mode,"recovery-ap")&&n.recovery.ap_address[0]){
+            c->recovery_portal_ok=1;
             c->recovery_portal_active=1;
             snprintf(c->recovery_portal_address,sizeof(c->recovery_portal_address),
                      "%s",n.recovery.ap_address);
+        }else{
+            c->recovery_portal_ok=0;
+            c->recovery_portal_active=0;
+            c->recovery_portal_address[0]='\0';
         }
     }
     if(!c->recovery_portal_active)return 0;

@@ -274,5 +274,8 @@ static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,
  0,
  timers_mock, timer_add_mock, timer_cancel_mock, timer_dismiss_mock,
  noise_start_ex_mock, led_idle_mode_mock, led_sleep_mock,
- recovery_configure_mock, recovery_prepare_mock, recovery_stop_mock};
+ recovery_configure_mock, recovery_prepare_mock, recovery_stop_mock,
+ /* network_portal: the mock never stalls; the dispatcher falls back to the
+    normal network op. */
+ 0};
 int le_mock_create(struct le_backend*b,const char*mock,const char*cfg,unsigned seed){struct mock_state*m=calloc(1,sizeof(*m));if(!m)return LE_IO;defaults(m,seed);load_profile(m,mock,seed);if(cfg){strncpy(m->config_path,cfg,sizeof(m->config_path)-1);load(m,cfg);}b->data=m;b->ops=&ops;return LE_OK;}

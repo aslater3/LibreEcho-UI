@@ -38,6 +38,12 @@ struct le_backend_ops {
  int (*recovery_configure)(struct le_backend*,int,int,int);
  int (*recovery_prepare)(struct le_backend*,char*,size_t);
  int (*recovery_stop)(struct le_backend*);
+ /* Recovery-portal probe with a short, bounded adapter I/O timeout. The
+    static-file path asks this on every GET/HEAD, so it must never block the
+    single event loop on a stalled networkd. Appended last for the positional
+    init reason above; a backend that leaves it null falls back to the normal
+    network op. */
+ int (*network_portal)(struct le_backend*,struct le_network_state*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);
