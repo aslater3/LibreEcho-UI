@@ -171,6 +171,8 @@ struct le_live_session {
     uint64_t audio_output_ms;
     uint64_t delegation_count;
     uint64_t delegation_failures;
+    /* Saturating count of result delivery failures, not local tool failures. */
+    uint64_t delegation_delivery_failures;
     uint64_t delegation_deduped;
     uint64_t barge_ins;
     uint64_t last_connection_ms;

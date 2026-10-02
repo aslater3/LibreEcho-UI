@@ -133,7 +133,8 @@ struct le_live_transport_ops {
      * be delivered for the cancelled turn.
      */
     int (*interrupt)(struct le_live_transport *transport);
-    /* Return a delegation result to the model. */
+    /* Return a delegation result to the model: 0 on success, -1 on failure.
+       Failure may leave a partial frame on the stream; the caller must stop it. */
     int (*complete_delegation)(struct le_live_transport *transport,
                                const char *delegation_id,
                                const char *result);

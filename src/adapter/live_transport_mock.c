@@ -103,7 +103,8 @@ static int mock_start(struct le_live_transport *transport,
     state->rate = 24000U;
     state->audio_chunks = 3U;
     state->delay_open = !strcmp(state->scenario, "delay_open");
-    state->duplicate_delegation = !strcmp(state->scenario, "duplicate_delegation");
+    state->duplicate_delegation = !strcmp(state->scenario, "duplicate_delegation") ||
+        !strcmp(state->scenario, "completion_replay_error");
     if (!strcmp(state->scenario, "silent"))
         state->audio_chunks = 0U;
     /*
@@ -297,6 +298,10 @@ static int mock_complete_delegation(struct le_live_transport *transport,
     if (!delegation_id || !delegation_id[0])
         return -1;
     ++state->complete_calls;
+    if (!strcmp(state->scenario, "completion_error") ||
+        (!strcmp(state->scenario, "completion_replay_error") &&
+         state->complete_calls == 2U))
+        return -1;
     if (result && result[0])
         state->result_ok = strstr(result, "\"ok\":true") ? 1 : 0;
     snprintf(state->last_result, sizeof(state->last_result), "%s",
