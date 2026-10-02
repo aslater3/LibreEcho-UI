@@ -392,68 +392,6 @@ static int refresh_home_assistant_discovery(void)
         return LE_OK;
     return run_init_command(LE_INIT_MDNSD, "start");
 }
-/* Set when Home Assistant is enabled but the shared mDNS supervisor could not
- * refresh the ESPHome advertisement. The pipeline transition still succeeds;
- * this lets the caller report the unavailable discovery instead of discarding
- * the controller result. */
-static int home_assistant_discovery_unavailable;
-static int apply_home_assistant_mode(int enabled)
-{
-    static const char *const stop_local[] = {
-        LE_INIT_AGENTD, "stop", NULL
-    };
-    static const char *const start_local[] = {
-        LE_INIT_AGENTD, "start", NULL
-    };
-    static const char *const stop_stt[] = {
-        LE_INIT_STTD, "stop", NULL
-    };
-    static const char *const start_stt[] = {
-        LE_INIT_STTD, "start", NULL
-    };
-    static const char *const stop_tts[] = {
-        LE_INIT_TTSD, "stop", NULL
-    };
-    static const char *const start_tts[] = {
-        LE_INIT_TTSD, "start", NULL
-    };
-    static const char *const stop_esphome[] = {
-        LE_INIT_ESPHOMED, "stop", NULL
-    };
-    static const char *const start_esphome[] = {
-        LE_INIT_ESPHOMED, "start", NULL
-    };
-    int refresh;
-
-    if (access(LE_INIT_ESPHOMED, X_OK) < 0)
-        return LE_OK;
-
-    home_assistant_discovery_unavailable = 0;
-    if (enabled) {
-        if (run_init_command(stop_local[0], stop_local[1]) ||
-            run_init_command(stop_stt[0], stop_stt[1]) ||
-            run_init_command(stop_tts[0], stop_tts[1]) ||
-            run_init_command(start_esphome[0], start_esphome[1]))
-            return LE_IO;
-    } else {
-        if (run_init_command(stop_esphome[0], stop_esphome[1]) ||
-            run_init_command(start_stt[0], start_stt[1]) ||
-            run_init_command(start_tts[0], start_tts[1]) ||
-            run_init_command(start_local[0], start_local[1]))
-            return LE_IO;
-    }
-    /* The shared mDNS supervisor init script is installed on every system, but
-     * its start path depends on root-owned private runtime directories and can
-     * exit nonzero when they cannot be prepared. The discovery refresh is
-     * therefore attempted only after the requested pipeline state is restored.
-     * Its failure never rolls back or fails that pipeline transition; when Home
-     * Assistant was enabled it is recorded so the caller can report the missing
-     * ESPHome advertisement. */
-    refresh = refresh_home_assistant_discovery();
-    if (enabled && refresh != LE_OK)
-        home_assistant_discovery_unavailable = 1;
-    return LE_OK;
-}
 static int valid_pipeline_token(const char *value)
 {
     const unsigned char *p = (const unsigned char *)value;
@@ -467,18 +405,6 @@ static int valid_pipeline_token(const char *value)
     }
     return 1;
 }
-#ifndef LE_INIT_AGENTD
-#define LE_INIT_AGENTD    "/etc/init.d/libreecho-agentd.init"
-#endif
-#ifndef LE_INIT_STTD
-#define LE_INIT_STTD      "/etc/init.d/libreecho-sttd.init"
-#endif
-#ifndef LE_INIT_TTSD
-#define LE_INIT_TTSD      "/etc/init.d/libreecho-ttsd.init"
-#endif
-#ifndef LE_INIT_ESPHOMED
-#define LE_INIT_ESPHOMED  "/etc/init.d/libreecho-esphomed.init"
-#endif
 /* Home Assistant mode is served by libreecho-esphomed; its pidfile is one
    readiness signal for the ESPHome satellite. The wake socket, the waked
    daemon behind it, and the listening ESPHome port are the rest. */
