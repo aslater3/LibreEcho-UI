@@ -50,9 +50,9 @@ This document explains how the LibreEcho web management interface works, from th
 │  └──────────────────────┘           │                                 │   │
 │                                     │                                 │   │
 │  ┌──────────────────────────────────┘                                 │   │
-│  │              config_manager.c                                      │   │
-│  │  /etc/libreecho/config.json ◄──▶ SIGHUP reload                   │   │
-│  │  /etc/libreecho/history/config-*.json                            │   │
+│  │              config_store.c                                      │   │
+│  │  --config path ◄──▶ atomic read/write                   │   │
+│  │  Single previous-file .bak backup                            │   │
 │  └───────────────────────────────────────────────────────────────────┘   │
 │                                    │                                     │
 │                              AF_UNIX adapter protocol                      │
@@ -80,7 +80,7 @@ This document explains how the LibreEcho web management interface works, from th
 
 **Role:** HTTP server, API routing, config management, orchestration.
 
-**Files:** `src/main.c`, `src/http_server.c`, `src/api.c`, `src/backend_linux.c`, `src/config_manager.c`
+**Files:** `src/main.c`, `src/http_server.c`, `src/api.c`, `src/backend_linux.c`, `src/config_store.c`
 
 **Startup:**
 ```sh
@@ -97,7 +97,7 @@ libreecho-web --backend linux \
   registration during setup
 - Schedule the explicitly confirmed, one-shot, unverified vendor-import retry
   marker without rebooting the device
-- Manage central config (`/etc/libreecho/config.json`)
+- Persist web configuration at the `--config` path
 - Coordinate with companion daemons via adapter protocol
 - Log to central logd
 
@@ -260,37 +260,14 @@ le_log_error("failed: %s", strerror(errno));
 **Log levels:** DEBUG < INFO < WARNING < ERROR. Default: INFO.
 **Flags:** `--verbose` (DEBUG), `--debug` (DEBUG + source), `--quiet` (WARNING+).
 
-### 5. Configuration Manager
+### 5. Configuration Store
 
-**Role:** Central JSON config with sections per service, SIGHUP reload, history.
-
-**File:** `/etc/libreecho/config.json`
-
-```json
-{
-  "version": 1,
-  "system": { "hostname": "libreecho", "log_level": "info" },
-  "audio": { "volume": 50, "microphone_gain": 65 },
-  "led": { "brightness": 70, "boot_color": [72, 216, 118] },
-  "network": { "wifi_enabled": true, "hostname": "libreecho" },
-  "wake_word": { "enabled": true, "sensitivity": 68 },
-  "privacy": { "local_only": true, "telemetry": false }
-}
-```
-
-**API:**
-```c
-#include "config_manager.h"
-
-le_config_init("/etc/libreecho/config.json");
-int volume;
-le_config_get_int("audio", "volume", &volume);
-le_config_reload();  // Called on SIGHUP
-```
-
-**History:** Every write saves previous version to `/etc/libreecho/history/config-<timestamp>.json`. Keeps last 10.
-
-**Reload:** Send `SIGHUP` to any daemon to reload its config section.
+`src/config_store.c` provides bounded file reads and atomic writes for the web
+configuration selected by `--config` (normally `/etc/libreecho/web-config.json`).
+`src/api.c` serializes persisted settings and loads them into the backend.
+Writes use a mode-0600 temporary file, `fsync`, and rename; the previous file is
+linked to a single `.bak` backup on a best-effort basis. This store does not
+provide per-service sections, timestamped history, or SIGHUP reload.
 
 ### 6. Backup/Restore
 
