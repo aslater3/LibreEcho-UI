@@ -48,6 +48,9 @@
 
 #define PROBE_TIMEOUT_MS 1500
 #define DEFAULT_INTERVAL_S 5
+/* Probe intervals of grace before a re-armed voice service can be
+   restarted: 30 s at the default interval. */
+#define REARM_GRACE_INTERVALS 6
 #define MAX_SERVICES 24
 
 /*
@@ -108,6 +111,10 @@ struct supervised {
     int healthy;
     int last_healthy;
     int seen_healthy;
+    /* Has ever answered. Survives voice-mode deselection, so supervision is
+       re-armed when the mode is selected again rather than waiting for a
+       daemon that may already have died to answer first. */
+    int installed;
     int reported_give_up;
     unsigned int total_restarts;
 };
@@ -526,6 +533,18 @@ int main(int argc, char **argv)
                the API on purpose. Drop its supervision latch and failure
                history, so it is neither restarted now nor treated as a crash
                when its mode is selected again and the API starts it. */
+            if (wanted(s->desc, mode) && s->installed && !s->seen_healthy) {
+                s->seen_healthy = 1;
+                s->last_healthy = 1;
+                s->reported_give_up = 0;
+                le_watchdog_service_init(&s->state, now);
+                /* The API is starting it now; give a model-loading daemon
+                   time to answer before a restart can stop it again. */
+                s->state.next_attempt_ms =
+                    now + (long long)interval * REARM_GRACE_INTERVALS * 1000;
+                le_log_info("watchdog: supervising %s again; its voice mode "
+                            "is selected", s->desc->name);
+            }
             if (!wanted(s->desc, mode)) {
                 if (s->seen_healthy)
                     le_log_info("watchdog: not supervising %s; its voice "
@@ -543,6 +562,8 @@ int main(int argc, char **argv)
             /* Supervision latches on the first healthy probe. A daemon that
                has never answered is either disabled or not installed, and
                starting something the owner turned off is not recovery. */
+            if (s->healthy)
+                s->installed = 1;
             if (s->healthy && !s->seen_healthy) {
                 s->seen_healthy = 1;
                 le_log_info("watchdog: supervising %s", s->desc->name);

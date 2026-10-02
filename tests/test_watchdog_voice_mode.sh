@@ -147,4 +147,28 @@ if [ "$(starts local)" != "$local_before" ] || [ -S "$dir/local.sock" ]; then
     cat "$dir/wd5.log"; exit 1
 fi
 echo "  mode switch during a restart is honoured: ok"
+
+# --- a service whose mode is reselected is supervised again ----------------
+# Leaving local mode must not make the watchdog forget local voice is
+# installed. When local is selected again and the daemon dies before the
+# watchdog's next probe, it must still be restarted.
+printf '%s\n' "$local_cfg" > "$config"
+[ -S "$dir/local.sock" ] || sh "$dir/local.init" start
+[ -f "$dir/ha.pid" ] && sh "$dir/ha.init" stop
+local_before=$(starts local)
+(
+    sleep 3
+    printf '%s\n' "$ha_cfg" > "$config"
+    sh "$dir/local.init" stop
+    sleep 3
+    # Local is selected again; its daemon exited before being probed.
+    printf '%s\n' "$local_cfg" > "$config"
+) &
+"$WD" --passes 20 --interval 1 --config "$config" $services >"$dir/wd6.log" 2>&1
+wait
+if [ "$(starts local)" -le "$local_before" ]; then
+    echo "FAIL: watchdog forgot a reselected voice service and never restarted it"
+    cat "$dir/wd6.log"; exit 1
+fi
+echo "  reselected voice service is supervised again: ok"
 echo "watchdog voice-mode ownership: PASS"
