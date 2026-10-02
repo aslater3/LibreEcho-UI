@@ -165,8 +165,7 @@ async function setLiveProvider(enabled,assistant) {
   } catch(error) {
     toast(error.message,true);
   } finally {
-    await integrationsPage();
-    setBusy(false);
+    setBusy(false); try{ await integrationsPage(); }catch(error){ toast(error.message,true); }
   }
 }
 
@@ -311,12 +310,14 @@ function homeAssistantVoiceStatus(enabled,pipeline) {
 }
 
 async function integrationsPage() {
+  const generation=state.renderGeneration,page=state.page;
   const [d,a,pipeline,live]=await Promise.all([
     api('/integrations'),
     api('/assistant').catch(error=>({unsupported:error.message})),
     api('/voice-pipeline').catch(()=>({mode:'local',stt:{},tts:{}})),
     api('/live').catch(error=>({unsupported:error.message}))
   ]);
+  if(generation!==state.renderGeneration||page!==state.page)return;
   /*
    * integrationBlurb/integrationStatus come from app.js, which loads first.
    * An integration the image was built without reports installed:false; it is
@@ -448,8 +449,7 @@ async function integrationsPage() {
       } catch(error) {
         toast(error.message,true);
       } finally {
-        await integrationsPage();
-        setBusy(false);
+        setBusy(false); try{ await integrationsPage(); }catch(error){ toast(error.message,true); }
       }
     };
     if($('#local-test'))$('#local-test').onclick=()=>post('/assistant/respond',{text:$('#local-test-text').value},'Test response queued');

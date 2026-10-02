@@ -103,7 +103,9 @@ function bluetoothScanFinished(b) {
 }
 
 async function bluetoothPage() {
+  const generation=state.renderGeneration,page=state.page;
   const b=await api('/bluetooth',{allowUnavailable:true});
+  if(generation!==state.renderGeneration||page!==state.page)return;
   state.btScanning=!!b.scanning;
   content.innerHTML=bluetoothMarkup(b);
   bindBluetooth(b);
@@ -114,9 +116,13 @@ async function bluetoothPage() {
 async function refreshBluetooth() {
   if (state.page!=='Bluetooth') return;
   if (state.btPairingResponding) return;
+  const generation=state.renderGeneration;
   try {
     const b=await api('/bluetooth',{allowUnavailable:true});
-    if (state.page==='Bluetooth' && !state.btPairingResponding && !($('#save-bt-mac') && !$('#save-bt-mac').disabled)) { content.innerHTML=bluetoothMarkup(b); bindBluetooth(b); bluetoothScanFinished(b); updateBluetoothLiveRegion(b); }
+    if(state.page!=='Bluetooth'||generation!==state.renderGeneration||state.btPairingResponding)return;
+    const editingPairing=['#bt-pairing-pin','#bt-pairing-value'].some(id=>{const input=$(id);return input&&(input.value!==''||document.activeElement===input)});
+    if (!editingPairing && !($('#save-bt-mac') && !$('#save-bt-mac').disabled)) { content.innerHTML=bluetoothMarkup(b); bindBluetooth(b); }
+    bluetoothScanFinished(b); updateBluetoothLiveRegion(b);
   } catch (_) { /* Preserve the last good Bluetooth state during a transient adapter failure. */ }
-  finally { if (state.page==='Bluetooth') state.timer=setTimeout(refreshBluetooth,2000); }
+  finally { if (state.page==='Bluetooth'&&generation===state.renderGeneration) state.timer=setTimeout(refreshBluetooth,2000); }
 }
