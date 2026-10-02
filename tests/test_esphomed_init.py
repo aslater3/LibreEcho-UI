@@ -21,3 +21,12 @@ with tempfile.TemporaryDirectory(prefix='esphomed-init-',dir=os.environ.get('TMP
  except ConnectionRefusedError:pass
  else:s.close();raise AssertionError('listener survived shipped stop')
 print('ESPHome shipped init private-path start/readiness/status/stop cleanup: PASS')
+# Watchdog and boot starts carry no LE_CONFIG_PATH. The default must then be
+# the live user config that the web API writes (as for sttd/ttsd/agentd), not
+# the read-only shipped seed, or HA ownership is unreadable after any restart.
+config_line=next(l for l in (ROOT/'init/libreecho-esphomed.init').read_text().splitlines() if l.startswith('CONFIG='))
+resolved=subprocess.run(['env','-i','PATH=/usr/bin:/bin','sh','-c',config_line+'; printf %s "$CONFIG"'],check=True,stdout=subprocess.PIPE,timeout=5).stdout.decode()
+assert resolved=='/data/libreecho/config/web-config.json',resolved
+resolved=subprocess.run(['env','-i','PATH=/usr/bin:/bin','LE_CONFIG_PATH=/private/override.json','sh','-c',config_line+'; printf %s "$CONFIG"'],check=True,stdout=subprocess.PIPE,timeout=5).stdout.decode()
+assert resolved=='/private/override.json',resolved
+print('ESPHome shipped init defaults to the live API config: PASS')
