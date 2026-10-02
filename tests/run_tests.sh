@@ -158,6 +158,7 @@ node tests/test_kernel_log_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
+node tests/test_frontend_state_ui.js
 node tests/test_update_identity_ui.js
 node tests/test_baby_monitor_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
@@ -376,6 +377,8 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_usb_role_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_limits.sh
 make build/test-http-client-state
 LIBREECHO_TEST_URL="$URL" ./build/test-http-client-state
+# Uses its own padded static fixture and isolated mock server.
+sh tests/test_http_send_deadline.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_playback_transport_contract.sh
 sh tests/test_memory.sh "$pid"
 kill "$pid"
