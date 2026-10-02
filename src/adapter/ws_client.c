@@ -158,17 +158,15 @@ static void sha1_final(struct sha1 *s, unsigned char out[20])
 
 /* --- stream helpers ----------------------------------------------------- */
 
-static long read_exact(struct le_ws *ws, unsigned char *buffer, size_t length,
-                       uint64_t deadline)
+static long read_exact_progress(struct le_ws *ws, unsigned char *buffer,
+                                size_t length, size_t *used, uint64_t deadline)
 {
-    size_t used = 0;
-
-    while (used < length) {
-        long got = ws->stream->recv(ws->stream->context, buffer + used,
-                                    length - used);
+    while (*used < length) {
+        long got = ws->stream->recv(ws->stream->context, buffer + *used,
+                                    length - *used);
 
         if (got > 0) {
-            used += (size_t)got;
+            *used += (size_t)got;
             continue;
         }
         if (got == 0)
@@ -178,7 +176,16 @@ static long read_exact(struct le_ws *ws, unsigned char *buffer, size_t length,
         if (monotonic_ms() >= deadline)
             return READ_TIMEOUT;
     }
-    return (long)used;
+    return (long)*used;
+}
+
+/* The handshake reads one byte at a time and fails on any timeout. */
+static long read_exact(struct le_ws *ws, unsigned char *buffer, size_t length,
+                       uint64_t deadline)
+{
+    size_t used = 0;
+
+    return read_exact_progress(ws, buffer, length, &used, deadline);
 }
 
 static long write_all(struct le_ws *ws, const void *buffer, size_t length)
@@ -501,18 +508,18 @@ int le_ws_send_close(struct le_ws *ws, int code)
 static int read_frame(struct le_ws *ws, int *opcode, unsigned char *payload,
                       size_t capacity, size_t *length, uint64_t deadline)
 {
-    unsigned char header[2];
-    unsigned char extended[8];
+    unsigned char *header = ws->read_header;
     uint64_t payload_length;
     int fin;
 
     {
-        long got = read_exact(ws, header, sizeof(header), deadline);
+        long got = read_exact_progress(ws, header, 2, &ws->read_header_used,
+                                       deadline);
 
         /*
          * A quiet moment and a closed stream are different outcomes: reporting
          * a timeout as a close would end a healthy session every time the
-         * model paused.
+         * model paused. Retain partial frame bytes too, for the next poll.
          */
         if (got == READ_TIMEOUT)
             return READ_TIMEOUT;
@@ -531,18 +538,20 @@ static int read_frame(struct le_ws *ws, int *opcode, unsigned char *payload,
     }
     payload_length = header[1] & 0x7fU;
     if (payload_length == 126U) {
-        int got = (int)read_exact(ws, extended, 2, deadline);
+        int got = (int)read_exact_progress(ws, header, 4,
+                                          &ws->read_header_used, deadline);
         if (got == READ_TIMEOUT)
             return READ_TIMEOUT;
         if (got == READ_CLOSED)
             return READ_CLOSED;
         if (got < 0)
             return READ_ERROR;
-        payload_length = ((uint64_t)extended[0] << 8) | extended[1];
+        payload_length = ((uint64_t)header[2] << 8) | header[3];
     } else if (payload_length == 127U) {
         int i;
 
-        int got = (int)read_exact(ws, extended, 8, deadline);
+        int got = (int)read_exact_progress(ws, header, 10,
+                                          &ws->read_header_used, deadline);
         if (got == READ_TIMEOUT)
             return READ_TIMEOUT;
         if (got == READ_CLOSED)
@@ -551,13 +560,13 @@ static int read_frame(struct le_ws *ws, int *opcode, unsigned char *payload,
             return READ_ERROR;
         payload_length = 0;
         for (i = 0; i < 8; ++i)
-            payload_length = (payload_length << 8) | extended[i];
+            payload_length = (payload_length << 8) | header[2 + i];
     }
     if (payload_length > capacity)
         return READ_ERROR;                   /* refuse rather than truncate */
     if (payload_length) {
-        int got = (int)read_exact(ws, payload, (size_t)payload_length,
-                                  deadline);
+        int got = (int)read_exact_progress(ws, payload, (size_t)payload_length,
+                                          &ws->read_payload_used, deadline);
         if (got == READ_TIMEOUT)
             return READ_TIMEOUT;
         if (got == READ_CLOSED)
@@ -578,21 +587,24 @@ static int read_frame(struct le_ws *ws, int *opcode, unsigned char *payload,
 int le_ws_read_text(struct le_ws *ws, char *out, size_t out_size,
                     int timeout_ms)
 {
-    static unsigned char payload[LE_WS_MAX_PAYLOAD];
+    unsigned char *payload;
     uint64_t deadline;
 
     if (!ws || !ws->connected || !out || out_size == 0)
         return -1;
+    payload = ws->read_payload;
     out[0] = '\0';
     deadline = monotonic_ms() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 100);
     for (;;) {
         int opcode = 0;
         size_t length = 0;
-        int result = read_frame(ws, &opcode, payload, sizeof(payload) - 1U,
+        int result = read_frame(ws, &opcode, payload, sizeof(ws->read_payload) - 1U,
                                 &length, deadline);
 
         if (result == READ_TIMEOUT)
             return 0;
+        ws->read_header_used = 0;
+        ws->read_payload_used = 0;
         if (result == READ_CLOSED) {
             ws->close_received = 1;
             return 2;
@@ -625,6 +637,8 @@ void le_ws_close(struct le_ws *ws)
     if (!ws)
         return;
     ws->connected = 0;
+    ws->read_header_used = 0;
+    ws->read_payload_used = 0;
     if (ws->urandom >= 0)
         close(ws->urandom);
     ws->urandom = -1;

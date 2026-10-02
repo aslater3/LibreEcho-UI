@@ -350,6 +350,83 @@ static int test_timeout_reports_nothing(void)
     return 0;
 }
 
+/* Expose only a prefix until the next poll: recv keeps reporting -2 across
+   the deadline, just like a segmented non-blocking TCP stream. */
+struct split_stream {
+    unsigned char frame[320];
+    size_t length;
+    size_t available;
+    size_t used;
+};
+
+static long split_recv(void *context, void *buffer, size_t length)
+{
+    struct split_stream *s = context;
+    size_t take = s->available - s->used;
+
+    if (!take)
+        return -2;
+    if (take > length)
+        take = length;
+    memcpy(buffer, s->frame + s->used, take);
+    s->used += take;
+    return (long)take;
+}
+
+static int test_partial_frame_resumes(size_t header_length, size_t split)
+{
+    struct le_ws ws;
+    struct le_ws_stream stream;
+    struct split_stream source;
+    char message[301];
+    size_t payload_length = header_length == 2 ? 5 : 300;
+    size_t i;
+
+    memset(&ws, 0, sizeof(ws));
+    memset(&stream, 0, sizeof(stream));
+    memset(&source, 0, sizeof(source));
+    ws.stream = &stream;
+    ws.connected = 1;
+    ws.urandom = -1;
+    stream.context = &source;
+    stream.recv = split_recv;
+    source.frame[0] = 0x81;
+    source.frame[1] = header_length == 2 ? 5 :
+                      (header_length == 4 ? 126 : 127);
+    if (header_length > 2) {
+        source.frame[header_length - 2] = (unsigned char)(payload_length >> 8);
+        source.frame[header_length - 1] = (unsigned char)payload_length;
+    }
+    memset(source.frame + header_length, 'x', payload_length);
+    source.length = header_length + payload_length;
+    /* Follow with another frame to prove the parser stays aligned and resets. */
+    source.frame[source.length++] = 0x81;
+    source.frame[source.length++] = 2;
+    source.frame[source.length++] = 'o';
+    source.frame[source.length++] = 'k';
+    source.available = split;
+
+    CHECK(le_ws_read_text(&ws, message, sizeof(message), 1) == 0);
+    CHECK(source.used == split);
+    CHECK(ws.connected == 1);
+    CHECK(message[0] == '\0');
+    CHECK(ws.frames_in == 0 && ws.bytes_in == 0);
+    /* More than one idle poll must also preserve the pending frame. */
+    CHECK(le_ws_read_text(&ws, message, sizeof(message), 1) == 0);
+    source.available = source.length;
+    CHECK(le_ws_read_text(&ws, message, sizeof(message), 1) == 1);
+    CHECK(strlen(message) == payload_length);
+    for (i = 0; i < payload_length; ++i)
+        CHECK(message[i] == 'x');
+    CHECK(ws.frames_in == 1 && ws.bytes_in == payload_length);
+    CHECK(le_ws_read_text(&ws, message, sizeof(message), 1) == 1);
+    CHECK(!strcmp(message, "ok"));
+    CHECK(ws.frames_in == 2 && ws.bytes_in == payload_length + 2);
+    CHECK(le_ws_read_text(&ws, message, sizeof(message), 1) == 0);
+    le_ws_close(&ws);
+    return 0;
+}
+
 static int test_stream_error_is_not_a_clean_close(void)
 {
     struct le_ws ws;
@@ -377,6 +454,14 @@ int main(void)
     failures += test_server_frames_are_read_and_validated() != 0;
     failures += test_oversized_frame_is_refused() != 0;
     failures += test_timeout_reports_nothing() != 0;
+    failures += test_partial_frame_resumes(2, 1) != 0;   /* split header */
+    failures += test_partial_frame_resumes(2, 2) != 0;   /* before payload */
+    failures += test_partial_frame_resumes(2, 4) != 0;   /* split payload */
+    failures += test_partial_frame_resumes(4, 2) != 0;   /* before 16-bit length */
+    failures += test_partial_frame_resumes(4, 3) != 0;   /* split 16-bit length */
+    failures += test_partial_frame_resumes(4, 100) != 0; /* long split payload */
+    failures += test_partial_frame_resumes(10, 2) != 0;  /* before 64-bit length */
+    failures += test_partial_frame_resumes(10, 7) != 0;  /* split 64-bit length */
     failures += test_stream_error_is_not_a_clean_close() != 0;
     if (failures) {
         fprintf(stderr, "ws client: FAILED\n");
