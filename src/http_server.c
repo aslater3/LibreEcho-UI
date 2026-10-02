@@ -58,10 +58,16 @@ extern int setgroups(int,const gid_t*);
 #define LE_MAX_UPDATE_WORKERS 4
 #define LE_MAX_CONFIG_WORKERS 1
 #define LE_TLS_IDLE_TIMEOUT_MS 60000
-/* Parent writes must yield even to trickle readers: cap each send and the
-   entire response (including all static-file chunks), without changing workers. */
-#define LE_SEND_TIMEOUT_MS 250
-#define LE_RESPONSE_TIMEOUT_MS 1000
+/* The no-progress cap protects the parent loop; the total bounds pathological
+   trickle readers without changing workers. Total must comfortably exceed
+   largest_static_asset / slow_wifi_throughput: 220 KB at ~50 KB/s takes ~4.4 s.
+   Allow Wi-Fi power-save gaps and slow transfers, including all file chunks. */
+#ifndef LE_SEND_TIMEOUT_MS
+#define LE_SEND_TIMEOUT_MS 2000
+#endif
+#ifndef LE_RESPONSE_TIMEOUT_MS
+#define LE_RESPONSE_TIMEOUT_MS 30000
+#endif
 enum child_worker_kind{CHILD_WORKER_ASSISTANT,CHILD_WORKER_TLS_RELAY,CHILD_WORKER_KERNEL_LOG,CHILD_WORKER_PCM_STREAM,CHILD_WORKER_UPDATE,CHILD_WORKER_CONFIG,CHILD_WORKER_KIND_COUNT};
 #define LE_MAX_CHILD_WORKERS (LE_MAX_ASSISTANT_WORKERS+LE_MAX_TLS_RELAYS+LE_MAX_KERNEL_LOG_WORKERS+LE_MAX_PCM_STREAM_WORKERS+LE_MAX_UPDATE_WORKERS+LE_MAX_CONFIG_WORKERS)
 struct client{int fd;

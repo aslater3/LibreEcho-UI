@@ -25,7 +25,7 @@ int main(void)
     start=send_now_ms();deadline=start+LE_RESPONSE_TIMEOUT_MS;
     do{rc=send_all(pair[0],data,sizeof(data),deadline);}while(!rc);
     elapsed=send_now_ms()-start;
-    assert(elapsed>=LE_SEND_TIMEOUT_MS-20&&elapsed<LE_RESPONSE_TIMEOUT_MS);
+    assert(elapsed>=LE_SEND_TIMEOUT_MS-20&&elapsed<LE_SEND_TIMEOUT_MS+500);
     assert(fcntl(pair[0],F_GETFL)==flags);
     close(pair[0]);close(pair[1]);
     assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);

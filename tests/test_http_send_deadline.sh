@@ -12,7 +12,9 @@ cleanup(){
 }
 trap cleanup EXIT INT TERM
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror tests/test_http_send_deadline.c -o "$ROOT/client"
-cc -D_POSIX_C_SOURCE=200809L -DLE_HTTP_SEND_BOUNDS_TEST -std=c99 -Wall -Wextra -Wpedantic -Werror -Wno-unused-function -ffunction-sections -fdata-sections -Isrc -Isrc/adapter tests/test_http_send_deadline.c -Wl,--gc-sections -o "$ROOT/bounds"
+# Only the direct helper fixture uses short budgets; the mock server below
+# exercises the production 2000 ms no-progress cap and concurrent status reply.
+cc -D_POSIX_C_SOURCE=200809L -DLE_HTTP_SEND_BOUNDS_TEST -DLE_SEND_TIMEOUT_MS=250 -DLE_RESPONSE_TIMEOUT_MS=1000 -std=c99 -Wall -Wextra -Wpedantic -Werror -Wno-unused-function -ffunction-sections -fdata-sections -Isrc -Isrc/adapter tests/test_http_send_deadline.c -Wl,--gc-sections -o "$ROOT/bounds"
 "$ROOT/bounds"
 mkdir -p "$ROOT/web/js"
 cp web/js/app.js "$ROOT/web/js/app.js"
