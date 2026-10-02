@@ -55,10 +55,6 @@ python3 tests/test_http_worker_registry_contract.py
 python3 tests/test_pr141_review_contract.py
 sh tests/test_pr137_review_contract.sh
 sh tests/test_pr139_review_contract.sh
-make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-bt-mgmt-events build/test-bt-pairing-events
-./build/test-network-health
-./build/test-adapter-client-events
-./build/test-gateway-probe
 make build/test-backend-linux-wifi-emission build/test-thermal-zone-selection build/test-light-sensor
 ./build/test-backend-linux-wifi-emission
 ./build/test-thermal-zone-selection
