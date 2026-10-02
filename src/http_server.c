@@ -34,6 +34,9 @@ extern int setgroups(int,const gid_t*);
 #define LE_REQ_MAX 24576
 #define LE_HEADER_MAX 8192
 #define LE_BODY_MAX 16384
+/* Absolute header/body budget from accept, never renewed by incoming bytes.
+   Completed requests close or hand off to a worker outside this slot budget. */
+#define LE_REQUEST_TIMEOUT_MS 15000
 /* The ceiling lives in api.h so the size the API advertises and the size
    enforced here cannot drift apart. */
 #define LE_UPDATE_PATH "/data/libreecho/update/incoming/manual.tar"
@@ -60,8 +63,11 @@ enum child_worker_kind{CHILD_WORKER_ASSISTANT,CHILD_WORKER_TLS_RELAY,CHILD_WORKE
 struct client{int fd;
 int secure_transport;
 size_t used;
+unsigned long long started_ms;
 char buf[LE_REQ_MAX+1];
 };
+/* Reset state after closing or handing off the fd; never close a worker's fd twice. */
+static void client_clear(struct client*c){c->fd=-1;c->secure_transport=0;c->used=0;c->buf[0]=0;c->started_ms=0;}
 static volatile sig_atomic_t child_worker_pids[LE_MAX_CHILD_WORKERS];
 static volatile sig_atomic_t child_worker_kinds[LE_MAX_CHILD_WORKERS];
 static volatile sig_atomic_t child_worker_counts[CHILD_WORKER_KIND_COUNT];
@@ -208,7 +214,7 @@ if(cl)content_len=(size_t)strtoul(cl,0,10);
 /* Two size gates: the fixed ceiling, and what the staging filesystem can
    actually hold. Refusing here costs the client one request; refusing after
    the stream costs it the whole upload. */
-if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));{size_t limit=le_update_max_upload_bytes();char detail[128];if(!content_len||content_len>LE_UPDATE_MAX_BYTES){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(content_len>limit){snprintf(detail,sizeof(detail),"Update is larger than the %lu bytes this device can stage",(unsigned long)limit);update_error(c->fd,413,"update_size",detail);goto done;}}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}sync_configuration_worker(api);if(config_worker_pending){update_error(c->fd,409,"busy","Network configuration is in progress; retry when it finishes");goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}c->fd=-1;c->used=0;return;}
+if(!strcmp(q.path,"/api/v1/system/update/upload")){size_t initial;copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));copy_header(q.authorization,sizeof(q.authorization),header(c->buf,"Authorization"));copy_header(q.csrf,sizeof(q.csrf),header(c->buf,"X-LibreEcho-CSRF"));{size_t limit=le_update_max_upload_bytes();char detail[128];if(!content_len||content_len>LE_UPDATE_MAX_BYTES){update_error(c->fd,413,"update_size","Update must be between 1 byte and 32 MiB");goto done;}if(content_len>limit){snprintf(detail,sizeof(detail),"Update is larger than the %lu bytes this device can stage",(unsigned long)limit);update_error(c->fd,413,"update_size",detail);goto done;}}if(!api_update_upload_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}sync_configuration_worker(api);if(config_worker_pending){update_error(c->fd,409,"busy","Network configuration is in progress; retry when it finishes");goto done;}initial=c->used>headers?c->used-headers:0;if(initial>content_len)initial=content_len;{const char*au=header(c->buf,"X-LibreEcho-Allow-Unsigned");int allow_unsigned=au&&(*au=='1'||*au=='t'||*au=='T'||*au=='y'||*au=='Y');if(start_update_upload(c->fd,end+4,initial,content_len,allow_unsigned)<0){update_error(c->fd,503,"io_error","The update upload could not start");goto done;}}client_clear(c);return;}
 if(content_len>LE_BODY_MAX){response(c->fd,413,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}",sizeof("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}")-1);
 goto done;
 }if(c->used<headers+content_len)return;
@@ -242,13 +248,13 @@ if(configuration_worker_request(api,&q)){
         response(c->fd,503,"application/json",message,strlen(message));goto done;
     }
     if(body_len)memset(body,0,body_len);
-    c->fd=-1;c->used=0;return;
+    client_clear(c);return;
 }
-if((!strcmp(q.path,"/api/v1/assistant/respond")&&!strcmp(q.method,"POST"))||(!strcmp(q.path,"/api/v1/assistant/history")&&(!strcmp(q.method,"GET")||!strcmp(q.method,"DELETE")))||(!strncmp(q.path,"/api/v1/assistant/history/",26)&&!strcmp(q.method,"GET"))||(!strcmp(q.path,"/api/v1/network/wifi/scan")&&!strcmp(q.method,"POST"))||(!strcmp(q.path,"/api/v1/assistant/history/clear")&&!strcmp(q.method,"POST"))){if(start_api_worker(c->fd,api,&q)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}",sizeof("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}")-1);goto done;}c->fd=-1;c->used=0;return;}
-if(!strcmp(q.path,"/api/v1/system/update/check")||!strcmp(q.path,"/api/v1/system/update/apply")){const char*action=!strcmp(q.path,"/api/v1/system/update/check")?"check":"install";if(!api_update_fetch_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update command could not start");goto done;}c->fd=-1;c->used=0;return;}
-if(!strcmp(q.path,"/api/v1/system/update/channel")){char channel[16],action[32];if(!api_update_channel_authorize(api,&q,&r,channel,sizeof(channel))){response(c->fd,r.status,r.type,r.body,r.length);goto done;}snprintf(action,sizeof(action),"set-channel-%s",channel);if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update channel could not be changed");goto done;}c->fd=-1;c->used=0;return;}
-if(!strncmp(q.path,"/api/v1/baby-monitor/stream",27)){int card,device,channels,bits,selected_channel;if(!api_baby_monitor_stream_authorize(api,&q,&r,&card,&device,&channels,&bits,&selected_channel)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_pcm_stream(c->fd,selected_channel)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Microphone stream could not start\"}}",sizeof("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Microphone stream could not start\"}}")-1);goto done;}c->fd=-1;c->used=0;return;}
-if(!strcmp(q.path,"/api/v1/diagnostics/kernel.log")){if(!api_diagnostics_kernel_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_kernel_log_stream(c->fd, http_listener, https_listener, relay_listener, clients, max)<0){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log stream could not start\"}}";response(c->fd,503,"application/json",m,strlen(m));goto done;}c->fd=-1;c->used=0;return;}if(!strncmp(q.path,"/api/",5)){time_t now=time(0);
+if((!strcmp(q.path,"/api/v1/assistant/respond")&&!strcmp(q.method,"POST"))||(!strcmp(q.path,"/api/v1/assistant/history")&&(!strcmp(q.method,"GET")||!strcmp(q.method,"DELETE")))||(!strncmp(q.path,"/api/v1/assistant/history/",26)&&!strcmp(q.method,"GET"))||(!strcmp(q.path,"/api/v1/network/wifi/scan")&&!strcmp(q.method,"POST"))||(!strcmp(q.path,"/api/v1/assistant/history/clear")&&!strcmp(q.method,"POST"))){if(start_api_worker(c->fd,api,&q)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}",sizeof("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io_error\",\"message\":\"Assistant request could not start\"}}")-1);goto done;}client_clear(c);return;}
+if(!strcmp(q.path,"/api/v1/system/update/check")||!strcmp(q.path,"/api/v1/system/update/apply")){const char*action=!strcmp(q.path,"/api/v1/system/update/check")?"check":"install";if(!api_update_fetch_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update command could not start");goto done;}client_clear(c);return;}
+if(!strcmp(q.path,"/api/v1/system/update/channel")){char channel[16],action[32];if(!api_update_channel_authorize(api,&q,&r,channel,sizeof(channel))){response(c->fd,r.status,r.type,r.body,r.length);goto done;}snprintf(action,sizeof(action),"set-channel-%s",channel);if(start_update_fetch(c->fd,action)<0){update_error(c->fd,503,"io_error","The update channel could not be changed");goto done;}client_clear(c);return;}
+if(!strncmp(q.path,"/api/v1/baby-monitor/stream",27)){int card,device,channels,bits,selected_channel;if(!api_baby_monitor_stream_authorize(api,&q,&r,&card,&device,&channels,&bits,&selected_channel)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_pcm_stream(c->fd,selected_channel)<0){response(c->fd,503,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Microphone stream could not start\"}}",sizeof("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Microphone stream could not start\"}}")-1);goto done;}client_clear(c);return;}
+if(!strcmp(q.path,"/api/v1/diagnostics/kernel.log")){if(!api_diagnostics_kernel_authorize(api,&q,&r)){response(c->fd,r.status,r.type,r.body,r.length);goto done;}if(start_kernel_log_stream(c->fd, http_listener, https_listener, relay_listener, clients, max)<0){const char*m="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"io\",\"message\":\"Kernel log stream could not start\"}}";response(c->fd,503,"application/json",m,strlen(m));goto done;}client_clear(c);return;}if(!strncmp(q.path,"/api/",5)){time_t now=time(0);
 if(destructive_path(q.path)&&last_destructive&&now-last_destructive<3){const char*message="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"rate_limited\",\"message\":\"Wait before another device action\"}}";response(c->fd,429,"application/json",message,strlen(message));
 goto done;
 }if(destructive_path(q.path))last_destructive=now;
@@ -266,8 +272,7 @@ if(recovery_active&&(captive_probe_path(q.path)||host_is_foreign(q.host,portal)|
 else {const char*base=strrchr(q.path,'/');base=base?base+1:q.path;page_path=q.path;if(recovery_active&&!strcmp(clean,"/"))page_path="/setup.html";else if(!strcmp(q.path,"/login"))page_path="/login.html";else if(!strcmp(q.path,"/initial-setup"))page_path="/initial-setup.html";else if(!strcmp(q.path,"/")&&!api->setup_completed)page_path="/setup.html";else if(api_bootstrap_required(api)&&!strchr(base,'.'))page_path="/initial-setup.html";if(serve_file(c->fd,o,page_path)){if(strchr(base,'.')||serve_file(c->fd,o,"/index.html"))response(c->fd,404,"text/plain","Not found",9);}}}
 
 done:close(c->fd);
-c->fd=-1;
-c->used=0;
+client_clear(c);
 }
 /*
  * HTTPS is served by terminating TLS in a short-lived child that relays
@@ -384,7 +389,7 @@ fprintf(stderr,"HTTPS relay listener unavailable: %s\n",strerror(errno));if(rela
 }}
 if(o->run_user[0]){struct passwd*pw=getpwnam(o->run_user);if(!pw){fprintf(stderr,"Unknown privilege-drop user: %s\n",o->run_user);if(relay_ls>=0)close(relay_ls);if(tls_ls>=0)close(tls_ls);close(ls);return-1;}if(setgroups(0,0)||setgid(pw->pw_gid)||setuid(pw->pw_uid)){perror("privilege drop");if(relay_ls>=0)close(relay_ls);if(tls_ls>=0)close(tls_ls);close(ls);return-1;}fprintf(stderr,"Dropped privileges to %s\n",o->run_user);}
 fprintf(stderr,"LibreEcho listening on http://%s:%d (%s backend)\n",o->listen_host,o->port,le_backend_mode(api->backend));
-while(*running){p[0].fd=ls;
+while(*running){struct timespec now;unsigned long long now_ms;int ready;p[0].fd=ls;
 p[0].events=POLLIN;
 p[max+1].fd=tls_ls;
 p[max+1].events=POLLIN;
@@ -394,14 +399,20 @@ for(i=0;
 i<max;
 i++){p[i+1].fd=c[i].fd;
 p[i+1].events=POLLIN;
-}if(poll(p,(nfds_t)(max+3),500)<0&&errno!=EINTR)break;
+}ready=poll(p,(nfds_t)(max+3),500);if(ready<0&&errno!=EINTR)break;
+if(clock_gettime(CLOCK_MONOTONIC,&now)<0)break;
+now_ms=(unsigned long long)now.tv_sec*1000+(unsigned long long)now.tv_nsec/1000000;
+/* Only incomplete requests remain in these slots. Expire before accepting so
+   a full set of idle clients cannot prevent the next connection from working. */
+for(i=0;i<max;i++)if(c[i].fd>=0&&now_ms-c[i].started_ms>=LE_REQUEST_TIMEOUT_MS){close(c[i].fd);client_clear(&c[i]);p[i+1].revents=0;}
+if(ready<0)continue;
 if(p[0].revents&POLLIN){int fd=accept(ls,0,0);
 if(fd>=0&&close_on_exec(fd)<0){close(fd);fd=-1;}
 if(fd>=0){for(i=0;
 i<max&&c[i].fd>=0;
 i++){/* find free bounded slot */}if(i==max){response(fd,503,"text/plain","Server busy",11);
 close(fd);
-}else {c[i].fd=fd;c[i].secure_transport=0;}
+}else {client_clear(&c[i]);c[i].fd=fd;c[i].secure_transport=0;c[i].started_ms=now_ms;}
 }}if(tls_ls>=0&&(p[max+1].revents&POLLIN)){int tfd=accept(tls_ls,0,0);
 if(tfd>=0&&close_on_exec(tfd)<0){close(tfd);tfd=-1;}
 if(tfd>=0){if(spawn_tls_relay(tfd,o,relay_port,ls,tls_ls,relay_ls,c,max)<0)close(tfd);else close(tfd);}
@@ -409,13 +420,12 @@ if(tfd>=0){if(spawn_tls_relay(tfd,o,relay_port,ls,tls_ls,relay_ls,c,max)<0)close
 if(rfd>=0&&close_on_exec(rfd)<0){close(rfd);rfd=-1;}
 if(rfd>=0){for(i=0;i<max&&c[i].fd>=0;i++){}
 if(i==max){response(rfd,503,"text/plain","Server busy",11);close(rfd);}
-else {c[i].fd=rfd;c[i].secure_transport=1;}
+else {client_clear(&c[i]);c[i].fd=rfd;c[i].secure_transport=1;c[i].started_ms=now_ms;}
 }}for(i=0;
 i<max;
 i++)if(c[i].fd>=0&&(p[i+1].revents&(POLLIN|POLLHUP|POLLERR))){ssize_t n=recv(c[i].fd,c[i].buf+c[i].used,LE_REQ_MAX-c[i].used,0);
 if(n<=0){close(c[i].fd);
-c[i].fd=-1;
-c[i].secure_transport=0;
+client_clear(&c[i]);
 }else{c[i].used+=(size_t)n;
 c[i].buf[c[i].used]=0;
 process(&c[i],o,api,ls,tls_ls,relay_ls,c,max);
@@ -425,7 +435,7 @@ le_backend_tick(api->backend);
 le_authority_provenance_tick();
 }for(i=0;
 i<max;
-i++)if(c[i].fd>=0)close(c[i].fd);
+i++)if(c[i].fd>=0){close(c[i].fd);client_clear(&c[i]);}
 if(tls_ls>=0)close(tls_ls);
 if(relay_ls>=0)close(relay_ls);
 close(ls);

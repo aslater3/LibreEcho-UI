@@ -369,6 +369,8 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_mock_behaviour.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_bluetooth_scan_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_usb_role_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_limits.sh
+make build/test-http-client-state
+LIBREECHO_TEST_URL="$URL" ./build/test-http-client-state
 LIBREECHO_TEST_URL="$URL" sh tests/test_playback_transport_contract.sh
 sh tests/test_memory.sh "$pid"
 kill "$pid"
