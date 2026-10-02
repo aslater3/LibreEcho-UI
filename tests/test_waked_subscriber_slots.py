@@ -75,6 +75,8 @@ def call(path, cmd, timeout=3.0):
 class SubscriberSlots(unittest.TestCase):
     def setUp(self):
         if not os.access(WAKED, os.X_OK):
+            if os.environ.get('WAKED_REQUIRED') == '1':
+                self.fail('libreecho-waked not built: ' + WAKED)
             self.skipTest('libreecho-waked not built')
         self.dir = tempfile.mkdtemp(prefix='waked-slots-', dir=os.environ.get('TMPDIR'))
         self.mic = FakeMic(os.path.join(self.dir, 'mic.sock'))

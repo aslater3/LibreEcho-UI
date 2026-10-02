@@ -124,7 +124,8 @@ sh tests/test_startup_animation.sh
 make build/libreecho-watchdogd
 sh tests/test_watchdogd_recovery.sh
 sh tests/test_watchdog_voice_mode.sh
-python3 tests/test_waked_subscriber_slots.py
+make build/libreecho-waked
+WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
 sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
 make build/libreecho-timerd build/libreecho-watchdogd
