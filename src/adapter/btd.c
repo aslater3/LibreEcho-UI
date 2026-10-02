@@ -43,8 +43,12 @@
 #define CONFIGURE_HELPER "/sbin/wmt_configure"
 #define BT_ON_HELPER "/sbin/wmt_bt_on"
 #define FIRMWARE_DIR "/lib/firmware"
+#ifndef DEVICE_DB
 #define DEVICE_DB "/data/libreecho/config/bluetooth.devices"
+#endif
+#ifndef KEY_DB
 #define KEY_DB "/data/libreecho/config/bluetooth.keys"
+#endif
 #define MEDIA_BUS_PATH "/run/libreecho-audio/media.pcm"
 
 #define BTPROTO_HCI 1
@@ -724,13 +728,17 @@ static int save_devices(const struct bt_context *context)
         if (fprintf(file, "%s %u %d %d %s\n", address,
                     context->devices[i].type, context->devices[i].rssi_valid,
                     context->devices[i].rssi, context->devices[i].name) < 0) {
+            int error_number = errno;
             fclose(file);
             unlink(temporary);
+            errno = error_number;
             return -1;
         }
     }
     if (fclose(file) != 0 || rename(temporary, DEVICE_DB) != 0) {
+        int error_number = errno;
         unlink(temporary);
+        errno = error_number;
         return -1;
     }
     return 0;
@@ -806,12 +814,16 @@ static int save_keys(const struct bt_context *context)
         (context->ltk_count &&
          fwrite(context->ltks, sizeof(context->ltks[0]), context->ltk_count,
                 file) != context->ltk_count)) {
+        int error_number = errno;
         fclose(file);
         unlink(temporary);
+        errno = error_number;
         return -1;
     }
     if (fclose(file) != 0 || rename(temporary, KEY_DB) != 0) {
+        int error_number = errno;
         unlink(temporary);
+        errno = error_number;
         return -1;
     }
     return 0;
@@ -893,6 +905,36 @@ static void led_pattern(const char *name, unsigned int r, unsigned int g,
 static void pairing_clear(struct bt_context *context)
 {
     memset(&context->pairing, 0, sizeof(context->pairing));
+}
+
+static void save_pairing_bond(struct bt_context *context)
+{
+    int devices_result = save_devices(context);
+    int devices_error = errno;
+    int keys_result = save_keys(context);
+    int keys_error = errno;
+
+    /* The controller still holds the session bond even if persistence fails. */
+    if (devices_result != 0 || keys_result != 0) {
+        if (devices_result != 0)
+            le_log_warn("btd: paired for this session only: device database save failed: %s",
+                        strerror(devices_error ? devices_error : EIO));
+        if (keys_result != 0)
+            le_log_warn("btd: paired for this session only: key database save failed: %s",
+                        strerror(keys_error ? keys_error : EIO));
+        snprintf(context->last_error, sizeof(context->last_error),
+                 "Paired for this session only: %s database save failed: %s",
+                 devices_result != 0 && keys_result != 0 ? "device/key" :
+                 devices_result != 0 ? "device" : "key",
+                 strerror(devices_result != 0 ?
+                          (devices_error ? devices_error : EIO) :
+                          (keys_error ? keys_error : EIO)));
+        led_pattern("flash", 255, 0, 0, 100, 1);
+    } else {
+        context->last_error[0] = '\0';
+        led_pattern("flash", 0, 255, 0, 100, 3);
+    }
+    pairing_clear(context);
 }
 
 static void update_pairing(struct bt_context *context, const uint8_t *payload,
@@ -1263,10 +1305,7 @@ static void process_event(struct bt_context *context, uint16_t event,
                 context->link_key_count++;
             if (i < BT_MAX_KEYS)
                 memcpy(&context->link_keys[i].key, key, sizeof(*key));
-            (void)save_devices(context);
-            (void)save_keys(context);
-            led_pattern("flash", 0, 255, 0, 100, 3);
-            pairing_clear(context);
+            save_pairing_bond(context);
         }
         return;
     case MGMT_EV_NEW_LONG_TERM_KEY:
@@ -1286,10 +1325,7 @@ static void process_event(struct bt_context *context, uint16_t event,
                 context->ltk_count++;
             if (i < BT_MAX_KEYS)
                 memcpy(&context->ltks[i].key, key, sizeof(*key));
-            (void)save_devices(context);
-            (void)save_keys(context);
-            led_pattern("flash", 0, 255, 0, 100, 3);
-            pairing_clear(context);
+            save_pairing_bond(context);
         }
         return;
     default:
