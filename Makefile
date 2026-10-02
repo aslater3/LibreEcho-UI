@@ -537,6 +537,11 @@ $(BUILD)/test-auth-transport: tests/test_auth_transport.c $(WEB_TEST_OBJECTS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -Isrc $< $(WEB_TEST_OBJECTS) -lm -lpthread -o $@
 
+$(BUILD)/test-update-upload-cleanup: tests/test_update_upload_cleanup.c src/http_server.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc $< -o $@
+
 $(BUILD)/test-inherited-fds: tests/test_inherited_fds.c src/inherited_fds.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@

@@ -49,6 +49,8 @@ make build/test-auth-transport
 ./build/test-auth-transport
 make build/test-inherited-fds
 ./build/test-inherited-fds
+make build/test-update-upload-cleanup
+./build/test-update-upload-cleanup
 make build/test-http-worker-registry
 ./build/test-http-worker-registry
 python3 tests/test_http_worker_registry_contract.py
