@@ -57,6 +57,21 @@ async function page(overrides={},failWrite='',pipelineResult=null) {
   await ha.disable();
   assert(ha.writes.some(x=>x.path==='/live'&&x.body.enabled===false),'disable must disarm GPT-Live');
   assert(ha.writes.some(x=>x.path==='/voice-pipeline'&&x.body.mode==='local'),'disable must leave HA mode');
+  const warning='Network AI disabled where routing was known; some routes could not be determined';
+  const unavailableRoutes=await page({'/assistant':new Error('Unavailable'),'/voice-pipeline':new Error('Unavailable'),'/live':{enabled:true}});
+  await unavailableRoutes.disable();
+  assert.deepStrictEqual(unavailableRoutes.writes.map(x=>x.path),['/live','/privacy'],'unknown routes must not prevent known disarm or privacy save');
+  assert.equal(unavailableRoutes.writes[0].body.enabled,false);
+  assert.equal(unavailableRoutes.writes[1].body.local_only,true);
+  assert(unavailableRoutes.toasts.some(x=>x.error&&x.message===warning),'unknown routing must warn instead of failing');
+  for(const mode of ['local','custom']) {
+    const previousFailure=await page({'/voice-pipeline':{mode,restart:{state:'failed',error:'Previous transition failed'}},'/assistant':{provider:'openai-codex',enabled:true}},'',{restart:{state:'ready'}});
+    await previousFailure.disable();
+    assert(previousFailure.writes.some(x=>x.path==='/assistant'&&x.body.enabled===false),'previous failure must not block assistant disarm');
+    if(mode==='custom')assert(previousFailure.writes.some(x=>x.path==='/voice-pipeline'&&x.body.mode==='local'),'previous failure must not block a new pipeline transition');
+    assert(previousFailure.writes.some(x=>x.path==='/privacy'&&x.body.local_only===true),'previous restart failure must not block local-only save');
+    assert(previousFailure.toasts.some(x=>x.error&&x.message===warning),'previous restart failure must warn');
+  }
   const unavailable=await page({'/live':new Error('Unavailable')});await unavailable.disable();
   assert(!unavailable.toasts.some(x=>x.message==='Network AI services disabled'),'unknown routing must not report disabled');
   const failure=await page({'/live':{enabled:true}},'/live');await failure.disable();
