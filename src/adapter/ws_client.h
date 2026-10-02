@@ -53,6 +53,13 @@ struct le_ws {
     uint64_t frames_out;
     uint64_t bytes_in;
     uint64_t bytes_out;
+    /* Pending frame bytes survive receive deadlines, separately per stream.
+       Header progress selects the base/extended-length stage; payload progress
+       selects the body stage. All storage remains fixed and bounded. */
+    unsigned char read_header[10];
+    size_t read_header_used;
+    size_t read_payload_used;
+    unsigned char read_payload[LE_WS_MAX_PAYLOAD];
 };
 
 /*
