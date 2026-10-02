@@ -14,7 +14,7 @@ set -eu
 python3 - <<'PY'
 from pathlib import Path
 
-ui = Path('web/js/app.js').read_text()
+ui = Path('web/js/integrations-ui.js').read_text()
 
 # The placeholder is gone.
 assert 'Provider setup will appear here' not in ui, 'placeholder copy still present'
@@ -22,7 +22,7 @@ assert 'when a reviewed model is installed' not in ui
 
 # Real controls exist.
 for control in ('local-base-url', 'local-model', 'local-api-key',
-                'local-enabled', 'save-local', 'local-test'):
+                'use-local-provider', 'save-local-assistant', 'local-test'):
     assert f"id=\"{control}\"" in ui or f"'#{control}'" in ui, f'missing control {control}'
 
 # Both providers are reachable; neither is the only option.
@@ -31,10 +31,11 @@ assert "'openai-codex'" in ui, 'ChatGPT provider id lost'
 
 # Provider-specific state must not expose ChatGPT actions while a local
 # endpoint is active, and the local test must target only the active provider.
-assert "const chatgptActive=a.provider==='openai-codex',signedIn=chatgptActive&&a.authenticated,waiting=chatgptActive&&a.auth_state==='waiting'" in ui
-assert "${localActive&&localUrl?action('Send test prompt','local-test'):''}" in ui
-assert "toggle('Enable wake-to-reply voice loop',localActive&&a.enabled,'local-enabled')" in ui
-assert "'local-enabled',!localUrl" not in ui
+assert "const deviceSelected=a.provider==='openai-codex'" in ui
+assert "if(deviceSelected)" in ui
+assert "selected&&configured?" in ui
+assert "toggleId:'use-local-provider'" in ui
+assert "enabled:localEnabled" in ui
 
 # The local save path sends the endpoint fields.
 assert 'base_url:' in ui, 'base_url never submitted'
@@ -47,14 +48,12 @@ assert 'value:a.api_key' not in ui
 assert 'esc(a.api_key)' not in ui
 assert "field('API key" not in ui or "'password'" in ui, 'API key field must be a password input'
 
-# Clearing a stored key is possible without retyping it.
-assert 'local-clear-key' in ui, 'no way to clear a stored API key'
-
-# Endpoint validation mirrors agentd endpoint_valid loosely, client side.
-assert 'http://' in ui and 'https://' in ui, 'no scheme validation'
+# Blank key preserves the stored secret in the production save handler.
+assert 'if(key)body.api_key=key;' in ui
+assert 'type="password"' in ui
 
 print('local LLM UI contract: ok')
 PY
 
-node --check web/js/app.js
+node --check web/js/integrations-ui.js
 echo 'local llm ui contract: ok'

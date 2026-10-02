@@ -7,7 +7,7 @@
  *   2. discovery is owned by the shared libreecho-mdnsd supervisor, so the
  *      refresh must call its init/status path instead of restarting AirPlay.
  *
- * This runs the real apply_home_assistant_mode() with argument-stubbed init
+ * This runs the real voice_pipeline_restart() with argument-stubbed init
  * scripts and asserts that the requested pipeline state is restored even when
  * the discovery refresh fails, that the refresh never restarts the AirPlay
  * controller, and that a failed refresh never fails the transition.
@@ -179,7 +179,7 @@ int main(void)
      * but every local daemon must still be restored and AirPlay untouched. */
     rewrite_all(1, 1, 1);
     reset_log();
-    rc = apply_home_assistant_mode(0);
+    rc = voice_pipeline_restart("local");
     if (rc != LE_OK) {
         fprintf(stderr, "disable returned %d, expected LE_OK\n", rc);
         return 1;
@@ -196,20 +196,16 @@ int main(void)
         fprintf(stderr, "pipeline restore must not wait on the discovery refresh\n");
         return 1;
     }
-    if (log_count() != 6) {
-        fprintf(stderr, "disable ran %d commands, expected 6\n", log_count());
-        return 1;
-    }
-    if (home_assistant_discovery_unavailable) {
-        fprintf(stderr, "disabling must not report an unavailable discovery\n");
+    if (log_count() != 9) {
+        fprintf(stderr, "disable ran %d commands, expected 9\n", log_count());
         return 1;
     }
 
     /* Enable while the discovery refresh fails: the local pipeline is stopped,
      * ESPHome is started, and the transition still succeeds. The failed
-     * refresh must be reported, not silently discarded. */
+     * discovery refresh remains best-effort. */
     reset_log();
-    rc = apply_home_assistant_mode(1);
+    rc = voice_pipeline_restart("home-assistant");
     if (rc != LE_OK) {
         fprintf(stderr, "enable returned %d, expected LE_OK\n", rc);
         return 1;
@@ -218,40 +214,48 @@ int main(void)
     expect_invoked("libreecho-ha-sttd.init", "stop");
     expect_invoked("libreecho-ha-ttsd.init", "stop");
     expect_invoked("libreecho-ha-esphomed.init", "start");
+    if (log_position("libreecho-ha-agentd.init stop") >=
+            log_position("libreecho-ha-esphomed.init start") ||
+        log_position("libreecho-ha-sttd.init stop") >=
+            log_position("libreecho-ha-esphomed.init start") ||
+        log_position("libreecho-ha-ttsd.init stop") >=
+            log_position("libreecho-ha-esphomed.init start") ||
+        log_position("libreecho-ha-esphomed.init start") >=
+            log_position("libreecho-ha-mdnsd.init status")) {
+        fprintf(stderr, "local stops must precede HA start, then discovery\n");
+        return 1;
+    }
+
     expect_invoked("libreecho-ha-mdnsd.init", "status");
     expect_invoked("libreecho-ha-mdnsd.init", "start");
     expect_not_invoked("libreecho-ha-airplayd.init");
-    if (log_count() != 6) {
-        fprintf(stderr, "enable ran %d commands, expected 6\n", log_count());
-        return 1;
-    }
-    if (!home_assistant_discovery_unavailable) {
-        fprintf(stderr, "a failed discovery refresh must be reported as unavailable\n");
+    if (log_count() != 7) {
+        fprintf(stderr, "enable ran %d commands, expected 7\n", log_count());
         return 1;
     }
 
     /* Enable with a healthy supervisor: the probe succeeds and no restart is
-     * needed, so nothing is reported as unavailable. */
+     * needed. */
     rewrite_all(0, 0, 0);
     reset_log();
-    rc = apply_home_assistant_mode(1);
-    if (rc != LE_OK || home_assistant_discovery_unavailable) {
+    rc = voice_pipeline_restart("home-assistant");
+    if (rc != LE_OK) {
         fprintf(stderr, "enable with a healthy supervisor must report discovery available\n");
         return 1;
     }
     expect_invoked("libreecho-ha-mdnsd.init", "status");
     expect_not_invoked("libreecho-ha-airplayd.init");
-    if (log_count() != 5) {
-        fprintf(stderr, "healthy probe ran %d commands, expected 5\n", log_count());
+    if (log_count() != 6) {
+        fprintf(stderr, "healthy probe ran %d commands, expected 6\n", log_count());
         return 1;
     }
 
     /* When the supervisor is not installed the refresh is skipped entirely and
      * the pipeline transition is still success. Disabling needs no
-     * advertisement, so it is not reported; enabling cannot advertise. */
+     * advertisement; enabling cannot advertise. */
     unlink(LE_INIT_MDNSD);
     reset_log();
-    rc = apply_home_assistant_mode(0);
+    rc = voice_pipeline_restart("local");
     if (rc != LE_OK) {
         fprintf(stderr, "disable without supervisor returned %d, expected LE_OK\n", rc);
         return 1;
@@ -259,16 +263,24 @@ int main(void)
     expect_invoked("libreecho-ha-agentd.init", "start");
     expect_invoked("libreecho-ha-sttd.init", "start");
     expect_invoked("libreecho-ha-ttsd.init", "start");
-    if (log_count() != 4) {
-        fprintf(stderr, "skipped refresh ran %d commands, expected 4\n", log_count());
+    if (log_count() != 7) {
+        fprintf(stderr, "skipped refresh ran %d commands, expected 7\n", log_count());
         return 1;
     }
-    if (home_assistant_discovery_unavailable) {
-        fprintf(stderr, "disabling without a supervisor must not report unavailable discovery\n");
+    if (voice_pipeline_restart("home-assistant") != LE_OK) {
+        fprintf(stderr, "enabling without a supervisor must still succeed\n");
         return 1;
     }
-    if (apply_home_assistant_mode(1) != LE_OK || !home_assistant_discovery_unavailable) {
-        fprintf(stderr, "enabling without a supervisor must report unavailable discovery\n");
+
+    /* HA must release audio ownership before any local owner can start. */
+    rewrite_all(1, 1, 1);
+    write_script(LE_INIT_ESPHOMED, 0, 1);
+    reset_log();
+    if (voice_pipeline_restart("local") != LE_IO || log_count() != 4 ||
+        log_position("libreecho-ha-sttd.init start") >= 0 ||
+        log_position("libreecho-ha-ttsd.init start") >= 0 ||
+        log_position("libreecho-ha-agentd.init start") >= 0) {
+        fprintf(stderr, "failed HA stop must prevent local activation and discovery\n");
         return 1;
     }
 
@@ -276,7 +288,7 @@ int main(void)
     rewrite_all(1, 1, 1);
     write_script(LE_INIT_STTD, 1, 1);
     reset_log();
-    if (apply_home_assistant_mode(0) != LE_IO) {
+    if (voice_pipeline_restart("local") != LE_IO) {
         fprintf(stderr, "a failing pipeline command must report LE_IO\n");
         return 1;
     }

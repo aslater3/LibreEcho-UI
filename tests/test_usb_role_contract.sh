@@ -60,7 +60,15 @@ esac
 grep -q 'usb_role_write' src/api.c
 grep -q '/sys/class/usb_role' src/api.c
 ! grep -q 'musb-hdrc.*\/mode' src/api.c
-! grep -q 'usb_host' src/config_manager.c 2>/dev/null || true
+python3 - <<'PY'
+from pathlib import Path
+
+source = Path('src/api.c').read_text()
+start = source.index('static int configuration_json(')
+end = source.index('/* Where audiod plays samples from;', start)
+# Check both the base serializer and the extra persisted voice settings.
+assert 'usb_host' not in source[start:end], 'USB host role must never be persisted'
+PY
 # The storage endpoint answers whether or not a drive is present, and must
 # never claim a mount it does not have.
 curl -fsS "$URL/api/v1/storage/usb" | jq -e '.ok and (.data|has("present"))' >/dev/null
