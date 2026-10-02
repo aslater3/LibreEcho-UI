@@ -255,6 +255,63 @@ static int test_duplicate_delegation_runs_once(void)
     return 0;
 }
 
+static int test_delegation_delivery_failure(const char *scenario, int replay)
+{
+    struct harness h;
+    struct le_live_transport_config transport_config;
+    char metrics[512];
+    char status[1024];
+
+    harness_init(&h, scenario, 5000, 60000);
+    CHECK(feed_ms(&h, 300, 40) == 0);
+    CHECK(le_live_session_wake(&h.session, le_live_ring_end(&h.ring), h.now) == 0);
+    CHECK(pump_until(&h, 3000, replay ? pred_deduped : pred_delegated) == 0);
+    CHECK(h.session.state == LE_LIVE_IDLE);
+    CHECK(h.session.last_end == LE_LIVE_END_TRANSPORT_ERROR);
+    CHECK(h.session.sessions_failed == 1);
+    CHECK(h.session.delegation_failures == 0);
+    CHECK(h.session.delegation_delivery_failures == 1);
+    le_live_session_status_json(&h.session, status, sizeof(status));
+    CHECK(strstr(status, "\"delegation_delivery_failures\":1") != NULL);
+    CHECK(h.dispatches == 1);
+    CHECK(h.session.delegation_count == 1);
+    CHECK(h.session.delegation_deduped == (uint64_t)replay);
+    CHECK(h.cancels == 1);
+    CHECK(h.outputs == 0);
+    CHECK(strstr(h.session.last_error, "delegation result delivery failed") != NULL);
+    h.session.transport.ops->metrics(&h.session.transport, metrics, sizeof(metrics));
+    CHECK(strstr(metrics, "\"closes\":1") != NULL);
+    CHECK(h.session.delegation_cache[0].used);
+    CHECK(!strcmp(h.session.delegation_cache[0].result, "{\"ok\":true,\"seconds\":600}"));
+
+    /* Replace only the transport, replaying dg-0 in the same conversation.
+       A new wake is a new conversation and must not reuse this cache. */
+    memset(&transport_config, 0, sizeof(transport_config));
+    transport_config.mock_scenario = "session";
+    CHECK(h.session.transport.ops->start(&h.session.transport, &transport_config,
+                                        NULL, 0) == 0);
+    h.session.state = LE_LIVE_CONNECTING;
+    CHECK(pump_until(&h, 3000, pred_output) == 0);
+    CHECK(h.dispatches == 1);
+    CHECK(h.session.delegation_count == 1);
+    CHECK(h.session.delegation_delivery_failures == 1);
+    CHECK(h.session.delegation_deduped == (uint64_t)replay + 1U);
+    h.session.transport.ops->metrics(&h.session.transport, metrics, sizeof(metrics));
+    CHECK(strstr(metrics, "\"delegation_completions\":1") != NULL);
+    le_live_session_close(&h.session, LE_LIVE_END_STOPPED, h.now);
+    return 0;
+}
+
+static int test_fresh_delegation_delivery_failure(void)
+{
+    return test_delegation_delivery_failure("completion_error", 0);
+}
+
+static int test_replayed_delegation_delivery_failure(void)
+{
+    return test_delegation_delivery_failure("completion_replay_error", 1);
+}
+
 static int test_delegation_ids_are_scoped_to_one_session(void)
 {
     struct harness h;
@@ -525,6 +582,7 @@ static int test_status_and_transcript_are_bounded(void)
     CHECK(strstr(status, "\"state\":\"idle\"") != NULL);
     CHECK(strstr(status, "bad \\\"quote\\\"\\nline") != NULL);
     CHECK(strstr(status, "\"sessions_started\":1") != NULL);
+    CHECK(strstr(status, "\"delegation_delivery_failures\":0") != NULL);
     /* Status must never carry speech content or credentials. */
     CHECK(strstr(status, "kitchen") == NULL);
     CHECK(strstr(status, "Bearer") == NULL);
@@ -546,6 +604,8 @@ int main(void)
     } tests[] = {
         {"open/listen/speak/timeout", test_open_listen_speak_timeout},
         {"duplicate delegation", test_duplicate_delegation_runs_once},
+        {"fresh delegation delivery failure", test_fresh_delegation_delivery_failure},
+        {"replayed delegation delivery failure", test_replayed_delegation_delivery_failure},
         {"delegation ids per session", test_delegation_ids_are_scoped_to_one_session},
         {"missing transport", test_missing_transport_fails_closed},
         {"empty preroll", test_empty_preroll_refuses_wake},

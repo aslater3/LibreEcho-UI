@@ -672,7 +672,13 @@ the first PCM submitted to the announcement bus; the current target is 3000 ms.
 
 Returns the runtime status of `libreecho-lived`, including whether GPT-Live is
 armed, the WebSocket transport metrics, current session state, and bounded audio
-counters. The mode is runtime state and is not persisted across daemon restarts.
+counters. The nested `session.delegation_failures` counts local tool dispatch
+failures; `session.delegation_delivery_failures` separately counts failed result
+deliveries (saturating at UINT64_MAX). A delivery failure closes the transport
+with `last_end: "transport_error"`, rather than reporting `speaking`. Cached
+results survive transport close for same-conversation replay, but a new wake
+starts a new delegation-id scope. The mode is runtime state and is not persisted
+across daemon restarts.
 If the daemon is not installed or running, the endpoint returns HTTP 503.
 
 #### PUT /api/v1/live

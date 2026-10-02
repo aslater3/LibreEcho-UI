@@ -281,6 +281,25 @@ static void delegation_store(struct le_live_session *session, const char *id,
         (session->delegation_next + 1) % LE_LIVE_DELEGATION_CACHE;
 }
 
+/* A failed send may have written only part of a WebSocket frame. Never keep
+   that stream in service, and never confuse delivery with local dispatch. */
+static int complete_delegation(struct le_live_session *session, const char *id,
+                               const char *result, uint64_t now_ms)
+{
+    if (session->transport.ops->complete_delegation &&
+        session->transport.ops->complete_delegation(&session->transport,
+                                                    id, result) == 0)
+        return 0;
+    if (session->delegation_delivery_failures < UINT64_MAX)
+        ++session->delegation_delivery_failures;
+    copy_text(session->last_error, sizeof(session->last_error),
+              "delegation result delivery failed");
+    fprintf(stderr, "lived: delegation result delivery failed (failures=%llu)\n",
+            (unsigned long long)session->delegation_delivery_failures);
+    le_live_session_close(session, LE_LIVE_END_TRANSPORT_ERROR, now_ms);
+    return -1;
+}
+
 static void handle_delegation(struct le_live_session *session,
                               const struct le_live_event *event,
                               uint64_t now_ms)
@@ -297,9 +316,8 @@ static void handle_delegation(struct le_live_session *session,
     replay = delegation_lookup(session, event->delegation_id);
     if (replay) {
         ++session->delegation_deduped;
-        if (session->transport.ops->complete_delegation)
-            (void)session->transport.ops->complete_delegation(
-                &session->transport, replay->id, replay->result);
+        if (complete_delegation(session, replay->id, replay->result, now_ms) < 0)
+            return;
         return;
     }
     ++session->delegation_count;
@@ -316,9 +334,8 @@ static void handle_delegation(struct le_live_session *session,
             copy_text(result, sizeof(result), "unsupported");
     }
     delegation_store(session, event->delegation_id, event->tool, ok, result);
-    if (session->transport.ops->complete_delegation)
-        (void)session->transport.ops->complete_delegation(
-            &session->transport, event->delegation_id, result);
+    if (complete_delegation(session, event->delegation_id, result, now_ms) < 0)
+        return;
     if (strstr(result, "\"end_session\":true")) {
         le_live_session_close(session, LE_LIVE_END_STOPPED, now_ms);
         return;
@@ -504,6 +521,9 @@ int le_live_session_wake(struct le_live_session *session,
         return -1;
     }
 
+    /* A new wake starts a new conversation, with a fresh delegation id scope. */
+    memset(session->delegation_cache, 0, sizeof(session->delegation_cache));
+    session->delegation_next = 0;
     session->transport.ops = session->config.transport_ops;
     memset(&transport_config, 0, sizeof(transport_config));
     transport_config.model = session->config.model;
@@ -690,8 +710,7 @@ void le_live_session_close(struct le_live_session *session,
         ++session->sessions_failed;
     session->next_send_sample = 0;
     session->barge_in_run = 0;
-    memset(session->delegation_cache, 0, sizeof(session->delegation_cache));
-    session->delegation_next = 0;
+    /* Keep answers available for a same-conversation transport replay. */
     (void)now_ms;
     set_state(session, LE_LIVE_IDLE);
 }
@@ -722,6 +741,7 @@ void le_live_session_status_json(const struct le_live_session *session,
         "\"sessions_failed\":%llu,\"last_end\":\"%s\","
         "\"audio_input_ms\":%llu,\"audio_output_ms\":%llu,"
         "\"delegations\":%llu,\"delegation_failures\":%llu,"
+        "\"delegation_delivery_failures\":%llu,"
         "\"delegation_deduped\":%llu,\"barge_ins\":%llu,"
         "\"connection_ms\":%llu,\"first_audio_ms\":%llu,"
         "\"transcript_turns\":%u,\"conversation_timeout_ms\":%u,"
@@ -740,6 +760,7 @@ void le_live_session_status_json(const struct le_live_session *session,
         (unsigned long long)session->audio_output_ms,
         (unsigned long long)session->delegation_count,
         (unsigned long long)session->delegation_failures,
+        (unsigned long long)session->delegation_delivery_failures,
         (unsigned long long)session->delegation_deduped,
         (unsigned long long)session->barge_ins,
         (unsigned long long)session->last_connection_ms,
