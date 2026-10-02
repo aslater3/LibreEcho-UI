@@ -1737,7 +1737,7 @@ static int scan(struct le_backend *b, struct le_wifi_scan *o)
             if (o->networks[o->count].signal > 100) o->networks[o->count].signal = 100;
             ++o->count;
         }
-        p++;
+        p += strlen(object);
     }
     return LE_OK;
 }
