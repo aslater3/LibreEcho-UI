@@ -58,6 +58,10 @@ extern int setgroups(int,const gid_t*);
 #define LE_MAX_UPDATE_WORKERS 4
 #define LE_MAX_CONFIG_WORKERS 1
 #define LE_TLS_IDLE_TIMEOUT_MS 60000
+/* Parent writes must yield even to trickle readers: cap each send and the
+   entire response (including all static-file chunks), without changing workers. */
+#define LE_SEND_TIMEOUT_MS 250
+#define LE_RESPONSE_TIMEOUT_MS 1000
 enum child_worker_kind{CHILD_WORKER_ASSISTANT,CHILD_WORKER_TLS_RELAY,CHILD_WORKER_KERNEL_LOG,CHILD_WORKER_PCM_STREAM,CHILD_WORKER_UPDATE,CHILD_WORKER_CONFIG,CHILD_WORKER_KIND_COUNT};
 #define LE_MAX_CHILD_WORKERS (LE_MAX_ASSISTANT_WORKERS+LE_MAX_TLS_RELAYS+LE_MAX_KERNEL_LOG_WORKERS+LE_MAX_PCM_STREAM_WORKERS+LE_MAX_UPDATE_WORKERS+LE_MAX_CONFIG_WORKERS)
 struct client{int fd;
@@ -106,17 +110,28 @@ if(!strcmp(e,".svg"))return"image/svg+xml";
 if(!strcmp(e,".png"))return"image/png";
 return"application/octet-stream";
 }
-static void send_all(int fd,const void*b,size_t n){const char*p=b;
-while(n){ssize_t w=send(fd,p,n,0);
-if(w<=0)return;
-p+=w;
-n-=(size_t)w;
-}}
-static void response(int fd,int code,const char*type,const void*body,size_t n){char h[1024];
+static long long send_now_ms(void){struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t)<0)return-1;return (long long)t.tv_sec*1000+t.tv_nsec/1000000;}
+static int send_all(int fd,const void*b,size_t n,long long deadline){const char*p=b;int flags=fcntl(fd,F_GETFL),result=-1;long long now=send_now_ms(),write_deadline=now+LE_SEND_TIMEOUT_MS;
+if(flags<0||now<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0)return-1;
+while(n){ssize_t w;struct pollfd ready={fd,POLLOUT,0};long long left;int rc;
+now=send_now_ms();if(now<0||now>=deadline||now>=write_deadline)break;
+w=send(fd,p,n,0);
+if(w>0){p+=w;n-=(size_t)w;write_deadline=now+LE_SEND_TIMEOUT_MS;continue;}
+if(w<0&&errno==EINTR)continue;
+if(w==0||(errno!=EAGAIN&&errno!=EWOULDBLOCK))break;
+left=(deadline<write_deadline?deadline:write_deadline)-now;
+rc=poll(&ready,1,(int)left);
+if(rc<0&&errno==EINTR)continue;
+if(rc<=0||(ready.revents&(POLLHUP|POLLERR|POLLNVAL)))break;
+}if(!n)result=0;
+if(fcntl(fd,F_SETFL,flags)<0)return-1;
+return result;
+}
+static void response(int fd,int code,const char*type,const void*body,size_t n){char h[1024];long long deadline=send_now_ms();if(deadline<0)return;deadline+=LE_RESPONSE_TIMEOUT_MS;
 const char*reason=code==200?"OK":code==400?"Bad Request":code==403?"Forbidden":code==404?"Not Found":code==405?"Method Not Allowed":code==409?"Conflict":code==413?"Payload Too Large":code==429?"Too Many Requests":code==501?"Not Implemented":code==503?"Service Unavailable":"Error";
 int z=snprintf(h,sizeof(h),"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; media-src 'self' data: blob:; connect-src 'self' https://geocoding-api.open-meteo.com https://api.postcodes.io; script-src 'self'\r\n\r\n",code,reason,type,(unsigned long)n);
-send_all(fd,h,(size_t)z);
-if(n)send_all(fd,body,n);
+if(send_all(fd,h,(size_t)z,deadline)<0)return;
+if(n)(void)send_all(fd,body,n,deadline);
 }
 /* Captive-portal detection for the recovery AP.  While networkd reports the
  * recovery AP serving, a client that joins has its DNS pointed at the device
@@ -126,7 +141,7 @@ if(n)send_all(fd,body,n);
  * never weakens authentication and only ever fires in recovery mode. */
 static int captive_probe_path(const char*target){static const char*paths[]={"/generate_204","/gen_204","/hotspot-detect.html","/library/test/success.html","/connecttest.txt","/ncsi.txt","/canonical.html","/success.txt",0};size_t n=strcspn(target,"?#");int i;for(i=0;paths[i];++i)if(strlen(paths[i])==n&&!strncmp(target,paths[i],n))return 1;return 0;}
 static int host_is_foreign(const char*host,const char*portal){size_t n;if(!host||!host[0]||!portal[0])return 0;n=strcspn(host,":");return strlen(portal)!=n||strncasecmp(host,portal,n);}
-static void portal_redirect(int fd,const char*portal){char head[512],body[192];int bl=snprintf(body,sizeof(body),"LibreEcho recovery: continue at http://%s/?recovery=1\n",portal);int z;if(bl<0)bl=0;z=snprintf(head,sizeof(head),"HTTP/1.1 302 Found\r\nLocation: http://%s/?recovery=1\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n",portal,bl);send_all(fd,head,(size_t)z);if(bl)send_all(fd,body,(size_t)bl);}
+static void portal_redirect(int fd,const char*portal){char head[512],body[192];long long deadline=send_now_ms();if(deadline<0)return;deadline+=LE_RESPONSE_TIMEOUT_MS;int bl=snprintf(body,sizeof(body),"LibreEcho recovery: continue at http://%s/?recovery=1\n",portal);int z;if(bl<0)bl=0;z=snprintf(head,sizeof(head),"HTTP/1.1 302 Found\r\nLocation: http://%s/?recovery=1\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n",portal,bl);if(send_all(fd,head,(size_t)z,deadline)<0)return;if(bl)(void)send_all(fd,body,(size_t)bl,deadline);}
 static int stream_send_all(int fd,const void*body,size_t n){const char*p=body;while(n){ssize_t w=send(fd,p,n,0);if(w<=0)return-1;p+=w;n-=w;}return 0;}
 static int stream_shared_audio(int fd){struct sockaddr_un address;int wake=-1;char request[128],reply[1024],header[512];size_t used=0;ssize_t n;int frame_result;struct le_voice_stream_frame frame;wake=socket(AF_UNIX,SOCK_STREAM,0);if(wake<0)return-2;memset(&address,0,sizeof(address));address.sun_family=AF_UNIX;strncpy(address.sun_path,LE_ADAPTER_WAKEWORD_SOCK,sizeof(address.sun_path)-1);if(connect(wake,(struct sockaddr*)&address,sizeof(address))<0)goto unavailable;n=snprintf(request,sizeof(request),"{\"v\":1,\"id\":1,\"cmd\":\"stream_audio\",\"args\":{}}\n");if(n<0||stream_send_all(wake,request,(size_t)n)<0)goto unavailable;while(used+1<sizeof(reply)){n=read(wake,reply+used,1);if(n<=0)goto unavailable;if(reply[used++]=='\n')break;}reply[used]='\0';if(!strstr(reply,"\"ok\":true"))goto unavailable;signal(SIGPIPE,SIG_IGN);n=snprintf(header,sizeof(header),"HTTP/1.1 200 OK\r\nContent-Type: audio/L16; rate=16000; channels=1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nAccept-Ranges: none\r\nX-LibreEcho-Audio: pcm_s16_le;rate=16000;channels=1;selected-channel=shared-wake;calibration=applied\r\nX-Content-Type-Options: nosniff\r\n\r\n");if(n<0||stream_send_all(fd,header,(size_t)n)<0){close(wake);return-1;}while((frame_result=le_voice_stream_read_frame(wake,&frame))>0){size_t bytes=(size_t)frame.sample_count*sizeof(frame.samples[0]);int z=snprintf(header,sizeof(header),"%zx\r\n",bytes);if(z<0||stream_send_all(fd,header,(size_t)z)<0||stream_send_all(fd,frame.samples,bytes)<0||stream_send_all(fd,"\r\n",2)<0){close(wake);return-1;}}if(frame_result==0)(void)stream_send_all(fd,"0\r\n\r\n",5);close(wake);return frame_result<0?-1:0;unavailable:close(wake);return-2;}
 static int stream_microphone(int fd,int selected_channel){struct sockaddr_un address;int microphone=-1;char request[160],reply[LE_ADAPTER_MSG_MAX],buffer[8192],header[512];size_t used=0;ssize_t n;int shared_result=stream_shared_audio(fd);if(shared_result!=-2){close(fd);return 0;}microphone=socket(AF_UNIX,SOCK_STREAM,0);if(microphone<0)goto unavailable;memset(&address,0,sizeof(address));address.sun_family=AF_UNIX;strncpy(address.sun_path,LE_ADAPTER_MIC_SOCK,sizeof(address.sun_path)-1);if(connect(microphone,(struct sockaddr*)&address,sizeof(address))<0)goto unavailable;n=snprintf(request,sizeof(request),"{\"v\":1,\"id\":1,\"cmd\":\"stream_raw\",\"args\":{\"channel\":%d}}\n",selected_channel);if(n<0||stream_send_all(microphone,request,(size_t)n)<0)goto unavailable;while(used+1<sizeof(reply)){n=read(microphone,reply+used,1);if(n<=0)goto unavailable;if(reply[used++]=='\n')break;}reply[used]='\0';if(!strstr(reply,"\"ok\":true"))goto unavailable;signal(SIGPIPE,SIG_IGN);n=snprintf(header,sizeof(header),"HTTP/1.1 200 OK\r\nContent-Type: audio/L24; rate=16000; channels=9\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nAccept-Ranges: none\r\nX-LibreEcho-Audio: pcm_s24_3le;rate=16000;channels=9;container-bits=24;valid-bits=16;selected-channel=%d;calibration=none\r\nX-Content-Type-Options: nosniff\r\n\r\n",selected_channel);if(n<0||stream_send_all(fd,header,(size_t)n)<0)goto stop;while((n=read(microphone,buffer,sizeof(buffer)))>0){int z=snprintf(header,sizeof(header),"%zx\r\n",(size_t)n);if(z<0||stream_send_all(fd,header,(size_t)z)<0||stream_send_all(fd,buffer,(size_t)n)<0||stream_send_all(fd,"\r\n",2)<0)goto stop;}if(n==0)(void)stream_send_all(fd,"0\r\n\r\n",5);goto stop;unavailable:{const char*message="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"microphone_unavailable\",\"message\":\"Microphone service could not start the stream\"}}";response(fd,503,"application/json",message,strlen(message));}stop:if(microphone>=0)close(microphone);close(fd);return 0;}
@@ -172,6 +187,7 @@ int f;
 struct stat st;
 char b[8192];
 ssize_t n;
+long long deadline;
 if(strstr(url,"..")||strchr(url,'\\'))return-1;
 q=strchr(url,'?');
 url_len=q?(size_t)(q-url):strlen(url);
@@ -183,10 +199,10 @@ if(snprintf(path,sizeof(path),"%s%s",o->web_root,clean)>=(int)sizeof(path))retur
 f=open(path,O_RDONLY);
 if(f<0||fstat(f,&st)||!S_ISREG(st.st_mode)){if(f>=0)close(f);
 return-1;
-} {char h[1024];
+}deadline=send_now_ms();if(deadline<0){close(f);return 0;}deadline+=LE_RESPONSE_TIMEOUT_MS; {char h[1024];
 int z=snprintf(h,sizeof(h),"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self'; media-src 'self' data: blob:; connect-src 'self' https://geocoding-api.open-meteo.com https://api.postcodes.io; script-src 'self'\r\n\r\n",mime(path),(unsigned long)st.st_size);
-send_all(fd,h,(size_t)z);
-}while((n=read(f,b,sizeof(b)))>0)send_all(fd,b,(size_t)n);
+if(send_all(fd,h,(size_t)z,deadline)<0){close(f);return 0;}
+}while((n=read(f,b,sizeof(b)))>0)if(send_all(fd,b,(size_t)n,deadline)<0)break;
 close(f);
 return 0;
 }

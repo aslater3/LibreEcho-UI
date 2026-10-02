@@ -375,6 +375,8 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_usb_role_contract.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_limits.sh
 make build/test-http-client-state
 LIBREECHO_TEST_URL="$URL" ./build/test-http-client-state
+# Uses its own padded static fixture and isolated mock server.
+sh tests/test_http_send_deadline.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_playback_transport_contract.sh
 sh tests/test_memory.sh "$pid"
 kill "$pid"
