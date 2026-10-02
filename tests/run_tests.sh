@@ -158,6 +158,7 @@ node tests/test_kernel_log_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
+node tests/test_frontend_state_ui.js
 node tests/test_update_identity_ui.js
 node tests/test_baby_monitor_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
