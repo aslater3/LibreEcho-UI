@@ -42,7 +42,8 @@ case "\$1" in
   start) echo start >> "$dir/$name.starts"
          python3 "$dir/fake.py" "$dir/$name.sock" "$dir/$name.pid" &
          sleep 1 ;;
-  stop)  [ -f "$dir/$name.pid" ] && kill "\$(cat "$dir/$name.pid")" 2>/dev/null || true
+  stop)  [ -f "$dir/flip-on-stop" ] && cp "$dir/flip-on-stop" "$dir/web-config.json"
+         [ -f "$dir/$name.pid" ] && kill "\$(cat "$dir/$name.pid")" 2>/dev/null || true
          rm -f "$dir/$name.sock" "$dir/$name.pid" ;;
 esac
 exit 0
@@ -123,4 +124,27 @@ if [ "$(starts local)" -le "$local_before" ]; then
     cat "$dir/wd4.log"; exit 1
 fi
 echo "  unreadable config keeps supervising running services: ok"
+
+# --- a mode switch that lands during a restart is honoured -----------------
+# The watchdog reads the mode once per pass. If the API persists HA after that
+# read while a local restart is already due, starting the local service would
+# leave both exclusive voice owners running. The fake local init's "stop"
+# persists HA mode itself, so the switch lands exactly inside the restart.
+printf '%s\n' "$local_cfg" > "$config"
+[ -S "$dir/local.sock" ] || sh "$dir/local.init" start
+[ -f "$dir/ha.pid" ] && sh "$dir/ha.init" stop
+printf '%s\n' "$ha_cfg" > "$dir/flip-on-stop"
+local_before=$(starts local)
+(
+    sleep 3
+    kill "$(cat "$dir/local.pid")"; rm -f "$dir/local.sock"
+) &
+"$WD" --passes 12 --interval 1 --config "$config" $services >"$dir/wd5.log" 2>&1
+wait
+rm -f "$dir/flip-on-stop"
+if [ "$(starts local)" != "$local_before" ] || [ -S "$dir/local.sock" ]; then
+    echo "FAIL: watchdog started a local voice service after HA took ownership mid-restart"
+    cat "$dir/wd5.log"; exit 1
+fi
+echo "  mode switch during a restart is honoured: ok"
 echo "watchdog voice-mode ownership: PASS"

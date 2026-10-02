@@ -281,9 +281,10 @@ static int group_healthy(const struct supervised *services, size_t count,
 }
 
 static void restart_group(struct supervised *services, size_t count,
-                          size_t leader)
+                          size_t leader, const char *config_path)
 {
     size_t i;
+    enum voice_mode mode;
 
     /* A stop request arrived before this group was reached: the caller is
        quiescing these services, and starting one now would undo that. */
@@ -302,9 +303,19 @@ static void restart_group(struct supervised *services, size_t count,
     if (!running)
         return;
 
+    /* So can a voice-mode switch: the pass read the mode before deciding,
+       and starting a member the new owner does not want would leave both
+       exclusive voice owners running. */
+    mode = read_voice_mode(config_path);
+
     for (i = 0; i < count; ++i) {
         if (!in_group(services, i, leader))
             continue;
+        if (!wanted(services[i].desc, mode)) {
+            le_log_info("watchdog: not restarting %s; its voice mode is no "
+                        "longer selected", services[i].desc->name);
+            continue;
+        }
         le_log_warn("watchdog: restarting %s", services[i].desc->name);
         if (run_init(services[i].desc->init_script, "start") != 0)
             le_log_error("watchdog: restarting %s failed",
@@ -565,7 +576,7 @@ int main(int argc, char **argv)
                 continue;
             action = le_watchdog_step(&s->state, healthy, now);
             if (action == LE_WATCHDOG_RESTART) {
-                restart_group(services, count, i);
+                restart_group(services, count, i, config_path);
                 le_watchdog_restarted(&s->state, now);
             } else if (action == LE_WATCHDOG_GIVE_UP && !s->reported_give_up) {
                 /* Say it once, then stay quiet rather than logging forever. */
