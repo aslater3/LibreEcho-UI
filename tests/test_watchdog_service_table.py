@@ -32,6 +32,11 @@ NEVER_ALONE = {"waked": "capture", "micd": "capture"}
 # a hung service and restarted mid-turn.
 PIDFILE_WHILE_BUSY = {"agentd", "ttsd", "sttd"}
 
+# Voice ownership. The API stops one set and starts the other on a mode
+# switch; an owner missing here makes the watchdog undo that switch.
+VOICE_OWNER = {"agentd": "OWNER_LOCAL", "ttsd": "OWNER_LOCAL",
+               "sttd": "OWNER_LOCAL", "esphomed": "OWNER_HA"}
+
 # Daemons with no init script of their own, or deliberately not supervised.
 NOT_SUPERVISED = {
     # The web UI is started by its own unit and is not an adapter daemon.
@@ -43,7 +48,7 @@ NOT_SUPERVISED = {
 ENTRY = re.compile(
     r'\{"(?P<name>\w+)",\s*(?P<kind>PROBE_SOCKET|PROBE_PIDFILE),\s*'
     r'"(?P<path>[^"]+)",\s*(?:\n\s*)?(?P<init>"[^"]+"|NULL),\s*'
-    r'(?P<restart>[01]),\s*(?P<group>"[^"]+"|NULL)',
+    r'(?P<restart>[01]),\s*(?P<group>"[^"]+"|NULL),\s*(?P<owner>OWNER_\w+)',
 )
 
 
@@ -71,6 +76,11 @@ def main():
         return 1
 
     maximum = int(re.search(r"#define MAX_SERVICES (\d+)", text).group(1))
+    for e in entries:
+        want = VOICE_OWNER.get(e["name"], "OWNER_ANY")
+        if e["owner"] != want:
+            failures.append("%s must be %s, not %s" % (e["name"], want, e["owner"]))
+
     if len(entries) > maximum or len({e["name"] for e in entries}) != len(entries):
         failures.append("service table is oversized or contains duplicate names")
 
