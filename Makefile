@@ -533,6 +533,10 @@ $(BUILD)/test-auth-sessions: tests/test_auth_sessions.c src/auth.c
 
 WEB_TEST_OBJECTS = $(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
 
+$(BUILD)/test-http-client-state: tests/test_http_client_state.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror $< -o $@
+
 $(BUILD)/test-auth-transport: tests/test_auth_transport.c $(WEB_TEST_OBJECTS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -Isrc $< $(WEB_TEST_OBJECTS) -lm -lpthread -o $@
@@ -1143,7 +1147,7 @@ clean:
 		$(BUILD)/test-light-sensor \
 		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \
 		$(BUILD)/test-radiod-mp3-frames \
-		$(BUILD)/test-http-worker-registry \
+		$(BUILD)/test-http-worker-registry $(BUILD)/test-http-client-state \
 		$(BUILD)/test-wake-decode \
 		$(BUILD)/test-wake-led $(BUILD)/test-spoken-time \
 		$(BUILD)/test-voice-stream \
