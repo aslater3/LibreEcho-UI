@@ -319,6 +319,47 @@ static int parse_sensitivity(const char *args, int *sensitivity)
     return 0;
 }
 
+/*
+ * Free the slot of any subscriber that has hung up. A slot was otherwise
+ * freed only when a send to it failed, and event sends happen only on a wake
+ * word: a client that subscribed and went away while the room was quiet held
+ * its slot indefinitely, and a few of those made every later subscriber --
+ * including the satellite's wake path -- fail with "subscriber limit
+ * reached". Subscribers never send after subscribing, so an orderly EOF or a
+ * socket error on a non-blocking peek means the peer is gone.
+ */
+static int subscriber_gone(int fd)
+{
+    char byte;
+    ssize_t count = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+
+    if (count == 0)
+        return 1;
+    if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+        errno != EINTR)
+        return 1;
+    return 0;
+}
+
+static void reap_subscribers(struct waked_ipc *ipc)
+{
+    size_t i;
+
+    for (i = 0; i < MAX_WAKE_SUBSCRIBERS; ++i) {
+        if (ipc->subscribers[i] >= 0 && subscriber_gone(ipc->subscribers[i])) {
+            close(ipc->subscribers[i]);
+            ipc->subscribers[i] = -1;
+        }
+    }
+    for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i) {
+        if (ipc->audio_subscribers[i] >= 0 &&
+            subscriber_gone(ipc->audio_subscribers[i])) {
+            close(ipc->audio_subscribers[i]);
+            ipc->audio_subscribers[i] = -1;
+        }
+    }
+}
+
 static int add_subscriber(struct waked_ipc *ipc, int client_fd)
 {
     size_t i;
@@ -728,6 +769,7 @@ static int run_waked(const struct waked_config *config)
                         sizeof(event))) == (ssize_t)sizeof(event))
                 publish_wake_event(&ipc, &event);
         }
+        reap_subscribers(&ipc);
         if (descriptors[2].revents & POLLIN) {
             int client_fd = le_adapter_accept(ipc.listen_fd);
 
