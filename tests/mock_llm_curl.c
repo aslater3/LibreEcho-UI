@@ -8,6 +8,7 @@ int main(int argc, char **argv)
 {
     const char *config_path = NULL;
     const char *capture = getenv("LE_TEST_CURL_CAPTURE");
+    const char *append = getenv("LE_TEST_CURL_APPEND");
     const char *mode = getenv("LE_TEST_CURL_MODE");
     char buffer[16384];
     char body[16384];
@@ -19,6 +20,7 @@ int main(int argc, char **argv)
     int compatible_route;
     int poll_route;
     int token_route;
+    int forecast_route;
     int i;
 
     for (i = 1; i + 1 < argc; ++i)
@@ -41,6 +43,20 @@ int main(int argc, char **argv)
     buffer[config_used] = '\0';
     fclose(input);
     fclose(output);
+    /*
+     * The capture file holds only the newest request, so a test that needs to
+     * see an earlier one -- the weather lookup that a turn makes before the
+     * model call -- asks for an append log instead.
+     */
+    if (append) {
+        FILE *log = fopen(append, "a");
+
+        if (log) {
+            fputs(buffer, log);
+            fputs("\n---\n", log);
+            fclose(log);
+        }
+    }
     response_route =
         strstr(buffer, "/backend-api/codex/responses") != NULL;
     compatible_route =
@@ -48,6 +64,8 @@ int main(int argc, char **argv)
     poll_route =
         strstr(buffer, "/api/accounts/deviceauth/token") != NULL;
     token_route = strstr(buffer, "/oauth/token") != NULL;
+    forecast_route =
+        strstr(buffer, "api.open-meteo.com/v1/forecast") != NULL;
     while (body_used + 1 < sizeof(body)) {
         size_t count = fread(
             body + body_used, 1, sizeof(body) - body_used - 1, stdin);
@@ -73,6 +91,16 @@ int main(int argc, char **argv)
         fputs("{\"choices\":[{\"finish_reason\":\"stop\","
               "\"index\":0,\"message\":{\"role\":\"assistant\","
               "\"content\":\"Local ready\"}}]}\n", stdout);
+    } else if (!mode && forecast_route) {
+        /*
+         * Enough of an Open-Meteo reading for agentd to cache one: without it
+         * the lookup fails, the cache stays empty, and a test cannot tell a
+         * refetch from a cache hit.
+         */
+        fputs("{\"latitude\":53.75,\"longitude\":-2.7,"
+              "\"current\":{\"time\":\"2026-01-01T12:00\","
+              "\"interval\":900,\"temperature_2m\":12.5,"
+              "\"weather_code\":3,\"wind_speed_10m\":5.0}}\n", stdout);
     } else if (!mode && poll_route) {
         fputs("{\"authorization_code\":\"test-auth-code\","
               "\"code_verifier\":\"test-code-verifier\"}\n", stdout);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression contracts for the 0.13.10 setup and Wi-Fi UI fixes."""
+"""Regression contracts for the setup and Wi-Fi UI fixes."""
 from pathlib import Path
 import json
 
@@ -57,6 +57,32 @@ def test_scan_api_schema_documents_metadata_and_security_outcomes():
         assert field in schema_text
     assert "wpa3-transition" in API_DOC
     assert "wpa3-only" in API_DOC
+
+
+def test_recovery_and_setup_scan_share_the_scan_api():
+    """Both scan entry points drive the same Wi-Fi scan route.
+
+    The recovery landing's manual/automatic "Scan again" action must not invent
+    a separate path; it calls the one route the daemon serves (and which is now
+    AP-compatible while the recovery AP owns the radio).
+    """
+    assert "/network/wifi/scan" in SETUP_JS
+    assert "async function recoveryScan" in SETUP_JS
+    assert 'id="recovery-scan"' in SETUP_HTML
+    assert "setupScan.onclick=recoveryScan" in SETUP_JS
+    assert "recoveryShowNetwork" in SETUP_JS
+    assert "$('#scan-wifi').onclick=scan" in SETUP_JS
+
+
+def test_unknown_owner_local_firmware_requires_explicit_setup_acceptance():
+    assert "VENDOR_IMPORT_UNKNOWN_COMPATIBLE_SET" in SETUP_JS
+    assert "Unrecognised Wi-Fi firmware detected" in SETUP_JS
+    assert "Accept device firmware" in SETUP_JS
+    assert "Accepted — reboot required" in SETUP_JS
+    assert "only its hashes and sizes will be stored locally" in SETUP_JS
+    assert "The firmware bytes stay on the stock partition" in SETUP_JS
+    assert "fw.error!=='VENDOR_IMPORT_UNKNOWN_COMPATIBLE_SET'" in SETUP_JS
+    assert "force-unverified-owner-local-import" in SETUP_JS
 
 
 if __name__ == "__main__":

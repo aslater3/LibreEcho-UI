@@ -34,6 +34,61 @@ The SBC code is used as a separately licensed component; inclusion in this
 repository does not make it MIT-licensed. Changes to the SBC component must
 preserve its upstream notices and LGPL boundary.
 
+## Vendored Helix fixed-point AAC decoder
+
+The directory [`third-party/helix-aac/`](third-party/helix-aac/) contains the
+RealNetworks Helix fixed-point HE-AAC decoder (2005), compiled into
+`libreecho-radiod` to decode the AAC-LC and HE-AAC v1 audio in radio streams.
+It retains the upstream RealNetworks copyright and license header in every
+applicable source file and is distributed under the **RealNetworks Public
+Source License v1.0 (RPSL-1.0)**. The applicable license text ships with the
+source as `third-party/helix-aac/LICENSE-RPSL.txt` (in-tree).
+
+Provenance, the pinned upstream commit, the build flags, and the SHA-256 of
+every vendored file are recorded in
+`third-party/helix-aac/README.libreecho.md`.
+The vendored `*.c`, `*.h` and `readme.txt` files are copied byte-for-byte from
+`earlephilhower/ESP8266Audio` commit
+`10d929ac01436dfe8856e0a06fd9ec35a848c6e2` (path `src/libhelix-aac/`) and are
+**unmodified**; the two shim headers under
+[`third-party/helix-aac/shim/`](third-party/helix-aac/shim/) are
+LibreEcho-authored (MIT).
+
+The RPSL obligations are honoured: upstream license headers stay intact, the
+license text is shipped with the source, no file is modified (so no
+modification marker applies), and binary distributions must carry a notice that
+the source is available. MIT is on the RPSL's compatible-source-license list,
+so the static link into the MIT `radiod` is permitted. The Helix decoder is not
+MIT-licensed; do not describe it as such. AAC patent licensing is a
+distribution-time matter and is noted as an open item in the README only.
+
+## Pinned Ogg Opus decode stack
+
+`libreecho-radiod` can decode Ogg Opus local files via
+`src/adapter/radio_opus.c`. Opus is decoded by a pinned, statically linked
+stack built **outside this repository** by the image build helper
+`tools/mt8163-arm32/ui/build_opus.sh` (in the separate LibreEcho platform
+repository), not vendored here:
+
+| Component | Version | License | Upstream |
+|---|---|---|---|
+| libogg | 1.3.5 | BSD-3-Clause | https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz |
+| libopus | 1.4 | BSD-3-Clause | https://downloads.xiph.org/releases/opus/opus-1.4.tar.gz |
+| libopusfile | 0.12 | BSD-3-Clause | https://github.com/xiph/opusfile/releases/tag/v0.12 |
+
+The build is static and HTTP/TLS-free by construction: libopusfile is compiled
+from its four local-file sources only, so `src/http.c` and its libcurl/OpenSSL
+dependencies are absent. The image build records the archive and license
+SHA-256 values and the exact source URLs in its `opus/SOURCE.lock` and emits
+`opus-source.json`/`opus-identity.json` beside the prefix. When this stack is
+linked into a binary image, ship the three upstream `COPYING` files (BSD-3
+text) with the image's notices; the source offer and redistribution
+obligations for the linked binary belong to that image release boundary.
+
+`src/adapter/radio_opus.c` is LibreEcho-authored (MIT). The Opus test fixtures
+in `tests/radiod_opus_fixture.h` are generated synthetic tones (no third-party
+audio) by `tests/gen_radiod_opus_fixture.py`.
+
 ## Build-time and runtime integrations
 
 The following are referenced by the UI/service layer or supplied by the image

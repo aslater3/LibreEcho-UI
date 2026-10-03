@@ -59,6 +59,15 @@ int le_wake_worker_submit(
 int le_wake_worker_set_threshold(
     struct le_wake_worker *worker, float accept_threshold);
 
+/* Reload on the existing inference thread using owned startup settings and
+ * the live threshold. Submit/threshold/reload/stop have one control owner.
+ * Success discards old queued/partial PCM and decoder history; failure keeps
+ * the current engine. A timed-out load cannot publish a late replacement. */
+int le_wake_worker_reload(struct le_wake_worker *worker);
+
+/* Safe live observation; ages are monotonic and -1 until inference advances. */
+int le_wake_worker_health(struct le_wake_worker *worker, int *inference_age_ms);
+
 void le_wake_worker_stop(
     struct le_wake_worker *worker,
     struct le_wake_worker_metrics *metrics);

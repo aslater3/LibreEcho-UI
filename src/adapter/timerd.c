@@ -48,8 +48,24 @@
 #define RING_HIGH_HZ 1320
 #define RING_CUE_MS 250
 
+/* HA owns remote expiry. This table is separate from the persisted local
+   schedule and cannot consume local timer/alarm slots or synthesize a due time. */
+#define REMOTE_TIMER_MAX 8
+#define REMOTE_TIMER_ID_MAX 64
+#define REMOTE_TIMER_NAME_MAX 49
+struct remote_timer {
+    enum le_timer_state state;
+    char external_id[REMOTE_TIMER_ID_MAX];
+    char name[REMOTE_TIMER_NAME_MAX];
+    unsigned int total_seconds;
+    unsigned int seconds_left;
+    int is_active;
+    long long ring_started_ms;
+};
+
 struct context {
     struct le_timer_set timers;
+    struct remote_timer remote_timers[REMOTE_TIMER_MAX];
     const char *socket_path;
     const char *state_path;
     const char *audio_sock;
@@ -531,11 +547,62 @@ static int state_load(struct context *ctx)
     return result;
 }
 
+static int remote_ringing_count(const struct context *ctx)
+{
+    size_t i;
+    int count = 0;
+    for (i = 0; i < REMOTE_TIMER_MAX; ++i)
+        count += ctx->remote_timers[i].state == LE_TIMER_STATE_RINGING;
+    return count;
+}
+
+static int ringing_count(const struct context *ctx)
+{
+    return le_timer_ringing_count(&ctx->timers) + remote_ringing_count(ctx);
+}
+
+static void remote_ring_expire(struct context *ctx, long long now_ms)
+{
+    size_t i;
+    for (i = 0; i < REMOTE_TIMER_MAX; ++i) {
+        struct remote_timer *timer = &ctx->remote_timers[i];
+        if (timer->state == LE_TIMER_STATE_RINGING &&
+            now_ms - timer->ring_started_ms >= LE_TIMER_RING_SECONDS * 1000LL)
+            memset(timer, 0, sizeof(*timer));
+    }
+}
+
+static int remote_dismiss_all(struct context *ctx)
+{
+    size_t i;
+    int count = 0;
+    for (i = 0; i < REMOTE_TIMER_MAX; ++i) {
+        if (ctx->remote_timers[i].state != LE_TIMER_STATE_RINGING)
+            continue;
+        memset(&ctx->remote_timers[i], 0, sizeof(ctx->remote_timers[i]));
+        ++count;
+    }
+    return count;
+}
+
 static long long timer_poll_timeout(const struct context *ctx,
                                     long long now_ms, long long now_epoch)
 {
     long long timeout = le_timer_poll_timeout_ms(&ctx->timers, now_ms,
                                                  now_epoch, POLL_CAP_MS);
+
+    size_t i;
+    for (i = 0; i < REMOTE_TIMER_MAX; ++i) {
+        const struct remote_timer *timer = &ctx->remote_timers[i];
+        long long remaining;
+        if (timer->state != LE_TIMER_STATE_RINGING)
+            continue; /* Never poll toward seconds_left: HA sends FINISHED. */
+        remaining = timer->ring_started_ms + LE_TIMER_RING_SECONDS * 1000LL - now_ms;
+        if (remaining < 0)
+            remaining = 0;
+        if (remaining < timeout)
+            timeout = remaining;
+    }
 
     /* NTP can make the wall clock valid while poll is sleeping. Retry the
        deferred restore promptly instead of waiting for the full cap. */
@@ -567,6 +634,7 @@ static void audio_cue(struct context *ctx)
     snprintf(args, sizeof(args),
              "{\"first_hz\":%d,\"second_hz\":%d,\"ms\":%d}",
              RING_LOW_HZ, RING_HIGH_HZ, RING_CUE_MS);
+    le_adapter_set_io_timeout(adapter, AUDIO_TIMEOUT_MS);
     result = le_adapter_call(adapter, "cue", args, NULL, 0);
     if (result != LE_ADAPTER_OK)
         le_log_warn("timerd: audio cue failed (%d)", result);
@@ -575,7 +643,8 @@ static void audio_cue(struct context *ctx)
 
 static void ring_tick(struct context *ctx, long long now_ms)
 {
-    if (le_timer_ringing_count(&ctx->timers) <= 0) {
+    remote_ring_expire(ctx, now_ms);
+    if (ringing_count(ctx) <= 0) {
         ctx->next_ring_ms = 0;
         return;
     }
@@ -633,10 +702,38 @@ static int timers_json(struct context *ctx, char *out, size_t size)
         used += (size_t)written;
         first = 0;
     }
+    /* Keep the legacy local array and count valid for Local/Custom parsers. */
     written = snprintf(out + used, size - used,
-                       "],\"ringing\":%d,\"missed\":%u}",
-                       le_timer_ringing_count(&ctx->timers),
-                       ctx->timers.missed);
+                       "],\"ringing\":%d,\"missed\":%u,\"remote_timers\":[",
+                       le_timer_ringing_count(&ctx->timers), ctx->timers.missed);
+    if (written < 0 || (size_t)written >= size - used)
+        return -1;
+    used += (size_t)written;
+    first = 1;
+    for (i = 0; i < REMOTE_TIMER_MAX; ++i) {
+        const struct remote_timer *timer = &ctx->remote_timers[i];
+        char name[REMOTE_TIMER_NAME_MAX * 6];
+        char external_id[REMOTE_TIMER_ID_MAX * 6];
+        if (timer->state == LE_TIMER_STATE_FREE)
+            continue;
+        json_escape(name, sizeof(name), timer->name);
+        json_escape(external_id, sizeof(external_id), timer->external_id);
+        written = snprintf(out + used, size - used,
+                           "%s{\"kind\":\"remote\",\"external_id\":\"%s\","
+                           "\"name\":\"%s\",\"state\":\"%s\",\"total_seconds\":%u,"
+                           "\"seconds_left\":%u,\"is_active\":%s}",
+                           first ? "" : ",", external_id, name,
+                           timer->state == LE_TIMER_STATE_RINGING ? "ringing" :
+                               timer->is_active ? "pending" : "paused",
+                           timer->total_seconds, timer->seconds_left,
+                           timer->is_active ? "true" : "false");
+        if (written < 0 || (size_t)written >= size - used)
+            return -1;
+        used += (size_t)written;
+        first = 0;
+    }
+    written = snprintf(out + used, size - used,
+                       "],\"remote_ringing\":%d}", remote_ringing_count(ctx));
     if (written < 0 || (size_t)written >= size - used)
         return -1;
     return 0;
@@ -656,6 +753,80 @@ static const char *add_error(int result)
     }
 }
 
+/* Native ESPHome timer event enum: STARTED=0, UPDATED=1, CANCELLED=2,
+   FINISHED=3. Validate the entire event before touching state; never truncate
+   identifiers or allow a nested/duplicate field to select a different timer. */
+static int remote_event(struct context *ctx, const char *args,
+                        unsigned long id, char *out, size_t size)
+{
+    static const char *const keys[] = {
+        "event_type", "timer_id", "name", "total_seconds", "seconds_left", "is_active"
+    };
+    struct remote_timer value;
+    struct remote_timer *timer = NULL, *free_timer = NULL;
+    long long type, total, left;
+    size_t i, length;
+
+    memset(&value, 0, sizeof(value));
+    if (!args || !json_valid_object(args, strlen(args)))
+        return le_adapter_respond_err(out, size, id, "invalid remote timer event");
+    length = strlen(args);
+    for (i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
+        if (json_duplicate_key(args, length, keys[i]))
+            return le_adapter_respond_err(out, size, id, "duplicate remote timer field");
+    if (json_get_int64_top_level(args, "event_type", &type) != 1 || type < 0 || type > 3 ||
+        json_get_string_top_level(args, "timer_id", value.external_id,
+                                  sizeof(value.external_id)) != 1 || !value.external_id[0] ||
+        json_get_string_top_level(args, "name", value.name, sizeof(value.name)) != 1 ||
+        json_get_int64_top_level(args, "total_seconds", &total) != 1 || total < 0 || total > UINT_MAX ||
+        json_get_int64_top_level(args, "seconds_left", &left) != 1 || left < 0 || left > total ||
+        json_get_top_level_bool(args, length, "is_active", &value.is_active) != 1)
+        return le_adapter_respond_err(out, size, id, "invalid remote timer event");
+    value.total_seconds = (unsigned int)total;
+    value.seconds_left = (unsigned int)left;
+    for (i = 0; i < REMOTE_TIMER_MAX; ++i) {
+        struct remote_timer *candidate = &ctx->remote_timers[i];
+        if (candidate->state == LE_TIMER_STATE_FREE) {
+            if (!free_timer)
+                free_timer = candidate;
+        } else if (!strcmp(candidate->external_id, value.external_id)) {
+            timer = candidate;
+        }
+    }
+    if (type != 0 && !timer)
+        return le_adapter_respond_err(out, size, id, "no such remote timer");
+    if (type == 2) {
+        memset(timer, 0, sizeof(*timer));
+    } else if (type == 3) {
+        /* Repeated FINISHED must not extend the bounded ringing lifetime. */
+        if (timer->state != LE_TIMER_STATE_RINGING) {
+            value.ring_started_ms = monotonic_ms();
+            ctx->next_ring_ms = 0;
+        } else {
+            value.ring_started_ms = timer->ring_started_ms;
+        }
+        value.state = LE_TIMER_STATE_RINGING;
+        value.is_active = 0;
+        *timer = value;
+    } else {
+        if (!timer)
+            timer = free_timer;
+        if (!timer)
+            return le_adapter_respond_err(out, size, id, "no free remote timer slots");
+        /* A late update cannot silence or reset an already finished ring. A
+           STARTED event explicitly starts a new lifetime for that same id. */
+        if (type == 1 && timer->state == LE_TIMER_STATE_RINGING) {
+            value.state = LE_TIMER_STATE_RINGING;
+            value.ring_started_ms = timer->ring_started_ms;
+            value.is_active = 0;
+        } else {
+            value.state = LE_TIMER_STATE_PENDING;
+        }
+        *timer = value;
+    }
+    return le_adapter_respond_ok(out, size, id, "{}");
+}
+
 static int dispatch(struct context *ctx, const char *cmd, const char *args,
                     unsigned long id, char *out, size_t size)
 {
@@ -665,6 +836,13 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
     long long wide_value = 0;
     int label_result = 0;
 
+    if (!strcmp(cmd, "remote_event"))
+        return remote_event(ctx, args, id, out, size);
+    if (!strcmp(cmd, "remote_clear")) {
+        memset(ctx->remote_timers, 0, sizeof(ctx->remote_timers));
+        return le_adapter_respond_ok(out, size, id, "{}");
+    }
+
     label[0] = '\0';
     if (args)
         label_result = json_get_string(args, "label", label, sizeof(label));
@@ -673,7 +851,12 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
                                       "label is missing, invalid, or too long");
 
     if (!strcmp(cmd, "status") || !strcmp(cmd, "list")) {
-        if (timers_json(ctx, data, sizeof(data)) != 0)
+        /* Reserve the adapter envelope (including a full unsigned-long id).
+           Oversize status must return an error, not a truncated/no response. */
+        size_t data_size = sizeof(data) - 64;
+        if (size < sizeof(data))
+            data_size = size > 64 ? size - 64 : 0;
+        if (timers_json(ctx, data, data_size) != 0)
             return le_adapter_respond_err(out, size, id, "too many timers");
         return le_adapter_respond_ok(out, size, id, data);
     }
@@ -817,7 +1000,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
 
     /* What "Alexa, stop" reaches. Silences every ring and leaves pending
        timers alone. */
-    if (!strcmp(cmd, "dismiss")) {
+    if (!strcmp(cmd, "dismiss") || !strcmp(cmd, "dismiss_all")) {
         int stopped;
         unsigned int dismiss_id = 0;
         int id_result = args ? json_get_uint(args, "id", &dismiss_id) : 0;
@@ -828,7 +1011,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         if (id_result > 0)
             stopped = le_timer_dismiss(&ctx->timers, dismiss_id);
         else
-            stopped = le_timer_dismiss_all(&ctx->timers);
+            stopped = le_timer_dismiss_all(&ctx->timers) + remote_dismiss_all(ctx);
         if (stopped)
             ctx->dirty = 1;
         snprintf(data, sizeof(data), "{\"dismissed\":%d}", stopped);
@@ -988,7 +1171,7 @@ int main(int argc, char **argv)
         }
 
         timeout = timer_poll_timeout(&ctx, now_ms, now_epoch);
-        if (le_timer_ringing_count(&ctx.timers) > 0) {
+        if (ringing_count(&ctx) > 0) {
             long long until_ring = ctx.next_ring_ms - now_ms;
 
             if (until_ring < 0)

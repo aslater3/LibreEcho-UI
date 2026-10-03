@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Regression contracts for acoustic feature update and restore paths.
+
+These checks keep the validation and application ordering explicit because the
+USB role switch is unavailable on ordinary host test machines.  A request that
+names both settings must validate every boolean before the USB branch can
+return, while a malformed acoustic value must return before either setting is
+changed.
+"""
+from pathlib import Path
+import json
+
+api_c = Path("src/api.c").read_text(encoding="utf-8")
+api_h = Path("src/api.h").read_text(encoding="utf-8")
+openapi = json.loads(Path("web/openapi.json").read_text(encoding="utf-8"))
+
+# USB role is live kernel state, not a persisted feature preference. Keeping a
+# context member or export key would make config export claim a restorable
+# setting that config import cannot consume.
+assert "feature_usb_host" not in api_c
+assert "feature_usb_host" not in api_h
+
+
+def assert_no_nullable_ref_siblings(value):
+    if isinstance(value, dict):
+        assert not ("$ref" in value and "nullable" in value), (
+            "OpenAPI 3.0 Reference Objects must not carry nullable siblings"
+        )
+        for child in value.values():
+            assert_no_nullable_ref_siblings(child)
+    elif isinstance(value, list):
+        for child in value:
+            assert_no_nullable_ref_siblings(child)
+
+
+assert_no_nullable_ref_siblings(openapi)
+
+features_start = api_c.index('if(!strcmp(p,"/api/v1/system/features"))')
+features_end = api_c.index('if(!strcmp(p,"/api/v1/integrations/radio/play")', features_start)
+features = api_c[features_start:features_end]
+
+feature_keys = ("simulation", "https", "acoustic_events", "usb_host")
+for key in feature_keys:
+    marker = f'json_get_top_level_bool(q->body,q->body_len,"{key}"'
+    assert marker in features, f"{key} must be read only from the top level"
+    duplicate = f'json_duplicate_key(q->body,q->body_len,"{key}")'
+    assert duplicate in features, f"duplicate {key} properties must be rejected"
+assert 'json_get_bool(q->body' not in features, (
+    "feature updates must not use the nested-key parser"
+)
+duplicate_check = features.index('json_duplicate_key(q->body')
+parse = features.index('want_host=json_get_top_level_bool(q->body,q->body_len,"usb_host"')
+assert duplicate_check < parse, "duplicate feature fields must be rejected before parsing"
+validate = features.index('want_https<0||want_sim<0||want_aed<0||', parse)
+usb_write = features.index('usb_role_write(')
+usb_success = features.index('api_log(c,"info",host?"USB port switched', usb_write)
+acoustic_apply = features.index('if(want_aed>0)c->feature_acoustic_events=av;', validate)
+persist = features.index('rc=persist_configuration(c);', validate)
+
+assert parse < validate < usb_write, (
+    "all feature booleans must be parsed and validated before USB can apply"
+)
+assert validate < usb_success < acoustic_apply, (
+    "valid mixed updates must apply USB before acoustic settings"
+)
+assert validate < acoustic_apply < persist, (
+    "valid acoustic updates must be applied before the shared persistence step"
+)
+assert features.count('features_json(c,r);return;') == 2, (
+    "the USB branch must not return before applying other feature settings"
+)
+assert 'if(want_host>0){int urc=usb_role_write(host?"host":"device");' in features
+assert 'json_get_top_level_bool(q->body,q->body_len,"acoustic_events",&av)' in features
+
+import_start = api_c.index('static int import_configuration(')
+import_end = api_c.index('static int read_central_logs(', import_start)
+importer = api_c[import_start:import_end]
+assert 'json_duplicate_key(j,n,"feature_acoustic_events")' in importer, (
+    "config import must reject duplicate acoustic feature fields"
+)
+assert 'json_get_top_level_bool(j,n,"feature_acoustic_events"' in importer, (
+    "config import must use the bounded request length for the top-level field"
+)
+assert 'json_get_top_level_bool(j,strlen(j),"feature_acoustic_events"' not in importer, (
+    "config import must not scan beyond the bounded request body"
+)
+assert 'json_get_bool(j,"feature_acoustic_events"' not in importer, (
+    "config import must not use the depth-insensitive feature parser"
+)
+assert 'if(acoustic_events_field>0)c->feature_acoustic_events=acoustic_events;' in importer, (
+    "config import must restore the acoustic feature flag"
+)
+
+feature_path = openapi["paths"]["/system/features"]
+response_ref = feature_path["get"]["responses"]["200"]["$ref"]
+response_name = response_ref.rsplit("/", 1)[-1]
+response_schema = openapi["components"]["responses"][response_name]["content"]["application/json"]["schema"]
+error_schema = response_schema["properties"]["error"]
+assert error_schema == {"$ref": "#/components/schemas/NullableApiError"}
+assert openapi["components"]["schemas"]["ApiError"].get("nullable") is not True
+assert openapi["components"]["schemas"]["NullableApiError"]["nullable"] is True
+
+for key in feature_keys:
+    assert "default" not in feature_path["put"]["requestBody"]["content"]["application/json"]["schema"]["properties"][key], (
+        f"partial feature update {key} must not advertise a default"
+    )
+
+for name in ("Envelope", "FeatureState", "NetworkState", "VoicePipelineEnvelope"):
+    schema = openapi["components"]["schemas"].get(name)
+    if schema is not None and "error" in schema.get("properties", {}):
+        assert schema["properties"]["error"] == {"$ref": "#/components/schemas/NullableApiError"}
+for name in ("FeatureState", "NetworkState"):
+    response = openapi["components"]["responses"][name]["content"]["application/json"]["schema"]
+    assert response["properties"]["error"] == {"$ref": "#/components/schemas/NullableApiError"}
+error_response = openapi["components"]["responses"]["Error"]["content"]["application/json"]["schema"]
+assert error_response == {"$ref": "#/components/schemas/ErrorEnvelope"}
+assert openapi["components"]["schemas"]["ErrorEnvelope"]["properties"]["error"] == {
+    "$ref": "#/components/schemas/ApiError"
+}
+
+print("acoustic events review contracts: ok")

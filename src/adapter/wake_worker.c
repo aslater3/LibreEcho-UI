@@ -3,6 +3,8 @@
 #include "wake_worker.h"
 
 #include "wake_engine.h"
+#include "wake_health.h"
+#include <time.h>
 
 #include <pthread.h>
 #include <stdint.h>
@@ -11,7 +13,29 @@
 
 #define WAKE_BLOCK_SAMPLES 1280U
 #define WAKE_QUEUE_BLOCKS 8U
-#define WAKE_SUPPORT_THRESHOLD 0.35f
+#define WAKE_MODEL_DIRECTORY_BYTES 1024U
+#define WAKE_RELOAD_SECONDS 5
+/*
+ * The bar a neighbouring frame must reach to corroborate a peak.
+ *
+ * At 0.35 this sat about two thirds of the way to the accept threshold, which
+ * asks a detector with a one-frame response to hold near its peak for three
+ * frames running. Measured on hardware, a real utterance scored
+ *
+ *     0.019, 0.864, 0.239, 0.249
+ *
+ * across four consecutive frames -- the peak beat the 0.533 accept threshold
+ * by a wide margin and was still discarded, because neither neighbour reached
+ * 0.35. A detection that strong is not a noise spike.
+ *
+ * 0.20 is the highest value that recovers every real detection in the captures
+ * taken from this device, and it adds no false ones: swept from 0.35 down to
+ * 0.10 over roughly two and a half minutes of recorded audio -- including a
+ * noisy room and a run of failed attempts -- 0.20 and below find all three
+ * genuine utterances and nothing else, while 0.25 and above miss one. The
+ * accept threshold is untouched and still does the real gating.
+ */
+#define WAKE_SUPPORT_THRESHOLD 0.20f
 #define WAKE_LOCKOUT_SAMPLES 28000ULL
 
 struct wake_block {
@@ -21,12 +45,20 @@ struct wake_block {
 
 struct wake_decoder {
     float scores[3];
+    /*
+     * The observation each score was computed from, carried alongside it so a
+     * detection can be attributed to the frame that actually peaked rather
+     * than to whichever frame happened to be newest when it was noticed.
+     */
+    struct le_wake_observation observations[3];
     unsigned int score_count;
     uint64_t lockout_until_sample;
 };
 
 struct wake_worker_impl {
     struct le_wake_engine *engine;
+    char model_directory[WAKE_MODEL_DIRECTORY_BYTES];
+    unsigned int threads;
     pthread_t thread;
     pthread_mutex_t mutex;
     pthread_cond_t condition;
@@ -36,6 +68,11 @@ struct wake_worker_impl {
     size_t queued;
     int stopping;
     int thread_started;
+    int inference_failed;
+    int reload_requested;
+    int reload_cancelled;
+    int reload_result;
+    uint64_t last_inference_ns;
 
     int16_t accumulating[WAKE_BLOCK_SAMPLES];
     size_t accumulated;
@@ -47,6 +84,27 @@ struct wake_worker_impl {
     le_wake_event_callback callback;
     void *callback_opaque;
 };
+
+static uint64_t wake_now_ns(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+}
+
+int le_wake_worker_health(struct le_wake_worker *worker, int *inference_age_ms)
+{
+    struct wake_worker_impl *impl;
+    int loaded;
+    *inference_age_ms = -1;
+    if (!worker || !worker->implementation) return 0;
+    impl = worker->implementation;
+    pthread_mutex_lock(&impl->mutex);
+    loaded = impl->thread_started && !impl->inference_failed && !impl->stopping;
+    *inference_age_ms = le_wake_age_ms(wake_now_ns(), impl->last_inference_ns);
+    pthread_mutex_unlock(&impl->mutex);
+    return loaded;
+}
 
 static void merge_observation(
     struct le_wake_observation *destination,
@@ -68,11 +126,15 @@ static void decode_score(struct wake_worker_impl *worker,
     struct wake_decoder *decoder = &worker->decoder;
     float accept_threshold;
     unsigned int support = 0;
+    unsigned int peak;
     unsigned int i;
 
     decoder->scores[0] = decoder->scores[1];
     decoder->scores[1] = decoder->scores[2];
     decoder->scores[2] = score;
+    decoder->observations[0] = decoder->observations[1];
+    decoder->observations[1] = decoder->observations[2];
+    decoder->observations[2] = block->observation;
     if (decoder->score_count < 3)
         ++decoder->score_count;
     ++worker->metrics.scores;
@@ -85,21 +147,52 @@ static void decode_score(struct wake_worker_impl *worker,
     pthread_mutex_lock(&worker->mutex);
     accept_threshold = worker->accept_threshold;
     pthread_mutex_unlock(&worker->mutex);
-    if (block->observation.detection_sample <
+
+    /*
+     * Judge the window by its peak rather than by its newest frame.
+     *
+     * The support rule exists so that a single noisy frame cannot wake the
+     * device, and that is worth keeping. But testing it against the newest
+     * score alone made it unsatisfiable for any detection that rises quickly:
+     * the two frames it looks back at are, by definition, the approach to the
+     * peak and still low. Measured on hardware, an utterance scored
+     * 0.083, 0.102, 0.554 across three consecutive frames -- the 0.554
+     * cleared the 0.533 accept threshold, and was thrown away because the two
+     * frames before it sat under the 0.35 support line. One frame later the
+     * support was there and the score had already fallen to 0.414, under the
+     * threshold. The window it needed never existed.
+     *
+     * Taking the peak of the three lets the corroboration come from either
+     * side of it, which is what "two of the last three" was meant to mean. A
+     * lone idle spike is still rejected. During playback, an above-threshold
+     * VAD-positive peak can have only one supporting frame after echo
+     * cancellation; the playback observation must belong to the peak itself,
+     * not a later frame. Hardware false-activation acceptance remains required.
+     * The cost is 80 ms of latency on the
+     * detection, one frame, since the peak is confirmed only once the frame
+     * after it has been scored.
+     */
+    peak = 0;
+    for (i = 3 - decoder->score_count; i < 3; ++i) {
+        if (decoder->scores[i] > decoder->scores[peak])
+            peak = i;
+    }
+    if (decoder->observations[peak].detection_sample <
             decoder->lockout_until_sample ||
-        !block->observation.vad_active ||
-        score < accept_threshold || support < 2)
+        !decoder->observations[peak].vad_active ||
+        decoder->scores[peak] < accept_threshold || support < (decoder->observations[peak].playback_active ? 1U : 2U))
         return;
 
     ++worker->metrics.events;
     decoder->lockout_until_sample =
-        block->observation.detection_sample + WAKE_LOCKOUT_SAMPLES;
+        decoder->observations[peak].detection_sample +
+        WAKE_LOCKOUT_SAMPLES;
     if (worker->callback) {
         const struct le_wake_event event = {
-            block->observation.detection_sample,
-            score,
-            block->observation.vad_score,
-            block->observation.playback_active,
+            decoder->observations[peak].detection_sample,
+            decoder->scores[peak],
+            decoder->observations[peak].vad_score,
+            decoder->observations[peak].playback_active,
             "alexa_v0.1"
         };
 
@@ -118,9 +211,42 @@ static void *wake_thread(void *opaque)
         unsigned int inference_us;
 
         pthread_mutex_lock(&worker->mutex);
-        while (worker->queued == 0 && !worker->stopping)
+        while ((worker->queued == 0 || worker->inference_failed) &&
+               !worker->stopping && !worker->reload_requested)
             pthread_cond_wait(&worker->condition, &worker->mutex);
-        if (worker->queued == 0 && worker->stopping) {
+        if (worker->reload_requested) {
+            struct le_wake_engine *replacement, *retired;
+
+            /* No feed can compete with model initialization/warmup: this is
+             * the same inference thread. Retain the old engine until load
+             * succeeds, including on a cancelled/late initialization. */
+            pthread_mutex_unlock(&worker->mutex);
+            replacement = le_wake_engine_create(
+                worker->model_directory, worker->threads);
+            pthread_mutex_lock(&worker->mutex);
+            retired = replacement;
+            worker->reload_result = -1;
+            if (replacement && !worker->reload_cancelled && !worker->stopping) {
+                retired = worker->engine;
+                worker->engine = replacement;
+                worker->read_position = worker->write_position = worker->queued = 0;
+                worker->accumulated = 0;
+                memset(&worker->accumulated_observation, 0,
+                       sizeof(worker->accumulated_observation));
+                memset(&worker->decoder, 0, sizeof(worker->decoder));
+                worker->inference_failed = 0;
+                worker->last_inference_ns = 0;
+                worker->reload_result = 0;
+            }
+            pthread_mutex_unlock(&worker->mutex);
+            if (retired) le_wake_engine_destroy(retired);
+            pthread_mutex_lock(&worker->mutex);
+            worker->reload_requested = 0;
+            pthread_cond_broadcast(&worker->condition);
+            pthread_mutex_unlock(&worker->mutex);
+            continue;
+        }
+        if ((worker->queued == 0 || worker->inference_failed) && worker->stopping) {
             pthread_mutex_unlock(&worker->mutex);
             break;
         }
@@ -134,8 +260,17 @@ static void *wake_thread(void *opaque)
                 worker->engine, block.samples, WAKE_BLOCK_SAMPLES,
                 &score, &new_score) < 0 || !new_score) {
             worker->metrics.failed = 1;
-            break;
+            pthread_mutex_lock(&worker->mutex);
+            worker->inference_failed = 1;
+            pthread_mutex_unlock(&worker->mutex);
+            /* Keep the existing worker dormant so a later reload can recover
+             * without adding a second inference thread. No more PCM is fed
+             * to the failed engine unless reinitialization succeeds. */
+            continue;
         }
+        pthread_mutex_lock(&worker->mutex);
+        worker->last_inference_ns = wake_now_ns();
+        pthread_mutex_unlock(&worker->mutex);
         inference_us =
             le_wake_engine_last_inference_us(worker->engine);
         if (inference_us > worker->metrics.max_inference_us)
@@ -153,21 +288,35 @@ int le_wake_worker_start(struct le_wake_worker *worker,
                          void *callback_opaque)
 {
     struct wake_worker_impl *impl;
+    pthread_condattr_t condition_attributes;
 
     if (!worker || worker->implementation ||
-        !model_directory || accept_threshold <= 0.0f ||
+        !model_directory ||
+        strnlen(model_directory, WAKE_MODEL_DIRECTORY_BYTES) >= WAKE_MODEL_DIRECTORY_BYTES ||
+        accept_threshold <= 0.0f ||
         accept_threshold >= 1.0f)
         return -1;
     impl = calloc(1, sizeof(*impl));
     if (!impl)
         return -1;
+    memcpy(impl->model_directory, model_directory, strlen(model_directory) + 1);
+    impl->threads = threads;
     impl->accept_threshold = accept_threshold;
     impl->callback = callback;
     impl->callback_opaque = callback_opaque;
     if (pthread_mutex_init(&impl->mutex, NULL) != 0)
         goto fail;
-    if (pthread_cond_init(&impl->condition, NULL) != 0)
+    if (pthread_condattr_init(&condition_attributes) != 0)
         goto fail_mutex;
+    if (pthread_condattr_setclock(&condition_attributes, CLOCK_MONOTONIC) != 0) {
+        pthread_condattr_destroy(&condition_attributes);
+        goto fail_mutex;
+    }
+    if (pthread_cond_init(&impl->condition, &condition_attributes) != 0) {
+        pthread_condattr_destroy(&condition_attributes);
+        goto fail_mutex;
+    }
+    pthread_condattr_destroy(&condition_attributes);
     impl->engine = le_wake_engine_create(model_directory, threads);
     if (!impl->engine)
         goto fail_condition;
@@ -255,6 +404,48 @@ int le_wake_worker_set_threshold(
     impl->accept_threshold = accept_threshold;
     pthread_mutex_unlock(&impl->mutex);
     return 0;
+}
+
+int le_wake_worker_reload(struct le_wake_worker *worker)
+{
+    struct wake_worker_impl *impl;
+    struct timespec deadline;
+    int result;
+
+    if (!worker || !worker->implementation ||
+        clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+        return -1;
+    deadline.tv_sec += WAKE_RELOAD_SECONDS;
+    impl = worker->implementation;
+    pthread_mutex_lock(&impl->mutex);
+    if (!impl->thread_started || impl->stopping || impl->reload_requested) {
+        pthread_mutex_unlock(&impl->mutex);
+        return -1;
+    }
+    impl->reload_requested = 1;
+    impl->reload_cancelled = 0;
+    impl->reload_result = -1;
+    pthread_cond_signal(&impl->condition);
+    while (impl->reload_requested) {
+        if (pthread_cond_timedwait(&impl->condition, &impl->mutex, &deadline) != 0 &&
+            impl->reload_requested) {
+            /* Publication is already irrevocable once reload_result is zero.
+             * Slow retirement must not turn a committed success into a failure. */
+            if (impl->reload_result == 0) {
+                pthread_mutex_unlock(&impl->mutex);
+                return 0;
+            }
+            /* ONNX initialization itself cannot be interrupted. Cancel its
+             * publication, retain the current model and refuse another load
+             * until this one retires on the worker. */
+            impl->reload_cancelled = 1;
+            pthread_mutex_unlock(&impl->mutex);
+            return -1;
+        }
+    }
+    result = impl->reload_result;
+    pthread_mutex_unlock(&impl->mutex);
+    return result;
 }
 
 void le_wake_worker_stop(

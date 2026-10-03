@@ -18,6 +18,69 @@ static char captured_args[1024];
 static char captured_socket[256];
 static int captured_timeout_ms;
 static char captured_hostname[256];
+static const char *scan_response;
+
+int le_backend_linux_test_adapter_command(const char *socket_path,
+                                          const char *command,
+                                          const char *args, char *response,
+                                          size_t response_size)
+{
+    int written;
+
+    if (strcmp(socket_path, LE_ADAPTER_NETWORK_SOCK) ||
+        strcmp(command, "scan") || args || !scan_response)
+        return LE_IO;
+    written = snprintf(response, response_size, "%s", scan_response);
+    if (written < 0 || (size_t)written >= response_size)
+        return LE_IO;
+    return LE_OK;
+}
+
+static void test_scan_ssid_delimiters(void)
+{
+    static const struct {
+        const char *json_ssid;
+        const char *ssid;
+    } cases[] = {
+        {"plain", "plain"},
+        {"br{ace", "br{ace"},
+        {"br}ace", "br}ace"},
+        {"quoted\\\"{ssid", "quoted\"{ssid"}
+    };
+    char response[512];
+    struct le_wifi_scan results;
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        int rc;
+        int written = snprintf(response, sizeof(response),
+                               "{\"networks\":[{\"ssid\":\"%s\","
+                               "\"security\":\"wpa2\",\"signal\":72},"
+                               "{\"ssid\":\"later\",\"security\":\"open\","
+                               "\"signal\":48}]}", cases[i].json_ssid);
+        if (written < 0 || (size_t)written >= sizeof(response))
+            _exit(1);
+        scan_response = response;
+        rc = scan(NULL, &results);
+        if (rc != LE_OK || results.count != 2) {
+            fprintf(stderr, "Wi-Fi scan test: SSID %s returned rc=%d, "
+                    "count=%zu; expected LE_OK and 2 networks\n",
+                    cases[i].ssid, rc, results.count);
+            _exit(1);
+        }
+        if (strcmp(results.networks[0].ssid, cases[i].ssid) ||
+            strcmp(results.networks[0].security, "wpa2") ||
+            results.networks[0].signal != 72 ||
+            strcmp(results.networks[1].ssid, "later") ||
+            strcmp(results.networks[1].security, "open") ||
+            results.networks[1].signal != 48) {
+            fprintf(stderr, "Wi-Fi scan test: incorrect networks after SSID %s\n",
+                    cases[i].ssid);
+            _exit(1);
+        }
+    }
+    scan_response = NULL;
+}
 
 static int test_sethostname(const char *name, size_t length)
 {
@@ -100,6 +163,7 @@ int main(void)
         return 1;
     }
 
-    puts("Linux backend emission: Wi-Fi and mDNS hostname refresh PASS");
+    test_scan_ssid_delimiters();
+    puts("Linux backend emission: Wi-Fi scan, connect and mDNS hostname refresh PASS");
     return 0;
 }

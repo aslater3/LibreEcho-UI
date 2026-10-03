@@ -88,9 +88,10 @@
 #define LE_CAP_ID_COMPANIES 0x02
 #define LE_CAP_ID_EVENTS 0x03
 #define LE_AVRCP_EVENT_PLAYBACK_STATUS 0x01
-#define LE_AVRCP_STATUS_RESPONSE 0x05
+#define LE_AVRCP_STATUS_STABLE 0x0c
 #define LE_AVRCP_STATUS_NOT_IMPLEMENTED 0x08
 #define LE_AVRCP_STATUS_ACCEPTED 0x09
+#define LE_AVRCP_STATUS_REJECTED 0x0a
 #define LE_AVRCP_STATUS_INTERIM 0x0f
 
 /* SDP constants (SDP 3.0). */
@@ -1532,6 +1533,35 @@ static void avdtp_media_read(struct le_profiles *p,
 
 /* ---- AVRCP over AVCTP --------------------------------------------------- */
 
+#define LE_AVCTP_PACKET_SINGLE 0
+#define LE_AVCTP_COMMAND 0
+#define LE_AVCTP_RESPONSE 1
+#define LE_AVC_OPCODE_VENDOR_DEPENDENT 0x00
+#define LE_AVC_OPCODE_PASSTHROUGH 0x7c
+
+static uint8_t avctp_make_header(uint8_t transaction, uint8_t packet_type,
+                                 uint8_t cr)
+{
+    return (uint8_t)(((transaction & 0x0f) << 4) |
+                     ((packet_type & 0x03) << 2) |
+                     ((cr & 0x01) << 1));
+}
+
+static uint8_t avctp_transaction(uint8_t header)
+{
+    return (uint8_t)(header >> 4);
+}
+
+static uint8_t avctp_packet_type(uint8_t header)
+{
+    return (uint8_t)((header >> 2) & 0x03);
+}
+
+static uint8_t avctp_cr(uint8_t header)
+{
+    return (uint8_t)((header >> 1) & 0x01);
+}
+
 static void avrcp_send_pdu(struct le_avrcp_session *session, uint8_t transaction,
                            uint8_t pdu_id, uint8_t status,
                            const uint8_t *payload, size_t payload_length)
@@ -1539,14 +1569,15 @@ static void avrcp_send_pdu(struct le_avrcp_session *session, uint8_t transaction
     uint8_t packet[256];
     size_t offset = 0;
 
-    if (payload_length + 14 > sizeof(packet))
-        payload_length = sizeof(packet) - 14;
-    packet[offset++] = (uint8_t)((transaction << 4) | 0x00); /* single, response */
+    if (payload_length > sizeof(packet) - 13)
+        payload_length = sizeof(packet) - 13;
+    packet[offset++] = avctp_make_header(transaction, LE_AVCTP_PACKET_SINGLE,
+                                         LE_AVCTP_RESPONSE);
     packet[offset++] = (uint8_t)(LE_AVRCP_PID_CONTROL >> 8);
     packet[offset++] = (uint8_t)(LE_AVRCP_PID_CONTROL & 0xff);
     packet[offset++] = status;               /* AV/C response ctype */
     packet[offset++] = 0x48;                 /* panel subunit id + type */
-    packet[offset++] = 0x00;                 /* vendor dependent opcode */
+    packet[offset++] = LE_AVC_OPCODE_VENDOR_DEPENDENT;
     packet[offset++] = (uint8_t)((LE_AVRCP_COMPANY_BLUETOOTH >> 16) & 0xff);
     packet[offset++] = (uint8_t)((LE_AVRCP_COMPANY_BLUETOOTH >> 8) & 0xff);
     packet[offset++] = (uint8_t)(LE_AVRCP_COMPANY_BLUETOOTH & 0xff);
@@ -1560,20 +1591,16 @@ static void avrcp_send_pdu(struct le_avrcp_session *session, uint8_t transaction
 }
 
 static void avrcp_send_passthrough(struct le_avrcp_session *session,
-                                   uint8_t transaction, uint8_t opcode,
-                                   uint8_t state_flag)
+                                   uint8_t transaction, uint8_t *packet,
+                                   size_t packet_length)
 {
-    uint8_t packet[7];
-    size_t offset = 0;
-
-    packet[offset++] = (uint8_t)((transaction << 4) | 0x00);
-    packet[offset++] = (uint8_t)(LE_AVRCP_PID_CONTROL >> 8);
-    packet[offset++] = (uint8_t)(LE_AVRCP_PID_CONTROL & 0xff);
-    packet[offset++] = LE_AVRCP_STATUS_ACCEPTED;
-    packet[offset++] = 0x48;
-    packet[offset++] = (uint8_t)(opcode | state_flag);
-    packet[offset++] = 0x00; /* no operands */
-    (void)ignore_write(session->fd, packet, offset);
+    /* The caller has a complete frame in the bounded session buffer.
+     * Echo both operands and any operation data, changing only the response
+     * fields; a PLAY press/release includes a zero data-length operand. */
+    packet[0] = avctp_make_header(transaction, LE_AVCTP_PACKET_SINGLE,
+                                  LE_AVCTP_RESPONSE);
+    packet[3] = LE_AVRCP_STATUS_ACCEPTED;
+    (void)ignore_write(session->fd, packet, packet_length);
 }
 
 static void avrcp_session_read(struct le_avrcp_session *session)
@@ -1590,15 +1617,17 @@ static void avrcp_session_read(struct le_avrcp_session *session)
     }
     session->used += (size_t)received;
     while (session->used >= 6) {
-        uint8_t transaction = (uint8_t)(buffer[0] >> 4);
-        uint8_t is_command = (uint8_t)(buffer[0] >> 2) & 0x01;
+        uint8_t header = buffer[0];
+        uint8_t transaction = avctp_transaction(header);
         uint16_t profile_id = (uint16_t)((buffer[1] << 8) | buffer[2]);
         uint8_t ctype = buffer[3];
         uint8_t subunit = buffer[4];
         uint8_t opcode = buffer[5];
 
         (void)ctype;
-        if (!is_command || profile_id != LE_AVRCP_PID_CONTROL) {
+        if (avctp_packet_type(header) != LE_AVCTP_PACKET_SINGLE ||
+            avctp_cr(header) != LE_AVCTP_COMMAND ||
+            profile_id != LE_AVRCP_PID_CONTROL) {
             session->used = 0;
             return;
         }
@@ -1606,7 +1635,7 @@ static void avrcp_session_read(struct le_avrcp_session *session)
             session->used = 0;
             return;
         }
-        if (opcode == 0x7c) { /* vendor dependent */
+        if (opcode == LE_AVC_OPCODE_VENDOR_DEPENDENT) {
             uint8_t pdu_id;
             size_t pdu_length;
 
@@ -1618,25 +1647,32 @@ static void avrcp_session_read(struct le_avrcp_session *session)
                 break;
             switch (pdu_id) {
             case LE_AVRCP_PDU_GET_CAPABILITIES: {
-                uint8_t payload[16];
+                uint8_t payload[5];
                 size_t offset = 0;
 
-                payload[offset++] = 0x02; /* capability id: company */
+                if (pdu_length != 1 || (buffer[13] != 0x02 && buffer[13] != 0x03)) {
+                    payload[0] = 0x01; /* invalid parameter */
+                    avrcp_send_pdu(session, transaction, pdu_id,
+                                   LE_AVRCP_STATUS_REJECTED, payload, 1);
+                    break;
+                }
+                payload[offset++] = buffer[13]; /* requested capability only */
                 payload[offset++] = 1;
-                payload[offset++] = (uint8_t)((LE_AVRCP_COMPANY_BLUETOOTH >> 16) & 0xff);
-                payload[offset++] = (uint8_t)((LE_AVRCP_COMPANY_BLUETOOTH >> 8) & 0xff);
-                payload[offset++] = (uint8_t)(LE_AVRCP_COMPANY_BLUETOOTH & 0xff);
-                payload[offset++] = 0x03; /* capability id: events */
-                payload[offset++] = 1;
-                payload[offset++] = LE_AVRCP_EVENT_PLAYBACK_STATUS;
+                if (buffer[13] == 0x02) { /* company IDs */
+                    payload[offset++] = (uint8_t)((LE_AVRCP_COMPANY_BLUETOOTH >> 16) & 0xff);
+                    payload[offset++] = (uint8_t)((LE_AVRCP_COMPANY_BLUETOOTH >> 8) & 0xff);
+                    payload[offset++] = (uint8_t)(LE_AVRCP_COMPANY_BLUETOOTH & 0xff);
+                } else { /* supported events */
+                    payload[offset++] = LE_AVRCP_EVENT_PLAYBACK_STATUS;
+                }
                 avrcp_send_pdu(session, transaction, pdu_id,
-                               LE_AVRCP_STATUS_RESPONSE, payload, offset);
+                               LE_AVRCP_STATUS_STABLE, payload, offset);
                 break;
             }
             case LE_AVRCP_PDU_GET_ELEMENT_ATTRIBUTES: {
                 uint8_t payload[4] = { 0, 0, 0, 0 };
                 avrcp_send_pdu(session, transaction, pdu_id,
-                               LE_AVRCP_STATUS_RESPONSE, payload, 4);
+                               LE_AVRCP_STATUS_STABLE, payload, 4);
                 break;
             }
             case LE_AVRCP_PDU_REGISTER_NOTIFICATION: {
@@ -1656,16 +1692,22 @@ static void avrcp_session_read(struct le_avrcp_session *session)
             memmove(buffer, buffer + 13 + pdu_length, session->used);
             continue;
         }
-        /* AV/C passthrough (play/pause/stop etc.) */
-        {
-            uint8_t operand_length = buffer[6];
-            if (7 + (size_t)operand_length > session->used)
+        if (opcode == LE_AVC_OPCODE_PASSTHROUGH) {
+            size_t packet_length;
+
+            /* State/operation is followed by the operation-data length. */
+            if (session->used < 8)
                 break;
-            avrcp_send_passthrough(session, transaction, opcode & 0x7f,
-                                   opcode & 0x80);
-            session->used -= 7 + operand_length;
-            memmove(buffer, buffer + 7 + operand_length, session->used);
+            packet_length = 8 + (size_t)buffer[7];
+            if (packet_length > session->used)
+                break;
+            avrcp_send_passthrough(session, transaction, buffer, packet_length);
+            session->used -= packet_length;
+            memmove(buffer, buffer + packet_length, session->used);
+            continue;
         }
+        session->used = 0;
+        return;
     }
 }
 
@@ -2066,4 +2108,53 @@ done:
     session->fd = -1;
     session->signal_used = 0;
     return result;
+}
+
+ssize_t le_profile_test_avrcp_exchange(struct le_profiles *p,
+                                       const uint8_t *request,
+                                       size_t request_len,
+                                       uint8_t *response,
+                                       size_t response_max)
+{
+    struct le_profile_sessions *sessions = p ? p->sessions : NULL;
+    struct le_avrcp_session *session = NULL;
+    struct pollfd pollfd;
+    int fds[2];
+    int slot;
+    ssize_t result = -1;
+
+    if (!sessions || !request || !request_len || !response || !response_max)
+        return -1;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0)
+        return -1;
+    for (slot = 0; slot < LE_MAX_AVRCP_SESSIONS; ++slot) {
+        if (sessions->avrcp[slot].fd < 0) {
+            session = &sessions->avrcp[slot];
+            break;
+        }
+    }
+    if (!session)
+        goto close_pair;
+    session->fd = fds[0];
+    session->used = 0;
+    if (write(fds[1], request, request_len) != (ssize_t)request_len)
+        goto done;
+    avrcp_session_read(session);
+    pollfd.fd = fds[1];
+    pollfd.events = POLLIN;
+    pollfd.revents = 0;
+    if (poll(&pollfd, 1, 2000) > 0)
+        result = read(fds[1], response, response_max);
+
+done:
+    close(fds[0]);
+    close(fds[1]);
+    session->fd = -1;
+    session->used = 0;
+    return result;
+
+close_pair:
+    close(fds[0]);
+    close(fds[1]);
+    return -1;
 }

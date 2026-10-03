@@ -32,3 +32,6 @@ print("source provenance contract: ok")
 PY
 make provenance >/dev/null
 python3 -m json.tool build/source-provenance.json >/dev/null
+
+# Validate the effective wake link recipe against the supported ORT layout.
+python3 tests/test_wake_link_closure.py
