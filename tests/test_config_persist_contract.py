@@ -40,4 +40,16 @@ if problems:
     for p in problems:
         print(f"config persist contract: FAIL - {p}", file=sys.stderr)
     raise SystemExit(1)
+
+# The Platform boot gate (libreecho-config-migrate) treats a config with no
+# root schema as unsupported and raises the config_error banner. Both the
+# first-start copy and every subsequent save must carry schema_version 1.
+import json
+defaults = json.loads(pathlib.Path("config/defaults.json").read_text(encoding="utf-8"))
+if defaults.get("schema_version") != 1 or "schema" in defaults:
+    print("config persist contract: FAIL - config/defaults.json must carry \"schema_version\": 1", file=sys.stderr)
+    raise SystemExit(1)
+if '\\"schema_version\\": 1' not in writer.group(0):
+    print("config persist contract: FAIL - configuration_json must write \"schema_version\": 1", file=sys.stderr)
+    raise SystemExit(1)
 print(f"config persist contract: ok ({len(fields)} feature flags round-trip)")
