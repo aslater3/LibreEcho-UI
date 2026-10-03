@@ -164,7 +164,7 @@ local_before=$(starts local)
     # Local is selected again; its daemon exited before being probed.
     printf '%s\n' "$local_cfg" > "$config"
 ) &
-"$WD" --passes 20 --interval 1 --config "$config" $services >"$dir/wd6.log" 2>&1
+"$WD" --passes 20 --interval 1 --rearm-grace 2 --config "$config" $services >"$dir/wd6.log" 2>&1
 wait
 if [ "$(starts local)" -le "$local_before" ]; then
     echo "FAIL: watchdog forgot a reselected voice service and never restarted it"
@@ -185,7 +185,7 @@ local_before=$(starts local)
     printf '%s\n' "$local_cfg" > "$config"
     sh "$dir/ha.init" stop
 ) &
-"$WD" --passes 20 --interval 1 --config "$config" $services >"$dir/wd7.log" 2>&1
+"$WD" --passes 20 --interval 1 --rearm-grace 2 --config "$config" $services >"$dir/wd7.log" 2>&1
 wait
 if [ "$(starts local)" -le "$local_before" ]; then
     echo "FAIL: watchdog never armed a voice service first selected after it started"
@@ -196,4 +196,29 @@ if [ -f "$dir/ha.pid" ]; then
     cat "$dir/wd7.log"; exit 1
 fi
 echo "  service selected after watchdog start is armed: ok"
+
+# --- a re-armed service is not restarted while its init is still starting -
+# agentd's init can wait 90 s for its dependencies before it answers. The
+# default grace must cover that: restarting inside it would stop the runtime
+# under the API's start and race it. Here the API-started daemon takes 12 s
+# to answer, longer than the old 6-interval grace at --interval 1.
+printf '%s\n' "$ha_cfg" > "$config"
+[ -f "$dir/local.pid" ] && sh "$dir/local.init" stop
+[ -S "$dir/ha.sock" ] || sh "$dir/ha.init" start
+local_before=$(starts local)
+(
+    sleep 3
+    printf '%s\n' "$local_cfg" > "$config"
+    sh "$dir/ha.init" stop
+    # What a slow API start looks like: no socket until the daemon is up.
+    sleep 12
+    python3 "$dir/fake.py" "$dir/local.sock" "$dir/local.pid" &
+) &
+"$WD" --passes 22 --interval 1 --config "$config" $services >"$dir/wd8.log" 2>&1
+wait
+if [ "$(starts local)" -ne "$local_before" ]; then
+    echo "FAIL: watchdog restarted a re-armed service during its startup window"
+    cat "$dir/wd8.log"; exit 1
+fi
+echo "  re-armed service is not restarted while starting: ok"
 echo "watchdog voice-mode ownership: PASS"

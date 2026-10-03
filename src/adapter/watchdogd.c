@@ -48,9 +48,12 @@
 
 #define PROBE_TIMEOUT_MS 1500
 #define DEFAULT_INTERVAL_S 5
-/* Probe intervals of grace before a re-armed voice service can be
-   restarted: 30 s at the default interval. */
-#define REARM_GRACE_INTERVALS 6
+/* Seconds a re-armed voice service may take to answer before it can be
+   restarted. It must cover the slowest API-started init: agentd waits up to
+   AGENT_DEPENDENCY_TIMEOUT_SECONDS (90 s) for the STT/TTS sockets before it
+   writes its pidfile, and restarting inside that window would stop its
+   runtime under the original start and race it. */
+#define DEFAULT_REARM_GRACE_S 120
 #define MAX_SERVICES 24
 
 /*
@@ -392,6 +395,7 @@ int main(int argc, char **argv)
     int interval = DEFAULT_INTERVAL_S;
     int passes = 0;   /* 0 = run forever */
     int start_delay = 0;
+    int rearm_grace = DEFAULT_REARM_GRACE_S;
     int pass = 0;
     const char *config_path = getenv("LE_CONFIG_PATH");
     enum voice_mode mode = MODE_UNKNOWN, last_mode = MODE_UNKNOWN;
@@ -419,6 +423,9 @@ int main(int argc, char **argv)
            starting has not failed. */
         else if (!strcmp(argv[i], "--start-delay") && i + 1 < (size_t)argc)
             start_delay = atoi(argv[++i]);
+        /* Grace for a voice service whose mode was just selected. */
+        else if (!strcmp(argv[i], "--rearm-grace") && i + 1 < (size_t)argc)
+            rearm_grace = atoi(argv[++i]);
         /* The configuration the voice mode is read from. */
         else if (!strcmp(argv[i], "--config") && i + 1 < (size_t)argc)
             config_path = argv[++i];
@@ -471,12 +478,14 @@ int main(int argc, char **argv)
         }
         else {
             fprintf(stderr, "usage: %s [--foreground] [--interval SECONDS] "
-                    "[--config PATH]\n", argv[0]);
+                    "[--config PATH] [--rearm-grace SECONDS]\n", argv[0]);
             return 2;
         }
     }
     if (interval < 1)
         interval = DEFAULT_INTERVAL_S;
+    if (rearm_grace < 0)
+        rearm_grace = DEFAULT_REARM_GRACE_S;
     if (!config_path || !config_path[0])
         config_path = "/data/libreecho/config/web-config.json";
     if (custom)
@@ -547,8 +556,7 @@ int main(int argc, char **argv)
                 le_watchdog_service_init(&s->state, now);
                 /* The API is starting it now; give a model-loading daemon
                    time to answer before a restart can stop it again. */
-                s->state.next_attempt_ms =
-                    now + (long long)interval * REARM_GRACE_INTERVALS * 1000;
+                s->state.next_attempt_ms = now + (long long)rearm_grace * 1000;
                 le_log_info("watchdog: supervising %s again; its voice mode "
                             "is selected", s->desc->name);
             }
