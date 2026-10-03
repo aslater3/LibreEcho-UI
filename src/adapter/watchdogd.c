@@ -34,6 +34,7 @@
 
 #include "adapter.h"
 #include "watchdog_policy.h"
+#include "../json.h"
 #include "../log.h"
 #include "../service_env.h"
 
@@ -47,6 +48,12 @@
 
 #define PROBE_TIMEOUT_MS 1500
 #define DEFAULT_INTERVAL_S 5
+/* Seconds a re-armed voice service may take to answer before it can be
+   restarted. It must cover the slowest API-started init: agentd waits up to
+   AGENT_DEPENDENCY_TIMEOUT_SECONDS (90 s) for the STT/TTS sockets before it
+   writes its pidfile, and restarting inside that window would stop its
+   runtime under the original start and race it. */
+#define DEFAULT_REARM_GRACE_S 120
 #define MAX_SERVICES 24
 
 /*
@@ -65,6 +72,19 @@ enum probe_kind {
     PROBE_PIDFILE
 };
 
+enum voice_owner {
+    OWNER_ANY = 0,     /* not tied to a voice mode */
+    OWNER_LOCAL,       /* wanted unless Home Assistant owns voice */
+    OWNER_HA           /* wanted only while Home Assistant owns voice */
+};
+
+/* What the saved configuration says about voice ownership. */
+enum voice_mode {
+    MODE_UNKNOWN = 0,  /* unreadable: supervise everything, as before */
+    MODE_LOCAL,
+    MODE_HA
+};
+
 /* What is supervised: constant, and the thing the contract test reads. */
 struct service_desc {
     const char *name;
@@ -75,6 +95,13 @@ struct service_desc {
     /* Services sharing a group name are stopped and started together, in
        table order. NULL means this service stands alone. */
     const char *group;
+    /* Which voice mode owns this service. Local voice (sttd, ttsd, agentd)
+       and the Home Assistant satellite (esphomed) hold the microphone path
+       exclusively, and the web API stops one set and starts the other on a
+       mode switch. Restarting a service the saved mode does not want undoes
+       that switch, so such a service is not supervised until its mode is
+       selected again. */
+    enum voice_owner owner;
 };
 
 /* How it is going: mutable, one per descriptor. */
@@ -87,6 +114,15 @@ struct supervised {
     int healthy;
     int last_healthy;
     int seen_healthy;
+    /* Has ever answered. Survives voice-mode deselection, so supervision is
+       re-armed when the mode is selected again rather than waiting for a
+       daemon that may already have died to answer first. */
+    int installed;
+    /* Skipped because its voice mode was not selected. Selecting the mode
+       while this watchdog runs is the owner asking for the service, so it
+       is armed then even if it was never seen answering (booted in the
+       other mode). */
+    int deselected;
     int reported_give_up;
     unsigned int total_restarts;
 };
@@ -185,6 +221,56 @@ static int run_init(const char *script, const char *action)
     return le_service_command_cancellable("/bin/sh", argv, &running);
 }
 
+#define CONFIG_MAX 65536
+
+/*
+ * Read the voice owner from the configuration the web API persists. The rule
+ * is the API's own load rule: Home Assistant owns voice when integration bit
+ * 1 is set or the pipeline mode is "home-assistant". Anything unreadable is
+ * MODE_UNKNOWN, never "nothing wanted": a missing or half-written file must
+ * not switch supervision off.
+ */
+static enum voice_mode read_voice_mode(const char *path)
+{
+    static char text[CONFIG_MAX];
+    unsigned int integrations = 0;
+    char mode[32];
+    int have_bits, have_mode;
+    size_t n;
+    FILE *file;
+
+    if (!path || !path[0])
+        return MODE_UNKNOWN;
+    file = fopen(path, "r");
+    if (!file)
+        return MODE_UNKNOWN;
+    n = fread(text, 1, sizeof(text) - 1, file);
+    if (ferror(file) || !feof(file)) {
+        fclose(file);
+        return MODE_UNKNOWN;
+    }
+    fclose(file);
+    text[n] = '\0';
+    if (!json_valid_object(text, n))
+        return MODE_UNKNOWN;
+    have_bits = json_get_uint(text, "integrations", &integrations) == 1;
+    have_mode = json_get_string_top_level(text, "voice_pipeline_mode", mode,
+                                          sizeof(mode)) > 0;
+    if (!have_bits && !have_mode)
+        return MODE_UNKNOWN;
+    if ((have_bits && (integrations & 1u)) ||
+        (have_mode && !strcmp(mode, "home-assistant")))
+        return MODE_HA;
+    return MODE_LOCAL;
+}
+
+static int wanted(const struct service_desc *desc, enum voice_mode mode)
+{
+    if (mode == MODE_UNKNOWN || desc->owner == OWNER_ANY)
+        return 1;
+    return desc->owner == (mode == MODE_HA ? OWNER_HA : OWNER_LOCAL);
+}
+
 static int in_group(const struct supervised *services, size_t index,
                     size_t leader)
 {
@@ -210,9 +296,10 @@ static int group_healthy(const struct supervised *services, size_t count,
 }
 
 static void restart_group(struct supervised *services, size_t count,
-                          size_t leader)
+                          size_t leader, const char *config_path)
 {
     size_t i;
+    enum voice_mode mode;
 
     /* A stop request arrived before this group was reached: the caller is
        quiescing these services, and starting one now would undo that. */
@@ -231,9 +318,19 @@ static void restart_group(struct supervised *services, size_t count,
     if (!running)
         return;
 
+    /* So can a voice-mode switch: the pass read the mode before deciding,
+       and starting a member the new owner does not want would leave both
+       exclusive voice owners running. */
+    mode = read_voice_mode(config_path);
+
     for (i = 0; i < count; ++i) {
         if (!in_group(services, i, leader))
             continue;
+        if (!wanted(services[i].desc, mode)) {
+            le_log_info("watchdog: not restarting %s; its voice mode is no "
+                        "longer selected", services[i].desc->name);
+            continue;
+        }
         le_log_warn("watchdog: restarting %s", services[i].desc->name);
         if (run_init(services[i].desc->init_script, "start") != 0)
             le_log_error("watchdog: restarting %s failed",
@@ -248,48 +345,48 @@ int main(int argc, char **argv)
         /* Socket paths are the defaults the init scripts pass; a source
            contract test keeps this table and init/ from drifting apart. */
         {"networkd", PROBE_SOCKET, "/run/libreecho/network.sock",
-         "/etc/init.d/libreecho-networkd.init", 1, NULL},
+         "/etc/init.d/libreecho-networkd.init", 1, NULL, OWNER_ANY},
         {"audiod", PROBE_SOCKET, "/run/libreecho/audio.sock",
-         "/etc/init.d/libreecho-audiod.init", 1, NULL},
+         "/etc/init.d/libreecho-audiod.init", 1, NULL, OWNER_ANY},
         /* micd and waked are one unit -- see the note at the top. */
         {"micd", PROBE_SOCKET, "/run/libreecho/mic.sock",
-         "/etc/init.d/libreecho-micd.init", 1, "capture"},
+         "/etc/init.d/libreecho-micd.init", 1, "capture", OWNER_ANY},
         {"ledd", PROBE_SOCKET, "/run/libreecho/led.sock",
-         "/etc/init.d/libreecho-ledd.init", 1, NULL},
+         "/etc/init.d/libreecho-ledd.init", 1, NULL, OWNER_ANY},
         {"btd", PROBE_SOCKET, "/run/libreecho/bluetooth.sock",
-         "/etc/init.d/libreecho-btd.init", 1, NULL},
+         "/etc/init.d/libreecho-btd.init", 1, NULL, OWNER_ANY},
         {"radiod", PROBE_SOCKET, "/run/libreecho/radio.sock",
-         "/etc/init.d/libreecho-radiod.init", 1, NULL},
+         "/etc/init.d/libreecho-radiod.init", 1, NULL, OWNER_ANY},
         /* Lived stays available while disarmed so the UI can select GPT-Live. */
         {"lived", PROBE_SOCKET, "/run/libreecho/live.sock",
-         "/etc/init.d/libreecho-lived.init", 1, NULL},
+         "/etc/init.d/libreecho-lived.init", 1, NULL, OWNER_ANY},
         /* Status can wait behind an in-flight provider response. */
         {"agentd", PROBE_PIDFILE, "/var/run/libreecho-agentd.pid",
-         "/etc/init.d/libreecho-agentd.init", 1, NULL},
+         "/etc/init.d/libreecho-agentd.init", 1, NULL, OWNER_LOCAL},
         /* In-process synthesis can occupy the status path for one utterance. */
         {"ttsd", PROBE_PIDFILE, "/var/run/libreecho-ttsd.pid",
-         "/etc/init.d/libreecho-ttsd.init", 1, NULL},
+         "/etc/init.d/libreecho-ttsd.init", 1, NULL, OWNER_LOCAL},
         /* Streaming recognition owns the request loop until the turn ends. */
         {"sttd", PROBE_PIDFILE, "/var/run/libreecho-sttd.pid",
-         "/etc/init.d/libreecho-sttd.init", 1, NULL},
+         "/etc/init.d/libreecho-sttd.init", 1, NULL, OWNER_LOCAL},
         {"mdnsd", PROBE_SOCKET, "/run/libreecho/mdns.sock",
-         "/etc/init.d/libreecho-mdnsd.init", 1, NULL},
+         "/etc/init.d/libreecho-mdnsd.init", 1, NULL, OWNER_ANY},
         {"airplayd", PROBE_SOCKET, "/run/libreecho/airplay.sock",
-         "/etc/init.d/libreecho-airplayd.init", 1, NULL},
+         "/etc/init.d/libreecho-airplayd.init", 1, NULL, OWNER_ANY},
         /* Timers must recover with their durable schedule after a daemon exit. */
         {"timerd", PROBE_SOCKET, "/run/libreecho/timer.sock",
-         "/etc/init.d/libreecho-timerd.init", 1, NULL},
+         "/etc/init.d/libreecho-timerd.init", 1, NULL, OWNER_ANY},
         /* No control socket; the pidfile is the only signal. */
         {"buttond", PROBE_PIDFILE, "/var/run/libreecho-buttond.pid",
-         "/etc/init.d/libreecho-buttond.init", 1, NULL},
+         "/etc/init.d/libreecho-buttond.init", 1, NULL, OWNER_ANY},
         {"timed", PROBE_PIDFILE, "/var/run/libreecho-timed.pid",
-         "/etc/init.d/libreecho-timed.init", 1, NULL},
+         "/etc/init.d/libreecho-timed.init", 1, NULL, OWNER_ANY},
         {"logd", PROBE_PIDFILE, "/var/run/libreecho-logd.pid",
-         "/etc/init.d/libreecho-logd.init", 1, NULL},
+         "/etc/init.d/libreecho-logd.init", 1, NULL, OWNER_ANY},
         {"esphomed", PROBE_PIDFILE, "/var/run/libreecho-esphomed.pid",
-         "/etc/init.d/libreecho-esphomed.init", 1, NULL},
+         "/etc/init.d/libreecho-esphomed.init", 1, NULL, OWNER_HA},
         {"waked", PROBE_SOCKET, "/run/libreecho/wakeword.sock",
-         "/etc/init.d/libreecho-waked.init", 1, "capture"},
+         "/etc/init.d/libreecho-waked.init", 1, "capture", OWNER_ANY},
     };
     static struct supervised services[MAX_SERVICES];
     static char argbuf[MAX_SERVICES][512];
@@ -298,7 +395,10 @@ int main(int argc, char **argv)
     int interval = DEFAULT_INTERVAL_S;
     int passes = 0;   /* 0 = run forever */
     int start_delay = 0;
+    int rearm_grace = DEFAULT_REARM_GRACE_S;
     int pass = 0;
+    const char *config_path = getenv("LE_CONFIG_PATH");
+    enum voice_mode mode = MODE_UNKNOWN, last_mode = MODE_UNKNOWN;
     size_t custom = 0;
     long long now;
 
@@ -323,6 +423,12 @@ int main(int argc, char **argv)
            starting has not failed. */
         else if (!strcmp(argv[i], "--start-delay") && i + 1 < (size_t)argc)
             start_delay = atoi(argv[++i]);
+        /* Grace for a voice service whose mode was just selected. */
+        else if (!strcmp(argv[i], "--rearm-grace") && i + 1 < (size_t)argc)
+            rearm_grace = atoi(argv[++i]);
+        /* The configuration the voice mode is read from. */
+        else if (!strcmp(argv[i], "--config") && i + 1 < (size_t)argc)
+            config_path = argv[++i];
         /* Supervise only what the caller names: NAME:SOCKET:INIT. Without
            this the service table is compiled in and the daemon cannot be
            exercised against anything but a real device. */
@@ -342,8 +448,26 @@ int main(int argc, char **argv)
             if (!init) { fprintf(stderr, "--service wants NAME:SOCKET:INIT[:GROUP]\n"); return 2; }
             *init++ = '\0';
             group = strchr(init, ':');
-            if (group)
+            if (group) {
+                char *owner;
+
                 *group++ = '\0';
+                owner = strchr(group, ':');
+                if (owner) {
+                    *owner++ = '\0';
+                    if (!strcmp(owner, "local"))
+                        custom_descs[custom].owner = OWNER_LOCAL;
+                    else if (!strcmp(owner, "home-assistant"))
+                        custom_descs[custom].owner = OWNER_HA;
+                    else if (*owner) {
+                        fprintf(stderr, "--service owner must be local or "
+                                "home-assistant\n");
+                        return 2;
+                    }
+                }
+                if (!*group)
+                    group = NULL;
+            }
             custom_descs[custom].name = name;
             custom_descs[custom].kind = PROBE_SOCKET;
             custom_descs[custom].probe_path = sock;
@@ -353,13 +477,17 @@ int main(int argc, char **argv)
             ++custom;
         }
         else {
-            fprintf(stderr, "usage: %s [--foreground] [--interval SECONDS]\n",
-                    argv[0]);
+            fprintf(stderr, "usage: %s [--foreground] [--interval SECONDS] "
+                    "[--config PATH] [--rearm-grace SECONDS]\n", argv[0]);
             return 2;
         }
     }
     if (interval < 1)
         interval = DEFAULT_INTERVAL_S;
+    if (rearm_grace < 0)
+        rearm_grace = DEFAULT_REARM_GRACE_S;
+    if (!config_path || !config_path[0])
+        config_path = "/data/libreecho/config/web-config.json";
     if (custom)
         count = custom;
     for (i = 0; i < count; ++i) {
@@ -400,6 +528,14 @@ int main(int argc, char **argv)
 
     while (running) {
         now = monotonic_ms();
+        mode = read_voice_mode(config_path);
+        if (mode != last_mode) {
+            le_log_info("watchdog: voice is owned by %s",
+                        mode == MODE_HA ? "Home Assistant" :
+                        mode == MODE_LOCAL ? "the local pipeline" :
+                        "an unknown mode (supervising all)");
+            last_mode = mode;
+        }
 
         /* Probe everything first, then decide. A group has to be judged on
            one sweep, or a member restarted mid-pass looks like a second
@@ -407,11 +543,43 @@ int main(int argc, char **argv)
         for (i = 0; i < count && running; ++i) {
             struct supervised *s = &services[i];
 
+            /* A service the saved voice mode does not want was stopped by
+               the API on purpose. Drop its supervision latch and failure
+               history, so it is neither restarted now nor treated as a crash
+               when its mode is selected again and the API starts it. */
+            if (wanted(s->desc, mode) && (s->installed || s->deselected) &&
+                !s->seen_healthy) {
+                s->seen_healthy = 1;
+                s->deselected = 0;
+                s->last_healthy = 1;
+                s->reported_give_up = 0;
+                le_watchdog_service_init(&s->state, now);
+                /* The API is starting it now; give a model-loading daemon
+                   time to answer before a restart can stop it again. */
+                s->state.next_attempt_ms = now + (long long)rearm_grace * 1000;
+                le_log_info("watchdog: supervising %s again; its voice mode "
+                            "is selected", s->desc->name);
+            }
+            if (!wanted(s->desc, mode)) {
+                if (s->seen_healthy)
+                    le_log_info("watchdog: not supervising %s; its voice "
+                                "mode is not selected", s->desc->name);
+                s->seen_healthy = 0;
+                s->deselected = 1;
+                s->healthy = 0;
+                s->last_healthy = 1;
+                s->reported_give_up = 0;
+                le_watchdog_service_init(&s->state, now);
+                continue;
+            }
+
             s->healthy = probe(s->desc);
 
             /* Supervision latches on the first healthy probe. A daemon that
                has never answered is either disabled or not installed, and
                starting something the owner turned off is not recovery. */
+            if (s->healthy)
+                s->installed = 1;
             if (s->healthy && !s->seen_healthy) {
                 s->seen_healthy = 1;
                 le_log_info("watchdog: supervising %s", s->desc->name);
@@ -445,7 +613,7 @@ int main(int argc, char **argv)
                 continue;
             action = le_watchdog_step(&s->state, healthy, now);
             if (action == LE_WATCHDOG_RESTART) {
-                restart_group(services, count, i);
+                restart_group(services, count, i, config_path);
                 le_watchdog_restarted(&s->state, now);
             } else if (action == LE_WATCHDOG_GIVE_UP && !s->reported_give_up) {
                 /* Say it once, then stay quiet rather than logging forever. */

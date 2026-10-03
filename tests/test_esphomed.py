@@ -66,11 +66,11 @@ class Adapter:
   self.stop=True;self.thread.join(2);self.sock.close()
   for c in self.clients:
    with contextlib.suppress(OSError):c.close()
-class Fixture(unittest.TestCase):
+class Daemon(unittest.TestCase):
  def setUp(self):
   self.assertTrue(os.access(BIN,os.X_OK), 'daemon executable is missing')
   self.tmp=tempfile.TemporaryDirectory(prefix='esphomed-',dir=os.environ.get('TMPDIR'));self.p=pathlib.Path(self.tmp.name)
-  self.config=self.p/'config.json';self.config.write_text(json.dumps({'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','voice_assistant_mode':1,'esphome_noise_key':''}))
+  self.config=self.p/'config.json';self.config.write_text(json.dumps(getattr(self,'config_fields',{'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','voice_assistant_mode':1,'esphome_noise_key':''})))
   self.privacy=self.p/'privacy';self.privacy.write_text('0\n');self.bus=self.p/'system.pcm';os.mkfifo(self.bus);self.busfd=os.open(self.bus,os.O_RDONLY|os.O_NONBLOCK);self.busbytes=bytearray()
   self.adapters={k:Adapter(self.p/(k+'.sock'),k) for k in ('audio','wake','radio','timer','led')}
   s=socket.socket();s.bind(('127.0.0.1',0));self.port=s.getsockname()[1];s.close();self.clients=[]
@@ -91,6 +91,7 @@ class Fixture(unittest.TestCase):
  def hello(self):
   for b in frame(1,num(2,1)+num(3,14)):self.s.sendall(bytes([b]))
   self.assertEqual(receive(self.s)[0],2)
+class Fixture(Daemon):
  def test_hello_auth_device_list_ping_disconnect(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(b'fixture-satellite',b);self.assertIn(num(17,61),b)
   self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(3)],[63,17,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
@@ -257,4 +258,21 @@ class Fixture(unittest.TestCase):
    def log_message(self,*args):pass
   server=ThreadingHTTPServer(('127.0.0.1',0),HTTP);thread=threading.Thread(target=server.serve_forever);thread.start();self.addCleanup(server.server_close);self.addCleanup(thread.join,2);self.addCleanup(server.shutdown)
   self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4))+frame(119,text(1,f'http://127.0.0.1:{server.server_port}/chunked.wav')));self.wait_completion();self.assertEqual(self.busbytes,struct.pack('<h',1700)*2000)
+# The web API persists HA ownership as integrations bit 1 plus
+# voice_pipeline_mode; it never writes voice_assistant_mode. These fixtures use
+# exactly that saved shape so the daemon is tested against the real contract.
+API_HA_CONFIG={'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','esphome_noise_key':'','integrations':21,'voice_pipeline_mode':'home-assistant','voice_pipeline_previous_mode':'local'}
+class ApiSavedHomeAssistant(Daemon):
+ config_fields=API_HA_CONFIG
+ def test_api_saved_ha_selection_starts_wake_turn(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  time.sleep(.1);a.wake(4000);t,b=receive(self.s);self.assertEqual(t,90,'API-saved HA mode must let a wake word start a satellite run');self.assertIn(num(1,1),b)
+class ApiSavedLocalMode(Daemon):
+ config_fields=dict(API_HA_CONFIG,integrations=20,voice_pipeline_mode='local')
+ def test_api_saved_local_mode_never_starts_turn(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  time.sleep(.1);a.wake(4000);self.s.settimeout(.3)
+  with self.assertRaises(TimeoutError):receive(self.s)
 if __name__=='__main__':unittest.main()
