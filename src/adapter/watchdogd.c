@@ -115,6 +115,11 @@ struct supervised {
        re-armed when the mode is selected again rather than waiting for a
        daemon that may already have died to answer first. */
     int installed;
+    /* Skipped because its voice mode was not selected. Selecting the mode
+       while this watchdog runs is the owner asking for the service, so it
+       is armed then even if it was never seen answering (booted in the
+       other mode). */
+    int deselected;
     int reported_give_up;
     unsigned int total_restarts;
 };
@@ -533,8 +538,10 @@ int main(int argc, char **argv)
                the API on purpose. Drop its supervision latch and failure
                history, so it is neither restarted now nor treated as a crash
                when its mode is selected again and the API starts it. */
-            if (wanted(s->desc, mode) && s->installed && !s->seen_healthy) {
+            if (wanted(s->desc, mode) && (s->installed || s->deselected) &&
+                !s->seen_healthy) {
                 s->seen_healthy = 1;
+                s->deselected = 0;
                 s->last_healthy = 1;
                 s->reported_give_up = 0;
                 le_watchdog_service_init(&s->state, now);
@@ -550,6 +557,7 @@ int main(int argc, char **argv)
                     le_log_info("watchdog: not supervising %s; its voice "
                                 "mode is not selected", s->desc->name);
                 s->seen_healthy = 0;
+                s->deselected = 1;
                 s->healthy = 0;
                 s->last_healthy = 1;
                 s->reported_give_up = 0;

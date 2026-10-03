@@ -171,4 +171,29 @@ if [ "$(starts local)" -le "$local_before" ]; then
     cat "$dir/wd6.log"; exit 1
 fi
 echo "  reselected voice service is supervised again: ok"
+
+# --- a service deselected when the watchdog started is armed on selection --
+# Booting in HA mode means local voice is never probed. When the owner then
+# selects local and the daemon exits before the first probe, the watchdog
+# must still restart it rather than wait for an answer that never comes.
+printf '%s\n' "$ha_cfg" > "$config"
+[ -f "$dir/local.pid" ] && sh "$dir/local.init" stop
+[ -S "$dir/ha.sock" ] || sh "$dir/ha.init" start
+local_before=$(starts local)
+(
+    sleep 3
+    printf '%s\n' "$local_cfg" > "$config"
+    sh "$dir/ha.init" stop
+) &
+"$WD" --passes 20 --interval 1 --config "$config" $services >"$dir/wd7.log" 2>&1
+wait
+if [ "$(starts local)" -le "$local_before" ]; then
+    echo "FAIL: watchdog never armed a voice service first selected after it started"
+    cat "$dir/wd7.log"; exit 1
+fi
+if [ -f "$dir/ha.pid" ]; then
+    echo "FAIL: watchdog restarted the deselected satellite"
+    cat "$dir/wd7.log"; exit 1
+fi
+echo "  service selected after watchdog start is armed: ok"
 echo "watchdog voice-mode ownership: PASS"
