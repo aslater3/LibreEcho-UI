@@ -661,17 +661,19 @@ int json_int_span(const char *s, size_t n, int *out)
 {
     struct json_cursor c;
     char *end;
-    long value;
+    long long value;
 
     if (!s || !out || span_cursor(&c, s, n) || c.s[c.i] == '"')
         return -1;
     errno = 0;
-    value = strtol(s + c.i, &end, 10);
+    /* strtoll, not strtol: long is 32-bit on the ARM target, where the
+     * int range check below would be always false (-Werror=type-limits). */
+    value = strtoll(s + c.i, &end, 10);
     /* strtol would accept a fraction, an exponent, a leading plus or any
      * trailing token; parse_value() accepts none of those, so it is what
      * decides whether the span is a whole JSON integer and nothing more. */
-    if (end == s + c.i || errno == ERANGE || value > 2147483647L ||
-        value < -2147483648L || !span_is_single_value(s, n, c.i))
+    if (end == s + c.i || errno == ERANGE || value > INT_MAX ||
+        value < INT_MIN || !span_is_single_value(s, n, c.i))
         return -1;
     *out = (int)value;
     return 1;
