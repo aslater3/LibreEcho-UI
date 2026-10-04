@@ -48,7 +48,7 @@ CPP="-D_POSIX_C_SOURCE=200809L -Isrc/adapter -Isrc -DLE_TLS_AVAILABLE=0 -DLE_DEV
 CPP="$CPP -DLE_OS_VERSION=\"$OS_VERSION\" -DLE_SOURCE_COMMIT=\"test\" -DLE_SOURCE_DIRTY=\"test\" -DLE_SOURCE_DIGEST=\"test\""
 
 ND_SOURCES="src/adapter/networkd.c src/adapter/network_health.c src/adapter/gateway_probe.c src/adapter/adapter_server.c src/log.c src/adapter/network_recovery.c"
-WEB_SOURCES="src/main.c src/http_server.c src/inherited_fds.c src/tls_stub.c src/api.c src/update_identity.c src/diagnostic_export.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c"
+WEB_SOURCES="src/main.c src/http_server.c src/inherited_fds.c src/tls_stub.c src/api.c src/provision.c src/update_identity.c src/diagnostic_export.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c"
 
 echo "== building private recovery-backend binaries =="
 cd "$ROOT" || exit 1
