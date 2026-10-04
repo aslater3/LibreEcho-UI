@@ -35,6 +35,14 @@ struct api_response{int status;char type[64];char body[LE_API_RESPONSE_BYTES];si
 #define LE_UPDATE_STAGE_MARGIN_BYTES (4u * 1024u * 1024u)
 struct api_context{struct le_backend*backend;struct le_event_bus events;struct le_auth_db auth;int dev_controls,allow_insecure_lan,setup_completed,setup_failure_stage,privacy_local_only,privacy_audio_retention,privacy_telemetry,privacy_crash_reports,privacy_log_hours,privacy_audio_retention_hours,privacy_audio_max_mb,net_ssh,net_api_lan;unsigned integrations,auth_failures;time_t auth_window_started,auth_blocked_until;char privacy_audio_mode[8],privacy_audio_remote_url[256];/* Button press cues, on by default: the buttons are on top of the device where the ring cannot be seen, so silence reads as a dead button. *//* Action button: which behaviour, and how bright its ring flash is. Only one behaviour is implemented; the rest are placeholders so the choice is visible before the wiring exists. */int button_mute_brightness;char button_action[24];/* Sounds the action button rotates through, comma-separated, in play order. Curated in the UI so a press walks only what is switched on. */char button_action_sounds[192];int button_action_brightness;int button_tones;const char*buttond_status_path;char button_short[32],button_long[32],auth_token[192],allowed_origin[256],csrf_token[65],config_path[384],users_path[384];char voice_pipeline_mode[24],voice_pipeline_previous_mode[24],stt_wyoming_uri[320],stt_wyoming_model[128],tts_wyoming_uri[320],tts_wyoming_voice[128];int voice_pipeline_previous_valid,stt_max_utterance_ms,stt_end_silence_ms,stt_vad_floor_rms;char timezone[64];int boot_estimate_seconds;int feature_simulation;int feature_https,feature_acoustic_events,https_port;char https_cert[384];
 char configured_wake_word[LE_TEXT];int configured_wake_sensitivity,configured_wake_valid;
+/* First-boot provisioning, applied before the listener starts and finished
+   from the HTTP server's tick. provision_started is the deadline anchor for
+   the association window, in whole seconds. */
+time_t provision_started;int provision_pending;
+/* The SSID the provisioned hand-off asked for. Completion is checked against
+   this, not merely against "connected": a device that was already associated
+   to some other network has not proved that this hand-off worked. */
+char provision_ssid[LE_TEXT];
 /* Empty means "use the board's address". Applied at boot, not live: changing a
    MAC on a running interface drops the link and the connection carrying the
    request that changed it. */
@@ -58,6 +66,23 @@ void api_set_https_active(struct api_context*,int);
 int api_init(struct api_context*,struct le_backend*,int,int,const char*,const char*,const char*,const char*,const char*);int api_apply_persisted_configuration(struct api_context*,char*,size_t);int api_persist_configuration(struct api_context*);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
 int api_diagnostics_kernel_authorize(struct api_context*,const struct api_request*,struct api_response*);int api_baby_monitor_stream_authorize(struct api_context*,const struct api_request*,struct api_response*,int*,int*,int*,int*,int*);
 size_t le_update_max_upload_bytes(void);
+/*
+ * The setup page's own field rules, shared with the provisioning path so a
+ * delivered document is validated by the same code as a wizard submission.
+ * There is one definition of each, and it is the one the wizard hits.
+ */
+int api_valid_hostname(const char*);
+int api_valid_wifi_security(const char*);
+/* The sole completion authority, written by the setup transaction and by a
+   verified provisioned apply. Returns 0 when the marker is present. */
+int api_write_setup_marker(const struct api_context*,int);
+/* Apply <config dir>/provision.json if it is present: 1 when a document was
+   found, 0 when there was none, -1 when one was found but could not be
+   applied. Called once, before the listener starts. */
+int api_provision_start(struct api_context*);
+/* Finish a provisioned apply from the HTTP server's tick: completes setup only
+   once networkd reports an association with an address. */
+void api_provision_poll(struct api_context*);
 int api_update_upload_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_update_fetch_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_update_channel_authorize(struct api_context*,const struct api_request*,struct api_response*,char*,size_t);
