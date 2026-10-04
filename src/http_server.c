@@ -453,6 +453,9 @@ c[i].buf[c[i].used]=0;
 process(&c[i],o,api,ls,tls_ls,relay_ls,c,max);
 }}if(time(0)!=last_tick){last_tick=time(0);
 le_backend_tick(api->backend);
+/* The once-a-second tick is where a pending provisioned apply finishes: the
+   association is a wait, and the device's own web UI must answer during it. */
+api_provision_poll(api);
 }le_feature_provenance_tick();
 le_authority_provenance_tick();
 }for(i=0;

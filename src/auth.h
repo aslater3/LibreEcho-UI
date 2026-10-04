@@ -65,7 +65,18 @@ int le_auth_save_issued_session(struct le_auth_db *db, const char *path,
 void le_auth_load_sessions(struct le_auth_db *db, const char *path);
 int le_auth_add_user(struct le_auth_db *db, const char *path,
                      const char *username, const char *password);
+/* Whether a delivered line is one this daemon would itself have written.
+   Checked before an account is adopted, so a malformed document is refused
+   whole rather than applied and then found wanting. */
+int le_auth_users_line_valid(const char *line);
+int le_auth_add_users_line(struct le_auth_db *db, const char *path,
+                           const char *line);
 int le_auth_remove_user(struct le_auth_db *db, const char *path,
                         const char *username);
 
+/*
+ * The longest line write_users_file() can produce: a folded username, the
+ * method, a 64-character salt and a 64-character digest, plus separators.
+ */
+#define LE_AUTH_USERS_LINE_MAX 192
 #endif

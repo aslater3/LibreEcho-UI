@@ -400,7 +400,9 @@ Browser: displays scan results
 ├── web-config.json          # Canonical non-secret device configuration
 ├── agent.json               # Non-secret assistant provider/model/prompt
 ├── wpa_supplicant.conf      # Wi-Fi credentials (0600, excluded from export)
-└── users                    # Local authentication database (0600)
+├── users                    # Local authentication database (0600)
+├── provision.json           # Installer's one-shot document (absent after one boot)
+└── provision.result         # Outcome codes for that document (0600, no secrets)
 
 /data/libreecho/secrets/
 └── openai-codex.json        # OAuth credentials (0600; never exported)
@@ -446,6 +448,58 @@ not presented as usable Wi-Fi unless the kernel interface is registered. The
 CSRF-protected compatibility action atomically writes the exact one-shot marker
 `/data/libreecho/config/vendor-import-force-next-boot`; Platform consumes it on
 the next boot and labels that import `forced-unverified`.
+
+## First-Boot Provisioning
+
+The web installer collects the setup page's fields on the host and writes one
+document, `/data/libreecho/config/provision.json`, during the install. On the
+first boot after that install, `libreecho-web` applies it itself, through the
+same validators, writers and adapter calls the on-device wizard uses. There is
+no second configuration system, no second password-hashing scheme, and no
+hand-written `wpa_supplicant.conf`.
+
+The order of operations in `src/provision.c` is the contract:
+
+1. `provision_read()` opens the file `O_NOFOLLOW`, requires a regular file owned
+   by the caller at mode 0600 and at most 4096 bytes, and **unlinks it
+   immediately** — on every path, including the rejections. It carries a
+   plaintext Wi-Fi passphrase, so it must not survive having been read.
+2. `document_parse()` validates the whole document first. Any unknown key, any
+   repeated key and any field outside the setup page's own limits rejects the
+   document whole, and nothing is applied. `json_object_members()` exists for
+   this: the ordinary `json_get_*` lookups are substring searches, so they
+   cannot tell an unknown key from a known one, or one member's value from an
+   identically named member of a nested object.
+3. `provision_apply()` creates the account only when the users file does not
+   exist — the same rule as `/api/v1/auth/bootstrap`, so an account the owner
+   already has is never reset — merges the settings through the canonical
+   persist path (a hostname sets `hostname_persisted`, and AirPlay 2 is enabled
+   as setup always does), and hands Wi-Fi to the backend through the same
+   `le_connect_wifi()` call `/api/v1/setup` makes. networkd and wpa_supplicant
+   serialise the credentials. Secret buffers are zeroed on every path out.
+4. `write_status()` records `result`, `error`, `admin`, `wifi` and `settings` as
+   codes only. No document value reaches that file, so there is nothing in it
+   for a later reader to leak.
+
+The apply runs in the daemon process itself, before the listener opens — the
+same place and with the same bounded adapter calls as the existing
+persisted-settings restore that follows it. It has to be this process: the
+setup-complete marker is a claim about a working network, and only the process
+that issued the hand-off can later observe the backend joining the provisioned
+SSID and taking an address.
+
+Only the *wait* is deferred. `api_provision_poll()` runs from the HTTP server's
+one-second tick and writes the `schema=1` marker through the same writer the
+wizard uses, but only once the backend reports the provisioned SSID, state
+`connected`, and an address. A device that was already joined to some other
+network has proved nothing about this one. If the bounded window
+(`LIBREECHO_PROVISION_ASSOC_TIMEOUT_SECONDS`, 180s by default) closes first,
+the result is `partial` / `assoc-timeout` / `wifi=failed`, the account and
+settings that did apply stay applied, and the setup wizard remains available.
+So does it for a document with no Wi-Fi, a refused hand-off, a rejected
+document, or a device whose owner already completed setup: in each case the
+wizard skips account bootstrap because a user exists. There is no HTTP surface
+here — nothing new in `web/openapi.json` or `docs/API.md`.
 
 ## Process Dependencies
 
