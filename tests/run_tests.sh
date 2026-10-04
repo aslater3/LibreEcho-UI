@@ -334,6 +334,9 @@ make test-lived
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
 sh tests/test_setup_first_run.sh
+# First-boot provisioning drives the real daemon over loopback with the mock
+# backend and owns its own ports, so it runs outside the shared server above.
+python3 tests/test_provision_first_boot.py
 AGENT_SOCKET="$PWD/build/test-agent.sock"
 # Set the parent environment so the web daemon uses this fixture too, rather
 # than the production socket or an inherited socket from another test run.
