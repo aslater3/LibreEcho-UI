@@ -115,4 +115,26 @@ sh -c 'RUNTIME_ROOT=$1; CONFIG=$2; mount_support() { :; }; . "$3"; configure_ser
     sh "$work/root" "$work/config-bad.json" "$work/function.sh" || true
 [ ! -f "$generated" ] || { echo "an unsafe service name was accepted" >&2; exit 1; }
 
+# #218: a unit with no display name must still announce a name of its own.
+# The browser installer persists only "hostname", and the image has no
+# /etc/hostname, so the old fallback left every such unit on "LibreEcho".
+run_name() {
+    rm -f "$generated"
+    sh -c 'RUNTIME_ROOT=$1; CONFIG=$2; AIRPLAY_MAC_FILE=$4; mount_support() { :; }; . "$3"; configure_service_name' \
+        sh "$work/root" "$1" "$work/function.sh" "$work/mac" 2>/dev/null || true
+    sed -n 's/^[[:space:]]*name = "\([^/"]*\)";/\1/p' "$generated" 2>/dev/null
+}
+printf '02:00:00:00:12:ab\n' >"$work/mac"
+printf '{"hostname": "kitchen-echo", "volume": 64}\n' >"$work/config-host.json"
+[ "$(run_name "$work/config-host.json")" = "kitchen-echo" ] || {
+    echo "the configured host name was not announced when no display name is set" >&2; exit 1; }
+printf '{"device_name": "Kitchen", "hostname": "kitchen-echo"}\n' >"$work/config-both.json"
+[ "$(run_name "$work/config-both.json")" = "Kitchen" ] || {
+    echo "the display name no longer takes precedence over the host name" >&2; exit 1; }
+for default in libreecho LibreEcho none; do
+    printf '{"hostname": "%s"}\n' "$default" >"$work/config-default.json"
+    [ "$(run_name "$work/config-default.json")" = "LibreEcho 12AB" ] || {
+        echo "the shared default \"$default\" was announced without a unit-unique suffix" >&2; exit 1; }
+done
+
 printf '%s\n' 'AirPlay external shared mDNS dependency: ok'
