@@ -160,13 +160,33 @@ configure_service_name() {
     [ -f "$target" ] || return 0
     grep -q " $target " /proc/mounts 2>/dev/null && return 0
 
+    # The configured display name, then the configured host name, then the
+    # kernel's. Devices set up without a display name (the browser installer
+    # writes only "hostname", and /etc/hostname does not exist on the image)
+    # otherwise kept the payload's shared "LibreEcho" and collided (#218).
     service_name=
     if [ -r "$CONFIG" ]; then
         service_name=$(sed -n \
             's/.*"device_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
             "$CONFIG" 2>/dev/null | head -n 1)
+        [ -n "$service_name" ] || service_name=$(sed -n \
+            's/.*"hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$CONFIG" 2>/dev/null | head -n 1)
     fi
     [ -n "$service_name" ] || service_name=$(cat /etc/hostname 2>/dev/null)
+    [ -n "$service_name" ] || service_name=$(hostname 2>/dev/null)
+    # Every unit ships the same defaults; a default is never unique on a LAN,
+    # so qualify it with the end of this unit's own Wi-Fi address.
+    case "$service_name" in
+        ''|[Ll]ibre[Ee]cho|none|localhost)
+            suffix=$(tr -d ':\n' < "${AIRPLAY_MAC_FILE:-/sys/class/net/wlan0/address}" 2>/dev/null |
+                tail -c 4 | tr 'a-f' 'A-F')
+            case "$suffix" in
+                [0-9A-F][0-9A-F][0-9A-F][0-9A-F]) service_name="LibreEcho $suffix" ;;
+                *) service_name= ;;
+            esac
+            ;;
+    esac
     [ -n "$service_name" ] || return 0
     # The name is announced on the LAN, so keep it to plain name characters.
     case "$service_name" in
