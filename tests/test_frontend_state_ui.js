@@ -14,7 +14,7 @@ function boot(){
 async function busyCleanup(){
  const {context:c,node}=boot();let puts=0;
  c.api=async(path,opt={})=>{if(opt.method==='PUT'){puts++;return {}}throw new Error('refresh failed')};
- await c.setLiveProvider(true,{});
+ await c.setLiveProvider(true,{provider:'openai-codex',authenticated:true});
  assert.strictEqual(c.state.busy,false,'rejected integrations refresh must release busy');
  assert.strictEqual(puts,1,'save should complete before the refresh fails');
  for(const id of ['#save-privacy','#save-retention']){

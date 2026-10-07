@@ -202,7 +202,7 @@ async function setLiveProvider(enabled,assistant) {
   if(state.busy)return;
   if(enabled&&!chatgptAccount(assistant).signedIn) {
     toast('Sign in to ChatGPT before enabling GPT-Live',true);
-    await integrationsPage();
+    try { await integrationsPage(); } catch(error) { toast(error.message,true); }
     return;
   }
   setBusy(true);
@@ -238,7 +238,7 @@ async function setAssistantProvider(provider,enabled,pipeline,assistant) {
   if(state.busy)return;
   if(enabled&&provider==='openai-codex'&&!chatgptAccount(assistant).signedIn) {
     toast('Sign in to ChatGPT before enabling this assistant',true);
-    await integrationsPage();
+    try { await integrationsPage(); } catch(error) { toast(error.message,true); }
     return;
   }
   setBusy(true);
