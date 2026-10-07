@@ -2933,7 +2933,7 @@
      "System"
     ],
     "summary": "Read OS, NTP and PMIC RTC state",
-    "description": "Reports whether network time has synchronized, the configured public peers, the last successful synchronization, and whether UTC was persisted to the hardware RTC.",
+    "description": "Reports whether network time has synchronized, the configured public peers, the last successful synchronization, and whether UTC was persisted to the hardware RTC. The legacy boot_estimate_seconds field is always null: no end-to-end restart measurement is available. Daemon-start uptime is not a restart duration; clients must show indeterminate reconnect progress rather than a countdown.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
