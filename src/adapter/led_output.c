@@ -118,6 +118,18 @@ void led_output_process(const struct led_output_calibration *cal,
                         struct led_rgb out[LE_LED_PIXELS],
                         struct led_output_diag *diag)
 {
+    led_output_process_transfer(cal, state, logical, brightness,
+                                LE_OUTPUT_TRANSFER_GAMMA, out, diag);
+}
+
+void led_output_process_transfer(const struct led_output_calibration *cal,
+                                 struct led_output_state *state,
+                                 const struct led_rgb logical[LE_LED_PIXELS],
+                                 unsigned int brightness,
+                                 enum led_output_transfer transfer,
+                                 struct led_rgb out[LE_LED_PIXELS],
+                                 struct led_output_diag *diag)
+{
     struct led_output_diag local;
     unsigned int raw_load;
     size_t i;
@@ -153,9 +165,15 @@ void led_output_process(const struct led_output_calibration *cal,
         b = le_apply_gain(b, cal->gain_b);
 
         /* 3. perceptual transfer, applied once */
-        out[i].r = led_output_gamma(r);
-        out[i].g = led_output_gamma(g);
-        out[i].b = led_output_gamma(b);
+        if (transfer == LE_OUTPUT_TRANSFER_LINEAR) {
+            out[i].r = r;
+            out[i].g = g;
+            out[i].b = b;
+        } else {
+            out[i].r = led_output_gamma(r);
+            out[i].g = led_output_gamma(g);
+            out[i].b = led_output_gamma(b);
+        }
     }
 
     /* 4. weighted whole-frame budget */
