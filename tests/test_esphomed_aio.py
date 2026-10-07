@@ -39,7 +39,7 @@ class PinnedFixture(Fixture):
   unsubscribe=client.subscribe_voice_assistant(handle_start=start,handle_stop=stop,handle_audio=capture,handle_announcement_finished=done)
   a=self.adapters['wake'];a.wait_streams()
   for i in range(0,6400,320):a.samples(i)
-  await asyncio.sleep(.1);a.wake(4000);await self.wait_for(lambda:len(starts)==1 and audio,'wake and indexed API audio');self.assertEqual(starts[0],('',3,'Alexa'));self.assertEqual(len(audio[0][0]),640);self.assertEqual(audio[0][0][:2],struct.pack('<h',800));self.assertFalse(audio[0][1])
+  await asyncio.sleep(.1);a.wake(4000);await self.wait_for(lambda:len(starts)==1 and audio,'wake and indexed API audio');self.assertEqual(starts[0],('',1,'Alexa'),'device-side wake: USE_VAD only, never USE_WAKE_WORD');self.assertEqual(len(audio[0][0]),640);self.assertEqual(audio[0][0][:2],struct.pack('<h',800));self.assertFalse(audio[0][1])
   for kind in VT:
    client.send_voice_assistant_timer_event(kind,'pinned-timer','tea',60,45,True)
    await self.wait_for(lambda:len([r for r in self.adapters['timer'].calls if r['cmd']=='remote_event'])==int(kind)+1,'ordered timer event')
