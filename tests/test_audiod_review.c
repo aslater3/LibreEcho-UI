@@ -578,6 +578,43 @@ static void test_airplay_restart_recovery(void)
     require_condition(restarted.volume == 27, "acknowledged callback not replayed");
     airplay_restore_poll(&restarted);
     require_condition(restarted.airplay_session[0], "live controller does not end session");
+    /* A busy controller fills its accept queue (EAGAIN). That is not loss:
+     * neither the session nor the media acknowledgment may be revoked. */
+    {
+        struct sockaddr_un busy_address;
+        int queued[64], queued_count = 0, saturated = 0;
+        memset(&busy_address, 0, sizeof(busy_address));
+        busy_address.sun_family = AF_UNIX;
+        require_condition(strlen(controller_path) < sizeof(busy_address.sun_path), "short controller path");
+        memcpy(busy_address.sun_path, controller_path, strlen(controller_path) + 1);
+        while (queued_count < 64) {
+            int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+            require_condition(fd >= 0, "backlog fixture socket");
+            if (connect(fd, (struct sockaddr *)&busy_address, sizeof(busy_address)) < 0) {
+                saturated = errno == EAGAIN || errno == EWOULDBLOCK;
+                close(fd);
+                break;
+            }
+            queued[queued_count++] = fd;
+        }
+        require_condition(saturated, "controller accept queue saturated");
+        file = fopen(LE_AIRPLAY_MASTER_ACK_PATH, "w");
+        require_condition(file != NULL && fclose(file) == 0, "busy ack fixture");
+        restarted.airplay_controller_missing_since_ms = 0;
+        airplay_restore_poll(&restarted);
+        require_condition(restarted.airplay_session[0] &&
+                          restarted.airplay_controller_missing_since_ms == 0 &&
+                          access(LE_AIRPLAY_MASTER_ACK_PATH, F_OK) == 0,
+                          "busy controller keeps AirPlay session and media admission");
+        while (queued_count > 0) close(queued[--queued_count]);
+        {
+            int drained, flags = fcntl(controller, F_GETFL, 0);
+            require_condition(flags >= 0 && fcntl(controller, F_SETFL, flags | O_NONBLOCK) == 0,
+                              "nonblocking drain");
+            while ((drained = accept(controller, NULL, NULL)) >= 0) close(drained);
+            require_condition(fcntl(controller, F_SETFL, flags) == 0, "restore listener flags");
+        }
+    }
     /* A single failed controller connect can coincide with a live callback.
      * It must not permanently tombstone this still-active marker. */
     file = fopen(LE_AIRPLAY_MASTER_ACK_PATH, "w");

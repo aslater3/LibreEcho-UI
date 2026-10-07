@@ -258,6 +258,7 @@ sh tests/test_home_assistant_discovery.sh
 sh tests/test_airplay_setup_persistence.sh
 sh tests/test_airplay_mount_failure.sh
 python3 tests/test_airplay_premounted_runtime.py
+python3 tests/test_airplayd_accept_backlog.py
 python3 tests/test_wyoming_discovery_port.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \

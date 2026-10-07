@@ -27,7 +27,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -39,6 +41,8 @@
 #define AIRPLAY_METADATA_FIELD_MAX 192
 #define AIRPLAY_METADATA_AP2_PLIST_MAX 16384
 #define AIRPLAY_METADATA_READ_MAX 16
+#define AIRPLAY_ACCEPT_BATCH_MAX 16
+#define AIRPLAY_LISTEN_BACKLOG 16
 
 struct airplay_metadata_parser {
     char item[AIRPLAY_METADATA_ITEM_MAX + 1];
@@ -1458,6 +1462,17 @@ int main(int argc, char **argv)
         perror("airplayd: listen");
         return 1;
     }
+    /* Nonblocking so the batched accept loop stops when the queue is empty,
+     * and a deeper queue than the shared default: start-up bursts (web UI,
+     * watchdog, audiod liveness probe) must not overflow it. */
+    {
+        int flags = fcntl(ctx.listener, F_GETFL, 0);
+        if (flags < 0 || fcntl(ctx.listener, F_SETFL, flags | O_NONBLOCK) < 0 ||
+            listen(ctx.listener, AIRPLAY_LISTEN_BACKLOG) < 0) {
+            perror("airplayd: listener setup");
+            return 1;
+        }
+    }
     ctx.engine_pid = spawn_engine(&ctx);
     if (ctx.engine_pid < 0 ||
         !wait_for_runtime_file(&ctx, "/run/libreecho-audio/media.pcm", 30) ||
@@ -1481,7 +1496,7 @@ int main(int argc, char **argv)
         struct pollfd pfd[2];
         nfds_t descriptors = 1;
         int poll_result;
-        int client;
+        int client, served;
         if (reap(&ctx) && ctx.enabled) {
             /* A child can exit after enable succeeded, most notably when an
              * ALSA stream is opened.  Clear runtime state and reap the
@@ -1528,10 +1543,20 @@ int main(int argc, char **argv)
             metadata_fifo_close(&ctx);
         if (!(pfd[0].revents & POLLIN))
             continue;
-        client = le_adapter_accept(ctx.listener);
-        if (client >= 0) {
+        /* Serve every queued request on this wake-up (bounded). audiod uses
+         * this socket as its liveness probe; leaving a backlog lets the
+         * accept queue fill and look like controller loss to the probe. */
+        for (served = 0; served < AIRPLAY_ACCEPT_BATCH_MAX; ++served) {
+            struct timeval receive_timeout = { 0, 200000 };
             char message[INPUT_MAX], response[INPUT_MAX];
-            ssize_t n = read(client, message, sizeof(message) - 1);
+            ssize_t n;
+            client = le_adapter_accept(ctx.listener);
+            if (client < 0)
+                break;
+            /* A connected but silent client cannot stall the loop. */
+            (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                             &receive_timeout, sizeof(receive_timeout));
+            n = read(client, message, sizeof(message) - 1);
             if (n > 0) {
                 int length;
                 message[n] = '\0';
