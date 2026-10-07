@@ -95,6 +95,55 @@ static int all_dark(const struct daemon_context *ctx)
     return 1;
 }
 
+static void write_state_file(const char *text)
+{
+    FILE *f = fopen(STATE_PATH, "w");
+    require_condition(f != NULL, "the test state file must be writable");
+    fputs(text, f);
+    fclose(f);
+}
+
+/* Boot-time load of a given on-disk state, as main() does it. */
+static void boot_with_state(struct led_state *state, const char *text)
+{
+    write_state_file(text);
+    memset(state, 0, sizeof(*state));
+    default_state(state);
+    load_state(state);
+    finish_idle_policy_upgrade(state);
+}
+
+/* The idle indicator: exactly the two front-centre pixels lit green, at equal
+   level, nothing else.  Pixels 10 and 11 were identified on hardware as the
+   front centre of the ring. */
+static int is_indicator_pixel(size_t i)
+{
+    return i == 10U || i == 11U;
+}
+
+static int indicator_only(const struct daemon_context *ctx)
+{
+    size_t i;
+
+    if (ctx->rendered_pixels[10].g != ctx->rendered_pixels[11].g)
+        return 0;
+    for (i = 0; i < RING_PIXELS; i++) {
+        if (!is_indicator_pixel(i))
+            continue;
+        if (ctx->rendered_pixels[i].g == 0U ||
+            ctx->rendered_pixels[i].r != 0U || ctx->rendered_pixels[i].b != 0U)
+            return 0;
+    }
+    for (i = 0; i < RING_PIXELS; i++) {
+        if (is_indicator_pixel(i))
+            continue;
+        if (ctx->rendered_pixels[i].r || ctx->rendered_pixels[i].g ||
+            ctx->rendered_pixels[i].b)
+            return 0;
+    }
+    return 1;
+}
+
 /* A controlled reset: default state, stub hardware, visualizer switchable. */
 static void reset(struct daemon_context *ctx)
 {
@@ -148,12 +197,32 @@ int main(void)
     double t0;
     unsigned int peak_a, peak_b;
 
-    /* ---- 1. Default idle is dark; an event lights and returns to base. --- */
+    /* ---- 1. Default idle is the dim green front indicator; an event lights
+       the ring and returns to that base.  Off stays a dark base. ------------ */
     reset(&ctx);
-    require_condition(ctx.state.idle_mode == IDLE_MODE_OFF,
-                      "idle must default to off");
+    require_condition(ctx.state.idle_mode == IDLE_MODE_INDICATOR,
+                      "idle must default to the single-pixel indicator");
     apply_base_state(&ctx, 0.0);
-    require_condition(all_dark(&ctx), "default idle frame must be dark");
+    require_condition(indicator_only(&ctx),
+                      "default idle frame must be the green front indicator");
+
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+               "{\"name\":\"solid\",\"r\":255,\"g\":0,\"b\":0,"
+               "\"brightness\":100,\"repeats\":0,\"owner\":\"evt\"}}");
+    require_condition(response_ok() && ctx.pattern_active,
+                      "an event pattern must take the ring");
+    require_condition(!indicator_only(&ctx), "event frame must replace the idle base");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+               "{\"name\":\"stop\",\"owner\":\"evt\"}}");
+    require_condition(response_ok() && !ctx.pattern_active,
+                      "stopping the event must release the ring");
+    require_condition(indicator_only(&ctx),
+                      "the ring must return to the indicator base after an event");
+
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_OFF;
+    apply_base_state(&ctx, 0.0);
+    require_condition(all_dark(&ctx), "off idle frame must be dark");
 
     fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
                "{\"name\":\"solid\",\"r\":255,\"g\":0,\"b\":0,"
@@ -168,18 +237,69 @@ int main(void)
     require_condition(all_dark(&ctx),
                       "the ring must return to the dark base after an event");
 
-    /* ---- 2. Idle indicator is one dim pixel, never above its ceiling. --- */
+    /* ---- 2. Idle indicator is the two front-centre pixels, green at 20%,
+       never above the ceiling. -------------------------------------------- */
     reset(&ctx);
     ctx.state.idle_mode = IDLE_MODE_INDICATOR;
     apply_base_state(&ctx, 0.0);
-    require_condition(ctx.rendered_pixels[0].r >= 1U,
-                      "the indicator pixel must be visible");
-    require_condition(ctx.rendered_pixels[IDLE_INDICATOR_PIXEL].r <=
+    require_condition(IDLE_INDICATOR_BRIGHTNESS == 20U,
+                      "the idle indicator must be 20% brightness");
+    require_condition(ctx.rendered_pixels[10].g >= 1U &&
+                          ctx.rendered_pixels[11].g >= 1U,
+                      "both indicator pixels must be visible");
+    require_condition(ctx.rendered_pixels[10].g <=
                           (255U * IDLE_INDICATOR_BRIGHTNESS + 50U) / 100U,
                       "indicator must not exceed the requested dim ceiling");
-    for (size_t i = 1; i < RING_PIXELS; i++)
-        require_condition(ctx.rendered_pixels[i].r == 0U,
-                          "only the single front pixel may be lit at idle");
+    require_condition(indicator_only(&ctx),
+                      "only pixels 10 and 11 may be lit, pure green, at idle");
+
+    /* ---- 2b. Upgrading to 0.14 resets every device to the green indicator
+       once, then honours the owner's later choice. ------------------------- */
+    {
+        struct led_state s;
+        static const char *const upgrades[] = {
+            /* 0.13: no idle object; the whole ring was always lit. */
+            "{\"current\":{\"r\":0,\"g\":96,\"b\":255,\"brightness\":60}}",
+            /* 0.14 pre-release with the dark default saved. */
+            "{\"current\":{\"r\":0,\"g\":96,\"b\":255,\"brightness\":60},"
+            "\"idle\":{\"mode\":0}}",
+            /* 0.14 pre-release with always-on saved. */
+            "{\"idle\":{\"mode\":2}}"
+        };
+        size_t k;
+
+        for (k = 0; k < sizeof(upgrades) / sizeof(upgrades[0]); k++) {
+            boot_with_state(&s, upgrades[k]);
+            require_condition(s.idle_mode == IDLE_MODE_INDICATOR,
+                              "an upgraded device must start on the indicator");
+            require_condition(!s.idle_policy_upgraded,
+                              "the upgrade must be persisted on first boot");
+            require_condition(state_file_contains(
+                                  "\"idle\":{\"mode\":1,\"policy\":2}"),
+                              "the upgraded idle policy must be written back");
+            require_condition(s.current.brightness == 60U ||
+                                  k == 2,
+                              "the upgrade must keep the owner's other settings");
+        }
+
+        /* The owner then chooses off (or always) in the UI: kept across boots. */
+        reset(&ctx);
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
+                   "{\"mode\":\"off\"}}");
+        require_condition(response_ok(), "the owner may choose off");
+        require_condition(state_file_contains("\"idle\":{\"mode\":0,\"policy\":2}"),
+                          "an owner choice must be saved under the new policy");
+        memset(&s, 0, sizeof(s));
+        default_state(&s);
+        load_state(&s);
+        finish_idle_policy_upgrade(&s);
+        require_condition(s.idle_mode == IDLE_MODE_OFF,
+                          "a choice made after the upgrade must survive a reboot");
+        boot_with_state(&s, "{\"idle\":{\"mode\":2,\"policy\":2}}");
+        require_condition(s.idle_mode == IDLE_MODE_ALWAYS,
+                          "always-on chosen after the upgrade must survive a reboot");
+        (void)unlink(STATE_PATH);
+    }
 
     /* ---- 3. Night mode caps the actual output, end to end. -------------- */
     reset(&ctx);
@@ -255,7 +375,8 @@ int main(void)
     require_condition(!ctx.sleep_active, "timer expiry must end the sleep light");
     require_condition(ctx.state.sleep_mode == SLEEP_MODE_OFF,
                       "expiry must select off");
-    require_condition(all_dark(&ctx), "expiry must return to the dark base");
+    require_condition(indicator_only(&ctx),
+                      "expiry must return to the default indicator base");
 
     /* ---- 6b. A timed sleep light that expires while persistence fails keeps
        the OFF state owed on disk and retries it (Codex review on d650caf): the

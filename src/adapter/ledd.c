@@ -75,14 +75,26 @@
 #define STARTUP_FRAME_MS 88
 #define NIGHT_POLL_MS 60000
 
-/* Idle base ring modes (#110).  Off is the default so a resting device in a
-   bedroom is dark; events still light the ring and it returns to the base. */
+/* Idle base ring modes (#110).  The indicator is the default: a resting
+   device shows two dim green front-centre pixels, so "powered and listening for the
+   wake word" is distinguishable from a dead device without lighting a room.
+   Events still light the ring and it returns to the base. */
 #define IDLE_MODE_OFF       0
 #define IDLE_MODE_INDICATOR 1
 #define IDLE_MODE_ALWAYS    2
-/* A single very dim white front pixel substitutes for "silently dark". */
-#define IDLE_INDICATOR_BRIGHTNESS 4U
-#define IDLE_INDICATOR_PIXEL 0U
+/* The two pixels either side of the ring's front centre, green at 20%
+   brightness.  Pixel 0 sits one step off centre; pixels 10 and 11 were
+   identified on hardware as the front-centre pair. */
+#define IDLE_INDICATOR_BRIGHTNESS 20U
+#define IDLE_INDICATOR_PIXEL_A 10U
+#define IDLE_INDICATOR_PIXEL_B 11U
+#define IDLE_INDICATOR_GREEN 255U
+/* Version of the idle-ring policy recorded beside the persisted idle mode.
+   A state file without it (0.13, or a 0.14 pre-release that defaulted to a
+   dark ring) predates the single-green-indicator default: the upgrade resets
+   its idle mode to the indicator once and records this version, so every
+   device starts 0.14 the same way and later owner choices are kept. */
+#define IDLE_POLICY_VERSION 2U
 
 /* Sleep-light bounds (#101).  Server-side, not advisory. */
 #define SLEEP_MODE_OFF   0
@@ -134,6 +146,9 @@ struct led_state {
     int night_end_minute;
     /* Idle base ring mode (#110). */
     int idle_mode;
+    /* Not persisted: set by load_state() when a state file predating
+       IDLE_POLICY_VERSION was upgraded and must be written back. */
+    int idle_policy_upgraded;
     /* Sleep light settings (#101); persisted but not automatically active. */
     int sleep_mode;
     unsigned int sleep_brightness;
@@ -1247,9 +1262,9 @@ static void default_state(struct led_state *state)
     state->night_enabled = 0;
     state->night_start_minute = 22 * 60;
     state->night_end_minute = 7 * 60;
-    /* A resting ring is dark by default (#110); the dark idle state is the
-       healthy state and events light it. */
-    state->idle_mode = IDLE_MODE_OFF;
+    /* A resting ring shows the dim green front indicator by default (#110);
+       events light the ring and it returns to the indicator. */
+    state->idle_mode = IDLE_MODE_INDICATOR;
     /* Sleep light defaults: off, a dark-room-deep red at low brightness. */
     state->sleep_mode = SLEEP_MODE_OFF;
     state->sleep_brightness = 8U;
@@ -1336,12 +1351,26 @@ static void load_state(struct led_state *state)
             }
         }
     }
-    if (json_object_find(root, "idle", &object) == 1 &&
-        json_span_is_object(object)) {
-        struct request r = { .args = object, .have_args = 1 };
-        unsigned int v;
-        if (get_arg_unsigned(&r, "mode", &v, IDLE_MODE_ALWAYS) == 0)
-            state->idle_mode = (int)v;
+    {
+        unsigned int mode = (unsigned int)IDLE_MODE_INDICATOR, policy = 0U;
+
+        if (json_object_find(root, "idle", &object) == 1 &&
+            json_span_is_object(object)) {
+            struct request r = { .args = object, .have_args = 1 };
+            unsigned int v;
+            if (get_arg_unsigned(&r, "mode", &v, IDLE_MODE_ALWAYS) == 0)
+                mode = v;
+            if (get_arg_unsigned(&r, "policy", &v, 0xffffU) == 0)
+                policy = v;
+        }
+        if (policy >= IDLE_POLICY_VERSION) {
+            state->idle_mode = (int)mode;
+        } else {
+            /* Upgrade: the stored mode (if any) was chosen under the old
+               always-on or dark default; adopt the green front indicator. */
+            state->idle_mode = IDLE_MODE_INDICATOR;
+            state->idle_policy_upgraded = 1;
+        }
     }
     if (json_object_find(root, "sleep", &object) == 1 &&
         json_span_is_object(object)) {
@@ -1362,6 +1391,23 @@ static void load_state(struct led_state *state)
     }
 }
 
+static int persist_state(const struct led_state *state);
+
+/* Write an upgraded idle policy back once, so the reset happens on the first
+   boot of the new release only.  A failed write is retried on the next boot;
+   the in-memory mode is already the indicator either way. */
+static void finish_idle_policy_upgrade(struct led_state *state)
+{
+    if (!state->idle_policy_upgraded)
+        return;
+    if (persist_state(state) == 0) {
+        state->idle_policy_upgraded = 0;
+        le_log_info("ledd: idle ring reset to the green indicator for this release");
+    } else {
+        le_log_warn("ledd: idle ring upgrade not persisted; will retry next boot");
+    }
+}
+
 static int persist_state(const struct led_state *state)
 {
     /* The persistent config directory exists on a provisioned device, but
@@ -1378,7 +1424,7 @@ static int persist_state(const struct led_state *state)
         "{\"current\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"night\":{\"enabled\":%d,\"start_minute\":%d,\"end_minute\":%d},"
-        "\"idle\":{\"mode\":%d},"
+        "\"idle\":{\"mode\":%d,\"policy\":%u},"
         "\"sleep\":{\"mode\":%d,\"brightness\":%u,\"period_ms\":%u,"
         "\"timer_minutes\":%d,\"restore_on_boot\":%d},"
         "\"profiles\":{",
@@ -1386,9 +1432,9 @@ static int persist_state(const struct led_state *state)
         state->current.brightness, state->boot.r, state->boot.g, state->boot.b,
         state->boot.brightness, state->night_enabled,
         state->night_start_minute, state->night_end_minute,
-        state->idle_mode, state->sleep_mode, state->sleep_brightness,
-        state->sleep_period_ms, state->sleep_timer_minutes,
-        state->sleep_restore_on_boot);
+        state->idle_mode, IDLE_POLICY_VERSION, state->sleep_mode,
+        state->sleep_brightness, state->sleep_period_ms,
+        state->sleep_timer_minutes, state->sleep_restore_on_boot);
     if (n < 0 || (size_t)n >= sizeof(text))
         return -1;
     for (i = 0; i < PROFILE_COUNT; i++) {
@@ -1981,9 +2027,9 @@ static void sleep_tick(struct daemon_context *ctx, double now)
 
 /*
  * The single idle/sleep base renderer (#110, #101).  Every reset path funnels
- * here, so there is one definition of "resting".  Off is the default; the
- * sleep light, when active, is the base owner; night mode caps whichever base
- * is selected rather than replacing it.
+ * here, so there is one definition of "resting".  The dim green front
+ * indicator is the default; the sleep light, when active, is the base owner;
+ * night mode caps whichever base is selected rather than replacing it.
  */
 static void apply_base_state(struct daemon_context *ctx, double now)
 {
@@ -2001,15 +2047,14 @@ static void apply_base_state(struct daemon_context *ctx, double now)
     for (i = 0; i < RING_PIXELS; i++)
         pixels[i] = (struct pixel){0, 0, 0};
     if (ctx->state.idle_mode == IDLE_MODE_INDICATOR) {
-        struct led_rgb white;
-
-        if (led_output_accent(LE_ACCENT_WARM_WHITE, &white))
-            pixels[IDLE_INDICATOR_PIXEL] =
-                (struct pixel){white.r, white.g, white.b};
+        pixels[IDLE_INDICATOR_PIXEL_A] =
+            (struct pixel){0U, IDLE_INDICATOR_GREEN, 0U};
+        pixels[IDLE_INDICATOR_PIXEL_B] =
+            (struct pixel){0U, IDLE_INDICATOR_GREEN, 0U};
         output_pixels(ctx, pixels, IDLE_INDICATOR_BRIGHTNESS);
         return;
     }
-    /* IDLE_MODE_OFF: a dark resting ring is the healthy, intended state. */
+    /* IDLE_MODE_OFF: an explicitly dark resting ring. */
     output_pixels(ctx, pixels, 0U);
 }
 
@@ -3325,6 +3370,7 @@ int main(int argc, char **argv)
 
     default_state(&ctx.state);
     load_state(&ctx.state);
+    finish_idle_policy_upgrade(&ctx.state);
     /* Sleep light persists its settings but starts off unless the owner
        explicitly opted into restoring it.  Boot diagnostics remain higher
        priority: the base layer is the lowest owner. */

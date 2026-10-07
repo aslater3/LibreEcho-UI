@@ -58,7 +58,7 @@ strcpy(m->net.recovery.ssid,"LibreEcho-Setup-MOCK");
 strcpy(m->net.recovery.ap_address,"192.168.4.1");
 m->net.recovery.available=1;m->net.recovery.enabled=1;m->net.recovery.net_configured=1;
 m->net.recovery.auto_timeout_ms=120000;
-m->led.idle_mode=0;
+m->led.idle_mode=1;
 strcpy(m->led.sleep_light.mode,"off");
 m->led.sleep_light.period_ms=6000;
 m->led.output.effective_brightness=m->led.current.brightness;
