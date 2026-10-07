@@ -290,6 +290,17 @@ Returns the unit's unified playback state. `state` is one of `idle`, `playing`,
 identifies the active integration when known. Track metadata is nullable
 because not every sender or future integration supplies it.
 
+When audiod reports an active sleep generator and playback has no named
+integration or real media metadata, `source` is `noise` and `metadata.title`
+is `White Noise`, `Pink Noise`, `Brown Noise`, or `Heartbeat`, taken from the
+active `noise.source` (`noise.colour` for legacy daemons). These are generator
+labels, not sender track metadata. Stopped/expired generators and unavailable
+or unknown noise state do not supply labels. Radio and named integrations,
+real media metadata, and priority audio retain their existing presentation.
+The label is rebuilt from live state on every request, including colour/source
+changes; no noise title is cached. Sleep audio still uses the Audio page's Stop
+control, not `/playback/transport`; all transport flags are false for noise.
+
 ```json
 {
   "ok": true,
