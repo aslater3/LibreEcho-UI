@@ -29,6 +29,55 @@ function assistantProviderPanel(options) {
   </details>`;
 }
 
+function chatgptAccount(a) {
+  /* Local endpoint readiness is not ChatGPT subscription authentication. */
+  const selected=a?.provider==='openai-codex';
+  const signedIn=selected&&Boolean(a.authenticated);
+  const waiting=selected&&a.auth_state==='waiting';
+  return {signedIn,waiting,status:signedIn?'Signed in':waiting?'Waiting for sign-in':selected&&a.auth_state==='error'?'Sign-in failed':'Sign in required'};
+}
+
+function chatgptSignInBlock(a,prefix) {
+  const account=chatgptAccount(a);
+  return `${account.waiting?`<div class="device-code"><span>Enter this code</span><strong>${esc(a.user_code)}</strong><a class="primary-btn action-link" href="${esc(a.verification_url)}" target="_blank" rel="noopener">Open ChatGPT sign-in</a></div>`:''}
+  ${a.provider==='openai-codex'&&a.auth_state==='error'&&a.auth_error?`<p class="error-text">ChatGPT sign-in failed: ${esc(a.auth_error)}</p>`:''}
+  <div class="button-row">
+    ${!account.signedIn&&!account.waiting?action('Connect ChatGPT',prefix+'-auth-start','primary-btn'):''}
+    ${account.waiting?action('Check sign-in',prefix+'-auth-poll','primary-btn'):''}
+    ${account.waiting?action('Cancel sign-in',prefix+'-logout','secondary-btn'):''}
+    ${account.signedIn?action('Disconnect',prefix+'-logout','danger-btn'):''}
+  </div>
+  ${a.provider!=='openai-codex'?'<p class="muted">Connecting selects ChatGPT without enabling it and stops Local LLM. Your local settings are kept.</p>':''}`;
+}
+
+function bindChatgptSignIn(prefix,a) {
+  if($('#'+prefix+'-auth-start'))$('#'+prefix+'-auth-start').onclick=async()=>{
+    if(state.busy)return;
+    if(a.provider==='openai-codex')return assistantAction('/assistant/auth/start','ChatGPT device sign-in started');
+    setBusy(true);
+    try {
+      await api('/assistant',{method:'PUT',body:JSON.stringify({provider:'openai-codex',enabled:false})});
+      await api('/assistant/auth/start',{method:'POST',body:'{}'});
+      toast('ChatGPT device sign-in started');
+    } catch(error) { toast(error.message,true); }
+    finally { setBusy(false); await integrationsPage(); }
+  };
+  if($('#'+prefix+'-auth-poll'))$('#'+prefix+'-auth-poll').onclick=()=>assistantAction('/assistant/auth/poll','Sign-in status checked');
+  if($('#'+prefix+'-logout'))$('#'+prefix+'-logout').onclick=()=>assistantAction('/assistant/logout',chatgptAccount(a).waiting?'Sign-in cancelled':'ChatGPT disconnected');
+}
+
+function scheduleChatgptAuthPoll(a) {
+  clearTimeout(state.timer);
+  if(!chatgptAccount(a).waiting)return;
+  state.timer=setTimeout(async()=>{
+    if(state.page!=='Integrations')return;
+    try {
+      await api('/assistant/auth/poll',{method:'POST',body:'{}'});
+      await integrationsPage();
+    } catch(error) { toast(error.message,true); }
+  },3000);
+}
+
 function assistantTelemetry(a) {
   const latency=Number(a.last_speech_end_to_first_pcm_ms||0);
   return `<dl class="facts">
@@ -94,9 +143,9 @@ function deviceAssistantBody(a,selected) {
         <p class="muted">Uses ChatGPT device login without storing an API key or falling back to metered API billing.</p>
       </div>
     </div>
-    <div class="privacy-callout">Enable this assistant to view or change its ChatGPT sign-in.</div>`;
+    ${chatgptSignInBlock(a,'assistant')}`;
   }
-  const signedIn=Boolean(a.authenticated),waiting=a.auth_state==='waiting';
+  const signedIn=chatgptAccount(a).signedIn;
   return `<div class="assistant-heading">
     <div>
       <span class="source-pill">Subscription</span>
@@ -104,7 +153,7 @@ function deviceAssistantBody(a,selected) {
       <p class="muted">Uses ChatGPT device login without storing an API key or falling back to metered API billing.</p>
     </div>
   </div>
-  ${waiting?`<div class="device-code"><span>Enter this code</span><strong>${esc(a.user_code)}</strong><a class="primary-btn action-link" href="${esc(a.verification_url)}" target="_blank" rel="noopener">Open ChatGPT sign-in</a></div>`:''}
+  ${chatgptSignInBlock(a,'assistant')}
   <div class="settings-grid assistant-settings">
     <div>
       ${field('Provider',a.provider_name||a.provider,'assistant-provider','text','disabled')}
@@ -115,17 +164,12 @@ function deviceAssistantBody(a,selected) {
     </div>
     <div>
       ${assistantTelemetry(a)}
-      <div class="button-row">
-        ${!signedIn&&!waiting?action('Connect ChatGPT','assistant-auth-start','primary-btn'):''}
-        ${waiting?action('Check sign-in','assistant-auth-poll','primary-btn'):''}
-        ${signedIn?action('Disconnect','assistant-logout','danger-btn'):''}
-      </div>
       ${signedIn?`<label class="field"><span>Test prompt</span><input id="assistant-test-text" value="Say hello in one short sentence."></label>${action('Speak test response','assistant-test')}`:''}
     </div>
   </div>`;
 }
 
-function liveAssistantBody(live) {
+function liveAssistantBody(live,a) {
   if(live.unsupported) return unsupported(live.unsupported);
   const session=live.session||{},metrics=live.transport_metrics||{};
   return `<div class="assistant-heading">
@@ -135,6 +179,7 @@ function liveAssistantBody(live) {
       <p class="muted">Full-duplex speech-to-speech over the ChatGPT subscription. Post-AEC audio, including the short RAM-only wake preroll, leaves the device only after a wake starts a conversation.</p>
     </div>
   </div>
+  ${a&&!a.unsupported&&!chatgptAccount(a).signedIn?chatgptSignInBlock(a,'live'):''}
   <div class="settings-grid assistant-settings">
     <div>
       <dl class="facts">
@@ -155,6 +200,11 @@ function liveAssistantBody(live) {
 
 async function setLiveProvider(enabled,assistant) {
   if(state.busy)return;
+  if(enabled&&!chatgptAccount(assistant).signedIn) {
+    toast('Sign in to ChatGPT before enabling GPT-Live',true);
+    await integrationsPage();
+    return;
+  }
   setBusy(true);
   try {
     if(enabled && assistant && assistant.enabled) {
@@ -184,8 +234,13 @@ function clockFormatField(value,id) {
     `</select></label>`;
 }
 
-async function setAssistantProvider(provider,enabled,pipeline) {
+async function setAssistantProvider(provider,enabled,pipeline,assistant) {
   if(state.busy)return;
+  if(enabled&&provider==='openai-codex'&&!chatgptAccount(assistant).signedIn) {
+    toast('Sign in to ChatGPT before enabling this assistant',true);
+    await integrationsPage();
+    return;
+  }
   setBusy(true);
   try {
     if(enabled) {
@@ -222,11 +277,11 @@ async function setAssistantProvider(provider,enabled,pipeline) {
   }
 }
 
-function bindProviderToggle(id,provider,pipeline) {
+function bindProviderToggle(id,provider,pipeline,assistant) {
   const input=$(id),row=input?.closest('.switch-row');
   if(!input)return;
   if(row)row.onclick=event=>event.stopPropagation();
-  input.onchange=()=>setAssistantProvider(provider,input.checked,pipeline);
+  input.onchange=()=>setAssistantProvider(provider,input.checked,pipeline,assistant);
 }
 
 /*
@@ -373,6 +428,7 @@ async function integrationsPage() {
     api('/home-assistant').catch(()=>({}))
   ]);
   if(generation!==state.renderGeneration||page!==state.page)return;
+  clearTimeout(state.timer);
   /*
    * integrationBlurb/integrationStatus come from app.js, which loads first.
    * An integration the image was built without reports installed:false; it is
@@ -401,14 +457,14 @@ async function integrationsPage() {
     const livePanel=assistantProviderPanel({
       title:'GPT-Live',
       description:'Full-duplex speech with your ChatGPT subscription',
-      status:live.unsupported?'Unavailable':liveEnabled?'Enabled':'Disabled',
-      statusOkay:liveEnabled,
+      status:live.unsupported?'Unavailable':'Sign-in status unavailable',
+      statusOkay:false,
       toggleLabel:'Use GPT-Live',
       toggleId:'use-live-provider',
       enabled:liveEnabled,
       body:liveAssistantBody(live),
       open:false,
-      disabled:Boolean(live.unsupported)
+      disabled:true
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${unsupported(a.unsupported)}${livePanel}</section>
@@ -422,7 +478,8 @@ async function integrationsPage() {
     const deviceEnabled=deviceSelected&&Boolean(a.enabled);
     const localConfigured=Boolean(a.base_url);
     const localStatus=localEnabled?'Enabled':localSelected?'Disabled':localConfigured?'Configured':'Not configured';
-    const deviceStatus=deviceEnabled?(a.authenticated?'Enabled':'Sign-in required'):deviceSelected?'Disabled':'Inactive';
+    const account=chatgptAccount(a);
+    const deviceStatus=!account.signedIn?account.status:deviceEnabled?'Enabled':'Disabled';
     const localPanel=assistantProviderPanel({
       title:'Local LLM',
       description:'OpenAI-compatible server on your network',
@@ -449,20 +506,22 @@ async function integrationsPage() {
       toggleId:'use-device-provider',
       enabled:deviceEnabled,
       body:deviceAssistantBody(a,deviceSelected),
-      open:false
+      open:!account.signedIn,
+      disabled:!account.signedIn
     });
     const liveEnabled=!live.unsupported&&Boolean(live.enabled);
     const livePanel=assistantProviderPanel({
       title:'GPT-Live',
       description:'Full-duplex speech with your ChatGPT subscription',
-      status:live.unsupported?'Unavailable':liveEnabled?'Enabled':'Disabled',
-      statusOkay:liveEnabled,
+      status:live.unsupported?'Unavailable':!account.signedIn?account.status:liveEnabled?'Enabled':'Disabled',
+      statusOkay:liveEnabled&&account.signedIn,
       toggleLabel:'Use GPT-Live',
       toggleId:'use-live-provider',
       enabled:liveEnabled,
-      body:liveAssistantBody(live),
-      open:false,
-      disabled:Boolean(live.unsupported)    });
+      body:liveAssistantBody(live,a),
+      open:!live.unsupported&&!account.signedIn,
+      disabled:Boolean(live.unsupported)||!account.signedIn
+    });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}${livePanel}</section>
       ${weatherCard(a)}
@@ -470,8 +529,11 @@ async function integrationsPage() {
     </div>`;
 
     bindProviderToggle('#use-local-provider','openai-compatible',pipeline);
-    bindProviderToggle('#use-device-provider','openai-codex',pipeline);
+    bindProviderToggle('#use-device-provider','openai-codex',pipeline,a);
     bindLiveToggle('#use-live-provider',a);
+    bindChatgptSignIn('assistant',a);
+    if(!live.unsupported)bindChatgptSignIn('live',a);
+    scheduleChatgptAuthPoll(a);
     bindHomeLocation(a);
 
     bindDirty(['#local-base-url','#local-model','#local-clock-format','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
@@ -513,24 +575,12 @@ async function integrationsPage() {
       bindDirty(['#assistant-model','#assistant-clock-format','#assistant-prompt'],'#save-assistant');
       $('#save-assistant').onclick=()=>mutate('/assistant',{
         provider:'openai-codex',
-        enabled:deviceEnabled,
+        enabled:deviceEnabled&&account.signedIn,
         model:$('#assistant-model').value.trim(),
         clock_format:$('#assistant-clock-format').value,
         prompt:$('#assistant-prompt').value.trim()
       },'On Device Voice Assistant settings saved');
-      if($('#assistant-auth-start'))$('#assistant-auth-start').onclick=()=>assistantAction('/assistant/auth/start','ChatGPT device sign-in started');
-      if($('#assistant-auth-poll'))$('#assistant-auth-poll').onclick=()=>assistantAction('/assistant/auth/poll','Sign-in status checked');
-      if($('#assistant-logout'))$('#assistant-logout').onclick=()=>assistantAction('/assistant/logout','ChatGPT disconnected');
       if($('#assistant-test'))$('#assistant-test').onclick=()=>post('/assistant/respond',{text:$('#assistant-test-text').value},'Test response queued');
-      if(a.auth_state==='waiting')state.timer=setTimeout(async()=>{
-        if(state.page!=='Integrations')return;
-        try {
-          await api('/assistant/auth/poll',{method:'POST',body:'{}'});
-          await integrationsPage();
-        } catch(error) {
-          toast(error.message,true);
-        }
-      },3000);
     }
   }
 
