@@ -2119,7 +2119,7 @@ $('#auth-control').onclick=()=>state.token?signOut():redirectToLogin();
  * asynchronous history collection/detail/clear requests are generation-scoped
  * so a stale response can never overwrite a newer page.
  * ========================================================================= */
-const IDLE_MODES=[['off','Off'],['indicator','Indicator only'],['always','Always on']];
+const IDLE_MODES=[['indicator','Green front light (default)'],['off','All off'],['always','Whole ring on']];
 const SLEEP_MODES=[['off','Off'],['solid','Solid dim'],['pulse','Slow pulse']];
 const NOISE_SOURCES=[['white','White noise'],['pink','Pink noise'],['brown','Brown noise'],['heartbeat','Heartbeat']];
 const NOISE_BEDS=[['none','None'],['pink','Pink bed'],['brown','Brown bed']];
@@ -2158,10 +2158,10 @@ function musicDiagHtml(m){
   `<dt>Producer session</dt><dd>${Number(m.session??0)}</dd></dl>`);
 }
 function ledBasePanels(l){
- const idle=l.idle_mode||'off';
+ const idle=l.idle_mode||'indicator';
  return panel('Idle behaviour',
   `<label class="field"><span>When the ring is idle</span><select id="led-idle-mode">${IDLE_MODES.map(([v,lab])=>opt(v,lab,idle)).join('')}</select></label>`+
-  `<p class="muted">Off is fully dark. Indicator shows one dim pixel so the device can be found in the dark. Always on keeps the ring dimly lit.</p>`+
+  `<p class="muted">Green front light (the default) lights the two front LEDs dimly in green so you can see the device is on and listening for the wake word. All off keeps the ring dark until something happens. Whole ring on keeps the ring lit in the chosen colour. Wake word, volume and alerts light the ring in every mode.</p>`+
   saveButton('save-led-idle'))+
   sleepLightHtml(l.sleep_light)+
   outputDiagHtml(l.output)+

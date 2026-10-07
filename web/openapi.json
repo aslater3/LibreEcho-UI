@@ -2202,7 +2202,7 @@
      "LED and buttons"
     ],
     "summary": "Set the idle LED mode (set_idle_mode)",
-    "description": "mode is required and must be one of off, indicator or always; a missing or unknown mode is 400. Returns the extended LED state.",
+    "description": "mode is required and must be one of off, indicator or always; a missing or unknown mode is 400. The default is indicator (the two front-centre pixels, green, 20% brightness, while idle and listening for the wake word). Returns the extended LED state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"

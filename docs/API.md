@@ -2284,7 +2284,13 @@ recovery routes included) bypasses the management auth/CSRF gate.
   `output` and `music` objects matching `ledd` status. Existing controls
   (`colour`/`brightness`/`visualizer_enabled`/`night`/`profiles`) are preserved.
 - `PUT /api/v1/led/idle` — `{"mode":"off"|"indicator"|"always"}` (required) ->
-  `set_idle_mode`; a missing or unknown mode is `400`.
+  `set_idle_mode`; a missing or unknown mode is `400`. The default is
+  `indicator`: the two front-centre pixels lit green at 20% brightness while the
+  device is idle and listening for the wake word. `off` is fully dark; `always` lights
+  the whole ring in the saved colour. On the first boot of 0.14, `ledd` resets
+  the idle mode of every existing device to `indicator` once (the persisted
+  `idle.policy` marker records that this happened); a mode the owner chooses
+  afterwards is kept across reboots and updates.
 - `PUT /api/v1/led/sleep` — `{"mode":"off"|"solid"|"pulse"}` (required) with
   optional `brightness` (0..20), `period_ms` (3000..15000), `timer_minutes`
   (0..720) and `restore_on_boot` (bool). A missing field keeps the current daemon

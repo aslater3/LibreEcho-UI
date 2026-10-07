@@ -122,12 +122,16 @@ else:
 
 status = call("status")
 assert status["startup_animation_active"] is False, status
-# #110 dark idle: the boot animation is an event that lights the ring, and with
-# the default idle mode "off" the ring returns to the dark base once readiness
-# stops it (ledd apply_base_state IDLE_MODE_OFF). It does not hold the boot
-# colour. Proven by tests/test_led_daemon_core.c ("the ring must return to the
-# dark base after an event").
-assert status["pixels"] == [{"r": 0, "g": 0, "b": 0}] * 12, status
+# #110 idle indicator: the boot animation is an event that lights the ring, and
+# with the default idle mode "indicator" the ring returns to the two dim green
+# front-centre pixels (10 and 11) once readiness stops it (ledd apply_base_state
+# IDLE_MODE_INDICATOR). It does not hold the boot colour. Proven by
+# tests/test_led_daemon_core.c ("the ring must return to the indicator base
+# after an event").
+assert status["idle_mode"] == "indicator", status
+for front in status["pixels"][10:12]:
+    assert front["g"] > 0 and front["r"] == 0 and front["b"] == 0, status
+assert status["pixels"][:10] == [{"r": 0, "g": 0, "b": 0}] * 10, status
 PY
 
 echo "startup LED animation readiness hand-off: ok"
