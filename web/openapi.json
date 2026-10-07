@@ -3363,6 +3363,85 @@
     }
    }
   },
+  "/home-assistant": {
+   "get": {
+    "tags": ["Assistant"],
+    "summary": "Read Home Assistant onboarding details",
+    "description": "The owner's Home Assistant address (default http://homeassistant.local:8123) for the web UI's \"Set up in Home Assistant\" link, and the ESPHome API encryption key to paste into Home Assistant.",
+    "responses": {
+     "200": {
+      "description": "Home Assistant address",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": ["ok", "data", "error"],
+         "properties": {
+          "ok": {"type": "boolean"},
+          "data": {
+           "type": "object",
+           "required": ["url", "default_url", "encryption_key"],
+           "properties": {
+            "url": {"type": "string"},
+            "default_url": {"type": "string", "enum": ["http://homeassistant.local:8123"]},
+            "encryption_key": {"type": "string", "description": "Base64 ESPHome API encryption key Home Assistant asks for when adding this satellite. Returned only to authenticated owners while the Home Assistant integration is enabled and once libreecho-esphomed has generated it; empty otherwise. No other endpoint returns it."}
+           }
+          },
+          "error": {"$ref": "#/components/schemas/NullableApiError"}
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "put": {
+    "tags": ["Assistant"],
+    "summary": "Set the Home Assistant address",
+    "description": "Persists an http:// or https:// address (optional port and path). Does not restart the voice pipeline.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+         "url": {"type": "string", "maxLength": 199, "example": "http://homeassistant.local:8123"}
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Home Assistant address",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": ["ok", "data", "error"],
+         "properties": {
+          "ok": {"type": "boolean"},
+          "data": {
+           "type": "object",
+           "required": ["url", "default_url", "encryption_key"],
+           "properties": {
+            "url": {"type": "string"},
+            "default_url": {"type": "string", "enum": ["http://homeassistant.local:8123"]},
+            "encryption_key": {"type": "string", "description": "Base64 ESPHome API encryption key Home Assistant asks for when adding this satellite. Returned only to authenticated owners while the Home Assistant integration is enabled and once libreecho-esphomed has generated it; empty otherwise. No other endpoint returns it."}
+           }
+          },
+          "error": {"$ref": "#/components/schemas/NullableApiError"}
+         }
+        }
+       }
+      }
+     },
+     "400": {"description": "Address is not a plain http(s) URL"}
+    }
+   }
+  },
   "/voice-pipeline": {
    "get": {
     "tags": [

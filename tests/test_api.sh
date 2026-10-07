@@ -254,6 +254,22 @@ curl -fsS -X POST "$URL/api/v1/bluetooth/pair" -H "$CSRF" -H 'Content-Type: appl
 curl -fsS -X POST "$URL/api/v1/bluetooth/unpair" -H "$CSRF" -H 'Content-Type: application/json' --data '{"address":"10:20:30:40:50:60","type":0}' | jq -e '.ok and (.data.known_devices | length) == 0' >/dev/null
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and (.data.connectivity == "unknown" or .data.connectivity == "healthy") and .data.recovery_stage == "none" and ((.data.gateway_reachable | type) == "boolean" or .data.gateway_reachable == null) and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/network/wifi/scan")" 'LibreNet-5G'
+# Home Assistant onboarding link: defaults to homeassistant.local, owner-editable,
+# validated as a plain http(s) address, persisted, and never exposes the key outside HA mode.
+curl -fsS "$URL/api/v1/home-assistant" | jq -e '.ok and .data.url == "http://homeassistant.local:8123" and .data.default_url == "http://homeassistant.local:8123" and .data.encryption_key == ""' >/dev/null
+# The voice status document keeps its fixed home_assistant shape and never carries the key.
+curl -fsS "$URL/api/v1/voice-pipeline" | jq -e '.data.home_assistant | has("encryption_key") | not' >/dev/null
+code=$(curl -sS -o /tmp/le-ha-url-post.out -w '%{http_code}' -X POST "$URL/api/v1/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+for body in '{"url":"javascript:alert(1)"}' '{"url":"http://ha\"><img>"}' '{"url":"ftp://ha.local"}' '{"url":"http://"}' '{"url":"http://ha local"}' '{"url":7}' '{}'; do
+    code=$(curl -sS -o /tmp/le-ha-url-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data "$body")
+    [ "$code" = 400 ] || { echo "HA url accepted: $body" >&2; exit 1; }
+done
+code=$(curl -sS -o /tmp/le-ha-url-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/home-assistant" -H 'Content-Type: application/json' --data '{"url":"http://ha.example.test:8123"}')
+[ "$code" = 403 ]
+curl -fsS -X PUT "$URL/api/v1/home-assistant" -H "$CSRF" -H 'Content-Type: application/json' --data '{"url":"http://ha.example.test:8123"}' |
+    jq -e '.ok and .data.url == "http://ha.example.test:8123"' >/dev/null
+jq -e '.home_assistant_url == "http://ha.example.test:8123"' "$CFG" >/dev/null
 curl -fsS "$URL/api/v1/voice-pipeline" | jq -e \
     '.ok and .data.mode == "local" and
      .data.stt.engine == "sherpa" and

@@ -19,7 +19,12 @@ class SilentWake(Fixture):
         time.sleep(.15)
         wake.wake(100)
         self.assertEqual(receive(self.s)[0], 90)
-        self.assertEqual(self.wait_call('led', 'animate')['args'], {'profile': 'listening'})
+        listening = self.wait_call('led', 'pattern')['args']
+        self.assertEqual((listening['name'], listening['profile'], listening['owner'], listening['repeats']),
+                         ('pulse', 'listening', 'esphome', 0))
+        # A turn indicator must never persist ring state via animate (#esphome-led).
+        self.assertFalse(any(req['cmd'] == 'animate' for req in self.adapters['led'].calls),
+                         'ESPHome turn indicators must not use persistent animate')
         # Ping is a processing fence; the LED transaction above is actual IO.
         self.s.sendall(frame(7))
         self.assertEqual(receive(self.s), (8, b''))
@@ -34,6 +39,12 @@ class SilentWake(Fixture):
         self.s.sendall(frame(92, num(1, 0)))
         self.assertEqual(receive(self.s), (90, num(1, 0)))
         self.assertFalse(any(req['cmd'] == 'cue' for req in self.adapters['audio'].calls))
+        # The ended turn's indicator must expire on its own: a finite flash or an
+        # owner release, never an open-ended breathing animation.
+        ended = self.wait_call('led', 'pattern', 1)['args']
+        self.assertEqual(ended['owner'], 'esphome')
+        self.assertTrue(ended['name'] == 'stop' or (ended['name'] == 'flash' and 0 < ended['repeats'] <= 5), ended)
+        self.assertFalse(any(req['cmd'] == 'animate' for req in self.adapters['led'].calls))
 
 
 def main():

@@ -37,7 +37,8 @@ static void fixture_esphomed_start(void)
 }
 static void fixture_esphomed_stop(void)
 {
-    char path[600];const char *files[]={"pid","status.json","config.json","privacy"};
+    char path[600];/* config.json.bak/.tmp: the daemon persists its generated API key with config_write_atomic. */
+    const char *files[]={"pid","status.json","config.json","config.json.bak","config.json.tmp","privacy"};
     if(fixture_esphomed_pid>1){kill(fixture_esphomed_pid,SIGTERM);assert(waitpid(fixture_esphomed_pid,NULL,0)==fixture_esphomed_pid);}
     for(unsigned i=0;i<sizeof files/sizeof files[0];i++){snprintf(path,sizeof path,"%s/%s",fixture_esphomed_root,files[i]);unlink(path);}
     assert(rmdir(fixture_esphomed_root)==0);

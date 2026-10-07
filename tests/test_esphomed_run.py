@@ -42,6 +42,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
   'noise':['tests/test_esphomed_noise.c','src/adapter/esphome_noise.c'],
   'url':['tests/test_esphomed_playback.c','src/adapter/esphome_playback.c','src/adapter/radio_resample.c'],
   'http':['tests/test_esphomed_http.c','src/adapter/radio_resample.c'],
+  'pacing':['tests/test_esphomed_playback_pacing.c','src/adapter/radio_resample.c'],
   'queue':['tests/test_esphomed_queue.c']+common,
   'timer-lifecycle':['tests/test_esphomed_timer_lifecycle.c']+common,
  }
@@ -56,7 +57,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
  run([sys.executable,'tests/test_esphomed_native_lifecycle.py'],env)
  timerd=d/'libreecho-timerd';run(flags+['-Isrc','src/adapter/timerd.c','src/adapter/timer_schedule.c','src/adapter/adapter_client.c','src/adapter/adapter_server.c','src/json.c','src/log.c']+libs+['-o',timerd])
  run([sys.executable,'tests/test_esphomed_final_spec.py'],dict(env,TIMERD_BIN=str(timerd),ESPHOMED_PRIVATE_NAMESPACE='1'))
- run([a.crypto_python,'tests/test_esphomed_noise.py','NoiseFixture.test_noise_provision_persist_reconnect_wrong_key_and_plain_refusal','NoiseFixture.test_noise_replay_is_rejected'],env)
+ run([a.crypto_python,'tests/test_esphomed_noise.py','NoiseFixture.test_noise_provision_persist_reconnect_wrong_key_and_plain_refusal','NoiseFixture.test_noise_replay_is_rejected','KeyedDaemon'],env)
  run([sys.executable,'tests/test_esphomed_tls.py','TLSFixture.test_https_validated_ca_hostname_wav','TLSFixture.test_https_untrusted_is_negative_completion','TLSFixture.test_https_trusted_wrong_hostname_is_negative_completion'],env)
  run([sys.executable,'tests/test_esphomed_watchdog.py'],env);run([sys.executable,'tests/test_esphomed_init.py'],env)
  run([sys.executable,'tests/test_esphome_health.py'],env)
