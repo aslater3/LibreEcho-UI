@@ -1218,6 +1218,7 @@ state. The hardware clock is maintained in UTC.
       "rollback_available": false
     },
     "timezone": "UTC",
+    "boot_estimate_seconds": null,
     "ntp": true,
     "ntp_state": "synchronized",
     "ntp_servers": "time.cloudflare.com,time.nist.gov,ntp1.npl.co.uk,ntp2.npl.co.uk",
@@ -1230,6 +1231,12 @@ state. The hardware clock is maintained in UTC.
   "error": null
 }
 ```
+
+The legacy `boot_estimate_seconds` field is always `null`: no end-to-end
+restart measurement is available. Daemon-start uptime is not a restart duration.
+The browser ignores old numeric estimates (including those from older builds)
+and shows indeterminate reconnect progress until the device answers again.
+No restart duration is persisted or inferred from daemon-only restarts.
 
 #### POST /api/v1/system/reboot
 
