@@ -415,6 +415,7 @@ pid=$!
 sleep 1
 curl -fsS "$URL/api/v1/audio" | grep -q '"volume":37'
 curl -fsS "$URL/api/v1/device" | grep -q '"hostname":"persistent-echo"'
+curl -fsS "$URL/api/v1/home-assistant" | jq -e '.data.url == "http://ha.example.test:8123"' >/dev/null
 curl -fsS "$URL/api/v1/led" | jq -e \
     '.data.colour == {"r":12,"g":34,"b":56} and
      .data.brightness == 43 and .data.visualizer_enabled == false' \

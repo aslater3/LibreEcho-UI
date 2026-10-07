@@ -212,3 +212,4 @@ body.light{--bg:#edf3f6;--bg2:#f7fafc;--panel:#fff;--panel2:#f4f8fa;--line:#c8d5
 .voice-preview{margin:6px 0;color:var(--text,#f5f7fb);overflow-wrap:anywhere}
 .voice-detail-body{margin-top:8px}
 .recovery-psk{display:block;margin:8px 0;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.25);font-size:16px;letter-spacing:.06em;overflow-wrap:anywhere}
+.ha-setup{margin-top:18px;padding-top:16px;border-top:1px solid #24394a}.ha-setup h4{margin:0 0 8px}.ha-setup-steps{margin:0 0 14px;padding-left:20px;line-height:1.6;color:var(--muted)}.ha-key-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.ha-key{flex:1 1 260px;padding:10px 12px;font:14px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;user-select:all}.ha-setup a.primary-btn{text-decoration:none;display:inline-flex;align-items:center}.ha-setup a.primary-btn.disabled{opacity:.55;pointer-events:none}.light .ha-setup{border-color:#d7e1e6}

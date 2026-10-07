@@ -74,7 +74,7 @@ class Daemon(unittest.TestCase):
   self.privacy=self.p/'privacy';self.privacy.write_text('0\n');self.bus=self.p/'system.pcm';os.mkfifo(self.bus);self.busfd=os.open(self.bus,os.O_RDONLY|os.O_NONBLOCK);self.busbytes=bytearray()
   self.adapters={k:Adapter(self.p/(k+'.sock'),k) for k in ('audio','wake','radio','timer','led')}
   s=socket.socket();s.bind(('127.0.0.1',0));self.port=s.getsockname()[1];s.close();self.clients=[]
-  cmd=[BIN,'--port',str(self.port),'--bind','127.0.0.1','--plaintext','--config',str(self.config),'--status-file',str(self.p/'status.json'),'--privacy-state',str(self.privacy),'--audio-bus',str(self.bus),'--mdns-socket',str(self.p/'missing-mdns')]
+  cmd=[BIN,'--port',str(self.port),'--bind','127.0.0.1']+(['--plaintext'] if getattr(self,'plaintext',True) else [])+['--config',str(self.config),'--status-file',str(self.p/'status.json'),'--privacy-state',str(self.privacy),'--audio-bus',str(self.bus),'--mdns-socket',str(self.p/'missing-mdns')]
   for k in self.adapters:cmd+=['--'+k+'-socket',str(self.p/(k+'.sock'))]
   cmd+=getattr(self,'extra_args',[]);self.proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE);end=time.monotonic()+3
   while time.monotonic()<end:

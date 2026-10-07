@@ -92,7 +92,15 @@ static void status_write(void){char b[512],tmp[512];int connected=0,fd,n;for(uns
  fd=open(tmp,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)return;if(write(fd,b,(size_t)n)==n){close(fd);if(rename(tmp,S.status_path))unlink(tmp);}else{close(fd);unlink(tmp);}
 }
 static int mic_muted(void){return S.local_mute_gate||S.muted||S.privacy!=0||!S.last_audio_status||S.now-S.last_audio_status>1500;}
-static void profile(const char *name){char a[128];if(!strcmp(name,"idle"))return;snprintf(a,sizeof a,"{\"profile\":\"%s\"}",name);(void)job(S.led_path,"animate",a,0,0);}
+/* Turn indicators use ledd's owner-scoped pattern layer, never "animate":
+ * animate persists the theme as the ring's saved colour and breathes until
+ * another command replaces it, and nothing ever ended it -- a failed turn left
+ * the ring pulsing the error colour indefinitely. Colours are ledd's default
+ * themes; brightness follows the user's theme. Errors flash briefly and expire;
+ * idle releases only this owner, leaving the saved ring settings untouched. */
+static void profile(const char *name){char a[192];if(!strcmp(name,"idle")){(void)job(S.led_path,"pattern","{\"name\":\"stop\",\"owner\":\"esphome\"}",0,0);return;}
+ int error=!strcmp(name,"error");unsigned r=72,g=185,b=255;if(!strcmp(name,"thinking")){r=168;g=115;b=239;}else if(error){r=239;g=80;b=80;}
+ snprintf(a,sizeof a,"{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":100,\"repeats\":%d,\"profile\":\"%s\",\"owner\":\"esphome\"}",error?"flash":"pulse",r,g,b,error?3:0,name);(void)job(S.led_path,"pattern",a,0,0);}
 static void states_send(struct client *c){unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};float f=(float)S.volume/100.0f;uint32_t bits;memcpy(&bits,&f,4);
  ep_fixed32(&w,1,MEDIA_KEY);ep_uint(&w,2,S.playing?2:S.radio_state);ep_fixed32(&w,3,bits);ep_uint(&w,4,S.output_muted);if(S.last_audio_status)(void)send_writer(c,64,&w);
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
@@ -181,10 +189,17 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  default:return 0;}
 }
 static int process_rx(unsigned idx){struct client *c=&S.clients[idx];unsigned packets=0;
- while(c->rx_n&&packets++<32){size_t used,len;unsigned type;int rc;if(c->mode<0){if(c->rx[0]==1){c->mode=1;c->phase=0;}else if(c->rx[0]==0&&S.plaintext&&!S.provisioned){c->mode=0;c->phase=2;}else return -1;}
+ while(c->rx_n&&packets++<32){size_t used,len;unsigned type;int rc;if(c->mode<0){if(c->rx[0]==1){c->mode=1;c->phase=0;}else if(c->rx[0]==0&&S.plaintext&&!S.provisioned){c->mode=0;c->phase=2;}
+ /* Real ESPHome answers a plaintext hello on an encrypted API with a Noise-framed
+  * "\1Bad indicator byte"; clients map the 0x01 preamble to "requires encryption"
+  * and Home Assistant then asks for the key instead of claiming the YAML lacks api:. */
+ else if(c->rx[0]==0){static const unsigned char reject[]="\1Bad indicator byte";c->mode=1;c->phase=0;c->rx_n=0;if(outer(c,reject,sizeof reject-1))return -1;c->closing=1;return 0;}else return -1;}
  rc=ef_parse(c->rx,c->rx_n,c->mode==1,&used,&type,&len);if(rc<=0)return rc;
  const unsigned char *p=c->rx+used-len;if(c->mode==1&&c->phase<2){unsigned char reply[128];size_t z;
- if(c->phase==0){if(len)return -1;reply[0]=1;z=1;size_t n=strlen(S.name)+1;memcpy(reply+z,S.name,n);z+=n;n=strlen(S.mac)+1;memcpy(reply+z,S.mac,n);z+=n;if(outer(c,reply,z))return -1;c->phase=1;}
+ if(c->phase==0){if(len)return -1;reply[0]=1;z=1;size_t n=strlen(S.name)+1;memcpy(reply+z,S.name,n);z+=n;/* ESPHome sends the bare 12-digit lowercase MAC here; aioesphomeapi caps this field at 16
+    characters, so the colon form would arrive truncated and Home Assistant would treat a key
+    change as a different device instead of asking for the new key. */
+ {char hello_mac[13];size_t m=0;for(size_t i=0;S.mac[i]&&m<12;i++)if(S.mac[i]!=':')hello_mac[m++]=(char)tolower((unsigned char)S.mac[i]);hello_mac[m]=0;n=m+1;memcpy(reply+z,hello_mac,n);z+=n;}if(outer(c,reply,z))return -1;c->phase=1;}
  else{if(en_handshake(&c->noise,S.psk,p,len,reply,&z)){static const unsigned char err[]="\1Handshake MAC failure";if(outer(c,err,sizeof err-1))return -1;c->closing=1;}else{if(outer(c,reply,z))return -1;c->phase=2;}}
  }else if(c->mode==1){unsigned char plain[RX_CAP];size_t z;if(en_decrypt(&c->noise,p,len,plain,sizeof plain,&z)||z<4||(((size_t)plain[2]<<8)|plain[3])!=z-4)return -1;type=((unsigned)plain[0]<<8)|plain[1];int result=dispatch(idx,type,plain+4,z-4);mbedtls_platform_zeroize(plain,z);if(result)return -1;}
  else if(dispatch(idx,type,p,len))return -1;
@@ -238,7 +253,14 @@ static int load_configuration(void){char b[16384],key[45],mac[64],name[64],wake[
  {unsigned integrations=0;char pipeline[32];int mode=0;
   S.ha_selected=(json_get_uint(b,"integrations",&integrations)==1&&(integrations&1u))||
    (json_get_string_top_level(b,"voice_pipeline_mode",pipeline,sizeof pipeline)>0&&!strcmp(pipeline,"home-assistant"))||
-   (json_get_int(b,"voice_assistant_mode",&mode)>0&&(mode&1));}memcpy(key,cfg.esphome_noise_key,sizeof key);S.provisioned=!!key[0];memset(S.psk,0,32);if(S.provisioned&&(mbedtls_base64_decode(S.psk,32,&z,(unsigned char*)key,44)||z!=32)){mbedtls_platform_zeroize(key,sizeof key);return -1;}mbedtls_platform_zeroize(key,sizeof key);mbedtls_platform_zeroize(&cfg,sizeof cfg);
+   (json_get_int(b,"voice_assistant_mode",&mode)>0&&(mode&1));}memcpy(key,cfg.esphome_noise_key,sizeof key);
+ /* Like an ESPHome YAML `api: encryption: key:`, the satellite always owns a
+  * key. Generate one on first start so the owner can copy it from the web UI
+  * into Home Assistant; a key Home Assistant later pushes replaces it. */
+ if(!key[0]&&!S.plaintext){unsigned char fresh[32];size_t fz;int fd=open("/dev/urandom",O_RDONLY|O_CLOEXEC),got=fd>=0&&read(fd,fresh,32)==32;if(fd>=0)close(fd);
+  if(!got||mbedtls_base64_encode((unsigned char*)key,sizeof key,&fz,fresh,32)||fz!=44||config_set_string("esphome_noise_key",key)){mbedtls_platform_zeroize(fresh,32);mbedtls_platform_zeroize(key,sizeof key);return -1;}
+  key[44]=0;mbedtls_platform_zeroize(fresh,32);n=config_read(S.config_path,b,sizeof b);if(n<0)return -1;}
+ S.provisioned=!!key[0];memset(S.psk,0,32);if(S.provisioned&&(mbedtls_base64_decode(S.psk,32,&z,(unsigned char*)key,44)||z!=32)){mbedtls_platform_zeroize(key,sizeof key);return -1;}mbedtls_platform_zeroize(key,sizeof key);mbedtls_platform_zeroize(&cfg,sizeof cfg);
  if(!S.name[0]){if(json_get_string(b,"hostname",name,sizeof name)<=0)snprintf(name,sizeof name,"libreecho");if(strlen(name)>31||!name[0])return -1;for(size_t i=0;name[i];i++)if(!(isalnum((unsigned char)name[i])||name[i]=='-'))return -1;snprintf(S.name,sizeof S.name,"%.31s",name);}
  if(!S.friendly[0])snprintf(S.friendly,sizeof S.friendly,"%s",S.name);
  if(!S.mac[0]){if(json_get_string(b,"wifi_mac",mac,sizeof mac)>0&&mac[0]){if(normalize_mac(mac,S.mac))return -1;}else{static const char *fields[]={"mac_addr","macaddr","wifi_mac","wifi_mac_addr","mac"};int found=0;for(unsigned i=0;i<5;i++){char path[512];if(snprintf(path,sizeof path,"%s/%s/value",S.idme_path,fields[i])>=(int)sizeof path)return -1;if(config_read(path,mac,sizeof mac)>0&&!normalize_mac(mac,S.mac)){found=1;break;}}if(!found)return -1;}}

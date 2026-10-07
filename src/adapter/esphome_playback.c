@@ -76,7 +76,7 @@ static int prepare(struct esp_playback *p,uint64_t now){unsigned char *b=p->buff
  }else{mp3dec_init(&p->decoder);if(n>=10&&!memcmp(b,"ID3",3)){if((b[6]|b[7]|b[8]|b[9])&128)return -1;p->position=10+((size_t)b[6]<<21)+((size_t)b[7]<<14)+((size_t)b[8]<<7)+b[9];if(p->position>=n)return -1;}}
  le_radio_resample_reset(&p->resampler);p->bus_fd=open(p->bus,O_WRONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW);if(p->bus_fd<0)return -1;p->origin=now;p->deadline=now+120000;p->state=6;return 0;
 }
-int esp_playback_tick(struct esp_playback *p,uint64_t now){int rc;ssize_t got;unsigned char *b;if(!p->state)return p->result? p->result:-1;if(now>p->deadline)goto fail;
+static int tick_once(struct esp_playback *p,uint64_t now){int rc;ssize_t got;unsigned char *b;if(!p->state)return p->result? p->result:-1;if(now>p->deadline)goto fail;
  if(p->state==1){if(dns_tick(p)<0)goto fail;return 0;}
  if(p->state==2){struct sockaddr_in a;socklen_t n=sizeof a;if(getpeername(p->fd,(struct sockaddr*)&a,&n)<0){int err=0;n=sizeof err;if(getsockopt(p->fd,SOL_SOCKET,SO_ERROR,&err,&n)<0||err)goto fail;return 0;}p->state=p->tls?3:4;}
  if(p->state==3){rc=mbedtls_ssl_handshake(&p->ssl);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc||mbedtls_ssl_get_verify_result(&p->ssl))goto fail;p->state=4;}
@@ -98,4 +98,18 @@ int esp_playback_tick(struct esp_playback *p,uint64_t now){int rc;ssize_t got;un
  else{mp3dec_frame_info_t info;frames=mp3dec_decode_frame(&p->decoder,b+p->position,(int)((end-p->position)>65536?65536:end-p->position),pcm,&info);if(info.frame_bytes<=0)goto fail;p->position+=(size_t)info.frame_bytes;if(!frames)return 0;channels=info.channels;rate=info.hz;if(rate<8000||rate>48000||channels<1||channels>2)goto fail;}
  if(p->source_rate&&p->source_rate!=rate)goto fail;p->source_rate=rate;p->input_frames+=(unsigned)frames;rc=le_radio_resample(&p->resampler,pcm,frames,channels,rate,p->output,8192);if(rc<=0)goto fail;p->output_len=(size_t)rc*4;p->output_sent=0;return 0;}
  fail:p->result=-1;esp_playback_close(p);return -1;
+}
+/* One decode step (one MP3 frame or <=1024 WAV frames) and its bus write
+ * happen on separate tick_once() calls. At 22.05 kHz that is only 13-46 ms of
+ * 48 kHz output per two calls, while esphomed's poll loop runs every ~20 ms on
+ * a HZ=100 kernel, so a single step per daemon tick fell behind real time and
+ * the engine closed and reopened the PCM every couple of seconds. Keep
+ * stepping until the pacing lead is full, the bus would block or the state
+ * changes; the step bound keeps one tick from monopolising the loop. */
+int esp_playback_tick(struct esp_playback *p,uint64_t now){int playing=p->state==6,rc=tick_once(p,now);
+ /* Only an already-playing slot catches up; fetch/prepare transitions keep
+  * their one-step-per-tick behaviour. */
+ for(unsigned step=0;playing&&!rc&&p->state==6&&step<64;step++){size_t position=p->position,sent=p->output_sent,len=p->output_len;uint64_t frames=p->frames;
+  rc=tick_once(p,now);if(!rc&&p->state==6&&p->position==position&&p->output_sent==sent&&p->output_len==len&&p->frames==frames)break;}
+ return rc;
 }

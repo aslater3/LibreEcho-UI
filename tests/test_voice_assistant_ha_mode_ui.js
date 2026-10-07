@@ -71,6 +71,7 @@ async function page(homeAssistant,assistant,pipeline){
       if(pipeline instanceof Error)throw pipeline;
       return pipeline;
     }
+    if(path==='/home-assistant')return globalThis.homeAssistantDoc||{url:'http://homeassistant.local:8123',default_url:'http://homeassistant.local:8123',encryption_key:''};
     if(path==='/live')return {enabled:false,mode:'inactive',transport:'realtime',last_event:'idle',session:{state:'idle',last_end:'none',sessions_completed:0,delegations:0},transport_metrics:{transport:'websocket',session_ready:false}};
     throw new Error('unexpected API path '+path);
   };
@@ -164,6 +165,40 @@ async function checkHaStatus(enabled,pipeline,status,okay=false) {
     catch(error) {failures.push(name);console.error('HA status: '+name+': '+error.message);}
   }
   assert.equal(failures.length,0,'HA status regressions: '+failures.join(', '));
+  // Home Assistant onboarding: key + editable link, mirroring the ESPHome flow.
+  {
+    const key='q2XQ1Yc3oQ9mN0bP7t4Lr8sVw6Zy5Ae1Bc2Df3Gh4Jk=';
+    globalThis.homeAssistantDoc={url:'http://homeassistant.local:8123',encryption_key:key};
+    const awaiting=await page(true,healthy,voicePipeline(true,{
+      home_assistant:{protocol:'esphome',port:6053,ready:true,connected:false}
+    }));
+    const voice=voiceSection(awaiting);
+    assert(voice.includes('Set up in Home Assistant'),'setup call-to-action missing');
+    assert(voice.includes('href="http://homeassistant.local:8123/config/integrations/dashboard/add?domain=esphome"'),'default HA link missing');
+    assert(voice.includes('target="_blank" rel="noopener noreferrer"'),'HA link must open safely in a new tab');
+    assert(voice.includes('id="ha-url"')&&voice.includes('value="http://homeassistant.local:8123"'),'HA address must be editable with the default');
+    assert(voice.includes('data-copy-value="'+key+'"'),'encryption key must be copyable');
+    assert(!voice.replace('data-copy-value="'+key+'"','').includes(key),'key must be masked until revealed');
+    assert(/<details[^>]*voice-assistants|<details class="panel setting-panel integration-section assistant-mode" open>/.test(voice)||voice.includes('assistant-mode" open'),'setup must be expanded while awaiting HA');
+    globalThis.homeAssistantDoc={url:'https://ha.example:8443/',encryption_key:key};
+    const custom=await page(true,healthy,voicePipeline(true,{
+      home_assistant:{protocol:'esphome',port:6053,ready:true,connected:true}
+    }));
+    assert(voiceSection(custom).includes('href="https://ha.example:8443/config/integrations/dashboard/add?domain=esphome"'),'saved HA address must drive the link');
+    globalThis.homeAssistantDoc={url:'javascript:alert(1)',encryption_key:'"><img src=x>'};
+    const hostile=await page(true,healthy,voicePipeline(true,{
+      home_assistant:{protocol:'esphome',port:6053,ready:true,connected:false}
+    }));
+    assert(!voiceSection(hostile).includes('href="javascript:'),'non-http address must never become a link');
+    assert(!voiceSection(hostile).includes('<img src=x>'),'key must be escaped');
+    globalThis.homeAssistantDoc={url:'http://homeassistant.local:8123',encryption_key:''};
+    const pending=await page(true,healthy,voicePipeline(true,{
+      home_assistant:{protocol:'esphome',port:6053,ready:false,connected:false}
+    }));
+    assert(voiceSection(pending).includes('encryption key is generated'),'missing key must explain itself');
+    globalThis.homeAssistantDoc=undefined;
+    console.log('HA setup panel: ok');
+  }
   // Even a still-responsive local service must not offer controls in HA mode.
   for(const assistant of [null,healthy]){
     const html=await page(true,assistant);

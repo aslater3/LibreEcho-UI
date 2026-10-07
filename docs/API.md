@@ -654,11 +654,47 @@ not evidence; missing, malformed, stale or mismatched status reports false.
 Both fields are false outside HA mode.
 
 The private `esphome_noise_key` is a validated, canonical base64 32-byte Noise
-PSK, stored in mode-0600 configuration and backups. Empty means unprovisioned:
-the daemon uses the all-zero PSK for HA provisioning. Missing or old
-`ha_protocol` normalizes to `esphome`. Ordinary config GET/export, voice status,
-logs and diagnostic exports must not reveal the key. This release does not
-expose a web key-reveal/rotation endpoint; HA provisioning owns that operation.
+PSK, stored in mode-0600 configuration and backups. Like an ESPHome YAML
+`api: encryption: key:`, the satellite always owns a key: `libreecho-esphomed`
+generates a random one on first start when none is stored, and a key Home
+Assistant later pushes replaces it. A plaintext client receives ESPHome's
+explicit "requires encryption" reject, so Home Assistant asks for the key.
+Missing or old `ha_protocol` normalizes to `esphome`. Ordinary config
+GET/export, voice status, logs and diagnostic exports must not reveal the key;
+only `GET /api/v1/home-assistant` returns it.
+
+#### GET /api/v1/home-assistant
+
+Home Assistant onboarding details for the web UI's "Set up in Home Assistant"
+panel:
+
+```json
+{
+  "url": "http://homeassistant.local:8123",
+  "default_url": "http://homeassistant.local:8123",
+  "encryption_key": "<base64 key>"
+}
+```
+
+`url` is the owner's Home Assistant address (default
+`http://homeassistant.local:8123`); the UI links to its "add ESPHome
+integration" page. `encryption_key` is the key to paste when Home Assistant
+asks for it. It is returned only to an authenticated owner while the Home
+Assistant integration is enabled and once the daemon has generated it;
+otherwise it is empty.
+
+#### PUT /api/v1/home-assistant
+
+Sets the Home Assistant address. Requires `X-LibreEcho-CSRF`.
+
+```json
+{ "url": "http://homeassistant.local:8123" }
+```
+
+Only `http://` or `https://` addresses (optional port and path, at most 199
+bytes, no spaces, quotes or markup characters) are accepted; anything else
+returns HTTP 400 and leaves the saved address unchanged. Saving the address
+does not restart the voice pipeline.
 
 #### GET /api/v1/assistant
 

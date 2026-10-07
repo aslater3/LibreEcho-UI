@@ -309,13 +309,68 @@ function homeAssistantVoiceStatus(enabled,pipeline) {
   return {status,okay:status==='Connected'};
 }
 
+/*
+ * Home Assistant onboarding, mirroring the stock ESPHome flow: HA discovers the
+ * satellite over mDNS (or the owner adds it by host and port 6053), then asks
+ * for the device's API encryption key. The key is the one libreecho-esphomed
+ * generated and stores; the link opens HA's "add ESPHome integration" flow.
+ */
+const HOME_ASSISTANT_DEFAULT_URL='http://homeassistant.local:8123';
+function homeAssistantSetupLink(url) {
+  const base=String(url||HOME_ASSISTANT_DEFAULT_URL).replace(/\/+$/,'');
+  return /^https?:\/\/[^\s"'<>`]+$/.test(base)?base+'/config/integrations/dashboard/add?domain=esphome':'';
+}
+function homeAssistantSetupPanel(ha,connected) {
+  ha=ha||{};const url=ha.url||HOME_ASSISTANT_DEFAULT_URL,key=ha.encryption_key||'';
+  const link=homeAssistantSetupLink(url),host=location.hostname||'this device';
+  const keyRow=key
+    ?`<div class="field"><span>Encryption key</span><div class="ha-key-row"><code id="ha-encryption-key" class="ha-key" data-revealed="false">${'•'.repeat(16)}</code>
+        <button type="button" class="secondary-btn" id="ha-key-reveal" aria-controls="ha-encryption-key">Show</button>
+        ${provenanceCopy('encryption key',key)}</div></div>`
+    :`<p class="muted">The encryption key is generated when the Home Assistant satellite starts. Refresh this page in a moment.</p>`;
+  return `<div class="ha-setup" id="ha-setup">
+    <h4>${connected?'Home Assistant setup details':'Set up in Home Assistant'}</h4>
+    <ol class="ha-setup-steps">
+      <li>Open Home Assistant. LibreEcho is usually discovered automatically under <strong>Settings → Devices &amp; services</strong>; otherwise add the <strong>ESPHome</strong> integration with host <code>${esc(host)}</code> and port <code>6053</code>.</li>
+      <li>When Home Assistant asks for the encryption key, paste the key below.</li>
+    </ol>
+    ${keyRow}
+    ${field('Home Assistant address',url,'ha-url','url','placeholder="'+HOME_ASSISTANT_DEFAULT_URL+'" spellcheck="false" autocomplete="off"')}
+    <div class="button-row">
+      ${link?`<a class="primary-btn" id="ha-open-link" href="${esc(link)}" target="_blank" rel="noopener noreferrer">Set up in Home Assistant</a>`:''}
+      <button class="save-btn save-changes" id="save-ha-url" disabled>Save address</button>
+    </div>
+  </div>`;
+}
+function bindHomeAssistantSetup() {
+  const reveal=$('#ha-key-reveal'),code=$('#ha-encryption-key');
+  if(reveal&&code) {
+    const copy=code.parentElement?.querySelector('.copy-provenance');
+    reveal.onclick=()=>{
+      const show=code.dataset.revealed!=='true';
+      code.textContent=show?(copy?.dataset.copyValue||''):'•'.repeat(16);
+      code.dataset.revealed=show?'true':'false';
+      reveal.textContent=show?'Hide':'Show';
+    };
+  }
+  const input=$('#ha-url'),save=$('#save-ha-url'),open=$('#ha-open-link');
+  if(!input||!save)return;
+  bindDirty(['#ha-url'],'#save-ha-url');
+  input.addEventListener('input',()=>{
+    const link=homeAssistantSetupLink(input.value.trim()||HOME_ASSISTANT_DEFAULT_URL);
+    if(open){if(link)open.href=link;open.classList.toggle('disabled',!link);}
+  });
+  save.onclick=()=>mutate('/home-assistant',{url:input.value.trim()||HOME_ASSISTANT_DEFAULT_URL},'Home Assistant address saved');
+}
+
 async function integrationsPage() {
   const generation=state.renderGeneration,page=state.page;
-  const [d,a,pipeline,live]=await Promise.all([
+  const [d,a,pipeline,live,homeAssistant]=await Promise.all([
     api('/integrations'),
     api('/assistant').catch(error=>({unsupported:error.message})),
     api('/voice-pipeline').catch(()=>({mode:'local',stt:{},tts:{}})),
-    api('/live').catch(error=>({unsupported:error.message}))
+    api('/live').catch(error=>({unsupported:error.message})),
+    api('/home-assistant').catch(()=>({}))
   ]);
   if(generation!==state.renderGeneration||page!==state.page)return;
   /*
@@ -338,7 +393,7 @@ async function integrationsPage() {
 
   if(homeAssistantEnabled) {
     content.innerHTML=`<div class="integration-grid">
-      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${collapsiblePanel(homeAssistantState.okay?'Managed by Home Assistant':'Home Assistant voice',`<div class="assistant-heading"><div><span class="source-pill">Integration</span><h4>Home Assistant</h4><p class="muted">${homeAssistantState.okay?'Voice is handled by Home Assistant over the encrypted ESPHome connection (TCP 6053).':'Home Assistant is selected for voice using the encrypted ESPHome connection (TCP 6053).'} Your Local and Custom settings are kept for when you disable Home Assistant. The on-device assistant (Local LLM and ChatGPT) controls stay hidden while the Home Assistant integration is enabled. Disable it on this page to use the on-device assistant.</p></div><div class="assistant-state"><span class="status-dot ${homeAssistantState.okay?'ok':''}"></span>${esc(homeAssistantState.status)}</div></div>`,'assistant-mode')}</section>
+      <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${collapsiblePanel(homeAssistantState.okay?'Managed by Home Assistant':'Home Assistant voice',`<div class="assistant-heading"><div><span class="source-pill">Integration</span><h4>Home Assistant</h4><p class="muted">${homeAssistantState.okay?'Voice is handled by Home Assistant over the encrypted ESPHome connection (TCP 6053).':'Home Assistant is selected for voice using the encrypted ESPHome connection (TCP 6053).'} Your Local and Custom settings are kept for when you disable Home Assistant. The on-device assistant (Local LLM and ChatGPT) controls stay hidden while the Home Assistant integration is enabled. Disable it on this page to use the on-device assistant.</p></div><div class="assistant-state"><span class="status-dot ${homeAssistantState.okay?'ok':''}"></span>${esc(homeAssistantState.status)}</div></div>${homeAssistantSetupPanel(homeAssistant,homeAssistantState.okay)}`,'assistant-mode',!homeAssistantState.okay)}</section>
       ${integrations}
     </div>`;
   } else if(a.unsupported) {
@@ -479,6 +534,7 @@ async function integrationsPage() {
     }
   }
 
+  if(homeAssistantEnabled){bindHomeAssistantSetup();bindProvenanceCopy();}
   d.items.forEach(x=>{
     const save=$('#save-int-'+x.id);
     if(!save)return;                       /* not installed: nothing rendered to bind */
