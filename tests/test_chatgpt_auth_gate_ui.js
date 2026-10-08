@@ -62,7 +62,8 @@ globalThis.api=async(path,options={})=>{
   }
   if(path==='/assistant/auth/poll')return assistant;
   if(path==='/assistant/logout') {
-    Object.assign(assistant,{authenticated:false,auth_state:'signed_out',user_code:'',verification_url:''});
+    // agentd logout clears the shared store, including Local LLM credentials.
+    Object.assign(assistant,{authenticated:false,auth_state:'signed_out',user_code:'',verification_url:'',base_url:'',api_key_configured:false});
     return assistant;
   }
   throw Error('Unexpected API path '+path);
@@ -82,7 +83,7 @@ function disabled(id){return /\sdisabled/.test(tag(id));}
 function checked(id){return /\schecked/.test(tag(id));}
 function writes(path){return requests.filter(r=>r.path===path&&r.method!=='GET');}
 function noEnable(){assert.deepEqual(requests.filter(r=>r.method!=='GET'&&r.body?.enabled===true),[]);}
-async function change(id){const e=document.querySelector('#'+id);assert.equal(typeof e.onchange,'function');e.checked=true;await e.onchange();}
+async function change(id,value=true){const e=document.querySelector('#'+id);assert.equal(typeof e.onchange,'function');e.checked=value;await e.onchange();}
 (async()=>{
   await setup();
   for(const id of ['use-device-provider','use-live-provider']) {
@@ -141,13 +142,61 @@ async function change(id){const e=document.querySelector('#'+id);assert.equal(ty
   assert(label('use-live-provider','Sign-in status unavailable'));assert(disabled('use-live-provider'));
   await change('use-live-provider');noEnable();
 
+  // Authentication gates enabling, not turning off an already-enabled service.
+  for(const auth_state of ['signed_out','waiting']) {
+    await setup(fixture({enabled:true,auth_state}),{enabled:true});
+    for(const id of ['use-device-provider','use-live-provider'])assert(!disabled(id)&&checked(id));
+    await change('use-device-provider',false);
+    assert.deepEqual(writes('/assistant').map(r=>r.body),[{provider:'openai-codex',enabled:false}]);
+    assert(disabled('use-device-provider')&&!checked('use-device-provider'));
+    await change('use-live-provider',false);
+    assert.deepEqual(writes('/live').map(r=>r.body),[{enabled:false}]);
+    assert(disabled('use-live-provider')&&!checked('use-live-provider'));
+    await change('use-device-provider');await change('use-live-provider');noEnable();
+  }
+  await setup(null,{enabled:true});
+  assert(!disabled('use-live-provider')&&checked('use-live-provider'));
+  await change('use-live-provider',false);
+  assert.deepEqual(writes('/live').map(r=>r.body),[{enabled:false}]);noEnable();
+
   await setup(fixture({enabled:true}));
-  assert(disabled('use-device-provider')&&checked('use-device-provider'));
+  assert(!disabled('use-device-provider')&&checked('use-device-provider'));
   document.querySelector('#assistant-model').value='gpt-5.4';
   document.querySelector('#assistant-clock-format').value='12';
   document.querySelector('#assistant-prompt').value='Reply briefly.';
   await document.querySelector('#save-assistant').onclick();
   assert.equal(writes('/assistant')[0].body.enabled,false);noEnable();
+
+  // Both panels must confirm the shared-store loss before cancelling sign-in.
+  for(const prefix of ['assistant','live']) {
+    await setup(fixture({provider:'openai-compatible',base_url:'http://192.0.2.10:8000/v1',api_key_configured:true}));
+    assert(!html.includes('Your local settings are kept.'));
+    assert(html.includes('clears the saved Local LLM endpoint and API key'));
+    await document.querySelector('#'+prefix+'-auth-start').onclick();
+    let questions=[];
+    globalThis.confirm=question=>{questions.push(question);return false;};
+    await document.querySelector('#'+prefix+'-logout').onclick();
+    assert.equal(writes('/assistant/logout').length,0);
+    assert.equal(assistant.base_url,'http://192.0.2.10:8000/v1');
+    assert(assistant.api_key_configured);
+    assert(open('use-device-provider')&&html.includes('WXYZ-4242'));
+    assert.equal(questions.length,1);
+    assert(questions[0].includes('Local LLM endpoint and API key'));
+    globalThis.confirm=()=>true;
+    await document.querySelector('#'+prefix+'-logout').onclick();
+    assert.equal(writes('/assistant/logout').length,1);
+    assert.equal(assistant.base_url,'');assert(!assistant.api_key_configured);noEnable();
+  }
+  // Disconnect also warns, even if only a saved key remains.
+  await setup(fixture({authenticated:true,auth_state:'signed_in',api_key_configured:true}));
+  let disconnectQuestion='';
+  globalThis.confirm=question=>{disconnectQuestion=question;return false;};
+  await document.querySelector('#assistant-logout').onclick();
+  assert(disconnectQuestion.includes('Local LLM endpoint and API key'));
+  assert.equal(writes('/assistant/logout').length,0);assert(assistant.authenticated);
+  globalThis.confirm=()=>true;
+  await document.querySelector('#assistant-logout').onclick();
+  assert.equal(writes('/assistant/logout').length,1);assert(!assistant.authenticated);noEnable();
 
   await setup(fixture({provider:'openai-compatible',base_url:'http://192.0.2.10:8000/v1'}));
   await change('use-local-provider');

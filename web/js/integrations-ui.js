@@ -47,7 +47,8 @@ function chatgptSignInBlock(a,prefix) {
     ${account.waiting?action('Cancel sign-in',prefix+'-logout','secondary-btn'):''}
     ${account.signedIn?action('Disconnect',prefix+'-logout','danger-btn'):''}
   </div>
-  ${a.provider!=='openai-codex'?'<p class="muted">Connecting selects ChatGPT without enabling it and stops Local LLM. Your local settings are kept.</p>':''}`;
+  ${a.provider!=='openai-codex'?'<p class="muted">Connecting selects ChatGPT without enabling it and stops Local LLM.</p>':''}
+  ${a.base_url||a.api_key_configured?'<p class="muted">Cancelling sign-in or disconnecting ChatGPT also clears the saved Local LLM endpoint and API key. You will be asked to confirm.</p>':''}`;
 }
 
 function bindChatgptSignIn(prefix,a) {
@@ -63,7 +64,11 @@ function bindChatgptSignIn(prefix,a) {
     finally { setBusy(false); await integrationsPage(); }
   };
   if($('#'+prefix+'-auth-poll'))$('#'+prefix+'-auth-poll').onclick=()=>assistantAction('/assistant/auth/poll','Sign-in status checked');
-  if($('#'+prefix+'-logout'))$('#'+prefix+'-logout').onclick=()=>assistantAction('/assistant/logout',chatgptAccount(a).waiting?'Sign-in cancelled':'ChatGPT disconnected');
+  if($('#'+prefix+'-logout'))$('#'+prefix+'-logout').onclick=()=>{
+    if(state.busy)return;
+    if((a.base_url||a.api_key_configured)&&!confirm('Cancelling sign-in or disconnecting ChatGPT also clears the saved Local LLM endpoint and API key. Continue?'))return;
+    return assistantAction('/assistant/logout',chatgptAccount(a).waiting?'Sign-in cancelled':'ChatGPT disconnected');
+  };
 }
 
 function scheduleChatgptAuthPoll(a) {
@@ -464,7 +469,7 @@ async function integrationsPage() {
       enabled:liveEnabled,
       body:liveAssistantBody(live),
       open:false,
-      disabled:true
+      disabled:Boolean(live.unsupported)||!liveEnabled
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${unsupported(a.unsupported)}${livePanel}</section>
@@ -507,7 +512,7 @@ async function integrationsPage() {
       enabled:deviceEnabled,
       body:deviceAssistantBody(a,deviceSelected),
       open:!account.signedIn,
-      disabled:!account.signedIn
+      disabled:!account.signedIn&&!deviceEnabled
     });
     const liveEnabled=!live.unsupported&&Boolean(live.enabled);
     const livePanel=assistantProviderPanel({
@@ -520,7 +525,7 @@ async function integrationsPage() {
       enabled:liveEnabled,
       body:liveAssistantBody(live,a),
       open:!live.unsupported&&!account.signedIn,
-      disabled:Boolean(live.unsupported)||!account.signedIn
+      disabled:Boolean(live.unsupported)||(!account.signedIn&&!liveEnabled)
     });
     content.innerHTML=`<div class="integration-grid">
       <section class="panel setting-panel voice-assistants wide"><h3>Voice Assistants</h3>${localPanel}${devicePanel}${livePanel}</section>
