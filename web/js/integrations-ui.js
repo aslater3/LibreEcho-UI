@@ -174,6 +174,11 @@ function deviceAssistantBody(a,selected) {
   </div>`;
 }
 
+/* GPT-Live is deferred from 0.14: its daemon is not packaged in the image, so
+   the provider option stays hidden. The code is kept for the next release;
+   set globalThis.LE_GPT_LIVE_UI=true before load to render it. */
+function gptLiveUiEnabled(){return globalThis.LE_GPT_LIVE_UI===true;}
+
 function liveAssistantBody(live,a) {
   if(live.unsupported) return unsupported(live.unsupported);
   const session=live.session||{},metrics=live.transport_metrics||{};
@@ -459,7 +464,7 @@ async function integrationsPage() {
     </div>`;
   } else if(a.unsupported) {
     const liveEnabled=!live.unsupported&&Boolean(live.enabled);
-    const livePanel=assistantProviderPanel({
+    const livePanel=!gptLiveUiEnabled()?'':assistantProviderPanel({
       title:'GPT-Live',
       description:'Full-duplex speech with your ChatGPT subscription',
       status:live.unsupported?'Unavailable':'Sign-in status unavailable',
@@ -515,7 +520,7 @@ async function integrationsPage() {
       disabled:!account.signedIn&&!deviceEnabled
     });
     const liveEnabled=!live.unsupported&&Boolean(live.enabled);
-    const livePanel=assistantProviderPanel({
+    const livePanel=!gptLiveUiEnabled()?'':assistantProviderPanel({
       title:'GPT-Live',
       description:'Full-duplex speech with your ChatGPT subscription',
       status:live.unsupported?'Unavailable':!account.signedIn?account.status:liveEnabled?'Enabled':'Disabled',
@@ -537,7 +542,7 @@ async function integrationsPage() {
     bindProviderToggle('#use-device-provider','openai-codex',pipeline,a);
     bindLiveToggle('#use-live-provider',a);
     bindChatgptSignIn('assistant',a);
-    if(!live.unsupported)bindChatgptSignIn('live',a);
+    if(gptLiveUiEnabled()&&!live.unsupported)bindChatgptSignIn('live',a);
     scheduleChatgptAuthPoll(a);
     bindHomeLocation(a);
 

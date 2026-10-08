@@ -95,9 +95,11 @@ async function checkHaStatus(enabled,pipeline,status,okay=false) {
         'unready voice must not claim an active connection');
     }
   } else {
-    for(const id of ['use-local-provider','use-device-provider','use-live-provider','save-wx'])
+    for(const id of ['use-local-provider','use-device-provider','save-wx'])
       assert(html.includes('id="'+id+'"'),
         'disabled HA must preserve '+id);
+    // GPT-Live is deferred from 0.14 and hidden unless LE_GPT_LIVE_UI is set.
+    assert(!html.includes('id="use-live-provider"'),'deferred GPT-Live option must stay hidden');
   }
   return html;
 }
@@ -209,9 +211,11 @@ async function checkHaStatus(enabled,pipeline,status,okay=false) {
     assert(html.includes('int-home-assistant'),'HA must remain disableable');
   }
   const local=await page(false,healthy);
-  for(const id of ['local-base-url','local-api-key','local-model','stt-wyoming-uri','tts-wyoming-uri','save-wx','use-live-provider'])
+  for(const id of ['local-base-url','local-api-key','local-model','stt-wyoming-uri','tts-wyoming-uri','save-wx'])
     assert(local.includes('id="'+id+'"'),'0.14 control lost: '+id);
-  assert(local.includes('GPT-Live'),'GPT-Live provider option is missing');
+  // GPT-Live is deferred from 0.14: no provider panel, toggle or sign-in block.
+  assert(!local.includes('GPT-Live'),'deferred GPT-Live provider option must be hidden');
+  assert(!local.includes('id="use-live-provider"')&&!local.includes('id="live-auth-start"'),'deferred GPT-Live controls must be hidden');
   assert(!local.includes('Managed by Home Assistant'));
   assert(!local.includes('id="int-spotify"'),'uninstalled integration became actionable');
   for(const mode of ['local','custom']) {

@@ -334,14 +334,14 @@ async function main() {
   assert.match(await home.locator('summary h3').innerText(), /Home location & weather/);
   /* Non-auth panels remain collapsed. The signed-out ChatGPT panel is the
      exception: account setup must be reachable before activation (#272).
-     This mock image has no GPT-Live service, so that panel stays collapsed. */
+     GPT-Live is deferred from 0.14 and its panel is not rendered. */
   assert.equal(await home.evaluate(el => el.open), false, 'the card starts collapsed');
   const providerPanels = page.locator('.assistant-provider');
-  assert.equal(await providerPanels.count(), 3, 'all three voice provider panels render');
-  assert.deepEqual(await providerPanels.evaluateAll(els => els.map(el => el.open)), [false, true, false], 'only the signed-out ChatGPT account panel starts open');
+  assert.equal(await providerPanels.count(), 2, 'Local LLM and ChatGPT provider panels render; deferred GPT-Live is hidden');
+  assert.deepEqual(await providerPanels.evaluateAll(els => els.map(el => el.open)), [false, true], 'only the signed-out ChatGPT account panel starts open');
   assert.equal(await page.locator('#assistant-auth-start').isVisible(), true, 'Connect is visible before activation');
   assert.equal(await page.locator('#use-device-provider').isDisabled(), true, 'ChatGPT cannot enable while signed out');
-  assert.equal(await page.locator('#use-live-provider').isDisabled(), true, 'missing GPT-Live cannot enable');
+  assert.equal(await page.locator('#use-live-provider').count(), 0, 'deferred GPT-Live toggle is not rendered');
   assert.equal(await page.locator('#use-local-provider').isDisabled(), false, 'Local LLM is independent of ChatGPT sign-in');
   await home.locator('summary').click();
   assert.match(await home.innerText(), /Home address or place/);
