@@ -7,6 +7,8 @@ grep -Fq 'source_socket=/run/libreecho/led.sock' "$script"
 grep -Fq 'target_socket=$RUNTIME_ROOT/run/libreecho/led.sock' "$script"
 grep -Fq 'mount --bind "$source_socket" "$target_socket"' "$script"
 grep -Fq 'umount "$RUNTIME_ROOT/run/libreecho/led.sock"' "$script"
+# ledd restarts replace the socket inode; airplayd re-points the bridge.
+grep -Fq 'airplay_led_bridge_poll(&ctx);' src/adapter/airplayd.c
 grep -Fq 'CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}' "$script"
 grep -Fq 'airplay_enabled_at_boot=1' "$script"
 grep -Fq 'persistent AirPlay disable' "$script"

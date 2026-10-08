@@ -268,6 +268,11 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -lm -o build/test-airplay-metadata
 ./build/test-airplay-metadata
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_airplay_led_bridge_refresh.c \
+    src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+    -lm -o build/test-airplay-led-bridge-refresh
+./build/test-airplay-led-bridge-refresh
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_micd.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
     -o build/test-micd
