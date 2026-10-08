@@ -38,7 +38,7 @@ class SatelliteShipping(unittest.TestCase):
 
     def test_lifecycle_health_media_and_wake_review_regressions_are_normal_gates(self):
         native = (ROOT / "tests/test_esphomed_run.py").read_text()
-        for test in ("test_esphomed_timer_lifecycle.c", "test_esphomed_native_lifecycle.py",
+        for test in ("test_esphomed_timer_lifecycle.c", "test_esphomed_idle.c", "test_esphomed_native_lifecycle.py",
                      "test_esphomed_final_spec.py", "src/adapter/timerd.c",
                      "test_esphome_health.py", "test_esphomed_media_state.py"):
             self.assertIn(test, native, test + " is absent from the normal native gate")
