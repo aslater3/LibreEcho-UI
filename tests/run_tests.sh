@@ -155,6 +155,9 @@ python3 tests/test_home_location_panel_contract.py
 python3 tests/test_weather_provider_contract.py
 python3 tools/test_virtual_echo.py
 python3 tests/test_now_playing_ui_contract.py
+make build/test-noise-playback
+./build/test-noise-playback
+node tests/test_noise_now_playing.js
 python3 tests/test_config_persist_contract.py
 python3 tests/test_web_ui_behaviour_contract.py
 node tests/test_reboot_reconnect.js
