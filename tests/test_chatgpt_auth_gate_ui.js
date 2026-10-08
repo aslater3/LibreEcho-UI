@@ -30,6 +30,8 @@ globalThis.confirm=()=>false;globalThis.prompt=()=>'';
 globalThis.fetch=()=>new Promise(()=>{}); // prevent startup from racing the cases
 const scripts=[...fs.readFileSync('web/index.html','utf8').matchAll(/<script\s+src="(\/js\/[^"?]+)(?:\?[^" ]+)?"/g)].map(x=>x[1]);
 assert(scripts.includes('/js/integrations-ui.js'));
+// GPT-Live is hidden by default for 0.14; opt in so its auth gating stays covered.
+globalThis.LE_GPT_LIVE_UI=true;
 for(const src of scripts)vm.runInThisContext(fs.readFileSync('web'+src,'utf8'),{filename:src});
 strictDOM=true;
 const state=vm.runInThisContext('state'),page=vm.runInThisContext('integrationsPage');

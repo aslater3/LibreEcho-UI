@@ -57,6 +57,12 @@ async function page(overrides={},failWrite='',pipelineResult=null) {
   await ha.disable();
   assert(ha.writes.some(x=>x.path==='/live'&&x.body.enabled===false),'disable must disarm GPT-Live');
   assert(ha.writes.some(x=>x.path==='/voice-pipeline'&&x.body.mode==='local'),'disable must leave HA mode');
+  // GPT-Live is deferred from 0.14: no row unless it is actually enabled
+  // (an enabled leftover must still be disclosed and disarmable).
+  for(const live of [{enabled:false},{},new Error('Unavailable')]) {
+    const off=await page({'/live':live});
+    assert(!off.html.includes('<dt>GPT-Live'),'deferred GPT-Live row must be hidden when not enabled');
+  }
   const warning='Network AI disabled where routing was known; some routes could not be determined';
   const unavailableRoutes=await page({'/assistant':new Error('Unavailable'),'/voice-pipeline':new Error('Unavailable'),'/live':{enabled:true}});
   await unavailableRoutes.disable();
