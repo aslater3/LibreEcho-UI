@@ -37,7 +37,7 @@
 #define RING_SAMPLES 48000U
 #define MEDIA_KEY 1U
 #define MUTE_KEY 2U
-struct client { int fd,mode,phase,hello,states,closing; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen;struct en_session noise; };
+struct client { int fd,mode,phase,hello,states,closing; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
 struct state {
  struct client clients[CLIENTS];struct io jobs[JOBS],wake,mic,timer_cleanup;
@@ -108,7 +108,9 @@ static void states_send(struct client *c){unsigned char b[64];struct ep_writer w
 static void all_states(void){for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].states)states_send(&S.clients[i]);}
 static int announce_done(int success){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,(unsigned)success);return S.owner>=0?send_writer(&S.clients[S.owner],120,&w):-1;}
 static void capture_end(void){if(S.turn==2&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,2,1);(void)send_writer(&S.clients[S.owner],106,&w);}if(S.turn==1||S.turn==2)S.turn=3;profile("thinking");}
-static void turn_clear(const char *result,int notify){if(notify)(void)announce_done(0);esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=0;S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);profile(!strcmp(result,"success")?"idle":"error");status_write();all_states();}
+static void turn_clear(const char *result,int notify){int active=S.turn||S.playing;if(notify)(void)announce_done(0);esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=0;S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);/* Error flash only for a turn that was really interrupted: an idle HA
+ * reconnect is not a user-visible failure. */
+ profile(active&&strcmp(result,"success")?"error":"idle");status_write();all_states();}
 static void cancel_turn(const char *reason){if(S.turn&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,0);(void)send_writer(&S.clients[S.owner],90,&w);}turn_clear(reason,S.announcement);}
 static void client_close(unsigned i){struct client *c=&S.clients[i];if(c->fd>=0)close(c->fd);c->fd=-1;if(S.owner==(int)i){cancel_turn("disconnected");S.owner=-1;timer_owner_end();}en_free(&c->noise);memset(c,0,sizeof *c);c->fd=-1;status_write();}
 static int voice_start(uint64_t sample,int continued){unsigned char b[256];struct ep_writer w={b,sizeof b,0,0};if(!S.ha_selected||S.owner<0||S.turn||mic_muted()||(!continued&&!S.active_wake))return -1;
@@ -211,6 +213,9 @@ static int process_rx(unsigned idx){struct client *c=&S.clients[idx];unsigned pa
  }return 0;
 }
 static void client_tick(unsigned idx,short events){struct client *c=&S.clients[idx];if(c->fd<0)return;if(S.now>c->deadline){client_close(idx);return;}
+ /* aioesphomeapi only pings after hearing nothing, and our state stream keeps
+  * it quiet, so probe a silent peer ourselves well inside the idle deadline. */
+ if(c->hello&&!c->closing&&S.now>=c->last_seen+60000&&S.now>=c->ping_at+30000){c->ping_at=S.now;(void)send_msg(c,7,NULL,0);}
  if((events&POLLIN)&&!c->closing){ssize_t n=recv(c->fd,c->rx+c->rx_n,sizeof c->rx-c->rx_n,MSG_DONTWAIT);if(n<0&&(errno==EAGAIN||errno==EWOULDBLOCK))n=-2;if(n==-2){}else if(n<=0){client_close(idx);return;}else{c->rx_n+=(size_t)n;c->last_seen=S.now;if(c->hello)c->deadline=S.now+120000;if(process_rx(idx)<0||c->rx_n==sizeof c->rx){client_close(idx);return;}}}
  if(c->tx_sent<c->tx_n){ssize_t n=send(c->fd,c->tx+c->tx_sent,c->tx_n-c->tx_sent,MSG_DONTWAIT|MSG_NOSIGNAL);if(n<0&&errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR){client_close(idx);return;}if(n>0)c->tx_sent+=(size_t)n;if(c->tx_sent==c->tx_n)c->tx_sent=c->tx_n=0;}
  if((c->closing&&!c->tx_n)||(events&(POLLERR|POLLNVAL))){client_close(idx);return;}
