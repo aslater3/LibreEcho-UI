@@ -1794,15 +1794,28 @@ successful `200` response with `data.available: false` and
 
 #### PUT /api/v1/wake-word
 
-Update wake word settings.
+Update detection sensitivity without resubmitting or changing the model.
 
 **Request:**
 ```json
 {
-  "wake_word": "Echo",
   "sensitivity": 75
 }
 ```
+
+The installed on-device model determines the phrase. The bundled `waked`
+reports `Alexa` and accepts only `Alexa` or `alexa` through its existing
+`set_word` command; LibreEcho, Computer, Echo and Custom model are not installed
+choices. Unsupported selections fail rather than switching models. The web UI
+therefore displays the adapter-reported word read-only and saves sensitivity
+only. There is no model upload, training or phrase-selection flow here.
+
+Custom voice mode selects STT/TTS engines, not another wake model. Home
+Assistant can select or disable the installed Alexa model through the ESPHome
+native API; its `esphome_active_wake_word` setting is separate from saved
+Local/Custom preferences. The web page reports the wake adapter, not that HA
+selection or proof that voice capture is active. Existing settings are not
+migrated or rewritten by viewing the page or saving sensitivity.
 
 #### POST /api/v1/wake-word/test
 

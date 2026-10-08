@@ -3620,7 +3620,8 @@
     "tags": [
      "Wake word"
     ],
-    "summary": "Update model or sensitivity",
+    "summary": "Update wake detection sensitivity",
+    "description": "The web UI sends sensitivity only and displays the adapter-reported wake word read-only. The bundled on-device model is Alexa; existing wake_word requests reach the adapter, which accepts Alexa/alexa and rejects unsupported model names. There is no custom model upload or phrase-selection flow. Custom STT/TTS settings do not change the wake model; Home Assistant native wake selection is stored separately as esphome_active_wake_word.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
