@@ -228,6 +228,11 @@ class Fixture(Daemon):
   except TimeoutError:pass
   self.assertIn((120,num(1,0)),messages,'cancelled announcement must return a negative completion');self.assertFalse(json.loads((self.p/'status.json').read_text())['in_progress']);self.assertEqual(len([r for r in self.adapters['timer'].calls if r['cmd']=='remote_clear']),clears)
   self.s.settimeout(3);self.s.sendall(frame(119,text(1,'file:///invalid')));self.assertEqual(receive(self.s),(120,num(1,0)))
+ def test_wake_start_requests_stt_not_ha_wake_word(self):
+  # The wake word is detected on the device; asking HA to run its own wake
+  # engine (USE_WAKE_WORD, bit 1) makes HA fail the run with wake-engine-missing.
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams();a.samples(0);time.sleep(.1);a.wake(100)
+  t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(3,1),b);self.assertNotIn(num(3,3),b);self.assertIn(text(5,'Alexa'),b)
  def test_no_tts_run_end_continues_and_preserves_timers(self):
   self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams();a.samples(0);time.sleep(.1);a.wake(100);self.assertEqual(receive(self.s)[0],90);self.s.sendall(frame(91))
   clears=len([r for r in self.adapters['timer'].calls if r['cmd']=='remote_clear'])

@@ -392,6 +392,12 @@ $(BUILD)/test-wake-health: tests/test_wake_health.c src/json.c src/log.c src/ser
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $^ -o $@
 
+$(BUILD)/test-noise-playback: tests/test_noise_playback.c src/api.c src/json.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CSTD) $(WARN) \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter tests/test_noise_playback.c src/json.c -lm -o $@
+
 $(BUILD)/test-wake-health-api: tests/test_wake_health_api.c \
 	$(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
 	@mkdir -p $(BUILD)

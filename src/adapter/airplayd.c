@@ -27,11 +27,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define INPUT_MAX LE_ADAPTER_MSG_MAX
@@ -84,6 +86,80 @@ struct airplay_ctx {
 static volatile sig_atomic_t running = 1;
 
 #define AIRPLAY_CHROOT "/bin/busybox"
+#define AIRPLAY_LED_BRIDGE_CHECK_MS 2000
+
+/* The AirPlay sandbox reaches ledd through a bind mount of the single socket
+ * file (see libreecho-airplayd.init). A bind mount pins the inode, so when
+ * ledd restarts and creates a new socket the sandbox keeps the deleted one
+ * and visualiser frames are silently dropped. Re-point the bind whenever the
+ * bridged inode is no longer the live socket.
+ *
+ * Returns 1 when the bind was (re)created, 0 when nothing needed doing
+ * (current, ledd not up, or sandbox /run not prepared yet), -1 on failure. */
+static int airplay_led_bridge_refresh(const char *source, const char *target)
+{
+    struct stat live, bridged, parent;
+    char directory[256];
+    char *slash;
+    int fd;
+
+    if (stat(source, &live) != 0 || !S_ISSOCK(live.st_mode))
+        return 0;
+    if (strlen(target) >= sizeof(directory))
+        return -1;
+    memcpy(directory, target, strlen(target) + 1);
+    slash = strrchr(directory, '/');
+    if (!slash || slash == directory)
+        return -1;
+    *slash = '\0';
+    if (stat(directory, &parent) != 0 || !S_ISDIR(parent.st_mode))
+        return 0;
+    if (stat(target, &bridged) == 0 && bridged.st_dev == live.st_dev &&
+        bridged.st_ino == live.st_ino)
+        return 0;
+    (void)umount2(target, MNT_DETACH);
+    fd = open(target, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    close(fd);
+    if (mount(source, target, NULL, MS_BIND, NULL) != 0)
+        return -1;
+    return 1;
+}
+
+static uint64_t airplay_monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+}
+
+static void airplay_led_bridge_poll(const struct airplay_ctx *ctx)
+{
+    static uint64_t last_check_ms;
+    static int last_failed;
+    char target[256];
+    uint64_t now = airplay_monotonic_ms();
+    int result;
+
+    if (last_check_ms && now - last_check_ms < AIRPLAY_LED_BRIDGE_CHECK_MS)
+        return;
+    last_check_ms = now;
+    if (snprintf(target, sizeof(target), "%s%s", ctx->runtime_root,
+                 LE_ADAPTER_LED_SOCK) >= (int)sizeof(target))
+        return;
+    result = airplay_led_bridge_refresh(LE_ADAPTER_LED_SOCK, target);
+    if (result > 0) {
+        le_log_info("airplayd: LED socket bridge re-attached to the live ledd socket");
+        last_failed = 0;
+    } else if (result < 0 && !last_failed) {
+        le_log_warn("airplayd: LED socket bridge re-attach failed: %s", strerror(errno));
+        last_failed = 1;
+    } else if (result == 0) {
+        last_failed = 0;
+    }
+}
 
 static void on_signal(int signo)
 {
@@ -1522,6 +1598,7 @@ int main(int argc, char **argv)
         if (ctx.enabled && ctx.metadata_fd < 0)
             (void)metadata_fifo_open(&ctx);
         airplay_master_poll(&ctx);
+        airplay_led_bridge_poll(&ctx);
         pfd[0].fd = ctx.listener;
         pfd[0].events = POLLIN;
         pfd[0].revents = 0;

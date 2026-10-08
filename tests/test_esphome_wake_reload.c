@@ -223,6 +223,8 @@ static void validation(struct le_wake_worker *worker, struct waked_ipc *ipc)
 {
     static const char *invalid[] = {
         "{}", "{\"note\":\"Alexa\"}",
+        "{\"word\":\"LibreEcho\"}", "{\"word\":\"Computer\"}",
+        "{\"word\":\"Echo\"}", "{\"word\":\"Custom model\"}",
         "{\"word\":\"other\",\"note\":\"Alexa\"}",
         "{\"nested\":{\"word\":\"Alexa\"}}",
         "{\"word\":[\"Alexa\"]}", "{\"word\":{\"name\":\"Alexa\"}}",

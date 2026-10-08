@@ -155,6 +155,9 @@ python3 tests/test_home_location_panel_contract.py
 python3 tests/test_weather_provider_contract.py
 python3 tools/test_virtual_echo.py
 python3 tests/test_now_playing_ui_contract.py
+make build/test-noise-playback
+./build/test-noise-playback
+node tests/test_noise_now_playing.js
 python3 tests/test_config_persist_contract.py
 python3 tests/test_web_ui_behaviour_contract.py
 node tests/test_reboot_reconnect.js
@@ -265,6 +268,11 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
     -lm -o build/test-airplay-metadata
 ./build/test-airplay-metadata
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_airplay_led_bridge_refresh.c \
+    src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+    -lm -o build/test-airplay-led-bridge-refresh
+./build/test-airplay-led-bridge-refresh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_micd.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \

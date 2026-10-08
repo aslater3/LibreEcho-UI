@@ -45,6 +45,9 @@
 #endif
 
 #define MAX_CLIENTS 4
+/* Queue depth for the visualiser producer's nonblocking connects: a full
+   queue drops a music frame, so keep headroom over the client slots. */
+#define LED_LISTEN_BACKLOG 16
 /*
  * The ring colour, brightness and the four state themes are persisted here.
  *
@@ -272,6 +275,18 @@ struct daemon_context {
     /* Common output stage diagnostics (#66). */
     struct led_output_state output_state;
     struct led_output_diag output_diag;
+    /* Hardware write pacing.  The IS31FL3236 sits on the I2C bus shared with
+       the four audio codecs and light sensors; one frame is 37 register
+       writes and was measured at 30..120 ms on Radar.  Writing every 33 ms
+       frame kept ledd blocked in the I2C driver for up to half of each
+       second, so it could not service the visualiser socket and the ring
+       froze.  Identical frames are skipped and writes are paced to at most
+       half the bus time; the newest frame is always written eventually. */
+    struct pixel hw_written[RING_PIXELS];
+    int hw_written_valid;
+    int hw_pending;
+    double hw_next_write;
+    double hw_write_cost;      /* smoothed seconds per hardware write */
     /* Sleep light runtime (#101). */
     int sleep_active;
     double sleep_started;
@@ -546,22 +561,82 @@ static struct colour night_capped(const struct daemon_context *ctx,
    pattern, meter, visualizer/music scene, transition and test frame ends up
    here, so the perceptual transfer, calibration and aggregate budget apply
    uniformly and exactly once. */
+#define HW_WRITE_MIN_INTERVAL (FRAME_MS / 1000.0)
+#define HW_WRITE_MAX_INTERVAL 0.125
+#define HW_WRITE_BUS_SHARE 2.0 /* spend at most 1/2 of the time writing */
+
+/* Write the newest rendered frame if it differs from the hardware and the
+   pacing interval has elapsed.  Returns 1 when a write was attempted. */
+static int output_flush(struct daemon_context *ctx, double now, int force)
+{
+    double started, cost, interval;
+
+    if (!ctx->hw_pending)
+        return 0;
+    if (ctx->hw_written_valid &&
+        memcmp(ctx->hw_written, ctx->rendered_pixels,
+               sizeof(ctx->hw_written)) == 0) {
+        ctx->hw_pending = 0;
+        return 0;
+    }
+    if (!force && now < ctx->hw_next_write)
+        return 0;
+    started = monotonic_seconds();
+    if (hardware_write_pixels(&ctx->hw, ctx->rendered_pixels) != 0) {
+        le_log_warn("LED hardware write failed; retaining state in memory");
+        ctx->hw_written_valid = 0;
+    } else {
+        memcpy(ctx->hw_written, ctx->rendered_pixels, sizeof(ctx->hw_written));
+        ctx->hw_written_valid = 1;
+    }
+    ctx->hw_pending = 0;
+    cost = monotonic_seconds() - started;
+    if (cost < 0.0)
+        cost = 0.0;
+    ctx->hw_write_cost = ctx->hw_write_cost <= 0.0
+                       ? cost : (ctx->hw_write_cost * 3.0 + cost) / 4.0;
+    interval = ctx->hw_write_cost * HW_WRITE_BUS_SHARE;
+    if (interval < HW_WRITE_MIN_INTERVAL)
+        interval = HW_WRITE_MIN_INTERVAL;
+    if (interval > HW_WRITE_MAX_INTERVAL)
+        interval = HW_WRITE_MAX_INTERVAL;
+    ctx->hw_next_write = started + interval;
+    return 1;
+}
+
+/* Milliseconds until a paced pending write is due, or -1 when none. */
+static int output_flush_timeout(const struct daemon_context *ctx, double now)
+{
+    double remaining;
+
+    if (!ctx->hw_pending)
+        return -1;
+    remaining = (ctx->hw_next_write - now) * 1000.0;
+    return remaining <= 1.0 ? 1 : (int)remaining + 1;
+}
+
+static void output_commit_transfer(struct daemon_context *ctx,
+                                   const struct led_rgb logical[RING_PIXELS],
+                                   unsigned int brightness,
+                                   enum led_output_transfer transfer)
+{
+    struct led_rgb out[RING_PIXELS];
+    size_t i;
+
+    led_output_process_transfer(led_output_default_calibration(),
+                                &ctx->output_state, logical, brightness,
+                                transfer, out, &ctx->output_diag);
+    for (i = 0; i < RING_PIXELS; i++)
+        ctx->rendered_pixels[i] = (struct pixel){out[i].r, out[i].g, out[i].b};
+    ctx->hw_pending = 1;
+    (void)output_flush(ctx, monotonic_seconds(), 0);
+}
+
 static void output_commit(struct daemon_context *ctx,
                           const struct led_rgb logical[RING_PIXELS],
                           unsigned int brightness)
 {
-    struct led_rgb out[RING_PIXELS];
-    struct pixel write[RING_PIXELS];
-    size_t i;
-
-    led_output_process(led_output_default_calibration(), &ctx->output_state,
-                       logical, brightness, out, &ctx->output_diag);
-    for (i = 0; i < RING_PIXELS; i++) {
-        ctx->rendered_pixels[i] = (struct pixel){out[i].r, out[i].g, out[i].b};
-        write[i] = ctx->rendered_pixels[i];
-    }
-    if (hardware_write_pixels(&ctx->hw, write) != 0)
-        le_log_warn("LED hardware write failed; retaining state in memory");
+    output_commit_transfer(ctx, logical, brightness, LE_OUTPUT_TRANSFER_GAMMA);
 }
 
 static void night_cap_pixels(const struct daemon_context *ctx,
@@ -605,9 +680,10 @@ static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
 }
 
 /* A logical per-pixel frame (0..255 per channel, no brightness baked in). */
-static void output_logical_rgb(struct daemon_context *ctx,
-                               const struct led_rgb logical[RING_PIXELS],
-                               unsigned int brightness)
+static void output_logical_rgb_transfer(struct daemon_context *ctx,
+                                        const struct led_rgb logical[RING_PIXELS],
+                                        unsigned int brightness,
+                                        enum led_output_transfer transfer)
 {
     struct pixel capped[RING_PIXELS];
     struct led_rgb frame[RING_PIXELS];
@@ -618,7 +694,26 @@ static void output_logical_rgb(struct daemon_context *ctx,
     night_cap_pixels(ctx, capped);
     for (i = 0; i < RING_PIXELS; i++)
         frame[i] = (struct led_rgb){capped[i].r, capped[i].g, capped[i].b};
-    output_commit(ctx, frame, brightness);
+    output_commit_transfer(ctx, frame, brightness, transfer);
+}
+
+static void output_logical_rgb(struct daemon_context *ctx,
+                               const struct led_rgb logical[RING_PIXELS],
+                               unsigned int brightness)
+{
+    output_logical_rgb_transfer(ctx, logical, brightness,
+                                LE_OUTPUT_TRANSFER_GAMMA);
+}
+
+/* Music frames: band levels are already perceptually shaped by the analyser,
+   so they bypass the gamma-2 transfer (brightness cap, calibration, night cap
+   and frame budget still apply). */
+static void output_music_rgb(struct daemon_context *ctx,
+                             const struct led_rgb logical[RING_PIXELS],
+                             unsigned int brightness)
+{
+    output_logical_rgb_transfer(ctx, logical, brightness,
+                                LE_OUTPUT_TRANSFER_LINEAR);
 }
 
 static void output_pixels(struct daemon_context *ctx,
@@ -1882,10 +1977,16 @@ static void apply_visualizer(struct daemon_context *ctx, double now)
         ctx->visualizer_rhythm_pulse = 0;
     ctx->visualizer_impact = ctx->visualizer_impact > 12U
                            ? ctx->visualizer_impact - 12U : 0U;
-    if (ctx->music_active)
+    if (ctx->music_active) {
         apply_music_v2(ctx, now);
-    else
-        output_pixels(ctx, pixels, ctx->visualizer_brightness);
+    } else {
+        struct led_rgb frame[RING_PIXELS];
+        size_t p;
+
+        for (p = 0; p < RING_PIXELS; p++)
+            frame[p] = (struct led_rgb){pixels[p].r, pixels[p].g, pixels[p].b};
+        output_music_rgb(ctx, frame, ctx->visualizer_brightness);
+    }
 }
 
 static void expire_visualizer(struct daemon_context *ctx, double now)
@@ -2358,7 +2459,7 @@ static void apply_music_v2(struct daemon_context *ctx, double now)
 
     le_music_director_scene(&ctx->music_director, now, &scene);
     le_music_render(&scene, &ctx->music_features, &ctx->music_render, logical);
-    output_logical_rgb(ctx, logical, ctx->music_brightness);
+    output_music_rgb(ctx, logical, ctx->music_brightness);
 }
 
 static void start_music_v2(struct daemon_context *ctx,
@@ -3247,7 +3348,7 @@ static int make_listener(const char *path)
     address.sun_family = AF_UNIX;
     memcpy(address.sun_path, path, strlen(path) + 1);
     if (bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        listen(fd, MAX_CLIENTS) != 0 || chmod(path, 0660) != 0 ||
+        listen(fd, LED_LISTEN_BACKLOG) != 0 || chmod(path, 0660) != 0 ||
         set_nonblocking(fd) != 0) {
         le_log_error( "cannot create LED socket %s: %s", path,
                     strerror(errno));
@@ -3456,6 +3557,11 @@ int main(int argc, char **argv)
             timeout = remaining <= 1.0 ? 1 : (int)remaining;
         } else if (ctx.state.night_enabled)
             timeout = night_schedule_timeout(&ctx, now);
+        {
+            int flush_timeout = output_flush_timeout(&ctx, now);
+            if (flush_timeout >= 0 && (timeout < 0 || flush_timeout < timeout))
+                timeout = flush_timeout;
+        }
 
         for (j = 0; j < MAX_CLIENTS; j++) {
             if (ctx.clients[j].fd >= 0) {
@@ -3491,11 +3597,13 @@ int main(int argc, char **argv)
             update_animation(&ctx, now);
         sleep_tick(&ctx, now);
         night_schedule_tick(&ctx, now);
+        (void)output_flush(&ctx, monotonic_seconds(), 0);
     }
 
     for (i = 0; i < MAX_CLIENTS; i++)
         close_client(&ctx.clients[i]);
     hardware_apply(&ctx, &(struct colour){0, 0, 0, 0});
+    (void)output_flush(&ctx, monotonic_seconds(), 1);
     if (ctx.listen_fd >= 0)
         close(ctx.listen_fd);
     unlink(ctx.socket_path);
