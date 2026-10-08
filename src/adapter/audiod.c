@@ -1970,9 +1970,28 @@ static int airplay_finish_restore(struct audio_hw *audio)
     return 0;
 }
 
+/* Liveness only: is a listener bound to the controller path? A full accept
+ * queue (EAGAIN) or a slow handshake means the controller is busy, not gone,
+ * and must not revoke media. Only a missing or unbound socket is loss. */
+static int airplay_controller_alive(const char *path)
+{
+    struct sockaddr_un address;
+    int fd, rc, error = 0;
+    if (strlen(path) >= sizeof(address.sun_path)) return 0;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, path, strlen(path) + 1);
+    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) return 1; /* local resource failure is not controller loss */
+    rc = connect(fd, (struct sockaddr *)&address, sizeof(address));
+    if (rc < 0) error = errno;
+    close(fd);
+    return rc == 0 || error == EAGAIN || error == EWOULDBLOCK ||
+           error == EINPROGRESS || error == EINTR;
+}
+
 static void airplay_restore_poll(struct audio_hw *audio)
 {
-    struct le_adapter *controller = NULL;
     if (audio->airplay_restore_pending) {
         (void)unlink(LE_AIRPLAY_MASTER_ACK_PATH);
         if (airplay_finish_restore(audio) < 0)
@@ -1983,15 +2002,13 @@ static void airplay_restore_poll(struct audio_hw *audio)
     if (airplay_media_active()) {
         long long now;
         if (!audio->airplay_controller_socket[0]) return; /* host fixture */
-        controller = le_adapter_connect(audio->airplay_controller_socket, 25);
-        if (controller) {
-            le_adapter_close(controller);
+        if (airplay_controller_alive(audio->airplay_controller_socket)) {
             audio->airplay_controller_missing_since_ms = 0;
             return;
         }
-        /* A single failed 25 ms connect is not proof that the controller or
-         * stream ended. Revoke admission immediately, but keep the snapshot
-         * long enough for a transiently busy listener to recover. */
+        /* An unbound socket is not yet proof that the stream ended (the
+         * controller may be restarting). Revoke admission immediately, but
+         * keep the snapshot long enough for a restarted listener to recover. */
         (void)unlink(LE_AIRPLAY_MASTER_ACK_PATH);
         now = monotonic_millis();
         if (now > 0 && (!audio->airplay_controller_missing_since_ms ||
