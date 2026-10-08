@@ -332,13 +332,17 @@ async function main() {
   await home.waitFor({ timeout: 5000 });
   assert.equal(await home.count(), 1, 'exactly one home-location card');
   assert.match(await home.locator('summary h3').innerText(), /Home location & weather/);
-  /* Collapsed by default since "stop expanding panels": Home location, Local
-     LLM, the on-device assistant, GPT-Live and Internet radio must not open
-     themselves on load. */
+  /* Non-auth panels remain collapsed. The signed-out ChatGPT panel is the
+     exception: account setup must be reachable before activation (#272).
+     This mock image has no GPT-Live service, so that panel stays collapsed. */
   assert.equal(await home.evaluate(el => el.open), false, 'the card starts collapsed');
   const providerPanels = page.locator('.assistant-provider');
   assert.equal(await providerPanels.count(), 3, 'all three voice provider panels render');
-  assert.deepEqual(await providerPanels.evaluateAll(els => els.map(el => el.open)), [false, false, false], 'voice provider panels start collapsed');
+  assert.deepEqual(await providerPanels.evaluateAll(els => els.map(el => el.open)), [false, true, false], 'only the signed-out ChatGPT account panel starts open');
+  assert.equal(await page.locator('#assistant-auth-start').isVisible(), true, 'Connect is visible before activation');
+  assert.equal(await page.locator('#use-device-provider').isDisabled(), true, 'ChatGPT cannot enable while signed out');
+  assert.equal(await page.locator('#use-live-provider').isDisabled(), true, 'missing GPT-Live cannot enable');
+  assert.equal(await page.locator('#use-local-provider').isDisabled(), false, 'Local LLM is independent of ChatGPT sign-in');
   await home.locator('summary').click();
   assert.match(await home.innerText(), /Home address or place/);
   assert.match(await home.innerText(), /weather, local time and, in future, directions/);
