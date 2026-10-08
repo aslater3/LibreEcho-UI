@@ -100,6 +100,16 @@ struct led_output_state {
     int have_previous;
 };
 
+/* Transfer applied in step 3 of led_output_process_transfer(). */
+enum led_output_transfer {
+    /* Physical gamma 2 (led_output_gamma): status colours, patterns, idle. */
+    LE_OUTPUT_TRANSFER_GAMMA = 0,
+    /* Identity: music visualiser frames, whose band levels are already
+       perceptually shaped by the analyser.  Squaring them again crushes the
+       typical 10..60 levels to 1..15 PWM counts and leaves the ring thin. */
+    LE_OUTPUT_TRANSFER_LINEAR = 1
+};
+
 /*
  * Process one logical frame.  brightness is 0..100; the frame is scaled by it
  * in logical space.  out receives the corrected, budgeted pixels.  diag may be
@@ -111,6 +121,16 @@ void led_output_process(const struct led_output_calibration *cal,
                         unsigned int brightness,
                         struct led_rgb out[LE_LED_PIXELS],
                         struct led_output_diag *diag);
+
+/* As led_output_process() with an explicit step-3 transfer.  The brightness
+   cap, calibration and frame budget apply identically for every transfer. */
+void led_output_process_transfer(const struct led_output_calibration *cal,
+                                 struct led_output_state *state,
+                                 const struct led_rgb logical[LE_LED_PIXELS],
+                                 unsigned int brightness,
+                                 enum led_output_transfer transfer,
+                                 struct led_rgb out[LE_LED_PIXELS],
+                                 struct led_output_diag *diag);
 
 /* Convenience: one logical colour replicated across the whole ring. */
 void led_output_process_solid(const struct led_output_calibration *cal,
