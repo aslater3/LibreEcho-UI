@@ -1,0 +1,88 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          libreecho-esphomed
+# Required-Start:    $remote_fs $network libreecho-waked libreecho-audiod libreecho-mdnsd
+# Required-Stop:     $remote_fs libreecho-waked libreecho-audiod libreecho-mdnsd
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+### END INIT INFO
+# The daemon never forks. Transport is Noise by default; no plaintext fallback.
+DEFAULTS=${DEFAULTS:-/etc/default/libreecho-esphomed}
+[ ! -r "$DEFAULTS" ] || . "$DEFAULTS"
+DAEMON=${DAEMON:-/usr/local/sbin/libreecho-esphomed}
+PIDFILE=${PIDFILE:-/var/run/libreecho-esphomed.pid}
+LOGFILE=${LOGFILE:-/var/log/libreecho-esphomed.log}
+CONFIG=${LE_CONFIG_PATH:-${CONFIG:-/data/libreecho/config/web-config.json}}
+STATUS_FILE=${STATUS_FILE:-/run/libreecho/esphome-status.json}
+PORT=${PORT:-6053}
+BIND=${BIND:-0.0.0.0}
+WAKE_SOCKET=${WAKE_SOCKET:-/run/libreecho/wakeword.sock}
+AUDIO_SOCKET=${AUDIO_SOCKET:-/run/libreecho/audio.sock}
+AUDIO_BUS=${AUDIO_BUS:-/run/libreecho-audio/system.pcm}
+MDNS_SOCKET=${MDNS_SOCKET:-/run/libreecho/mdns.sock}
+TLS_CA=${TLS_CA:-/etc/ssl/certs/ca-certificates.crt}
+RADIO_SOCKET=${RADIO_SOCKET:-/run/libreecho/radio.sock}
+TIMER_SOCKET=${TIMER_SOCKET:-/run/libreecho/timer.sock}
+LED_SOCKET=${LED_SOCKET:-/run/libreecho/led.sock}
+PRIVACY_STATE=${PRIVACY_STATE:-/sys/devices/platform/amz_privacy/privacy_state}
+IDME_ROOT=${IDME_ROOT:-/sys/firmware/devicetree/base/idme}
+# A stale/reused pid never authorizes killing another process.
+pidfile_pid() {
+    [ -f "$PIDFILE" ] && [ ! -L "$PIDFILE" ] || return 1
+    IFS= read -r pid < "$PIDFILE" || return 1
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null || return 1
+    "$DAEMON" --process-check "$PIDFILE" "$STATUS_FILE" "$PORT" "$DAEMON" ready || return 1
+    printf '%s\n' "$pid"
+}
+start_service() {
+    # An already-running executable is not proof it owns a usable listener.
+    if pidfile_pid >/dev/null; then
+        "$DAEMON" --health-check "$PIDFILE" "$STATUS_FILE" "$PORT" "$DAEMON" ready
+        return $?
+    fi
+    [ -x "$DAEMON" ] || return 1
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$STATUS_FILE")" || return 1
+    rm -f "$PIDFILE" "$STATUS_FILE"
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- \
+            --config "$CONFIG" --status-file "$STATUS_FILE" --port "$PORT" --bind "$BIND" \
+            --wake-socket "$WAKE_SOCKET" --audio-socket "$AUDIO_SOCKET" --audio-bus "$AUDIO_BUS" \
+            --mdns-socket "$MDNS_SOCKET" --tls-ca "$TLS_CA" \
+            --radio-socket "$RADIO_SOCKET" --timer-socket "$TIMER_SOCKET" --led-socket "$LED_SOCKET" \
+            --privacy-state "$PRIVACY_STATE" --idme-root "$IDME_ROOT" </dev/null >>"$LOGFILE" 2>&1 || return 1
+    else
+        "$DAEMON" --config "$CONFIG" --status-file "$STATUS_FILE" --port "$PORT" --bind "$BIND" \
+            --wake-socket "$WAKE_SOCKET" --audio-socket "$AUDIO_SOCKET" --audio-bus "$AUDIO_BUS" \
+            --mdns-socket "$MDNS_SOCKET" --tls-ca "$TLS_CA" \
+            --radio-socket "$RADIO_SOCKET" --timer-socket "$TIMER_SOCKET" --led-socket "$LED_SOCKET" \
+            --privacy-state "$PRIVACY_STATE" --idme-root "$IDME_ROOT" </dev/null >>"$LOGFILE" 2>&1 &
+        printf '%s\n' "$!" > "$PIDFILE"
+    fi
+    attempts=0
+    while [ "$attempts" -lt 40 ]; do
+        if "$DAEMON" --health-check "$PIDFILE" "$STATUS_FILE" "$PORT" "$DAEMON" ready; then return 0; fi
+        sleep 0.05
+        attempts=$((attempts + 1))
+    done
+    stop_service
+    return 1
+}
+stop_service() {
+    target=$(pidfile_pid) || { rm -f "$PIDFILE" "$STATUS_FILE"; return 0; }
+    kill -TERM "$target" 2>/dev/null || true
+    attempts=0
+    while pidfile_pid >/dev/null && [ "$attempts" -lt 50 ]; do
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+    if pidfile_pid >/dev/null; then kill -KILL "$target" 2>/dev/null || true; fi
+    rm -f "$PIDFILE" "$STATUS_FILE"
+}
+case "${1:-}" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart) stop_service; start_service ;;
+    status) "$DAEMON" --health-check "$PIDFILE" "$STATUS_FILE" "$PORT" "$DAEMON" ready ;;
+    *) printf '%s\n' "Usage: $0 {start|stop|restart|status}"; exit 2 ;;
+esac

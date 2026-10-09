@@ -22,6 +22,7 @@ struct le_voice_playback {
     int playing;
     int running;
     int failed;
+    int cancelled;
     le_voice_playback_fn play;
     void *context;
 };
@@ -34,6 +35,11 @@ int le_voice_playback_enqueue(struct le_voice_playback *playback,
 int le_voice_playback_begin_turn(struct le_voice_playback *playback);
 int le_voice_playback_wait_idle(struct le_voice_playback *playback,
                                 unsigned int timeout_ms);
+/* Cancel a turn without destroying the worker. The current callback must
+ * observe cancelled and interrupt its sink; begin_turn resets it once idle. */
+void le_voice_playback_cancel(struct le_voice_playback *playback);
+int le_voice_playback_cancelled(struct le_voice_playback *playback);
+int le_voice_playback_pending(struct le_voice_playback *playback);
 void le_voice_playback_stop(struct le_voice_playback *playback);
 
 #endif

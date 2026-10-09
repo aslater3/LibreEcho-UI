@@ -120,7 +120,7 @@ struct myd_state {
 static void load_state(struct myd_state *st)
 {
     // Load from /etc/libreecho/myd-state.json
-    // Use config_manager or json.h
+    // Use config_read() and json.h
     st->value = 0;
     st->enabled = 1;
 }
@@ -128,7 +128,7 @@ static void load_state(struct myd_state *st)
 static void save_state(const struct myd_state *st)
 {
     // Save to /etc/libreecho/myd-state.json
-    // Use config_manager or atomic file write
+    // Use config_write_atomic() for atomic file writes
 }
 
 /* ── Command Handlers ───────────────────────────────────────────────── */
@@ -463,4 +463,4 @@ If hardware disappears mid-operation, log the error and return `LE_IO` — don't
 For sensors that update frequently, add a minimum poll interval in the daemon. Don't let the web UI hammer the hardware.
 
 ### Atomic Config
-Use `config_write_atomic()` or `le_config_write()` for config changes. Never write directly to `/etc/libreecho/config.json` from a companion daemon — only the web daemon writes config.
+Use `config_write_atomic()` for config changes. Never write directly to `/etc/libreecho/config.json` from a companion daemon — only the web daemon writes config.

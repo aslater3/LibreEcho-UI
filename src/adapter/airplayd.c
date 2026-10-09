@@ -3,6 +3,12 @@
  * The controller is started with the other local daemons, but AirPlay itself
  * is deliberately stopped until the user enables the integration.  NQPTP is
  * started before Shairport Sync because AirPlay 2 uses it for PTP timing.
+ *
+ * Discovery is NOT owned here. The shared libreecho-mdnsd supervisor starts
+ * D-Bus and Avahi once for the whole image; this controller only reads its
+ * readiness and stages its own service definitions where that supervisor
+ * reads them. Starting a second responder here is what made a hostname
+ * refresh or a discovery update take AirPlay audio down with it.
  */
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
@@ -10,8 +16,10 @@
 
 #include "adapter.h"
 #include "log.h"
+#include "mdns_client.h"
 
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -19,17 +27,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define INPUT_MAX LE_ADAPTER_MSG_MAX
 #define AIRPLAY_METADATA_FIFO "/run/libreecho-audio/airplay.metadata"
+#define LE_MDNS_BUS_SOCKET "/usr/local/lib/libreecho-mdns/root/run/dbus/system_bus_socket"
 #define AIRPLAY_METADATA_ITEM_MAX 8192
 #define AIRPLAY_METADATA_FIELD_MAX 192
 #define AIRPLAY_METADATA_AP2_PLIST_MAX 16384
 #define AIRPLAY_METADATA_READ_MAX 16
+#define AIRPLAY_ACCEPT_BATCH_MAX 16
+#define AIRPLAY_LISTEN_BACKLOG 16
 
 struct airplay_metadata_parser {
     char item[AIRPLAY_METADATA_ITEM_MAX + 1];
@@ -44,13 +59,18 @@ struct airplay_ctx {
     char runtime_root[128];
     char nqptp_path[128];
     char shairport_path[128];
-    char avahi_path[128];
-    char dbus_path[128];
     char audio_path[128];
     char engine_path[128];
     char config_path[128];
-    pid_t dbus_pid;
-    pid_t avahi_pid;
+    char mdns_socket[128];
+    char volume_root[128];
+    char master_socket[128];
+    char master_session[96];
+    dev_t applied_marker_dev, applied_volume_dev;
+    ino_t applied_marker_ino, applied_volume_ino;
+    struct timespec applied_marker_time, applied_volume_time;
+    int applied;
+    int write_confirmed;
     pid_t nqptp_pid;
     pid_t audio_pid;
     pid_t engine_pid;
@@ -66,11 +86,259 @@ struct airplay_ctx {
 static volatile sig_atomic_t running = 1;
 
 #define AIRPLAY_CHROOT "/bin/busybox"
+#define AIRPLAY_LED_BRIDGE_CHECK_MS 2000
+
+/* The AirPlay sandbox reaches ledd through a bind mount of the single socket
+ * file (see libreecho-airplayd.init). A bind mount pins the inode, so when
+ * ledd restarts and creates a new socket the sandbox keeps the deleted one
+ * and visualiser frames are silently dropped. Re-point the bind whenever the
+ * bridged inode is no longer the live socket.
+ *
+ * Returns 1 when the bind was (re)created, 0 when nothing needed doing
+ * (current, ledd not up, or sandbox /run not prepared yet), -1 on failure. */
+static int airplay_led_bridge_refresh(const char *source, const char *target)
+{
+    struct stat live, bridged, parent;
+    char directory[256];
+    char *slash;
+    int fd;
+
+    if (stat(source, &live) != 0 || !S_ISSOCK(live.st_mode))
+        return 0;
+    if (strlen(target) >= sizeof(directory))
+        return -1;
+    memcpy(directory, target, strlen(target) + 1);
+    slash = strrchr(directory, '/');
+    if (!slash || slash == directory)
+        return -1;
+    *slash = '\0';
+    if (stat(directory, &parent) != 0 || !S_ISDIR(parent.st_mode))
+        return 0;
+    if (stat(target, &bridged) == 0 && bridged.st_dev == live.st_dev &&
+        bridged.st_ino == live.st_ino)
+        return 0;
+    (void)umount2(target, MNT_DETACH);
+    fd = open(target, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    close(fd);
+    if (mount(source, target, NULL, MS_BIND, NULL) != 0)
+        return -1;
+    return 1;
+}
+
+static uint64_t airplay_monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+}
+
+static void airplay_led_bridge_poll(const struct airplay_ctx *ctx)
+{
+    static uint64_t last_check_ms;
+    static int last_failed;
+    char target[256];
+    uint64_t now = airplay_monotonic_ms();
+    int result;
+
+    if (last_check_ms && now - last_check_ms < AIRPLAY_LED_BRIDGE_CHECK_MS)
+        return;
+    last_check_ms = now;
+    if (snprintf(target, sizeof(target), "%s%s", ctx->runtime_root,
+                 LE_ADAPTER_LED_SOCK) >= (int)sizeof(target))
+        return;
+    result = airplay_led_bridge_refresh(LE_ADAPTER_LED_SOCK, target);
+    if (result > 0) {
+        le_log_info("airplayd: LED socket bridge re-attached to the live ledd socket");
+        last_failed = 0;
+    } else if (result < 0 && !last_failed) {
+        le_log_warn("airplayd: LED socket bridge re-attach failed: %s", strerror(errno));
+        last_failed = 1;
+    } else if (result == 0) {
+        last_failed = 0;
+    }
+}
 
 static void on_signal(int signo)
 {
     if (signo == SIGTERM || signo == SIGINT)
         running = 0;
+}
+
+static int airplay_master_end(struct airplay_ctx *ctx)
+{
+    struct le_adapter *adapter;
+    char args[144], response[256];
+    int n;
+    if (!ctx->master_session[0]) return 0;
+    adapter = le_adapter_connect(ctx->master_socket, 100);
+    if (!adapter) return -1;
+    le_adapter_set_io_timeout(adapter, 100);
+    snprintf(args, sizeof(args), "{\"session\":\"%s\"}", ctx->master_session);
+    n = le_adapter_call(adapter, "airplay_end", args, response, sizeof(response));
+    le_adapter_close(adapter);
+    if (n != LE_ADAPTER_OK) return -1;
+    ctx->master_session[0] = '\0';
+    ctx->applied = ctx->write_confirmed = 0;
+    return 0;
+}
+
+/* Shairport's standard profile sends -30..0 dB for the slider and -144
+ * for mute. Reject corrupt callbacks rather than changing the shared master. */
+static int airplay_db_to_percent(const char *text, int *percent)
+{
+    char *end;
+    double db;
+    errno = 0;
+    db = strtod(text, &end);
+    if (end == text || errno == ERANGE || !isfinite(db) ||
+        (db != -144.0 && (db < -30.0 || db > 0.0)))
+        return -1;
+    while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') ++end;
+    if (*end) return -1;
+    if (db == -144.0) *percent = 0;
+    else {
+        *percent = (int)(((db + 30.0) * 99.0 / 30.0) + 1.5);
+        if (*percent > 100) *percent = 100;
+    }
+    return 0;
+}
+
+/* A cached write cannot survive revocation of its on-disk admission token.
+ * Compare the whole token, not just its path, before skipping a retry. */
+static int airplay_ack_matches(const char *path, const struct stat *m, const struct stat *v)
+{
+    char expected[160], observed[160];
+    struct stat st;
+    int fd, length;
+    ssize_t size;
+    length = snprintf(expected, sizeof(expected), "%llu %llu %lld %ld %llu %llu %lld %ld\n",
+                      (unsigned long long)m->st_dev, (unsigned long long)m->st_ino,
+                      (long long)m->st_ctim.tv_sec, m->st_ctim.tv_nsec,
+                      (unsigned long long)v->st_dev, (unsigned long long)v->st_ino,
+                      (long long)v->st_ctim.tv_sec, v->st_ctim.tv_nsec);
+    if (length <= 0 || length >= (int)sizeof(expected)) return 0;
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size != length) {
+        close(fd); return 0;
+    }
+    size = read(fd, observed, sizeof(observed));
+    close(fd);
+    return size == length && !memcmp(observed, expected, (size_t)length);
+}
+
+/* Acknowledgment names both immutable inodes. A new callback or session
+ * cannot inherit an old acknowledgment; media remains gated on IPC failure. */
+static void airplay_master_poll(struct airplay_ctx *ctx)
+{
+    char marker[256], volume[256], ack[256], temp[272], text[160], args[256];
+    char response[LE_ADAPTER_MSG_MAX];
+    char session[96], callback[96];
+    struct stat m, v, current;
+    struct le_adapter *adapter;
+    int fd, n, percent, length, same_callback;
+    long readback;
+    char *end, *field;
+    ssize_t size;
+    if (!ctx->enabled) { (void)airplay_master_end(ctx); return; }
+    if (snprintf(marker, sizeof(marker), "%s/airplay.active", ctx->volume_root) >= (int)sizeof(marker) ||
+        snprintf(volume, sizeof(volume), "%s/airplay.volume", ctx->volume_root) >= (int)sizeof(volume) ||
+        snprintf(ack, sizeof(ack), "%s/airplay.master", ctx->volume_root) >= (int)sizeof(ack) ||
+        snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", ack) >= (int)sizeof(temp)) return;
+    if (stat(marker, &m) < 0 || !S_ISREG(m.st_mode)) {
+        (void)airplay_master_end(ctx);
+        return;
+    }
+    snprintf(session, sizeof(session), "%llu:%llu:%lld:%ld",
+             (unsigned long long)m.st_dev, (unsigned long long)m.st_ino,
+             (long long)m.st_ctim.tv_sec, m.st_ctim.tv_nsec);
+    if (ctx->master_session[0] && strcmp(ctx->master_session, session) &&
+        airplay_master_end(ctx) < 0) return;
+    fd = open(volume, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+    if (fd < 0) return;
+    if (fstat(fd, &v) < 0 || !S_ISREG(v.st_mode) ||
+        v.st_size <= 0 || v.st_size >= (off_t)sizeof(text)) { close(fd); return; }
+    size = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (size != v.st_size || stat(volume, &current) < 0 ||
+        current.st_dev != v.st_dev || current.st_ino != v.st_ino) return;
+    text[size] = '\0';
+    if (airplay_db_to_percent(text, &percent) < 0) return;
+    n = snprintf(callback, sizeof(callback), "%llu:%llu:%lld:%ld",
+                 (unsigned long long)v.st_dev, (unsigned long long)v.st_ino,
+                 (long long)v.st_ctim.tv_sec, v.st_ctim.tv_nsec);
+    if (n <= 0 || n >= (int)sizeof(callback)) return;
+    same_callback = ctx->write_confirmed && ctx->applied_marker_dev == m.st_dev &&
+        ctx->applied_marker_ino == m.st_ino &&
+        ctx->applied_marker_time.tv_sec == m.st_ctim.tv_sec &&
+        ctx->applied_marker_time.tv_nsec == m.st_ctim.tv_nsec &&
+        ctx->applied_volume_dev == v.st_dev && ctx->applied_volume_ino == v.st_ino &&
+        ctx->applied_volume_time.tv_sec == v.st_ctim.tv_sec &&
+        ctx->applied_volume_time.tv_nsec == v.st_ctim.tv_nsec;
+    if (same_callback && ctx->applied) {
+        if (airplay_ack_matches(ack, &m, &v)) return;
+        /* audiod revoked the token after a transient controller probe.
+         * Reconfirm with audiod before restoring media admission; an ended
+         * session must reject the retry instead of inheriting this cache. */
+        ctx->applied = ctx->write_confirmed = same_callback = 0;
+    }
+    adapter = le_adapter_connect(ctx->master_socket, 100);
+    if (!adapter) return;
+    le_adapter_set_io_timeout(adapter, 100);
+    if (!same_callback) {
+        snprintf(args, sizeof(args), "{\"session\":\"%s\",\"callback\":\"%s\",\"volume\":%d}", session, callback, percent);
+        /* A timed-out reply is unknown, not a failed write: end must still
+         * reach audiod even if the request already changed the mixer. */
+        snprintf(ctx->master_session, sizeof(ctx->master_session), "%s", session);
+        n = le_adapter_call(adapter, "airplay_volume", args, response, sizeof(response));
+        if (n != LE_ADAPTER_OK) { le_adapter_close(adapter); return; }
+        /* The write is confirmed independently of status/ack. On a retry of
+         * this same callback, only read status: a newer button choice wins. */
+        ctx->write_confirmed = 1;
+        ctx->applied = 0;
+        ctx->applied_marker_dev = m.st_dev; ctx->applied_marker_ino = m.st_ino;
+        ctx->applied_marker_time = m.st_ctim;
+        ctx->applied_volume_dev = v.st_dev; ctx->applied_volume_ino = v.st_ino;
+        ctx->applied_volume_time = v.st_ctim;
+    }
+    n = le_adapter_call(adapter, "status", "{}", response, sizeof(response));
+    le_adapter_close(adapter);
+    /* A failed status still leaves media gated, but never replays a confirmed
+     * write. A changed callback/session has a different identity and writes. */
+    if (n != LE_ADAPTER_OK) return;
+    field = strstr(response, "\"volume\":");
+    if (!field) return;
+    field += strlen("\"volume\":");
+    errno = 0;
+    readback = strtol(field, &end, 10);
+    if (errno || end == field || readback < 0 || readback > 100 ||
+        (*end != ',' && *end != '}')) return;
+    if (stat(marker, &current) < 0 || current.st_dev != m.st_dev || current.st_ino != m.st_ino ||
+        current.st_ctim.tv_sec != m.st_ctim.tv_sec || current.st_ctim.tv_nsec != m.st_ctim.tv_nsec ||
+        stat(volume, &current) < 0 || current.st_dev != v.st_dev || current.st_ino != v.st_ino ||
+        current.st_ctim.tv_sec != v.st_ctim.tv_sec || current.st_ctim.tv_nsec != v.st_ctim.tv_nsec) return;
+    length = snprintf(text, sizeof(text), "%llu %llu %lld %ld %llu %llu %lld %ld\n",
+                      (unsigned long long)m.st_dev, (unsigned long long)m.st_ino,
+                      (long long)m.st_ctim.tv_sec, m.st_ctim.tv_nsec,
+                      (unsigned long long)v.st_dev, (unsigned long long)v.st_ino,
+                      (long long)v.st_ctim.tv_sec, v.st_ctim.tv_nsec);
+    if (length <= 0 || length >= (int)sizeof(text)) return;
+    fd = mkstemp(temp);
+    if (fd < 0) return;
+    if (fchmod(fd, 0640) < 0 || write(fd, text, (size_t)length) != length ||
+        fsync(fd) < 0) {
+        close(fd); unlink(temp); return;
+    }
+    if (close(fd) < 0) { unlink(temp); return; }
+    if (rename(temp, ack) < 0) { unlink(temp); return; }
+    ctx->applied = 1;
+    ctx->applied_marker_dev = m.st_dev; ctx->applied_marker_ino = m.st_ino;
+    ctx->applied_marker_time = m.st_ctim;
+    ctx->applied_volume_dev = v.st_dev; ctx->applied_volume_ino = v.st_ino;
+    ctx->applied_volume_time = v.st_ctim;
 }
 
 static int json_bool(const char *json, const char *key, int *value)
@@ -956,14 +1224,6 @@ static int reap(struct airplay_ctx *ctx)
     int lost = 0;
 
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        if (pid == ctx->dbus_pid) {
-            ctx->dbus_pid = -1;
-            lost = 1;
-        }
-        if (pid == ctx->avahi_pid) {
-            ctx->avahi_pid = -1;
-            lost = 1;
-        }
         if (pid == ctx->nqptp_pid) {
             ctx->nqptp_pid = -1;
             lost = 1;
@@ -1014,28 +1274,6 @@ static pid_t spawn_nqptp(const struct airplay_ctx *ctx)
     _exit(127);
 }
 
-static pid_t spawn_dbus(const struct airplay_ctx *ctx)
-{
-    pid_t pid = fork();
-    if (pid != 0)
-        return pid;
-    execl(AIRPLAY_CHROOT, AIRPLAY_CHROOT, "chroot", ctx->runtime_root,
-          ctx->dbus_path, "--nofork", "--nopidfile",
-          "--config-file=/etc/dbus-1/system.conf", (char *)NULL);
-    _exit(127);
-}
-
-static pid_t spawn_avahi(const struct airplay_ctx *ctx)
-{
-    pid_t pid = fork();
-    if (pid != 0)
-        return pid;
-    execl(AIRPLAY_CHROOT, AIRPLAY_CHROOT, "chroot", ctx->runtime_root,
-          ctx->avahi_path, "--no-chroot", "--no-drop-root",
-          "--no-rlimits", (char *)NULL);
-    _exit(127);
-}
-
 static pid_t spawn_shairport(const struct airplay_ctx *ctx)
 {
     pid_t pid = fork();
@@ -1067,13 +1305,23 @@ static pid_t spawn_engine(const struct airplay_ctx *ctx)
     _exit(127);
 }
 
+/* The shared supervisor owns D-Bus and Avahi for the whole image. This
+ * controller only asks whether that responder is ready: it never starts,
+ * stops or restarts one of its own, so discovery work cannot take AirPlay
+ * audio down and two responders can never race for the same records. */
+static int mdns_ready(const struct airplay_ctx *ctx)
+{
+    struct stat state;
+    if (le_mdns_status(ctx->mdns_socket) == 1)
+        return 1;
+    return lstat(LE_MDNS_BUS_SOCKET, &state) == 0 && S_ISSOCK(state.st_mode);
+}
+
 static int set_enabled(struct airplay_ctx *ctx, int enabled)
 {
     int i;
     if (enabled == ctx->enabled && (!enabled ||
                                     (child_alive(ctx->engine_pid) &&
-                                     child_alive(ctx->dbus_pid) &&
-                                     child_alive(ctx->avahi_pid) &&
                                      child_alive(ctx->nqptp_pid) &&
                                      child_alive(ctx->audio_pid) &&
                                      child_alive(ctx->shairport_pid) &&
@@ -1082,9 +1330,8 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
     if (!enabled) {
         stop_child(&ctx->shairport_pid);
         stop_child(&ctx->audio_pid);
+        (void)airplay_master_end(ctx);
         stop_child(&ctx->nqptp_pid);
-        stop_child(&ctx->avahi_pid);
-        stop_child(&ctx->dbus_pid);
         ctx->enabled = 0;
         metadata_fifo_close(ctx);
         le_log_info("airplayd: AirPlay 2 disabled");
@@ -1095,8 +1342,6 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
     (snprintf(path, sizeof(path), "%s%s", ctx->runtime_root, (relative)), \
      access(path, (mode)) < 0)
     if (access(AIRPLAY_CHROOT, X_OK) < 0 ||
-        RUNTIME_ACCESS(ctx->dbus_path, X_OK) ||
-        RUNTIME_ACCESS(ctx->avahi_path, X_OK) ||
         RUNTIME_ACCESS(ctx->nqptp_path, X_OK) ||
         RUNTIME_ACCESS(ctx->audio_path, X_OK) ||
         RUNTIME_ACCESS(ctx->engine_path, X_OK) ||
@@ -1107,20 +1352,11 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
         return -1;
     }
 #undef RUNTIME_ACCESS
-    ctx->dbus_pid = spawn_dbus(ctx);
-    if (ctx->dbus_pid < 0)
-        return -1;
-    if (!wait_for_runtime_file(ctx, "/run/dbus/system_bus_socket", 30))
-        goto fail;
-    ctx->avahi_pid = spawn_avahi(ctx);
-    if (ctx->avahi_pid < 0) {
-        stop_child(&ctx->dbus_pid);
-        return -1;
-    }
-    for (i = 0; i < 10 && child_running(&ctx->avahi_pid); ++i)
-        usleep(100000);
-    if (ctx->avahi_pid <= 0)
-        goto fail;
+    /* Discovery is an external dependency. AirPlay audio is still started when
+     * the shared responder is unavailable, but the state is reported so the
+     * caller can surface a degraded, undiscoverable integration. */
+    if (!mdns_ready(ctx))
+        le_log_warn("airplayd: shared mDNS supervisor is not ready; AirPlay is not discoverable");
     ctx->nqptp_pid = spawn_nqptp(ctx);
     if (ctx->nqptp_pid < 0)
         goto fail;
@@ -1138,39 +1374,33 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
     /* A successful fork is not a successful enable: a child may reject its
      * configuration or a required runtime mount may still be absent. */
     for (i = 0; i < 20; ++i) {
-        if (!child_running(&ctx->dbus_pid) || !child_running(&ctx->avahi_pid) ||
-            !child_running(&ctx->nqptp_pid) || !child_running(&ctx->audio_pid) ||
+        if (!child_running(&ctx->nqptp_pid) || !child_running(&ctx->audio_pid) ||
             !child_running(&ctx->shairport_pid))
             goto fail;
         usleep(100000);
     }
     ctx->enabled = 1;
-    le_log_info("airplayd: AirPlay 2 enabled (D-Bus, Avahi, NQPTP, Shairport Sync)");
+    le_log_info("airplayd: AirPlay 2 enabled (NQPTP, Shairport Sync)");
     return 0;
 fail:
     stop_child(&ctx->shairport_pid);
     metadata_fifo_close(ctx);
     stop_child(&ctx->audio_pid);
     stop_child(&ctx->nqptp_pid);
-    stop_child(&ctx->avahi_pid);
-    stop_child(&ctx->dbus_pid);
     return -1;
 }
 
+/* A host name change is republished by the shared supervisor, which renders
+ * its records from the current host name. This controller no longer owns that
+ * stack, so a refresh only reports whether the external dependency is
+ * available; libreecho-web asks the supervisor's init script to restart it. */
 static int refresh_hostname(struct airplay_ctx *ctx)
 {
     if (!ctx->enabled)
         return 0;
-    if (set_enabled(ctx, 0) < 0)
+    if (!mdns_ready(ctx))
         return -1;
-    if (set_enabled(ctx, 1) < 0) {
-        /* The integration remains administratively enabled even when this
-         * runtime restart fails, so the event loop and later requests retry
-         * rather than reporting a disabled stack as refreshed. */
-        ctx->enabled = 1;
-        return -1;
-    }
-    le_log_info("airplayd: registration stack restarted after hostname change");
+    le_log_info("airplayd: shared mDNS supervisor ready after hostname change");
     return 0;
 }
 
@@ -1188,14 +1418,13 @@ static int request(struct airplay_ctx *ctx, char *message,
         char data[LE_ADAPTER_MSG_MAX - 128];
         char path[256];
         int available = access(AIRPLAY_CHROOT, X_OK) == 0;
+        int mdns = mdns_ready(ctx);
         int length;
         size_t used;
 #define RUNTIME_AVAILABLE(relative, mode) \
         (snprintf(path, sizeof(path), "%s%s", ctx->runtime_root, (relative)), \
          access(path, (mode)) == 0)
         available = available && child_alive(ctx->engine_pid) &&
-                    RUNTIME_AVAILABLE(ctx->dbus_path, X_OK) &&
-                    RUNTIME_AVAILABLE(ctx->avahi_path, X_OK) &&
                     RUNTIME_AVAILABLE(ctx->nqptp_path, X_OK) &&
                     RUNTIME_AVAILABLE(ctx->audio_path, X_OK) &&
                     RUNTIME_AVAILABLE(ctx->engine_path, X_OK) &&
@@ -1203,12 +1432,11 @@ static int request(struct airplay_ctx *ctx, char *message,
                     RUNTIME_AVAILABLE(ctx->config_path, R_OK);
 #undef RUNTIME_AVAILABLE
         length = snprintf(data, sizeof(data),
-                          "{\"available\":%s,\"enabled\":%s,\"engine_running\":%s,\"dbus_running\":%s,\"avahi_running\":%s,\"nqptp_running\":%s,\"audio_running\":%s,\"shairport_running\":%s",
+                          "{\"available\":%s,\"enabled\":%s,\"engine_running\":%s,\"mdns_running\":%s,\"nqptp_running\":%s,\"audio_running\":%s,\"shairport_running\":%s",
                           available ? "true" : "false",
                           ctx->enabled ? "true" : "false",
                           child_alive(ctx->engine_pid) ? "true" : "false",
-                          child_alive(ctx->dbus_pid) ? "true" : "false",
-                          child_alive(ctx->avahi_pid) ? "true" : "false",
+                          mdns ? "true" : "false",
                           child_alive(ctx->nqptp_pid) ? "true" : "false",
                           child_alive(ctx->audio_pid) ? "true" : "false",
                           child_alive(ctx->shairport_pid) ? "true" : "false");
@@ -1267,8 +1495,6 @@ int main(int argc, char **argv)
     ctx.metadata_fd = -1;
     snprintf(ctx.runtime_root, sizeof(ctx.runtime_root),
              "/run/libreecho/features/airplay2/root");
-    ctx.dbus_pid = -1;
-    ctx.avahi_pid = -1;
     ctx.nqptp_pid = -1;
     ctx.audio_pid = -1;
     ctx.engine_pid = -1;
@@ -1278,11 +1504,12 @@ int main(int argc, char **argv)
              AIRPLAY_METADATA_FIFO);
     snprintf(ctx.nqptp_path, sizeof(ctx.nqptp_path), "/usr/local/sbin/nqptp");
     snprintf(ctx.shairport_path, sizeof(ctx.shairport_path), "/usr/local/sbin/shairport-sync");
-    snprintf(ctx.avahi_path, sizeof(ctx.avahi_path), "/usr/local/sbin/avahi-daemon");
-    snprintf(ctx.dbus_path, sizeof(ctx.dbus_path), "/usr/local/sbin/dbus-daemon");
     snprintf(ctx.audio_path, sizeof(ctx.audio_path), "/usr/local/sbin/libreecho-airplay-audio");
     snprintf(ctx.engine_path, sizeof(ctx.engine_path), "/usr/local/sbin/libreecho-audio-engine");
     snprintf(ctx.config_path, sizeof(ctx.config_path), "/etc/libreecho/airplay2.conf");
+    snprintf(ctx.mdns_socket, sizeof(ctx.mdns_socket), "%s", LE_MDNS_SOCKET);
+    snprintf(ctx.volume_root, sizeof(ctx.volume_root), "%s", "/run/libreecho-audio");
+    snprintf(ctx.master_socket, sizeof(ctx.master_socket), "%s", LE_ADAPTER_AUDIO_SOCK);
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--foreground")) foreground = 1;
         else if (!strcmp(argv[i], "--enable-on-start")) enable_on_start = 1;
@@ -1294,7 +1521,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--engine") && i + 1 < argc) snprintf(ctx.engine_path, sizeof(ctx.engine_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) snprintf(ctx.config_path, sizeof(ctx.config_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--metadata") && i + 1 < argc) snprintf(ctx.metadata_path, sizeof(ctx.metadata_path), "%s", argv[++i]);
-        else { fprintf(stderr, "Usage: %s [--foreground] [--enable-on-start] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--audio PATH] [--engine PATH] [--config PATH] [--metadata PATH]\n", argv[0]); return 1; }
+        else if (!strcmp(argv[i], "--mdns-socket") && i + 1 < argc) snprintf(ctx.mdns_socket, sizeof(ctx.mdns_socket), "%s", argv[++i]);
+        else { fprintf(stderr, "Usage: %s [--foreground] [--enable-on-start] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--audio PATH] [--engine PATH] [--config PATH] [--metadata PATH] [--mdns-socket PATH]\n", argv[0]); return 1; }
     }
     (void)foreground;
     le_log_init("airplayd", argc, argv);
@@ -1310,6 +1538,17 @@ int main(int argc, char **argv)
         perror("airplayd: listen");
         return 1;
     }
+    /* Nonblocking so the batched accept loop stops when the queue is empty,
+     * and a deeper queue than the shared default: start-up bursts (web UI,
+     * watchdog, audiod liveness probe) must not overflow it. */
+    {
+        int flags = fcntl(ctx.listener, F_GETFL, 0);
+        if (flags < 0 || fcntl(ctx.listener, F_SETFL, flags | O_NONBLOCK) < 0 ||
+            listen(ctx.listener, AIRPLAY_LISTEN_BACKLOG) < 0) {
+            perror("airplayd: listener setup");
+            return 1;
+        }
+    }
     ctx.engine_pid = spawn_engine(&ctx);
     if (ctx.engine_pid < 0 ||
         !wait_for_runtime_file(&ctx, "/run/libreecho-audio/media.pcm", 30) ||
@@ -1319,8 +1558,12 @@ int main(int argc, char **argv)
     } else {
         le_log_info("airplayd: shared audio engine ready");
     }
-    le_log_info("airplayd: starting (socket=%s, enable_on_start=%s)",
-                ctx.socket_path, enable_on_start ? "yes" : "no");
+    /* Discovery is owned by libreecho-mdnsd.init, not by this controller.
+       Report the dependency state at startup so a missing responder is
+       visible without AirPlay audio being withheld. */
+    le_log_info("airplayd: starting (socket=%s, enable_on_start=%s, mdns=%s)",
+                ctx.socket_path, enable_on_start ? "yes" : "no",
+                mdns_ready(&ctx) ? "ready" : "unavailable");
     if (enable_on_start) {
         if (set_enabled(&ctx, 1) < 0)
             le_log_warn("airplayd: persisted AirPlay enable failed at startup");
@@ -1329,19 +1572,18 @@ int main(int argc, char **argv)
         struct pollfd pfd[2];
         nfds_t descriptors = 1;
         int poll_result;
-        int client;
+        int client, served;
         if (reap(&ctx) && ctx.enabled) {
             /* A child can exit after enable succeeded, most notably when an
              * ALSA stream is opened.  Clear runtime state and reap the
              * remaining children so the next enable starts cleanly instead
-             * of accumulating orphaned D-Bus/Avahi instances. */
+             * of accumulating orphaned audio processes. */
             ctx.enabled = 0;
             le_log_warn("airplayd: AirPlay child exited; stopping remaining children");
             stop_child(&ctx.shairport_pid);
             stop_child(&ctx.audio_pid);
+            (void)airplay_master_end(&ctx);
             stop_child(&ctx.nqptp_pid);
-            stop_child(&ctx.avahi_pid);
-            stop_child(&ctx.dbus_pid);
             metadata_fifo_close(&ctx);
         }
         if (!child_alive(ctx.engine_pid)) {
@@ -1355,6 +1597,8 @@ int main(int argc, char **argv)
         }
         if (ctx.enabled && ctx.metadata_fd < 0)
             (void)metadata_fifo_open(&ctx);
+        airplay_master_poll(&ctx);
+        airplay_led_bridge_poll(&ctx);
         pfd[0].fd = ctx.listener;
         pfd[0].events = POLLIN;
         pfd[0].revents = 0;
@@ -1376,10 +1620,20 @@ int main(int argc, char **argv)
             metadata_fifo_close(&ctx);
         if (!(pfd[0].revents & POLLIN))
             continue;
-        client = le_adapter_accept(ctx.listener);
-        if (client >= 0) {
+        /* Serve every queued request on this wake-up (bounded). audiod uses
+         * this socket as its liveness probe; leaving a backlog lets the
+         * accept queue fill and look like controller loss to the probe. */
+        for (served = 0; served < AIRPLAY_ACCEPT_BATCH_MAX; ++served) {
+            struct timeval receive_timeout = { 0, 200000 };
             char message[INPUT_MAX], response[INPUT_MAX];
-            ssize_t n = read(client, message, sizeof(message) - 1);
+            ssize_t n;
+            client = le_adapter_accept(ctx.listener);
+            if (client < 0)
+                break;
+            /* A connected but silent client cannot stall the loop. */
+            (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                             &receive_timeout, sizeof(receive_timeout));
+            n = read(client, message, sizeof(message) - 1);
             if (n > 0) {
                 int length;
                 message[n] = '\0';

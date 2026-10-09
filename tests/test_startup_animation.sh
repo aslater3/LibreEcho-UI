@@ -35,10 +35,10 @@ if grep -q 'for socket in network audio mic led bluetooth airplay' init/libreech
     echo 'unconditional Bluetooth readiness loop remains' >&2
     exit 1
 fi
-grep -q 'wyoming_service_ready()' init/libreecho-web.init
-! awk '/^wyoming_service_ready\(\)/,/^}/' init/libreecho-web.init | grep -q 'redistributable'
-grep -q '/proc/net/tcp' init/libreecho-web.init
-grep -q 'wyoming_service_ready' init/libreecho-web.init
+grep -q 'esphome_service_ready()' init/libreecho-web.init
+! awk '/^esphome_service_ready\(\)/,/^}/' init/libreecho-web.init | grep -q 'redistributable'
+grep -q 'ESPHOME_STATUS_FILE' init/libreecho-web.init
+grep -q 'esphome_service_ready' init/libreecho-web.init
 
 grep -q -- '--startup-animation' src/adapter/ledd.c
 grep -q -- '--startup-ready' src/adapter/ledd.c
@@ -99,8 +99,12 @@ def assert_chase(status):
     pixels = status["pixels"]
     assert len(pixels) == 12, status
     assert all(pixel["r"] == 0 and pixel["b"] == 0 for pixel in pixels), status
+    # 0.14 routes the ring through the portable output pipeline, which applies
+    # the gamma-2 perceptual transfer (ceil(v^2/255), led_output.c, asserted by
+    # test_led_output_core). The logic value 255 stays 255; the trail value 64
+    # drives 17, not 64. The status frame is the physical drive output.
     assert sum(pixel["g"] == 255 for pixel in pixels) == 1, status
-    assert sum(pixel["g"] == 64 for pixel in pixels) == 11, status
+    assert sum(pixel["g"] == 17 for pixel in pixels) == 11, status
 
 assert_chase(call("status"))
 time.sleep(0.12)
@@ -118,7 +122,16 @@ else:
 
 status = call("status")
 assert status["startup_animation_active"] is False, status
-assert status["pixels"] == [{"r": 0, "g": 96, "b": 255}] * 12, status
+# #110 idle indicator: the boot animation is an event that lights the ring, and
+# with the default idle mode "indicator" the ring returns to the two dim green
+# front-centre pixels (10 and 11) once readiness stops it (ledd apply_base_state
+# IDLE_MODE_INDICATOR). It does not hold the boot colour. Proven by
+# tests/test_led_daemon_core.c ("the ring must return to the indicator base
+# after an event").
+assert status["idle_mode"] == "indicator", status
+for front in status["pixels"][10:12]:
+    assert front["g"] > 0 and front["r"] == 0 and front["b"] == 0, status
+assert status["pixels"][:10] == [{"r": 0, "g": 0, "b": 0}] * 10, status
 PY
 
 echo "startup LED animation readiness hand-off: ok"

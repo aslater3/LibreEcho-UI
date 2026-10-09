@@ -90,7 +90,7 @@ async function testSetupUi() {
         'scan-wifi', 'setup-back', 'setup-next', 'step-count', 'setup-actions',
         'force-vendor-import', 'show-password', 'setup-volume', 'volume-output',
         'setup-sensitivity', 'sensitivity-output', 'setup-hostname',
-        'hostname-preview', 'setup-local', 'setup-telemetry'
+        'hostname-preview', 'setup-local', 'setup-telemetry', 'setup-crash-reports'
     ]) elements.set(id, element(id));
     elements.get('setup-security').value = 'wpa2';
     const document = {
@@ -235,9 +235,52 @@ async function testNetworkUi() {
     assert.strictEqual(requests[1].data.security, 'open');
 }
 
+async function testRecoveryScanUi() {
+    const elements = new Map();
+    const box = element('recovery-wifi-list');
+    elements.set('recovery-wifi-list', box);
+    for (const id of [
+        'recovery-ssid', 'recovery-security', 'recovery-password',
+        'recovery-status', 'recovery-connect', 'recovery-scan', 'setup-error',
+        'setup-ssid', 'setup-security', 'setup-password', 'password-field',
+        'scan-wifi', 'setup-back', 'setup-next', 'step-count', 'setup-actions',
+        'force-vendor-import', 'show-password', 'setup-volume', 'volume-output',
+        'setup-sensitivity', 'sensitivity-output', 'setup-hostname',
+        'hostname-preview', 'setup-local', 'setup-telemetry', 'setup-crash-reports'
+    ]) elements.set(id, element(id));
+    const document = {
+        querySelector: selector => selector.startsWith('#') ? elements.get(selector.slice(1)) || null : null,
+        querySelectorAll: () => [],
+        createElement: tag => element(tag),
+        addEventListener() {}
+    };
+    const requests = [];
+    const context = {
+        console, document, window: {}, location: { replace() {} },
+        sessionStorage: storage(), setTimeout() {}, clearTimeout() {},
+        fetch: async (url) => {
+            requests.push(url);
+            const data = url.endsWith('/config') ? { csrf_token: 'test', bootstrap_required: true } :
+                { networks: [
+                    { ssid: 'RecoveryNet', security: 'wpa2', capabilities: 'WPA2-PSK', signal: 70 }
+                ] };
+            return { ok: true, json: async () => ({ ok: true, data }) };
+        }
+    };
+    vm.createContext(context);
+    vm.runInContext(fs.readFileSync('web/js/setup.js', 'utf8'), context, { filename: 'setup.js' });
+    await Promise.resolve();
+    await vm.runInContext('recoveryScan()', context);
+    assert.ok(requests.includes('/api/v1/network/wifi/scan'),
+        'the recovery landing must scan through the shared Wi-Fi scan route');
+    assert.ok(box.innerHTML.includes('RecoveryNet'),
+        'recovery scan results must render as selectable options');
+}
+
 (async () => {
     await testSetupUi();
     await testNetworkUi();
+    await testRecoveryScanUi();
     console.log('Wi-Fi security interaction regression: ok');
 })().catch(error => {
     console.error(error.stack || error);

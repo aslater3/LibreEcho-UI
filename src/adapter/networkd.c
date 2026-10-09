@@ -9,11 +9,17 @@
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
+/* SO_PEERCRED / struct ucred: the adapter owner gate validates the caller's
+ * credentials on the socket as well as the HTTP layer's session + CSRF. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
 #include "adapter.h"
 #include "gateway_probe.h"
 #include "log.h"
 #include "network_health.h"
+#include "network_recovery.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -65,9 +71,37 @@
 #define WPA_TIMEOUT_MS 2500
 #define WEXT_SCAN_BUFFER_SIZE 65535
 #define WEXT_SCAN_RETRY_MS 100
+/* Overall deadline for a direct kernel scan.  The adapter client that carries
+ * the portal's scan request waits longer than this (the scan-specific
+ * LE_ADAPTER_SCAN_TIMEOUT_MS in src/backend_linux.c), so this daemon's bounded
+ * result or timeout always reaches the client before the client gives up. */
 #define NL80211_SCAN_TIMEOUT_MS 12000
 #define NL80211_SCAN_RETRY_MS 150
 #define NL80211_BUFFER_SIZE 65536
+/* One scan command is outstanding at a time, so the fixed sequences of the
+ * three netlink exchanges cannot collide. */
+#define NL80211_FAMILY_SEQ 1u
+#define NL80211_TRIGGER_SEQ 2u
+#define NL80211_DUMP_SEQ 3u
+/* Bound how much received data one readable scan event may add to a poll
+ * iteration; a large scan dump is drained across several iterations. */
+#define NL80211_STEP_MAX_DATAGRAMS 16
+/* Older headers may not carry the netlink socket option used to subscribe to a
+ * generic-netlink family's multicast group. */
+#ifndef SOL_NETLINK
+#define SOL_NETLINK 270
+#endif
+#ifndef NETLINK_ADD_MEMBERSHIP
+#define NETLINK_ADD_MEMBERSHIP 1
+#endif
+/* AP-forced scan flag (uapi NL80211_SCAN_FLAG_AP = 1<<2): request a scan even
+ * while the interface is beaconing as an access point.  This is the flag
+ * `iw dev <iface> scan ap-force` sets and the only scan that can run while the
+ * recovery AP owns the radio and wpa_supplicant has been stopped.  Guarded so
+ * the value never depends on the headers of whatever host built the test. */
+#ifndef NL80211_SCAN_FLAG_AP
+#define NL80211_SCAN_FLAG_AP (1 << 2)
+#endif
 #ifdef LE_NETWORKD_TESTING
 #define NETWORKD_POLL_MAX_MS 5
 #define ASSOCIATION_TIMEOUT_MS 300
@@ -110,12 +144,47 @@ struct client {
     int busy;
 };
 
+struct scan_result {
+    char ssid[IW_ESSID_MAX_SIZE + 1];
+    char flags[128];
+    int signal;
+    int signal_percent;
+    int rssi_dbm;
+    int frequency;
+    int channel;
+    int five_ghz;
+};
+
+/* A direct kernel (nl80211) scan is driven by the daemon's poll loop: the scan
+ * command only starts the exchange (driver_scan_begin) and every later state is
+ * advanced from readable events, so a slow AP-forced recovery scan can never
+ * stall other clients, the recovery portal, or the AP children. */
+enum driver_scan_state {
+    DRIVER_SCAN_NONE = 0,
+    DRIVER_SCAN_FAMILY,
+    DRIVER_SCAN_TRIGGER,
+    DRIVER_SCAN_DUMP,
+    DRIVER_SCAN_ORACLE
+};
+
 struct pending_scan {
     int active;
     int client_fd;
     unsigned long id;
     long long deadline;
     long long poll_at;
+    /* Direct kernel scan state (enum driver_scan_state). */
+    int driver;
+    int state;
+    int fd;
+    uint16_t family;
+    uint32_t group;
+    unsigned int ifindex;
+    uint32_t flags;
+    int result_count;
+    int dump_retry;
+    struct scan_result results[SCAN_MAX];
+    unsigned char *buffer;
 };
 
 struct pending_dhcp {
@@ -156,6 +225,16 @@ struct daemon_ctx {
     struct pending_scan scan;
     struct pending_association association;
     struct pending_dhcp dhcp;
+    /* Secure recovery access point (issue #96). */
+    struct le_recovery_config recovery_config;
+    /* --recovery-disabled is an operator hard override: it wins over the
+     * persisted owner configuration and the config API can never re-enable
+     * the AP while this boot was started with it. */
+    int recovery_cli_disabled;
+    struct le_recovery recovery;
+    int recovery_configured;
+    int recovery_led_active;
+    int recovery_has_saved_network;
 };
 
 static volatile sig_atomic_t g_running = 1;
@@ -295,6 +374,30 @@ static int state_equal(const struct network_state *a,
            !strcmp(a->ssid, b->ssid) && !strcmp(a->ip, b->ip) &&
            !strcmp(a->gateway, b->gateway) && !strcmp(a->dns, b->dns) &&
            !strcmp(a->mac, b->mac);
+}
+
+/* Full daemon status: the network state plus the recovery mode object.  This
+ * is what /network consumes; the recovery block is defined in
+ * docs/recovery-core.md and must stay in sync with the integrator bindings. */
+static int status_data(struct daemon_ctx *ctx, char *out, size_t size)
+{
+    char base[LE_ADAPTER_MSG_MAX];
+    char recovery[1024];
+    size_t used = 0;
+    int n, r;
+
+    n = state_json(&ctx->state, base, sizeof(base));
+    if (n <= 1 || base[n - 1] != '}')
+        return -1;
+    base[n - 1] = '\0';
+    r = le_recovery_status_json(&ctx->recovery, recovery, sizeof(recovery));
+    if (append_text(out, size, &used, "%s,\"mode\":", base) < 0 ||
+        append_json_string(out, size, &used,
+                           le_recovery_mode_name(ctx->recovery.mode)) < 0 ||
+        append_text(out, size, &used, ",\"recovery\":%s}",
+                    r >= 0 ? recovery : "{}") < 0)
+        return -1;
+    return (int)used;
 }
 
 /* ----- Direct wpa_supplicant control protocol -------------------------- */
@@ -447,6 +550,14 @@ static int wpa_open(struct daemon_ctx *ctx)
 {
     if (ctx->wpa.command.fd >= 0)
         return 0;
+    /* Single-radio handover: while the recovery AP owns the interface the
+     * platform net-up helper has stopped wpa_supplicant, so its control socket
+     * cannot answer until net-down restarts the control plane.  Do not spin
+     * reopening it mid-AP; the channel is re-established after handover. */
+    if (ctx->recovery_configured && ctx->recovery.net_configured) {
+        copy_string(ctx->state.state, sizeof(ctx->state.state), "unavailable");
+        return -1;
+    }
     wpa_close(ctx);
     if (wpa_ctrl_open_one(&ctx->wpa.command, ctx->wpa_path, 0) < 0) {
         wpa_close(ctx);
@@ -963,7 +1074,7 @@ static void broadcast_state(struct daemon_ctx *ctx, const char *event_type)
 {
     char data[LE_ADAPTER_MSG_MAX], event[LE_ADAPTER_MSG_MAX];
     int i, n;
-    if (state_json(&ctx->state, data, sizeof(data)) < 0)
+    if (status_data(ctx, data, sizeof(data)) < 0)
         return;
     n = le_adapter_format_event(event, sizeof(event), event_type, data);
     if (n < 0)
@@ -981,6 +1092,153 @@ static void refresh_and_broadcast(struct daemon_ctx *ctx, const char *event_type
     refresh_state(ctx);
     if (!state_equal(&before, &ctx->state))
         broadcast_state(ctx, event_type);
+}
+
+/* ----- Recovery access point (issue #96) -------------------------------- */
+
+/* Send one best-effort request to a companion daemon using the documented
+ * adapter wire format.  networkd links only the server side of the adapter
+ * protocol, so it speaks the one line the LED owner needs directly. */
+static int recovery_led_request(const char *sock_path, const char *args_json)
+{
+    struct sockaddr_un address;
+    struct pollfd descriptor;
+    char request[512], response[256];
+    static unsigned long sequence;
+    int fd, length;
+
+    if (!sock_path || !sock_path[0] || !args_json)
+        return -1;
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    set_cloexec(fd);
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    if (strlen(sock_path) >= sizeof(address.sun_path)) {
+        close(fd);
+        return -1;
+    }
+    copy_string(address.sun_path, sizeof(address.sun_path), sock_path);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        close(fd);
+        return -1;
+    }
+    length = snprintf(request, sizeof(request),
+                      "{\"v\":1,\"id\":%lu,\"cmd\":\"pattern\",\"args\":%s}\n",
+                      ++sequence, args_json);
+    if (length < 0 || length >= (int)sizeof(request) ||
+        send_bytes(fd, request, (size_t)length) < 0) {
+        close(fd);
+        return -1;
+    }
+    descriptor.fd = fd;
+    descriptor.events = POLLIN;
+    descriptor.revents = 0;
+    if (poll(&descriptor, 1, 1000) > 0)
+        (void)recv(fd, response, sizeof(response), MSG_DONTWAIT);
+    close(fd);
+    return 0;
+}
+
+/* The distinct recovery LED is owned through ledd's existing pattern
+ * protocol.  Ownership is released with a matching stop so the normal base
+ * layer resumes; a failed LED call never blocks the network transition. */
+static void recovery_apply_led(struct daemon_ctx *ctx)
+{
+    char args[256];
+    int want = ctx->recovery.led_active;
+
+    if (want == ctx->recovery_led_active || !ctx->recovery_configured)
+        return;
+    if (want) {
+        if (snprintf(args, sizeof(args),
+                     "{\"name\":\"pulse\",\"owner\":\"%s\",\"r\":24,\"g\":96,"
+                     "\"b\":224,\"brightness\":45,\"repeats\":0}",
+                     LE_RECOVERY_LED_OWNER) < (int)sizeof(args))
+            (void)recovery_led_request(ctx->recovery.config.led_socket, args);
+    } else {
+        (void)recovery_led_request(ctx->recovery.config.led_socket,
+                                   "{\"name\":\"stop\",\"owner\":\""
+                                   LE_RECOVERY_LED_OWNER "\"}");
+    }
+    ctx->recovery_led_active = want;
+}
+
+/* Decide the boot trigger from the validated tmpfs marker.  Physical entry is
+ * enabled by default; a rejected or malformed marker never enters recovery. */
+static void recovery_boot(struct daemon_ctx *ctx, long long now_ms)
+{
+    char reason[LE_RECOVERY_REASON_MAX] = "";
+    int marker;
+
+    if (!ctx->recovery_configured)
+        return;
+    if (!ctx->recovery.config.enabled)
+        return;
+#ifdef LE_NETWORKD_TESTING
+    /* Host fixtures cannot create root-owned tmpfs files; strict marker policy
+     * stays in the shipped build. */
+    if (getenv("LIBREECHO_RECOVERY_TEST_MARKER_RELAX")) {
+        ctx->recovery.config.require_tmpfs = 0;
+        ctx->recovery.config.require_root_owner = 0;
+    }
+#endif
+    marker = le_recovery_marker_check(&ctx->recovery.config, reason,
+                                      sizeof(reason));
+    if (marker == 1) {
+        if (le_recovery_arm(&ctx->recovery, LE_RECOVERY_TRIGGER_PHYSICAL,
+                            now_ms) < 0)
+            le_log_error("networkd: recovery requested but unavailable: %s",
+                         ctx->recovery.last_error);
+        else
+            le_log_warn("networkd: physical recovery requested; starting recovery access point");
+    } else if (marker < 0) {
+        le_log_error("networkd: rejected recovery marker (%s); staying in client mode",
+                     reason);
+        copy_string(ctx->recovery.unavailable_reason,
+                    sizeof(ctx->recovery.unavailable_reason), reason);
+    }
+    /* Automatic fallback is opt-in and only for an already-provisioned device;
+     * a never-set-up unit belongs to the normal first-boot AP. */
+    if (!ctx->recovery_has_saved_network)
+        ctx->recovery.config.auto_enabled = 0;
+}
+
+static void recovery_tick(struct daemon_ctx *ctx, long long now_ms)
+{
+    enum le_recovery_mode before;
+    int associated;
+
+    if (!ctx->recovery_configured)
+        return;
+    associated = !strcmp(ctx->state.state, "connected") &&
+                 ctx->state.ssid[0] && ctx->state.link_up;
+    before = ctx->recovery.mode;
+    if (le_recovery_tick(&ctx->recovery, now_ms, associated) ||
+        ctx->recovery.mode != before) {
+        recovery_apply_led(ctx);
+        if (ctx->recovery.mode == LE_RECOVERY_MODE_ACTIVE)
+            le_log_warn("networkd: recovery access point active (ssid=%s)",
+                        ctx->recovery.ssid);
+        else if (before == LE_RECOVERY_MODE_ACTIVE &&
+                 ctx->recovery.mode != LE_RECOVERY_MODE_ACTIVE)
+            le_log_warn("networkd: recovery access point stopped");
+        broadcast_state(ctx, "network.recovery");
+    }
+}
+
+static void recovery_shutdown(struct daemon_ctx *ctx)
+{
+    if (!ctx->recovery_configured)
+        return;
+    if (ctx->recovery.mode == LE_RECOVERY_MODE_ACTIVE ||
+        ctx->recovery.mode == LE_RECOVERY_MODE_STARTING ||
+        ctx->recovery.mode == LE_RECOVERY_MODE_ARMED ||
+        ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+        le_recovery_stop(&ctx->recovery, monotonic_ms(), "shutdown");
+        recovery_apply_led(ctx);
+    }
 }
 
 #ifdef LE_NETWORKD_TESTING
@@ -1350,11 +1608,21 @@ static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
         memset(&ctx->association, 0, sizeof(ctx->association));
         ctx->association.client_fd = -1;
     }
+    /* A recovery handover only completes once DHCP confirms a usable address.
+     * A failed or timed-out lease re-arms the AP (marker kept) so the owner
+     * keeps a portal to retry from.  The release path never runs in handover. */
+    if (ctx->recovery_configured &&
+        ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+        le_recovery_handover_result(&ctx->recovery, monotonic_ms(),
+                                    network_success);
+        recovery_apply_led(ctx);
+        broadcast_state(ctx, "network.recovery");
+    }
     if (fd >= 0) {
         int ci = client_index(ctx, fd);
         if (ci >= 0) {
             if (network_success)
-                (void)send_ok_fd(fd, id, state_json(&ctx->state, data, sizeof(data)) >= 0 ? data : "{}");
+                (void)send_ok_fd(fd, id, status_data(ctx, data, sizeof(data)) >= 0 ? data : "{}");
             else if (success && !release && !ctx->state.ip[0])
                 (void)send_err_fd(fd, id, "DHCP completed without an IPv4 address");
             else if (timed_out)
@@ -1374,7 +1642,11 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
     if (ctx->dhcp.active)
         return -1;
 #ifdef LE_NETWORKD_TESTING
-    if (getenv("LIBREECHO_NETWORKD_TEST_FIXTURE")) {
+    /* The fixture normally has no DHCP server: starting one would touch the
+     * host network.  A test that needs a real DHCP child (to prove the handover
+     * waits for a lease) supplies an oracle binary explicitly. */
+    if (getenv("LIBREECHO_NETWORKD_TEST_FIXTURE") &&
+        !getenv("LIBREECHO_NETWORKD_DHCP_ORACLE")) {
         errno = EOPNOTSUPP;
         return -1;
     }
@@ -1383,6 +1655,14 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
     if (pid < 0)
         return -1;
     if (pid == 0) {
+#ifdef LE_NETWORKD_TESTING
+        const char *oracle = getenv("LIBREECHO_NETWORKD_DHCP_ORACLE");
+        if (oracle && oracle[0]) {
+            execl(oracle, "udhcpc", "-i", ctx->interface, "-n", "-q",
+                  "-s", "/etc/udhcpc.script", (char *)NULL);
+            _exit(127);
+        }
+#endif
         if (release)
             execl("/bin/udhcpc", "udhcpc", "-i", ctx->interface, "-n", "-q",
                   "-R", "-s", "/etc/udhcpc.script", (char *)NULL);
@@ -1481,17 +1761,6 @@ static const char *scan_band(int frequency)
         return "6 GHz";
     return "unknown";
 }
-
-struct scan_result {
-    char ssid[IW_ESSID_MAX_SIZE + 1];
-    char flags[128];
-    int signal;
-    int signal_percent;
-    int rssi_dbm;
-    int frequency;
-    int channel;
-    int five_ghz;
-};
 
 static int scan_result_strength(const struct scan_result *result)
 {
@@ -2004,95 +2273,77 @@ static const struct nlattr *nl_find(const void *payload, size_t length,
     return NULL;
 }
 
-static int nl_wait_ack(int fd, unsigned char *buffer, size_t capacity,
-                       int timeout_ms)
+/* Send a fully built generic-netlink message to the kernel.  The scan engine
+ * never waits here: every reply is read back from the daemon's poll loop. */
+static int nl80211_send_kernel(int fd, const unsigned char *buffer, size_t used)
 {
-    struct pollfd descriptor = { fd, POLLIN, 0 };
-    long long deadline = monotonic_ms() + timeout_ms;
-
-    for (;;) {
-        ssize_t received;
-        struct nlmsghdr *header;
-        int remaining;
-        int wait_ms = (int)(deadline - monotonic_ms());
-        if (wait_ms <= 0) {
-            errno = ETIMEDOUT;
-            return -1;
-        }
-        if (poll(&descriptor, 1, wait_ms) <= 0) {
-            errno = errno == EINTR ? EINTR : ETIMEDOUT;
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        received = recv(fd, buffer, capacity, 0);
-        if (received < 0 && errno == EINTR)
-            continue;
-        if (received < 0)
-            return -1;
-        remaining = (int)received;
-        for (header = (struct nlmsghdr *)buffer;
-             NLMSG_OK(header, remaining);
-             header = NLMSG_NEXT(header, remaining)) {
-            if (header->nlmsg_type == NLMSG_ERROR) {
-                struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
-                if (header->nlmsg_len < NLMSG_LENGTH(sizeof(*error))) {
-                    errno = EPROTO;
-                    return -1;
-                }
-                if (!error->error)
-                    return 0;
-                errno = -error->error;
-                return -1;
-            }
-        }
-    }
-}
-
-static int nl80211_family_id(int fd, unsigned char *buffer, size_t capacity)
-{
-    struct nlmsghdr *header = (struct nlmsghdr *)buffer;
-    struct genlmsghdr *generic;
     struct sockaddr_nl address;
-    size_t used = NLMSG_LENGTH(GENL_HDRLEN);
-    uint32_t sequence = 1;
-    int remaining;
-    ssize_t received;
-    struct pollfd descriptor = { fd, POLLIN, 0 };
 
-    memset(buffer, 0, capacity);
-    header->nlmsg_len = (uint32_t)used;
-    header->nlmsg_type = GENL_ID_CTRL;
-    header->nlmsg_flags = NLM_F_REQUEST;
-    header->nlmsg_seq = sequence;
-    generic = (struct genlmsghdr *)NLMSG_DATA(header);
-    generic->cmd = CTRL_CMD_GETFAMILY;
-    generic->version = 1;
-    if (nl_put(buffer, capacity, &used, CTRL_ATTR_FAMILY_NAME,
-               "nl80211", sizeof("nl80211")) < 0)
-        return -1;
-    header->nlmsg_len = (uint32_t)used;
     memset(&address, 0, sizeof(address));
     address.nl_family = AF_NETLINK;
     if (sendto(fd, buffer, used, 0, (struct sockaddr *)&address,
                sizeof(address)) < 0)
         return -1;
-    if (poll(&descriptor, 1, NL80211_SCAN_TIMEOUT_MS) <= 0) {
-        errno = ETIMEDOUT;
-        return -1;
-    }
-    received = recv(fd, buffer, capacity, 0);
-    if (received < 0)
-        return -1;
-    remaining = (int)received;
-    for (header = (struct nlmsghdr *)buffer;
+    return 0;
+}
+
+/* Build a CTRL_CMD_GETFAMILY request for `family_name`.  The reply names the
+ * generic-netlink family id and, nested one level deeper, its multicast
+ * groups; the "scan" group is what carries NEW_SCAN_RESULTS/SCAN_ABORTED. */
+static size_t nl80211_build_family_request(unsigned char *buffer, size_t capacity,
+                                           const char *family_name)
+{
+    struct nlmsghdr *header;
+    struct genlmsghdr *generic;
+    size_t used = NLMSG_LENGTH(GENL_HDRLEN);
+
+    if (!buffer || !family_name || !family_name[0] || capacity < used)
+        return 0;
+    memset(buffer, 0, capacity);
+    header = (struct nlmsghdr *)buffer;
+    header->nlmsg_len = (uint32_t)used;
+    header->nlmsg_type = GENL_ID_CTRL;
+    header->nlmsg_flags = NLM_F_REQUEST;
+    header->nlmsg_seq = NL80211_FAMILY_SEQ;
+    generic = (struct genlmsghdr *)NLMSG_DATA(header);
+    generic->cmd = CTRL_CMD_GETFAMILY;
+    generic->version = 1;
+    if (nl_put(buffer, capacity, &used, CTRL_ATTR_FAMILY_NAME, family_name,
+               strlen(family_name) + 1) < 0)
+        return 0;
+    header->nlmsg_len = (uint32_t)used;
+    return used;
+}
+
+/*
+ * Parse a CTRL_CMD_GETFAMILY reply for the family id and the id of the
+ * multicast group called `group_name` (e.g. "scan" for nl80211).  The group
+ * list is nested twice -- CTRL_ATTR_MCAST_GROUPS holds one container per group,
+ * and each container carries CTRL_ATTR_MCAST_GRP_NAME/ID -- so both levels are
+ * walked with aligned, length-checked bounds.  Returns 0 when the family id was
+ * found (*group_id stays 0 when the family has no such group); -1 with errno
+ * set when the reply carries an error or no family id.
+ */
+static int nl80211_parse_family_reply(const unsigned char *buffer, size_t length,
+                                      uint32_t sequence, const char *group_name,
+                                      uint16_t *family_id, uint32_t *group_id)
+{
+    struct nlmsghdr *header;
+    int remaining = (int)length;
+
+    *family_id = 0;
+    *group_id = 0;
+    for (header = (struct nlmsghdr *)(void *)buffer;
          NLMSG_OK(header, remaining);
          header = NLMSG_NEXT(header, remaining)) {
+        struct genlmsghdr *generic;
         const struct nlattr *attribute;
         size_t payload_length;
+
         if (header->nlmsg_type == NLMSG_ERROR) {
             struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
-            errno = error->error ? -error->error : EPROTO;
+            errno = (header->nlmsg_len >= NLMSG_LENGTH(sizeof(*error)) &&
+                     error->error) ? -error->error : EPROTO;
             return -1;
         }
         if (header->nlmsg_seq != sequence ||
@@ -2102,67 +2353,112 @@ static int nl80211_family_id(int fd, unsigned char *buffer, size_t capacity)
         payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
         attribute = nl_find((unsigned char *)generic + GENL_HDRLEN,
                             payload_length, CTRL_ATTR_FAMILY_ID);
-        if (attribute && attribute->nla_len >= NLA_HDRLEN + sizeof(uint16_t)) {
-            uint16_t family;
-            memcpy(&family, (unsigned char *)attribute + NLA_HDRLEN,
-                   sizeof(family));
-            return (int)family;
+        if (attribute && attribute->nla_len >= NLA_HDRLEN + sizeof(uint16_t))
+            memcpy(family_id, (unsigned char *)attribute + NLA_HDRLEN,
+                   sizeof(*family_id));
+        attribute = nl_find((unsigned char *)generic + GENL_HDRLEN,
+                            payload_length, CTRL_ATTR_MCAST_GROUPS);
+        if (attribute && !*group_id && attribute->nla_len > NLA_HDRLEN) {
+            const unsigned char *cursor =
+                (const unsigned char *)attribute + NLA_HDRLEN;
+            size_t groups_length = attribute->nla_len - NLA_HDRLEN;
+
+            while (groups_length >= NLA_HDRLEN) {
+                const struct nlattr *group = (const struct nlattr *)cursor;
+                size_t aligned;
+
+                if (group->nla_len < NLA_HDRLEN)
+                    break;
+                aligned = nl_align(group->nla_len);
+                if (aligned > groups_length)
+                    break; /* truncated tail: stop instead of over-reading */
+                {
+                    const struct nlattr *name = nl_find(
+                        cursor + NLA_HDRLEN, group->nla_len - NLA_HDRLEN,
+                        CTRL_ATTR_MCAST_GRP_NAME);
+                    const struct nlattr *id = nl_find(
+                        cursor + NLA_HDRLEN, group->nla_len - NLA_HDRLEN,
+                        CTRL_ATTR_MCAST_GRP_ID);
+                    if (name && id && group_name && group_name[0] &&
+                        id->nla_len >= NLA_HDRLEN + sizeof(uint32_t)) {
+                        const char *value = (const char *)name + NLA_HDRLEN;
+                        size_t value_length = name->nla_len - NLA_HDRLEN;
+                        size_t wanted = strlen(group_name);
+                        if ((value_length == wanted ||
+                             (value_length == wanted + 1 &&
+                              value[wanted] == '\0')) &&
+                            !memcmp(value, group_name, wanted)) {
+                            memcpy(group_id,
+                                   (const unsigned char *)id + NLA_HDRLEN,
+                                   sizeof(*group_id));
+                            break;
+                        }
+                    }
+                }
+                cursor += aligned;
+                groups_length -= aligned;
+            }
         }
+        if (*family_id && *group_id)
+            return 0;
     }
-    errno = EPROTO;
-    return -1;
-}
-
-static int nl80211_send_request(int fd, int family, uint8_t command,
-                                uint16_t flags, unsigned char *buffer,
-                                size_t capacity, size_t used)
-{
-    struct nlmsghdr *header = (struct nlmsghdr *)buffer;
-    struct genlmsghdr *generic = (struct genlmsghdr *)NLMSG_DATA(header);
-    struct sockaddr_nl address;
-
-    header->nlmsg_len = (uint32_t)used;
-    header->nlmsg_type = (uint16_t)family;
-    header->nlmsg_flags = flags;
-    header->nlmsg_seq = 2;
-    generic->cmd = command;
-    generic->version = 1;
-    memset(&address, 0, sizeof(address));
-    address.nl_family = AF_NETLINK;
-    if (sendto(fd, buffer, used, 0, (struct sockaddr *)&address,
-               sizeof(address)) < 0)
+    if (!*family_id) {
+        errno = EPROTO;
         return -1;
-    if (flags & NLM_F_ACK)
-        return nl_wait_ack(fd, buffer, capacity, NL80211_SCAN_TIMEOUT_MS);
+    }
     return 0;
 }
 
-static int nl80211_trigger_scan(int fd, int family, unsigned int ifindex,
-                                unsigned char *buffer, size_t capacity)
+/*
+ * NEW_SCAN_RESULTS and SCAN_ABORTED are multicast notifications: they are only
+ * delivered to a socket that joined the family's "scan" group.  Subscribe
+ * before TRIGGER_SCAN or the scan waits out its whole deadline in silence.
+ */
+static int nl80211_join_group(int fd, uint32_t group)
+{
+    if (!group) {
+        errno = EPROTO;
+        return -1;
+    }
+    if (setsockopt(fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, &group,
+                   sizeof(group)) < 0)
+        return -1;
+    return 0;
+}
+
+/* Build the NL80211_CMD_TRIGGER_SCAN request body in `buffer` and return its
+ * length, or 0 on failure.  Split from the send so the exact netlink message
+ * (including whether it carries NL80211_ATTR_SCAN_FLAGS) can be exercised
+ * without a radio. */
+static size_t nl80211_build_trigger_scan(unsigned char *buffer, size_t capacity,
+                                         unsigned int ifindex,
+                                         uint32_t scan_flags)
 {
     size_t used = NLMSG_LENGTH(GENL_HDRLEN);
     size_t nested_start;
     struct nlattr *nested;
-    int result;
 
+    if (!buffer || capacity < used)
+        return 0;
     memset(buffer, 0, capacity);
     if (nl_put_u32(buffer, capacity, &used, NL80211_ATTR_IFINDEX,
                    ifindex) < 0)
-        return -1;
+        return 0;
+    /* An AP-forced scan must declare the flag or the kernel refuses to scan
+     * while the interface is beaconing as an access point. */
+    if (scan_flags &&
+        nl_put_u32(buffer, capacity, &used, NL80211_ATTR_SCAN_FLAGS,
+                   scan_flags) < 0)
+        return 0;
     nested_start = used;
     nested = (struct nlattr *)(buffer + used);
     nested->nla_type = NL80211_ATTR_SCAN_SSIDS | NLA_F_NESTED;
     nested->nla_len = NLA_HDRLEN;
     used += NLA_ALIGN(NLA_HDRLEN);
     if (nl_put(buffer, capacity, &used, 1, NULL, 0) < 0)
-        return -1;
-    nested->nla_len = (uint16_t)(used - nested_start);
-    result = nl80211_send_request(fd, family, NL80211_CMD_TRIGGER_SCAN,
-                                  NLM_F_REQUEST | NLM_F_ACK, buffer,
-                                  capacity, used);
-    if (result < 0 && errno == EBUSY)
         return 0;
-    return result;
+    nested->nla_len = (uint16_t)(used - nested_start);
+    return used;
 }
 
 static void nl80211_parse_ies(const unsigned char *ies, size_t length,
@@ -2316,208 +2612,395 @@ static int nl80211_append_bss(const struct nlattr *bss,
     return 1;
 }
 
-static int nl80211_wait_for_scan_event(int fd, unsigned char *buffer,
-                                       size_t capacity, long long deadline)
+/*
+ * Scan completion arrives as a multicast event, never as a reply to the
+ * trigger request: NEW_SCAN_RESULTS means the results may now be dumped, and
+ * SCAN_ABORTED means there is nothing to report.  Returns 1/2 for those, 0 when
+ * the datagram carried something else, and -1 with errno set on a kernel error
+ * (SCAN_ABORTED reports ECANCELED).
+ */
+static int nl80211_parse_scan_event(const unsigned char *buffer, size_t length)
 {
-    struct pollfd descriptor = { fd, POLLIN, 0 };
+    struct nlmsghdr *header;
+    int remaining = (int)length;
+    int result = 0;
 
-    for (;;) {
-        struct nlmsghdr *header;
-        int remaining;
-        ssize_t received;
-        int wait_ms = (int)(deadline - monotonic_ms());
+    for (header = (struct nlmsghdr *)(void *)buffer;
+         NLMSG_OK(header, remaining);
+         header = NLMSG_NEXT(header, remaining)) {
+        struct genlmsghdr *generic;
 
-        if (wait_ms <= 0) {
-            errno = ETIMEDOUT;
+        if (header->nlmsg_type == NLMSG_ERROR) {
+            struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
+            int status;
+            if (header->nlmsg_len < NLMSG_LENGTH(sizeof(*error)))
+                status = EPROTO;
+            else if (error->error == 0 || error->error == -EBUSY)
+                continue; /* trigger acknowledgement, not an event */
+            else
+                status = -error->error;
+            errno = status;
             return -1;
         }
-        if (poll(&descriptor, 1, wait_ms) <= 0) {
-            if (errno == EINTR)
-                continue;
-            errno = ETIMEDOUT;
-            return -1;
-        }
-        received = recv(fd, buffer, capacity, 0);
-        if (received < 0 && errno == EINTR)
+        if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
             continue;
-        if (received < 0)
+        generic = (struct genlmsghdr *)NLMSG_DATA(header);
+        if (generic->cmd == NL80211_CMD_NEW_SCAN_RESULTS)
+            result = 1;
+        else if (generic->cmd == NL80211_CMD_SCAN_ABORTED) {
+            errno = ECANCELED;
             return -1;
-        remaining = (int)received;
-        for (header = (struct nlmsghdr *)buffer;
-             NLMSG_OK(header, remaining);
-             header = NLMSG_NEXT(header, remaining)) {
-            struct genlmsghdr *generic;
-            const struct nlattr *attrs;
-            size_t payload_length;
-
-            if (header->nlmsg_type == NLMSG_ERROR) {
-                struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
-                errno = error->error ? -error->error : EPROTO;
-                return -1;
-            }
-            if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
-                continue;
-            generic = (struct genlmsghdr *)NLMSG_DATA(header);
-            payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
-            attrs = (const struct nlattr *)((unsigned char *)generic + GENL_HDRLEN);
-            if (generic->cmd == NL80211_CMD_NEW_SCAN_RESULTS)
-                return 0;
-            if (generic->cmd == NL80211_CMD_SCAN_ABORTED) {
-                errno = ECANCELED;
-                return -1;
-            }
-            (void)attrs;
-            (void)payload_length;
         }
     }
+    return result;
 }
 
-static int nl80211_dump_scan(int fd, int family, unsigned int ifindex,
-                             unsigned char *buffer, size_t capacity,
-                             char *data, size_t data_size)
+/*
+ * Parse one received NL80211_CMD_GET_SCAN dump datagram: each dumped message
+ * carries one NL80211_ATTR_BSS, and the kernel ends the dump with NLMSG_DONE.
+ * Results accumulate across datagrams up to the fixed SCAN_MAX bound.  Returns
+ * 0 normally (with *done set after NLMSG_DONE); -1 with errno set on a kernel
+ * error, where EBUSY/EAGAIN mean "results not ready yet, ask again".
+ */
+static int nl80211_parse_dump_message(struct scan_result *results, int *count,
+                                      const unsigned char *buffer, size_t length,
+                                      int *done)
+{
+    struct nlmsghdr *header;
+    int remaining = (int)length;
+
+    *done = 0;
+    for (header = (struct nlmsghdr *)(void *)buffer;
+         NLMSG_OK(header, remaining);
+         header = NLMSG_NEXT(header, remaining)) {
+        struct genlmsghdr *generic;
+        const struct nlattr *bss;
+        size_t payload_length;
+
+        if (header->nlmsg_type == NLMSG_DONE) {
+            *done = 1;
+            return 0;
+        }
+        if (header->nlmsg_type == NLMSG_ERROR) {
+            struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
+            if (header->nlmsg_len >= NLMSG_LENGTH(sizeof(*error)) &&
+                error->error == 0)
+                continue; /* late trigger acknowledgement, not a dump error */
+            errno = (header->nlmsg_len >= NLMSG_LENGTH(sizeof(*error)) &&
+                     error->error) ? -error->error : EPROTO;
+            return -1;
+        }
+        if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
+            continue;
+        generic = (struct genlmsghdr *)NLMSG_DATA(header);
+        payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+        bss = nl_find((unsigned char *)generic + GENL_HDRLEN, payload_length,
+                      NL80211_ATTR_BSS);
+        if (bss && *count < SCAN_MAX) {
+            int parsed = nl80211_append_bss(bss, &results[*count]);
+            if (parsed < 0)
+                return -1;
+            if (parsed > 0)
+                ++*count;
+        }
+    }
+    return 0;
+}
+
+static int nl80211_send_trigger_scan(struct daemon_ctx *ctx)
+{
+    struct nlmsghdr *header;
+    size_t used = nl80211_build_trigger_scan(ctx->scan.buffer,
+                                             NL80211_BUFFER_SIZE,
+                                             ctx->scan.ifindex, ctx->scan.flags);
+
+    if (!used)
+        return -1;
+    header = (struct nlmsghdr *)ctx->scan.buffer;
+    header->nlmsg_len = (uint32_t)used;
+    header->nlmsg_type = ctx->scan.family;
+    ((struct genlmsghdr *)NLMSG_DATA(header))->cmd = NL80211_CMD_TRIGGER_SCAN;
+    ((struct genlmsghdr *)NLMSG_DATA(header))->version = 1;
+    header->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    header->nlmsg_seq = NL80211_TRIGGER_SEQ;
+    return nl80211_send_kernel(ctx->scan.fd, ctx->scan.buffer, used);
+}
+
+static int nl80211_send_dump_request(struct daemon_ctx *ctx)
 {
     struct nlmsghdr *header;
     struct genlmsghdr *generic;
     size_t used = NLMSG_LENGTH(GENL_HDRLEN);
-    long long deadline = monotonic_ms() + NL80211_SCAN_RETRY_MS;
-    int remaining, result_count = 0;
-    struct scan_result results[SCAN_MAX];
-    ssize_t received;
-    struct pollfd descriptor = { fd, POLLIN, 0 };
 
-    memset(buffer, 0, capacity);
-    if (nl_put_u32(buffer, capacity, &used, NL80211_ATTR_IFINDEX,
-                   ifindex) < 0)
+    if (nl_put_u32(ctx->scan.buffer, NL80211_BUFFER_SIZE, &used,
+                   NL80211_ATTR_IFINDEX, ctx->scan.ifindex) < 0)
         return -1;
-    header = (struct nlmsghdr *)buffer;
+    header = (struct nlmsghdr *)ctx->scan.buffer;
     header->nlmsg_len = (uint32_t)used;
-    header->nlmsg_type = (uint16_t)family;
+    header->nlmsg_type = ctx->scan.family;
     header->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-    header->nlmsg_seq = 3;
+    header->nlmsg_seq = NL80211_DUMP_SEQ;
     generic = (struct genlmsghdr *)NLMSG_DATA(header);
     generic->cmd = NL80211_CMD_GET_SCAN;
     generic->version = 1;
-    if (send(fd, buffer, used, 0) < 0)
-        return -1;
-    for (;;) {
-        int wait_ms = (int)(deadline - monotonic_ms());
-        if (wait_ms <= 0) {
-            errno = EAGAIN;
-            return -1;
-        }
-        if (poll(&descriptor, 1, wait_ms) <= 0) {
-            errno = errno == EINTR ? EINTR : EAGAIN;
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        received = recv(fd, buffer, capacity, 0);
-        if (received < 0 && errno == EINTR)
-            continue;
-        if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            errno = EAGAIN;
-            continue;
-        }
-        if (received < 0)
-            return -1;
-        remaining = (int)received;
-        for (header = (struct nlmsghdr *)buffer;
-             NLMSG_OK(header, remaining);
-             header = NLMSG_NEXT(header, remaining)) {
-            size_t payload_length;
-            const struct nlattr *bss;
-            if (header->nlmsg_type == NLMSG_DONE) {
-                int i, j;
-                for (i = 0; i < result_count; ++i)
-                    for (j = i + 1; j < result_count; ++j)
-                        if (scan_result_better(&results[j], &results[i])) {
-                            struct scan_result swap = results[i];
-                            results[i] = results[j];
-                            results[j] = swap;
-                        }
-                return serialize_scan_results(results, result_count,
-                                               data, data_size);
-            }
-            if (header->nlmsg_type == NLMSG_ERROR) {
-                struct nlmsgerr *error = (struct nlmsgerr *)NLMSG_DATA(header);
-                errno = error->error ? -error->error : EPROTO;
-                return -1;
-            }
-            if (header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
-                continue;
-            generic = (struct genlmsghdr *)NLMSG_DATA(header);
-            payload_length = header->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
-            bss = nl_find((unsigned char *)generic + GENL_HDRLEN,
-                          payload_length, NL80211_ATTR_BSS);
-            if (bss && result_count < SCAN_MAX) {
-                int parsed = nl80211_append_bss(bss, &results[result_count]);
-                if (parsed < 0)
-                    return -1;
-                if (parsed > 0)
-                    ++result_count;
-            }
-        }
-    }
+    return nl80211_send_kernel(ctx->scan.fd, ctx->scan.buffer, used);
 }
 
-static int nl80211_scan(const char *iface, char *data, size_t data_size)
+/*
+ * Start an asynchronous direct kernel scan.  Only the socket setup and the
+ * family request happen here, and none of them block: the reply, the
+ * multicast-group subscription, the trigger, the completion event, and the
+ * results dump are all advanced by driver_scan_step() from the poll loop.
+ * That keeps the portal and every other adapter client responsive while an
+ * AP-forced recovery scan runs, and lets results reach the requesting client
+ * as soon as the kernel delivers them instead of at the end of one long call.
+ */
+static int driver_scan_begin(struct daemon_ctx *ctx)
 {
-    unsigned char *buffer;
     struct sockaddr_nl address;
-    unsigned int ifindex;
-    long long deadline;
-    int fd, family, result;
+    size_t used;
+    int fd;
 
-    if (!iface || !data || data_size < 16)
-        return -EINVAL;
-    ifindex = if_nametoindex(iface);
-    if (!ifindex)
-        return -errno;
+    ctx->scan.fd = -1;
+    ctx->scan.buffer = NULL;
+    ctx->scan.family = 0;
+    ctx->scan.group = 0;
+    ctx->scan.result_count = 0;
+    ctx->scan.dump_retry = 0;
+#ifdef LE_NETWORKD_TESTING
+    {
+        const char *oracle = getenv("LIBREECHO_NETWORKD_SCAN_ORACLE");
+        if (oracle && oracle[0]) {
+            ctx->scan.driver = 1;
+            ctx->scan.state = DRIVER_SCAN_ORACLE;
+            return 0;
+        }
+    }
+#endif
+    ctx->scan.ifindex = if_nametoindex(ctx->interface);
+    if (!ctx->scan.ifindex) {
+        errno = ENODEV;
+        return -1;
+    }
     fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
     if (fd < 0)
-        return -errno;
+        return -1;
     memset(&address, 0, sizeof(address));
     address.nl_family = AF_NETLINK;
     if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        result = -errno;
+        int saved = errno;
         close(fd);
-        return result;
+        errno = saved;
+        return -1;
     }
-    buffer = malloc(NL80211_BUFFER_SIZE);
-    if (!buffer) {
+    (void)set_nonblock(fd);
+    ctx->scan.buffer = malloc(NL80211_BUFFER_SIZE);
+    if (!ctx->scan.buffer) {
         close(fd);
-        return -ENOMEM;
+        errno = ENOMEM;
+        return -1;
     }
-    family = nl80211_family_id(fd, buffer, NL80211_BUFFER_SIZE);
-    if (family < 0 || nl80211_trigger_scan(fd, family, ifindex, buffer,
-                                           NL80211_BUFFER_SIZE) < 0) {
-        result = -errno;
-        goto done;
+    ctx->scan.fd = fd;
+    used = nl80211_build_family_request(ctx->scan.buffer, NL80211_BUFFER_SIZE,
+                                        "nl80211");
+    if (!used || nl80211_send_kernel(ctx->scan.fd, ctx->scan.buffer, used) < 0) {
+        int saved = errno ? errno : EIO;
+        close(ctx->scan.fd);
+        free(ctx->scan.buffer);
+        ctx->scan.fd = -1;
+        ctx->scan.buffer = NULL;
+        errno = saved;
+        return -1;
     }
-    deadline = monotonic_ms() + NL80211_SCAN_TIMEOUT_MS;
-    if (nl80211_wait_for_scan_event(fd, buffer, NL80211_BUFFER_SIZE,
-                                    deadline) < 0) {
-        result = -errno;
-        goto done;
-    }
-    for (;;) {
-        result = nl80211_dump_scan(fd, family, ifindex, buffer,
-                                   NL80211_BUFFER_SIZE, data, data_size);
-        if (result >= 0)
-            break;
-        if (errno != EAGAIN && errno != EBUSY)
-            break;
-        if (monotonic_ms() >= deadline) {
-            result = -ETIMEDOUT;
-            break;
-        }
-        (void)poll(NULL, 0, NL80211_SCAN_RETRY_MS);
-    }
-done:
-    free(buffer);
-    close(fd);
-    return result;
+    ctx->scan.driver = 1;
+    ctx->scan.state = DRIVER_SCAN_FAMILY;
+    return 0;
 }
+
+static void finish_driver_scan(struct daemon_ctx *ctx, int failed,
+                               const char *error, const char *data);
+
+/*
+ * Handle one received driver-scan datagram for the current state.  Returns 0 to
+ * keep waiting, -1 when the scan reached a terminal state (the reply has
+ * already been sent by finish_driver_scan).
+ */
+static int driver_scan_message(struct daemon_ctx *ctx,
+                               const unsigned char *buffer, size_t length)
+{
+    switch (ctx->scan.state) {
+    case DRIVER_SCAN_FAMILY: {
+        uint16_t family;
+        uint32_t group;
+
+        if (nl80211_parse_family_reply(buffer, length, NL80211_FAMILY_SEQ,
+                                       "scan", &family, &group) < 0) {
+            le_log_warn("networkd: nl80211 family lookup failed: %s",
+                        strerror(errno));
+            finish_driver_scan(ctx, 1, "Wi-Fi scan is unavailable", NULL);
+            return -1;
+        }
+        if (!group) {
+            /* An unsubscribed socket never receives NEW_SCAN_RESULTS, so
+             * waiting out the deadline would only delay the same failure. */
+            le_log_warn("networkd: nl80211 scan multicast group unavailable");
+            finish_driver_scan(ctx, 1, "Wi-Fi scan is unavailable", NULL);
+            return -1;
+        }
+        if (nl80211_join_group(ctx->scan.fd, group) < 0) {
+            le_log_warn("networkd: scan multicast group join failed: %s",
+                        strerror(errno));
+            finish_driver_scan(ctx, 1, "Wi-Fi scan is unavailable", NULL);
+            return -1;
+        }
+        ctx->scan.family = family;
+        ctx->scan.group = group;
+        if (nl80211_send_trigger_scan(ctx) < 0) {
+            le_log_warn("networkd: scan trigger failed: %s", strerror(errno));
+            finish_driver_scan(ctx, 1, "Wi-Fi scan is unavailable", NULL);
+            return -1;
+        }
+        ctx->scan.state = DRIVER_SCAN_TRIGGER;
+        return 0;
+    }
+    case DRIVER_SCAN_TRIGGER: {
+        int event = nl80211_parse_scan_event(buffer, length);
+
+        if (event < 0) {
+            le_log_warn("networkd: scan trigger rejected or aborted: %s",
+                        strerror(errno));
+            finish_driver_scan(ctx, 1, errno == ECANCELED ? "scan aborted"
+                                                          : "Wi-Fi scan is unavailable",
+                               NULL);
+            return -1;
+        }
+        if (event == 1) {
+            /* The completion event can arrive before the trigger
+             * acknowledgement only in a merged datagram; either order works. */
+            ctx->scan.result_count = 0;
+            ctx->scan.dump_retry = 0;
+            if (nl80211_send_dump_request(ctx) < 0) {
+                le_log_warn("networkd: scan dump request failed: %s",
+                            strerror(errno));
+                finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+                return -1;
+            }
+            ctx->scan.state = DRIVER_SCAN_DUMP;
+        }
+        return 0;
+    }
+    case DRIVER_SCAN_DUMP: {
+        char data[LE_ADAPTER_MSG_MAX];
+        int done = 0;
+
+        if (nl80211_parse_dump_message(ctx->scan.results,
+                                       &ctx->scan.result_count,
+                                       buffer, length, &done) < 0) {
+            if (errno == EBUSY || errno == EAGAIN) {
+                /* The kernel accepted the dump before the results were ready;
+                 * check_scan_timeout asks again at the retry interval. */
+                ctx->scan.dump_retry = 1;
+                ctx->scan.poll_at = monotonic_ms() + NL80211_SCAN_RETRY_MS;
+                return 0;
+            }
+            le_log_warn("networkd: scan dump failed: %s", strerror(errno));
+            finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+            return -1;
+        }
+        if (!done)
+            return 0;
+        if (serialize_scan_results(ctx->scan.results, ctx->scan.result_count,
+                                   data, sizeof(data)) < 0) {
+            finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+            return -1;
+        }
+        le_log_info("networkd: kernel scan results ready");
+        finish_driver_scan(ctx, 0, NULL, data);
+        return -1;
+    }
+    default:
+        return 0;
+    }
+}
+
+/*
+ * Advance one readable event of the direct kernel scan.  Bounded per call: at
+ * most NL80211_STEP_MAX_DATAGRAMS datagrams are drained and nothing blocks, so
+ * the poll loop keeps serving the portal, the adapter clients, and the AP
+ * children while the scan runs.
+ */
+static void driver_scan_step(struct daemon_ctx *ctx)
+{
+    int datagrams = 0;
+
+    while (datagrams < NL80211_STEP_MAX_DATAGRAMS) {
+        ssize_t received;
+
+        received = recv(ctx->scan.fd, ctx->scan.buffer, NL80211_BUFFER_SIZE,
+                        MSG_DONTWAIT);
+        if (received < 0) {
+            if (errno == EINTR)
+                continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return;
+            le_log_warn("networkd: scan receive failed: %s", strerror(errno));
+            finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+            return;
+        }
+        ++datagrams;
+        if (driver_scan_message(ctx, ctx->scan.buffer, (size_t)received) < 0)
+            return;
+    }
+}
+
+/* Scan flags for the current radio ownership.  While the recovery AP owns the
+ * interface the client supplicant has been stopped, so the scan must be the
+ * kernel AP-forced scan (NL80211_SCAN_FLAG_AP); in client mode no flag is set
+ * and the ordinary WEXT/nl80211 path is used. */
+static uint32_t scan_flags_for(const struct daemon_ctx *ctx)
+{
+    return ctx->recovery_configured && ctx->recovery.net_configured ?
+        (uint32_t)NL80211_SCAN_FLAG_AP : 0u;
+}
+
+#ifdef LE_NETWORKD_TESTING
+/* Host fixtures have no radio.  When the fixture supplies the rows a live
+ * supplicant would return, the driver branch parses them through the real scan
+ * parser so the AP-owned dispatch and the API mapping can be exercised without
+ * a wireless interface.  Never reachable in a production build. */
+static int scan_oracle_parse(const char *path, char *data, size_t data_size)
+{
+    char rows[4096];
+    FILE *file;
+    size_t length;
+
+    file = fopen(path, "r");
+    if (!file)
+        return -EIO;
+    length = fread(rows, 1, sizeof(rows) - 1, file);
+    fclose(file);
+    rows[length] = '\0';
+    return parse_scan_results(rows, data, data_size);
+}
+
+/* The oracle can be told to answer later than the scan command, so the
+ * lifecycle fixture can prove the daemon keeps serving other clients while a
+ * kernel scan is still pending.  Never reachable in a production build. */
+static long long scan_oracle_delay_ms(void)
+{
+    const char *value = getenv("LIBREECHO_NETWORKD_SCAN_ORACLE_DELAY_MS");
+    long parsed;
+
+    if (!value || !value[0])
+        return 0;
+    parsed = strtol(value, NULL, 10);
+    if (parsed < 0)
+        parsed = 0;
+    if (parsed > 5000)
+        parsed = 5000;
+    return (long long)parsed;
+}
+#endif
 
 static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
 {
@@ -2554,11 +3037,69 @@ static void finish_scan(struct daemon_ctx *ctx, int failed, const char *error)
     ctx->clients[ci].busy = 0;
 }
 
+/* Complete an asynchronous driver scan: report the outcome, release the
+ * netlink socket, and clear the pending state.  Safe to call once the client
+ * has gone away (fd < 0: nothing to answer, resources are still released). */
+static void finish_driver_scan(struct daemon_ctx *ctx, int failed,
+                               const char *error, const char *data)
+{
+    int fd = ctx->scan.client_fd;
+    unsigned long id = ctx->scan.id;
+    int ci;
+
+    if (ctx->scan.fd >= 0)
+        close(ctx->scan.fd);
+    free(ctx->scan.buffer);
+    ctx->scan.buffer = NULL;
+    ctx->scan.fd = -1;
+    ctx->scan.driver = 0;
+    ctx->scan.state = DRIVER_SCAN_NONE;
+    ctx->scan.active = 0;
+    ctx->scan.client_fd = -1;
+    if (fd < 0)
+        return;
+    ci = client_index(ctx, fd);
+    if (ci < 0)
+        return;
+    if (failed)
+        (void)send_err_fd(fd, id, error ? error : "scan failed");
+    else
+        (void)send_ok_fd(fd, id, data ? data : "{}");
+    ctx->clients[ci].busy = 0;
+}
+
 static void check_scan_timeout(struct daemon_ctx *ctx)
 {
     long long now = monotonic_ms();
     if (!ctx->scan.active)
         return;
+    if (ctx->scan.driver) {
+        /* A driver scan is completed by its own socket events.  Only its
+         * bounded timers are serviced here: the oracle/retry wake-up, and the
+         * overall deadline that answers the waiting client before the aligned
+         * adapter timeout expires. */
+#ifdef LE_NETWORKD_TESTING
+        if (ctx->scan.state == DRIVER_SCAN_ORACLE && now >= ctx->scan.poll_at) {
+            const char *oracle = getenv("LIBREECHO_NETWORKD_SCAN_ORACLE");
+            char data[LE_ADAPTER_MSG_MAX];
+            if (!oracle || !oracle[0] ||
+                scan_oracle_parse(oracle, data, sizeof(data)) < 0)
+                finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+            else
+                finish_driver_scan(ctx, 0, NULL, data);
+            return;
+        }
+#endif
+        if (ctx->scan.state == DRIVER_SCAN_DUMP && ctx->scan.dump_retry &&
+            now >= ctx->scan.poll_at) {
+            ctx->scan.dump_retry = 0;
+            if (nl80211_send_dump_request(ctx) < 0)
+                finish_driver_scan(ctx, 1, "unable to read scan results", NULL);
+        }
+        if (now >= ctx->scan.deadline)
+            finish_driver_scan(ctx, 1, "scan timed out", NULL);
+        return;
+    }
     if (ctx->wpa.monitor.fd < 0 && now >= ctx->scan.poll_at) {
         finish_scan(ctx, 0, NULL);
         return;
@@ -2572,7 +3113,7 @@ static void handle_wpa_event(struct daemon_ctx *ctx, const char *event)
     struct network_state before;
     le_log_debug("networkd: wpa event: %.80s", event);
     if (strstr(event, "CTRL-EVENT-SCAN-RESULTS")) {
-        if (ctx->scan.active)
+        if (ctx->scan.active && !ctx->scan.driver)
             finish_scan(ctx, 0, NULL);
         return;
     }
@@ -2709,6 +3250,96 @@ static int json_string_arg(const char *args, const char *key, char *out,
     return 1;
 }
 
+/* Parse a JSON boolean member.  Returns 1 (found, *out set), 0 (absent), or
+ * -1 (present but not the literal true/false). */
+static int json_bool_arg(const char *args, const char *key, int *out)
+{
+    const char *p;
+    char needle[64];
+
+    if (!args || !out)
+        return -1;
+    if (snprintf(needle, sizeof(needle), "\"%s\"", key) >= (int)sizeof(needle))
+        return -1;
+    p = strstr(args, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    if (*p++ != ':')
+        return -1;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    if (!strncmp(p, "true", 4)) {
+        *out = 1;
+        return 1;
+    }
+    if (!strncmp(p, "false", 5)) {
+        *out = 0;
+        return 1;
+    }
+    return -1;
+}
+
+/* Parse a JSON integer member.  Returns 1 (found, *out set), 0 (absent), or
+ * -1 (present but malformed).  Values are not range-checked here; the recovery
+ * core validates the assembled configuration strictly. */
+static int json_int_arg(const char *args, const char *key, long long *out)
+{
+    const char *p, *end;
+    char needle[64];
+    long long value;
+
+    if (!args || !out)
+        return -1;
+    if (snprintf(needle, sizeof(needle), "\"%s\"", key) >= (int)sizeof(needle))
+        return -1;
+    p = strstr(args, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    if (*p++ != ':')
+        return -1;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    errno = 0;
+    value = strtoll(p, (char **)&end, 10);
+    if (end == p || errno != 0)
+        return -1;
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')
+        ++end;
+    if (*end != ',' && *end != '}')
+        return -1;
+    *out = value;
+    return 1;
+}
+
+/*
+ * Owner-caller gate for the secret-bearing adapter commands.  The web layer
+ * enforces the authenticated owner session + CSRF; on the local socket we
+ * additionally require a root peer so only the (root) control plane can reveal
+ * or re-key the provisioning password.  Host fixtures build with
+ * LE_NETWORKD_TESTING and are exempt.
+ */
+static int recovery_peer_authorized(int fd)
+{
+#ifdef LE_NETWORKD_TESTING
+    (void)fd;
+    return 1;
+#else
+    struct ucred cred;
+    socklen_t length = sizeof(cred);
+
+    if (fd < 0 ||
+        getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &length) < 0)
+        return 0;
+    return cred.uid == 0;
+#endif
+}
+
 static int wpa_quote(char *out, size_t size, const char *value)
 {
     size_t n = 0;
@@ -2754,6 +3385,25 @@ static int existing_network_id(struct daemon_ctx *ctx)
         line = next;
     }
     return -1;
+}
+
+/* A device that already has a saved Wi-Fi profile is "set up"; a never-set-up
+ * unit must use the normal first-boot AP, not the recovery fallback. */
+static int wpa_has_saved_network(struct daemon_ctx *ctx)
+{
+    char reply[WPA_REPLY_MAX], *line, *next;
+    if (wpa_call(ctx, "LIST_NETWORKS\n", reply, sizeof(reply)) < 0)
+        return 0;
+    line = reply;
+    while (line && *line) {
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = '\0';
+        if (line[0] >= '0' && line[0] <= '9')
+            return 1;
+        line = next;
+    }
+    return 0;
 }
 
 static void remove_network_profile(struct daemon_ctx *ctx, int id)
@@ -2866,6 +3516,14 @@ static void finish_association(struct daemon_ctx *ctx, int success)
         le_log_error("networkd: Wi-Fi association did not complete for ssid=\"%s\"",
                      ctx->association.ssid);
         restore_previous_network(ctx);
+        /* The recovery AP released the radio for this attempt; rebuild it and
+         * keep the marker so the owner can retry with correct credentials. */
+        if (ctx->recovery_configured &&
+            ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+            le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 0);
+            recovery_apply_led(ctx);
+            broadcast_state(ctx, "network.recovery");
+        }
         if (ci >= 0) {
             (void)send_err_fd(fd, id, "Wi-Fi association did not complete");
             ctx->clients[ci].busy = 0;
@@ -2877,6 +3535,16 @@ static void finish_association(struct daemon_ctx *ctx, int success)
 
     if (wpa_ok(ctx, "SAVE_CONFIG\n", reply, sizeof(reply)) < 0) {
         restore_previous_network(ctx);
+        /* The profile could not be saved, so the handover cannot proceed: the
+         * candidate config was rolled back.  Re-arm the recovery AP exactly as
+         * for a failed association, otherwise the state machine is left in
+         * HANDOVER with no AP and le_recovery_tick() can never rebuild one. */
+        if (ctx->recovery_configured &&
+            ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+            le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 0);
+            recovery_apply_led(ctx);
+            broadcast_state(ctx, "network.recovery");
+        }
         if (ci >= 0) {
             (void)send_err_fd(fd, id, "Wi-Fi profile could not be saved");
             ctx->clients[ci].busy = 0;
@@ -2887,10 +3555,22 @@ static void finish_association(struct daemon_ctx *ctx, int success)
     }
     ctx->network_id = candidate;
     reset_network_health(ctx, monotonic_ms());
+    /* Association succeeded during recovery, but the single-radio handover is
+     * NOT complete yet: the interface is only returned to normal client
+     * ownership once DHCP confirms a usable address (see finish_dhcp).  Until
+     * then the boot marker is kept, so a failed or absent DHCP lease rebuilds
+     * the recovery AP and leaves the owner a portal to retry from. */
     copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ctx->association.ssid);
     copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
     ctx->association.active = 0;
     if (start_dhcp(ctx, 0, fd, id) < 0) {
+        /* DHCP could not even start: re-arm the recovery AP immediately. */
+        if (ctx->recovery_configured &&
+            ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+            le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 0);
+            recovery_apply_led(ctx);
+            broadcast_state(ctx, "network.recovery");
+        }
         restore_previous_network(ctx);
         if (ci >= 0) {
             ctx->clients[ci].busy = 0;
@@ -2956,9 +3636,119 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
     if (!strcmp(cmd, "status")) {
         (void)ensure_wpa(ctx);
         refresh_state(ctx);
-        if (state_json(&ctx->state, data, sizeof(data)) < 0 ||
+        if (status_data(ctx, data, sizeof(data)) < 0 ||
             send_ok_fd(ctx->clients[ci].fd, id, data) < 0)
             remove_client(ctx, ci);
+    } else if (!strcmp(cmd, "recovery_status")) {
+        if (le_recovery_status_json(&ctx->recovery, data, sizeof(data)) < 0 ||
+            send_ok_fd(ctx->clients[ci].fd, id, data) < 0)
+            remove_client(ctx, ci);
+    } else if (!strcmp(cmd, "recovery_psk")) {
+        /* Owner-only reveal, saveable while client-connected so the owner can
+         * keep the password before it is needed.  The core refuses the reveal
+         * while the captive AP is serving, so an unauthenticated captive client
+         * can never obtain it.  The web layer must additionally require an
+         * authenticated owner session + CSRF, and the socket additionally
+         * requires a root peer; the value is never logged. */
+        if (!recovery_peer_authorized(ctx->clients[ci].fd)) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "owner authorization required");
+        } else if (!ctx->recovery_configured ||
+            le_recovery_secret_json(&ctx->recovery, data, sizeof(data)) < 0)
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "recovery password is unavailable in this mode");
+        else if (send_ok_fd(ctx->clients[ci].fd, id, data) < 0)
+            remove_client(ctx, ci);
+    } else if (!strcmp(cmd, "recovery_prepare")) {
+        /* Owner action: generate/retain the per-device password now without
+         * returning it, so a later reveal is stable and it survives reboot. */
+        char reason[LE_RECOVERY_REASON_MAX] = "";
+        if (!recovery_peer_authorized(ctx->clients[ci].fd)) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "owner authorization required");
+        } else if (!ctx->recovery_configured ||
+            le_recovery_secret_prepare(&ctx->recovery, reason,
+                                       sizeof(reason)) < 0)
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              reason[0] ? reason : "recovery unavailable");
+        else if (send_ok_fd(ctx->clients[ci].fd, id,
+                            "{\"prepared\":true}") < 0)
+            remove_client(ctx, ci);
+    } else if (!strcmp(cmd, "recovery_configure")) {
+        /* Owner configuration: {enabled:bool, auto_enabled:bool,
+         * auto_timeout_ms:int 30000..600000}.  Strictly validated (never
+         * silently clamped) and persisted under protected /data storage; the
+         * runtime config only changes after the write succeeds. */
+        int enabled = 0, auto_enabled = 0;
+        long long timeout_ms = 0;
+        int have_enabled, have_auto, have_timeout;
+        char reason[LE_RECOVERY_REASON_MAX] = "";
+        if (!recovery_peer_authorized(ctx->clients[ci].fd)) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "owner authorization required");
+        } else if (!ctx->recovery_configured) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "recovery is not configured");
+        } else {
+            have_enabled = json_bool_arg(args, "enabled", &enabled);
+            have_auto = json_bool_arg(args, "auto_enabled", &auto_enabled);
+            have_timeout = json_int_arg(args, "auto_timeout_ms", &timeout_ms);
+            if (have_enabled != 1 || have_auto != 1 || have_timeout != 1) {
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "recovery_configure requires enabled, "
+                                  "auto_enabled, auto_timeout_ms");
+            } else if (ctx->recovery_cli_disabled && enabled) {
+                /* The boot override is authoritative: the owner API must not
+                 * be able to re-enable the AP the operator disabled. */
+                le_log_warn("networkd: recovery_configure refused: disabled by "
+                            "--recovery-disabled override");
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "recovery is disabled by the boot override");
+            } else if (le_recovery_configure(&ctx->recovery, enabled,
+                                             auto_enabled, timeout_ms,
+                                             reason, sizeof(reason)) < 0) {
+                le_log_warn("networkd: recovery_configure rejected: %s", reason);
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  reason[0] ? reason :
+                                  "recovery configuration rejected");
+            } else {
+                le_log_info("networkd: recovery configured (enabled=%d, auto=%d, timeout_ms=%lld)",
+                            enabled, auto_enabled, timeout_ms);
+                recovery_apply_led(ctx);
+                if (status_data(ctx, data, sizeof(data)) < 0 ||
+                    send_ok_fd(ctx->clients[ci].fd, id, data) < 0)
+                    remove_client(ctx, ci);
+                refresh_and_broadcast(ctx, "network.recovery");
+            }
+        }
+    } else if (!strcmp(cmd, "recovery_stop")) {
+        if (!recovery_peer_authorized(ctx->clients[ci].fd)) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "owner authorization required");
+        } else {
+            if (ctx->recovery_configured) {
+                le_recovery_stop(&ctx->recovery, monotonic_ms(), "owner-stop");
+                recovery_apply_led(ctx);
+                refresh_and_broadcast(ctx, "network.recovery");
+            }
+            /* le_recovery_stop() reports success even when the platform
+             * net-down helper has given up: the interface is still
+             * recovery-owned (net_configured stays set) and no automatic retry
+             * is scheduled (net_release_pending is clear).  Reply with a
+             * truthful error so the owner retries instead of being told a
+             * still-owned interface was released.  A stop that merely
+             * scheduled a bounded retry is not a failure, so that case still
+             * reports success; an explicit stop retry starts a fresh bounded
+             * budget (see release_net_ownership) and succeeds once net-down
+             * works. */
+            if (ctx->recovery.net_configured &&
+                !ctx->recovery.net_release_pending) {
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "recovery stop incomplete: network release failed; retry");
+            } else {
+                (void)send_ok_fd(ctx->clients[ci].fd, id, "{}");
+            }
+        }
     } else if (!strcmp(cmd, "scan")) {
         char reply[WPA_REPLY_MAX];
         int scan_state;
@@ -2968,40 +3758,55 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         }
         le_log_info("networkd: scan requested");
         scan_state = wpa_scan_request(ctx, reply, sizeof(reply));
-        if (scan_state < 0) {
-            le_log_error("networkd: wpa_supplicant scan unavailable");
-            (void)send_err_fd(ctx->clients[ci].fd, id, "wpa_supplicant scan unavailable");
+        if (scan_state < 0 || scan_state == 2) {
+            /* wpa_supplicant cannot run the scan: the recovery AP owns the
+             * single radio and the supplicant has been stopped (scan_state < 0),
+             * or the supplicant does not implement SCAN (scan_state == 2).
+             * Both run the kernel scanner asynchronously: the WEXT
+             * compatibility ioctl first when the client plane owns the radio
+             * and offers it, otherwise the nl80211 engine (AP-forced while the
+             * portal owns the radio) whose every step is driven from the poll
+             * loop.  The waiting client is answered by the engine's completion
+             * or by its bounded deadline, whichever comes first. */
+            if (scan_state == 2)
+                le_log_warn("networkd: wpa scan unsupported; using kernel scan");
+            else
+                le_log_warn("networkd: wpa_supplicant scan unavailable; using kernel scan");
+            if (!scan_flags_for(ctx)) {
+                int wext_result = wext_scan(ctx->interface, data, sizeof(data));
+                if (wext_result >= 0) {
+                    (void)send_ok_fd(ctx->clients[ci].fd, id, data);
+                    return;
+                }
+                if (wext_result != -EOPNOTSUPP && wext_result != -ENOTSUP) {
+                    le_log_error("networkd: driver scan unavailable: %s",
+                                 strerror(-wext_result));
+                    (void)send_err_fd(ctx->clients[ci].fd, id,
+                                      "Wi-Fi scan is unavailable");
+                    return;
+                }
+            }
+            if (driver_scan_begin(ctx) < 0) {
+                le_log_error("networkd: kernel scan unavailable: %s",
+                             strerror(errno));
+                (void)send_err_fd(ctx->clients[ci].fd, id,
+                                  "Wi-Fi scan is unavailable");
+                return;
+            }
+            ctx->scan.active = 1;
+            ctx->scan.client_fd = ctx->clients[ci].fd;
+            ctx->scan.id = id;
+            ctx->scan.deadline = monotonic_ms() + NL80211_SCAN_TIMEOUT_MS;
+            ctx->scan.poll_at = monotonic_ms() + NL80211_SCAN_RETRY_MS;
+#ifdef LE_NETWORKD_TESTING
+            if (ctx->scan.state == DRIVER_SCAN_ORACLE)
+                ctx->scan.poll_at = monotonic_ms() + scan_oracle_delay_ms();
+#endif
+            ctx->clients[ci].busy = 1;
             return;
         }
         if (scan_state == 1)
             le_log_warn("networkd: scan already active; waiting for results");
-        else if (scan_state == 2) {
-            int wext_result;
-            le_log_warn("networkd: wpa scan unsupported; trying WEXT driver results");
-            wext_result = wext_scan(ctx->interface, data, sizeof(data));
-            if (wext_result >= 0) {
-                le_log_info("networkd: WEXT scan results ready");
-                (void)send_ok_fd(ctx->clients[ci].fd, id, data);
-            } else if (wext_result == -EOPNOTSUPP ||
-                       wext_result == -ENOTSUP) {
-                le_log_warn("networkd: WEXT scan returned EOPNOTSUPP; using nl80211");
-                if (nl80211_scan(ctx->interface, data, sizeof(data)) < 0) {
-                    le_log_error("networkd: nl80211 scan unavailable: %s",
-                                 strerror(errno));
-                    (void)send_err_fd(ctx->clients[ci].fd, id,
-                                      "Wi-Fi scan is unavailable");
-                } else {
-                    le_log_info("networkd: nl80211 scan results ready");
-                    (void)send_ok_fd(ctx->clients[ci].fd, id, data);
-                }
-            } else {
-                le_log_error("networkd: WEXT scan unavailable: %s",
-                             strerror(-wext_result));
-                (void)send_err_fd(ctx->clients[ci].fd, id,
-                                  "Wi-Fi scan is unavailable");
-            }
-            return;
-        }
         ctx->scan.active = 1;
         ctx->scan.client_fd = ctx->clients[ci].fd;
         ctx->scan.id = id;
@@ -3024,7 +3829,25 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
                               "Wi-Fi association already in progress");
             return;
         }
+        /* Rate-limit credential submissions during recovery so the AP cannot
+         * be used to spray guesses at the home network or this daemon. */
+        if (ctx->recovery_configured &&
+            ctx->recovery.mode == LE_RECOVERY_MODE_ACTIVE &&
+            le_recovery_rate_limit(&ctx->recovery, monotonic_ms()) < 0) {
+            (void)send_err_fd(ctx->clients[ci].fd, id,
+                              "too many Wi-Fi attempts; wait and retry");
+            return;
+        }
         le_log_info("networkd: connect to ssid=\"%s\" security=%s", ssid, have_security == 1 ? security : "wpa2");
+        /* Single-radio handover: the recovery AP must release the interface
+         * (children down + portal IPv4 removed) before wpa_supplicant can try
+         * to associate.  The boot marker is kept so a failed attempt rebuilds
+         * the AP. */
+        if (ctx->recovery_configured && ctx->recovery.config.enabled &&
+            le_recovery_handover_begin(&ctx->recovery, monotonic_ms())) {
+            recovery_apply_led(ctx);
+            broadcast_state(ctx, "network.recovery");
+        }
         {
             int previous_id = -1;
             connect_result = connect_network(ctx, ssid, have_psk == 1 ? psk : "",
@@ -3047,6 +3870,12 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         }
         if (connect_result < 0) {
             le_log_error("networkd: wpa_supplicant rejected network \\\"%s\\\" at stage %d", ssid, connect_result);
+            if (ctx->recovery_configured &&
+                ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
+                le_recovery_handover_result(&ctx->recovery, monotonic_ms(), 0);
+                recovery_apply_led(ctx);
+                broadcast_state(ctx, "network.recovery");
+            }
             (void)send_err_fd(ctx->clients[ci].fd, id,
                               connect_result == -2 ? "wpa_supplicant unavailable" :
                               connect_result == -4 ? "SSID rejected by wpa_supplicant" :
@@ -3237,7 +4066,7 @@ static int daemonize_process(void)
 static void usage(const char *name)
 {
     fprintf(stderr,
-            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--reboot-request PATH] [--reboot-guard PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
+            "usage: %s [--socket PATH] [--wpa-ctrl PATH] [--interface NAME] [--reboot-request PATH] [--reboot-guard PATH] [--recovery-marker PATH] [--recovery-psk PATH] [--recovery-config PATH] [--recovery-run-dir PATH] [--recovery-timeout MS] [--recovery-start-timeout MS] [--recovery-stop-timeout MS] [--recovery-auto] [--recovery-disabled] [--recovery-ap-probe PATH] [--recovery-ready-probe PATH] [--recovery-net-up PATH] [--recovery-net-down PATH] [--recovery-address ADDR] [--hostapd PATH] [--hostapd-conf PATH] [--recovery-dhcp PATH] [--recovery-dns PATH] [--recovery-conf PATH] [--led-socket PATH] [--foreground] [--verbose] [--debug] [--quiet]\n",
             name);
 }
 
@@ -3252,27 +4081,110 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
     copy_string(ctx->reboot_guard_path, sizeof(ctx->reboot_guard_path),
                 "/data/libreecho/network-recovery-reboot.guard");
     copy_string(ctx->interface, sizeof(ctx->interface), "wlan0");
+    le_recovery_config_default(&ctx->recovery_config, ctx->interface);
+    ctx->recovery_configured = 1;
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--foreground")) {
             ctx->foreground = 1;
+        } else if (!strcmp(argv[i], "--recovery-auto")) {
+            ctx->recovery_config.auto_enabled = 1;
+        } else if (!strcmp(argv[i], "--recovery-disabled")) {
+            ctx->recovery_config.enabled = 0;
+            ctx->recovery_cli_disabled = 1;
         } else if ((!strcmp(argv[i], "--socket") ||
                     !strcmp(argv[i], "--wpa-ctrl") ||
                     !strcmp(argv[i], "--interface") ||
                     !strcmp(argv[i], "--reboot-request") ||
-                    !strcmp(argv[i], "--reboot-guard")) && i + 1 < argc) {
+                    !strcmp(argv[i], "--reboot-guard") ||
+                    !strcmp(argv[i], "--recovery-marker") ||
+                    !strcmp(argv[i], "--recovery-psk") ||
+                    !strcmp(argv[i], "--recovery-config") ||
+                    !strcmp(argv[i], "--recovery-run-dir") ||
+                    !strcmp(argv[i], "--recovery-timeout") ||
+                    !strcmp(argv[i], "--recovery-start-timeout") ||
+                    !strcmp(argv[i], "--recovery-stop-timeout") ||
+                    !strcmp(argv[i], "--recovery-ap-probe") ||
+                    !strcmp(argv[i], "--recovery-ready-probe") ||
+                    !strcmp(argv[i], "--recovery-net-up") ||
+                    !strcmp(argv[i], "--recovery-net-down") ||
+                    !strcmp(argv[i], "--recovery-address") ||
+                    !strcmp(argv[i], "--hostapd") ||
+                    !strcmp(argv[i], "--hostapd-conf") ||
+                    !strcmp(argv[i], "--recovery-dhcp") ||
+                    !strcmp(argv[i], "--recovery-dns") ||
+                    !strcmp(argv[i], "--recovery-conf") ||
+                    !strcmp(argv[i], "--led-socket")) && i + 1 < argc) {
+            const char *option = argv[i];
             const char *value = argv[++i];
-            if (!strcmp(argv[i - 1], "--socket"))
+            if (!strcmp(option, "--socket"))
                 copy_string(ctx->socket_path, sizeof(ctx->socket_path), value);
-            else if (!strcmp(argv[i - 1], "--wpa-ctrl"))
+            else if (!strcmp(option, "--wpa-ctrl"))
                 copy_string(ctx->wpa_path, sizeof(ctx->wpa_path), value);
-            else if (!strcmp(argv[i - 1], "--reboot-request"))
+            else if (!strcmp(option, "--reboot-request"))
                 copy_string(ctx->reboot_request_path,
                             sizeof(ctx->reboot_request_path), value);
-            else if (!strcmp(argv[i - 1], "--reboot-guard"))
+            else if (!strcmp(option, "--reboot-guard"))
                 copy_string(ctx->reboot_guard_path,
                             sizeof(ctx->reboot_guard_path), value);
-            else
+            else if (!strcmp(option, "--interface")) {
                 copy_string(ctx->interface, sizeof(ctx->interface), value);
+                copy_string(ctx->recovery_config.interface,
+                            sizeof(ctx->recovery_config.interface), value);
+            } else if (!strcmp(option, "--recovery-marker"))
+                copy_string(ctx->recovery_config.marker_path,
+                            sizeof(ctx->recovery_config.marker_path), value);
+            else if (!strcmp(option, "--recovery-psk"))
+                copy_string(ctx->recovery_config.psk_path,
+                            sizeof(ctx->recovery_config.psk_path), value);
+            else if (!strcmp(option, "--recovery-config"))
+                copy_string(ctx->recovery_config.config_path,
+                            sizeof(ctx->recovery_config.config_path), value);
+            else if (!strcmp(option, "--recovery-run-dir"))
+                copy_string(ctx->recovery_config.run_dir,
+                            sizeof(ctx->recovery_config.run_dir), value);
+            else if (!strcmp(option, "--recovery-timeout"))
+                ctx->recovery_config.auto_timeout_ms =
+                    strtoll(value, NULL, 10);
+            else if (!strcmp(option, "--recovery-start-timeout"))
+                ctx->recovery_config.start_timeout_ms =
+                    strtoll(value, NULL, 10);
+            else if (!strcmp(option, "--recovery-stop-timeout"))
+                ctx->recovery_config.stop_timeout_ms =
+                    strtoll(value, NULL, 10);
+            else if (!strcmp(option, "--recovery-ap-probe"))
+                copy_string(ctx->recovery_config.ap_probe_cmd,
+                            sizeof(ctx->recovery_config.ap_probe_cmd), value);
+            else if (!strcmp(option, "--recovery-ready-probe"))
+                copy_string(ctx->recovery_config.ready_probe_cmd,
+                            sizeof(ctx->recovery_config.ready_probe_cmd),
+                            value);
+            else if (!strcmp(option, "--recovery-net-up"))
+                copy_string(ctx->recovery_config.net_up_cmd,
+                            sizeof(ctx->recovery_config.net_up_cmd), value);
+            else if (!strcmp(option, "--recovery-net-down"))
+                copy_string(ctx->recovery_config.net_down_cmd,
+                            sizeof(ctx->recovery_config.net_down_cmd), value);
+            else if (!strcmp(option, "--recovery-address"))
+                copy_string(ctx->recovery_config.ap_address,
+                            sizeof(ctx->recovery_config.ap_address), value);
+            else if (!strcmp(option, "--hostapd"))
+                copy_string(ctx->recovery_config.hostapd_bin,
+                            sizeof(ctx->recovery_config.hostapd_bin), value);
+            else if (!strcmp(option, "--hostapd-conf"))
+                copy_string(ctx->recovery_config.hostapd_conf,
+                            sizeof(ctx->recovery_config.hostapd_conf), value);
+            else if (!strcmp(option, "--recovery-dhcp"))
+                copy_string(ctx->recovery_config.dhcp_bin,
+                            sizeof(ctx->recovery_config.dhcp_bin), value);
+            else if (!strcmp(option, "--recovery-dns"))
+                copy_string(ctx->recovery_config.dns_bin,
+                            sizeof(ctx->recovery_config.dns_bin), value);
+            else if (!strcmp(option, "--recovery-conf"))
+                copy_string(ctx->recovery_config.dhcp_conf,
+                            sizeof(ctx->recovery_config.dhcp_conf), value);
+            else if (!strcmp(option, "--led-socket"))
+                copy_string(ctx->recovery_config.led_socket,
+                            sizeof(ctx->recovery_config.led_socket), value);
         } else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "--debug") ||
                    !strcmp(argv[i], "--quiet") || !strcmp(argv[i], "--syslog")) {
             /* handled by le_log_init */
@@ -3287,6 +4199,7 @@ static int parse_args(struct daemon_ctx *ctx, int argc, char **argv)
 static void cleanup(struct daemon_ctx *ctx)
 {
     int i;
+    recovery_shutdown(ctx);
     if (ctx->association.active)
         cancel_association(ctx);
     if (ctx->dhcp.active) {
@@ -3311,7 +4224,7 @@ int main(int argc, char **argv)
 {
     struct daemon_ctx ctx;
     struct sigaction action;
-    struct pollfd pfds[4 + CLIENT_MAX];
+    struct pollfd pfds[5 + CLIENT_MAX];
     int i;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -3330,7 +4243,32 @@ int main(int argc, char **argv)
     le_log_init("networkd", argc, argv);
     if (parse_args(&ctx, argc, argv) < 0)
         return 2;
+    /* Load the owner's persisted recovery configuration before the boot trigger
+     * is evaluated, so an owner-disabled feature stays disabled across reboot
+     * and the saved auto/timeout choice survives.  An unreadable/invalid file
+     * is ignored (defaults apply) rather than trusted. */
+    {
+        char config_reason[LE_RECOVERY_REASON_MAX] = "";
+        int loaded = le_recovery_config_load(&ctx.recovery_config,
+                                             config_reason,
+                                             sizeof(config_reason));
+        if (loaded < 0)
+            le_log_warn("networkd: ignoring persisted recovery config: %s",
+                        config_reason);
+        else if (loaded > 0)
+            le_log_info("networkd: loaded persisted recovery config");
+    }
+    if (ctx.recovery_cli_disabled) {
+        /* The command line is authoritative for this boot: the load above
+         * replaces the whole config, so a persisted enabled/auto choice would
+         * otherwise silently re-arm an operator-disabled AP.  Re-apply the
+         * hard override after the load. */
+        ctx.recovery_config.enabled = 0;
+        ctx.recovery_config.auto_enabled = 0;
+        le_log_info("networkd: recovery disabled by --recovery-disabled override");
+    }
     le_network_health_init(&ctx.health, NULL, monotonic_ms());
+    le_recovery_init(&ctx.recovery, &ctx.recovery_config, NULL, monotonic_ms());
     le_log_info("networkd: starting (socket=%s, interface=%s, wpa=%s)",
                 ctx.socket_path, ctx.interface, ctx.wpa_path);
 
@@ -3361,6 +4299,8 @@ int main(int argc, char **argv)
     ctx.netlink_fd = open_netlink();
     (void)wpa_open(&ctx); /* Missing wpa_supplicant is a runtime state, not fatal. */
     refresh_state(&ctx);
+    ctx.recovery_has_saved_network = wpa_has_saved_network(&ctx);
+    recovery_boot(&ctx, monotonic_ms());
 
     while (g_running) {
         int nfds = 0;
@@ -3389,6 +4329,12 @@ int main(int argc, char **argv)
             pfds[nfds].revents = 0;
             ++nfds;
         }
+        if (ctx.scan.active && ctx.scan.driver && ctx.scan.fd >= 0) {
+            pfds[nfds].fd = ctx.scan.fd;
+            pfds[nfds].events = POLLIN;
+            pfds[nfds].revents = 0;
+            ++nfds;
+        }
         for (i = 0; i < CLIENT_MAX; ++i) {
             if (ctx.clients[i].fd >= 0) {
                 pfds[nfds].fd = ctx.clients[i].fd;
@@ -3399,6 +4345,11 @@ int main(int argc, char **argv)
         }
         if (ctx.scan.active && ctx.scan.deadline - now < timeout)
             timeout = (int)(ctx.scan.deadline > now ? ctx.scan.deadline - now : 0);
+        /* Driver-scan retry/oracle timers are separate from the deadline. */
+        if (ctx.scan.active && ctx.scan.driver &&
+            (ctx.scan.dump_retry || ctx.scan.state == DRIVER_SCAN_ORACLE) &&
+            ctx.scan.poll_at - now < timeout)
+            timeout = (int)(ctx.scan.poll_at > now ? ctx.scan.poll_at - now : 0);
         if (ctx.association.active && ctx.association.poll_at - now < timeout)
             timeout = (int)(ctx.association.poll_at > now ?
                             ctx.association.poll_at - now : 0);
@@ -3408,6 +4359,20 @@ int main(int argc, char **argv)
             ctx.gateway_probe.deadline_ms - now < timeout)
             timeout = (int)(ctx.gateway_probe.deadline_ms > now ?
                             ctx.gateway_probe.deadline_ms - now : 0);
+        if (ctx.recovery_configured && ctx.recovery.auto_counting &&
+            ctx.recovery.auto_deadline_ms - now < timeout)
+            timeout = (int)(ctx.recovery.auto_deadline_ms > now ?
+                            ctx.recovery.auto_deadline_ms - now : 0);
+        if (ctx.recovery_configured &&
+            ctx.recovery.mode == LE_RECOVERY_MODE_STARTING &&
+            ctx.recovery.start_deadline_ms - now < timeout)
+            timeout = (int)(ctx.recovery.start_deadline_ms > now ?
+                            ctx.recovery.start_deadline_ms - now : 0);
+        /* An owed net-down retry must not wait out a full poll interval. */
+        if (ctx.recovery_configured && ctx.recovery.net_release_pending &&
+            ctx.recovery.net_release_next_ms - now < timeout)
+            timeout = (int)(ctx.recovery.net_release_next_ms > now ?
+                            ctx.recovery.net_release_next_ms - now : 0);
         if (poll(pfds, (nfds_t)nfds, timeout) < 0 && errno != EINTR)
             break;
         now = monotonic_ms();
@@ -3431,6 +4396,16 @@ int main(int argc, char **argv)
                 if (pfds[pos].revents & (POLLIN | POLLERR | POLLHUP))
                     handle_netlink(&ctx);
                 ++pos;
+            }
+            if (ctx.scan.active && ctx.scan.driver && ctx.scan.fd >= 0) {
+                int scan_index;
+                for (scan_index = 0; scan_index < nfds; ++scan_index)
+                    if (pfds[scan_index].fd == ctx.scan.fd) {
+                        if (pfds[scan_index].revents &
+                            (POLLIN | POLLERR | POLLHUP | POLLNVAL))
+                            driver_scan_step(&ctx);
+                        break;
+                    }
             }
             for (i = 0; i < CLIENT_MAX; ++i) {
                 int j;
@@ -3464,6 +4439,7 @@ int main(int argc, char **argv)
              * automatic recovery in this poll iteration. */
             check_association(&ctx, now);
             check_network_health(&ctx, now);
+            recovery_tick(&ctx, now);
         }
     }
     cleanup(&ctx);

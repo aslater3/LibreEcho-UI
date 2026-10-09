@@ -6,7 +6,7 @@
 #endif
 struct le_backend_ops {
  void (*destroy)(struct le_backend*); int (*status)(struct le_backend*,struct le_system_status*); int (*device)(struct le_backend*,struct le_device_info*);
- int (*audio)(struct le_backend*,struct le_audio_state*); int (*volume)(struct le_backend*,int); int (*gain)(struct le_backend*,int); int (*mute)(struct le_backend*,int); int (*tone)(struct le_backend*); int (*tts_voice)(struct le_backend*,const char*); int (*announce)(struct le_backend*,const char*); int (*stop_speech)(struct le_backend*); int (*noise_start)(struct le_backend*,const char*,int,int); int (*noise_stop)(struct le_backend*); int (*simulate_audio)(struct le_backend*,const char*);
+ int (*audio)(struct le_backend*,struct le_audio_state*); int (*volume)(struct le_backend*,int); int (*gain)(struct le_backend*,int); int (*mute)(struct le_backend*,int); int (*tone)(struct le_backend*); int (*tts_voice)(struct le_backend*,const char*); int (*announce)(struct le_backend*,const char*); int (*stop_speech)(struct le_backend*); int (*noise_start)(struct le_backend*,const char*,int,int); int (*noise_stop)(struct le_backend*); int (*simulate_audio)(struct le_backend*,const char*); int (*radio_play)(struct le_backend*,const char*); int (*radio_stop)(struct le_backend*); int (*radio_playing)(struct le_backend*,struct le_radio_status*);
  int (*led)(struct le_backend*,struct le_led_state*); int (*colour)(struct le_backend*,uint8_t,uint8_t,uint8_t); int (*brightness)(struct le_backend*,int); int (*visualizer_enabled)(struct le_backend*,int); int (*boot_led)(struct le_backend*,const struct le_led_profile*); int (*profile)(struct le_backend*,const char*,const struct le_led_profile*); int (*night)(struct le_backend*,int,int,int); int (*led_test)(struct le_backend*);
  int (*network)(struct le_backend*,struct le_network_state*); int (*scan)(struct le_backend*,struct le_wifi_scan*); int (*connect)(struct le_backend*,const struct le_wifi_credentials*); int (*disconnect)(struct le_backend*); int (*hostname)(struct le_backend*,const char*);
  int (*wake)(struct le_backend*,struct le_wake_word_state*); int (*wake_set)(struct le_backend*,const char*); int (*sensitivity)(struct le_backend*,int); int (*wake_test)(struct le_backend*);
@@ -14,7 +14,36 @@ struct le_backend_ops {
  int (*airplay)(struct le_backend*,struct le_airplay_state*); int (*airplay_set)(struct le_backend*,int);
  int (*playback)(struct le_backend*,struct le_playback_state*);
  int (*reboot)(struct le_backend*); int (*shutdown)(struct le_backend*); int (*reset)(struct le_backend*); int (*tick)(struct le_backend*); int (*control)(struct le_backend*,const char*,const char*);
+ /* Spotify Connect. Appended last: the backends fill this struct
+    positionally, so anything inserted above silently shifts every op
+    after it. Null here reports the feature unsupported. */
+ int (*spotify)(struct le_backend*,struct le_spotify_state*);
+ int (*spotify_set)(struct le_backend*,int);
+ /* Ambient light detail. Appended after existing operations to preserve positional backends. */
+ int (*light)(struct le_backend*,struct le_light_state*);
+
+ /* Play one bundled sound by name, for previewing the action-button
+    rotation. Appended last on purpose: the backends initialise this
+    struct positionally, so anything added in the middle would silently
+    shift every op after it. A backend that leaves it null reports the
+    feature unsupported, which is the right answer for the mock. */
+ int (*sound_sample)(struct le_backend*,const char*);
  int (*timers)(struct le_backend*,struct le_timer_list*); int (*timer_add)(struct le_backend*,int,const char*,unsigned*); int (*timer_cancel)(struct le_backend*,unsigned); int (*timer_dismiss)(struct le_backend*,int*);
+ /* Extended noise, sleep lighting and recovery. Appended last for the same
+    positional-init reason as everything above; a backend that leaves one null
+    reports the feature unsupported. */
+ int (*noise_start_ex)(struct le_backend*,const struct le_noise_request*);
+ int (*led_idle_mode)(struct le_backend*,const char*);
+ int (*led_sleep)(struct le_backend*,const struct le_led_sleep_request*);
+ int (*recovery_configure)(struct le_backend*,int,int,int);
+ int (*recovery_prepare)(struct le_backend*,char*,size_t);
+ int (*recovery_stop)(struct le_backend*);
+ /* Recovery-portal probe with a short, bounded adapter I/O timeout. The
+    static-file path asks this on every GET/HEAD, so it must never block the
+    single event loop on a stalled networkd. Appended last for the positional
+    init reason above; a backend that leaves it null falls back to the normal
+    network op. */
+ int (*network_portal)(struct le_backend*,struct le_network_state*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

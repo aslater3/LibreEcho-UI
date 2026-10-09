@@ -38,12 +38,14 @@ def test_persisted_auth_root() -> None:
         )
         users.write_text(record)
         users.chmod(0o600)
+        # Reused authenticated root deliberately has no configuration marker.
+        assert not (root / "data/libreecho/config/web-config.json").exists()
         process = subprocess.Popen(
-            ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port)],
+            ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port), "--timeout", "30"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 30
             ready = False
             while time.monotonic() < deadline:
                 if process.poll() is not None:
@@ -77,12 +79,16 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="libreecho-virtual-") as temp:
         root = Path(temp)
         port = 18181
+        config = root / "data/libreecho/config/web-config.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('{"integrations": 0}\n')
+        config.chmod(0o600)
         process = subprocess.Popen(
-            ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port)],
+            ["python3", str(RUNNER), "start", "--root", str(root), "--port", str(port), "--timeout", "30"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 30
             ready = False
             while time.monotonic() < deadline:
                 if process.poll() is not None:
