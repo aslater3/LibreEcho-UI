@@ -18,8 +18,8 @@ trap cleanup EXIT INT TERM
 
 PAYLOAD='{"v":1,"hw":"radar","ver":"0.14.0","ch":"dev","build":"cc238ba","wk":"2026-W41","mo":"2026-10","yr":"2026","w":0,"m":0,"y":0}'
 mkdir -p "$WORK/state"
-printf '%s\n' "$PAYLOAD" > "$WORK/state/next-payload"
-printf 'schema=1\nresult=sent\nhttp=204\nperiod=2026-W41\npayload=%s\n' "$PAYLOAD" > "$WORK/state/status"
+printf '%s\n' "$PAYLOAD" > "$WORK/state/ping-next-payload"
+printf 'schema=1\nresult=sent\nhttp=204\nperiod=2026-W41\npayload=%s\n' "$PAYLOAD" > "$WORK/state/ping-status"
 
 start(){
     LIBREECHO_PING_STATE="$WORK/state" ./build/libreecho-web --backend mock --config "$WORK/config.json" \
@@ -56,8 +56,8 @@ curl -fsS "$URL/api/v1/privacy" | jq -e '
 stop
 
 # A tampered or missing payload file is reported as null, never injected.
-printf '%s\n' '{"v":1,"x":"</script><b>"}' > "$WORK/state/next-payload"
-printf 'schema=1\nresult=evil"\nhttp=2x\nperiod=<b>\n' > "$WORK/state/status"
+printf '%s\n' '{"v":1,"x":"</script><b>"}' > "$WORK/state/ping-next-payload"
+printf 'schema=1\nresult=evil"\nhttp=2x\nperiod=<b>\n' > "$WORK/state/ping-status"
 start
 curl -fsS "$URL/api/v1/privacy" | jq -e '
     .data.active_device_ping.next_payload == null and .data.active_device_ping.last == null' >/dev/null

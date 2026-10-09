@@ -2507,14 +2507,15 @@ static int handle_voice_pipeline(struct api_context *c,
 }
 /* Anonymous active-device ping (telemetry Tier 0).  Platform's libreecho-ping
    writes the exact body it will send next and the outcome of the last attempt
-   under /data/libreecho/telemetry; the Privacy page shows both verbatim so the
+   as ping-* files directly in /data/libreecho/update (a new /data/libreecho
+   directory would fail the boot data contract on older slots); the Privacy page shows both verbatim so the
    owner can see every byte that leaves the device.  The ping is always on and
    cannot be disabled; it carries no device identifier. */
 #define ACTIVE_PING_ENDPOINT "https://stats.libreecho.org/v1/ping"
 static const char *active_ping_dir(void)
 {
     const char *dir = getenv("LIBREECHO_PING_STATE");
-    return dir && dir[0] ? dir : "/data/libreecho/telemetry";
+    return dir && dir[0] ? dir : "/data/libreecho/update";
 }
 /* The payload is shown as raw JSON, so accept only the character set the
    sender can produce; anything else is reported as unavailable. */
@@ -2533,7 +2534,7 @@ static void active_ping_json(char *dst, size_t size)
 {
     char path[256], payload[320] = "", result[24] = "", http[8] = "", period[16] = "";
     FILE *f;
-    snprintf(path, sizeof(path), "%s/next-payload", active_ping_dir());
+    snprintf(path, sizeof(path), "%s/ping-next-payload", active_ping_dir());
     if ((f = fopen(path, "r"))) {
         if (!fgets(payload, sizeof(payload), f))
             payload[0] = 0;
@@ -2542,7 +2543,7 @@ static void active_ping_json(char *dst, size_t size)
     }
     if (!active_ping_payload_safe(payload))
         snprintf(payload, sizeof(payload), "null");
-    snprintf(path, sizeof(path), "%s/status", active_ping_dir());
+    snprintf(path, sizeof(path), "%s/ping-status", active_ping_dir());
     key_from_file(path, "result", result, sizeof(result));
     key_from_file(path, "http", http, sizeof(http));
     key_from_file(path, "period", period, sizeof(period));
