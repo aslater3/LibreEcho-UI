@@ -2568,7 +2568,8 @@ static void active_ping_json(char *dst, size_t size)
         "{\"name\":\"yr\",\"meaning\":\"Year (UTC)\"},"
         "{\"name\":\"w\",\"meaning\":\"1 if first ping this week\"},"
         "{\"name\":\"m\",\"meaning\":\"1 if first ping this month\"},"
-        "{\"name\":\"y\",\"meaning\":\"1 if first ping this year\"}],"
+        "{\"name\":\"y\",\"meaning\":\"1 if first ping this year\"},"
+        "{\"name\":\"i\",\"meaning\":\"Sent once, on this install's first counted ping; absent afterwards\"}],"
         "\"next_payload\":%s,\"last\":%s%s%s%s%s%s%s}",
         payload,
         result[0] ? "{\"result\":\"" : "null", result[0] ? result : "",
