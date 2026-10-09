@@ -3,6 +3,11 @@
 LibreEcho UI is public source for review and contribution. It is not a hosted
 service and it is not a public Internet device-control endpoint.
 
+This repository follows the
+[LibreEcho security policy](https://github.com/aslater3/LibreEcho/blob/main/SECURITY.md),
+which sets out supported versions, response targets and disclosure. The notes
+below add UI-specific scope.
+
 ## Report privately
 
 Please do not publish credentials, exploit details, private device data, or
@@ -43,6 +48,12 @@ The daemon defaults to loopback. LAN operation requires explicit authentication
 and Origin configuration. Do not use `--allow-insecure-lan` for production. Image
 construction, firmware, signing keys, Wi-Fi inputs, OTA publication, and target
 acceptance are owned by the separate LibreEcho build/product repositories.
+
+## Advisories
+
+Confirmed vulnerabilities are published as GitHub Security Advisories on the
+main LibreEcho repository and listed in the
+[advisory archive](https://github.com/aslater3/LibreEcho/blob/main/SECURITY-ADVISORIES.md).
 
 LibreEcho is experimental software for hardware that the user owns or is
 authorized to modify. Security reports are project documentation and not legal
