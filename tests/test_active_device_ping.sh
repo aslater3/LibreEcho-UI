@@ -43,7 +43,7 @@ jq -e --argjson want "$PAYLOAD" '
     .data.active_device_ping.user_agent == "libreecho-ping/1" and
     .data.active_device_ping.next_payload == $want and
     .data.active_device_ping.last == {"result":"sent","http":"204","period":"2026-W41"} and
-    ([.data.active_device_ping.fields[].name] == ["v","hw","ver","ch","build","wk","mo","yr","w","m","y"]) and
+    ([.data.active_device_ping.fields[].name] == ["v","hw","ver","ch","build","wk","mo","yr","w","m","y","i"]) and
     (.data | has("diagnostic_telemetry") and has("crash_reports"))' "$WORK/privacy.json" >/dev/null
 
 # The ping block is read-only: PUT cannot switch it off.
@@ -53,6 +53,13 @@ curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/
 curl -fsS "$URL/api/v1/privacy" | jq -e '
     .data.active_device_ping.enabled == true and
     .data.diagnostic_telemetry == false and .data.crash_reports == false' >/dev/null
+stop
+
+# A new install's first ping carries "i":1; it is relayed verbatim too.
+FIRST='{"v":1,"hw":"biscuit","ver":"0.14.0","ch":"stable","wk":"2026-W41","mo":"2026-10","yr":"2026","w":1,"m":1,"y":1,"i":1}'
+printf '%s\n' "$FIRST" > "$WORK/state/ping-next-payload"
+start
+curl -fsS "$URL/api/v1/privacy" | jq -e --argjson want "$FIRST" '.data.active_device_ping.next_payload == $want' >/dev/null
 stop
 
 # A tampered or missing payload file is reported as null, never injected.
