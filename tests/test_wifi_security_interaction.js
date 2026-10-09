@@ -90,7 +90,7 @@ async function testSetupUi() {
         'scan-wifi', 'setup-back', 'setup-next', 'step-count', 'setup-actions',
         'force-vendor-import', 'show-password', 'setup-volume', 'volume-output',
         'setup-sensitivity', 'sensitivity-output', 'setup-hostname',
-        'hostname-preview', 'setup-local', 'setup-telemetry'
+        'hostname-preview', 'setup-local', 'setup-telemetry', 'setup-crash-reports'
     ]) elements.set(id, element(id));
     elements.get('setup-security').value = 'wpa2';
     const document = {
@@ -246,7 +246,7 @@ async function testRecoveryScanUi() {
         'scan-wifi', 'setup-back', 'setup-next', 'step-count', 'setup-actions',
         'force-vendor-import', 'show-password', 'setup-volume', 'volume-output',
         'setup-sensitivity', 'sensitivity-output', 'setup-hostname',
-        'hostname-preview', 'setup-local', 'setup-telemetry'
+        'hostname-preview', 'setup-local', 'setup-telemetry', 'setup-crash-reports'
     ]) elements.set(id, element(id));
     const document = {
         querySelector: selector => selector.startsWith('#') ? elements.get(selector.slice(1)) || null : null,

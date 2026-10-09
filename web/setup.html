@@ -89,12 +89,14 @@
       <section class="setup-page" data-step="4">
         <span class="eyebrow">Privacy</span>
         <h1>Private by default.</h1>
-        <p class="lead">These conservative defaults can be changed later. No cloud dependency is required.</p>
+        <p class="lead">Your voice, your home and your settings stay on this device. Everything below can be changed later on the Privacy page.</p>
+        <div class="privacy-note" id="setup-active-ping"><strong>Weekly active-device count</strong><span>Once a week LibreEcho sends one anonymous ping to stats.libreecho.org, purely to count how many devices are running and on which version. It contains only the hardware model, LibreEcho version, update channel (and build on development builds) and the week, month and year. There is no device ID, serial number, MAC address, or anything about you or your home. LibreEcho does not store your IP address; Cloudflare processes the request to deliver it. This ping cannot be turned off. The exact contents are shown on the Privacy page.</span></div>
         <div class="choice-list">
           <label><span><strong>Local processing only</strong><small>Keep supported speech and automation processing on this device.</small></span><input id="setup-local" type="checkbox" checked><i></i></label>
-          <label><span><strong>Anonymous diagnostic telemetry</strong><small>Share basic reliability information. Audio and credentials are never included.</small></span><input id="setup-telemetry" type="checkbox"><i></i></label>
+          <label><span><strong>Help improve LibreEcho: health and usage</strong><small>Allow anonymous reliability and feature-use totals once LibreEcho starts collecting them. This release sends none yet. No audio, transcripts, Wi-Fi names or device identifiers. You can turn this off.</small></span><input id="setup-telemetry" type="checkbox" checked><i></i></label>
+          <label><span><strong>Help improve LibreEcho: crash reports</strong><small>Allow anonymous crash signatures once crash reporting is available. This release sends none yet. You can turn this off.</small></span><input id="setup-crash-reports" type="checkbox" checked><i></i></label>
         </div>
-        <div class="privacy-note"><strong>Microphone audio retention starts off.</strong><span>Crash reporting, remote API access, SSH and third-party integrations also remain disabled.</span></div>
+        <div class="privacy-note"><strong>Microphone audio retention starts off.</strong><span>Remote API access, SSH and third-party integrations also remain disabled.</span></div>
       </section>
 
       <section class="setup-page" data-step="5">

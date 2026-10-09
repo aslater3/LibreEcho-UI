@@ -1012,7 +1012,7 @@ static void setup_force_next_boot(struct api_context*c,const struct api_request*
 enum setup_failure_stage{SETUP_STAGE_NONE,SETUP_STAGE_HOSTNAME,SETUP_STAGE_AUDIO,SETUP_STAGE_WAKE,SETUP_STAGE_NETWORK,SETUP_STAGE_PERSIST,SETUP_STAGE_FEATURES};
 /* setup failure responses use setup_failure_message(c) for the user-facing stage. */
 static const char*setup_failure_message(const struct api_context*c){switch(c->setup_failure_stage){case SETUP_STAGE_HOSTNAME:return "The device hostname could not be applied";case SETUP_STAGE_AUDIO:return "The initial audio volume could not be applied";case SETUP_STAGE_WAKE:return "The wake-word setting could not be applied";case SETUP_STAGE_NETWORK:return "The Wi-Fi connection could not be completed; check the access point and try again";case SETUP_STAGE_PERSIST:return "Setup settings could not be saved";case SETUP_STAGE_FEATURES:return "Installed feature services are not ready";default:return "Initial setup could not be completed";}}
-static int setup_apply(struct api_context*c,const char*j){struct le_wifi_credentials wifi;char hostname[LE_TEXT],wake[LE_TEXT];int volume,sensitivity,local_only,telemetry,rc;memset(&wifi,0,sizeof(wifi));c->setup_failure_stage=SETUP_STAGE_NONE;if(c->setup_completed)return LE_BUSY;if(json_get_string(j,"hostname",hostname,sizeof(hostname))<1||!api_valid_hostname(hostname)||json_get_string(j,"ssid",wifi.ssid,sizeof(wifi.ssid))<1||!wifi.ssid[0]||json_get_string(j,"security",wifi.security,sizeof(wifi.security))<1||json_get_string(j,"password",wifi.password,sizeof(wifi.password))<1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||!wake[0]||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_bool(j,"local_only",&local_only)<1||json_get_bool(j,"diagnostic_telemetry",&telemetry)<1){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strlen(wifi.password)<8){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strcmp(wifi.security,"wpa2")){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}c->setup_failure_stage=SETUP_STAGE_HOSTNAME;if((rc=le_set_hostname(c->backend,hostname))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_AUDIO;if((rc=le_set_volume(c->backend,volume))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_WAKE;if((rc=le_set_wake_word(c->backend,wake))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}if((rc=le_set_wake_word_sensitivity(c->backend,sensitivity))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_NETWORK;if((rc=le_connect_wifi(c->backend,&wifi))){memset(wifi.password,0,sizeof(wifi.password));return rc;}strncpy(c->configured_wake_word,wake,sizeof(c->configured_wake_word)-1);c->configured_wake_word[sizeof(c->configured_wake_word)-1]=0;c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;memset(wifi.password,0,sizeof(wifi.password));c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;c->integrations|=16u;c->setup_completed=1;c->setup_failure_stage=SETUP_STAGE_PERSIST;rc=persist_configuration(c);if(!rc){snprintf(c->configured_wake_word,sizeof(c->configured_wake_word),"%s",wake);c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;c->setup_failure_stage=SETUP_STAGE_FEATURES;rc=setup_activate_installed_features(c);}if(!rc)rc=api_write_setup_marker(c,1);if(rc)c->setup_completed=0;else c->setup_failure_stage=SETUP_STAGE_NONE;return rc;}
+static int setup_apply(struct api_context*c,const char*j){struct le_wifi_credentials wifi;char hostname[LE_TEXT],wake[LE_TEXT];int volume,sensitivity,local_only,telemetry,crash_reports=-1,rc;memset(&wifi,0,sizeof(wifi));c->setup_failure_stage=SETUP_STAGE_NONE;if(c->setup_completed)return LE_BUSY;if(json_get_string(j,"hostname",hostname,sizeof(hostname))<1||!api_valid_hostname(hostname)||json_get_string(j,"ssid",wifi.ssid,sizeof(wifi.ssid))<1||!wifi.ssid[0]||json_get_string(j,"security",wifi.security,sizeof(wifi.security))<1||json_get_string(j,"password",wifi.password,sizeof(wifi.password))<1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||!wake[0]||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_bool(j,"local_only",&local_only)<1||json_get_bool(j,"diagnostic_telemetry",&telemetry)<1){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}/* crash_reports is optional for older setup clients; when present it must be a boolean. */if(json_get_bool(j,"crash_reports",&crash_reports)<0){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strlen(wifi.password)<8){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strcmp(wifi.security,"wpa2")){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}c->setup_failure_stage=SETUP_STAGE_HOSTNAME;if((rc=le_set_hostname(c->backend,hostname))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_AUDIO;if((rc=le_set_volume(c->backend,volume))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_WAKE;if((rc=le_set_wake_word(c->backend,wake))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}if((rc=le_set_wake_word_sensitivity(c->backend,sensitivity))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_NETWORK;if((rc=le_connect_wifi(c->backend,&wifi))){memset(wifi.password,0,sizeof(wifi.password));return rc;}strncpy(c->configured_wake_word,wake,sizeof(c->configured_wake_word)-1);c->configured_wake_word[sizeof(c->configured_wake_word)-1]=0;c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;memset(wifi.password,0,sizeof(wifi.password));c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;if(crash_reports>=0)c->privacy_crash_reports=crash_reports;c->integrations|=16u;c->setup_completed=1;c->setup_failure_stage=SETUP_STAGE_PERSIST;rc=persist_configuration(c);if(!rc){snprintf(c->configured_wake_word,sizeof(c->configured_wake_word),"%s",wake);c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;c->setup_failure_stage=SETUP_STAGE_FEATURES;rc=setup_activate_installed_features(c);}if(!rc)rc=api_write_setup_marker(c,1);if(rc)c->setup_completed=0;else c->setup_failure_stage=SETUP_STAGE_NONE;return rc;}
 /*
  * Is this the real device?
  *
@@ -2505,14 +2505,85 @@ static int handle_voice_pipeline(struct api_context *c,
     voice_pipeline_json(c, r);
     return 1;
 }
+/* Anonymous active-device ping (telemetry Tier 0).  Platform's libreecho-ping
+   writes the exact body it will send next and the outcome of the last attempt
+   under /data/libreecho/telemetry; the Privacy page shows both verbatim so the
+   owner can see every byte that leaves the device.  The ping is always on and
+   cannot be disabled; it carries no device identifier. */
+#define ACTIVE_PING_ENDPOINT "https://stats.libreecho.org/v1/ping"
+static const char *active_ping_dir(void)
+{
+    const char *dir = getenv("LIBREECHO_PING_STATE");
+    return dir && dir[0] ? dir : "/data/libreecho/telemetry";
+}
+/* The payload is shown as raw JSON, so accept only the character set the
+   sender can produce; anything else is reported as unavailable. */
+static int active_ping_payload_safe(const char *s)
+{
+    size_t n = strlen(s);
+    if (n < 2 || n > 255 || s[0] != '{' || s[n - 1] != '}')
+        return 0;
+    for (; *s; s++)
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+              (*s >= '0' && *s <= '9') || strchr("{}\":,._-", *s)))
+            return 0;
+    return 1;
+}
+static void active_ping_json(char *dst, size_t size)
+{
+    char path[256], payload[320] = "", result[24] = "", http[8] = "", period[16] = "";
+    FILE *f;
+    snprintf(path, sizeof(path), "%s/next-payload", active_ping_dir());
+    if ((f = fopen(path, "r"))) {
+        if (!fgets(payload, sizeof(payload), f))
+            payload[0] = 0;
+        fclose(f);
+        payload[strcspn(payload, "\r\n")] = 0;
+    }
+    if (!active_ping_payload_safe(payload))
+        snprintf(payload, sizeof(payload), "null");
+    snprintf(path, sizeof(path), "%s/status", active_ping_dir());
+    key_from_file(path, "result", result, sizeof(result));
+    key_from_file(path, "http", http, sizeof(http));
+    key_from_file(path, "period", period, sizeof(period));
+    if (strcmp(result, "sent") && strcmp(result, "rejected") && strcmp(result, "failed"))
+        result[0] = 0;
+    if (strspn(http, "0123456789") != strlen(http))
+        http[0] = 0;
+    if (strspn(period, "0123456789-W") != strlen(period))
+        period[0] = 0;
+    snprintf(dst, size,
+        "{\"enabled\":true,\"can_disable\":false,\"schema_version\":1,"
+        "\"endpoint\":\"" ACTIVE_PING_ENDPOINT "\",\"frequency\":\"once per week, month and year\","
+        "\"user_agent\":\"libreecho-ping/1\",\"ip_stored\":false,"
+        "\"fields\":["
+        "{\"name\":\"v\",\"meaning\":\"Schema version\"},"
+        "{\"name\":\"hw\",\"meaning\":\"Hardware model (radar or biscuit)\"},"
+        "{\"name\":\"ver\",\"meaning\":\"LibreEcho version\"},"
+        "{\"name\":\"ch\",\"meaning\":\"Update channel (dev or stable)\"},"
+        "{\"name\":\"build\",\"meaning\":\"Short build hash, development builds only\"},"
+        "{\"name\":\"wk\",\"meaning\":\"ISO week (UTC)\"},"
+        "{\"name\":\"mo\",\"meaning\":\"Month (UTC)\"},"
+        "{\"name\":\"yr\",\"meaning\":\"Year (UTC)\"},"
+        "{\"name\":\"w\",\"meaning\":\"1 if first ping this week\"},"
+        "{\"name\":\"m\",\"meaning\":\"1 if first ping this month\"},"
+        "{\"name\":\"y\",\"meaning\":\"1 if first ping this year\"}],"
+        "\"next_payload\":%s,\"last\":%s%s%s%s%s%s%s}",
+        payload,
+        result[0] ? "{\"result\":\"" : "null", result[0] ? result : "",
+        result[0] ? "\",\"http\":\"" : "", result[0] ? http : "",
+        result[0] ? "\",\"period\":\"" : "", result[0] ? period : "",
+        result[0] ? "\"}" : "");
+}
 static void privacy_json(struct api_context *c, struct api_response *r)
 {
     const char *effective, *state, *state_error;
-    char url[512], error[256];
+    char url[512], error[256], ping[2048];
     state=audio_retention_state(c,&effective,&state_error);
     json_escape(url,sizeof(url),c->privacy_audio_remote_url);
     json_escape(error,sizeof(error),state_error);
-    out(r,200,"{\"ok\":true,\"data\":{\"local_only\":%s,\"audio_retention\":\"%s\",\"audio_retention_mode\":\"%s\",\"audio_retention_hours\":%d,\"audio_retention_max_mb\":%d,\"audio_remote_destination\":{\"configured\":%s,\"url\":\"%s\",\"transport\":\"https-post\",\"authentication\":\"required-out-of-band\",\"credential_state\":\"not-configured\",\"available\":%s,\"state\":\"%s\",\"effective_mode\":\"%s\",\"fallback\":\"disabled\",\"last_error\":\"%s\"},\"diagnostic_telemetry\":%s,\"log_retention_hours\":%d,\"crash_reports\":%s},\"error\":null}",c->privacy_local_only?"true":"false",c->privacy_audio_mode,c->privacy_audio_mode,c->privacy_audio_retention_hours,c->privacy_audio_max_mb,c->privacy_audio_remote_url[0]?"true":"false",url,remote_retention_transport_available(c)?"true":"false",state,effective,error,c->privacy_telemetry?"true":"false",c->privacy_log_hours,c->privacy_crash_reports?"true":"false");
+    active_ping_json(ping,sizeof(ping));
+    out(r,200,"{\"ok\":true,\"data\":{\"active_device_ping\":%s,\"local_only\":%s,\"audio_retention\":\"%s\",\"audio_retention_mode\":\"%s\",\"audio_retention_hours\":%d,\"audio_retention_max_mb\":%d,\"audio_remote_destination\":{\"configured\":%s,\"url\":\"%s\",\"transport\":\"https-post\",\"authentication\":\"required-out-of-band\",\"credential_state\":\"not-configured\",\"available\":%s,\"state\":\"%s\",\"effective_mode\":\"%s\",\"fallback\":\"disabled\",\"last_error\":\"%s\"},\"diagnostic_telemetry\":%s,\"log_retention_hours\":%d,\"crash_reports\":%s},\"error\":null}",ping,c->privacy_local_only?"true":"false",c->privacy_audio_mode,c->privacy_audio_mode,c->privacy_audio_retention_hours,c->privacy_audio_max_mb,c->privacy_audio_remote_url[0]?"true":"false",url,remote_retention_transport_available(c)?"true":"false",state,effective,error,c->privacy_telemetry?"true":"false",c->privacy_log_hours,c->privacy_crash_reports?"true":"false");
 }
 static int handle_privacy(struct api_context *c,
                           const struct api_request *q,
