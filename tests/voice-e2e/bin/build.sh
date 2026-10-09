@@ -62,7 +62,7 @@ gcc -O2 -Wall -Wextra -Wpedantic -std=c99 /harness/src/harness-curl.c -o $B/harn
 
 # waked + the ONNX wake engine, amd64.
 CF="-D_POSIX_C_SOURCE=200809L -DLE_WAKE_ENGINE_ONNX -O2 -Wall -Wextra -Isrc -Isrc/adapter -I/tmp/speex/include"
-for f in waked voice_aec voice_reference voice_dsp voice_stream wake_worker wake_led adapter_client adapter_server; do
+for f in waked voice_aec voice_reference voice_dsp voice_stream wake_worker wake_engine wake_led adapter_client adapter_server; do
   gcc $CF -std=c99 -c src/adapter/$f.c -o $B/$f.wake.o
 done
 gcc $CF -std=c99 -c src/log.c -o $B/log.wake.o

@@ -6,6 +6,7 @@
 #include "voice_reference.h"
 #include "voice_stream.h"
 #include "wake_led.h"
+#include "wake_engine.h"
 #include "wake_worker.h"
 
 #include <errno.h>
@@ -396,12 +397,19 @@ static void handle_control_client(
             "\"cpu_cost\":17,\"memory_cost_mb\":6,"
             "\"vad_active\":%s,\"vad_floor_rms\":%u,"
             "\"vad_noise_energy\":%llu,\"aec_active\":%s,"
+            "\"engine\":\"%s\","
             "\"model\":\"alexa_v0.1\"}",
             ipc->sensitivity, ipc->detected_count,
             metrics->vad_active ? "true" : "false",
             metrics->vad_floor_rms,
             (unsigned long long)metrics->vad_noise_energy,
-            metrics->playback_active ? "true" : "false");
+            metrics->playback_active ? "true" : "false",
+#ifdef LE_WAKE_ENGINE_ONNX
+            le_wake_engine_selected()
+#else
+            "disabled"
+#endif
+            );
         (void)respond(client_fd, id, 1, status);
     } else if (!strcmp(command, "subscribe")) {
         if (add_subscriber(ipc, client_fd) < 0) {
@@ -658,7 +666,7 @@ static int run_waked(const struct waked_config *config)
             "preroll=3 s, vad-floor=%u RMS, wake=%s)\n",
             config->vad_floor_rms,
 #ifdef LE_WAKE_ENGINE_ONNX
-            "openwakeword-onnx"
+            le_wake_engine_selected()
 #else
             "disabled"
 #endif
@@ -830,6 +838,27 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--model-dir") &&
                    i + 1 < argc) {
             config.model_directory = argv[++i];
+        } else if (!strcmp(argv[i], "--wake-engine") &&
+                   i + 1 < argc) {
+#ifdef LE_WAKE_ENGINE_ONNX
+            /*
+             * Selected here rather than at build time so two engines can be
+             * compared on the same device and the same audio.
+             */
+            if (le_wake_engine_select(argv[++i]) < 0) {
+                unsigned int b;
+
+                fprintf(stderr, "waked: unknown wake engine '%s'; available:",
+                        argv[i]);
+                for (b = 0; le_wake_engine_backend_name(b); b++)
+                    fprintf(stderr, " %s", le_wake_engine_backend_name(b));
+                fprintf(stderr, "\n");
+                return 2;
+            }
+#else
+            fprintf(stderr, "waked: no wake engine in this build\n");
+            return 2;
+#endif
         } else if (!strcmp(argv[i], "--wake-threads") &&
                    i + 1 < argc) {
             long threads = strtol(argv[++i], NULL, 10);
