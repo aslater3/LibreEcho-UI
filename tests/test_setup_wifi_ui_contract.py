@@ -63,11 +63,23 @@ def test_unknown_owner_local_firmware_requires_explicit_setup_acceptance():
     assert "VENDOR_IMPORT_UNKNOWN_COMPATIBLE_SET" in SETUP_JS
     assert "Unrecognised Wi-Fi firmware detected" in SETUP_JS
     assert "Accept device firmware" in SETUP_JS
-    assert "Accepted — reboot required" in SETUP_JS
+    assert "Reboot now" in SETUP_JS
     assert "only its hashes and sizes will be stored locally" in SETUP_JS
     assert "The firmware bytes stay on the stock partition" in SETUP_JS
     assert "fw.error!=='VENDOR_IMPORT_UNKNOWN_COMPATIBLE_SET'" in SETUP_JS
     assert "force-unverified-owner-local-import" in SETUP_JS
+
+
+
+def test_accepted_firmware_offers_reboot_and_return_path():
+    # The accepted state must give the owner a way to reboot and get back to setup.
+    assert "if(fw.force_next_boot){await rebootForFirmware();return}" in SETUP_JS
+    assert "api('/system/reboot'" in SETUP_JS
+    assert "'X-LibreEcho-Confirm':'confirm-device-action'" in SETUP_JS
+    assert "if(opt.headers)Object.assign(headers,opt.headers);" in SETUP_JS
+    assert "adb forward tcp:18080 tcp:8080" in SETUP_JS
+    assert "http://127.0.0.1:18080/setup.html" in SETUP_JS
+    assert "Accepted — reboot required" not in SETUP_JS
 
 
 if __name__ == "__main__":
