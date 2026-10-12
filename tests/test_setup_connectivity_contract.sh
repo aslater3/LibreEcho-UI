@@ -12,7 +12,7 @@ grep -q 'force-unverified-owner-local-import' web/js/setup.js
 grep -q 'VENDOR_IMPORT_UNKNOWN_COMPATIBLE_SET' web/js/setup.js
 grep -q 'Unrecognised Wi-Fi firmware detected' web/js/setup.js
 grep -q 'Accept device firmware' web/js/setup.js
-grep -q 'Accepted — reboot required' web/js/setup.js
+grep -q "api('/system/reboot'" web/js/setup.js
 grep -q 'only their hashes and sizes locally' web/js/setup.js
 grep -q "fw.error!=='VENDOR_IMPORT_UNKNOWN_COMPATIBLE_SET'" web/js/setup.js
 grep -q 'vendor_firmware' src/api.c
