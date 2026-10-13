@@ -121,6 +121,30 @@ Each service reads its section at startup. To change:
 1. Edit `/etc/libreecho/config.json` (or use web UI)
 2. Reload: `killall -HUP libreecho-networkd libreecho-audiod libreecho-ledd libreecho-web`
 
+### Wake Word Model and Threshold
+
+These persist in `/data`, so they survive reboot and OTA.
+
+- **Threshold**: set `wake_sensitivity` (0-100) in the web UI or with
+  `PUT /api/v1/wake-word`. It is saved and reapplied at every boot, and maps
+  to a detector threshold of `0.85 - 0.0044 * sensitivity` (0.85 at 0,
+  0.41 at 100).
+- **Owner-staged model**: put a model in `/data/libreecho/wakeword-models/<name>/`
+  holding `melspectrogram.onnx`, `embedding_model.onnx` and the classifier
+  named `alexa_v0.1.onnx` (regular files, not symlinks), then write `<name>` to
+  `/data/libreecho/config/wake-model` and run
+  `/etc/init.d/libreecho-waked.init restart`. Names may use only letters,
+  digits, `.`, `_` and `-`, and may not start with `.`.
+  Only the model is replaceable. The detector is always the signed one from
+  the wakeword feature payload; nothing under `/data` is executed. An invalid
+  or incomplete selection, or a model the detector cannot load, falls back to
+  the stock model and logs why in `/var/log/libreecho-waked.log`. Delete the
+  `wake-model` file to return to stock. Staged models are not included in
+  configuration backups; keep your own copy.
+- **Microphone gain**: `microphone_gain` saved in `web-config.json` is
+  reapplied by micd every time capture starts, so a gain changed after boot
+  is not reverted when the wake listener reopens the stream.
+
 ### Config History
 
 Every write saves the previous version:
