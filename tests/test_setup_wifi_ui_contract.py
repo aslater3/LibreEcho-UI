@@ -78,6 +78,7 @@ def test_accepted_firmware_offers_reboot_and_return_path():
     assert "'X-LibreEcho-Confirm':'confirm-device-action'" in SETUP_JS
     assert "if(opt.headers)Object.assign(headers,opt.headers);" in SETUP_JS
     assert "adb forward tcp:18080 tcp:8080" in SETUP_JS
+    assert "keep the installer window open: it reconnects this page by itself" in SETUP_JS
     assert "http://127.0.0.1:18080/setup.html" in SETUP_JS
     assert "Accepted — reboot required" not in SETUP_JS
 
