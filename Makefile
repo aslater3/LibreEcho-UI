@@ -614,6 +614,17 @@ $(BUILD)/test-factory-reset-linux: tests/test_factory_reset_linux.c \
 		-Wl,--wrap=reboot -Wl,--wrap=access -Wl,--wrap=unlink \
 		$< src/factory_reset.c src/json.c src/log.c src/service_env.c -o $@
 
+# Restart-to-installer request file: the test includes backend_linux.c and wraps
+# geteuid/reboot so it runs unprivileged and proves the daemon never reboots.
+$(BUILD)/test-reboot-bootloader-request: tests/test_reboot_bootloader_request.c \
+		src/backend_linux.c src/json.c src/log.c src/service_env.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter \
+		-Wl,--wrap=geteuid -Wl,--wrap=reboot \
+		$< src/json.c src/log.c src/service_env.c -o $@
+
 $(BUILD)/test-update-identity: tests/test_update_identity.c src/update_identity.c
 	@mkdir -p $(BUILD)
 	# --wrap lets the torn-read fixture stand at the reader's own open of the

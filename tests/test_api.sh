@@ -405,6 +405,15 @@ code=$(curl -sS -o /tmp/le-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/audio"
 [ "$code" = 403 ]
 code=$(curl -sS -o /tmp/le-confirm.out -w '%{http_code}' -X POST "$URL/api/v1/system/reboot" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 403 ]
+# Destructive paths share a 3-second window that a refused request also arms,
+# so each reboot-bootloader check is spaced past it.
+sleep 3.2
+code=$(curl -sS -o /tmp/le-bootloader-confirm.out -w '%{http_code}' -X POST "$URL/api/v1/system/reboot-bootloader" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 403 ]
+sleep 3.2
+code=$(curl -sS -o /tmp/le-bootloader.out -w '%{http_code}' -X POST "$URL/api/v1/system/reboot-bootloader" -H "$CSRF" -H 'Content-Type: application/json' -H 'X-LibreEcho-Confirm: confirm-device-action' --data '{}')
+[ "$code" = 200 ]
+jq -e '.ok and .data.accepted == true' /tmp/le-bootloader.out >/dev/null
 code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' -X DELETE "$URL/api/v1/buttons" -H "$CSRF")
 [ "$code" = 405 ]
 code=$(curl -sS -o /tmp/le-method.out -w '%{http_code}' "$URL/api/v1/integrations/home-assistant")

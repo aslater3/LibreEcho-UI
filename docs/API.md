@@ -1309,6 +1309,26 @@ Reboot device. Requires `X-LibreEcho-Confirm: confirm-device-action`.
 }
 ```
 
+#### POST /api/v1/system/reboot-bootloader
+
+Restarts the device into the bootloader's installer (fastboot). Requires
+`X-LibreEcho-Confirm: confirm-device-action`. The daemon only writes the one-shot
+request file `/tmp/reboot.request` containing `fastboot` (the path can be
+overridden for tests with `LIBREECHO_REBOOT_REQUEST`); the init supervisor reads
+it, writes the bootloader command and performs the reboot. Returns HTTP 503 if
+the request file cannot be written and HTTP 501 when the daemon is not running as
+root or the backend has no such action. After the installer boots, unplug and
+replug the device to return to LibreEcho without reinstalling.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": { "accepted": true },
+  "error": null
+}
+```
+
 #### POST /api/v1/system/shutdown
 
 Shutdown device. Requires confirmation.

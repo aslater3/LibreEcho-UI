@@ -2671,6 +2671,102 @@ static int linux_shutdown(struct le_backend *b)
 }
 
 /*
+ * Restart into the installer. This only leaves the one-shot request for the
+ * init supervisor, which writes the bootloader command to misc and performs
+ * the reboot itself; the daemon never reboots here and never touches block
+ * devices. The request is published atomically: a temporary file is written,
+ * synced and hard-linked into place, so the supervisor can never read a
+ * partial "fastboot" token.
+ */
+static int file_says_fastboot(const char *path)
+{
+    char contents[10];
+    struct stat status;
+    ssize_t length;
+    int fd;
+
+    fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return 0;
+    if (fstat(fd, &status) < 0 || !S_ISREG(status.st_mode)) {
+        (void)close(fd);
+        return 0;
+    }
+    length = read(fd, contents, sizeof(contents));
+    (void)close(fd);
+    if (length == 8)
+        return memcmp(contents, "fastboot", 8) == 0;
+    return length == 9 && memcmp(contents, "fastboot\n", 9) == 0;
+}
+
+static int write_reboot_request(const char *request_path)
+{
+    static const char request[] = "fastboot\n";
+    char temporary[PATH_MAX];
+    ssize_t written;
+    int fd, saved_errno;
+
+    if (!request_path || !request_path[0] ||
+        snprintf(temporary, sizeof(temporary), "%s.webd", request_path) >=
+            (int)sizeof(temporary)) {
+        errno = EINVAL;
+        return -1;
+    }
+    (void)unlink(temporary);
+    fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0)
+        return -1;
+    written = write(fd, request, sizeof(request) - 1);
+    if (written != (ssize_t)(sizeof(request) - 1)) {
+        saved_errno = written < 0 ? errno : EIO;
+        (void)close(fd);
+        (void)unlink(temporary);
+        errno = saved_errno;
+        return -1;
+    }
+    if (fsync(fd) < 0) {
+        saved_errno = errno;
+        (void)close(fd);
+        (void)unlink(temporary);
+        errno = saved_errno;
+        return -1;
+    }
+    if (close(fd) < 0) {
+        saved_errno = errno;
+        (void)unlink(temporary);
+        errno = saved_errno;
+        return -1;
+    }
+    if (link(temporary, request_path) < 0) {
+        saved_errno = errno;
+        (void)unlink(temporary);
+        if (saved_errno == EEXIST && file_says_fastboot(request_path))
+            return 0;
+        errno = saved_errno;
+        return -1;
+    }
+    (void)unlink(temporary);
+    return 0;
+}
+
+static int linux_reboot_bootloader(struct le_backend *b)
+{
+    const char *request_path = getenv("LIBREECHO_REBOOT_REQUEST");
+
+    (void)b;
+    if (geteuid() != 0)
+        return LE_NOT_SUPPORTED;
+    if (!request_path || !request_path[0])
+        request_path = "/tmp/reboot.request";
+    le_log_info("backend: reboot to bootloader requested");
+    if (write_reboot_request(request_path) != 0) {
+        le_log_error("backend: reboot to bootloader request could not be written");
+        return LE_IO;
+    }
+    return LE_OK;
+}
+
+/*
  * The services that must be stopped before the persistent state is removed.
  *
  * Clearing files while their writer is still running is a race, and three
@@ -3037,7 +3133,8 @@ static const struct le_backend_ops ops = {
     timers, timer_add, timer_cancel, timer_dismiss,
     noise_start_ex, led_idle_mode, led_sleep,
     recovery_configure, recovery_prepare, recovery_stop,
-    network_portal
+    network_portal,
+    linux_reboot_bootloader
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)
