@@ -24,6 +24,9 @@ assert 'if (status_rc)' in source and 'append_unavailable(&w, "system")' in sour
 for subsystem in ('network', 'audio', 'wake_word', 'bluetooth', 'playback'):
     assert f'append_unavailable(&w, "{subsystem}")' in source
 assert 'redacted_json(escaped' in source
+assert 'append_boot_control(&w)' in source
+assert r'\"boot_control\":' in source
+assert 'boot.serial' not in source
 assert 'wifi_credentials' in source and 'bluetooth_addresses' in source
 assert 'network.ip' not in source
 assert 'network.ssid' not in source
