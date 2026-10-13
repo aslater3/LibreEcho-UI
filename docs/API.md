@@ -1317,8 +1317,10 @@ request file `/tmp/reboot.request` containing `fastboot` (the path can be
 overridden for tests with `LIBREECHO_REBOOT_REQUEST`); the init supervisor reads
 it, writes the bootloader command and performs the reboot. Returns HTTP 503 if
 the request file cannot be written and HTTP 501 when the daemon is not running as
-root or the backend has no such action. After the installer boots, unplug and
-replug the device to return to LibreEcho without reinstalling.
+root or the backend has no such action. The bootloader clears its one-shot
+command on entry, so `fastboot reboot` (or a power cycle) returns to LibreEcho
+without reinstalling. The supervisor refuses the request, without rebooting,
+unless the Kaeru boot chain is proven present.
 
 **Response:**
 ```json

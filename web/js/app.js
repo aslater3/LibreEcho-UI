@@ -260,7 +260,7 @@ async function power(path,name){
  const question=path==='factory-reset'
   ?'Factory reset this LibreEcho device? This permanently removes accounts, Wi-Fi profiles and passwords, assistant credentials, timers and all device settings.'
   :path==='reboot-bootloader'
-  ?'Restart this LibreEcho device into the installer (fastboot)?\n\nThe speaker will restart into fastboot installer mode and stop working as LibreEcho until the LibreEcho installer is run. To return to LibreEcho without reinstalling, unplug and replug the device.'
+  ?'Restart this LibreEcho device into the installer (fastboot)?\n\nThe speaker restarts into fastboot so the LibreEcho installer can reinstall it. To return to LibreEcho without installing, run "fastboot reboot" or unplug and replug the device.'
   :`${name} this LibreEcho device?`;
  if(!confirm(question))return;
  if(state.busy)return;
