@@ -139,7 +139,8 @@ These persist in `/data`, so they survive reboot and OTA.
   the wakeword feature payload; nothing under `/data` is executed. An invalid
   or incomplete selection, or a model the detector cannot load, falls back to
   the stock model and logs why in `/var/log/libreecho-waked.log`. Delete the
-  `wake-model` file to return to stock.
+  `wake-model` file to return to stock. Staged models are not included in
+  configuration backups; keep your own copy.
 - **Microphone gain**: `microphone_gain` saved in `web-config.json` is
   reapplied by micd every time capture starts, so a gain changed after boot
   is not reverted when the wake listener reopens the stream.
