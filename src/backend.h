@@ -192,7 +192,7 @@ int le_bluetooth_scan(struct le_backend*,int); int le_bluetooth_pair(struct le_b
 int le_get_airplay_state(struct le_backend*,struct le_airplay_state*); int le_set_airplay_enabled(struct le_backend*,int);
 int le_get_playback_state(struct le_backend*,struct le_playback_state*);
 int le_get_timers(struct le_backend*,struct le_timer_list*); int le_add_timer(struct le_backend*,int,const char*,unsigned*); int le_cancel_timer(struct le_backend*,unsigned); int le_dismiss_timers(struct le_backend*,int*);
-int le_reboot(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);
+int le_reboot(struct le_backend*); int le_reboot_bootloader(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);
 int le_backend_tick(struct le_backend*); int le_backend_mock_control(struct le_backend*,const char*,const char*);
 
 #endif

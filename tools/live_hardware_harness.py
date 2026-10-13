@@ -50,6 +50,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 SECRET_KEYS = re.compile(r"(?:token|password|secret|api[_-]?key|authorization|credential)", re.I)
 DESTRUCTIVE_PATHS = {
     "/api/v1/system/reboot",
+    "/api/v1/system/reboot-bootloader",
     "/api/v1/system/shutdown",
     "/api/v1/system/factory-reset",
 }

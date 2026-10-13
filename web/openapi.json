@@ -3192,6 +3192,37 @@
     }
    }
   },
+  "/system/reboot-bootloader": {
+   "post": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Restart into the installer (fastboot)",
+    "description": "Leaves a one-shot request for the init supervisor, which writes the bootloader command and performs the reboot. The daemon does not reboot itself.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     },
+     {
+      "$ref": "#/components/parameters/Confirm"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/system/shutdown": {
    "post": {
     "tags": [

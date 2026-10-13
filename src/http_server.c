@@ -212,7 +212,7 @@ if(send_all(fd,h,(size_t)z,deadline)<0){close(f);return 0;}
 close(f);
 return 0;
 }
-static int destructive_path(const char*path){return !strcmp(path,"/api/v1/system/reboot")||!strcmp(path,"/api/v1/system/shutdown")||!strcmp(path,"/api/v1/system/factory-reset");}
+static int destructive_path(const char*path){return !strcmp(path,"/api/v1/system/reboot")||!strcmp(path,"/api/v1/system/reboot-bootloader")||!strcmp(path,"/api/v1/system/shutdown")||!strcmp(path,"/api/v1/system/factory-reset");}
 static void process(struct client*c,const struct http_options*o,struct api_context*api,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){char*end=strstr(c->buf,"\r\n\r\n"),*body,*cl,*target_start,*target_end;
 size_t headers,body_len=0,content_len=0;
 const char *page_path;

@@ -38,6 +38,8 @@ make build/test-network-health build/test-adapter-client-events build/test-gatew
 ./build/test-factory-reset
 make build/test-factory-reset-linux
 ./build/test-factory-reset-linux
+make build/test-reboot-bootloader-request
+./build/test-reboot-bootloader-request
 sh tests/test_factory_reset_bluetooth_contract.sh
 sh tests/test_factory_reset_quiesce_contract.sh
 sh tests/test_factory_reset_api.sh

@@ -259,12 +259,14 @@ async function waitForDevice(title){
 async function power(path,name){
  const question=path==='factory-reset'
   ?'Factory reset this LibreEcho device? This permanently removes accounts, Wi-Fi profiles and passwords, assistant credentials, timers and all device settings.'
+  :path==='reboot-bootloader'
+  ?'Restart this LibreEcho device into the installer (fastboot)?\n\nThe speaker restarts into fastboot so the LibreEcho installer can reinstall it. To return to LibreEcho without installing, run "fastboot reboot" or unplug and replug the device.'
   :`${name} this LibreEcho device?`;
  if(!confirm(question))return;
  if(state.busy)return;
- if(path==='shutdown'){
+ if(path==='shutdown'||path==='reboot-bootloader'){
   try{await api(`/system/${path}`,{method:'POST',body:'{}',headers:{'X-LibreEcho-Confirm':'confirm-device-action'}});
-      toast('Shutting down')}catch(e){toast(e.message,true)}
+      toast(path==='shutdown'?'Shutting down':'Restarting into the installer (fastboot)')}catch(e){toast(e.message,true)}
   return}
  /* Fire the reboot but do not wait on it. The device frequently goes down
     before it can answer, so awaiting the response hangs forever and the
@@ -370,7 +372,7 @@ function hardwareCard(d){
   (groups?`<h4>Audio capability</h4><div class="hardware-groups">${groups}</div>`
          :`<p class="muted">This daemon does not report audio capability.</p>`),
   'wide hardware-card');}
-async function devicePage(){const generation=state.renderGeneration,page=state.page;const d=await api('/device');const light=await api('/light').catch(()=>null);if(generation!==state.renderGeneration||page!==state.page)return;content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${hardwareCard(d)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}</div>`,'wide')}${lightPanel(light)}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
+async function devicePage(){const generation=state.renderGeneration,page=state.page;const d=await api('/device');const light=await api('/light').catch(()=>null);if(generation!==state.renderGeneration||page!==state.page)return;content.innerHTML=`<div class="settings-grid">${panel('Device identity',field('Device name',d.name,'device-name','text','disabled')+field('Hostname',d.hostname,'hostname')+field('Model',d.model,'model','text','disabled')+field('Serial / development ID',d.serial,'serial','text','disabled')+saveButton('save-device'))}${panel('Platform',`<dl class="facts"><dt>OS version</dt><dd>${esc(d.os_version)}</dd><dt>Kernel</dt><dd>${esc(d.kernel)}</dd><dt>Hardware revision</dt><dd>${esc(d.hardware_revision)}</dd><dt>Backend</dt><dd>${esc(d.backend)}</dd></dl>`)}${hardwareCard(d)}${panel('Power controls',`<p class="muted">These actions require a confirmation token and are rate limited.</p><div class="button-row">${action('Reboot','power-reboot','outline-btn')}${action('Restart to installer (fastboot)','power-bootloader','outline-btn')}${action('Shut down','power-shutdown','danger-btn')}${action('Factory reset','power-reset','danger-btn')}</div>`,'wide')}${lightPanel(light)}</div>`;bindDirty(['#hostname'],'#save-device');$('#save-device').onclick=()=>mutate('/network',{hostname:$('#hostname').value},'Device changes saved');$('#power-reboot').onclick=()=>power('reboot','Reboot');$('#power-bootloader').onclick=()=>power('reboot-bootloader','Restart to installer');$('#power-shutdown').onclick=()=>power('shutdown','Shut down');$('#power-reset').onclick=()=>power('factory-reset','Factory reset')}
 const NOISE_COLOURS=[['white','White'],['pink','Pink'],['brown','Brown']];
 const NOISE_TIMERS=[[0,'No timer'],[15,'15 minutes'],[30,'30 minutes'],[45,'45 minutes'],[60,'1 hour'],[90,'1.5 hours'],[120,'2 hours'],[480,'8 hours']];
 /* Nursery sounds live in the feature-batch block near the end of this file. */
