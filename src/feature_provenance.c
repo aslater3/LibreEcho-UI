@@ -240,8 +240,8 @@ static int v3_feature_root(char *out, size_t size, const char *update_dir)
     if (n <= 0)
         return 0;
     tx[n] = 0;
-    len = strcspn(tx, "\r\n");
-    if (tx[len] && strcmp(tx + len, "\n") && strcmp(tx + len, "\r\n"))
+    len = strcspn(tx, "\n");
+    if (tx[len] && strcmp(tx + len, "\n"))
         return 0;
     tx[len] = 0;
     if (!len || len > 96 || !strcmp(tx, ".") || !strcmp(tx, ".."))
@@ -249,6 +249,13 @@ static int v3_feature_root(char *out, size_t size, const char *update_dir)
     for (i = 0; i < len; ++i)
         if (!isalnum((unsigned char)tx[i]) && !strchr("._+~:-", tx[i]))
             return 0;
+    /* Like the updater, refuse a linked generations root or generation so the
+       resolved tree cannot leave generations/. */
+    if (lstat(generations, &st) || !S_ISDIR(st.st_mode))
+        return 0;
+    if (snprintf(out, size, "%s/%s", generations, tx) >= (int)size ||
+        lstat(out, &st) || !S_ISDIR(st.st_mode))
+        return 0;
     if (snprintf(out, size, "%s/%s/features", generations, tx) >= (int)size)
         return 0;
     return !lstat(out, &st) && S_ISDIR(st.st_mode);
