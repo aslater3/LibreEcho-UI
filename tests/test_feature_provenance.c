@@ -132,10 +132,33 @@ static void test_incremental_hash_progress(void)
         if (!strstr(output, "\"effective\":\"pending\""))
             break;
     }
-    /* 4096 chunks at one chunk per tick would need 4096 ticks. */
-    assert(ticks < 64);
+    /* With the time budget lifted for tests, each tick runs exactly the
+       256-step cap: the manifest read, then 4096 payload chunks plus EOF,
+       so the job settles on tick 17 (index 16). One chunk per tick would
+       need 4096 ticks. */
+    assert(ticks == 16);
     assert_component_contains(output, "assistant", "\"effective\":\"mismatch\"");
     le_feature_provenance_shutdown();
+}
+
+static void write_record(const char *cache, const char *mode, const struct stat *st,
+                         const char *digest, const char *path)
+{
+    FILE *f = fopen(cache, mode);
+    assert(f);
+    assert(fprintf(f, "v1 %llu %llu %llu %lld %ld %lld %ld %s %s\n",
+                   (unsigned long long)st->st_dev, (unsigned long long)st->st_ino,
+                   (unsigned long long)st->st_size, (long long)st->st_mtim.tv_sec,
+                   (long)st->st_mtim.tv_nsec, (long long)st->st_ctim.tv_sec,
+                   (long)st->st_ctim.tv_nsec, digest, path) > 0);
+    assert(fclose(f) == 0);
+}
+
+static void plant_record(const char *cache, const struct stat *st, const char *digest,
+                         const char *path)
+{
+    unlink(cache);
+    write_record(cache, "w", st, digest, path);
 }
 
 static const char *output_for_restart(char *out, size_t size)
@@ -153,7 +176,10 @@ static void count_ticks_to_settle(const char *id, const char *expected, int *tic
         le_feature_provenance_tick();
         render_once(output, sizeof(output));
     }
-    assert_component_contains(output, id, expected);
+    if (expected)
+        assert_component_contains(output, id, expected);
+    else
+        assert(!strstr(output, "\"effective\":\"pending\""));
     *ticks_out = ticks;
 }
 
@@ -185,16 +211,7 @@ static void test_generation_hash_persists_across_restart(void)
        and observe it reported (a re-hash would report the real digest). */
     snprintf(payload, sizeof(payload), "%s/txn-0123456789abcdef/features/assistant/payload.squashfs", generations);
     assert(stat(payload, &st) == 0);
-    f = fopen(cache, "w");
-    assert(f);
-    assert(fprintf(f, "v1 %llu %llu %llu %lld %ld %lld %ld %s %s\n",
-                   (unsigned long long)st.st_dev, (unsigned long long)st.st_ino,
-                   (unsigned long long)st.st_size, (long long)st.st_mtim.tv_sec,
-                   (long)st.st_mtim.tv_nsec, (long long)st.st_ctim.tv_sec,
-                   (long)st.st_ctim.tv_nsec,
-                   "1111111111111111111111111111111111111111111111111111111111111111",
-                   payload) > 0);
-    assert(fclose(f) == 0);
+    plant_record(cache, &st, "1111111111111111111111111111111111111111111111111111111111111111", payload);
     assert(chmod(cache, 0600) == 0);
     /* The real payload matches its manifest, so "mismatch" here proves the
        stored digest was used rather than the file being re-hashed. */
@@ -218,12 +235,75 @@ static void test_generation_hash_persists_across_restart(void)
     assert(ticks > 0);
     le_feature_provenance_shutdown();
 
-    /* A cache that is group/world writable is ignored. */
-    write_file(cache, "v1 1 1 1 0 0 0 0 0f6d5b80eac2c95711e382c1895f2e89ac758836c4e0ab29c43c016db431dc69 /nowhere\n");
-    assert(chmod(cache, 0666) == 0);
-    count_ticks_to_settle("assistant", "\"effective\":\"mismatch\"", &ticks);
-    assert(ticks > 0);
-    le_feature_provenance_shutdown();
+    /* Untrusted caches are ignored. Each case plants a well-formed record for
+       the payload's exact current identity carrying the manifest digest, so
+       the payload (modified above) would wrongly read "present" if trusted. */
+    {
+        static const char *good = "0f6d5b80eac2c95711e382c1895f2e89ac758836c4e0ab29c43c016db431dc69";
+        char real_cache[1200];
+        assert(stat(payload, &st) == 0);
+        plant_record(cache, &st, good, payload);
+        assert(chmod(cache, 0600) == 0);
+        /* Control: a private, owned, regular cache is trusted ("present"
+           although the bytes no longer match; the manifest read still takes
+           one tick, so the result, not the tick count, is the discriminator). */
+        count_ticks_to_settle("assistant", "\"effective\":\"present\"", &ticks);
+        le_feature_provenance_shutdown();
+
+        plant_record(cache, &st, good, payload);
+        assert(chmod(cache, 0666) == 0); /* group/world writable */
+        count_ticks_to_settle("assistant", "\"effective\":\"mismatch\"", &ticks);
+        assert(ticks > 0);
+        le_feature_provenance_shutdown();
+
+        plant_record(cache, &st, good, payload);
+        assert(chmod(cache, 0620) == 0); /* group writable */
+        count_ticks_to_settle("assistant", "\"effective\":\"mismatch\"", &ticks);
+        assert(ticks > 0);
+        le_feature_provenance_shutdown();
+
+        snprintf(real_cache, sizeof(real_cache), "%s.real", cache);
+        unlink(real_cache);
+        plant_record(real_cache, &st, good, payload);
+        assert(chmod(real_cache, 0600) == 0);
+        unlink(cache);
+        assert(symlink(real_cache, cache) == 0); /* linked cache */
+        count_ticks_to_settle("assistant", "\"effective\":\"mismatch\"", &ticks);
+        assert(ticks > 0);
+        le_feature_provenance_shutdown();
+        unlink(cache);
+        unlink(real_cache);
+
+        /* Digests are only persisted for paths strictly inside the
+           generations root: a prefix-confused sibling and a dot-dot path
+           that escapes the root are hashed but never written to the cache. */
+        {
+            static const char *roots[] = { "-evil/txn/features", "/../outside/features" };
+            char feature_dir[1400], file_path[1500];
+            size_t r;
+            char made[1400];
+            snprintf(made, sizeof(made), "%s-evil", generations); mkdir_or_die(made);
+            snprintf(made, sizeof(made), "%s-evil/txn", generations); mkdir_or_die(made);
+            snprintf(made, sizeof(made), "%s/outside", root); mkdir_or_die(made);
+            for (r = 0; r < sizeof(roots) / sizeof(roots[0]); ++r) {
+                snprintf(feature_dir, sizeof(feature_dir), "%s%s", generations, roots[r]);
+                mkdir_or_die(feature_dir);
+                snprintf(file_path, sizeof(file_path), "%s/assistant", feature_dir); mkdir_or_die(file_path);
+                snprintf(file_path, sizeof(file_path), "%s/assistant/manifest.json", feature_dir);
+                write_file(file_path, "{\"schema_version\":1,\"feature_id\":\"assistant\",\"format\":\"squashfs-lz4\",\"payload\":{\"filename\":\"assistant.squashfs\",\"sha256\":\"0f6d5b80eac2c95711e382c1895f2e89ac758836c4e0ab29c43c016db431dc69\"},\"files\":{}}\n");
+                snprintf(file_path, sizeof(file_path), "%s/assistant/payload.squashfs", feature_dir);
+                write_file(file_path, "libreecho v3 payload\n");
+                setenv("LIBREECHO_FEATURE_ROOT", feature_dir, 1);
+                unlink(cache);
+                /* The sibling root hashes to "present"; the dot-dot root is
+                   refused outright by the path-safety check. */
+                count_ticks_to_settle("assistant", r == 0 ? "\"effective\":\"present\"" : NULL, &ticks);
+                assert(stat(cache, &st) != 0);
+                le_feature_provenance_shutdown();
+            }
+            unsetenv("LIBREECHO_FEATURE_ROOT");
+        }
+    }
     unsetenv("LIBREECHO_GENERATIONS_ROOT");
 }
 

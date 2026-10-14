@@ -2538,7 +2538,9 @@ immutable OTA v3 generation are recorded in `update/feature-hash-cache` (mode
 0600, atomic replace) keyed by the file's device, inode, size, mtime and ctime,
 so each generation is hashed once rather than on every boot; any identity change
 forces a re-hash, and an unreadable, linked or group/world-writable cache is
-ignored. Each artifact is limited to 512 MiB
+ignored. Reuse after deletion would need a recreated file with the same inode,
+size and nanosecond mtime and ctime at the same generation path; generations are
+never rewritten in place, so this is accepted. Each artifact is limited to 512 MiB
 (536870912 bytes): an oversized artifact, read error, growth or other
 identity/stat instability is `unavailable`. Feature metadata is bounded to 256
 KiB (262144 bytes) inclusive; signed OTA control input is bounded to 64 KiB

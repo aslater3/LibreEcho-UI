@@ -23,7 +23,9 @@
 #define LE_FEATURE_HASH_MAX (512ULL * 1024ULL * 1024ULL)
 #define LE_FEATURE_MANIFEST_CHUNK 16384
 /* Per event-loop tick: at most 20 ms or 256 chunks (4 MiB) of provenance work. */
+#ifndef LE_FEATURE_TICK_BUDGET_NS
 #define LE_FEATURE_TICK_BUDGET_NS 20000000LL
+#endif
 #define LE_FEATURE_TICK_MAX_STEPS 256
 #define LE_FEATURE_MANIFEST_SLOTS 2
 #define LE_FEATURE_HASH_CACHE_FILE_MAX 16384
@@ -774,7 +776,8 @@ static int persistable_path(const char *path)
     const char *root = generations_root();
     size_t len = strlen(root);
     return !strncmp(path, root, len) && path[len] == '/' && path[len + 1] &&
-           !strstr(path + len, "/../") && !strchr(path, '\n');
+           !strstr(path + len, "/../") && !strchr(path, '\n') &&
+           !(strlen(path) >= 3 && !strcmp(path + strlen(path) - 3, "/.."));
 }
 
 static void cache_hash(const char *path, const struct stat *st, le_hash_result result,
@@ -891,7 +894,27 @@ static void cache_hash(const char *path, const struct stat *st, le_hash_result r
                        const char *hash)
 {
     static size_t next;
-    le_hash_cache_entry *entry = &hash_cache[next++ % LE_FEATURE_HASH_CACHE_COUNT];
+    size_t i, slot = LE_FEATURE_HASH_CACHE_COUNT;
+    le_hash_cache_entry *entry;
+    /* Reuse this path's slot, else a free slot, else round-robin preferring
+       entries that are not persisted generation digests, so churn from
+       /proc executables or failed observations cannot evict them. */
+    for (i = 0; i < LE_FEATURE_HASH_CACHE_COUNT && slot == LE_FEATURE_HASH_CACHE_COUNT; ++i)
+        if (hash_cache[i].valid && !strcmp(hash_cache[i].path, path))
+            slot = i;
+    for (i = 0; i < LE_FEATURE_HASH_CACHE_COUNT && slot == LE_FEATURE_HASH_CACHE_COUNT; ++i)
+        if (!hash_cache[i].valid)
+            slot = i;
+    for (i = 0; i < LE_FEATURE_HASH_CACHE_COUNT && slot == LE_FEATURE_HASH_CACHE_COUNT; ++i) {
+        size_t candidate = (next + i) % LE_FEATURE_HASH_CACHE_COUNT;
+        if (hash_cache[candidate].result != LE_HASH_OK ||
+            !persistable_path(hash_cache[candidate].path))
+            slot = candidate;
+    }
+    if (slot == LE_FEATURE_HASH_CACHE_COUNT)
+        slot = next % LE_FEATURE_HASH_CACHE_COUNT;
+    next = slot + 1;
+    entry = &hash_cache[slot];
     memset(entry, 0, sizeof(*entry));
     entry->valid = 1;
     snprintf(entry->path, sizeof(entry->path), "%s", path);
