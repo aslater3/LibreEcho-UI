@@ -2530,9 +2530,15 @@ release identity. Missing or malformed values are reported as `"unavailable"`;
 `effective` is `present` only when the bounded hash of the canonical
 `payload.squashfs` (and, for a runtime manifest, `runtime.squashfs`) matches its
 expected metadata. Hashing is performed incrementally by the daemon's existing
-event loop; while an actual artifact is being verified, its observation is
+event loop, in bounded chunks under a per-tick time budget so requests are still
+served; while an actual artifact is being verified, its observation is
 `pending`, and no manifest hash is reported as verified. `present` is emitted
-only after the actual bytes match metadata. Each artifact is limited to 512 MiB
+only after the actual bytes match metadata. Digests of payloads inside an
+immutable OTA v3 generation are recorded in `update/feature-hash-cache` (mode
+0600, atomic replace) keyed by the file's device, inode, size, mtime and ctime,
+so each generation is hashed once rather than on every boot; any identity change
+forces a re-hash, and an unreadable, linked or group/world-writable cache is
+ignored. Each artifact is limited to 512 MiB
 (536870912 bytes): an oversized artifact, read error, growth or other
 identity/stat instability is `unavailable`. Feature metadata is bounded to 256
 KiB (262144 bytes) inclusive; signed OTA control input is bounded to 64 KiB

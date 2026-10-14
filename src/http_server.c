@@ -421,7 +421,7 @@ for(i=0;
 i<max;
 i++){p[i+1].fd=c[i].fd;
 p[i+1].events=POLLIN;
-}ready=poll(p,(nfds_t)(max+3),500);if(ready<0&&errno!=EINTR)break;
+}ready=poll(p,(nfds_t)(max+3),le_feature_provenance_busy()?0:500);if(ready<0&&errno!=EINTR)break;
 if(clock_gettime(CLOCK_MONOTONIC,&now)<0)break;
 now_ms=(unsigned long long)now.tv_sec*1000+(unsigned long long)now.tv_nsec/1000000;
 /* Only incomplete requests remain in these slots. Expire before accepting so

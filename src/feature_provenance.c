@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define LE_FEATURE_COUNT 5
@@ -21,7 +22,11 @@
 #define LE_FEATURE_HASH_CHUNK 16384
 #define LE_FEATURE_HASH_MAX (512ULL * 1024ULL * 1024ULL)
 #define LE_FEATURE_MANIFEST_CHUNK 16384
+/* Per event-loop tick: at most 20 ms or 256 chunks (4 MiB) of provenance work. */
+#define LE_FEATURE_TICK_BUDGET_NS 20000000LL
+#define LE_FEATURE_TICK_MAX_STEPS 256
 #define LE_FEATURE_MANIFEST_SLOTS 2
+#define LE_FEATURE_HASH_CACHE_FILE_MAX 16384
 
 typedef enum {
     LE_HASH_MISSING = 0,
@@ -736,6 +741,152 @@ static le_hash_cache_entry *cached_hash(const char *path, const struct stat *st)
     return NULL;
 }
 
+/* Persistent payload-hash cache. OTA v3 generations are immutable once
+   committed, so a payload digest computed once per generation stays valid
+   while the file's identity (device, inode, size, mtime and ctime, which no
+   userspace write can restore) is unchanged. Only successful digests of
+   regular files under the generations root are stored; anything else
+   (runtime /proc executables, the v2 flat tree, fixtures) is re-hashed per
+   boot as before. A missing, linked, foreign-owned, group/world-writable or
+   malformed cache is ignored and rebuilt. */
+static int persist_loaded;
+
+static const char *generations_root(void)
+{
+    const char *path = getenv("LIBREECHO_GENERATIONS_ROOT");
+    return path && path[0] ? path : "/data/libreecho/generations";
+}
+
+static const char *hash_cache_path(void)
+{
+    static char path[LE_FEATURE_PATH_MAX];
+    const char *explicit_path = getenv("LIBREECHO_FEATURE_HASH_CACHE");
+    if (explicit_path && explicit_path[0])
+        return explicit_path;
+    if (snprintf(path, sizeof(path), "%s/feature-hash-cache", update_root()) >=
+        (int)sizeof(path))
+        return NULL;
+    return path;
+}
+
+static int persistable_path(const char *path)
+{
+    const char *root = generations_root();
+    size_t len = strlen(root);
+    return !strncmp(path, root, len) && path[len] == '/' && path[len + 1] &&
+           !strstr(path + len, "/../") && !strchr(path, '\n');
+}
+
+static void cache_hash(const char *path, const struct stat *st, le_hash_result result,
+                       const char *hash);
+
+static void persist_load(void)
+{
+    char data[LE_FEATURE_HASH_CACHE_FILE_MAX + 1], *line, *next;
+    const char *path = hash_cache_path();
+    struct stat st;
+    ssize_t n;
+    size_t used = 0;
+    int fd, flags = O_RDONLY | O_CLOEXEC | O_NONBLOCK;
+    persist_loaded = 1;
+    if (!path)
+        return;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    fd = open(path, flags);
+    if (fd < 0)
+        return;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & 022) || st.st_size <= 0 ||
+        st.st_size > LE_FEATURE_HASH_CACHE_FILE_MAX) {
+        close(fd);
+        return;
+    }
+    while (used < (size_t)st.st_size) {
+        n = read(fd, data + used, (size_t)st.st_size - used);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            break;
+        used += (size_t)n;
+    }
+    close(fd);
+    if (used != (size_t)st.st_size)
+        return;
+    data[used] = 0;
+    for (line = data; line && *line; line = next) {
+        unsigned long long dev, ino, size;
+        long long mtime, ctime;
+        long mtime_ns, ctime_ns;
+        char hash[65], entry_path[LE_FEATURE_PATH_MAX];
+        int consumed = 0;
+        struct stat cached;
+        next = strchr(line, '\n');
+        if (!next)
+            break; /* a truncated final record is ignored */
+        *next++ = 0;
+        if (sscanf(line, "v1 %llu %llu %llu %lld %ld %lld %ld %64s %n", &dev, &ino,
+                   &size, &mtime, &mtime_ns, &ctime, &ctime_ns, hash, &consumed) != 8 ||
+            !consumed || !valid_hash(hash) || mtime_ns < 0 || mtime_ns >= 1000000000L ||
+            ctime_ns < 0 || ctime_ns >= 1000000000L ||
+            strlen(line + consumed) >= sizeof(entry_path))
+            continue;
+        snprintf(entry_path, sizeof(entry_path), "%s", line + consumed);
+        if (!persistable_path(entry_path))
+            continue;
+        memset(&cached, 0, sizeof(cached));
+        cached.st_dev = (dev_t)dev;
+        cached.st_ino = (ino_t)ino;
+        cached.st_size = (off_t)size;
+        cached.st_mtim.tv_sec = (time_t)mtime;
+        cached.st_mtim.tv_nsec = mtime_ns;
+        cached.st_ctim.tv_sec = (time_t)ctime;
+        cached.st_ctim.tv_nsec = ctime_ns;
+        if ((unsigned long long)cached.st_dev != dev ||
+            (unsigned long long)cached.st_ino != ino ||
+            (unsigned long long)cached.st_size != size)
+            continue;
+        cache_hash(entry_path, &cached, LE_HASH_OK, hash);
+    }
+}
+
+static void persist_store(void)
+{
+    char tmp[LE_FEATURE_PATH_MAX + 16], line[LE_FEATURE_PATH_MAX + 192];
+    const char *path = hash_cache_path();
+    size_t i, written = 0;
+    int fd, n, ok = 1;
+    if (!path || snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
+        return;
+    (void)unlink(tmp);
+    fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return;
+    for (i = 0; ok && i < LE_FEATURE_HASH_CACHE_COUNT; ++i) {
+        const le_hash_cache_entry *e = &hash_cache[i];
+        if (!e->valid || e->result != LE_HASH_OK || !persistable_path(e->path))
+            continue;
+        n = snprintf(line, sizeof(line), "v1 %llu %llu %llu %lld %ld %lld %ld %s %s\n",
+                     (unsigned long long)e->st.st_dev, (unsigned long long)e->st.st_ino,
+                     (unsigned long long)e->st.st_size, (long long)e->st.st_mtim.tv_sec,
+                     (long)e->st.st_mtim.tv_nsec, (long long)e->st.st_ctim.tv_sec,
+                     (long)e->st.st_ctim.tv_nsec, e->hash, e->path);
+        if (n < 0 || (size_t)n >= sizeof(line) ||
+            written + (size_t)n > LE_FEATURE_HASH_CACHE_FILE_MAX ||
+            write(fd, line, (size_t)n) != n)
+            ok = 0;
+        else
+            written += (size_t)n;
+    }
+    if (fsync(fd))
+        ok = 0;
+    if (close(fd))
+        ok = 0;
+    if (!ok || !written || rename(tmp, path))
+        (void)unlink(tmp);
+}
+
 static void cache_hash(const char *path, const struct stat *st, le_hash_result result,
                        const char *hash)
 {
@@ -772,6 +923,8 @@ static void hash_job_finish(le_hash_result result, const char *hash)
         result = LE_HASH_UNAVAILABLE;
     cache_hash(hash_job.path, &hash_job.before, result,
                result == LE_HASH_OK ? hash : NULL);
+    if (result == LE_HASH_OK && persistable_path(hash_job.path))
+        persist_store();
     hash_job_close();
 }
 
@@ -843,6 +996,8 @@ static le_hash_result hash_path(const char *path, int allow_final_symlink,
     if (!out || out_size < 65 || !safe_prefixes(path))
         return LE_HASH_UNAVAILABLE;
     out[0] = 0;
+    if (!persist_loaded)
+        persist_load();
     if (!allow_final_symlink && lstat(path, &listed))
         return errno == ENOENT ? LE_HASH_MISSING : LE_HASH_UNAVAILABLE;
     if (!allow_final_symlink && S_ISLNK(listed.st_mode))
@@ -1310,17 +1465,42 @@ void le_feature_components_json(char *out, size_t size,
     append(out, size, &used, "]");
 }
 
+static long long monotonic_ns(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now))
+        return -1;
+    return (long long)now.tv_sec * 1000000000LL + (long long)now.tv_nsec;
+}
+
+int le_feature_provenance_busy(void)
+{
+    return manifest_job.active || hash_job.active;
+}
+
 void le_feature_provenance_tick(void)
 {
+    /* Each step reads one bounded chunk. Run steps until the per-tick time or
+       step budget is spent so the event loop still services clients promptly,
+       but a ~200 MiB generation hashes in seconds instead of hours. */
     char scratch[LE_FEATURE_COMPONENTS_JSON_MAX];
     le_feature_transaction_state transaction;
-    if (manifest_job.active)
-        (void)manifest_job_step();
-    if (hash_job.active)
-        (void)hash_job_step();
-    if (!manifest_job.active && !hash_job.active) {
-        le_feature_transaction_state_read(&transaction);
-        le_feature_components_json(scratch, sizeof(scratch), &transaction);
+    long long start = monotonic_ns(), now;
+    int steps;
+    for (steps = 0; steps < LE_FEATURE_TICK_MAX_STEPS; ++steps) {
+        if (manifest_job.active) {
+            (void)manifest_job_step();
+        } else if (hash_job.active) {
+            (void)hash_job_step();
+        } else {
+            le_feature_transaction_state_read(&transaction);
+            le_feature_components_json(scratch, sizeof(scratch), &transaction);
+            if (!manifest_job.active && !hash_job.active)
+                break;
+        }
+        now = monotonic_ns();
+        if (start < 0 || now < 0 || now - start >= LE_FEATURE_TICK_BUDGET_NS)
+            break;
     }
 }
 
@@ -1331,4 +1511,5 @@ void le_feature_provenance_shutdown(void)
     memset(manifest_cache, 0, sizeof(manifest_cache));
     memset(manifest_data, 0, sizeof(manifest_data));
     memset(hash_cache, 0, sizeof(hash_cache));
+    persist_loaded = 0;
 }
