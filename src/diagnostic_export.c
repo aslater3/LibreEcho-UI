@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
@@ -131,6 +132,78 @@ static int read_key(const char *path, const char *key, char *out, size_t out_siz
     }
     return 0;
 }
+
+static const char *diag_update_root(void)
+{
+    const char *path = getenv("LIBREECHO_UPDATE_ROOT");
+    return path && path[0] ? path : "/data/libreecho/update";
+}
+
+static int diag_update_path(char *out, size_t out_size, const char *name)
+{
+    int n = snprintf(out, out_size, "%s/%s", diag_update_root(), name);
+    return n > 0 && (size_t)n < out_size;
+}
+
+/* The packaged channel file holds one bare token ("dev" or "stable"). */
+static int read_bare_token(const char *path, char *out, size_t out_size)
+{
+    int fd;
+    struct stat st;
+    char data[64];
+    ssize_t count;
+    if (!path || !out || !out_size)
+        return 0;
+    out[0] = '\0';
+    fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC
+#ifdef O_NOFOLLOW
+              | O_NOFOLLOW
+#endif
+    );
+    if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode)) {
+        if (fd >= 0)
+            close(fd);
+        return 0;
+    }
+    count = read(fd, data, sizeof(data) - 1);
+    close(fd);
+    if (count <= 0 || count >= (ssize_t)sizeof(data) - 1)
+        return 0;
+    data[count] = '\0';
+    data[strcspn(data, "\r\n")] = '\0';
+    return safe_token(out, out_size, data);
+}
+
+static int valid_channel(const char *value)
+{
+    return !strcmp(value, "stable") || !strcmp(value, "dev");
+}
+
+/* Resolve the channel the updater actually uses, in the updater's own order:
+   the owner selection in automatic-updates, then the image's packaged channel.
+   check-status only echoes the channel of the last check, so it is a fallback. */
+static void resolve_channel(char *out, size_t out_size)
+{
+    char path[512], value[64];
+    const char *packaged = getenv("LIBREECHO_PACKAGED_CHANNEL_FILE");
+    if (diag_update_path(path, sizeof(path), "automatic-updates") &&
+        read_key(path, "channel", value, sizeof(value)) && valid_channel(value)) {
+        bounded_copy(out, out_size, value);
+        return;
+    }
+    if (read_bare_token(packaged && packaged[0] ? packaged : "/etc/libreecho/update-channel",
+                        value, sizeof(value)) && valid_channel(value)) {
+        bounded_copy(out, out_size, value);
+        return;
+    }
+    if (diag_update_path(path, sizeof(path), "check-status") &&
+        read_key(path, "channel", value, sizeof(value)) && valid_channel(value)) {
+        bounded_copy(out, out_size, value);
+        return;
+    }
+    snprintf(out, out_size, "unavailable");
+}
+
 
 static int redact_text(char *out, size_t out_size, const char *input)
 {
@@ -336,7 +409,8 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
     struct le_bluetooth_state bluetooth;
     struct le_playback_state playback;
     char value[128], escaped[LE_DIAG_TEXT * 2];
-    char channel[16] = "stable", active_slot[16] = "unavailable";
+    char channel[16] = "unavailable", active_slot[16] = "unavailable";
+    char path[512];
     char pending_slot[16] = "unavailable", update_state[64] = "idle";
     char pending_version[96] = "unavailable";
     char components[LE_FEATURE_COMPONENTS_JSON_MAX];
@@ -379,26 +453,30 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
         playback_rc = le_get_playback_state(c->backend, &playback);
     }
 
-    if (!read_key("/data/libreecho/update/check-status", "channel", value, sizeof(value)) ||
-        (strcmp(value, "stable") && strcmp(value, "dev")))
-        snprintf(channel, sizeof(channel), "stable");
-    else
-        bounded_copy(channel, sizeof(channel), value);
-    if (!read_key("/data/libreecho/update/active-slot", "slot", value, sizeof(value)) ||
-        (strcmp(value, "a") && strcmp(value, "b")))
-        snprintf(active_slot, sizeof(active_slot), "unavailable");
-    else
-        bounded_copy(active_slot, sizeof(active_slot), value);
-    if (!read_key("/data/libreecho/update/pending", "slot", value, sizeof(value)) ||
+    resolve_channel(channel, sizeof(channel));
+    {
+        /* The running slot comes from the boot-health record init writes each
+           boot; no updater file named active-slot exists. */
+        struct le_boot_control boot;
+        le_boot_control_read(&boot);
+        if (!strcmp(boot.running_slot, "a") || !strcmp(boot.running_slot, "b"))
+            bounded_copy(active_slot, sizeof(active_slot), boot.running_slot);
+        else
+            snprintf(active_slot, sizeof(active_slot), "unavailable");
+    }
+    if (!diag_update_path(path, sizeof(path), "pending") ||
+        !read_key(path, "slot", value, sizeof(value)) ||
         (strcmp(value, "a") && strcmp(value, "b")))
         snprintf(pending_slot, sizeof(pending_slot), "unavailable");
     else
         bounded_copy(pending_slot, sizeof(pending_slot), value);
-    if (!read_key("/data/libreecho/update/state", "state", value, sizeof(value)))
+    if (!diag_update_path(path, sizeof(path), "state") ||
+        !read_key(path, "state", value, sizeof(value)))
         snprintf(update_state, sizeof(update_state), "idle");
     else
         bounded_copy(update_state, sizeof(update_state), value);
-    if (!read_key("/data/libreecho/update/pending", "version", value, sizeof(value)))
+    if (!diag_update_path(path, sizeof(path), "pending") ||
+        !read_key(path, "version", value, sizeof(value)))
         snprintf(pending_version, sizeof(pending_version), "unavailable");
     else
         bounded_copy(pending_version, sizeof(pending_version), value);
