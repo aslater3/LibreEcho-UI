@@ -573,9 +573,11 @@ $(BUILD)/test-authority-provenance: tests/test_authority_provenance.c src/author
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
+# The per-tick time budget is lifted so the 256-step cap alone bounds a tick
+# and tick-count assertions do not depend on host speed or load.
 $(BUILD)/test-feature-provenance: tests/test_feature_provenance.c src/feature_provenance.c src/json.c
 	@mkdir -p $(BUILD)
-	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_FEATURE_TICK_BUDGET_NS=600000000000LL -DLE_FEATURE_PROVENANCE_TESTING $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
 
 $(BUILD)/test-diagnostic-export: tests/test_diagnostic_export.c src/json.c src/feature_provenance.c
 	@mkdir -p $(BUILD)

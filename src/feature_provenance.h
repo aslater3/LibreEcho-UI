@@ -18,6 +18,7 @@ void le_feature_transaction_state_read(le_feature_transaction_state *state);
 void le_feature_components_json(char *out, size_t size,
                                 const le_feature_transaction_state *transaction);
 void le_feature_provenance_tick(void);
+int le_feature_provenance_busy(void);
 void le_feature_provenance_shutdown(void);
 
 #endif
