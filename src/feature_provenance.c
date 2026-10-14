@@ -207,10 +207,69 @@ static const char *update_root(void)
     return path && path[0] ? path : "/data/libreecho/update";
 }
 
+
+/* OTA v3 keeps each committed feature set in an immutable generation named by
+   update/current; the v2 flat /data/libreecho/features tree is then empty.
+   An explicit LIBREECHO_FEATURE_ROOT still wins so fixtures stay isolated. */
+static int v3_feature_root(char *out, size_t size, const char *update_dir)
+{
+    char path[512], tx[100];
+    const char *generations = getenv("LIBREECHO_GENERATIONS_ROOT");
+    struct stat st;
+    ssize_t n;
+    size_t len, i;
+    int fd;
+    if (!generations || !generations[0])
+        generations = "/data/libreecho/generations";
+    if (snprintf(path, sizeof(path), "%s/current", update_dir) >= (int)sizeof(path))
+        return 0;
+#ifdef O_NOFOLLOW
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+#else
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+#endif
+    if (fd < 0)
+        return 0;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size >= (off_t)sizeof(tx)) {
+        close(fd);
+        return 0;
+    }
+    n = read(fd, tx, sizeof(tx) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    tx[n] = 0;
+    len = strcspn(tx, "\n");
+    if (tx[len] && strcmp(tx + len, "\n"))
+        return 0;
+    tx[len] = 0;
+    if (!len || len > 96 || !strcmp(tx, ".") || !strcmp(tx, ".."))
+        return 0;
+    for (i = 0; i < len; ++i)
+        if (!isalnum((unsigned char)tx[i]) && !strchr("._+~:-", tx[i]))
+            return 0;
+    /* Like the updater, refuse a linked generations root or generation so the
+       resolved tree cannot leave generations/. */
+    if (lstat(generations, &st) || !S_ISDIR(st.st_mode))
+        return 0;
+    if (snprintf(out, size, "%s/%s", generations, tx) >= (int)size ||
+        lstat(out, &st) || !S_ISDIR(st.st_mode))
+        return 0;
+    if (snprintf(out, size, "%s/%s/features", generations, tx) >= (int)size)
+        return 0;
+    return !lstat(out, &st) && S_ISDIR(st.st_mode);
+}
+
 static const char *feature_root(void)
 {
+    static char generation_root[LE_FEATURE_PATH_MAX];
     const char *path = getenv("LIBREECHO_FEATURE_ROOT");
-    return path && path[0] ? path : "/data/libreecho/features";
+    if (path && path[0])
+        return path;
+    if (v3_feature_root(generation_root, sizeof(generation_root), update_root()))
+        return generation_root;
+    return "/data/libreecho/features";
 }
 
 static const char *feature_run_root(void)

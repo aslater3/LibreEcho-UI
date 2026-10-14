@@ -625,6 +625,90 @@ static void test_authority_identity_and_transaction_precedence(void)
     le_feature_provenance_shutdown();
 }
 
+
+static void write_v3_feature(const char *generations, const char *tx)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", generations, tx); mkdir_or_die(path);
+    snprintf(path, sizeof(path), "%s/%s/features", generations, tx); mkdir_or_die(path);
+    snprintf(path, sizeof(path), "%s/%s/features/assistant", generations, tx); mkdir_or_die(path);
+    snprintf(path, sizeof(path), "%s/%s/features/assistant/manifest.json", generations, tx);
+    write_file(path, "{\"schema_version\":1,\"feature_id\":\"assistant\",\"format\":\"squashfs-lz4\",\"payload\":{\"filename\":\"assistant.squashfs\",\"sha256\":\"0f6d5b80eac2c95711e382c1895f2e89ac758836c4e0ab29c43c016db431dc69\"},\"files\":{}}\n");
+    snprintf(path, sizeof(path), "%s/%s/features/assistant/payload.squashfs", generations, tx);
+    write_file(path, "libreecho v3 payload\n");
+}
+
+/* OTA v3 commits features into generations/<update/current>/features; the v2
+   flat feature root is empty on such devices and must not read as "missing". */
+static void test_v3_generation_feature_root(void)
+{
+    char output[LE_FEATURE_COMPONENTS_JSON_MAX], generations[1024], path[1024];
+    setup();
+    snprintf(generations, sizeof(generations), "%s/generations", root);
+    mkdir_or_die(generations);
+    setenv("LIBREECHO_GENERATIONS_ROOT", generations, 1);
+    write_v3_feature(generations, "txn-0123456789abcdef");
+    join_path(path, sizeof(path), update_root, "/current");
+    write_file(path, "txn-0123456789abcdef\n");
+
+    /* An explicit feature root still wins (fixtures and v2 devices). */
+    render(output, sizeof(output));
+    assert_component_contains(output, "assistant", "\"effective\":\"missing\"");
+
+    unsetenv("LIBREECHO_FEATURE_ROOT");
+    render(output, sizeof(output));
+    assert_component_contains(output, "assistant", "\"effective\":\"present\"");
+    assert_component_contains(output, "assistant", "\"effective_payload_sha256\":\"0f6d5b80eac2c95711e382c1895f2e89ac758836c4e0ab29c43c016db431dc69\"");
+
+    /* A hostile or malformed current pointer never escapes generations/. */
+    write_file(path, "../../etc\n");
+    render(output, sizeof(output));
+    assert_component_contains(output, "assistant", "\"effective\":\"missing\"");
+    write_file(path, "txn-0123456789abcdef\nextra\n");
+    render(output, sizeof(output));
+    assert_component_contains(output, "assistant", "\"effective\":\"missing\"");
+    write_file(path, "txn-absent\n");
+    render(output, sizeof(output));
+    assert_component_contains(output, "assistant", "\"effective\":\"missing\"");
+    /* The updater writes the id with a bare LF; CR is not part of the grammar. */
+    write_file(path, "txn-0123456789abcdef\r\n");
+    render(output, sizeof(output));
+    assert_component_contains(output, "assistant", "\"effective\":\"missing\"");
+
+    /* A linked generation, features tree or generations root is refused even
+       when it points at a well-formed generation. */
+    {
+        char link_path[1200], linked_root[1200];
+        write_file(path, "txn-linked\n");
+        snprintf(link_path, sizeof(link_path), "%s/txn-linked", generations);
+        assert(symlink("txn-0123456789abcdef", link_path) == 0);
+        render(output, sizeof(output));
+        assert_component_contains(output, "assistant", "\"effective\":\"missing\"");
+
+        write_v3_feature(generations, "txn-features-link");
+        snprintf(link_path, sizeof(link_path), "%s/txn-features-link/features", generations);
+        snprintf(linked_root, sizeof(linked_root), "%s/txn-features-link/features.real", generations);
+        assert(rename(link_path, linked_root) == 0);
+        assert(symlink("features.real", link_path) == 0);
+        write_file(path, "txn-features-link\n");
+        render(output, sizeof(output));
+        assert_component_contains(output, "assistant", "\"effective\":\"missing\"");
+
+        snprintf(linked_root, sizeof(linked_root), "%s/generations-link", root);
+        assert(symlink(generations, linked_root) == 0);
+        setenv("LIBREECHO_GENERATIONS_ROOT", linked_root, 1);
+        write_file(path, "txn-0123456789abcdef\n");
+        render(output, sizeof(output));
+        assert_component_contains(output, "assistant", "\"effective\":\"missing\"");
+
+        /* Control: the same generation through the real root is present. */
+        setenv("LIBREECHO_GENERATIONS_ROOT", generations, 1);
+        render(output, sizeof(output));
+        assert_component_contains(output, "assistant", "\"effective\":\"present\"");
+    }
+    unsetenv("LIBREECHO_GENERATIONS_ROOT");
+}
+
 int main(void)
 {
     test_incremental_hash_progress();
@@ -638,6 +722,7 @@ int main(void)
     test_rollback_record_validation();
     test_candidate_control_namespace_fails_closed();
     test_authority_identity_and_transaction_precedence();
+    test_v3_generation_feature_root();
     puts("feature provenance formatter: ok");
     return 0;
 }
