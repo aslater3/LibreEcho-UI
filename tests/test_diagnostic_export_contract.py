@@ -7,12 +7,13 @@ source = Path('src/diagnostic_export.c').read_text()
 assert '#define LE_DIAG_MAX_BYTES 24576' in source
 assert 'O_NOFOLLOW' in source
 open_calls = re.findall(r'fd = open\(path, (.*?)\n\s*\);', source, re.S)
-assert len(open_calls) == 2
+# read_key, the bare packaged-channel reader and fixed_file_summary.
+assert len(open_calls) == 3
 for flags in open_calls:
     assert 'O_RDONLY' in flags
     assert 'O_NONBLOCK' in flags
     assert 'O_CLOEXEC' in flags
-assert source.count('fstat(fd, &st)') == 2
+assert source.count('fstat(fd, &st)') == 3
 assert 'read(fd, data, sizeof(data) - 1)' in source
 assert 'while (total < 4096' in source
 assert 'warning_window[5]' in source
@@ -34,3 +35,8 @@ assert 'bluetooth.known[' not in source
 assert 'bluetooth.discovered[' not in source
 assert 'device.serial' not in source
 print('diagnostic export safety contract: ok')
+# Release identity reflects the device, in the updater's channel order.
+assert 'char channel[16] = "stable"' not in source
+assert '/data/libreecho/update/active-slot' not in source
+assert source.index('"automatic-updates"') < source.index('/etc/libreecho/update-channel') < source.index('"check-status"')
+assert 'boot.running_slot' in source

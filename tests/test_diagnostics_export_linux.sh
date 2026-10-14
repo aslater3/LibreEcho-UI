@@ -21,6 +21,11 @@ printf '%s' "$bundle" | jq -e \
      .data.boot_control.boot_count == 4 and
      .data.boot_control.last_check == "startup-ready-marker-missing" and
      (.data.boot_control.history | length) == 2' >/dev/null
+# Release identity must describe the running device: the owner-selected
+# channel (not a hard-coded "stable") and the slot boot-health reports running.
+printf '%s' "$bundle" | jq -e \
+    '.data.release_identity.channel == "dev" and
+     .data.release_identity.active_slot == "a"' >/dev/null
 printf '%s' "$bundle" | jq -e \
     '.data.manifest.sections | index("boot_control") != null' >/dev/null
 printf '%s\n' 'diagnostic export: missing Linux adapters and malformed-status fixture remain non-fatal'

@@ -500,11 +500,16 @@ strict_graph=0
 epoch=1700000000
 EOF
 printf '%s\n' 4 >./build/test-boot-control-root/boot-count
+# Release-identity fixture: the owner's channel selection must win over the
+# packaged image channel, in the updater's own resolution order.
+printf 'schema=1\nchannel=dev\nenabled=0\n' >./build/test-boot-control-root/automatic-updates
+printf '%s\n' stable >./build/test-packaged-update-channel
 cat >./build/test-boot-control-root/boot-history <<'EOF'
 epoch=1699999000 boot=3 mode=first-boot running=a selected=a pending=- a=15/1/0 b=14/7/0 prev=pending:none prev_slot=a
 epoch=1700000000 boot=4 mode=first-boot running=a selected=a pending=- a=15/0/0 b=14/7/0 prev=failed:startup-ready-marker-missing prev_slot=a
 EOF
 LIBREECHO_UPDATE_ROOT=./build/test-boot-control-root \
+LIBREECHO_PACKAGED_CHANNEL_FILE=./build/test-packaged-update-channel \
 LIBREECHO_TIME_STATUS=./build/test-time.status \
 LIBREECHO_VENDOR_STATUS_PATH=./build/test-vendor-import.status \
 LIBREECHO_VENDOR_FORCE_MARKER=./build/test-vendor-config/vendor-import-force-next-boot \
