@@ -1496,6 +1496,30 @@ static long long monotonic_ns(void)
     return (long long)now.tv_sec * 1000000000LL + (long long)now.tv_nsec;
 }
 
+#ifdef LE_FEATURE_PROVENANCE_TESTING
+/* Test-only hooks; never compiled into libreecho-web. */
+int le_feature_provenance_test_persistable(const char *path)
+{
+    return persistable_path(path);
+}
+
+void le_feature_provenance_test_cache(const char *path, const struct stat *st, int ok,
+                                      const char *hash)
+{
+    cache_hash(path, st, ok ? LE_HASH_OK : LE_HASH_UNAVAILABLE, ok ? hash : NULL);
+}
+
+int le_feature_provenance_test_cached(const char *path, const struct stat *st)
+{
+    return cached_hash(path, st) != NULL;
+}
+
+int le_feature_provenance_test_cache_slots(void)
+{
+    return LE_FEATURE_HASH_CACHE_COUNT;
+}
+#endif
+
 int le_feature_provenance_busy(void)
 {
     return manifest_job.active || hash_job.active;

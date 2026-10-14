@@ -8,6 +8,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef LE_FEATURE_PROVENANCE_TESTING
+int le_feature_provenance_test_persistable(const char *path);
+void le_feature_provenance_test_cache(const char *path, const struct stat *st, int ok,
+                                      const char *hash);
+int le_feature_provenance_test_cached(const char *path, const struct stat *st);
+int le_feature_provenance_test_cache_slots(void);
+#endif
+
 static char root_template[] = "/tmp/libreecho-feature-test-XXXXXX";
 static char root[sizeof(root_template)];
 static char feature_root[1024];
@@ -899,6 +907,75 @@ static void test_v3_generation_feature_root(void)
     unsetenv("LIBREECHO_GENERATIONS_ROOT");
 }
 
+#ifdef LE_FEATURE_PROVENANCE_TESTING
+static void test_persistable_path_rejects_escapes(void)
+{
+    char generations[1024], path[1400];
+    setup();
+    snprintf(generations, sizeof(generations), "%s/generations", root);
+    setenv("LIBREECHO_GENERATIONS_ROOT", generations, 1);
+    snprintf(path, sizeof(path), "%s/txn-a/features/assistant/payload.squashfs", generations);
+    assert(le_feature_provenance_test_persistable(path));
+    snprintf(path, sizeof(path), "%s/txn-a/..", generations);
+    assert(!le_feature_provenance_test_persistable(path));
+    snprintf(path, sizeof(path), "%s/txn-a/../../outside/payload.squashfs", generations);
+    assert(!le_feature_provenance_test_persistable(path));
+    snprintf(path, sizeof(path), "%s-evil/txn-a/features/assistant/payload.squashfs", generations);
+    assert(!le_feature_provenance_test_persistable(path));
+    snprintf(path, sizeof(path), "%s/", generations);
+    assert(!le_feature_provenance_test_persistable(path));
+    assert(!le_feature_provenance_test_persistable(generations));
+    assert(!le_feature_provenance_test_persistable("/proc/1/exe"));
+    unsetenv("LIBREECHO_GENERATIONS_ROOT");
+    le_feature_provenance_shutdown();
+}
+
+static void test_eviction_keeps_persisted_digests(void)
+{
+    static const char *digest = "0f6d5b80eac2c95711e382c1895f2e89ac758836c4e0ab29c43c016db431dc69";
+    char generations[1024], path[1400];
+    struct stat st;
+    int i, slots = le_feature_provenance_test_cache_slots(), persisted = 5;
+    setup();
+    snprintf(generations, sizeof(generations), "%s/generations", root);
+    setenv("LIBREECHO_GENERATIONS_ROOT", generations, 1);
+    memset(&st, 0, sizeof(st));
+    st.st_size = 1;
+    for (i = 0; i < persisted; ++i) {
+        st.st_ino = (ino_t)(1000 + i);
+        snprintf(path, sizeof(path), "%s/txn-a/features/f%d/payload.squashfs", generations, i);
+        le_feature_provenance_test_cache(path, &st, 1, digest);
+    }
+    /* Churn far more non-persisted entries than there are slots: runtime
+       executables and failed observations. */
+    for (i = 0; i < slots * 4; ++i) {
+        st.st_ino = (ino_t)(5000 + i);
+        snprintf(path, sizeof(path), "/proc/%d/exe", 100 + i);
+        le_feature_provenance_test_cache(path, &st, i % 2, digest);
+    }
+    for (i = 0; i < persisted; ++i) {
+        st.st_ino = (ino_t)(1000 + i);
+        snprintf(path, sizeof(path), "%s/txn-a/features/f%d/payload.squashfs", generations, i);
+        assert(le_feature_provenance_test_cached(path, &st));
+    }
+    /* Re-caching the same path with a new identity reuses its slot rather
+       than duplicating it or evicting another persisted digest. */
+    st.st_ino = 9999;
+    snprintf(path, sizeof(path), "%s/txn-a/features/f0/payload.squashfs", generations);
+    le_feature_provenance_test_cache(path, &st, 1, digest);
+    assert(le_feature_provenance_test_cached(path, &st));
+    st.st_ino = 1000;
+    assert(!le_feature_provenance_test_cached(path, &st));
+    for (i = 1; i < persisted; ++i) {
+        st.st_ino = (ino_t)(1000 + i);
+        snprintf(path, sizeof(path), "%s/txn-a/features/f%d/payload.squashfs", generations, i);
+        assert(le_feature_provenance_test_cached(path, &st));
+    }
+    unsetenv("LIBREECHO_GENERATIONS_ROOT");
+    le_feature_provenance_shutdown();
+}
+#endif
+
 int main(void)
 {
     test_incremental_hash_progress();
@@ -915,6 +992,10 @@ int main(void)
     test_v3_generation_feature_root();
     test_generation_hash_persists_across_restart();
     test_flat_feature_tree_is_not_persisted();
+#ifdef LE_FEATURE_PROVENANCE_TESTING
+    test_persistable_path_rejects_escapes();
+    test_eviction_keeps_persisted_digests();
+#endif
     puts("feature provenance formatter: ok");
     return 0;
 }
