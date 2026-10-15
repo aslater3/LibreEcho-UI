@@ -458,11 +458,169 @@ static void expect_cache_rejected(int (*edit)(int, const char *, char *, size_t)
     restart();
 }
 
+/* Re-creates the helper with identical bytes, as a fresh ramfs rootfs does on
+   every boot: new inode and times, same content. */
+static void recreate_helper(const char *extra)
+{
+    char data[8192];
+    FILE *f = fopen(helper, "r");
+    size_t n;
+    assert(f);
+    n = fread(data, 1, sizeof(data) - 1, f);
+    fclose(f);
+    data[n] = 0;
+    if (extra) {
+        assert(n + strlen(extra) + 1 < sizeof(data));
+        strcat(data, extra);
+        strcat(data, "\n");
+    }
+    assert(unlink(helper) == 0);
+    write_text(helper, data);
+    assert(chmod(helper, 0700) == 0);
+}
+
+static void cached_helper_line(char *out, size_t size)
+{
+    char path[1024], line[2048];
+    FILE *f;
+    out[0] = 0;
+    snprintf(path, sizeof(path), "%s/authority-cache", root);
+    f = fopen(path, "r");
+    assert(f);
+    while (fgets(line, sizeof(line), f))
+        if (strstr(line, helper) && line[strlen(line) - 1] == '\n')
+            snprintf(out, size, "%s", line);
+    fclose(f);
+    assert(out[0]);
+}
+
+static void test_v3_cache_survives_rootfs_recreation_with_same_content(void)
+{
+    char output[LE_AUTHORITY_PROVENANCE_JSON_MAX], line[2048], command[1200], expected[80];
+    struct stat before, after;
+    FILE *p;
+    v3_setup();
+    assert(settle(output, sizeof(output), "\"available\":true"));
+    assert(helper_runs() == 1);
+    restart();
+    /* the persisted helper identity is its real SHA-256, not inode times */
+    cached_helper_line(line, sizeof(line));
+    snprintf(command, sizeof(command), "sha256sum '%s'", helper);
+    p = popen(command, "r");
+    assert(p && fscanf(p, "%64s", expected) == 1);
+    pclose(p);
+    assert(strstr(line, expected));
+    assert(stat(helper, &before) == 0);
+    {
+        struct timespec delay = {0, 20000000};
+        nanosleep(&delay, NULL);
+    }
+    recreate_helper(NULL);
+    assert(stat(helper, &after) == 0);
+    assert(before.st_ctim.tv_sec != after.st_ctim.tv_sec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec);
+    le_authority_provenance_tick();
+    le_authority_provenance_json(output, sizeof(output));
+    assert(strstr(output, "\"available\":true"));
+    assert(helper_runs() == 1);
+    restart();
+}
+
+static void test_v3_cache_rejects_changed_rootfs_tool_content(void)
+{
+    char output[LE_AUTHORITY_PROVENANCE_JSON_MAX];
+    v3_setup();
+    assert(settle(output, sizeof(output), "\"available\":true"));
+    restart();
+    recreate_helper("#a");
+    le_authority_provenance_tick();
+    le_authority_provenance_json(output, sizeof(output));
+    assert(strstr(output, "\"available\":false"));
+    assert(settle(output, sizeof(output), "\"available\":true"));
+    assert(helper_runs() == 2);
+    /* live result is withdrawn when tool bytes change after completion, even
+       at the same size (so only the content hash can tell) */
+    {
+        char path[1100];
+        snprintf(path, sizeof(path), "%s.orig", helper);
+        assert(rename(helper, path) == 0);
+        {
+            char data[8192];
+            FILE *f = fopen(path, "r");
+            size_t n;
+            assert(f);
+            n = fread(data, 1, sizeof(data) - 1, f);
+            fclose(f);
+            data[n] = 0;
+            assert(n >= 3 && !strcmp(data + n - 3, "#a\n"));
+            data[n - 2] = 'b';
+            write_text(helper, data);
+            assert(chmod(helper, 0700) == 0);
+        }
+        le_authority_provenance_json(output, sizeof(output));
+        assert(strstr(output, "\"available\":false"));
+        assert(unlink(helper) == 0);
+        assert(rename(path, helper) == 0);
+    }
+    restart();
+}
+
+static void test_v3_rootfs_tool_mode_change_is_unavailable(void)
+{
+    char output[LE_AUTHORITY_PROVENANCE_JSON_MAX];
+    v3_setup();
+    assert(settle(output, sizeof(output), "\"available\":true"));
+    assert(chmod(helper, 0755) == 0);
+    le_authority_provenance_json(output, sizeof(output));
+    assert(strstr(output, "\"available\":false"));
+    restart();
+}
+
+/* Cached content hash altered: hash comparison. */
+static int flip_helper_hash(int n, const char *line, char *out, size_t size)
+{
+    const char *hash;
+    (void)n;
+    if (!strstr(line, helper) || !(hash = strstr(line, " /")) || hash - line < 65)
+        return 0;
+    snprintf(out, size, "%s", line);
+    out[hash - line - 1] = out[hash - line - 1] == '0' ? '1' : '0';
+    return 1;
+}
+
+/* Content path demoted to stat-only in the cache: content flag comparison. */
+static int demote_helper_to_stat(int n, const char *line, char *out, size_t size)
+{
+    const char *hash;
+    (void)n;
+    if (!strstr(line, helper) || !(hash = strstr(line, " /")) || hash - line < 65)
+        return 0;
+    snprintf(out, size, "%.*s-%s", (int)(hash - line - 64), line, hash);
+    return 1;
+}
+
+/* Uppercase or malformed hash fields are rejected. */
+static int uppercase_helper_hash(int n, const char *line, char *out, size_t size)
+{
+    size_t i;
+    const char *hash;
+    (void)n;
+    if (!strstr(line, helper) || !(hash = strstr(line, " /")) || hash - line < 65)
+        return 0;
+    snprintf(out, size, "%s", line);
+    for (i = (size_t)(hash - line - 64); i < (size_t)(hash - line); ++i)
+        if (out[i] >= 'a' && out[i] <= 'f') { out[i] = (char)(out[i] - 32); return 1; }
+    out[hash - line - 64] = 'G';
+    return 1;
+}
+
 static void test_v3_cache_rejects_edited_identity(void)
 {
     expect_cache_rejected(drop_last_path);
     expect_cache_rejected(rename_absent_path);
     expect_cache_rejected(bump_ctime_seconds);
+    expect_cache_rejected(flip_helper_hash);
+    expect_cache_rejected(demote_helper_to_stat);
+    expect_cache_rejected(uppercase_helper_hash);
 }
 
 static void run_until_helper_then_idle(void)
@@ -549,6 +707,9 @@ int main(void)
     test_v3_cache_rejects_other_generation_and_untrusted_files();
     test_v3_rejects_mismatch_and_malformed_output();
     test_v3_cache_rejects_edited_identity();
+    test_v3_cache_survives_rootfs_recreation_with_same_content();
+    test_v3_cache_rejects_changed_rootfs_tool_content();
+    test_v3_rootfs_tool_mode_change_is_unavailable();
     test_v3_unobservable_path_is_unavailable();
     test_v3_duplicate_target_key_is_unavailable();
     test_persistent_failure_backs_off_to_idle();

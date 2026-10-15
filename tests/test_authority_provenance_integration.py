@@ -42,7 +42,8 @@ def prepare(folder):
     identities = {}
     sources = ((PLATFORM, 'tools/mt8163-arm32/initramfs/libreecho-feature-transaction'),
                (PLATFORM, 'tools/mt8163-arm32/ota/test_feature_provenance.py'),
-               (ROOT, 'src/authority_provenance.c'), (ROOT, 'src/authority_provenance.h'))
+               (ROOT, 'src/authority_provenance.c'), (ROOT, 'src/authority_provenance.h'),
+               (ROOT, 'src/le_sha256.h'))
     for root, relative in sources:
         source = root / relative
         data = source.read_bytes()

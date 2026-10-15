@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include "le_sha256.h"
 #include <time.h>
 #include <unistd.h>
 
@@ -24,7 +25,10 @@
 #define AP_V3_SCHEMA "libreecho-feature-provenance-v3"
 #define AP_TARGET_MAX 16384
 #define AP_CACHE_MAX 32768
-#define AP_CACHE_MAGIC "libreecho-authority-cache-v1"
+#define AP_CACHE_MAGIC "libreecho-authority-cache-v2"
+/* Rootfs tools are compared by content: the ramfs rootfs is recreated every
+   boot, so inode times differ even though the bytes are identical. */
+#define AP_CONTENT_MAX (8U * 1024U * 1024U)
 
 static const char *ap_features[AP_FEATURE_COUNT] = {
     "airplay2", "tts", "wakeword", "stt", "assistant"
@@ -43,6 +47,7 @@ typedef struct {
     int present;
     int valid;
     struct stat st;
+    char hash[65];
 } ap_observation;
 
 typedef struct {
@@ -50,6 +55,7 @@ typedef struct {
     int v3;
     char generation[100];
     char paths[AP_SNAPSHOT_MAX][512];
+    unsigned char content[AP_SNAPSHOT_MAX];
     ap_observation entries[AP_SNAPSHOT_MAX];
 } ap_snapshot;
 
@@ -148,6 +154,17 @@ static int ap_add_path(ap_snapshot *snapshot, const char *path)
     if (snapshot->count >= AP_SNAPSHOT_MAX)
         return 0;
     snprintf(snapshot->paths[snapshot->count++], sizeof(snapshot->paths[0]), "%s", path);
+    return 1;
+}
+
+static int ap_add_content_path(ap_snapshot *snapshot, const char *path)
+{
+    size_t i;
+    if (!ap_add_path(snapshot, path))
+        return 0;
+    for (i = 0; i < snapshot->count; ++i)
+        if (!strcmp(snapshot->paths[i], path))
+            snapshot->content[i] = 1;
     return 1;
 }
 
@@ -259,8 +276,8 @@ static int ap_build_v3_snapshot(ap_snapshot *snapshot)
         if (n < 0 || (size_t)n >= sizeof(path) || !ap_add_path(snapshot, path)) return 0;
     }
     for (i = 0; i < sizeof(fixed) / sizeof(fixed[0]); ++i)
-        if (!ap_add_path(snapshot, fixed[i])) return 0;
-    return ap_add_path(snapshot, ap_helper());
+        if (!ap_add_content_path(snapshot, fixed[i])) return 0;
+    return ap_add_content_path(snapshot, ap_helper());
 }
 
 static int ap_build_snapshot(ap_snapshot *snapshot)
@@ -318,24 +335,6 @@ static int ap_build_snapshot(ap_snapshot *snapshot)
     return 1;
 }
 
-static void ap_take_snapshot(ap_snapshot *snapshot)
-{
-    size_t i;
-    if (!ap_build_snapshot(snapshot))
-        return;
-    for (i = 0; i < snapshot->count; ++i) {
-        if (!lstat(snapshot->paths[i], &snapshot->entries[i].st)) {
-            snapshot->entries[i].present = 1;
-            snapshot->entries[i].valid = 1;
-        } else if (errno == ENOENT) {
-            snapshot->entries[i].present = 0;
-            snapshot->entries[i].valid = 1;
-        } else {
-            snapshot->entries[i].valid = 0;
-        }
-    }
-}
-
 static int ap_same_stat(const struct stat *left, const struct stat *right)
 {
     return left->st_dev == right->st_dev && left->st_ino == right->st_ino &&
@@ -346,6 +345,85 @@ static int ap_same_stat(const struct stat *left, const struct stat *right)
            left->st_ctim.tv_nsec == right->st_ctim.tv_nsec;
 }
 
+/* Hashes the regular file that lstat observed; the open file must be the same
+   inode and size, and every byte must be read. */
+static int ap_hash_file(const char *path, const struct stat *seen, char *out)
+{
+    static unsigned char buffer[16384];
+    struct stat st;
+    le_sha256 sha;
+    unsigned long long used = 0;
+    ssize_t n;
+    int fd;
+    if (!S_ISREG(seen->st_mode) || seen->st_size < 0 || (unsigned long long)seen->st_size > AP_CONTENT_MAX)
+        return 0;
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+    if (fd < 0)
+        return 0;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_dev != seen->st_dev ||
+        st.st_ino != seen->st_ino || st.st_size != seen->st_size) {
+        close(fd); return 0;
+    }
+    sha256_init(&sha);
+    for (;;) {
+        n = read(fd, buffer, sizeof(buffer));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        used += (unsigned long long)n;
+        if (used > (unsigned long long)st.st_size) break;
+        sha256_update(&sha, buffer, (size_t)n);
+    }
+    close(fd);
+    if (n < 0 || used != (unsigned long long)st.st_size)
+        return 0;
+    sha256_final(&sha, out, 65);
+    return 1;
+}
+
+/* reference, when given, is an earlier snapshot from this boot: a content path
+   whose full stat identity is unchanged keeps its hash instead of re-reading. */
+static void ap_take_snapshot_from(ap_snapshot *snapshot, const ap_snapshot *reference)
+{
+    size_t i;
+    if (!ap_build_snapshot(snapshot))
+        return;
+    for (i = 0; i < snapshot->count; ++i) {
+        ap_observation *e = &snapshot->entries[i];
+        if (!lstat(snapshot->paths[i], &e->st)) {
+            e->present = 1;
+            e->valid = 1;
+            if (snapshot->content[i]) {
+                const ap_observation *r = reference && i < reference->count && reference->content[i] &&
+                    !strcmp(reference->paths[i], snapshot->paths[i]) ? &reference->entries[i] : NULL;
+                if (r && r->valid && r->present && r->hash[0] && ap_same_stat(&r->st, &e->st))
+                    memcpy(e->hash, r->hash, sizeof(e->hash));
+                else if (!ap_hash_file(snapshot->paths[i], &e->st, e->hash))
+                    e->valid = 0;
+            }
+        } else if (errno == ENOENT) {
+            e->present = 0;
+            e->valid = 1;
+        } else {
+            e->valid = 0;
+        }
+    }
+}
+
+static void ap_take_snapshot(ap_snapshot *snapshot)
+{
+    ap_take_snapshot_from(snapshot, NULL);
+}
+
+/* Content paths match on type/permissions, size and SHA-256; every other path
+   must keep its exact stat identity. */
+static int ap_same_observation(const ap_observation *left, const ap_observation *right, int content)
+{
+    if (!content)
+        return ap_same_stat(&left->st, &right->st);
+    return left->hash[0] && right->hash[0] && !strcmp(left->hash, right->hash) &&
+           left->st.st_mode == right->st.st_mode && left->st.st_size == right->st.st_size;
+}
+
 static int ap_snapshot_equal(const ap_snapshot *left, const ap_snapshot *right)
 {
     size_t i;
@@ -354,11 +432,12 @@ static int ap_snapshot_equal(const ap_snapshot *left, const ap_snapshot *right)
         return 0;
     for (i = 0; i < left->count; ++i) {
         if (strcmp(left->paths[i], right->paths[i]) ||
+            left->content[i] != right->content[i] ||
             !left->entries[i].valid || !right->entries[i].valid ||
             left->entries[i].present != right->entries[i].present)
             return 0;
         if (left->entries[i].present &&
-            !ap_same_stat(&left->entries[i].st, &right->entries[i].st))
+            !ap_same_observation(&left->entries[i], &right->entries[i], left->content[i]))
             return 0;
     }
     return 1;
@@ -659,12 +738,13 @@ static void ap_persist_store(const ap_snapshot *snapshot, const char *output, si
     for (i = 0; i < snapshot->count; ++i) {
         const ap_observation *e = &snapshot->entries[i];
         if (!e->valid) return;
-        count = snprintf(data + length, sizeof(data) - length, "%d %llu %llu %lu %lld %lld %ld %lld %ld %s\n", e->present,
+        if (snapshot->content[i] && e->present && !e->hash[0]) return;
+        count = snprintf(data + length, sizeof(data) - length, "%d %llu %llu %lu %lld %lld %ld %lld %ld %s %s\n", e->present,
                          e->present ? (unsigned long long)e->st.st_dev : 0ULL, e->present ? (unsigned long long)e->st.st_ino : 0ULL,
                          e->present ? (unsigned long)e->st.st_mode : 0UL, e->present ? (long long)e->st.st_size : 0LL,
                          e->present ? (long long)e->st.st_mtim.tv_sec : 0LL, e->present ? (long)e->st.st_mtim.tv_nsec : 0L,
                          e->present ? (long long)e->st.st_ctim.tv_sec : 0LL, e->present ? (long)e->st.st_ctim.tv_nsec : 0L,
-                         snapshot->paths[i]);
+                         !snapshot->content[i] ? "-" : e->present ? e->hash : "0", snapshot->paths[i]);
         if (count < 0 || (size_t)count >= sizeof(data) - length) return;
         length += (size_t)count;
     }
@@ -712,13 +792,20 @@ static int ap_persist_load(ap_record *parsed)
         long long size, mtime, ctime;
         long mtime_ns, ctime_ns;
         int present, consumed = 0;
+        char hash[65];
         ap_observation *e = &cached_snapshot.entries[i];
         if (!(next = strchr(line, '\n'))) return 0;
         *next++ = 0;
-        if (sscanf(line, "%d %llu %llu %lu %lld %lld %ld %lld %ld %n", &present, &dev, &ino, &mode, &size,
-                   &mtime, &mtime_ns, &ctime, &ctime_ns, &consumed) != 9 || !consumed ||
-            (present != 0 && present != 1) || !line[consumed] || strlen(line + consumed) >= sizeof(cached_snapshot.paths[0]))
+        if (sscanf(line, "%d %llu %llu %lu %lld %lld %ld %lld %ld %64s %n", &present, &dev, &ino, &mode, &size,
+                   &mtime, &mtime_ns, &ctime, &ctime_ns, hash, &consumed) != 10 || !consumed ||
+            (present != 0 && present != 1) || !line[consumed] || strlen(line + consumed) >= sizeof(cached_snapshot.paths[0]) ||
+            (strcmp(hash, "-") && (present ? !ap_lower_hex_hash(hash) : strcmp(hash, "0"))))
             return 0;
+        /* "-": stat-identity path; "0": absent content path; hex: content hash. */
+        if (strcmp(hash, "-")) {
+            cached_snapshot.content[i] = 1;
+            if (present) memcpy(e->hash, hash, sizeof(e->hash));
+        }
         snprintf(cached_snapshot.paths[i], sizeof(cached_snapshot.paths[0]), "%s", line + consumed);
         e->valid = 1;
         e->present = present;
@@ -895,7 +982,7 @@ void le_authority_provenance_tick(void)
             (parsed.v3 && (strcmp(parsed.generation, job.before.generation) || !ap_read_target(&job.before, &parsed)))) {
             ap_finish_unavailable(); return;
         }
-        ap_take_snapshot(&after);
+        ap_take_snapshot_from(&after, &job.before);
         if (!ap_snapshot_equal(&job.before, &after)) { ap_finish_unavailable(); return; }
         record = parsed; completed_snapshot = after; completed = 1; retry_count = 0;
         ap_persist_store(&after, job.output, job.used);
@@ -913,7 +1000,7 @@ void le_authority_provenance_json(char *out, size_t size)
 {
     ap_snapshot current;
     if (!completed) { ap_unavailable(out, size); return; }
-    ap_take_snapshot(&current);
+    ap_take_snapshot_from(&current, &completed_snapshot);
     if (!ap_snapshot_equal(&completed_snapshot, &current)) { ap_schedule_retry(); ap_unavailable(out, size); return; }
     if (!ap_make_json(&record, out, size)) ap_unavailable(out, size);
 }

@@ -2588,12 +2588,17 @@ from the verified signed target manifest), `target_manifest_sha256`, and five
 Because the helper re-hashes every payload, a verified v3 observation is stored
 in `/data/libreecho/update/authority-provenance-cache` (owner-only `0600`,
 atomic temp + `fsync` + rename) together with the device/inode/mode/size/mtime/
-ctime identity of `update/current`, `update/pending`, every generation file, the
-helper, verifier, target-manifest checker, target file and public key. Later
-boots reuse it without running the helper only while every one of those
-identities is unchanged; a symlinked, group/world-accessible, malformed, or
-other-generation cache is ignored and the helper runs again. Each OTA creates a
-new generation, so it is verified once after the update.
+ctime identity of `update/current`, `update/pending` and every generation file.
+The helper, verifier, generation tools, target-manifest checker, target file and
+public key live on the boot-time ramfs rootfs, which is recreated (new inodes
+and times) on every boot, so they are recorded by file type/permissions, size
+and SHA-256 of their bytes instead. Later boots reuse the observation without
+running the helper only while every one of those identities is unchanged; a
+symlinked, group/world-accessible, malformed, or other-generation cache is
+ignored and the helper runs again. Each OTA creates a new generation, so it is
+verified once after the update. Once loaded, an unchanged rootfs file keeps its
+recorded hash while its full stat identity is unchanged; any stat change causes
+the bytes to be re-hashed (at most a few hundred KiB in total).
 
 Missing, stale, partial, tampered, timed-out, or otherwise unverifiable evidence
 produces `available: false`, the same schema, `reason: "unavailable"`,
