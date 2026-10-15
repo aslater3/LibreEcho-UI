@@ -312,7 +312,9 @@ static void test_v3_rejects_mismatch_and_malformed_output(void)
         /* missing feature line */
         "feature_assistant_target_manifest_sha256=d6f45c424b326dd87ac4d24fefe9c2e46252e25d5bc350626802261520af79d6\n", "",
         /* non-hex hash */
-        "feature_tts_payload_sha256=a9defee5", "feature_tts_payload_sha256=Z9defee5"
+        "feature_tts_payload_sha256=a9defee5", "feature_tts_payload_sha256=Z9defee5",
+        /* uppercase hex would violate the published lowercase schema */
+        "target_manifest_sha256=02dd66d8", "target_manifest_sha256=02DD66D8"
     };
     char output[LE_AUTHORITY_PROVENANCE_JSON_MAX], path[1024], edited[8192], *at;
     size_t i;
@@ -334,12 +336,180 @@ static void test_v3_rejects_mismatch_and_malformed_output(void)
             le_authority_provenance_tick();
             nanosleep(&delay, NULL);
         }
+        assert(helper_runs() >= 1);
         le_authority_provenance_json(output, sizeof(output));
         assert(strstr(output, "\"available\":false"));
         snprintf(path, sizeof(path), "%s/authority-cache", root);
         assert(access(path, F_OK) != 0);
         restart();
     }
+}
+
+/* Rewrites the persisted cache line by line through edit(), keeping 0600. */
+static void edit_cache(int (*edit)(int, const char *, char *, size_t))
+{
+    char path[1024], out[32768], line[2048];
+    FILE *f;
+    size_t used = 0;
+    int n = 0;
+    snprintf(path, sizeof(path), "%s/authority-cache", root);
+    f = fopen(path, "r");
+    assert(f);
+    while (fgets(line, sizeof(line), f)) {
+        char replaced[2048];
+        size_t len;
+        if (!edit(n++, line, replaced, sizeof(replaced)))
+            snprintf(replaced, sizeof(replaced), "%s", line);
+        len = strlen(replaced);
+        assert(used + len < sizeof(out));
+        memcpy(out + used, replaced, len);
+        used += len;
+    }
+    fclose(f);
+    f = fopen(path, "w");
+    assert(f && fwrite(out, 1, used, f) == used && fclose(f) == 0);
+    assert(chmod(path, 0600) == 0);
+}
+
+static int cache_paths(void)
+{
+    char path[1024], line[2048];
+    unsigned long count = 0;
+    FILE *f;
+    snprintf(path, sizeof(path), "%s/authority-cache", root);
+    f = fopen(path, "r");
+    assert(f);
+    while (fgets(line, sizeof(line), f) && sscanf(line, "paths %lu", &count) != 1) {}
+    fclose(f);
+    assert(count > 0);
+    return (int)count;
+}
+
+static int cached_path_count;
+
+/* Persisted list one path shorter than the live snapshot: count check. */
+static int drop_last_path(int n, const char *line, char *out, size_t size)
+{
+    (void)line;
+    if (n == 2) { snprintf(out, size, "paths %d\n", cached_path_count - 1); return 1; }
+    if (n == 3 + cached_path_count - 1) { out[0] = 0; return 1; }
+    return 0;
+}
+
+/* Same count and identities, different path name: path comparison. */
+static int rename_absent_path(int n, const char *line, char *out, size_t size)
+{
+    (void)n;
+    if (!strncmp(line, "0 0 0 0 0 0 0 0 0 ", 18) && strstr(line, "/update/pending")) {
+        snprintf(out, size, "0 0 0 0 0 0 0 0 0 /elsewhere/pending\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* Only ctime seconds differ: ctime comparison. */
+static int bump_ctime_seconds(int n, const char *line, char *out, size_t size)
+{
+    int present, c = 0;
+    unsigned long long dev, ino;
+    unsigned long mode;
+    long long sz, mt, ct;
+    long mtn, ctn;
+    (void)n;
+    if (sscanf(line, "%d %llu %llu %lu %lld %lld %ld %lld %ld %n", &present, &dev, &ino, &mode, &sz, &mt, &mtn, &ct, &ctn, &c) == 9 &&
+        present && c && strstr(line, "/target.manifest\n")) {
+        snprintf(out, size, "%d %llu %llu %lu %lld %lld %ld %lld %ld %s", present, dev, ino, mode, sz, mt, mtn, ct + 1, ctn, line + c);
+        return 1;
+    }
+    return 0;
+}
+
+static int edits_made;
+static int count_edit(int (*edit)(int, const char *, char *, size_t), int n, const char *line, char *out, size_t size)
+{
+    int changed = edit(n, line, out, size);
+    edits_made += changed;
+    return changed;
+}
+static int (*active_edit)(int, const char *, char *, size_t);
+static int counted_edit(int n, const char *line, char *out, size_t size)
+{
+    return count_edit(active_edit, n, line, out, size);
+}
+
+static void expect_cache_rejected(int (*edit)(int, const char *, char *, size_t))
+{
+    char output[LE_AUTHORITY_PROVENANCE_JSON_MAX];
+    int before;
+    v3_setup();
+    assert(settle(output, sizeof(output), "\"available\":true"));
+    restart();
+    cached_path_count = cache_paths();
+    edits_made = 0;
+    active_edit = edit;
+    edit_cache(counted_edit);
+    assert(edits_made > 0);
+    before = helper_runs();
+    le_authority_provenance_tick();
+    le_authority_provenance_json(output, sizeof(output));
+    assert(strstr(output, "\"available\":false"));
+    assert(settle(output, sizeof(output), "\"available\":true"));
+    assert(helper_runs() == before + 1);
+    restart();
+}
+
+static void test_v3_cache_rejects_edited_identity(void)
+{
+    expect_cache_rejected(drop_last_path);
+    expect_cache_rejected(rename_absent_path);
+    expect_cache_rejected(bump_ctime_seconds);
+}
+
+static void run_until_helper_then_idle(void)
+{
+    int k;
+    for (k = 0; k < 200 && helper_runs() < 1; ++k) {
+        struct timespec delay = {0, 10000000};
+        le_authority_provenance_tick();
+        nanosleep(&delay, NULL);
+    }
+    assert(helper_runs() >= 1);
+    for (k = 0; k < 50; ++k) {
+        struct timespec delay = {0, 10000000};
+        le_authority_provenance_tick();
+        nanosleep(&delay, NULL);
+    }
+}
+
+/* A snapshot path that cannot be observed (ENOTDIR here; EACCES/EOVERFLOW on
+   devices) must never compare equal to itself and certify a verified identity. */
+static void test_v3_unobservable_path_is_unavailable(void)
+{
+    char output[LE_AUTHORITY_PROVENANCE_JSON_MAX], path[1024];
+    v3_setup();
+    snprintf(path, sizeof(path), "%s/generations/" V3_TX "/features/tts/payload.squashfs", root);
+    assert(unlink(path) == 0);
+    snprintf(path, sizeof(path), "%s/generations/" V3_TX "/features/tts/manifest.json", root);
+    assert(unlink(path) == 0);
+    snprintf(path, sizeof(path), "%s/generations/" V3_TX "/features/tts", root);
+    assert(rmdir(path) == 0);
+    write_text(path, "not a directory\n");
+    run_until_helper_then_idle();
+    le_authority_provenance_json(output, sizeof(output));
+    assert(strstr(output, "\"available\":false"));
+    restart();
+}
+
+static void test_v3_duplicate_target_key_is_unavailable(void)
+{
+    char output[LE_AUTHORITY_PROVENANCE_JSON_MAX], path[1024];
+    v3_setup();
+    snprintf(path, sizeof(path), "%s/generations/" V3_TX "/target.manifest", root);
+    write_text(path, "transaction_id=" V3_TX "\nrelease=a\nversion=0.14.0\nrelease=b\n");
+    run_until_helper_then_idle();
+    le_authority_provenance_json(output, sizeof(output));
+    assert(strstr(output, "\"available\":false"));
+    restart();
 }
 
 static void test_persistent_failure_backs_off_to_idle(void)
@@ -378,6 +548,9 @@ int main(void)
     test_v3_cache_invalidated_by_changed_generation_file();
     test_v3_cache_rejects_other_generation_and_untrusted_files();
     test_v3_rejects_mismatch_and_malformed_output();
+    test_v3_cache_rejects_edited_identity();
+    test_v3_unobservable_path_is_unavailable();
+    test_v3_duplicate_target_key_is_unavailable();
     test_persistent_failure_backs_off_to_idle();
     puts("authority provenance v3 parse/persist/backoff: ok");
 #endif

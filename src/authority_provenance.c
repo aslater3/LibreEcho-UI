@@ -175,8 +175,10 @@ static int ap_pid_from_file(const char *path, pid_t *pid)
     return 1;
 }
 
-/* Reads one regular non-symlink file of at most size-1 bytes, NUL terminated. */
-static ssize_t ap_read_small(const char *path, char *out, size_t size)
+/* Reads one regular non-symlink file of at most size-1 bytes, NUL terminated.
+   With owner_only, the owner/mode check applies to the same open file that is
+   read, so a path swap between check and read cannot substitute content. */
+static ssize_t ap_read_small_checked(const char *path, char *out, size_t size, int owner_only)
 {
     struct stat st;
     size_t used = 0;
@@ -184,7 +186,8 @@ static ssize_t ap_read_small(const char *path, char *out, size_t size)
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
     if (fd < 0)
         return -1;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || (size_t)st.st_size >= size) {
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || (size_t)st.st_size >= size ||
+        (owner_only && (st.st_uid != geteuid() || (st.st_mode & 077)))) {
         close(fd); return -1;
     }
     while (used < (size_t)st.st_size) {
@@ -197,7 +200,14 @@ static ssize_t ap_read_small(const char *path, char *out, size_t size)
     if (used != (size_t)st.st_size)
         return -1;
     out[used] = 0;
+    if (memchr(out, 0, used))
+        return -1;
     return (ssize_t)used;
+}
+
+static ssize_t ap_read_small(const char *path, char *out, size_t size)
+{
+    return ap_read_small_checked(path, out, size, 0);
 }
 
 /* OTA v3: the active immutable generation is named by update/current. Linked
@@ -344,7 +354,7 @@ static int ap_snapshot_equal(const ap_snapshot *left, const ap_snapshot *right)
         return 0;
     for (i = 0; i < left->count; ++i) {
         if (strcmp(left->paths[i], right->paths[i]) ||
-            left->entries[i].valid != right->entries[i].valid ||
+            !left->entries[i].valid || !right->entries[i].valid ||
             left->entries[i].present != right->entries[i].present)
             return 0;
         if (left->entries[i].present &&
@@ -360,6 +370,17 @@ static long ap_elapsed_seconds(const struct timespec *started)
     if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
         return AP_TIMEOUT_SECONDS + 1;
     return (long)(now.tv_sec - started->tv_sec);
+}
+
+static int ap_lower_hex_hash(const char *value)
+{
+    size_t i;
+    if (!value || strlen(value) != 64)
+        return 0;
+    for (i = 0; i < 64; ++i)
+        if (!isdigit((unsigned char)value[i]) && (value[i] < 'a' || value[i] > 'f'))
+            return 0;
+    return 1;
 }
 
 static int ap_hex_hash(const char *value)
@@ -482,7 +503,8 @@ static int ap_parse_v3(const char *text, size_t length, ap_record *parsed)
         if (!line_length || !equals || equals == line) return 0;
         key_length = (size_t)(equals - line);
         value_length = line_length - key_length - 1;
-        if (!value_length || key_length >= sizeof(key) || value_length >= sizeof(value)) return 0;
+        if (!value_length || key_length >= sizeof(key) || value_length >= sizeof(value) ||
+            memchr(line, 0, line_length)) return 0;
         memcpy(key, line, key_length); key[key_length] = 0;
         memcpy(value, equals + 1, value_length); value[value_length] = 0;
         if (memchr(value, '=', value_length) || memchr(value, '\r', value_length)) return 0;
@@ -495,7 +517,7 @@ static int ap_parse_v3(const char *text, size_t length, ap_record *parsed)
             memcpy(parsed->generation, value, value_length + 1);
             index = 1;
         } else if (!strcmp(key, "target_manifest_sha256")) {
-            if (!ap_hex_hash(value)) return 0;
+            if (!ap_lower_hex_hash(value)) return 0;
             memcpy(parsed->target_manifest_sha256, value, 65);
             index = 2;
         } else {
@@ -503,7 +525,7 @@ static int ap_parse_v3(const char *text, size_t length, ap_record *parsed)
                 for (j = 0; j < 4; ++j) {
                     int n = snprintf(expected, sizeof(expected), "feature_%s_%s_sha256", ap_features[i], kinds[j]);
                     if (n < 0 || (size_t)n >= sizeof(expected) || strcmp(key, expected)) continue;
-                    if (!ap_hex_hash(value)) return 0;
+                    if (!ap_lower_hex_hash(value)) return 0;
                     memcpy((j & 1 ? target : observed)[i][j / 2], value, 65);
                     index = (int)(3 + i * 4 + j);
                     break;
@@ -604,12 +626,14 @@ static int ap_read_target(const ap_snapshot *snapshot, ap_record *parsed)
         value = strchr(line, '=');
         if (!value) continue;
         *value++ = 0;
-        if (!strcmp(line, "transaction_id") && !have_tx++) {
-            if (strcmp(value, parsed->generation)) return 0;
-        } else if (!strcmp(line, "release") && !have_release++) {
+        if (!strcmp(line, "transaction_id")) {
+            if (have_tx++ || strcmp(value, parsed->generation)) return 0;
+        } else if (!strcmp(line, "release")) {
+            if (have_release++) return 0;
             if (!ap_token(value, sizeof(parsed->release))) return 0;
             snprintf(parsed->release, sizeof(parsed->release), "%s", value);
-        } else if (!strcmp(line, "version") && !have_version++) {
+        } else if (!strcmp(line, "version")) {
+            if (have_version++) return 0;
             if (!ap_token(value, sizeof(parsed->version))) return 0;
             snprintf(parsed->version, sizeof(parsed->version), "%s", value);
         }
@@ -671,15 +695,9 @@ static int ap_persist_load(ap_record *parsed)
     char *line, *next, generation[100];
     const char *path = ap_cache_path();
     unsigned long count, used, i;
-    struct stat st;
     ssize_t length;
-    int fd;
     if (!path) return 0;
-    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
-    if (fd < 0) return 0;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077)) { close(fd); return 0; }
-    close(fd);
-    if ((length = ap_read_small(path, data, sizeof(data))) < 0) return 0;
+    if ((length = ap_read_small_checked(path, data, sizeof(data), 1)) < 0) return 0;
     if (strncmp(data, AP_CACHE_MAGIC "\n", sizeof(AP_CACHE_MAGIC)) ) return 0;
     line = data + sizeof(AP_CACHE_MAGIC);
     if (sscanf(line, "generation %99s\npaths %lu\n", generation, &count) != 2 || !count || count > AP_SNAPSHOT_MAX) return 0;
