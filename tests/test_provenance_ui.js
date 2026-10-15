@@ -139,6 +139,30 @@ assert(firstTechnicalDetails > 0);
 assert(!html.slice(0, firstTechnicalDetails).includes(hashes.source), 'full source commit is not inline by default');
 assert(!html.slice(0, firstTechnicalDetails).includes(hashes.effective), 'full payload hash is not inline by default');
 
+const v3Html = provenancePanel({
+    os_version: 'LibreEcho OS 0.14.0', source_commit: hashes.source,
+    source_digest: hashes.effective, transaction_state: 'none',
+    last_transaction_result: 'installed', components,
+    authority_provenance: {
+        available: true, schema: 'libreecho-feature-provenance-v3',
+        generation: 'txn-717467f70c3e3d240e9f8947',
+        release: 'radar-puffin-build-ecc683e-ec29d7e8c0f3c99b-993b82b6e79ab683<b>',
+        version: '0.14.0', target_manifest_sha256: hashes.capsule,
+        features: ['airplay2', 'tts', 'wakeword', 'stt', 'assistant'].map(feature_id =>
+            ({ feature_id, payload_sha256: hashes.effective, manifest_sha256: hashes.capsule }))
+    }
+});
+assert(v3Html.includes('Signed authorizing authority'));
+assert(!v3Html.includes('Unavailable. The UI does not infer'), 'v3 authority is shown, not reported unavailable');
+assert(v3Html.includes('txn-717467f70c3e3d240e9f8947'));
+assert(v3Html.includes('0.14.0'));
+assert(v3Html.includes('&lt;b&gt;') && !v3Html.includes('<b>'), 'v3 release text is escaped');
+assert(v3Html.includes('Verified payload SHA-256'));
+assert.strictEqual((v3Html.match(/<tr>/g) || []).length, 12, 'component header/five rows plus v3 authority header/five rows');
+const unavailableHtml = provenancePanel({ components, authority_provenance: { available: false,
+    schema: 'libreecho-feature-provenance-v1', reason: 'unavailable', transaction_id: null, features: [] } });
+assert(unavailableHtml.includes('Unavailable. The UI does not infer'));
+
 function copyButton(label, value) {
     const button = element();
     button.textContent = 'Copy';

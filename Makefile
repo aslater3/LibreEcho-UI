@@ -569,9 +569,9 @@ $(BUILD)/test-http-worker-registry: tests/test_http_worker_registry.c src/http_s
 		tests/test_http_worker_registry.c src/inherited_fds.c src/tls_stub.c \
 		src/adapter/voice_stream.c -o $@
 
-$(BUILD)/test-authority-provenance: tests/test_authority_provenance.c src/authority_provenance.c
+$(BUILD)/test-authority-provenance: tests/test_authority_provenance.c src/authority_provenance.c tests/fixtures/authority_provenance_v3.txt
 	@mkdir -p $(BUILD)
-	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_AUTHORITY_PROVENANCE_TESTING -DLE_AUTHORITY_V3_FIXTURE='"tests/fixtures/authority_provenance_v3.txt"' $(CSTD) $(WARN) -Werror -Isrc tests/test_authority_provenance.c src/authority_provenance.c -o $@
 
 # The per-tick time budget is lifted so the 256-step cap alone bounds a tick
 # and tick-count assertions do not depend on host speed or load.
