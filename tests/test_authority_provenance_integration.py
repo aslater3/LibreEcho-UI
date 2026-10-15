@@ -26,7 +26,8 @@ CASES = ('valid-mixed-signed-authority', 'runtime-signature-invalidation',
          'installed-id-invalidation', 'cold-tampered-system-signature',
          'cold-missing-system-signature', 'cold-tampered-system-manifest',
          'cold-wrong-installed-id', 'cold-partial-runtime-authority',
-         'recovery-after-missing-signature', 'authenticated-http')
+         'recovery-after-missing-signature', 'authenticated-http',
+         'ota-v3-generation-output')
 
 
 def load_module(name, path):
@@ -175,7 +176,71 @@ def validate_response(value, path, method, fields):
             raise AssertionError(f'{path} response schema accepted {mutation} signed authority')
 
 
+def v3_child(folder):
+    """Real Radar OTA v3 helper output, via the C reader and the OpenAPI schema."""
+    result = {'case': 'ota-v3-generation-output', 'passed': False, 'hardware_actions': False}
+    tx = 'txn-717467f70c3e3d240e9f8947'
+    lib = None
+    with tempfile.TemporaryDirectory(prefix='authority-v3-') as temporary:
+        root = Path(temporary)
+        update, generations = root / 'update', root / 'generations'
+        generation = generations / tx
+        for feature in ('airplay2', 'tts', 'wakeword', 'stt', 'assistant'):
+            (generation / 'features' / feature).mkdir(parents=True)
+            (generation / 'features' / feature / 'payload.squashfs').write_bytes(b'payload')
+            (generation / 'features' / feature / 'manifest.json').write_text('{}\n')
+        update.mkdir()
+        (update / 'current').write_text(tx + '\n')
+        (generation / 'COMPLETE').write_text('complete\n')
+        (generation / 'target.manifest.sig').write_text('sig\n')
+        (generation / 'target.manifest').write_text(
+            f'transaction_id={tx}\nrelease=radar-puffin-build-ecc683e-ec29d7e8c0f3c99b-993b82b6e79ab683\nversion=0.14.0\n')
+        helper = root / 'helper'
+        helper.write_text('#!/bin/sh\ncat ' + str(ROOT / 'tests/fixtures/authority_provenance_v3.txt') + '\n')
+        helper.chmod(0o700)
+        os.environ.update({'LIBREECHO_UPDATE_ROOT': str(update), 'LIBREECHO_GENERATIONS_ROOT': str(generations),
+                           'LIBREECHO_FEATURE_RUN_ROOT': str(root), 'LIBREECHO_FEATURE_TRANSACTION_HELPER': str(helper)})
+        os.environ.pop('LIBREECHO_FEATURE_ROOT', None)
+        try:
+            lib = ctypes.CDLL(str(folder / 'authority_provenance.so'))
+            lib.le_authority_provenance_json.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+            output = ctypes.create_string_buffer(16384)
+            deadline, value = time.monotonic() + 10, {}
+            while time.monotonic() < deadline:
+                lib.le_authority_provenance_tick()
+                lib.le_authority_provenance_json(output, len(output))
+                value = json.loads(output.value)
+                if value['available']:
+                    break
+                time.sleep(0.01)
+            assert value['available'], 'v3 authority never became available'
+            validate_authority(value)
+            assert value['schema'] == 'libreecho-feature-provenance-v3' and value['generation'] == tx
+            assert value['version'] == '0.14.0'
+            expected = dict(line.split('=', 1) for line in
+                            (ROOT / 'tests/fixtures/authority_provenance_v3.txt').read_text().splitlines())
+            for item in value['features']:
+                assert item['payload_sha256'] == expected[f"feature_{item['feature_id']}_payload_sha256"]
+                assert item['manifest_sha256'] == expected[f"feature_{item['feature_id']}_manifest_sha256"]
+            assert (update / 'authority-provenance-cache').stat().st_mode & 0o777 == 0o600
+            (generation / 'features/stt/payload.squashfs').write_bytes(b'changed')
+            lib.le_authority_provenance_json(output, len(output))
+            invalid = json.loads(output.value)
+            assert not invalid['available'], 'v3 identity retained after payload changed'
+            validate_authority(invalid)
+            result['passed'] = True
+        except Exception as error:
+            result['error'] = str(error)
+        finally:
+            if lib is not None:
+                lib.le_authority_provenance_shutdown()
+    print(json.dumps(result))
+    return 0 if result['passed'] else 1
+
+
 def child(folder, case):
+    if case == 'ota-v3-generation-output':
+        return v3_child(folder)
     module = load_module('signed_fixture', folder / 'test_feature_provenance.py')
     setattr(module, 'TRANSACTION', folder / 'libreecho-feature-transaction')
     fixture = module.ProvenanceFixture()

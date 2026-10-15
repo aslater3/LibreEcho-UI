@@ -2575,12 +2575,34 @@ older signed authority. These are authorizing identities, not a claim of the
 original feature build's source; they do not replace the legacy `components`
 identity fields.
 
+On OTA v3 devices the helper hands off to Platform's generation engine, which
+verifies the signed `target.manifest`, the active immutable generation named by
+`/data/libreecho/update/current`, and every feature payload and manifest hash
+before printing schema `libreecho-feature-provenance-v3`. The UI accepts that
+output only when every observed hash equals its signed target hash and the
+generation equals `update/current`, then reports `available: true`, schema
+`libreecho-feature-provenance-v3`, `generation`, `release` and `version` (read
+from the verified signed target manifest), `target_manifest_sha256`, and five
+`features` with `feature_id`, `payload_sha256` and `manifest_sha256`.
+
+Because the helper re-hashes every payload, a verified v3 observation is stored
+in `/data/libreecho/update/authority-provenance-cache` (owner-only `0600`,
+atomic temp + `fsync` + rename) together with the device/inode/mode/size/mtime/
+ctime identity of `update/current`, `update/pending`, every generation file, the
+helper, verifier, target-manifest checker, target file and public key. Later
+boots reuse it without running the helper only while every one of those
+identities is unchanged; a symlinked, group/world-accessible, malformed, or
+other-generation cache is ignored and the helper runs again. Each OTA creates a
+new generation, so it is verified once after the update.
+
 Missing, stale, partial, tampered, timed-out, or otherwise unverifiable evidence
 produces `available: false`, the same schema, `reason: "unavailable"`,
 `transaction_id: null`, and `features: []`, with no release/source claims. Relevant
 canonical payload, manifest, mounted daemon, authority/signature, transaction,
 public-key and verifier changes invalidate the observation. Failed verification
-is retried with bounded backoff; the HTTP loop remains serviceable. No OTA state,
+is retried up to three times at 5-second intervals and then every 5 minutes, so a
+persistently unverifiable state cannot keep re-hashing payloads; the helper is
+given up to 120 seconds; the HTTP loop remains serviceable. No OTA state,
 confirmation, settings, or feature data is changed by this read-only path. About
 and System display signed authorizing identity in native expandable details,
 separate from measured component status and running-process hashes.

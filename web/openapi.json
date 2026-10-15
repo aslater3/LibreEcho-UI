@@ -4557,6 +4557,87 @@
      {
       "type": "object",
       "additionalProperties": false,
+      "description": "OTA v3: verified active immutable generation. Platform checked the signed target manifest, the generation tree and every feature payload/manifest hash; release and version come from that signed target manifest. Reused across boots while every observed generation, verifier and key file keeps its identity.",
+      "required": [
+       "available",
+       "schema",
+       "generation",
+       "release",
+       "version",
+       "target_manifest_sha256",
+       "features"
+      ],
+      "properties": {
+       "available": {
+        "type": "boolean",
+        "enum": [
+         true
+        ]
+       },
+       "schema": {
+        "type": "string",
+        "enum": [
+         "libreecho-feature-provenance-v3"
+        ]
+       },
+       "generation": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 96
+       },
+       "release": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 127
+       },
+       "version": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 63
+       },
+       "target_manifest_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+       },
+       "features": {
+        "type": "array",
+        "minItems": 5,
+        "maxItems": 5,
+        "items": {
+         "type": "object",
+         "additionalProperties": false,
+         "required": [
+          "feature_id",
+          "payload_sha256",
+          "manifest_sha256"
+         ],
+         "properties": {
+          "feature_id": {
+           "type": "string",
+           "enum": [
+            "airplay2",
+            "tts",
+            "wakeword",
+            "stt",
+            "assistant"
+           ]
+          },
+          "payload_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$"
+          },
+          "manifest_sha256": {
+           "type": "string",
+           "pattern": "^[0-9a-f]{64}$"
+          }
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "object",
+      "additionalProperties": false,
       "required": [
        "available",
        "schema",
