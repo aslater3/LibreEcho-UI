@@ -45,7 +45,7 @@ concurrency:
 jobs:
   chromium_e2e:
     name: Chromium browser smoke
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Check out UI source
@@ -109,7 +109,7 @@ jobs:
 
   webkit_baby_monitor:
     name: WebKit Baby Monitor playback
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Check out UI source
