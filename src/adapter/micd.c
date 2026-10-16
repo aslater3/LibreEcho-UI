@@ -336,12 +336,57 @@ static void apply_digital_gain(int16_t *samples, size_t count,
 #define MICPGA_DEFAULT_VOLUME 40
 #define MICPGA_MAX_VOLUME 80
 
+#define MIC_CONFIG_MAX_BYTES 16384
+
+/*
+ * The owner's saved gain, read from the persisted web configuration named by
+ * LE_MIC_CONFIG, or -1.  This is read on every capture start rather than once
+ * at boot: LE_MIC_CAPTURE_GAIN is fixed when micd starts, so a gain changed
+ * afterwards was reverted to the boot-time value the next time the wake
+ * listener reopened the stream.
+ */
+static long saved_capture_gain(void)
+{
+    const char *path = getenv("LE_MIC_CONFIG");
+    char text[MIC_CONFIG_MAX_BYTES];
+    const char *p;
+    char *end;
+    long percent;
+    size_t used;
+    FILE *file;
+
+    if (!path || !path[0] || !(file = fopen(path, "r")))
+        return -1;
+    used = fread(text, 1, sizeof(text) - 1, file);
+    (void)fclose(file);
+    text[used] = '\0';
+    if (!(p = strstr(text, "\"microphone_gain\"")))
+        return -1;
+    p += strlen("\"microphone_gain\"");
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    if (*p++ != ':')
+        return -1;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        ++p;
+    if (*p < '0' || *p > '9')
+        return -1;
+    errno = 0;
+    percent = strtol(p, &end, 10);
+    if (errno || percent > 100 || (*end != ',' && *end != '}' &&
+        *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n'))
+        return -1;
+    return percent;
+}
+
 static int micpga_volume_from_environment(void)
 {
     const char *text = getenv("LE_MIC_CAPTURE_GAIN");
     char *end;
-    long percent;
+    long percent = saved_capture_gain();
 
+    if (percent >= 0)
+        return (int)(percent * MICPGA_MAX_VOLUME / 100);
     if (!text || !text[0])
         return MICPGA_DEFAULT_VOLUME;
     errno = 0;

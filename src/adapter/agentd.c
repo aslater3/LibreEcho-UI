@@ -1,25 +1,35 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "adapter.h"
+#include "spoken_time.h"
 #include "llm_http.h"
 #include "llm_provider.h"
 #include "llm_store.h"
 #include "voice_pipeline.h"
+#include "voice_history.h"
 #include "voice_playback.h"
 #include "timer_intent.h"
+#include "stop_intent.h"
 #include "voice_reply.h"
 #include "../config_store.h"
 #include "../json.h"
 #include "../log.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <semaphore.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Twelve records fit the bounded adapter response with worst-case timestamps. */
+#define LE_AGENT_TURN_HISTORY 12
+#define LE_AGENT_CLIENT_WORKERS 4
 
 #define DEFAULT_AGENT_SOCKET LE_ADAPTER_AGENT_SOCK
 #define DEFAULT_AGENT_CONFIG "/data/libreecho/config/agent.json"
@@ -28,6 +38,8 @@
 #define DEFAULT_CURL "/usr/local/libexec/libreecho-curl"
 #define DEFAULT_MODEL "gpt-5.4"
 #define DEFAULT_AUDIO_SOCKET LE_ADAPTER_AUDIO_SOCK
+#define DEFAULT_RADIO_SOCKET LE_ADAPTER_RADIO_SOCK
+#define DEFAULT_MEDIA_STATUS "/run/libreecho-audio/status.json"
 #define DEFAULT_TIMER_SOCKET "/run/libreecho/timer.sock"
 #define DEFAULT_TTS_SOCKET LE_ADAPTER_TTS_SOCK
 #define DEFAULT_WAKE_SOCKET LE_ADAPTER_WAKEWORD_SOCK
@@ -58,6 +70,11 @@ struct agent_config {
     char latitude[16];
     char longitude[16];
     char weather_provider[24];
+    /*
+     * The clock the device speaks in, "12" or "24". Stored here with the other
+     * spoken-output settings because agentd is what says the time out loud.
+     */
+    char clock_format[4];
 };
 
 struct agent_state {
@@ -69,6 +86,8 @@ struct agent_state {
     char auth_error[256];
     char socket_path[256];
     char config_path[384];
+    char history_generation_path[384];
+    unsigned long long history_generation;
     char weather_text[160];
     time_t weather_fetched;
     char credentials_path[384];
@@ -76,6 +95,8 @@ struct agent_state {
     char audio_socket[256];
     char tts_socket[256];
     char timer_socket[256];
+    char radio_socket[256];
+    char media_status[256];
     char wake_socket[256];
     char stt_socket[256];
     char tts_first_pcm_file[384];
@@ -89,6 +110,34 @@ struct agent_state {
     uint64_t first_text_ms;
     uint64_t first_announce_ms;
     uint64_t first_pcm_ms;
+    /*
+     * Per-turn timings, kept here rather than in the browser.
+     *
+     * The simulation page used to hold this in localStorage, which is scoped
+     * per origin -- and this device takes a new DHCP lease on most boots
+     * because the Wi-Fi driver generates a fresh MAC, so every reboot moved
+     * the UI to a new origin and the history started empty. It also recorded
+     * what the browser observed across a network hop rather than what the
+     * device measured. These are the numbers agentd already computes.
+     */
+    struct turn_record {
+        uint64_t at_ms;
+        uint64_t stt_audio_ms, stt_processing_ms, stt_total_ms;
+        uint64_t first_text_ms, first_announce_ms, first_pcm_ms;
+        char request_id[64];
+        int follow_up;
+    } turn_history[LE_AGENT_TURN_HISTORY];
+    unsigned turn_history_next, turn_history_count;
+    /*
+     * Canonical private voice-turn history: the ten most recent turns with the
+     * recognised transcript and the final human-facing reply. RAM only; the
+     * transcript text is never written through the persisted latency history
+     * above. Guarded by metrics_mutex.
+     */
+    struct le_voice_history voice_history;
+    unsigned long long turn_history_generation;   /* captured at turn start */
+    uint64_t turn_history_id;                     /* current record id, 0 none */
+    int turn_tts_failed;
     unsigned long latency_violations;
     char turn_request_id[64];
     unsigned long completed_turns;
@@ -111,6 +160,15 @@ static uint64_t monotonic_milliseconds(void)
     struct timespec now;
 
     if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000ULL +
+           (uint64_t)now.tv_nsec / 1000000ULL;
+}
+
+static uint64_t wall_clock_milliseconds(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) < 0)
         return 0;
     return (uint64_t)now.tv_sec * 1000ULL +
            (uint64_t)now.tv_nsec / 1000000ULL;
@@ -175,6 +233,10 @@ static const char *auth_state_name(enum auth_state state)
 
 static void build_turn_prompt(struct agent_state *state, char *out,
                               size_t size);
+static int save_history_state(const struct agent_state *state,
+                              unsigned long long generation,
+                              const struct turn_record *records,
+                              unsigned next, unsigned count);
 
 static void config_defaults(struct agent_config *config)
 {
@@ -185,6 +247,7 @@ static void config_defaults(struct agent_config *config)
     snprintf(config->prompt, sizeof(config->prompt), "%s",
              le_llm_default_voice_prompt());
     strcpy(config->weather_provider, "open-meteo");
+    strcpy(config->clock_format, LE_CLOCK_FORMAT_DEFAULT);
 }
 
 /*
@@ -267,10 +330,12 @@ static int save_config(const struct agent_state *state)
         "\"prompt\":\"%s\","
         "\"home_location\":\"%s\","
         "\"latitude\":\"%s\",\"longitude\":\"%s\","
-        "\"weather_provider\":\"%s\"}\n",
+        "\"weather_provider\":\"%s\","
+        "\"clock_format\":\"%s\"}\n",
         state->config.enabled ? "true" : "false", state->config.provider,
         model, prompt, location, state->config.latitude,
-        state->config.longitude, state->config.weather_provider);
+        state->config.longitude, state->config.weather_provider,
+        state->config.clock_format);
     return length > 0 && length < (int)sizeof(json)
         ? config_write_atomic(state->config_path, json, (size_t)length)
         : -1;
@@ -301,6 +366,15 @@ static void load_config(struct agent_state *state)
     (void)json_get_string(json, "weather_provider",
                           state->config.weather_provider,
                           sizeof(state->config.weather_provider));
+    (void)json_get_string(json, "clock_format",
+                          state->config.clock_format,
+                          sizeof(state->config.clock_format));
+    /*
+     * A device that never chose gets the 12-hour default; one that did keeps
+     * its choice across the upgrade.
+     */
+    if (!le_clock_format_valid(state->config.clock_format))
+        strcpy(state->config.clock_format, LE_CLOCK_FORMAT_DEFAULT);
     if (!state->config.weather_provider[0])
         strcpy(state->config.weather_provider, "open-meteo");
     if (!state->config.model[0])
@@ -334,7 +408,25 @@ static int adapter_call(const char *socket_path, int timeout_ms,
     return result;
 }
 
-static int play_sentence(void *context, const char *text)
+/*
+ * The local speech path failed for the turn currently being answered. Mark the
+ * turn so its canonical history record is classified tts_failed, and upgrade a
+ * record that has already been stored. The stored generation is checked by the
+ * history unit, so a failure that races a clear cannot revive a scrubbed turn.
+ * Playback is single-flight, so this always belongs to the in-flight turn.
+ */
+static void note_tts_failure(struct agent_state *state)
+{
+    pthread_mutex_lock(&state->metrics_mutex);
+    state->turn_tts_failed = 1;
+    if (state->turn_history_id)
+        (void)le_voice_history_set_status(
+            &state->voice_history, state->turn_history_generation,
+            state->turn_history_id, LE_VOICE_TURN_TTS_FAILED, NULL);
+    pthread_mutex_unlock(&state->metrics_mutex);
+}
+
+static int play_sentence_internal(void *context, const char *text, int queued)
 {
     struct agent_state *state = context;
     char escaped[LE_VOICE_REPLY_SEGMENT_MAX * 2U];
@@ -342,11 +434,15 @@ static int play_sentence(void *context, const char *text)
     char request_id[sizeof(state->turn_request_id)];
     char response[LE_ADAPTER_MSG_MAX];
     struct timespec delay = {0, 50000000L};
-    int length;
+    int length, speaking;
     unsigned int attempt;
 
-    if (escape_json(escaped, sizeof(escaped), text) < 0)
+    if (queued && le_voice_playback_cancelled(&state->playback))
+        return 0;
+    if (escape_json(escaped, sizeof(escaped), text) < 0) {
+        note_tts_failure(state);
         return -1;
+    }
     pthread_mutex_lock(&state->metrics_mutex);
     snprintf(request_id, sizeof(request_id), "%s",
              state->turn_request_id);
@@ -357,8 +453,10 @@ static int play_sentence(void *context, const char *text)
         escaped, request_id);
     if (length <= 0 || length >= (int)sizeof(args) ||
         adapter_call(state->audio_socket, 1000, "speak", args,
-                     response, sizeof(response)) != LE_ADAPTER_OK)
+                     response, sizeof(response)) != LE_ADAPTER_OK) {
+        note_tts_failure(state);
         return -1;
+    }
     pthread_mutex_lock(&state->metrics_mutex);
     if (!state->first_announce_ms)
         state->first_announce_ms =
@@ -371,9 +469,17 @@ static int play_sentence(void *context, const char *text)
      * dequeuing another sentence. During in-process synthesis the status call
      * times out; this keeps the provider stream unblocked in its own thread.
      */
+    /* Cancellation can race the initial speak request. Check again after
+       acknowledgement, so a late speak cannot restart a cancelled turn. */
+    if (queued && le_voice_playback_cancelled(&state->playback))
+        return adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
+                            response, sizeof(response));
     if (access(state->tts_socket, F_OK) != 0)
         return 0;
     for (attempt = 0; attempt < 600 && running; ++attempt) {
+        if (queued && le_voice_playback_cancelled(&state->playback))
+            return adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
+                                response, sizeof(response));
         FILE *marker = fopen(state->tts_first_pcm_file, "r");
 
         if (marker) {
@@ -386,10 +492,33 @@ static int play_sentence(void *context, const char *text)
                 pthread_mutex_lock(&state->metrics_mutex);
                 if (!state->first_pcm_ms &&
                     marker_ms >= state->turn_started_ms) {
+                    unsigned history_i;
+                    int history_updated = 0;
                     state->first_pcm_ms =
                         marker_ms - state->turn_started_ms;
                     if (state->first_pcm_ms > 3000)
                         ++state->latency_violations;
+                    for (history_i = 0;
+                         history_i < state->turn_history_count;
+                         ++history_i) {
+                        unsigned idx = (state->turn_history_next
+                                        + LE_AGENT_TURN_HISTORY - 1
+                                        - history_i)
+                                       % LE_AGENT_TURN_HISTORY;
+                        if (!strcmp(state->turn_history[idx].request_id,
+                                    request_id)) {
+                            state->turn_history[idx].first_pcm_ms =
+                                state->first_pcm_ms;
+                            history_updated = 1;
+                            break;
+                        }
+                    }
+                    if (history_updated &&
+                        save_history_state(state, state->history_generation,
+                                           state->turn_history,
+                                           state->turn_history_next,
+                                           state->turn_history_count) != 0)
+                        le_log_warn("agentd: late turn history update could not be persisted");
                 }
                 pthread_mutex_unlock(&state->metrics_mutex);
             }
@@ -397,11 +526,395 @@ static int play_sentence(void *context, const char *text)
         }
         if (adapter_call(state->tts_socket, 250, "status", NULL,
                          response, sizeof(response)) == LE_ADAPTER_OK &&
-            strstr(response, "\"speaking\":false"))
+            json_get_bool(response, "speaking", &speaking) == 1 && !speaking)
             return 0;
         nanosleep(&delay, NULL);
     }
+    note_tts_failure(state);
     return -1;
+}
+
+/*
+ * The per-turn latency history. Its own command rather than extra fields on
+ * status: status is polled often and must stay well inside the 4096-byte
+ * adapter message, while this is read only when the page is open.
+ */
+static int command_history(struct agent_state *state, int client_fd,
+                           unsigned long id)
+{
+    char body[LE_ADAPTER_MSG_MAX];
+    size_t used = 0;
+    unsigned i, n;
+    int wrote;
+    const size_t body_limit = LE_ADAPTER_MSG_MAX - 256;
+
+    pthread_mutex_lock(&state->metrics_mutex);
+    wrote = snprintf(body, body_limit,
+                     "{\"history_generation\":%llu,\"turns\":[",
+                     state->history_generation);
+    if (wrote < 0 || (size_t)wrote >= body_limit) {
+        pthread_mutex_unlock(&state->metrics_mutex);
+        return respond(client_fd, id, 0, "history too large");
+    }
+    used = (size_t)wrote;
+
+    n = state->turn_history_count;
+    for (i = 0; i < n; ++i) {
+        /* newest first: walk back from the write cursor */
+        unsigned idx = (state->turn_history_next + LE_AGENT_TURN_HISTORY
+                        - 1 - i) % LE_AGENT_TURN_HISTORY;
+        const struct turn_record *r = &state->turn_history[idx];
+        wrote = snprintf(body + used, body_limit - used,
+                         "%s{\"at_ms\":%llu,\"stt_audio_ms\":%llu,"
+                         "\"stt_processing_ms\":%llu,\"stt_total_ms\":%llu,"
+                         "\"first_text_ms\":%llu,\"first_announce_ms\":%llu,"
+                         "\"first_pcm_ms\":%llu,\"follow_up\":%s}",
+                         i ? "," : "",
+                         (unsigned long long)r->at_ms,
+                         (unsigned long long)r->stt_audio_ms,
+                         (unsigned long long)r->stt_processing_ms,
+                         (unsigned long long)r->stt_total_ms,
+                         (unsigned long long)r->first_text_ms,
+                         (unsigned long long)r->first_announce_ms,
+                         (unsigned long long)r->first_pcm_ms,
+                         r->follow_up ? "true" : "false");
+        if (wrote < 0 || (size_t)wrote >= body_limit - used) {
+            pthread_mutex_unlock(&state->metrics_mutex);
+            return respond(client_fd, id, 0, "history too large");
+        }
+        used += (size_t)wrote;
+    }
+    pthread_mutex_unlock(&state->metrics_mutex);
+
+    wrote = snprintf(body + used, body_limit - used, "]}");
+    if (wrote < 0 || (size_t)wrote >= body_limit - used)
+        return respond(client_fd, id, 0, "history too large");
+    return respond(client_fd, id, 1, body);
+}
+
+static int sync_history_directory(const char *path)
+{
+    char directory[384];
+    char *slash;
+    int fd, rc;
+
+    snprintf(directory, sizeof(directory), "%s", path);
+    slash = strrchr(directory, '/');
+    if (!slash)
+        return -1;
+    if (slash == directory)
+        slash[1] = '\0';
+    else
+        *slash = '\0';
+    fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    rc = fsync(fd);
+    close(fd);
+    return rc;
+}
+
+static int json_get_u64(const char *json, const char *key, uint64_t *out)
+{
+    char needle[64];
+    const char *p;
+    char *end;
+    unsigned long long value;
+
+    if (snprintf(needle, sizeof(needle), "\"%s\"", key) >=
+        (int)sizeof(needle))
+        return -1;
+    p = strstr(json, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ||
+           *p == ':')
+        ++p;
+    if (*p < '0' || *p > '9')
+        return -1;
+    errno = 0;
+    value = strtoull(p, &end, 10);
+    if (errno || end == p ||
+        (*end && *end != ',' && *end != '}' && *end != ']' &&
+         *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n'))
+        return -1;
+    *out = (uint64_t)value;
+    return 1;
+}
+
+static int write_history_file(const char *path, const char *json,
+                              size_t length)
+{
+    char temporary[400];
+    char backup[389];
+    int fd;
+    FILE *file;
+
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX", path) >=
+        (int)sizeof(temporary) ||
+        snprintf(backup, sizeof(backup), "%s.bak", path) >=
+        (int)sizeof(backup))
+        return -1;
+    fd = mkstemp(temporary);
+    if (fd < 0 || fchmod(fd, 0600) != 0) {
+        if (fd >= 0)
+            close(fd);
+        unlink(temporary);
+        return -1;
+    }
+    file = fdopen(fd, "w");
+    if (!file || fwrite(json, 1, length, file) != length ||
+        fflush(file) != 0 || fsync(fileno(file)) != 0) {
+        if (file)
+            fclose(file);
+        else
+            close(fd);
+        unlink(temporary);
+        return -1;
+    }
+    if (fclose(file) != 0) {
+        unlink(temporary);
+        return -1;
+    }
+    if (rename(path, backup) != 0 &&
+        errno != ENOENT) {
+        unlink(temporary);
+        return -1;
+    }
+    if (rename(temporary, path) != 0) {
+        rename(backup, path);
+        unlink(temporary);
+        return -1;
+    }
+    if (sync_history_directory(path) != 0)
+        return -1;
+    return 0;
+}
+
+static int save_history_state(const struct agent_state *state,
+                              unsigned long long generation,
+                              const struct turn_record *records,
+                              unsigned next, unsigned count)
+{
+    char json[LE_ADAPTER_MSG_MAX];
+    size_t used = 0;
+    unsigned i, start;
+    int wrote;
+
+    if (count > LE_AGENT_TURN_HISTORY)
+        return -1;
+    wrote = snprintf(json, sizeof(json),
+                     "{\"version\":1,\"history_generation\":%llu,"
+                     "\"turns\":[",
+                     generation);
+    if (wrote < 0 || (size_t)wrote >= sizeof(json))
+        return -1;
+    used = (size_t)wrote;
+    start = (next + LE_AGENT_TURN_HISTORY - count) % LE_AGENT_TURN_HISTORY;
+    for (i = 0; i < count; ++i) {
+        const struct turn_record *record = &records[(start + i) %
+                                                     LE_AGENT_TURN_HISTORY];
+        char request_id[sizeof(record->request_id) * 2U];
+
+        if (escape_json(request_id, sizeof(request_id),
+                        record->request_id) < 0)
+            return -1;
+        wrote = snprintf(
+            json + used, sizeof(json) - used,
+            "%s{\"at_ms\":%llu,\"stt_audio_ms\":%llu,"
+            "\"stt_processing_ms\":%llu,\"stt_total_ms\":%llu,"
+            "\"first_text_ms\":%llu,\"first_announce_ms\":%llu,"
+            "\"first_pcm_ms\":%llu,\"follow_up\":%s,"
+            "\"request_id\":\"%s\"}",
+            i ? "," : "", (unsigned long long)record->at_ms,
+            (unsigned long long)record->stt_audio_ms,
+            (unsigned long long)record->stt_processing_ms,
+            (unsigned long long)record->stt_total_ms,
+            (unsigned long long)record->first_text_ms,
+            (unsigned long long)record->first_announce_ms,
+            (unsigned long long)record->first_pcm_ms,
+            record->follow_up ? "true" : "false", request_id);
+        if (wrote < 0 || (size_t)wrote >= sizeof(json) - used)
+            return -1;
+        used += (size_t)wrote;
+    }
+    wrote = snprintf(json + used, sizeof(json) - used, "]}\n");
+    if (wrote < 0 || (size_t)wrote >= sizeof(json) - used)
+        return -1;
+    return write_history_file(state->history_generation_path, json,
+                              used + (size_t)wrote);
+}
+
+static void append_history_record(struct agent_state *state,
+                                   const struct turn_record *record)
+{
+    state->turn_history[state->turn_history_next] = *record;
+    state->turn_history_next =
+        (state->turn_history_next + 1) % LE_AGENT_TURN_HISTORY;
+    if (state->turn_history_count < LE_AGENT_TURN_HISTORY)
+        ++state->turn_history_count;
+}
+
+static int load_history_file(struct agent_state *state, const char *path)
+{
+    char json[LE_ADAPTER_MSG_MAX];
+    char object[1024];
+    struct turn_record records[LE_AGENT_TURN_HISTORY];
+    const char *array;
+    const char *at;
+    uint64_t generation;
+    unsigned next = 0;
+    unsigned count = 0;
+    unsigned long long loaded_generation = state->history_generation;
+
+    memset(records, 0, sizeof(records));
+    if (config_read(path, json, sizeof(json)) < 0 ||
+        !json_valid_object(json, strlen(json)))
+        return -1;
+    if (json_get_u64(json, "history_generation", &generation) > 0 &&
+        generation)
+        loaded_generation = (unsigned long long)generation;
+    array = strstr(json, "\"turns\"");
+    array = array ? strchr(array, '[') : NULL;
+    if (array) {
+        at = array + 1;
+        for (;;) {
+            const char *end;
+            size_t length;
+            struct turn_record record;
+            int follow_up;
+
+            while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n' ||
+                   *at == ',')
+                ++at;
+            if (*at == ']')
+                break;
+            if (*at != '{')
+                return -1;
+            end = strchr(at, '}');
+            if (!end)
+                return -1;
+            length = (size_t)(end - at + 1);
+            if (length >= sizeof(object))
+                return -1;
+            memcpy(object, at, length);
+            object[length] = '\0';
+            memset(&record, 0, sizeof(record));
+            if (json_get_u64(object, "at_ms", &record.at_ms) < 1 ||
+                json_get_u64(object, "stt_audio_ms", &record.stt_audio_ms) < 1 ||
+                json_get_u64(object, "stt_processing_ms",
+                             &record.stt_processing_ms) < 1 ||
+                json_get_u64(object, "stt_total_ms", &record.stt_total_ms) < 1 ||
+                json_get_u64(object, "first_text_ms", &record.first_text_ms) < 1 ||
+                json_get_u64(object, "first_announce_ms",
+                             &record.first_announce_ms) < 1 ||
+                json_get_u64(object, "first_pcm_ms", &record.first_pcm_ms) < 1 ||
+                json_get_bool(object, "follow_up", &follow_up) < 1)
+                return -1;
+            record.follow_up = follow_up;
+            if (json_get_string(object, "request_id", record.request_id,
+                                sizeof(record.request_id)) < 0)
+                return -1;
+            records[next] = record;
+            next = (next + 1) % LE_AGENT_TURN_HISTORY;
+            if (count < LE_AGENT_TURN_HISTORY)
+                ++count;
+            at = end + 1;
+            if (*at == ']')
+                break;
+            if (*at != ',')
+                return -1;
+            ++at;
+        }
+    }
+    state->history_generation = loaded_generation;
+    memcpy(state->turn_history, records, sizeof(records));
+    state->turn_history_next = next;
+    state->turn_history_count = count;
+    return 0;
+}
+
+static int load_history(struct agent_state *state)
+{
+    return load_history_file(state, state->history_generation_path);
+}
+
+static int command_history_clear(struct agent_state *state, int client_fd,
+                                 unsigned long id)
+{
+    unsigned long long next;
+
+    pthread_mutex_lock(&state->metrics_mutex);
+    next = state->history_generation + 1;
+    if (!next)
+        next = 1;
+    if (save_history_state(state, next, NULL, 0, 0) != 0) {
+        pthread_mutex_unlock(&state->metrics_mutex);
+        return respond(client_fd, id, 0,
+                       "history clear could not be persisted");
+    }
+    state->history_generation = next;
+    state->turn_history_next = 0;
+    state->turn_history_count = 0;
+    /* The same clear action scrubs the private canonical transcript ring
+     * immediately; the generation bump makes any in-flight completion stale. */
+    le_voice_history_clear(&state->voice_history);
+    state->turn_history_id = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
+    return respond(client_fd, id, 1, "{}");
+}
+
+/*
+ * Canonical private voice history. Newest first, at most ten records, bounded
+ * so the collection always fits the adapter message; the full bounded text of
+ * one record is returned by voice_history_entry. Read-only, so it only takes
+ * metrics_mutex.
+ */
+static int command_voice_history(struct agent_state *state, int client_fd,
+                                 unsigned long id)
+{
+    char body[LE_ADAPTER_MSG_MAX];
+    int length;
+
+    pthread_mutex_lock(&state->metrics_mutex);
+    length = le_voice_history_serialize(
+        &state->voice_history, body, sizeof(body));
+    pthread_mutex_unlock(&state->metrics_mutex);
+    if (length < 0)
+        return respond(client_fd, id, 0, "voice history too large");
+    return respond(client_fd, id, 1, body);
+}
+
+static int command_voice_history_entry(struct agent_state *state,
+                                       const char *args, int client_fd,
+                                       unsigned long id)
+{
+    char body[LE_ADAPTER_MSG_MAX];
+    long long requested;
+    int length;
+
+    if (!args || json_get_int64(args, "id", &requested) < 1 || requested <= 0)
+        return respond(client_fd, id, 0, "id is required");
+    pthread_mutex_lock(&state->metrics_mutex);
+    length = le_voice_history_serialize_entry(
+        &state->voice_history, (uint64_t)requested, body, sizeof(body));
+    pthread_mutex_unlock(&state->metrics_mutex);
+    if (length == -1)
+        return respond(client_fd, id, 0, "history entry not found");
+    if (length < 0)
+        return respond(client_fd, id, 0, "history entry too large");
+    return respond(client_fd, id, 1, body);
+}
+
+static int command_voice_history_clear(struct agent_state *state, int client_fd,
+                                       unsigned long id)
+{
+    pthread_mutex_lock(&state->metrics_mutex);
+    le_voice_history_clear(&state->voice_history);
+    state->turn_history_id = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
+    return respond(client_fd, id, 1, "{}");
 }
 
 static int command_status(struct agent_state *state, int fd,
@@ -452,6 +965,7 @@ static int command_status(struct agent_state *state, int fd,
             "\"home_location\":\"%s\","
             "\"latitude\":\"%s\",\"longitude\":\"%s\","
             "\"weather_provider\":\"%s\","
+            "\"clock_format\":\"%s\","
             "\"base_url\":\"%s\",\"api_key_configured\":%s,"
             "\"voice_pipeline\":true,\"text_streaming\":true,"
             "\"wake_connected\":%s,\"audio_connected\":%s,"
@@ -476,7 +990,7 @@ static int command_status(struct agent_state *state, int fd,
             auth_state_name(state->auth_state), code, url, error,
             model, prompt, location, state->config.latitude,
             state->config.longitude, state->config.weather_provider,
-            base_url,
+            state->config.clock_format, base_url,
             state->credentials.api_key[0] ? "true" : "false",
             voice_metrics.wake_connected ? "true" : "false",
             voice_metrics.audio_connected ? "true" : "false",
@@ -594,6 +1108,16 @@ static int response_event(void *context, const char *data)
 
 /* --------------------------- Timer requests ----------------------------- */
 
+static int play_sentence(void *context, const char *text)
+{
+    return play_sentence_internal(context, text, 0);
+}
+
+static int play_queued_sentence(void *context, const char *text)
+{
+    return play_sentence_internal(context, text, 1);
+}
+
 /*
  * Timers are handled here rather than by the language model, which can
  * describe a timer but cannot start one. Matching locally also means the
@@ -616,8 +1140,11 @@ static int handle_timer_intent(struct agent_state *state,
     int remaining = 0;
     int timer_id = 0;
 
-    if (le_timer_intent_parse(transcript, &intent) == LE_TIMER_INTENT_NONE)
+    if (le_timer_intent_parse(transcript, &intent) == LE_TIMER_INTENT_NONE &&
+        !le_stop_intent_matches(transcript))
         return 0;
+    if (le_stop_intent_matches(transcript))
+        intent.kind = LE_TIMER_INTENT_DISMISS;
 
     if (adapter_call(state->timer_socket, 1000, "status", "{}", response,
                      sizeof(response)) != LE_ADAPTER_OK) {
@@ -629,6 +1156,8 @@ static int handle_timer_intent(struct agent_state *state,
 
     switch (intent.kind) {
     case LE_TIMER_INTENT_DISMISS:
+        if (!le_stop_intent_matches(transcript))
+            return 0;
         /* "Stop" means a dozen things. It only means the timer while one is
            actually ringing; otherwise this is not our request to answer. */
         if (ringing <= 0)
@@ -967,19 +1496,32 @@ static int fetch_open_meteo(struct agent_state *state, char *out, size_t size)
     struct le_llm_http_response *response;
     int outcome = 0;
     double temperature = 0.0, wind = 0.0, coded = 0.0;
+    const char *model;
 
     request = calloc(1, sizeof(*request));
     response = calloc(1, sizeof(*response));
     if (!request || !response)
         goto done;
+    /*
+     * The UK Met Office models are served from this same keyless endpoint, so
+     * a UK owner can be answered from the Met Office without an account, a
+     * key or a second transport.  ukmo_seamless is deliberate rather than the
+     * 2 km UK model alone: the 2 km model has no data outside its UK domain
+     * and answers HTTP 400 there, while the seamless blend falls back to the
+     * global UKMO model elsewhere, so a location that leaves the UK keeps
+     * working instead of losing its weather.
+     */
+    model = !strcmp(state->config.weather_provider, "ukmo")
+        ? "&models=ukmo_seamless" : "";
     (void)snprintf(request->method, sizeof(request->method), "GET");
     if (snprintf(request->url, sizeof(request->url),
                  "https://api.open-meteo.com/v1/forecast"
                  "?latitude=%s&longitude=%s"
                  "&current=temperature_2m,weather_code,wind_speed_10m"
-                 "&temperature_unit=fahrenheit&wind_speed_unit=mph",
+                 "&temperature_unit=fahrenheit&wind_speed_unit=mph%s",
                  state->config.latitude,
-                 state->config.longitude) >= (int)sizeof(request->url))
+                 state->config.longitude,
+                 model) >= (int)sizeof(request->url))
         goto done;
     if (le_llm_http_execute(state->curl_path, request, NULL, NULL,
                             response) < 0 || response->status != 200)
@@ -1052,7 +1594,8 @@ static void build_turn_prompt(struct agent_state *state, char *out,
 
     (void)snprintf(out, size, "%s", state->config.prompt);
     if (localtime_r(&now, &tm))
-        (void)strftime(when, sizeof(when), "%A %e %B, %H:%M", &tm);
+        le_spoken_time(when, sizeof(when), &tm,
+                       le_clock_format_twelve_hour(state->config.clock_format));
     if (when[0])
         (void)snprintf(out + strlen(out), size - strlen(out),
                        " The current local date and time is %s.", when);
@@ -1085,6 +1628,65 @@ static int response_asks_question(const char *text)
     return length && text[length - 1] == '?';
 }
 
+/* Local stop is handled before authentication and never opens a follow-up.
+ * Adapted from the behaviour proposed in #192, retaining the speech worker. */
+static int playback_status(const char *socket, const char *key, int *known)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int value = 0;
+    if (adapter_call(socket, 250, "status", NULL, response, sizeof(response)) ==
+            LE_ADAPTER_OK && json_get_bool(response, key, &value) == 1)
+        ++*known;
+    return value;
+}
+
+static int handle_stop_intent(struct agent_state *state, const char *text,
+                             char *spoken, size_t spoken_size)
+{
+    char response[LE_ADAPTER_MSG_MAX], media[768], source[32];
+    int known = 0, radio, speech, noise, external = 0, failed = 0;
+    if (!le_stop_intent_matches(text))
+        return 0;
+    spoken[0] = '\0';
+    state->follow_up_armed = 0;
+    state->follow_up_depth = 0;
+    state->previous_voice_user[0] = '\0';
+    state->previous_voice_reply[0] = '\0';
+    radio = playback_status(state->radio_socket, "playing", &known);
+    speech = playback_status(state->tts_socket, "speaking", &known);
+    noise = playback_status(state->audio_socket, "noise_active", &known);
+    speech |= le_voice_playback_pending(&state->playback);
+    if (config_read(state->media_status, media, sizeof(media)) > 0 &&
+        json_get_string_top_level(media, "active", source, sizeof(source)) == 1)
+        external = !strcmp(source, "airplay2") || !strcmp(source, "bluetooth");
+    le_voice_playback_cancel(&state->playback);
+    if (radio && adapter_call(state->radio_socket, 1000, "stop", NULL,
+                              response, sizeof(response)) != LE_ADAPTER_OK)
+        failed = 1;
+    if (noise && adapter_call(state->audio_socket, 1000, "noise_stop", NULL,
+                              response, sizeof(response)) != LE_ADAPTER_OK)
+        failed = 1;
+    if (speech && adapter_call(state->audio_socket, 1000, "stop_speech", NULL,
+                               response, sizeof(response)) != LE_ADAPTER_OK)
+        failed = 1;
+    if (failed || (!known && !external)) {
+        snprintf(spoken, spoken_size, "Playback control is unavailable.");
+        le_log_warn("agentd: local stop could not be confirmed");
+        return -1;
+    }
+    if (external) {
+        snprintf(spoken, spoken_size,
+                 "Phone playback must be stopped on your phone.");
+        (void)play_sentence(state, spoken);
+    }
+    /* An idle/repeated stop is still consumed, not sent to the model. */
+    state->follow_up_armed = 0;
+    state->follow_up_depth = 0;
+    state->previous_voice_user[0] = '\0';
+    state->previous_voice_reply[0] = '\0';
+    return 1;
+}
+
 static int command_respond(struct agent_state *state, const char *args,
                            int fd, unsigned long id)
 {
@@ -1113,6 +1715,20 @@ static int command_respond(struct agent_state *state, const char *args,
             ? respond(fd, id, 1, payload)
             : respond(fd, id, 0, "response text is too large");
     }
+    {
+        int stopped = handle_stop_intent(state, transcript, full_text, sizeof(full_text));
+        if (stopped < 0)
+            return respond(fd, id, 0, full_text);
+        if (stopped > 0) {
+            if (escape_json(escaped, sizeof(escaped), full_text) < 0)
+                return respond(fd, id, 0, "response text is too large");
+            length = snprintf(payload, sizeof(payload),
+                     "{\"queued\":true,\"text\":\"%s\",\"first_text_ms\":0}", escaped);
+            return length > 0 && length < (int)sizeof(payload)
+                ? respond(fd, id, 1, payload)
+                : respond(fd, id, 0, "response text is too large");
+        }
+    }
     if (generate_response(
             state, transcript, 0, full_text, sizeof(full_text),
             error, sizeof(error)) < 0)
@@ -1132,6 +1748,97 @@ static int command_respond(struct agent_state *state, const char *args,
         : respond(fd, id, 0, "response is too large");
 }
 
+/*
+ * Store one canonical voice turn. Called with metrics_mutex held. The caller's
+ * generation is the value captured before the turn started, so a clear that
+ * lands mid-turn makes this completion stale and it is dropped instead of
+ * repopulating a scrubbed ring. Only human-facing text is stored: the
+ * recognised transcript and the final reply, never the augmented prompt.
+ */
+static void record_voice_turn(struct agent_state *state, int status,
+                              unsigned long long generation, const char *text,
+                              const char *reply, uint32_t stt_ms,
+                              uint32_t assistant_ms, uint32_t tts_ms)
+{
+    struct le_voice_turn_record record;
+    int added;
+
+    memset(&record, 0, sizeof(record));
+    snprintf(record.request_id, sizeof(record.request_id), "%s",
+             state->turn_request_id);
+    record.status = status;
+    record.stt_ms = stt_ms;
+    record.assistant_ms = assistant_ms;
+    record.tts_ms = tts_ms;
+    if (text && text[0]) {
+        snprintf(record.transcript, sizeof(record.transcript), "%s", text);
+        if (strlen(text) >= sizeof(record.transcript))
+            record.transcript_truncated = 1;
+    }
+    if (reply && reply[0]) {
+        snprintf(record.response, sizeof(record.response), "%s", reply);
+        if (strlen(reply) >= sizeof(record.response))
+            record.response_truncated = 1;
+    }
+    added = le_voice_history_add(&state->voice_history, generation, &record);
+    state->turn_history_generation = generation;
+    state->turn_history_id = added == 1
+        ? le_voice_history_at(&state->voice_history, 0)->id : 0;
+    if (added != 1)
+        le_log_warn("agentd: voice history turn dropped (stale generation)");
+}
+
+/*
+ * Turn-begin sink. Recognition started for a turn, so snapshot the voice
+ * history generation now. A clear that lands while the turn is still in
+ * flight bumps the generation, which makes the eventual transcript or
+ * pre-transcript failure stale: it is dropped instead of repopulating the
+ * scrubbed ring. Capturing only at the terminal event (or when the transcript
+ * callback starts) let a cleared in-flight turn reappear, which is a privacy
+ * bug. Playback is single-flight, so one captured value covers the turn.
+ */
+static void voice_turn_begin(void *context, uint64_t detection_sample)
+{
+    struct agent_state *state = context;
+
+    (void)detection_sample;
+    pthread_mutex_lock(&state->metrics_mutex);
+    state->turn_history_generation =
+        le_voice_history_generation(&state->voice_history);
+    state->turn_history_id = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
+}
+
+/*
+ * Pre-transcript outcome sink. A recognition failure, a superseded wake or a
+ * recognition deadline now leaves a bounded record instead of disappearing.
+ * Transcript-bearing turns arrive through voice_transcript.
+ */
+static void voice_outcome(void *context,
+                          const struct le_voice_pipeline_outcome *outcome)
+{
+    struct agent_state *state = context;
+    struct le_voice_turn_record record;
+
+    memset(&record, 0, sizeof(record));
+    record.status = outcome->status;
+    record.stt_ms = outcome->stt_total_ms > 0xFFFFFFFFULL
+        ? 0xFFFFFFFFU : (uint32_t)outcome->stt_total_ms;
+    pthread_mutex_lock(&state->metrics_mutex);
+    /*
+     * The generation captured at turn start, never the live value: a clear
+     * that landed while the turn was in flight must keep its failure out of
+     * the freshly cleared ring.
+     */
+    (void)le_voice_history_add(
+        &state->voice_history,
+        state->turn_history_generation, &record);
+    pthread_mutex_unlock(&state->metrics_mutex);
+    le_log_info("agentd: voice turn %s before transcript follow_up=%s",
+                le_voice_turn_status_name(outcome->status),
+                outcome->follow_up ? "true" : "false");
+}
+
 static void voice_transcript(
     void *context, const char *text,
     const struct le_voice_pipeline_turn *turn)
@@ -1140,10 +1847,25 @@ static void voice_transcript(
     char input[LE_LLM_TEXT_MAX];
     char reply[LE_LLM_TEXT_MAX];
     char error[256];
+    unsigned long long generation;
+    uint32_t stt_ms;
     int continuation;
     int generated = 0;
 
     pthread_mutex_lock(&state->control_mutex);
+    stt_ms = turn->stt_total_ms > 0xFFFFFFFFULL
+        ? 0xFFFFFFFFU : (uint32_t)turn->stt_total_ms;
+    pthread_mutex_lock(&state->metrics_mutex);
+    /*
+     * The generation captured when recognition began, not the live value: a
+     * clear that landed after this turn's recognition started but before the
+     * transcript arrived must drop this record rather than let the cleared
+     * transcript reappear.
+     */
+    generation = state->turn_history_generation;
+    state->turn_history_id = 0;
+    state->turn_tts_failed = 0;
+    pthread_mutex_unlock(&state->metrics_mutex);
     /*
      * Timers are handled before the sign-in gate below, deliberately. They
      * need no language model, so a device with no LLM configured -- or no
@@ -1153,8 +1875,38 @@ static void voice_transcript(
     if (handle_timer_intent(state, text, reply, sizeof(reply))) {
         state->follow_up_armed = 0;
         state->follow_up_depth = 0;
+        pthread_mutex_lock(&state->metrics_mutex);
+        /*
+         * handle_timer_intent() speaks its own confirmation through
+         * play_sentence(); a failed playback calls note_tts_failure(). Reflect
+         * that in the recorded turn instead of always claiming completion, so
+         * a timer reply that never reached the speaker is visible as tts_failed.
+         */
+        record_voice_turn(state,
+                          state->turn_tts_failed ? LE_VOICE_TURN_TTS_FAILED
+                                                 : LE_VOICE_TURN_COMPLETED,
+                          generation, text, reply, stt_ms, 0, 0);
+        pthread_mutex_unlock(&state->metrics_mutex);
         pthread_mutex_unlock(&state->control_mutex);
         return;
+    }
+    {
+        int stopped = handle_stop_intent(state, text, reply, sizeof(reply));
+        if (stopped) {
+            state->follow_up_armed = 0;
+            state->follow_up_depth = 0;
+            if (stopped < 0)
+                (void)play_sentence(state, reply);
+            pthread_mutex_lock(&state->metrics_mutex);
+            record_voice_turn(
+                state,
+                stopped < 0 ? LE_VOICE_TURN_ASSISTANT_FAILED
+                            : LE_VOICE_TURN_COMPLETED,
+                generation, text, stopped < 0 ? "" : reply, stt_ms, 0, 0);
+            pthread_mutex_unlock(&state->metrics_mutex);
+            pthread_mutex_unlock(&state->control_mutex);
+            return;
+        }
     }
     if (state->config.enabled &&
         state->auth_state == AUTH_SIGNED_IN) {
@@ -1194,6 +1946,58 @@ static void voice_transcript(
             le_log_warn("agentd: voice response failed: %s", error);
         else
             generated = 1;
+        /* Metrics are final here: STT is done and the response has been
+           generated and dispatched. Keep successful turns so the UI can show
+           a history that survives a reboot. */
+        if (generated) {
+        pthread_mutex_lock(&state->metrics_mutex);
+        {
+            struct turn_record record;
+            memset(&record, 0, sizeof(record));
+            record.at_ms = wall_clock_milliseconds();
+            snprintf(record.request_id, sizeof(record.request_id), "%s",
+                     state->turn_request_id);
+            record.stt_audio_ms = turn->stt_audio_ms;
+            record.stt_processing_ms = turn->stt_processing_ms;
+            record.stt_total_ms = turn->stt_total_ms;
+            record.first_text_ms = state->first_text_ms;
+            record.first_announce_ms = state->first_announce_ms;
+            record.first_pcm_ms = state->first_pcm_ms;
+            record.follow_up = turn->follow_up ? 1 : 0;
+            append_history_record(state, &record);
+            if (save_history_state(state, state->history_generation,
+                                   state->turn_history,
+                                   state->turn_history_next,
+                                   state->turn_history_count) != 0)
+                le_log_warn("agentd: turn history could not be persisted");
+        }
+        pthread_mutex_unlock(&state->metrics_mutex);
+        }
+        /*
+         * Canonical private record. The transcript is what was recognised and
+         * the response is the final reply actually spoken/displayed -- never
+         * the augmented prompt or a raw provider error. A failed local speech
+         * path is reported as tts_failed, an abandoned reply as cancelled, and
+         * a response that could not be generated as assistant_failed.
+         */
+        pthread_mutex_lock(&state->metrics_mutex);
+        if (generated) {
+            int status = state->turn_tts_failed
+                ? LE_VOICE_TURN_TTS_FAILED
+                : (le_voice_playback_cancelled(&state->playback)
+                       ? LE_VOICE_TURN_CANCELLED : LE_VOICE_TURN_COMPLETED);
+
+            record_voice_turn(
+                state, status, generation, text, reply, stt_ms,
+                state->first_text_ms > 0xFFFFFFFFULL
+                    ? 0xFFFFFFFFU : (uint32_t)state->first_text_ms,
+                state->first_announce_ms > 0xFFFFFFFFULL
+                    ? 0xFFFFFFFFU : (uint32_t)state->first_announce_ms);
+        } else {
+            record_voice_turn(state, LE_VOICE_TURN_ASSISTANT_FAILED, generation,
+                              text, "", stt_ms, 0, 0);
+        }
+        pthread_mutex_unlock(&state->metrics_mutex);
         if (generated) {
             snprintf(state->previous_voice_user,
                      sizeof(state->previous_voice_user), "%.*s",
@@ -1317,6 +2121,7 @@ static int command_configure(struct agent_state *state, const char *args,
     char value[2048];
     int boolean;
     int parsed;
+    int weather_changed = 0;
 
     parsed = json_get_bool(args, "enabled", &boolean);
     if (parsed < 0)
@@ -1350,20 +2155,35 @@ static int command_configure(struct agent_state *state, const char *args,
     parsed = json_get_string(args, "latitude", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && !coordinate_valid(value, 90.0)))
         return respond(fd, id, 0, "latitude must be between -90 and 90");
-    if (parsed > 0)
+    if (parsed > 0) {
+        if (strcmp(updated.latitude, value))
+            weather_changed = 1;
         strcpy(updated.latitude, value);
+    }
     parsed = json_get_string(args, "longitude", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && !coordinate_valid(value, 180.0)))
         return respond(fd, id, 0, "longitude must be between -180 and 180");
-    if (parsed > 0)
+    if (parsed > 0) {
+        if (strcmp(updated.longitude, value))
+            weather_changed = 1;
         strcpy(updated.longitude, value);
+    }
     parsed = json_get_string(args, "weather_provider", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 && strcmp(value, "open-meteo") &&
-                       strcmp(value, "met-no") && strcmp(value, "off")))
+                       strcmp(value, "ukmo") && strcmp(value, "met-no") &&
+                       strcmp(value, "off")))
         return respond(fd, id, 0,
-                       "weather_provider must be open-meteo, met-no or off");
-    if (parsed > 0)
+                       "weather_provider must be open-meteo, ukmo, met-no or off");
+    if (parsed > 0) {
+        if (strcmp(updated.weather_provider, value))
+            weather_changed = 1;
         strcpy(updated.weather_provider, value);
+    }
+    parsed = json_get_string(args, "clock_format", value, sizeof(value));
+    if (parsed < 0 || (parsed > 0 && !le_clock_format_valid(value)))
+        return respond(fd, id, 0, "clock_format must be 12 or 24");
+    if (parsed > 0)
+        strcpy(updated.clock_format, value);
     parsed = json_get_string(args, "base_url", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 &&
         (!endpoint_valid(value) || strlen(value) >= sizeof(state->credentials.base_url))))
@@ -1382,6 +2202,17 @@ static int command_configure(struct agent_state *state, const char *args,
     state->provider = le_llm_provider_by_id(state->config.provider);
     if (!state->provider)
         return respond(fd, id, 0, "unsupported provider");
+    /*
+     * A reading already fetched belongs to the previous provider and location,
+     * and refresh_weather() serves it for ten minutes. Without dropping it, a
+     * provider change would answer from the old source while status already
+     * reports the new one -- the reading is only correct for what it was
+     * fetched for.
+     */
+    if (weather_changed) {
+        state->weather_text[0] = '\0';
+        state->weather_fetched = 0;
+    }
     if (save_config(state) < 0)
         return respond(fd, id, 0, "unable to save agent configuration");
     if (!strcmp(state->config.provider, "openai-compatible")) {
@@ -1411,6 +2242,26 @@ static void handle_client(struct agent_state *state, int client_fd)
         (void)respond(client_fd, id, 0, "malformed request");
         return;
     }
+    /* History only takes metrics_mutex. Do not make a read-only history poll
+       wait behind an in-flight provider request holding control_mutex. */
+    if (!strcmp(command, "history") || !strcmp(command, "history_clear")) {
+        if (!strcmp(command, "history_clear"))
+            (void)command_history_clear(state, client_fd, id);
+        else
+            (void)command_history(state, client_fd, id);
+        return;
+    }
+    if (!strcmp(command, "voice_history") ||
+        !strcmp(command, "voice_history_entry") ||
+        !strcmp(command, "voice_history_clear")) {
+        if (!strcmp(command, "voice_history_clear"))
+            (void)command_voice_history_clear(state, client_fd, id);
+        else if (!strcmp(command, "voice_history_entry"))
+            (void)command_voice_history_entry(state, args, client_fd, id);
+        else
+            (void)command_voice_history(state, client_fd, id);
+        return;
+    }
     pthread_mutex_lock(&state->control_mutex);
     if (!strcmp(command, "status"))
         (void)command_status(state, client_fd, id);
@@ -1429,20 +2280,51 @@ static void handle_client(struct agent_state *state, int client_fd)
     pthread_mutex_unlock(&state->control_mutex);
 }
 
+struct agent_client_job {
+    struct agent_state *state;
+    int client_fd;
+    sem_t *slots;
+    pthread_mutex_t *mutex;
+    int *done;
+    int slot;
+};
+
+static void *agent_client_worker(void *argument)
+{
+    struct agent_client_job *job = argument;
+
+    handle_client(job->state, job->client_fd);
+    close(job->client_fd);
+    pthread_mutex_lock(job->mutex);
+    job->done[job->slot] = 1;
+    pthread_mutex_unlock(job->mutex);
+    sem_post(job->slots);
+    free(job);
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     struct agent_state state;
     const char *poll_minimum;
     int listener;
     int i;
+    pthread_t client_threads[LE_AGENT_CLIENT_WORKERS];
+    int client_in_use[LE_AGENT_CLIENT_WORKERS] = {0};
+    int client_done[LE_AGENT_CLIENT_WORKERS] = {0};
+    pthread_mutex_t client_mutex;
+    sem_t client_slots;
 
     memset(&state, 0, sizeof(state));
+    le_voice_history_init(&state.voice_history);
     strcpy(state.socket_path, DEFAULT_AGENT_SOCKET);
     strcpy(state.config_path, DEFAULT_AGENT_CONFIG);
     strcpy(state.credentials_path, DEFAULT_AGENT_CREDENTIALS);
     strcpy(state.curl_path, DEFAULT_CURL);
     strcpy(state.audio_socket, DEFAULT_AUDIO_SOCKET);
     strcpy(state.timer_socket, DEFAULT_TIMER_SOCKET);
+    strcpy(state.radio_socket, DEFAULT_RADIO_SOCKET);
+    strcpy(state.media_status, DEFAULT_MEDIA_STATUS);
     strcpy(state.tts_socket, DEFAULT_TTS_SOCKET);
     strcpy(state.wake_socket, DEFAULT_WAKE_SOCKET);
     strcpy(state.stt_socket, DEFAULT_STT_SOCKET);
@@ -1466,6 +2348,13 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--audio-socket") && value) {
             snprintf(state.audio_socket, sizeof(state.audio_socket),
                      "%s", argv[++i]);
+        } else if ((!strcmp(argv[i], "--radio-socket") ||
+                    !strcmp(argv[i], "--media-status")) && value) {
+            char *target = !strcmp(argv[i], "--radio-socket")
+                ? state.radio_socket : state.media_status;
+            if (strlen(value) >= sizeof(state.radio_socket))
+                return 2;
+            strcpy(target, argv[++i]);
         } else if (!strcmp(argv[i], "--timer-socket") && value) {
             snprintf(state.timer_socket, sizeof(state.timer_socket),
                      "%s", argv[++i]);
@@ -1488,7 +2377,8 @@ int main(int argc, char **argv)
                     "[--credentials PATH] [--curl PATH] "
                     "[--audio-socket PATH] [--tts-socket PATH] "
                     "[--wake-socket PATH] [--stt-socket PATH] "
-                    "[--timer-socket PATH] "
+                    "[--timer-socket PATH] [--radio-socket PATH] "
+                    "[--media-status PATH] "
                     "[--tts-first-pcm-file PATH]\n",
                     argv[0]);
             return 2;
@@ -1502,6 +2392,42 @@ int main(int argc, char **argv)
 
         if (!*end && value <= 30)
             state.poll_minimum = (unsigned int)value;
+    }
+    if (snprintf(state.history_generation_path,
+                 sizeof(state.history_generation_path), "%s.history-generation",
+                 state.config_path) >=
+        (int)sizeof(state.history_generation_path))
+        return 1;
+    state.history_generation = 1;
+    if (load_history(&state) < 0) {
+        char backup[sizeof(state.history_generation_path) + 5];
+        FILE *file;
+        unsigned long long saved;
+        int loaded = 0;
+
+        snprintf(backup, sizeof(backup), "%s.bak",
+                 state.history_generation_path);
+        /* A JSON backup contains the recoverable turn ring, not just a counter. */
+        if (load_history_file(&state, backup) == 0)
+            loaded = 1;
+        if (!loaded) {
+            file = fopen(state.history_generation_path, "r");
+            if (file) {
+                if (fscanf(file, "%llu", &saved) == 1 && saved) {
+                    state.history_generation = saved;
+                    loaded = 1;
+                }
+                fclose(file);
+            }
+        }
+        if (!loaded) {
+            file = fopen(backup, "r");
+            if (file) {
+                if (fscanf(file, "%llu", &saved) == 1 && saved)
+                    state.history_generation = saved;
+                fclose(file);
+            }
+        }
     }
     load_config(&state);
     state.provider = le_llm_provider_by_id(state.config.provider);
@@ -1521,8 +2447,19 @@ int main(int argc, char **argv)
         pthread_mutex_destroy(&state.control_mutex);
         return 1;
     }
+    if (pthread_mutex_init(&client_mutex, NULL) != 0) {
+        pthread_mutex_destroy(&state.metrics_mutex);
+        pthread_mutex_destroy(&state.control_mutex);
+        return 1;
+    }
+    if (sem_init(&client_slots, 0, LE_AGENT_CLIENT_WORKERS) != 0) {
+        pthread_mutex_destroy(&client_mutex);
+        pthread_mutex_destroy(&state.metrics_mutex);
+        pthread_mutex_destroy(&state.control_mutex);
+        return 1;
+    }
     if (le_voice_playback_start(
-            &state.playback, play_sentence, &state) < 0)
+            &state.playback, play_queued_sentence, &state) < 0)
         goto fail_mutex;
     listener = le_adapter_listen(state.socket_path);
     if (listener < 0) {
@@ -1539,21 +2476,90 @@ int main(int argc, char **argv)
         le_voice_playback_stop(&state.playback);
         goto fail_mutex;
     }
+    le_voice_pipeline_set_outcome_callback(
+        state.voice_pipeline, voice_outcome, &state);
+    le_voice_pipeline_set_turn_begin_callback(
+        state.voice_pipeline, voice_turn_begin, &state);
     le_log_info("agentd: ready socket=%s provider=%s",
                 state.socket_path, state.provider->id);
     while (running) {
         int client_fd = le_adapter_accept(listener);
+        int slot = -1;
 
         if (client_fd < 0) {
             if (errno == EINTR)
                 continue;
             break;
         }
-        handle_client(&state, client_fd);
-        close(client_fd);
+        {
+            int slot_wait;
+            do
+                slot_wait = sem_wait(&client_slots);
+            while (slot_wait < 0 && errno == EINTR && running);
+            if (slot_wait < 0 || !running) {
+                close(client_fd);
+                break;
+            }
+        }
+        pthread_mutex_lock(&client_mutex);
+        for (i = 0; i < LE_AGENT_CLIENT_WORKERS; ++i) {
+            if (client_in_use[i] && client_done[i]) {
+                pthread_t completed = client_threads[i];
+                client_in_use[i] = 0;
+                client_done[i] = 0;
+                pthread_mutex_unlock(&client_mutex);
+                pthread_join(completed, NULL);
+                pthread_mutex_lock(&client_mutex);
+            }
+        }
+        for (i = 0; i < LE_AGENT_CLIENT_WORKERS; ++i) {
+            if (!client_in_use[i]) {
+                slot = i;
+                client_in_use[i] = 1;
+                client_done[i] = 0;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&client_mutex);
+        if (slot < 0) {
+            close(client_fd);
+            sem_post(&client_slots);
+            continue;
+        }
+        {
+            struct agent_client_job *job = calloc(1, sizeof(*job));
+            if (!job) {
+                pthread_mutex_lock(&client_mutex);
+                client_in_use[slot] = 0;
+                pthread_mutex_unlock(&client_mutex);
+                close(client_fd);
+                sem_post(&client_slots);
+                continue;
+            }
+            job->state = &state;
+            job->client_fd = client_fd;
+            job->slots = &client_slots;
+            job->mutex = &client_mutex;
+            job->done = client_done;
+            job->slot = slot;
+            if (pthread_create(&client_threads[slot], NULL,
+                               agent_client_worker, job) != 0) {
+                free(job);
+                pthread_mutex_lock(&client_mutex);
+                client_in_use[slot] = 0;
+                pthread_mutex_unlock(&client_mutex);
+                close(client_fd);
+                sem_post(&client_slots);
+            }
+        }
     }
     close(listener);
     unlink(state.socket_path);
+    for (i = 0; i < LE_AGENT_CLIENT_WORKERS; ++i)
+        if (client_in_use[i])
+            pthread_join(client_threads[i], NULL);
+    sem_destroy(&client_slots);
+    pthread_mutex_destroy(&client_mutex);
     le_voice_pipeline_stop(state.voice_pipeline);
     le_voice_playback_stop(&state.playback);
     le_llm_credentials_clear(&state.credentials);
@@ -1563,6 +2569,8 @@ int main(int argc, char **argv)
     return running ? 1 : 0;
 
 fail_mutex:
+    sem_destroy(&client_slots);
+    pthread_mutex_destroy(&client_mutex);
     pthread_mutex_destroy(&state.metrics_mutex);
     pthread_mutex_destroy(&state.control_mutex);
     return 1;

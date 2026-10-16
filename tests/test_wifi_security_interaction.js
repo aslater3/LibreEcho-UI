@@ -90,7 +90,7 @@ async function testSetupUi() {
         'scan-wifi', 'setup-back', 'setup-next', 'step-count', 'setup-actions',
         'force-vendor-import', 'show-password', 'setup-volume', 'volume-output',
         'setup-sensitivity', 'sensitivity-output', 'setup-hostname',
-        'hostname-preview', 'setup-local', 'setup-telemetry'
+        'hostname-preview', 'setup-local', 'setup-telemetry', 'setup-crash-reports'
     ]) elements.set(id, element(id));
     elements.get('setup-security').value = 'wpa2';
     const document = {
@@ -235,9 +235,110 @@ async function testNetworkUi() {
     assert.strictEqual(requests[1].data.security, 'open');
 }
 
+async function testRecoveryScanUi() {
+    const elements = new Map();
+    const box = element('recovery-wifi-list');
+    elements.set('recovery-wifi-list', box);
+    for (const id of [
+        'recovery-ssid', 'recovery-security', 'recovery-password',
+        'recovery-status', 'recovery-connect', 'recovery-scan', 'setup-error',
+        'setup-ssid', 'setup-security', 'setup-password', 'password-field',
+        'scan-wifi', 'setup-back', 'setup-next', 'step-count', 'setup-actions',
+        'force-vendor-import', 'show-password', 'setup-volume', 'volume-output',
+        'setup-sensitivity', 'sensitivity-output', 'setup-hostname',
+        'hostname-preview', 'setup-local', 'setup-telemetry', 'setup-crash-reports'
+    ]) elements.set(id, element(id));
+    const document = {
+        querySelector: selector => selector.startsWith('#') ? elements.get(selector.slice(1)) || null : null,
+        querySelectorAll: () => [],
+        createElement: tag => element(tag),
+        addEventListener() {}
+    };
+    const requests = [];
+    const context = {
+        console, document, window: {}, location: { replace() {} },
+        sessionStorage: storage(), setTimeout() {}, clearTimeout() {},
+        fetch: async (url) => {
+            requests.push(url);
+            const data = url.endsWith('/config') ? { csrf_token: 'test', bootstrap_required: true } :
+                { networks: [
+                    { ssid: 'RecoveryNet', security: 'wpa2', capabilities: 'WPA2-PSK', signal: 70 }
+                ] };
+            return { ok: true, json: async () => ({ ok: true, data }) };
+        }
+    };
+    vm.createContext(context);
+    vm.runInContext(fs.readFileSync('web/js/setup.js', 'utf8'), context, { filename: 'setup.js' });
+    await Promise.resolve();
+    await vm.runInContext('recoveryScan()', context);
+    assert.ok(requests.includes('/api/v1/network/wifi/scan'),
+        'the recovery landing must scan through the shared Wi-Fi scan route');
+    assert.ok(box.innerHTML.includes('RecoveryNet'),
+        'recovery scan results must render as selectable options');
+}
+
+async function testFirmwareAcceptThenReboot() {
+    const elements = new Map();
+    for (const id of [
+        'wifi-list', 'setup-ssid', 'setup-security', 'setup-password', 'password-field', 'setup-error',
+        'scan-wifi', 'setup-back', 'setup-next', 'step-count', 'setup-actions', 'vendor-firmware-state',
+        'vendor-firmware-title', 'vendor-firmware-detail', 'force-vendor-import', 'show-password',
+        'setup-volume', 'volume-output', 'setup-sensitivity', 'sensitivity-output', 'setup-hostname',
+        'hostname-preview', 'setup-local', 'setup-telemetry'
+    ]) elements.set(id, element(id));
+    const document = {
+        querySelector: selector => selector.startsWith('#') ? elements.get(selector.slice(1)) || null : null,
+        querySelectorAll: () => [], createElement: tag => element(tag), addEventListener() {}
+    };
+    const requests = [];
+    let confirmed = true;
+    const context = {
+        console, document, window: {}, location: { replace() {} },
+        sessionStorage: storage(), setTimeout() {}, clearTimeout() {},
+        confirm: () => confirmed,
+        fetch: async (url, opt = {}) => {
+            requests.push({ url, method: opt.method || 'GET', headers: opt.headers || {}, body: opt.body });
+            const data = url.endsWith('/config') ? { csrf_token: 'test', bootstrap_required: true } : { accepted: true };
+            return { ok: true, json: async () => ({ ok: true, data }) };
+        }
+    };
+    vm.createContext(context);
+    vm.runInContext(fs.readFileSync('web/js/setup.js', 'utf8'), context, { filename: 'setup.js' });
+    await Promise.resolve();
+    vm.runInContext(`renderFirmware({backend:'linux',wlan0_registered:false,vendor_firmware:{state:'failed',
+        verification:'none',source_layout:'etc/firmware',error:'VENDOR_IMPORT_UNKNOWN_COMPATIBLE_SET',force_next_boot:false}})`, context);
+    const button = elements.get('force-vendor-import');
+    assert.strictEqual(button.textContent, 'Accept device firmware');
+    await button.onclick();
+    assert.strictEqual(elements.get('vendor-firmware-title').textContent, 'Device firmware accepted');
+    assert.strictEqual(button.textContent, 'Reboot now');
+    assert.strictEqual(button.disabled, false, 'accepted state must offer an actionable reboot');
+    assert.ok(elements.get('vendor-firmware-detail').textContent.includes('adb forward tcp:18080 tcp:8080'));
+
+    confirmed = false;
+    const before = requests.length;
+    await button.onclick();
+    assert.strictEqual(requests.length, before, 'cancelled confirmation must not reboot');
+
+    confirmed = true;
+    await button.onclick();
+    const reboot = requests.filter(r => r.url === '/api/v1/system/reboot');
+    assert.strictEqual(reboot.length, 1);
+    assert.strictEqual(reboot[0].method, 'POST');
+    assert.strictEqual(reboot[0].headers['X-LibreEcho-Confirm'], 'confirm-device-action');
+    assert.strictEqual(reboot[0].headers['X-LibreEcho-CSRF'], 'test');
+    assert.strictEqual(button.textContent, 'Rebooting…');
+    assert.strictEqual(button.disabled, true);
+    await button.onclick();
+    assert.strictEqual(requests.filter(r => r.url === '/api/v1/system/reboot').length, 1,
+        'reboot must be requested at most once');
+}
+
 (async () => {
     await testSetupUi();
+    await testFirmwareAcceptThenReboot();
     await testNetworkUi();
+    await testRecoveryScanUi();
     console.log('Wi-Fi security interaction regression: ok');
 })().catch(error => {
     console.error(error.stack || error);

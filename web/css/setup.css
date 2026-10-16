@@ -8,3 +8,13 @@
 
 @media (max-width:390px){.setup-actions #setup-back{left:12px}.setup-actions #setup-next{width:calc(100vw - 172px);max-width:calc(100vw - 172px);padding-right:10px;padding-left:10px}}
 .address-list{display:grid;gap:10px;margin:20px 0}.address-list .device-address{margin:0;overflow-wrap:anywhere}.address-list .primary-address{font-size:clamp(22px,4vw,32px)}.wifi-option{cursor:default;gap:8px}.wifi-select{display:flex;flex:1;justify-content:space-between;align-items:center;min-width:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}.wifi-select>span:first-child{min-width:0}.wifi-select strong,.wifi-select small{overflow-wrap:anywhere}.wifi-wpa2{flex:0 0 auto}
+/* Recovery (configured device): sign in then a Wi-Fi-only reconnect page. */
+.button-row{display:flex;gap:12px;align-items:center;margin-top:22px;flex-wrap:wrap}
+.button-row .primary,.button-row .secondary{border:1px solid var(--line);border-radius:999px;padding:12px 19px;font:inherit;font-weight:800;cursor:pointer}
+.button-row .primary{border-color:transparent;background:var(--green);color:#07130c}
+.button-row .secondary{background:transparent;color:var(--text)}
+.button-row button:disabled{opacity:.45;cursor:not-allowed}
+#recovery-scan{margin:0}
+#recovery-status{margin-top:16px;overflow-wrap:anywhere}
+#recovery-wifi-list .wifi-option{width:100%;text-align:left}
+.recovery-psk{display:block;margin:8px 0;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.25);color:var(--text);font-size:16px;letter-spacing:.06em;overflow-wrap:anywhere}

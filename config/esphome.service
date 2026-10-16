@@ -1,0 +1,23 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Reference schema only: NEVER stage this as a static Avahi service.
+     libreecho-esphomed registers a bounded ESPHOME/1 lease AFTER listener
+     readiness and integration bit 1 selection. mdnsd renders escaped values
+     and withdraws on owner death/close. MAC must match stable DeviceInfo.
+     @...@ fields are reference placeholders, not shell substitutions. -->
+<service-group>
+  <name replace-wildcards="no">@FRIENDLY_NAME@</name>
+  <service>
+    <type>_esphomelib._tcp</type>
+    <port>6053</port>
+    <txt-record>version=@VERSION@</txt-record>
+    <txt-record>mac=@MAC@</txt-record>
+    <txt-record>platform=LibreEcho</txt-record>
+    <txt-record>board=radar-puffin</txt-record>
+    <txt-record>network=wifi</txt-record>
+    <txt-record>friendly_name=@FRIENDLY_NAME@</txt-record>
+    <txt-record>api_encryption=Noise_NNpsk0_25519_ChaChaPoly_SHA256</txt-record>
+    <txt-record>project_name=LibreEcho</txt-record>
+    <txt-record>project_version=@PROJECT_VERSION@</txt-record>
+  </service>
+</service-group>

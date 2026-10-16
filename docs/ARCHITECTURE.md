@@ -50,9 +50,9 @@ This document explains how the LibreEcho web management interface works, from th
 │  └──────────────────────┘           │                                 │   │
 │                                     │                                 │   │
 │  ┌──────────────────────────────────┘                                 │   │
-│  │              config_manager.c                                      │   │
-│  │  /etc/libreecho/config.json ◄──▶ SIGHUP reload                   │   │
-│  │  /etc/libreecho/history/config-*.json                            │   │
+│  │              config_store.c                                      │   │
+│  │  --config path ◄──▶ atomic read/write                   │   │
+│  │  Single previous-file .bak backup                            │   │
 │  └───────────────────────────────────────────────────────────────────┘   │
 │                                    │                                     │
 │                              AF_UNIX adapter protocol                      │
@@ -80,7 +80,7 @@ This document explains how the LibreEcho web management interface works, from th
 
 **Role:** HTTP server, API routing, config management, orchestration.
 
-**Files:** `src/main.c`, `src/http_server.c`, `src/api.c`, `src/backend_linux.c`, `src/config_manager.c`
+**Files:** `src/main.c`, `src/http_server.c`, `src/api.c`, `src/backend_linux.c`, `src/config_store.c`
 
 **Startup:**
 ```sh
@@ -97,7 +97,7 @@ libreecho-web --backend linux \
   registration during setup
 - Schedule the explicitly confirmed, one-shot, unverified vendor-import retry
   marker without rebooting the device
-- Manage central config (`/etc/libreecho/config.json`)
+- Persist web configuration at the `--config` path
 - Coordinate with companion daemons via adapter protocol
 - Log to central logd
 
@@ -198,7 +198,8 @@ Each daemon owns one hardware domain and exposes it via the adapter protocol.
 | `set_gain` | `{gain: 0-100}` | Set microphone gain |
 | `set_mute` | `{muted: bool}` | Toggle mic mute |
 | `test_tone` | — | Play 440Hz sine wave |
-| `cue` | `{first_hz, second_hz, ms}` | Play a bounded two-tone notification cue |
+| `cue` | `{first_hz, second_hz, ms}` | Play a two-tone notification cue. Rate-limited at this boundary: a request inside the 200ms minimum interval, or one that arrives while the previous cue is still playing, is dropped rather than queued and is answered with `{playing:false, throttled:true}` |
+| `wake_chirp` | — | The 90ms wake acknowledgement chirp, played through the same cue gate |
 
 **ALSA interface:** Direct ioctl on `/dev/snd/controlC0`. Enumerates controls, reads/writes values. Falls back to `amixer` if ioctl fails.
 
@@ -259,37 +260,14 @@ le_log_error("failed: %s", strerror(errno));
 **Log levels:** DEBUG < INFO < WARNING < ERROR. Default: INFO.
 **Flags:** `--verbose` (DEBUG), `--debug` (DEBUG + source), `--quiet` (WARNING+).
 
-### 5. Configuration Manager
+### 5. Configuration Store
 
-**Role:** Central JSON config with sections per service, SIGHUP reload, history.
-
-**File:** `/etc/libreecho/config.json`
-
-```json
-{
-  "version": 1,
-  "system": { "hostname": "libreecho", "log_level": "info" },
-  "audio": { "volume": 50, "microphone_gain": 65 },
-  "led": { "brightness": 70, "boot_color": [72, 216, 118] },
-  "network": { "wifi_enabled": true, "hostname": "libreecho" },
-  "wake_word": { "enabled": true, "sensitivity": 68 },
-  "privacy": { "local_only": true, "telemetry": false }
-}
-```
-
-**API:**
-```c
-#include "config_manager.h"
-
-le_config_init("/etc/libreecho/config.json");
-int volume;
-le_config_get_int("audio", "volume", &volume);
-le_config_reload();  // Called on SIGHUP
-```
-
-**History:** Every write saves previous version to `/etc/libreecho/history/config-<timestamp>.json`. Keeps last 10.
-
-**Reload:** Send `SIGHUP` to any daemon to reload its config section.
+`src/config_store.c` provides bounded file reads and atomic writes for the web
+configuration selected by `--config` (normally `/etc/libreecho/web-config.json`).
+`src/api.c` serializes persisted settings and loads them into the backend.
+Writes use a mode-0600 temporary file, `fsync`, and rename; the previous file is
+linked to a single `.bak` backup on a best-effort basis. This store does not
+provide per-service sections, timestamped history, or SIGHUP reload.
 
 ### 6. Backup/Restore
 
@@ -305,7 +283,37 @@ tools/libreecho-backup.sh create /tmp/backup.tar.gz
 tools/libreecho-backup.sh restore /tmp/backup.tar.gz
 ```
 
-**Contents:** Config files, recent logs, web state, manifest with version/timestamp/hostname.
+**Contents:** Active persistent state only: `/data/libreecho/config` and
+`/data/libreecho/secrets`, including accounts and supported daemon stores. The
+version-2 manifest records the bounded scope, required files, private secret
+policy, and exclusions. Factory defaults under `/etc/libreecho`, installed
+feature payloads, OTA/release identity, runtime state, logs, transaction files
+(`*.tmp` and the `*.tmp.<suffix>` residue of an interrupted `mkstemp` writer,
+`*.new`), stale pre-update copies (`*.bak`, the durable copy
+`config_write_atomic`, `agentd`, and `timerd` leave of the previous file
+contents), raw wake PCM, and one-shot platform markers are not backed up. The same exclusions are applied to
+the incoming trees of every restore, so an archive written by an earlier tool,
+or one whose manifest names no exclusions, cannot install them either. Symlinked
+state is refused in both directions, including a configured state root that is
+itself a link, a root spelled with a `.` or `..` component, and a root whose path
+crosses a link in any component, rather than archived or restored. A trailing or
+doubled separator is normalized to the same root before those checks, and no
+component is resolved, so another spelling of a root cannot slip past them. The
+top-level `manifest.json` must be a regular file, not a link and with a single
+link count, and is checked before it is read or listed, so reading it cannot
+disclose a root-readable file or a hard-linked captured secret; a member that
+escapes the archive root is refused before extraction by a streaming scan that
+holds one name at a time. The manifest names the tree scope and the suffixes of every pruned
+file class.
+
+Restore stages and validates both trees, including numeric ownership. It only
+replaces the live trees after staging succeeds, so ordinary copy or permission
+failures leave existing state untouched. `LIBREECHO_CONFIG_OWNER` and
+`LIBREECHO_SECRETS_OWNER` may supply numeric `uid:gid` values; when set they
+must match the existing tree owner. No account or credential database is read.
+Service recovery treats shipped inactive status `1` (most init scripts) and
+`3` (watchdog/radio) as inactive, stops the watchdog first, and starts only
+the services that were running, in dependency order.
 
 ## Data Flow Examples
 
@@ -392,7 +400,9 @@ Browser: displays scan results
 ├── web-config.json          # Canonical non-secret device configuration
 ├── agent.json               # Non-secret assistant provider/model/prompt
 ├── wpa_supplicant.conf      # Wi-Fi credentials (0600, excluded from export)
-└── users                    # Local authentication database (0600)
+├── users                    # Local authentication database (0600)
+├── provision.json           # Installer's one-shot document (absent after one boot)
+└── provision.result         # Outcome codes for that document (0600, no secrets)
 
 /data/libreecho/secrets/
 └── openai-codex.json        # OAuth credentials (0600; never exported)
@@ -439,6 +449,58 @@ CSRF-protected compatibility action atomically writes the exact one-shot marker
 `/data/libreecho/config/vendor-import-force-next-boot`; Platform consumes it on
 the next boot and labels that import `forced-unverified`.
 
+## First-Boot Provisioning
+
+The web installer collects the setup page's fields on the host and writes one
+document, `/data/libreecho/config/provision.json`, during the install. On the
+first boot after that install, `libreecho-web` applies it itself, through the
+same validators, writers and adapter calls the on-device wizard uses. There is
+no second configuration system, no second password-hashing scheme, and no
+hand-written `wpa_supplicant.conf`.
+
+The order of operations in `src/provision.c` is the contract:
+
+1. `provision_read()` opens the file `O_NOFOLLOW`, requires a regular file owned
+   by the caller at mode 0600 and at most 4096 bytes, and **unlinks it
+   immediately** — on every path, including the rejections. It carries a
+   plaintext Wi-Fi passphrase, so it must not survive having been read.
+2. `document_parse()` validates the whole document first. Any unknown key, any
+   repeated key and any field outside the setup page's own limits rejects the
+   document whole, and nothing is applied. `json_object_members()` exists for
+   this: the ordinary `json_get_*` lookups are substring searches, so they
+   cannot tell an unknown key from a known one, or one member's value from an
+   identically named member of a nested object.
+3. `provision_apply()` creates the account only when the users file does not
+   exist — the same rule as `/api/v1/auth/bootstrap`, so an account the owner
+   already has is never reset — merges the settings through the canonical
+   persist path (a hostname sets `hostname_persisted`, and AirPlay 2 is enabled
+   as setup always does), and hands Wi-Fi to the backend through the same
+   `le_connect_wifi()` call `/api/v1/setup` makes. networkd and wpa_supplicant
+   serialise the credentials. Secret buffers are zeroed on every path out.
+4. `write_status()` records `result`, `error`, `admin`, `wifi` and `settings` as
+   codes only. No document value reaches that file, so there is nothing in it
+   for a later reader to leak.
+
+The apply runs in the daemon process itself, before the listener opens — the
+same place and with the same bounded adapter calls as the existing
+persisted-settings restore that follows it. It has to be this process: the
+setup-complete marker is a claim about a working network, and only the process
+that issued the hand-off can later observe the backend joining the provisioned
+SSID and taking an address.
+
+Only the *wait* is deferred. `api_provision_poll()` runs from the HTTP server's
+one-second tick and writes the `schema=1` marker through the same writer the
+wizard uses, but only once the backend reports the provisioned SSID, state
+`connected`, and an address. A device that was already joined to some other
+network has proved nothing about this one. If the bounded window
+(`LIBREECHO_PROVISION_ASSOC_TIMEOUT_SECONDS`, 180s by default) closes first,
+the result is `partial` / `assoc-timeout` / `wifi=failed`, the account and
+settings that did apply stay applied, and the setup wizard remains available.
+So does it for a document with no Wi-Fi, a refused hand-off, a rejected
+document, or a device whose owner already completed setup: in each case the
+wizard skips account bootstrap because a user exists. There is no HTTP surface
+here — nothing new in `web/openapi.json` or `docs/API.md`.
+
 ## Process Dependencies
 
 ```
@@ -451,11 +513,83 @@ libreecho-audiod    (needs logd for logging)
 libreecho-ledd      (needs logd for logging)
     ↑
 libreecho-waked → libreecho-sttd → libreecho-ttsd → libreecho-agentd
+        └──────────────────────────────→ libreecho-lived (disarmed until selected)
     ↑
 libreecho-web       (needs all above for full functionality)
 ```
 
 **Startup order:** logd → networkd → audiod → micd → waked → sttd → ledd →
-btd → airplayd → ttsd → agentd → web
+btd → airplayd → ttsd → agentd → lived → web
 
 **Shutdown order:** reverse startup order.
+
+## Home Assistant voice ownership
+
+Home Assistant mode uses only `libreecho-esphomed`, the C99 ESPHome native API
+satellite on TCP 6053. Integration bit 1 selects that mode. There is no Wyoming
+satellite service or protocol selector. Missing or old `ha_protocol` settings
+normalize to `esphome`; Wyoming Whisper/Piper **client** engines remain available
+for Custom mode.
+
+A bounded, tracked HTTP child stops the local STT/TTS/assistant owner before
+starting ESPHome. The accepted response is 202/pending; ordinary APIs continue
+to work. Only the voice-owned fields are snapshotted. If activation fails, the
+HTTP parent restores those fields and persisted intent before starting a tracked
+rollback worker for the previous service graph. Concurrent unrelated settings
+are not reverted. A failed HA stop never starts a competing local owner.
+Disabling HA restores the previously selected Local or Custom pipeline and its
+saved endpoints, model and voice; custom assistant settings are not rewritten.
+
+`GET /api/v1/voice-pipeline` separates daemon `ready` from authenticated HA
+`connected`, read from `/run/libreecho/esphome-status.json` and gated by the live
+ESPHome pidfile. A TCP listener alone is not a connection. The persistent
+`esphome_noise_key` holds a canonical base64-encoded 32-byte PSK; empty explicitly
+means the all-zero provisioning PSK until HA provisions one. The private key is
+preserved on ordinary config saves but absent from public config exports,
+voice status and diagnostics. Config and backups remain mode 0600.
+
+## Service Control Boundary
+
+Services are controlled by running another daemon's init script
+(`/etc/init.d/libreecho-<service>.init`): the Web daemon starts and stops the
+voice pipeline, factory reset stops the service supervisor and every daemon that
+owns persistent state, and `libreecho-watchdogd` restarts a service that stopped
+answering. The supervisor is stopped first because the daemons the reset stops
+are exactly the ones it supervises; `src/backend_linux.c` holds the list and the
+reason for each entry. Stopping it also stops the recovery it had in flight, in
+both halves: the init script collects the supervisor's descendants while it is
+still alive (`init/libreecho-watchdogd.init`), and the supervisor itself stops
+launching recoveries as soon as it is asked to stop and terminates the one it is
+running with the work it has started (`src/service_env.c`). The second half is
+what covers a fork that happens after that one-time snapshot, which is the
+window that matters: a service start can wait a long time for its own
+dependencies before it launches the daemon, and a recovery left running would
+start a service the caller has already confirmed stopped.
+
+`libreecho-micd` and `libreecho-waked` are one unit in that same list. micd
+offers its mono stream once and waked attaches to it once with no reconnect
+path, so the reset stops the consumer before the producer, and a refused reset
+restores the pair in the other order -- micd first -- because a waked started
+against the micd it was stopped with answers the second stream request with a
+protocol error and leaves the device without a wake word until the next reboot.
+
+The same list carries `libreecho-waked`, which is not only a configuration
+reader: when the one-shot dump request (`config/wake-dump-seconds`) is present it
+creates `config/wake-dump.raw` inside the reset scope once its model and
+microphone are ready, so a reset that scanned the directory before that open
+would carry recorded microphone audio across the reboot.
+
+Each of those callers carries its own generic `ARGS`, `DAEMON`, `PIDFILE` and
+`LOGFILE`, and every init script resolves its settings with
+`VAR=${VAR:-default}`. An inherited value therefore wins inside the child
+script, which is how a voice-pipeline change used to start
+`libreecho-sttd`/`libreecho-ttsd`/`libreecho-agentd` and `libreecho-esphomed`
+with the Web daemon's own command line — usage on stderr, exit, and an API
+that reported "Voice assistant service is unavailable".
+
+`src/service_env.c` is that boundary: the four caller-identity names are
+removed in the forked child immediately before `exec`, so each script resolves
+its own defaults and its own root-owned `/etc/default/libreecho-<service>`
+file. Unrelated variables, including the service-scoped `LE_*` settings a
+script may read, are left alone. A service's own configuration is never the
+caller's command line.

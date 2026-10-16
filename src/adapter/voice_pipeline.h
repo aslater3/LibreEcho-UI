@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "voice_history.h"
+
 struct le_voice_pipeline;
 
 struct le_voice_pipeline_turn {
@@ -26,18 +28,64 @@ struct le_voice_pipeline_metrics {
     unsigned long follow_up_listens;
     unsigned long completed_transcripts;
     unsigned long dropped_turns;
+    /* Turns that ended without a transcript, by terminal class. */
+    unsigned long stt_failures;
+    unsigned long cancellations;
+    unsigned long timeouts;
     uint64_t last_stt_audio_ms;
     uint64_t last_stt_processing_ms;
     uint64_t last_stt_total_ms;
+};
+
+/*
+ * Reported for a turn that ends before a usable transcript exists (or without
+ * one at all): a speech recognition failure, a superseded/cancelled wake, or a
+ * recognition that exceeded its bounded deadline. The canonical transcript
+ * callback reports turns that reach the assistant; this callback exists so
+ * those earlier failures do not simply disappear.
+ */
+struct le_voice_pipeline_outcome {
+    int status;
+    int follow_up;
+    uint64_t detection_sample;
+    uint64_t stt_audio_ms;
+    uint64_t stt_processing_ms;
+    uint64_t stt_total_ms;
 };
 
 typedef void (*le_voice_pipeline_transcript_fn)(
     void *context, const char *text,
     const struct le_voice_pipeline_turn *turn);
 
+typedef void (*le_voice_pipeline_outcome_fn)(
+    void *context, const struct le_voice_pipeline_outcome *outcome);
+
+/*
+ * Reported once when a turn's recognition begins, before any terminal callback
+ * for that turn (transcript or outcome). The embedder snapshots per-turn
+ * context here -- the private voice-history generation in particular -- so it
+ * stays stable even if the owner clears the history while the turn is still
+ * in flight. Without this a clear during recognition is only observed when the
+ * delayed terminal event arrives, and a cleared in-flight turn reappears.
+ */
+typedef void (*le_voice_pipeline_turn_begin_fn)(void *context,
+                                                uint64_t detection_sample);
+
 struct le_voice_pipeline *le_voice_pipeline_start(
     const char *wake_socket, const char *stt_socket,
     le_voice_pipeline_transcript_fn transcript, void *context);
+
+/* Register the pre-transcript failure sink. Safe to call before any wake;
+ * NULL disables reporting. */
+void le_voice_pipeline_set_outcome_callback(
+    struct le_voice_pipeline *pipeline,
+    le_voice_pipeline_outcome_fn outcome, void *context);
+
+/* Register the turn-begin hook. Safe to call before any wake; NULL disables
+ * it. It is invoked once per turn attempt, before recognition can fail. */
+void le_voice_pipeline_set_turn_begin_callback(
+    struct le_voice_pipeline *pipeline,
+    le_voice_pipeline_turn_begin_fn turn_begin, void *context);
 
 int le_voice_pipeline_request_follow_up(
     struct le_voice_pipeline *pipeline);

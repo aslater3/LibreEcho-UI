@@ -121,6 +121,30 @@ Each service reads its section at startup. To change:
 1. Edit `/etc/libreecho/config.json` (or use web UI)
 2. Reload: `killall -HUP libreecho-networkd libreecho-audiod libreecho-ledd libreecho-web`
 
+### Wake Word Model and Threshold
+
+These persist in `/data`, so they survive reboot and OTA.
+
+- **Threshold**: set `wake_sensitivity` (0-100) in the web UI or with
+  `PUT /api/v1/wake-word`. It is saved and reapplied at every boot, and maps
+  to a detector threshold of `0.85 - 0.0044 * sensitivity` (0.85 at 0,
+  0.41 at 100).
+- **Owner-staged model**: put a model in `/data/libreecho/wakeword-models/<name>/`
+  holding `melspectrogram.onnx`, `embedding_model.onnx` and the classifier
+  named `alexa_v0.1.onnx` (regular files, not symlinks), then write `<name>` to
+  `/data/libreecho/config/wake-model` and run
+  `/etc/init.d/libreecho-waked.init restart`. Names may use only letters,
+  digits, `.`, `_` and `-`, and may not start with `.`.
+  Only the model is replaceable. The detector is always the signed one from
+  the wakeword feature payload; nothing under `/data` is executed. An invalid
+  or incomplete selection, or a model the detector cannot load, falls back to
+  the stock model and logs why in `/var/log/libreecho-waked.log`. Delete the
+  `wake-model` file to return to stock. Staged models are not included in
+  configuration backups; keep your own copy.
+- **Microphone gain**: `microphone_gain` saved in `web-config.json` is
+  reapplied by micd every time capture starts, so a gain changed after boot
+  is not reverted when the wake listener reopens the stream.
+
 ### Config History
 
 Every write saves the previous version:
@@ -184,29 +208,80 @@ Automatic when file exceeds 512KB:
 # On target device
 tools/libreecho-backup.sh create /tmp/backup.tar.gz
 
-# Contents:
-# - /etc/libreecho/ (all config)
-# - /var/log/libreecho/ (recent logs)
-# - Web daemon state
+# The archive contains active /data/libreecho/config and /data/libreecho/secrets
+# only. It does not contain the /etc/libreecho factory seed, logs, installed
+# features, OTA/release identity, runtime state, transaction files (*.tmp,
+# *.tmp.<suffix>, *.new), stale pre-update copies (*.bak), one-shot diagnostic
+# requests,
+# symlinked state, or raw wake audio. Credentials are included as private files
+# and the archive must be protected or encrypted out-of-band.
 ```
 
 ### Restore Backup
 
 ```sh
-# Stops all services, restores, restarts
+# Stops available persistent-state writers, stages and validates both active
+# trees, replaces them only after staging succeeds, and restarts only services
+# that were running. Required state is validated before the prompt. Init status
+# 1 (most scripts) and 3 (watchdog/radio) both mean inactive.
 tools/libreecho-backup.sh restore /tmp/backup.tar.gz
-
-# Restore only config
-tar -xzf /tmp/backup.tar.gz -C /tmp/restore
-cp /tmp/restore/config/* /etc/libreecho/
-killall -HUP libreecho-web
 ```
+
+The restore preserves the existing numeric owner of each active tree. A
+supported non-root consumer can set `LIBREECHO_CONFIG_OWNER` and/or
+`LIBREECHO_SECRETS_OWNER` to an explicit numeric `uid:gid`; the value must
+match the existing tree owner. The tool does not read host account or
+credential databases. Copy, permission, ownership, or sync failures are
+reported and never printed as a successful restore. Replacement errors attempt
+rollback; if recovery cannot put an original tree back, retain its
+`*.restore-backup.*` directory for manual recovery before restarting services.
+This is not a power-loss-atomic transaction across the two trees. Both target
+directories must already exist with the intended owner; restore after a fresh
+image reinstall remains a separate acceptance check.
+
+The same exclusions are applied by every restore, not only by creation: the
+transaction files (`*.tmp` and the `*.tmp.<suffix>` residue of an interrupted
+`mkstemp` writer, `*.new`), the stale pre-update copies (`*.bak`) that
+`config_write_atomic`, `agentd`, and `timerd` leave behind (each holds the
+previous contents of a committed file, including accounts and credentials), and
+the one-shot wake-dump and vendor-import markers are dropped from the incoming
+trees before the prompt, so nothing the
+contract excludes is ever installed. This holds for an archive written by an
+earlier tool or one whose manifest names no exclusions, and the restored tree is
+the archive minus those files. `list` prints the same reminder next to the
+manifest. An archive whose top-level `manifest.json` is a symlink, is not a
+regular file, or shares its inode with another member (a hard link) is refused
+before it is read, so listing a hostile archive cannot disclose a root-readable
+file or a captured secret. An archive with a member that escapes the archive
+root (`../` or an absolute path) is refused before extraction, by a scan that
+holds one member name at a time (`list` and `restore` decompress the archive
+twice for that: once to prove it is readable, once to scan). Both refusals
+leave live state unchanged and stop no services.
+
+Symlinked state is refused in both directions: creation fails instead of
+archiving a link, and an archive whose trees contain a link is rejected before
+the restore prompt, leaving live state unchanged. A configured `config` or
+`secrets` root that is itself a link is refused as well, because copying
+through it would archive another tree, and so is a root spelled with a `.` or
+`..` component or one whose path crosses a link above the root itself. Every
+component is inspected without following it, so an ancestor cannot move the
+state tree. A trailing or doubled separator is normalized to that same root
+before the checks, and no root is canonicalized: a name that merely contains a
+dot is an ordinary root.
+
+Creation uses file copies, not an atomic snapshot, and does not stop services.
+Quiesce persistent-state writers before creating a backup that must be
+consistent across config, accounts, and secrets.
 
 ### List Backup Contents
 
 ```sh
 tools/libreecho-backup.sh list /tmp/backup.tar.gz
 ```
+
+`list` refuses the same archives that `restore` refuses, prints the manifest
+stored in the archive followed by the exclusion reminder, and lists member names
+only: captured file bytes and credentials are never printed by any operation.
 
 ## Service Management
 

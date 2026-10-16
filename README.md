@@ -31,7 +31,7 @@ The project has several different evidence levels. They must not be confused:
 | Wi-Fi/network | Implemented and adapter-wired | Scan/liveness/recovery contracts and mock transitions | Requires `networkd`, `wpa_supplicant`, DHCP and target WLAN support |
 | Bluetooth | Implemented through `btd` and API contracts | MGMT, pairing, metadata, SDP/A2DP/AVRCP and startup contracts | Controller transport remains target-dependent; a later live attempt failed below the UI at HCI/MGMT bring-up |
 | Audio/microphone | Implemented through service boundaries | DSP, shared-capture, stream-format and API contracts | Requires target ALSA/Radar capture and companion services |
-| Voice pipeline | Implemented as local/custom/Home Assistant modes | Wyoming, assistant, latency and configuration contracts | Requires the selected STT/TTS/assistant services and credentials |
+| Voice pipeline | Local/Custom engines and ESPHome Home Assistant mode | ESPHome native API/Noise, Wyoming Whisper/Piper clients, assistant and configuration contracts | HA uses TCP 6053; Local/Custom settings remain saved while HA owns voice |
 | OTA/update | Implemented through the live Linux image path | API/channel/authorization contracts; mock deliberately returns unavailable | Requires the signed A/B helper set and image release policy |
 | Hardware acceptance | Separate gate | Never inferred from a host build | Must be recorded from the actual target and image |
 
@@ -98,6 +98,7 @@ libreecho-web
   ├── wakeword.sock → wake-word service
   ├── btd socket    → libreecho-btd
   ├── agent.sock    → libreecho-agentd
+  ├── live.sock     → libreecho-lived (GPT-Live, disarmed by default)
   └── log.sock      → libreecho-logd
 ```
 
@@ -205,6 +206,27 @@ For the size-optimised production daemon set:
 make release
 ```
 
+Internet radio plays MP3 and AAC streams and HLS (MPEG-TS, AAC-LC/HE-AAC v1,
+which covers BBC radio). AAC decoding uses the vendored Helix decoder in
+`third-party/helix-aac` (RPSL-1.0; see `THIRD_PARTY_NOTICES.md`). fMP4 and
+encrypted HLS, and HE-AAC v2, are not supported.
+
+Ogg Opus local files (`.ogg`/`.opus` on the mounted USB store) are decoded
+when the build defines `LE_RADIOD_ENABLE_OPUS` and links the pinned static
+libogg/libopus/libopusfile prefix produced by the image build helper
+`tools/mt8163-arm32/ui/build_opus.sh`; see `THIRD_PARTY_NOTICES.md` and
+`tests/run_radiod_opus_tests.sh`. Without the macro the default build stays
+dependency-free and reports the capability as unavailable: `radiod`'s status
+document carries an `"opus"` boolean so the API can gate an Opus launch before
+asking for playback, and an Opus file is refused with a clear reason instead of
+a silent station.
+
+The documented default build remains dependency-free. HTTPS and HTTPS radio
+fetching are enabled when both `WEB_TLS_LIBS` and `RADIOD_TLS_LIBS` are set,
+with matching mbedTLS include/library paths in `CPPFLAGS` and `LDFLAGS`; without
+those variables the build uses a bounded no-TLS fallback and reports HTTPS as
+unavailable rather than failing compilation.
+
 Cross-compilation and staged installation are explicit:
 
 ```sh
@@ -289,6 +311,19 @@ git diff --check
 ```
 
 See [`tests/browser-checklist.md`](tests/browser-checklist.md) for the responsive/accessibility pass.
+
+The browser suites in `tests/e2e/` run the real frontend in a real engine against the preview mock backend:
+
+```sh
+sh tests/e2e/run.sh                                  # every suite, Chromium
+LIBREECHO_E2E_SUITES=baby-monitor sh tests/e2e/run.sh
+LIBREECHO_E2E_BROWSER=webkit LIBREECHO_E2E_SUITES=baby-monitor sh tests/e2e/run.sh
+```
+
+`LIBREECHO_E2E_SUITES` narrows the run to a subset (`smoke features-radio baby-monitor`) and
+`LIBREECHO_E2E_BROWSER` selects the engine (Chromium, or WebKit as the Safari engine).
+`baby-monitor.cjs` drives the Baby Monitor playback lifecycle; it needs Playwright's browser
+binaries, which CI installs in [`.github/workflows/playwright-e2e.yml`](.github/workflows/playwright-e2e.yml).
 
 ## Security and public-source rules
 

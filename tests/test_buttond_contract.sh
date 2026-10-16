@@ -9,6 +9,77 @@ grep -q 'refresh_audio(ctx)' src/adapter/buttond.c
 grep -q 'POLLHUP | POLLERR | POLLNVAL' src/adapter/buttond.c
 grep -q 'rescan_requested' src/adapter/buttond.c
 
+python3 - <<'PY'
+from pathlib import Path
+
+source = Path('src/adapter/buttond.c').read_text()
+assert 'action_capable' in source
+assert 'TEST_BIT(KEY_HELP, key_bits)' in source
+assert 'action=%d' in source
+assert 'privacy_state=%d' in source, 'the privacy latch is not reported to the UI'
+assert 'ctx->privacy_observed,' in source, 'the status file must publish the observed latch'
+assert 'ctx->lamp_supported == 1 ? 1 : 0' not in source, (
+    'the untested lamp capability must not be published as unsupported')
+assert 'ctx->lamp_supported)' in source, (
+    'the status file must publish whether software can light the lamp')
+assert 'static void publish_latch_observation(' in source, (
+    'a changed observation must be published without waiting for the heartbeat')
+assert 'publish_latch_observation(ctx, -1)' in source, (
+    'an unreadable latch must publish as unknown')
+assert 'write_mute_lamp(ctx, muted);' in source, (
+    'the software mute must drive the kernel lamp control')
+assert 'BUTTOND_MUTE_LAMP_PATH' in source, (
+    'the lamp control path is not defined')
+assert 'lamp_control=%d' in source, (
+    'the status file must report whether software can light the lamp')
+assert 'lamp_failure_is_final' in source and 'return err == EOPNOTSUPP;' in source, (
+    'only the kernel refusing the control outright may settle the lamp probe')
+assert 'failed = written < 0 ? errno : 0;' in source, (
+    'a short write carries no errno, so a stale one must not settle the probe')
+assert 'LAMP_PROBE_RETRY_MS' in source and \
+    'ctx->lamp_retry_at_ms = monotonic_ms() + LAMP_PROBE_RETRY_MS;' in source, (
+    'an attribute that is not there yet must be probed again, not latched off')
+assert 'set_lamp_capability(ctx, 1)' in source and \
+    'set_lamp_capability(ctx, 0)' in source, (
+    'the lamp capability must be remembered and published as the probe learns it')
+# The two contract documents describe the same probe, so the deferral wording has
+# to agree with the implementation in both: a write the kernel defers while the
+# latch owns the line leaves the field at the answer it already had -- null only
+# while nothing has tested the control, and a proven true intact -- and absence is
+# re-probed rather than latched off.
+for name in ('docs/API.md', 'web/openapi.json'):
+    # Flattened and with the prose's code spans removed, so the same sentence can
+    # be asserted in a wrapped markdown paragraph and in a one-line JSON string.
+    text = ' '.join(Path(name).read_text().replace('`', '').split())
+    assert 'null while nothing has tested the control' in text, (
+        name + ': the deferral must say what it leaves behind instead')
+    assert 'a write has already been accepted' in text, (
+        name + ': a deferral must not erase a proven true')
+    assert 'since a deferral does not unlearn proven support' in text, (
+        name + ': the deferral wording must match the implementation')
+    assert 'is probed again, so a driver that binds later turns' in text, (
+        name + ': a missing attribute must be retried, not latched off')
+indicator = source[source.index('static void mute_indicator('):source.index('static void show_meter(')]
+assert 'write_mute_lamp(ctx, muted);' in indicator, (
+    'the mute indicator must drive the kernel lamp control')
+assert indicator.index('write_mute_lamp(ctx, muted);') < indicator.index('le_adapter_connect('), (
+    'the lamp is the kernel\'s and must not depend on the LED daemon')
+assert 'json_get_int(buffer, "button_action_brightness", &value) > 0' in source
+assert 'json_get_int(buffer, "button_mute_brightness", &value) > 0' in source
+assert 'json_get_string(buffer, "button_action_sounds", value_text,\n                        sizeof(value_text)) == 1' in source
+sample = source[source.index('static void play_sample'):source.index('#define CUE_LOW_HZ')]
+assert 'ctx->tones' not in sample
+mute_indicator = source[source.index('static void mute_indicator'):source.index('static void show_meter')]
+assert 'privacy_lamp(' not in source and 'static int privacy_write(' not in source, 'kernel must own the privacy latch'
+assert 'static int read_privacy_state(' in source and 'O_RDONLY | O_CLOEXEC' in mute_indicator
+assert 'static int sync_privacy_state(' in mute_indicator
+assert 'ctx->indicator_warned = 1;' in mute_indicator
+assert 'if (ctx.muted >= 0)\n                mute_indicator(&ctx, ctx.muted);' in source
+restart = Path('tests/test_buttond_led_restart.py').read_text()
+assert "'--unshare-all'" in restart and "'--ro-bind'" in restart
+assert "'--dir', '/sys'" in restart and "'--dir', '/data'" in restart
+PY
+
 test_dir=$(mktemp -d)
 socket_path="$test_dir/led.sock"
 log_path=./build/test-buttond-led.log

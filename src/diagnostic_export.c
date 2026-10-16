@@ -1,10 +1,14 @@
 #include "api.h"
+#include "feature_provenance.h"
+#include "authority_provenance.h"
+#include "boot_control.h"
 #include "json.h"
 #include "version.h"
 #include <ctype.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
@@ -129,10 +133,82 @@ static int read_key(const char *path, const char *key, char *out, size_t out_siz
     return 0;
 }
 
+static const char *diag_update_root(void)
+{
+    const char *path = getenv("LIBREECHO_UPDATE_ROOT");
+    return path && path[0] ? path : "/data/libreecho/update";
+}
+
+static int diag_update_path(char *out, size_t out_size, const char *name)
+{
+    int n = snprintf(out, out_size, "%s/%s", diag_update_root(), name);
+    return n > 0 && (size_t)n < out_size;
+}
+
+/* The packaged channel file holds one bare token ("dev" or "stable"). */
+static int read_bare_token(const char *path, char *out, size_t out_size)
+{
+    int fd;
+    struct stat st;
+    char data[64];
+    ssize_t count;
+    if (!path || !out || !out_size)
+        return 0;
+    out[0] = '\0';
+    fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC
+#ifdef O_NOFOLLOW
+              | O_NOFOLLOW
+#endif
+    );
+    if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode)) {
+        if (fd >= 0)
+            close(fd);
+        return 0;
+    }
+    count = read(fd, data, sizeof(data) - 1);
+    close(fd);
+    if (count <= 0 || count >= (ssize_t)sizeof(data) - 1)
+        return 0;
+    data[count] = '\0';
+    data[strcspn(data, "\r\n")] = '\0';
+    return safe_token(out, out_size, data);
+}
+
+static int valid_channel(const char *value)
+{
+    return !strcmp(value, "stable") || !strcmp(value, "dev");
+}
+
+/* Resolve the channel the updater actually uses, in the updater's own order:
+   the owner selection in automatic-updates, then the image's packaged channel.
+   check-status only echoes the channel of the last check, so it is a fallback. */
+static void resolve_channel(char *out, size_t out_size)
+{
+    char path[512], value[64];
+    const char *packaged = getenv("LIBREECHO_PACKAGED_CHANNEL_FILE");
+    if (diag_update_path(path, sizeof(path), "automatic-updates") &&
+        read_key(path, "channel", value, sizeof(value)) && valid_channel(value)) {
+        bounded_copy(out, out_size, value);
+        return;
+    }
+    if (read_bare_token(packaged && packaged[0] ? packaged : "/etc/libreecho/update-channel",
+                        value, sizeof(value)) && valid_channel(value)) {
+        bounded_copy(out, out_size, value);
+        return;
+    }
+    if (diag_update_path(path, sizeof(path), "check-status") &&
+        read_key(path, "channel", value, sizeof(value)) && valid_channel(value)) {
+        bounded_copy(out, out_size, value);
+        return;
+    }
+    snprintf(out, out_size, "unavailable");
+}
+
+
 static int redact_text(char *out, size_t out_size, const char *input)
 {
     static const char *sensitive[] = {
-        "password", "passwd", "psk", "secret", "token", "cookie",
+        "esphome_noise_key", "password", "passwd", "psk", "secret", "token", "cookie",
         "authorization", "bearer", "ssid", "bssid", "username", "address",
         "mac", "hostname", "path", NULL
     };
@@ -284,7 +360,8 @@ static int append_logs(struct diag_writer *w, const struct api_context *c)
         return -1;
     for (i = 0; i < count; ++i) {
         const char *line = c->logs[(first + i) % LE_MAX_LOGS];
-        char level[32], message[LE_DIAG_TEXT], redacted[LE_DIAG_TEXT * 2];
+        char level[32], escaped_level[LE_DIAG_TEXT * 2];
+        char message[LE_DIAG_TEXT], redacted[LE_DIAG_TEXT * 2];
         int boot_seconds = 0;
         int parsed = json_get_string(line, "level", level, sizeof(level)) > 0 &&
                      json_get_string(line, "message", message, sizeof(message)) > 0;
@@ -294,9 +371,10 @@ static int append_logs(struct diag_writer *w, const struct api_context *c)
             snprintf(level, sizeof(level), "unknown");
             snprintf(message, sizeof(message), "unavailable");
         }
+        redacted_json(escaped_level, sizeof(escaped_level), level);
         redacted_json(redacted, sizeof(redacted), message);
         if (diag_append(w, "%s{\"level\":\"%s\",\"boot_seconds\":%d,\"message\":\"%s\"}",
-                        i ? "," : "", level, boot_seconds, redacted))
+                        i ? "," : "", escaped_level, boot_seconds, redacted))
             return -1;
     }
     return diag_append(w, "],\"malformed_entries\":%s},", c->log_count > LE_MAX_LOGS ? "true" : "false");
@@ -305,6 +383,20 @@ static int append_logs(struct diag_writer *w, const struct api_context *c)
 static void append_unavailable(struct diag_writer *w, const char *name)
 {
     (void)diag_append(w, "\"%s\":{\"available\":false,\"reason\":\"unavailable\"},", name);
+}
+
+/* Boot-slot countdown evidence read from userdata.  A device that stops booting
+   cannot report anything else, so this is the section that explains why: the
+   per-slot retry counts, the confirmation verdict, and the reason no
+   confirmation was attempted. */
+static void append_boot_control(struct diag_writer *w)
+{
+    struct le_boot_control boot;
+    char payload[LE_BOOT_CONTROL_JSON_MAX];
+    le_boot_control_read(&boot);
+    if (le_boot_control_json(payload, sizeof(payload), &boot))
+        snprintf(payload, sizeof(payload), "{\"available\":false,\"reason\":\"unavailable\"}");
+    (void)diag_append(w, "\"boot_control\":%s,", payload);
 }
 
 void diagnostics_export_json(struct api_context *c, struct api_response *r)
@@ -317,9 +409,14 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
     struct le_bluetooth_state bluetooth;
     struct le_playback_state playback;
     char value[128], escaped[LE_DIAG_TEXT * 2];
-    char channel[16] = "stable", active_slot[16] = "unavailable";
+    char channel[16] = "unavailable", active_slot[16] = "unavailable";
+    char path[512];
     char pending_slot[16] = "unavailable", update_state[64] = "idle";
     char pending_version[96] = "unavailable";
+    char components[LE_FEATURE_COMPONENTS_JSON_MAX];
+    char authority[LE_AUTHORITY_PROVENANCE_JSON_MAX];
+    char escaped_transaction_state[80], escaped_last_result[80];
+    le_feature_transaction_state transaction;
     size_t reset_bytes = 0, pstore_bytes = 0, file_bytes = 0;
     int reset_warning = 0, pstore_warning = 0, file_warning = 0;
     int status_rc, device_rc, network_rc, audio_rc, wake_rc, bluetooth_rc, playback_rc;
@@ -332,6 +429,14 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
     memset(&wake, 0, sizeof(wake));
     memset(&bluetooth, 0, sizeof(bluetooth));
     memset(&playback, 0, sizeof(playback));
+    le_feature_transaction_state_read(&transaction);
+    le_feature_components_json(components, sizeof(components),
+                               &transaction);
+    le_authority_provenance_json(authority, sizeof(authority));
+    json_value(escaped_transaction_state, sizeof(escaped_transaction_state),
+               transaction.state);
+    json_value(escaped_last_result, sizeof(escaped_last_result),
+               transaction.last_result);
     status_rc = le_get_system_status(c->backend, &status);
     device_rc = le_get_device_info(c->backend, &device);
     /* The Linux backend's adapter calls use synchronous socket timeouts. Keep
@@ -348,26 +453,30 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
         playback_rc = le_get_playback_state(c->backend, &playback);
     }
 
-    if (!read_key("/data/libreecho/update/check-status", "channel", value, sizeof(value)) ||
-        (strcmp(value, "stable") && strcmp(value, "dev")))
-        snprintf(channel, sizeof(channel), "stable");
-    else
-        bounded_copy(channel, sizeof(channel), value);
-    if (!read_key("/data/libreecho/update/active-slot", "slot", value, sizeof(value)) ||
-        (strcmp(value, "a") && strcmp(value, "b")))
-        snprintf(active_slot, sizeof(active_slot), "unavailable");
-    else
-        bounded_copy(active_slot, sizeof(active_slot), value);
-    if (!read_key("/data/libreecho/update/pending", "slot", value, sizeof(value)) ||
+    resolve_channel(channel, sizeof(channel));
+    {
+        /* The running slot comes from the boot-health record init writes each
+           boot; no updater file named active-slot exists. */
+        struct le_boot_control boot;
+        le_boot_control_read(&boot);
+        if (!strcmp(boot.running_slot, "a") || !strcmp(boot.running_slot, "b"))
+            bounded_copy(active_slot, sizeof(active_slot), boot.running_slot);
+        else
+            snprintf(active_slot, sizeof(active_slot), "unavailable");
+    }
+    if (!diag_update_path(path, sizeof(path), "pending") ||
+        !read_key(path, "slot", value, sizeof(value)) ||
         (strcmp(value, "a") && strcmp(value, "b")))
         snprintf(pending_slot, sizeof(pending_slot), "unavailable");
     else
         bounded_copy(pending_slot, sizeof(pending_slot), value);
-    if (!read_key("/data/libreecho/update/state", "state", value, sizeof(value)))
+    if (!diag_update_path(path, sizeof(path), "state") ||
+        !read_key(path, "state", value, sizeof(value)))
         snprintf(update_state, sizeof(update_state), "idle");
     else
         bounded_copy(update_state, sizeof(update_state), value);
-    if (!read_key("/data/libreecho/update/pending", "version", value, sizeof(value)))
+    if (!diag_update_path(path, sizeof(path), "pending") ||
+        !read_key(path, "version", value, sizeof(value)))
         snprintf(pending_version, sizeof(pending_version), "unavailable");
     else
         bounded_copy(pending_version, sizeof(pending_version), value);
@@ -405,10 +514,11 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
         (void)diag_append(&w, "\"boot_image\":\"unavailable\",\"kernel\":\"%s\",\"dtb\":\"unavailable\",\"ui\":\"%s\",\"platform\":\"%s\",",
                           escaped, LE_OS_VERSION_STRING, platform);
     }
-    (void)diag_append(&w, "\"os_version\":\"%s\",\"source_commit\":\"%s\",\"source_dirty\":%s,\"source_digest\":\"%s\",\"running_service\":{\"name\":\"libreecho-web\",\"version\":\"%s\",\"backend\":\"%s\"}},",
+    (void)diag_append(&w, "\"os_version\":\"%s\",\"source_commit\":\"%s\",\"source_dirty\":%s,\"source_digest\":\"%s\",\"components\":%s,\"transaction_state\":\"%s\",\"last_transaction_result\":\"%s\",\"authority_provenance\":%s,\"running_service\":{\"name\":\"libreecho-web\",\"version\":\"%s\",\"backend\":\"%s\"}},",
                       LE_OS_VERSION_STRING, LE_SOURCE_COMMIT,
                       !strcmp(LE_SOURCE_DIRTY, "1") ? "true" : "false",
-                      LE_SOURCE_DIGEST, LE_OS_VERSION_STRING, le_backend_mode(c->backend));
+                      LE_SOURCE_DIGEST, components, escaped_transaction_state,
+                      escaped_last_result, authority, LE_OS_VERSION_STRING, le_backend_mode(c->backend));
     (void)diag_append(&w, "\"runtime\":{");
     if (status_rc)
         append_unavailable(&w, "system");
@@ -484,8 +594,9 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
     (void)diag_append(&w, "\"privacy\":{\"local_only\":%s,\"audio_retention\":%s,\"diagnostic_telemetry\":%s,\"crash_reports\":%s,\"hardware_mute_capable\":true},",
                       json_bool(c->privacy_local_only), json_bool(c->privacy_audio_retention),
                       json_bool(c->privacy_telemetry), json_bool(c->privacy_crash_reports));
+    append_boot_control(&w);
     (void)append_logs(&w, c);
-    (void)diag_append(&w, "\"manifest\":{\"sections\":[\"release_identity\",\"runtime\",\"network\",\"audio\",\"wake_word\",\"bluetooth\",\"playback\",\"privacy\",\"logs\"],\"redactions\":[\"wifi_credentials\",\"ssid_bssid\",\"ip_addresses\",\"bluetooth_addresses\",\"owner_identifiers\",\"tokens_cookies\",\"private_paths\",\"media_metadata\"],\"omitted\":[\"private_keys\",\"ota_signing_material\",\"raw_pstore\",\"arbitrary_request_paths\"]}},\"error\":null}");
+    (void)diag_append(&w, "\"manifest\":{\"sections\":[\"release_identity\",\"runtime\",\"network\",\"audio\",\"wake_word\",\"bluetooth\",\"playback\",\"privacy\",\"boot_control\",\"logs\"],\"redactions\":[\"wifi_credentials\",\"ssid_bssid\",\"ip_addresses\",\"bluetooth_addresses\",\"owner_identifiers\",\"tokens_cookies\",\"private_paths\",\"media_metadata\"],\"omitted\":[\"private_keys\",\"ota_signing_material\",\"raw_pstore\",\"arbitrary_request_paths\"]}},\"error\":null}");
     if (w.failed) {
         snprintf(r->body, sizeof(r->body), "{\"ok\":true,\"data\":{\"schema_version\":1,\"format\":\"libreecho-diagnostic-bundle\",\"bounded\":true,\"partial\":true,\"manifest\":{\"redactions\":[\"all-private-identifiers\"]}},\"error\":null}");
     }

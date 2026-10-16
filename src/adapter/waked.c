@@ -7,7 +7,9 @@
 #include "voice_stream.h"
 #include "wake_led.h"
 #include "wake_worker.h"
+#include "../json.h"
 
+#include "wake_health.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -62,6 +64,7 @@ struct waked_ipc {
 
 struct waked_metrics {
     uint64_t processed_frames;
+    uint64_t last_capture_ns;
     uint64_t aec_frames;
     uint64_t vad_active_frames;
     uint64_t vad_noise_energy;
@@ -316,6 +319,47 @@ static int parse_sensitivity(const char *args, int *sensitivity)
     return 0;
 }
 
+/*
+ * Free the slot of any subscriber that has hung up. A slot was otherwise
+ * freed only when a send to it failed, and event sends happen only on a wake
+ * word: a client that subscribed and went away while the room was quiet held
+ * its slot indefinitely, and a few of those made every later subscriber --
+ * including the satellite's wake path -- fail with "subscriber limit
+ * reached". Subscribers never send after subscribing, so an orderly EOF or a
+ * socket error on a non-blocking peek means the peer is gone.
+ */
+static int subscriber_gone(int fd)
+{
+    char byte;
+    ssize_t count = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+
+    if (count == 0)
+        return 1;
+    if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+        errno != EINTR)
+        return 1;
+    return 0;
+}
+
+static void reap_subscribers(struct waked_ipc *ipc)
+{
+    size_t i;
+
+    for (i = 0; i < MAX_WAKE_SUBSCRIBERS; ++i) {
+        if (ipc->subscribers[i] >= 0 && subscriber_gone(ipc->subscribers[i])) {
+            close(ipc->subscribers[i]);
+            ipc->subscribers[i] = -1;
+        }
+    }
+    for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i) {
+        if (ipc->audio_subscribers[i] >= 0 &&
+            subscriber_gone(ipc->audio_subscribers[i])) {
+            close(ipc->audio_subscribers[i]);
+            ipc->audio_subscribers[i] = -1;
+        }
+    }
+}
+
 static int add_subscriber(struct waked_ipc *ipc, int client_fd)
 {
     size_t i;
@@ -388,20 +432,31 @@ static void handle_control_client(
         return;
     }
     if (!strcmp(command, "status")) {
+        int model_loaded = 0, inference_age_ms = -1;
+        int capture_age_ms = le_wake_age_ms(monotonic_nanoseconds(), metrics->last_capture_ns);
+#ifdef LE_WAKE_ENGINE_ONNX
+        model_loaded = le_wake_worker_health(wake_worker, &inference_age_ms);
+#endif
         snprintf(
             status, sizeof(status),
             "{\"enabled\":true,\"wake_word\":\"Alexa\","
-            "\"model_status\":\"loaded\",\"sensitivity\":%d,"
+            "\"model_status\":\"%s\",\"sensitivity\":%d,"
             "\"cooldown_ms\":1750,\"detected_count\":%u,"
             "\"cpu_cost\":17,\"memory_cost_mb\":6,"
             "\"vad_active\":%s,\"vad_floor_rms\":%u,"
             "\"vad_noise_energy\":%llu,\"aec_active\":%s,"
+            "\"model_loaded\":%s,\"processed_frames\":%llu,"
+            "\"capture_active\":%s,\"capture_age_ms\":%d,"
+            "\"inference_active\":%s,\"inference_age_ms\":%d,"
             "\"model\":\"alexa_v0.1\"}",
-            ipc->sensitivity, ipc->detected_count,
+            model_loaded ? "loaded" : "unavailable", ipc->sensitivity, ipc->detected_count,
             metrics->vad_active ? "true" : "false",
             metrics->vad_floor_rms,
             (unsigned long long)metrics->vad_noise_energy,
-            metrics->playback_active ? "true" : "false");
+            metrics->playback_active ? "true" : "false",
+            model_loaded ? "true" : "false", (unsigned long long)metrics->processed_frames,
+            metrics->processed_frames && le_wake_recent(capture_age_ms, LE_WAKE_CAPTURE_STALE_MS) ? "true" : "false", capture_age_ms,
+            model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms);
         (void)respond(client_fd, id, 1, status);
     } else if (!strcmp(command, "subscribe")) {
         if (add_subscriber(ipc, client_fd) < 0) {
@@ -460,12 +515,25 @@ static void handle_control_client(
             (void)respond(client_fd, id, 1, "{}");
         }
     } else if (!strcmp(command, "set_word")) {
-        if (!strstr(args, "\"Alexa\"") &&
-            !strstr(args, "\"alexa\""))
+        char word[16];
+        size_t length = args ? strnlen(args, LE_ADAPTER_MSG_MAX) : 0;
+
+        if (!args || length == LE_ADAPTER_MSG_MAX ||
+            !json_valid_object(args, length) ||
+            json_duplicate_key(args, length, "word") ||
+            json_get_string_top_level(args, "word", word, sizeof(word)) != 1 ||
+            (strcmp(word, "Alexa") && strcmp(word, "alexa")))
             (void)respond(client_fd, id, 0,
                           "only the Alexa development model is installed");
+#ifdef LE_WAKE_ENGINE_ONNX
+        else if (le_wake_worker_reload(wake_worker) < 0)
+            (void)respond(client_fd, id, 0, "wake model reload failed");
         else
             (void)respond(client_fd, id, 1, "{}");
+#else
+        else
+            (void)respond(client_fd, id, 0, "wake model runtime unavailable");
+#endif
     } else if (!strcmp(command, "test")) {
         const struct le_wake_event event = {
             metrics->processed_frames *
@@ -528,6 +596,7 @@ static int process_frame(struct le_voice_aec *aec,
     preroll_write(preroll, preroll_position, clean,
                   LE_VOICE_AEC_FRAME_SAMPLES);
     ++metrics->processed_frames;
+    metrics->last_capture_ns = now_ns;
     publish_audio_frame(
         ipc,
         (metrics->processed_frames - 1U) *
@@ -700,6 +769,7 @@ static int run_waked(const struct waked_config *config)
                         sizeof(event))) == (ssize_t)sizeof(event))
                 publish_wake_event(&ipc, &event);
         }
+        reap_subscribers(&ipc);
         if (descriptors[2].revents & POLLIN) {
             int client_fd = le_adapter_accept(ipc.listen_fd);
 

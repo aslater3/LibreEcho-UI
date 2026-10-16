@@ -89,12 +89,14 @@
       <section class="setup-page" data-step="4">
         <span class="eyebrow">Privacy</span>
         <h1>Private by default.</h1>
-        <p class="lead">These conservative defaults can be changed later. No cloud dependency is required.</p>
+        <p class="lead">Your voice, your home and your settings stay on this device. Everything below can be changed later on the Privacy page.</p>
+        <div class="privacy-note" id="setup-active-ping"><strong>Weekly active-device count</strong><span>Once a week LibreEcho sends one anonymous ping to stats.libreecho.org, purely to count how many devices are running and on which version. It contains only the hardware model, LibreEcho version, update channel (and build on development builds) and the week, month and year. There is no device ID, serial number, MAC address, or anything about you or your home. LibreEcho does not store your IP address; Cloudflare processes the request to deliver it. This ping cannot be turned off. The exact contents are shown on the Privacy page.</span></div>
         <div class="choice-list">
           <label><span><strong>Local processing only</strong><small>Keep supported speech and automation processing on this device.</small></span><input id="setup-local" type="checkbox" checked><i></i></label>
-          <label><span><strong>Anonymous diagnostic telemetry</strong><small>Share basic reliability information. Audio and credentials are never included.</small></span><input id="setup-telemetry" type="checkbox"><i></i></label>
+          <label><span><strong>Help improve LibreEcho: health and usage</strong><small>Allow anonymous reliability and feature-use totals once LibreEcho starts collecting them. This release sends none yet. No audio, transcripts, Wi-Fi names or device identifiers. You can turn this off.</small></span><input id="setup-telemetry" type="checkbox" checked><i></i></label>
+          <label><span><strong>Help improve LibreEcho: crash reports</strong><small>Allow anonymous crash signatures once crash reporting is available. This release sends none yet. You can turn this off.</small></span><input id="setup-crash-reports" type="checkbox" checked><i></i></label>
         </div>
-        <div class="privacy-note"><strong>Microphone audio retention starts off.</strong><span>Crash reporting, remote API access, SSH and third-party integrations also remain disabled.</span></div>
+        <div class="privacy-note"><strong>Microphone audio retention starts off.</strong><span>Remote API access, SSH and third-party integrations also remain disabled.</span></div>
       </section>
 
       <section class="setup-page" data-step="5">
@@ -115,6 +117,32 @@
           <a id="mdns-link" class="device-address" href="/">mDNS address will appear after setup</a>
         </div>
         <p id="mdns-warning" class="notice unsupported">The .local name is an mDNS alternative. It depends on AirPlay 2/Avahi being enabled on LibreEcho and supported by your client; the LAN IP above remains the reliable link when mDNS is disabled or unavailable.</p>
+      </section>
+
+      <section class="setup-page" id="recovery-login">
+        <span class="eyebrow">Recovery</span>
+        <h1>Sign in to reconnect.</h1>
+        <p class="lead">This LibreEcho has already been set up, so there is no account to create here — the one-time setup wizard will not run again. Sign in with your local account to reconnect it to Wi-Fi.</p>
+        <div class="form-card">
+          <label><span>Username</span><input id="recovery-username" autocomplete="username" maxlength="31"></label>
+          <label><span>Password</span><input id="recovery-password" type="password" autocomplete="current-password" maxlength="128"></label>
+        </div>
+        <div class="button-row"><button class="primary" id="recovery-signin" type="button">Sign in</button></div>
+      </section>
+
+      <section class="setup-page" id="recovery-network">
+        <span class="eyebrow">Network</span>
+        <h1>Reconnect <span class="no-wrap">Wi-Fi</span>.</h1>
+        <p class="lead">Choose the network LibreEcho should join. Your phone stays on the recovery access point while this is sent, then the recovery access point closes so the device can join your Wi-Fi. Your phone will briefly disconnect — if the handover fails, reconnect to the same recovery network and try again.</p>
+        <div class="section-heading"><h2>Networks</h2><button class="text-button" id="recovery-scan" type="button">Scan again</button></div>
+        <div id="recovery-wifi-list" class="wifi-list" aria-live="polite"><p class="muted">Scanning for networks…</p></div>
+        <div class="form-grid">
+          <label><span>Network name (SSID)</span><input id="recovery-ssid" maxlength="63" autocomplete="off"></label>
+          <label><span>Security</span><select id="recovery-security"><option value="wpa2">WPA2</option><option value="open">Open</option></select></label>
+          <label class="wide"><span>Wi-Fi password</span><input id="recovery-wifi-password" type="password" maxlength="127" autocomplete="new-password"><small>At least 8 characters. It will not be exposed through the web API.</small></label>
+        </div>
+        <div class="button-row"><button class="primary" id="recovery-connect" type="button">Connect LibreEcho</button></div>
+        <p id="recovery-status" class="muted"></p>
       </section>
 
       <footer class="setup-actions" id="setup-actions">

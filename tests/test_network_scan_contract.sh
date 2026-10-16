@@ -1,20 +1,23 @@
 #!/bin/sh
 set -eu
 python3 tests/test_nl80211_scan_completion.py
+make build/test-nl80211-scan-transport
+./build/test-nl80211-scan-transport
 python3 - <<'PY'
 from pathlib import Path
 source = Path('src/adapter/networkd.c').read_text()
 assert '#include <linux/nl80211.h>' in source
-assert 'static int nl80211_scan(' in source
-assert 'wext_result == -EOPNOTSUPP' in source
-assert 'wext_result == -ENOTSUP' in source
+assert 'static int driver_scan_begin(' in source
+assert 'wext_result != -EOPNOTSUPP' in source
+assert 'wext_result != -ENOTSUP' in source
+assert 'NETLINK_ADD_MEMBERSHIP' in source
 assert 'return scan_errno ? -scan_errno : -EIO;' in source
 assert 'NL80211_CMD_TRIGGER_SCAN' in source
 assert 'NL80211_CMD_GET_SCAN' in source
-assert 'static int nl80211_wait_for_scan_event(' in source
+assert 'static int driver_scan_message(' in source
 assert 'NL80211_CMD_NEW_SCAN_RESULTS' in source
 assert 'NL80211_CMD_SCAN_ABORTED' in source
-assert 'nl80211_wait_for_scan_event(fd, buffer, NL80211_BUFFER_SIZE,' in source
+assert 'nl80211_parse_family_reply' in source
 assert 'NL80211_SCAN_FRESH_WAIT_MS' not in source
 assert 'TRIGGER_SCAN is only an acknowledgement' not in source
 assert 'struct scan_result' in source
@@ -47,7 +50,7 @@ assert 'NL80211_BSS_FREQUENCY' in source
 assert 'NL80211_BSS_SIGNAL_UNSPEC' in source
 assert 'SIOCGIWFREQ' in source
 assert 'signal_percent' in source
-assert 'nl80211_append_bss(bss, &results[result_count])' in source
-assert 'return serialize_scan_results(results, result_count, data, data_size);' in source
+assert 'nl80211_append_bss(bss, &results[*count])' in source
+assert 'serialize_scan_results(ctx->scan.results, ctx->scan.result_count,' in source
 print('network scan EOPNOTSUPP/nl80211 and signed RSSI contract: ok')
 PY

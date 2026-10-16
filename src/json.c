@@ -51,6 +51,62 @@ static int parse_string(struct json_cursor *c)
     return 0;
 }
 
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Parse a member name while comparing its decoded characters to key. */
+static int parse_string_key(struct json_cursor *c, const char *key)
+{
+    size_t key_len = strlen(key), decoded_len = 0;
+    int match = 1;
+
+    if (c->i >= c->n || c->s[c->i++] != '"') return -1;
+    while (c->i < c->n) {
+        unsigned char ch = (unsigned char)c->s[c->i++];
+        if (ch == '"') return match && decoded_len == key_len ? 1 : 0;
+        if (ch < 0x20) return -1;
+        if (ch == '\\') {
+            int value, digit, nibble;
+            if (c->i >= c->n) return -1;
+            ch = (unsigned char)c->s[c->i++];
+            switch (ch) {
+            case '"': case '\\': case '/': break;
+            case 'b': ch = '\b'; break;
+            case 'f': ch = '\f'; break;
+            case 'n': ch = '\n'; break;
+            case 'r': ch = '\r'; break;
+            case 't': ch = '\t'; break;
+            case 'u':
+                value = 0;
+                for (digit = 0; digit < 4; digit++) {
+                    if (c->i >= c->n || (nibble = hex_value(c->s[c->i])) < 0)
+                        return -1;
+                    value = (value << 4) | nibble;
+                    c->i++;
+                }
+                /* Supported feature names are ASCII; other code points can
+                 * never match them but must still be valid member names. */
+                if (value > 0x7f) match = 0;
+                ch = (unsigned char)value;
+                break;
+            default: return -1;
+            }
+        }
+        if (decoded_len < key_len) {
+            if (!match || (unsigned char)key[decoded_len] != ch) match = 0;
+            decoded_len++;
+        } else {
+            match = 0;
+        }
+    }
+    return -1;
+}
+
 static int literal(struct json_cursor *c, const char *value)
 {
     size_t n = strlen(value);
@@ -145,36 +201,74 @@ int json_valid_object(const char *s, size_t n)
     return c.i == c.n;
 }
 
+int json_get_top_level_bool(const char *s, size_t n, const char *key, int *out)
+{
+    struct json_cursor c = {s, n, 0, 0};
+    int found = 0, value = 0;
+
+    if (!s || !key || !out) return 0;
+    skip_ws(&c);
+    if (c.i >= c.n || c.s[c.i++] != '{') return 0;
+    skip_ws(&c);
+    if (c.i < c.n && c.s[c.i] == '}') return 0;
+    for (;;) {
+        int match;
+
+        if (c.i >= c.n || c.s[c.i] != '"') return -1;
+        match = parse_string_key(&c, key);
+        if (match < 0) return -1;
+        skip_ws(&c);
+        if (c.i >= c.n || c.s[c.i++] != ':') return -1;
+        skip_ws(&c);
+        if (match) {
+            /* A caller must not accidentally accept the first value from an
+             * ambiguous object.  parse_string_key() compares decoded names,
+             * so escaped spellings such as acoustic\\u005fevents count too. */
+            if (found) return -1;
+            if (literal(&c, "true")) value = 1;
+            else if (literal(&c, "false")) value = 0;
+            else return -1;
+            if (c.i < c.n && !ws(c.s[c.i]) && c.s[c.i] != ',' &&
+                c.s[c.i] != '}') return -1;
+            found = 1;
+        } else if (!parse_value(&c)) {
+            return -1;
+        }
+        skip_ws(&c);
+        if (c.i < c.n && c.s[c.i] == '}') {
+            if (found) *out = value;
+            return found;
+        }
+        if (c.i >= c.n || c.s[c.i++] != ',') return -1;
+        skip_ws(&c);
+    }
+}
+
 int json_duplicate_key(const char *s, size_t n, const char *key)
 {
-    size_t i = 0, key_len, count = 0;
-    int depth = 0;
+    struct json_cursor c = {s, n, 0, 0};
+    size_t count = 0;
+    int match;
+
     if (!s || !key) return 0;
-    key_len = strlen(key);
-    while (i < n) {
-        if (s[i] == '"') {
-            size_t start = ++i;
-            int escaped = 0;
-            while (i < n) {
-                char ch = s[i++];
-                if (escaped) { escaped = 0; continue; }
-                if (ch == '\\') { escaped = 1; continue; }
-                if (ch == '"') break;
-            }
-            if (i > n || !i || s[i - 1] != '"') return 0;
-            if (depth == 1 && i - start - 1 == key_len &&
-                !memcmp(s + start, key, key_len)) {
-                size_t j = i;
-                while (j < n && ws(s[j])) j++;
-                if (j < n && s[j] == ':' && ++count > 1) return 1;
-            }
-            continue;
-        }
-        if (s[i] == '{' || s[i] == '[') depth++;
-        else if ((s[i] == '}' || s[i] == ']') && depth > 0) depth--;
-        i++;
+    skip_ws(&c);
+    if (c.i >= c.n || c.s[c.i++] != '{') return 0;
+    skip_ws(&c);
+    if (c.i < c.n && c.s[c.i] == '}') return 0;
+    for (;;) {
+        if (c.i >= c.n || c.s[c.i] != '"') return 0;
+        match = parse_string_key(&c, key);
+        if (match < 0) return 0;
+        skip_ws(&c);
+        if (c.i >= c.n || c.s[c.i++] != ':') return 0;
+        skip_ws(&c);
+        if (match) count++;
+        if (!parse_value(&c)) return 0;
+        skip_ws(&c);
+        if (c.i < c.n && c.s[c.i] == '}') return count > 1;
+        if (c.i >= c.n || c.s[c.i++] != ',') return 0;
+        skip_ws(&c);
     }
-    return 0;
 }
 
 static const char *find_key(const char *s, const char *k)
@@ -446,27 +540,187 @@ int json_get_string_top_level(const char *s, const char *k,
     return p ? json_get_string_at(p, out, z) : 0;
 }
 
+int json_object_members(const char *s, size_t n, struct json_member *out,
+                        size_t capacity, size_t *count)
+{
+    struct json_cursor c = {s, n, 0, 0};
+    size_t used = 0;
+
+    if (count)
+        *count = 0;
+    if (!s || !count)
+        return -1;
+    skip_ws(&c);
+    if (c.i >= c.n || c.s[c.i++] != '{')
+        return -1;
+    skip_ws(&c);
+    if (c.i < c.n && c.s[c.i] == '}') {
+        c.i++;
+        skip_ws(&c);
+        if (c.i != c.n)
+            return -1;
+        return 0;
+    }
+    for (;;) {
+        size_t name_start, name_len, value_start, value_len;
+
+        skip_ws(&c);
+        if (c.i >= c.n || c.s[c.i] != '"')
+            return -1;
+        name_start = c.i + 1;
+        if (!parse_string(&c))
+            return -1;
+        name_len = c.i - name_start - 1;
+        skip_ws(&c);
+        if (c.i >= c.n || c.s[c.i++] != ':')
+            return -1;
+        skip_ws(&c);
+        value_start = c.i;
+        if (!parse_value(&c))
+            return -1;
+        value_len = c.i - value_start;
+        if (out && used < capacity) {
+            out[used].name = s + name_start;
+            out[used].name_len = name_len;
+            out[used].value = s + value_start;
+            out[used].value_len = value_len;
+        }
+        used++;
+        skip_ws(&c);
+        if (c.i < c.n && c.s[c.i] == '}') {
+            c.i++;
+            skip_ws(&c);
+            if (c.i != c.n)
+                return -1;
+            if (used > capacity)
+                return -1;   /* the caller could not have seen them all */
+            *count = used;
+            return 0;
+        }
+        if (c.i >= c.n || c.s[c.i++] != ',')
+            return -1;
+        skip_ws(&c);
+        if (c.i < c.n && c.s[c.i] == '}')
+            return -1;
+    }
+}
+
+/*
+ * The span decoders below reuse the existing value parser over exactly the
+ * caller's span, so the accepted escapes, surrogate pairing and integer
+ * grammar are the ones the rest of the file already accepts rather than a
+ * second set. A span must be one complete value and nothing else, which is
+ * what rejects a member that decoded a prefix of a longer token.
+ */
+static int span_cursor(struct json_cursor *c, const char *s, size_t n)
+{
+    c->s = s;
+    c->n = n;
+    c->i = 0;
+    c->depth = 0;
+    skip_ws(c);
+    if (c->i >= c->n)
+        return -1;
+    return 0;
+}
+
+static int span_exhausted(struct json_cursor *c)
+{
+    skip_ws(c);
+    return c->i == c->n;
+}
+
+/*
+ * Validate that a span holds exactly one value of the wanted type, then decode
+ * it with the helper the rest of the file already uses. Running the existing
+ * value parser over the span is what makes "exactly one value" checkable: a
+ * number with a trailing token, or a string that ends before the span does,
+ * both fail here rather than decoding a plausible prefix.
+ */
+static int span_is_single_value(const char *s, size_t n, size_t from)
+{
+    struct json_cursor probe = {s, n, from, 0};
+
+    if (from >= n || !parse_value(&probe))
+        return 0;
+    return span_exhausted(&probe);
+}
+
+int json_string_span(const char *s, size_t n, char *out, size_t z)
+{
+    struct json_cursor c;
+
+    if (!s || !out || z < 2 || span_cursor(&c, s, n) || c.s[c.i] != '"')
+        return -1;
+    if (!span_is_single_value(s, n, c.i))
+        return -1;
+    return json_get_string_at(s + c.i, out, z);
+}
+
+int json_int_span(const char *s, size_t n, int *out)
+{
+    struct json_cursor c;
+    char *end;
+    long long value;
+
+    if (!s || !out || span_cursor(&c, s, n) || c.s[c.i] == '"')
+        return -1;
+    errno = 0;
+    /* strtoll, not strtol: long is 32-bit on the ARM target, where the
+     * int range check below would be always false (-Werror=type-limits). */
+    value = strtoll(s + c.i, &end, 10);
+    /* strtol would accept a fraction, an exponent, a leading plus or any
+     * trailing token; parse_value() accepts none of those, so it is what
+     * decides whether the span is a whole JSON integer and nothing more. */
+    if (end == s + c.i || errno == ERANGE || value > INT_MAX ||
+        value < INT_MIN || !span_is_single_value(s, n, c.i))
+        return -1;
+    *out = (int)value;
+    return 1;
+}
+
+int json_bool_span(const char *s, size_t n, int *out)
+{
+    struct json_cursor c;
+    int value;
+
+    if (!s || !out || span_cursor(&c, s, n))
+        return -1;
+    if (literal(&c, "true"))
+        value = 1;
+    else if (literal(&c, "false"))
+        value = 0;
+    else
+        return -1;
+    if (!span_exhausted(&c))
+        return -1;
+    *out = value;
+    return 1;
+}
+
 void json_escape(char *out, size_t z, const char *in)
 {
     static const char hex[] = "0123456789abcdef";
     size_t n = 0;
-    /* Reserve room for the longest single escape (\\uXXXX = 6 bytes). Control
-       characters must be escaped, not dropped: silently deleting newlines
-       turned a multi-line log into one unreadable line, and passing a raw
-       newline through would have produced invalid JSON. */
-    /* Check the width of the current escape rather than reserving six bytes
-       for every input character; quotes and named controls need only two. */
     while (*in) {
         unsigned char c = (unsigned char)*in;
-        size_t width = (c == 34 || c == 92 || c == 10 || c == 13 || c == 9) ? 2 : (c < 32 ? 6 : 1);
-        if (n + width + 1 > z) break;
-        in++;
-        if (c == '"' || c == '\\') { out[n++] = '\\'; out[n++] = (char)c; }
-        else if (c == '\n') { out[n++] = '\\'; out[n++] = 'n'; }
-        else if (c == '\r') { out[n++] = '\\'; out[n++] = 'r'; }
-        else if (c == '\t') { out[n++] = '\\'; out[n++] = 't'; }
-        else if (c >= 32) out[n++] = (char)c;
-        else {
+        size_t width = (c == 34 || c == 92 || c == 10 || c == 13 || c == 9)
+            ? 2 : (c < 32 ? 6 : 1);
+        if (n + width + 1 > z)
+            break;
+        ++in;
+        if (c == 34 || c == 92) {
+            out[n++] = '\\';
+            out[n++] = (char)c;
+        } else if (c == 10) {
+            out[n++] = '\\'; out[n++] = 'n';
+        } else if (c == 13) {
+            out[n++] = '\\'; out[n++] = 'r';
+        } else if (c == 9) {
+            out[n++] = '\\'; out[n++] = 't';
+        } else if (c >= 32) {
+            out[n++] = (char)c;
+        } else {
             out[n++] = '\\'; out[n++] = 'u'; out[n++] = '0'; out[n++] = '0';
             out[n++] = hex[c >> 4]; out[n++] = hex[c & 15];
         }

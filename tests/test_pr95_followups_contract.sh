@@ -12,7 +12,9 @@ assert 'start_api_worker' in server
 assert 'start_api_worker(c->fd,api,&q)' in server
 assert 'api_handle(api,q,&r)' in server.split('start_api_worker', 1)[1]
 assert 'LE_MAX_ASSISTANT_WORKERS 4' in server
-assert 'reap_assistant_workers' in server
+# Renamed when TLS relays became forked children too: one SIGCHLD handler now
+# reaps both pools, so the name no longer says "assistant".
+assert 'reap_child_workers' in server
 assert 'sigaction(SIGCHLD' in server
 assert 'access("/etc/init.d/libreecho-sttd.init"' not in server
 assert 'access("/etc/init.d/libreecho-ttsd.init"' not in server

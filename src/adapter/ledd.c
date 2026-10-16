@@ -13,7 +13,11 @@
 #endif
 
 #include "adapter.h"
+#include "led_output.h"
+#include "led_music_director.h"
+#include "led_music_render.h"
 #include "log.h"
+#include "music_visualizer_protocol.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -41,6 +45,9 @@
 #endif
 
 #define MAX_CLIENTS 4
+/* Queue depth for the visualiser producer's nonblocking connects: a full
+   queue drops a music frame, so keep headroom over the client slots. */
+#define LED_LISTEN_BACKLOG 16
 /*
  * The ring colour, brightness and the four state themes are persisted here.
  *
@@ -51,7 +58,9 @@
  * that survives, and is where the web and assistant configuration already
  * live.
  */
+#ifndef STATE_PATH
 #define STATE_PATH "/data/libreecho/config/led-state.json"
+#endif
 #define LEGACY_STATE_PATH "/etc/libreecho/led-state.json"
 #define SYSFS_LED_DIR "/sys/class/leds"
 #define SYSFS_I2C_DIR "/sys/bus/i2c/devices"
@@ -68,6 +77,41 @@
 #define STARTUP_READY_PATH "/run/libreecho/startup-ready"
 #define STARTUP_FRAME_MS 88
 #define NIGHT_POLL_MS 60000
+
+/* Idle base ring modes (#110).  The indicator is the default: a resting
+   device shows two dim green front-centre pixels, so "powered and listening for the
+   wake word" is distinguishable from a dead device without lighting a room.
+   Events still light the ring and it returns to the base. */
+#define IDLE_MODE_OFF       0
+#define IDLE_MODE_INDICATOR 1
+#define IDLE_MODE_ALWAYS    2
+/* The two pixels either side of the ring's front centre, green at 20%
+   brightness.  Pixel 0 sits one step off centre; pixels 10 and 11 were
+   identified on hardware as the front-centre pair. */
+#define IDLE_INDICATOR_BRIGHTNESS 20U
+#define IDLE_INDICATOR_PIXEL_A 10U
+#define IDLE_INDICATOR_PIXEL_B 11U
+#define IDLE_INDICATOR_GREEN 255U
+/* Version of the idle-ring policy recorded beside the persisted idle mode.
+   A state file without it (0.13, or a 0.14 pre-release that defaulted to a
+   dark ring) predates the single-green-indicator default: the upgrade resets
+   its idle mode to the indicator once and records this version, so every
+   device starts 0.14 the same way and later owner choices are kept. */
+#define IDLE_POLICY_VERSION 2U
+
+/* Sleep-light bounds (#101).  Server-side, not advisory. */
+#define SLEEP_MODE_OFF   0
+#define SLEEP_MODE_SOLID 1
+#define SLEEP_MODE_PULSE 2
+#define SLEEP_BRIGHTNESS_MAX 20U
+#define SLEEP_PERIOD_MIN_MS 3000U
+#define SLEEP_PERIOD_MAX_MS 15000U
+#define SLEEP_TIMER_MAX_MINUTES 720
+#define SLEEP_PULSE_FLOOR_PERCENT 15U
+/* A timed sleep light that expires while the state write fails must retry that
+   write; it is owed to disk or a restart restores the sleep light from the
+   stale file.  Retried on a bounded cadence, not once a frame. */
+#define SLEEP_PERSIST_RETRY_S 1.0
 
 struct colour {
     unsigned int r;
@@ -103,6 +147,17 @@ struct led_state {
     int night_enabled;
     int night_start_minute;
     int night_end_minute;
+    /* Idle base ring mode (#110). */
+    int idle_mode;
+    /* Not persisted: set by load_state() when a state file predating
+       IDLE_POLICY_VERSION was upgraded and must be written back. */
+    int idle_policy_upgraded;
+    /* Sleep light settings (#101); persisted but not automatically active. */
+    int sleep_mode;
+    unsigned int sleep_brightness;
+    unsigned int sleep_period_ms;
+    int sleep_timer_minutes;
+    int sleep_restore_on_boot;
 };
 
 
@@ -171,6 +226,8 @@ struct daemon_context {
     struct colour pattern_colour;
     unsigned int pattern_repeats;
     double pattern_started;
+    int mute_pattern_active;
+    struct colour mute_pattern_colour;
     int pattern_previous_kind;
     struct colour pattern_previous_colour;
     unsigned int pattern_previous_repeats;
@@ -190,11 +247,15 @@ struct daemon_context {
     unsigned int visualizer_rhythm_step;
     unsigned int visualizer_rhythm_pulse;
     unsigned int visualizer_rhythm_cooldown;
+    /*
+     * Legacy v1 major music FX is disabled (UI#65).  These stay zero because
+     * the compatibility path may never select a timer- or transient-driven
+     * overlay; only the v2 director/render path owns major transitions.  They
+     * are retained so the regression harness can assert the invariant.
+     */
     unsigned int visualizer_fx_kind;
     unsigned int visualizer_fx_frames;
     unsigned int visualizer_fx_phase;
-    unsigned int visualizer_fx_cooldown;
-    double visualizer_periodic_fx_next;
     unsigned int visualizer_energy_ema;
     unsigned int visualizer_flux_ema;
     int visualizer_mood;
@@ -211,9 +272,43 @@ struct daemon_context {
     double night_next_check;
     int night_last_active;
     int night_schedule_initialized;
+    /* Common output stage diagnostics (#66). */
+    struct led_output_state output_state;
+    struct led_output_diag output_diag;
+    /* Hardware write pacing.  The IS31FL3236 sits on the I2C bus shared with
+       the four audio codecs and light sensors; one frame is 37 register
+       writes and was measured at 30..120 ms on Radar.  Writing every 33 ms
+       frame kept ledd blocked in the I2C driver for up to half of each
+       second, so it could not service the visualiser socket and the ring
+       froze.  Identical frames are skipped and writes are paced to at most
+       half the bus time; the newest frame is always written eventually. */
+    struct pixel hw_written[RING_PIXELS];
+    int hw_written_valid;
+    int hw_pending;
+    double hw_next_write;
+    double hw_write_cost;      /* smoothed seconds per hardware write */
+    /* Sleep light runtime (#101). */
+    int sleep_active;
+    double sleep_started;
+    double sleep_expires;      /* absolute monotonic seconds, 0 = no timer */
+    int sleep_persist_pending; /* expiry applied in memory; disk write owed */
+    int sleep_persist_logged;  /* one warning per failure streak */
+    double sleep_persist_next; /* earliest retry, monotonic seconds */
+    /* Music director and renderer state (#64, #65). */
+    int music_active;
+    unsigned int music_session;
+    unsigned int music_brightness;
+    struct le_music_features music_features;
+    struct le_music_director music_director;
+    struct le_music_render_state music_render;
+    struct le_music_stream music_stream;
 };
 
-enum pattern_kind { PATTERN_NONE = 0, PATTERN_PULSE, PATTERN_FLASH };
+/* PATTERN_SOLID holds a steady colour until its owner stops it. The mute
+   indicator needs a state you can read at a glance, which neither the pulse
+   nor the 1.5s meter can express. */
+enum pattern_kind { PATTERN_NONE = 0, PATTERN_PULSE, PATTERN_FLASH,
+                    PATTERN_SOLID };
 enum visualizer_mood {
     VISUALIZER_MOOD_CALM = 0,
     VISUALIZER_MOOD_BALANCED,
@@ -309,6 +404,18 @@ static int write_number_file(const char *path, unsigned int value)
 }
 
 static unsigned int scale_channel(unsigned int channel, unsigned int brightness);
+
+static void apply_base_state(struct daemon_context *ctx, double now);
+static void apply_base_layer(struct daemon_context *ctx, double now);
+static void sleep_tick(struct daemon_context *ctx, double now);
+static void output_logical_rgb(struct daemon_context *ctx,
+                               const struct led_rgb logical[RING_PIXELS],
+                               unsigned int brightness);
+static void apply_music_v2(struct daemon_context *ctx, double now);
+static void start_music_v2(struct daemon_context *ctx,
+                           const struct le_music_features *features,
+                           unsigned int brightness, const char *owner,
+                           double now);
 
 static int write_is31_pixels(const struct hardware *hw,
                              const struct pixel pixels[RING_PIXELS])
@@ -450,22 +557,86 @@ static struct colour night_capped(const struct daemon_context *ctx,
     return c;
 }
 
-static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
+/* One choke point for the whole output pipeline (#66).  Every steady colour,
+   pattern, meter, visualizer/music scene, transition and test frame ends up
+   here, so the perceptual transfer, calibration and aggregate budget apply
+   uniformly and exactly once. */
+#define HW_WRITE_MIN_INTERVAL (FRAME_MS / 1000.0)
+#define HW_WRITE_MAX_INTERVAL 0.125
+#define HW_WRITE_BUS_SHARE 2.0 /* spend at most 1/2 of the time writing */
+
+/* Write the newest rendered frame if it differs from the hardware and the
+   pacing interval has elapsed.  Returns 1 when a write was attempted. */
+static int output_flush(struct daemon_context *ctx, double now, int force)
 {
-    /* One choke point: every path that lights the ring ends up here, so the
-       night cap applies to the idle colour, the state themes, patterns and
-       the meter alike without each having to remember it. */
-    struct colour capped = night_capped(ctx, *c);
+    double started, cost, interval;
+
+    if (!ctx->hw_pending)
+        return 0;
+    if (ctx->hw_written_valid &&
+        memcmp(ctx->hw_written, ctx->rendered_pixels,
+               sizeof(ctx->hw_written)) == 0) {
+        ctx->hw_pending = 0;
+        return 0;
+    }
+    if (!force && now < ctx->hw_next_write)
+        return 0;
+    started = monotonic_seconds();
+    if (hardware_write_pixels(&ctx->hw, ctx->rendered_pixels) != 0) {
+        le_log_warn("LED hardware write failed; retaining state in memory");
+        ctx->hw_written_valid = 0;
+    } else {
+        memcpy(ctx->hw_written, ctx->rendered_pixels, sizeof(ctx->hw_written));
+        ctx->hw_written_valid = 1;
+    }
+    ctx->hw_pending = 0;
+    cost = monotonic_seconds() - started;
+    if (cost < 0.0)
+        cost = 0.0;
+    ctx->hw_write_cost = ctx->hw_write_cost <= 0.0
+                       ? cost : (ctx->hw_write_cost * 3.0 + cost) / 4.0;
+    interval = ctx->hw_write_cost * HW_WRITE_BUS_SHARE;
+    if (interval < HW_WRITE_MIN_INTERVAL)
+        interval = HW_WRITE_MIN_INTERVAL;
+    if (interval > HW_WRITE_MAX_INTERVAL)
+        interval = HW_WRITE_MAX_INTERVAL;
+    ctx->hw_next_write = started + interval;
+    return 1;
+}
+
+/* Milliseconds until a paced pending write is due, or -1 when none. */
+static int output_flush_timeout(const struct daemon_context *ctx, double now)
+{
+    double remaining;
+
+    if (!ctx->hw_pending)
+        return -1;
+    remaining = (ctx->hw_next_write - now) * 1000.0;
+    return remaining <= 1.0 ? 1 : (int)remaining + 1;
+}
+
+static void output_commit_transfer(struct daemon_context *ctx,
+                                   const struct led_rgb logical[RING_PIXELS],
+                                   unsigned int brightness,
+                                   enum led_output_transfer transfer)
+{
+    struct led_rgb out[RING_PIXELS];
     size_t i;
 
-    c = &capped;
-    for (i = 0; i < RING_PIXELS; i++) {
-        ctx->rendered_pixels[i].r = scale_channel(c->r, c->brightness);
-        ctx->rendered_pixels[i].g = scale_channel(c->g, c->brightness);
-        ctx->rendered_pixels[i].b = scale_channel(c->b, c->brightness);
-    }
-    if (hardware_write_pixels(&ctx->hw, ctx->rendered_pixels) != 0)
-        le_log_warn( "LED hardware write failed; retaining state in memory");
+    led_output_process_transfer(led_output_default_calibration(),
+                                &ctx->output_state, logical, brightness,
+                                transfer, out, &ctx->output_diag);
+    for (i = 0; i < RING_PIXELS; i++)
+        ctx->rendered_pixels[i] = (struct pixel){out[i].r, out[i].g, out[i].b};
+    ctx->hw_pending = 1;
+    (void)output_flush(ctx, monotonic_seconds(), 0);
+}
+
+static void output_commit(struct daemon_context *ctx,
+                          const struct led_rgb logical[RING_PIXELS],
+                          unsigned int brightness)
+{
+    output_commit_transfer(ctx, logical, brightness, LE_OUTPUT_TRANSFER_GAMMA);
 }
 
 static void night_cap_pixels(const struct daemon_context *ctx,
@@ -495,16 +666,66 @@ static void night_cap_pixels(const struct daemon_context *ctx,
     }
 }
 
-static void hardware_apply_pixels(struct daemon_context *ctx,
-                                  const struct pixel pixels[RING_PIXELS])
+/* A solid colour across the ring: brightness is the colour's own master cap,
+   further capped by night mode, then applied by the output stage. */
+static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
+{
+    struct colour capped = night_capped(ctx, *c);
+    struct led_rgb logical[RING_PIXELS];
+    size_t i;
+
+    for (i = 0; i < RING_PIXELS; i++)
+        logical[i] = (struct led_rgb){capped.r, capped.g, capped.b};
+    output_commit(ctx, logical, capped.brightness);
+}
+
+/* A logical per-pixel frame (0..255 per channel, no brightness baked in). */
+static void output_logical_rgb_transfer(struct daemon_context *ctx,
+                                        const struct led_rgb logical[RING_PIXELS],
+                                        unsigned int brightness,
+                                        enum led_output_transfer transfer)
 {
     struct pixel capped[RING_PIXELS];
+    struct led_rgb frame[RING_PIXELS];
+    size_t i;
 
-    memcpy(capped, pixels, sizeof(capped));
+    for (i = 0; i < RING_PIXELS; i++)
+        capped[i] = (struct pixel){logical[i].r, logical[i].g, logical[i].b};
     night_cap_pixels(ctx, capped);
-    memcpy(ctx->rendered_pixels, capped, sizeof(ctx->rendered_pixels));
-    if (hardware_write_pixels(&ctx->hw, capped) != 0)
-        le_log_warn( "LED hardware write failed; retaining state in memory");
+    for (i = 0; i < RING_PIXELS; i++)
+        frame[i] = (struct led_rgb){capped[i].r, capped[i].g, capped[i].b};
+    output_commit_transfer(ctx, frame, brightness, transfer);
+}
+
+static void output_logical_rgb(struct daemon_context *ctx,
+                               const struct led_rgb logical[RING_PIXELS],
+                               unsigned int brightness)
+{
+    output_logical_rgb_transfer(ctx, logical, brightness,
+                                LE_OUTPUT_TRANSFER_GAMMA);
+}
+
+/* Music frames: band levels are already perceptually shaped by the analyser,
+   so they bypass the gamma-2 transfer (brightness cap, calibration, night cap
+   and frame budget still apply). */
+static void output_music_rgb(struct daemon_context *ctx,
+                             const struct led_rgb logical[RING_PIXELS],
+                             unsigned int brightness)
+{
+    output_logical_rgb_transfer(ctx, logical, brightness,
+                                LE_OUTPUT_TRANSFER_LINEAR);
+}
+
+static void output_pixels(struct daemon_context *ctx,
+                          const struct pixel logical[RING_PIXELS],
+                          unsigned int brightness)
+{
+    struct led_rgb frame[RING_PIXELS];
+    size_t i;
+
+    for (i = 0; i < RING_PIXELS; i++)
+        frame[i] = (struct led_rgb){logical[i].r, logical[i].g, logical[i].b};
+    output_logical_rgb(ctx, frame, brightness);
 }
 
 static void night_schedule_tick(struct daemon_context *ctx, double now)
@@ -527,7 +748,7 @@ static void night_schedule_tick(struct daemon_context *ctx, double now)
         if (!ctx->startup_animation_active && !ctx->test_active &&
             !ctx->pattern_active && !ctx->visualizer_active &&
             !ctx->meter_active && !ctx->animation_active)
-            hardware_apply(ctx, &ctx->state.current);
+            apply_base_state(ctx, now);
     }
     if (ctx->night_next_check > 0.0 && now >= ctx->night_next_check)
         ctx->night_next_check = now + NIGHT_POLL_MS / 1000.0;
@@ -561,7 +782,7 @@ static void apply_startup_animation(struct daemon_context *ctx)
         pixels[i] = (struct pixel){0, 64, 0};
     pixels[ctx->startup_animation_frame % RING_PIXELS] =
         (struct pixel){0, 255, 0};
-    hardware_apply_pixels(ctx, pixels);
+    output_pixels(ctx, pixels, 100U);
 }
 
 static void stop_startup_animation(struct daemon_context *ctx)
@@ -569,7 +790,7 @@ static void stop_startup_animation(struct daemon_context *ctx)
     if (!ctx->startup_animation_active)
         return;
     ctx->startup_animation_active = 0;
-    hardware_apply(ctx, &ctx->state.current);
+    apply_base_state(ctx, monotonic_seconds());
     le_log_info("green startup animation complete");
 }
 
@@ -1136,6 +1357,15 @@ static void default_state(struct led_state *state)
     state->night_enabled = 0;
     state->night_start_minute = 22 * 60;
     state->night_end_minute = 7 * 60;
+    /* A resting ring shows the dim green front indicator by default (#110);
+       events light the ring and it returns to the indicator. */
+    state->idle_mode = IDLE_MODE_INDICATOR;
+    /* Sleep light defaults: off, a dark-room-deep red at low brightness. */
+    state->sleep_mode = SLEEP_MODE_OFF;
+    state->sleep_brightness = 8U;
+    state->sleep_period_ms = 8000U;
+    state->sleep_timer_minutes = 0;
+    state->sleep_restore_on_boot = 0;
 }
 
 static void read_colour(struct json_span object, struct colour *colour,
@@ -1216,6 +1446,61 @@ static void load_state(struct led_state *state)
             }
         }
     }
+    {
+        unsigned int mode = (unsigned int)IDLE_MODE_INDICATOR, policy = 0U;
+
+        if (json_object_find(root, "idle", &object) == 1 &&
+            json_span_is_object(object)) {
+            struct request r = { .args = object, .have_args = 1 };
+            unsigned int v;
+            if (get_arg_unsigned(&r, "mode", &v, IDLE_MODE_ALWAYS) == 0)
+                mode = v;
+            if (get_arg_unsigned(&r, "policy", &v, 0xffffU) == 0)
+                policy = v;
+        }
+        if (policy >= IDLE_POLICY_VERSION) {
+            state->idle_mode = (int)mode;
+        } else {
+            /* Upgrade: the stored mode (if any) was chosen under the old
+               always-on or dark default; adopt the green front indicator. */
+            state->idle_mode = IDLE_MODE_INDICATOR;
+            state->idle_policy_upgraded = 1;
+        }
+    }
+    if (json_object_find(root, "sleep", &object) == 1 &&
+        json_span_is_object(object)) {
+        struct request r = { .args = object, .have_args = 1 };
+        unsigned int v;
+        if (get_arg_unsigned(&r, "mode", &v, SLEEP_MODE_PULSE) == 0)
+            state->sleep_mode = (int)v;
+        if (get_arg_unsigned(&r, "brightness", &v, SLEEP_BRIGHTNESS_MAX) == 0)
+            state->sleep_brightness = v;
+        if (get_arg_unsigned(&r, "period_ms", &v, SLEEP_PERIOD_MAX_MS) == 0 &&
+            v >= SLEEP_PERIOD_MIN_MS)
+            state->sleep_period_ms = v;
+        if (get_arg_unsigned(&r, "timer_minutes", &v,
+                             (unsigned int)SLEEP_TIMER_MAX_MINUTES) == 0)
+            state->sleep_timer_minutes = (int)v;
+        if (get_arg_unsigned(&r, "restore_on_boot", &v, 1) == 0)
+            state->sleep_restore_on_boot = (int)v;
+    }
+}
+
+static int persist_state(const struct led_state *state);
+
+/* Write an upgraded idle policy back once, so the reset happens on the first
+   boot of the new release only.  A failed write is retried on the next boot;
+   the in-memory mode is already the indicator either way. */
+static void finish_idle_policy_upgrade(struct led_state *state)
+{
+    if (!state->idle_policy_upgraded)
+        return;
+    if (persist_state(state) == 0) {
+        state->idle_policy_upgraded = 0;
+        le_log_info("ledd: idle ring reset to the green indicator for this release");
+    } else {
+        le_log_warn("ledd: idle ring upgrade not persisted; will retry next boot");
+    }
 }
 
 static int persist_state(const struct led_state *state)
@@ -1234,11 +1519,17 @@ static int persist_state(const struct led_state *state)
         "{\"current\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"night\":{\"enabled\":%d,\"start_minute\":%d,\"end_minute\":%d},"
+        "\"idle\":{\"mode\":%d,\"policy\":%u},"
+        "\"sleep\":{\"mode\":%d,\"brightness\":%u,\"period_ms\":%u,"
+        "\"timer_minutes\":%d,\"restore_on_boot\":%d},"
         "\"profiles\":{",
         state->current.r, state->current.g, state->current.b,
         state->current.brightness, state->boot.r, state->boot.g, state->boot.b,
         state->boot.brightness, state->night_enabled,
-        state->night_start_minute, state->night_end_minute);
+        state->night_start_minute, state->night_end_minute,
+        state->idle_mode, IDLE_POLICY_VERSION, state->sleep_mode,
+        state->sleep_brightness, state->sleep_period_ms,
+        state->sleep_timer_minutes, state->sleep_restore_on_boot);
     if (n < 0 || (size_t)n >= sizeof(text))
         return -1;
     for (i = 0; i < PROFILE_COUNT; i++) {
@@ -1431,62 +1722,17 @@ static void trigger_visualizer_rhythm(struct daemon_context *ctx,
     ctx->visualizer_rhythm_cooldown = 2U;
 }
 
-static void trigger_visualizer_fx(struct daemon_context *ctx,
-                                  double now,
-                                  unsigned int onset,
-                                  unsigned int peak_jump,
-                                  unsigned int low_delta,
-                                  unsigned int mid_delta,
-                                  unsigned int high_delta)
-{
-    unsigned int dominant = low_delta;
-    unsigned int kind = 1;
-
-    if (mid_delta >= dominant) {
-        dominant = mid_delta;
-        kind = 2U;
-    }
-    if (high_delta >= dominant) {
-        dominant = high_delta;
-        kind = 3U;
-    }
-
-    if (ctx->visualizer_fx_cooldown > 0 ||
-        (onset < 76U && peak_jump < 118U && dominant < 66U))
-        return;
-
-    ctx->visualizer_fx_kind = kind;
-    ctx->visualizer_fx_frames = 5U;
-    ctx->visualizer_fx_phase = ctx->visualizer_rhythm_step;
-    ctx->visualizer_fx_cooldown = 36U;
-    ctx->visualizer_periodic_fx_next = now + 10.0;
-}
-
-static void trigger_visualizer_periodic_comet(struct daemon_context *ctx,
-                                              double now,
-                                              unsigned int onset)
-{
-    if (ctx->visualizer_periodic_fx_next <= 0.0)
-        ctx->visualizer_periodic_fx_next = now + 8.0;
-    if (now < ctx->visualizer_periodic_fx_next ||
-        ctx->visualizer_fx_frames > 0 ||
-        ctx->visualizer_fx_cooldown > 0)
-        return;
-
-    if (ctx->visualizer_mood == VISUALIZER_MOOD_CALM ||
-        (ctx->visualizer_energy_ema < 58U && onset < 28U)) {
-        ctx->visualizer_periodic_fx_next = now + 5.0;
-        return;
-    }
-
-    ctx->visualizer_fx_kind = 4U;
-    ctx->visualizer_fx_frames = 10U;
-    ctx->visualizer_fx_phase = ctx->visualizer_rhythm_step;
-    ctx->visualizer_fx_cooldown = 44U;
-    ctx->visualizer_periodic_fx_next =
-        now + 12.0 + (double)(ctx->visualizer_rhythm_step % 5U);
-}
-
+/*
+ * Legacy v1 major music FX triggers are intentionally absent (UI#65).
+ *
+ * The compatibility path keeps compatible rendering -- the twelve-level
+ * spectrum, the rhythm step/pulse, the beat halo, mood palettes and output
+ * priority -- but it may not start a major overlay.  A generic transient
+ * overlay cannot meet the structural (feature-vector) confidence bar the v2
+ * director requires, and a purely elapsed-time or cooldown-expiry effect is
+ * exactly the forbidden decoration.  Major transitions therefore live only in
+ * the v2 director/render path (#64, #65).
+ */
 static int classify_visualizer_mood(unsigned int energy, unsigned int flux,
                                     unsigned int low, unsigned int mid,
                                     unsigned int high)
@@ -1731,7 +1977,16 @@ static void apply_visualizer(struct daemon_context *ctx, double now)
         ctx->visualizer_rhythm_pulse = 0;
     ctx->visualizer_impact = ctx->visualizer_impact > 12U
                            ? ctx->visualizer_impact - 12U : 0U;
-    hardware_apply_pixels(ctx, pixels);
+    if (ctx->music_active) {
+        apply_music_v2(ctx, now);
+    } else {
+        struct led_rgb frame[RING_PIXELS];
+        size_t p;
+
+        for (p = 0; p < RING_PIXELS; p++)
+            frame[p] = (struct led_rgb){pixels[p].r, pixels[p].g, pixels[p].b};
+        output_music_rgb(ctx, frame, ctx->visualizer_brightness);
+    }
 }
 
 static void expire_visualizer(struct daemon_context *ctx, double now)
@@ -1745,8 +2000,10 @@ static void expire_visualizer(struct daemon_context *ctx, double now)
         ctx->visualizer_rhythm_cooldown = 0;
         ctx->visualizer_fx_kind = 0;
         ctx->visualizer_fx_frames = 0;
-        ctx->visualizer_fx_cooldown = 0;
-        ctx->visualizer_periodic_fx_next = 0.0;
+        /* An expired stream releases the v2 session so a resumed producer is
+           treated as a fresh start rather than as stale/reordered frames. */
+        ctx->music_active = 0;
+        le_music_stream_reset(&ctx->music_stream);
     }
 }
 
@@ -1772,21 +2029,24 @@ static void apply_meter(struct daemon_context *ctx)
         unsigned int level;
 
         if (i < filled)
-            level = brightness;
+            level = 100U;
         else if (i == filled && partial)
-            level = brightness * partial / 100U;
+            level = partial;
         else
-            level = brightness * METER_TRACK_PERCENT / 100U;
+            level = METER_TRACK_PERCENT;
         /*
          * A reading of zero still lights the first pixel at the track level,
          * which keeps "volume 0" distinguishable from "ring off" -- pressing
          * volume-down to silence should still acknowledge the press.
+         *
+         * level is a spatial arc fraction; the master brightness is applied
+         * once by the output stage, not baked in here.
          */
-        pixels[i].r = scale_channel(ctx->meter_colour.r, level);
-        pixels[i].g = scale_channel(ctx->meter_colour.g, level);
-        pixels[i].b = scale_channel(ctx->meter_colour.b, level);
+        pixels[i].r = ctx->meter_colour.r * level / 100U;
+        pixels[i].g = ctx->meter_colour.g * level / 100U;
+        pixels[i].b = ctx->meter_colour.b * level / 100U;
     }
-    hardware_apply_pixels(ctx, pixels);
+    output_pixels(ctx, pixels, brightness);
 }
 
 static void start_meter(struct daemon_context *ctx, unsigned int value,
@@ -1800,17 +2060,115 @@ static void start_meter(struct daemon_context *ctx, unsigned int value,
     ctx->meter_expires = now + hold_ms / 1000.0;
     copy_pattern_owner(ctx->meter_owner, owner);
     ctx->meter_active = 1;
+    if (ctx->music_active)
+        le_music_director_interrupt(&ctx->music_director);
+}
+
+/* Sleep light (#101): a low-priority persistent owner.  The pulse phase is
+   absolute from activation, so pre-emption and resume are continuous rather
+   than restarting the waveform. */
+static void apply_sleep_light(struct daemon_context *ctx, double now)
+{
+    struct colour c = {255U, 40U, 0U, ctx->state.sleep_brightness};
+
+    if (c.brightness > SLEEP_BRIGHTNESS_MAX)
+        c.brightness = SLEEP_BRIGHTNESS_MAX;
+    if (ctx->state.sleep_mode == SLEEP_MODE_PULSE &&
+        ctx->state.sleep_period_ms > 0U) {
+        double period = ctx->state.sleep_period_ms / 1000.0;
+        double phase = (now - ctx->sleep_started) / period;
+        double wave;
+
+        phase -= (double)(long long)phase;
+        if (phase < 0.0)
+            phase += 1.0;
+        wave = (double)SLEEP_PULSE_FLOOR_PERCENT / 100.0 +
+               (1.0 - (double)SLEEP_PULSE_FLOOR_PERCENT / 100.0) *
+               (0.5 + 0.5 * sine_approx(phase * 6.28318530717958647692));
+        c.brightness = (unsigned int)
+            ((double)c.brightness * wave + 0.5);
+    }
+    hardware_apply(ctx, &c);
+}
+
+static void sleep_tick(struct daemon_context *ctx, double now)
+{
+    /* A timed sleep light that expired while persist_state() failed still owes
+     * the OFF state to disk: the in-memory light is off but the file would
+     * restore it on the next boot.  Retry on a bounded cadence until the write
+     * lands, logging once per failure streak. */
+    if (ctx->sleep_persist_pending && now >= ctx->sleep_persist_next) {
+        if (persist_state(&ctx->state) == 0) {
+            ctx->sleep_persist_pending = 0;
+            ctx->sleep_persist_logged = 0;
+        } else {
+            ctx->sleep_persist_next = now + SLEEP_PERSIST_RETRY_S;
+        }
+    }
+    if (!ctx->sleep_active)
+        return;
+    if (ctx->sleep_expires > 0.0 && now >= ctx->sleep_expires) {
+        ctx->sleep_active = 0;
+        ctx->sleep_expires = 0.0;
+        ctx->state.sleep_mode = SLEEP_MODE_OFF;
+        if (persist_state(&ctx->state) != 0) {
+            ctx->sleep_persist_pending = 1;
+            ctx->sleep_persist_next = now + SLEEP_PERSIST_RETRY_S;
+            if (!ctx->sleep_persist_logged) {
+                ctx->sleep_persist_logged = 1;
+                le_log_warn("ledd: sleep-light expiry not yet persisted; retrying");
+            }
+        } else {
+            ctx->sleep_persist_pending = 0;
+            ctx->sleep_persist_logged = 0;
+        }
+        apply_base_layer(ctx, now);
+    }
+}
+
+/*
+ * The single idle/sleep base renderer (#110, #101).  Every reset path funnels
+ * here, so there is one definition of "resting".  The dim green front
+ * indicator is the default; the sleep light, when active, is the base owner;
+ * night mode caps whichever base is selected rather than replacing it.
+ */
+static void apply_base_state(struct daemon_context *ctx, double now)
+{
+    struct pixel pixels[RING_PIXELS];
+    size_t i;
+
+    if (ctx->sleep_active) {
+        apply_sleep_light(ctx, now);
+        return;
+    }
+    if (ctx->state.idle_mode == IDLE_MODE_ALWAYS) {
+        hardware_apply(ctx, &ctx->state.current);
+        return;
+    }
+    for (i = 0; i < RING_PIXELS; i++)
+        pixels[i] = (struct pixel){0, 0, 0};
+    if (ctx->state.idle_mode == IDLE_MODE_INDICATOR) {
+        pixels[IDLE_INDICATOR_PIXEL_A] =
+            (struct pixel){0U, IDLE_INDICATOR_GREEN, 0U};
+        pixels[IDLE_INDICATOR_PIXEL_B] =
+            (struct pixel){0U, IDLE_INDICATOR_GREEN, 0U};
+        output_pixels(ctx, pixels, IDLE_INDICATOR_BRIGHTNESS);
+        return;
+    }
+    /* IDLE_MODE_OFF: an explicitly dark resting ring. */
+    output_pixels(ctx, pixels, 0U);
 }
 
 static void apply_base_layer(struct daemon_context *ctx, double now)
 {
     expire_visualizer(ctx, now);
+    sleep_tick(ctx, now);
     if (ctx->visualizer_active)
         apply_visualizer(ctx, now);
     else if (ctx->animation_active)
         apply_animated(ctx, now);
     else
-        hardware_apply(ctx, &ctx->state.current);
+        apply_base_state(ctx, now);
 }
 
 static void apply_current(struct daemon_context *ctx)
@@ -1820,7 +2178,9 @@ static void apply_current(struct daemon_context *ctx)
 
 static const char *pattern_name(int kind)
 {
-    return kind == PATTERN_PULSE ? "pulse" : kind == PATTERN_FLASH ? "flash" : "none";
+    return kind == PATTERN_PULSE ? "pulse" :
+           kind == PATTERN_FLASH ? "flash" :
+           kind == PATTERN_SOLID ? "solid" : "none";
 }
 
 static void copy_pattern_owner(char *destination, const char *source)
@@ -1842,6 +2202,8 @@ static void copy_pattern_owner(char *destination, const char *source)
 static void stop_pattern(struct daemon_context *ctx, const char *owner,
                          double now)
 {
+    if (!owner || !owner[0] || !strcmp(owner, "mute"))
+        ctx->mute_pattern_active = 0;
     if (!ctx->pattern_active)
         return;
     if (owner && owner[0]) {
@@ -1864,6 +2226,14 @@ static void stop_pattern(struct daemon_context *ctx, const char *owner,
             return;
         }
     }
+    if (owner && owner[0] && ctx->mute_pattern_active) {
+        ctx->pattern_kind = PATTERN_SOLID;
+        ctx->pattern_colour = ctx->mute_pattern_colour;
+        ctx->pattern_repeats = 0;
+        copy_pattern_owner(ctx->pattern_owner, "mute");
+        ctx->pattern_started = now;
+        return;
+    }
     ctx->pattern_active = 0;
     ctx->pattern_kind = PATTERN_NONE;
     ctx->pattern_previous_kind = PATTERN_NONE;
@@ -1880,11 +2250,24 @@ static void start_pattern(struct daemon_context *ctx, int kind,
                           const struct colour *colour, unsigned int repeats,
                           const char *owner, double now)
 {
+    /* Mute is a persistent underlay, not another transient stack entry.
+       Heartbeats update it without interrupting an action or pairing cue. */
+    if (owner && !strcmp(owner, "mute")) {
+        ctx->mute_pattern_active = 1;
+        ctx->mute_pattern_colour = *colour;
+        if (ctx->pattern_active && strcmp(ctx->pattern_owner, "mute")) {
+            if (!strcmp(ctx->pattern_previous_owner, "mute"))
+                ctx->pattern_previous_colour = *colour;
+            return;
+        }
+    }
     if (ctx->pattern_active) {
-        ctx->pattern_previous_kind = ctx->pattern_kind;
-        ctx->pattern_previous_colour = ctx->pattern_colour;
-        ctx->pattern_previous_repeats = ctx->pattern_repeats;
-        copy_pattern_owner(ctx->pattern_previous_owner, ctx->pattern_owner);
+        if (!owner || !owner[0] || strcmp(ctx->pattern_owner, owner)) {
+            ctx->pattern_previous_kind = ctx->pattern_kind;
+            ctx->pattern_previous_colour = ctx->pattern_colour;
+            ctx->pattern_previous_repeats = ctx->pattern_repeats;
+            copy_pattern_owner(ctx->pattern_previous_owner, ctx->pattern_owner);
+        }
     } else {
         ctx->pattern_saved = ctx->state.current;
         ctx->pattern_saved_animation = ctx->animation_active;
@@ -1898,6 +2281,10 @@ static void start_pattern(struct daemon_context *ctx, int kind,
     copy_pattern_owner(ctx->pattern_owner, owner);
     ctx->pattern_started = now;
     ctx->animation_active = 0;
+    /* A higher-priority owner takes the ring: abort any music transition
+       immediately rather than letting it replay later. */
+    if (ctx->music_active)
+        le_music_director_interrupt(&ctx->music_director);
 }
 
 static void update_pattern(struct daemon_context *ctx, double now)
@@ -1927,7 +2314,9 @@ static void update_pattern(struct daemon_context *ctx, double now)
                 ctx->pattern_started = now;
                 update_pattern(ctx, now);
             } else {
-                stop_pattern(ctx, NULL, now);
+                char finished_owner[32];
+                copy_pattern_owner(finished_owner, ctx->pattern_owner);
+                stop_pattern(ctx, finished_owner, now);
             }
             return;
         }
@@ -1953,6 +2342,14 @@ static void start_visualizer(struct daemon_context *ctx,
     if (!ctx->visualizer_enabled)
         return;
 
+    /* A v1 spectrum frame supersedes a v2 music stream. */
+    if (ctx->music_active) {
+        ctx->music_active = 0;
+        le_music_stream_reset(&ctx->music_stream);
+        ctx->visualizer_active = 0;
+        first_frame = 1;
+    }
+
     if (first_frame) {
         ctx->visualizer_started = now;
         ctx->visualizer_bass_floor =
@@ -1965,8 +2362,6 @@ static void start_visualizer(struct daemon_context *ctx,
         ctx->visualizer_fx_kind = 0;
         ctx->visualizer_fx_frames = 0;
         ctx->visualizer_fx_phase = 0;
-        ctx->visualizer_fx_cooldown = 0;
-        ctx->visualizer_periodic_fx_next = now + 8.0;
         for (i = 0; i < RING_PIXELS; i++)
             ctx->visualizer_smoothed[i] = levels[i];
     } else {
@@ -2020,9 +2415,11 @@ static void start_visualizer(struct daemon_context *ctx,
                 (low_delta + mid_delta + high_delta + 1U) / 3U;
         trigger_visualizer_rhythm(ctx, onset, low_delta, mid_delta,
                                   high_delta);
-        trigger_visualizer_fx(ctx, now, onset, peak_jump, low_delta,
-                              mid_delta, high_delta);
-        trigger_visualizer_periodic_comet(ctx, now, onset);
+        /*
+         * No major FX transition here: legacy compatibility may not start a
+         * timer- or transient-driven overlay (UI#65).  Ordinary beat, rhythm
+         * and spectrum motion below is preserved for the v1 path.
+         */
         if (onset > 22U) {
             unsigned int accent = onset * 2U;
             if (high_delta > low_delta && high_delta >= mid_delta)
@@ -2036,8 +2433,6 @@ static void start_visualizer(struct daemon_context *ctx,
         }
         if (ctx->visualizer_rhythm_cooldown > 0)
             ctx->visualizer_rhythm_cooldown--;
-        if (ctx->visualizer_fx_cooldown > 0)
-            ctx->visualizer_fx_cooldown--;
     }
     if (bass > ctx->visualizer_bass_floor + 24U && bass > 64U) {
         unsigned int beat = (bass - ctx->visualizer_bass_floor) * 2U;
@@ -2050,6 +2445,44 @@ static void start_visualizer(struct daemon_context *ctx,
         (ctx->visualizer_bass_floor * 15U + bass + 8U) / 16U;
     if (!ctx->test_active && !ctx->pattern_active)
         apply_visualizer(ctx, now);
+}
+
+/*
+ * v2 music path (#64, #65).  The director decides grammar/palette/transition
+ * and the renderer produces the logical frame; the output stage then applies
+ * brightness, calibration and the frame budget.
+ */
+static void apply_music_v2(struct daemon_context *ctx, double now)
+{
+    struct le_music_scene scene;
+    struct led_rgb logical[RING_PIXELS];
+
+    le_music_director_scene(&ctx->music_director, now, &scene);
+    le_music_render(&scene, &ctx->music_features, &ctx->music_render, logical);
+    output_music_rgb(ctx, logical, ctx->music_brightness);
+}
+
+static void start_music_v2(struct daemon_context *ctx,
+                           const struct le_music_features *features,
+                           unsigned int brightness, const char *owner,
+                           double now)
+{
+    if (!ctx->visualizer_enabled)
+        return;
+    if (!ctx->music_active || features->session != ctx->music_session) {
+        le_music_director_reset(&ctx->music_director, features->session, NULL);
+        le_music_render_state_reset(&ctx->music_render, features->session);
+        ctx->music_session = features->session;
+    }
+    ctx->music_features = *features;
+    le_music_director_update(&ctx->music_director, features, now);
+    ctx->music_active = 1;
+    ctx->music_brightness = brightness;
+    copy_pattern_owner(ctx->visualizer_owner, owner);
+    ctx->visualizer_active = 1;
+    ctx->visualizer_last_frame = now;
+    if (!ctx->test_active && !ctx->pattern_active)
+        apply_music_v2(ctx, now);
 }
 
 static void stop_visualizer(struct daemon_context *ctx, const char *owner,
@@ -2065,8 +2498,8 @@ static void stop_visualizer(struct daemon_context *ctx, const char *owner,
     ctx->visualizer_rhythm_cooldown = 0;
     ctx->visualizer_fx_kind = 0;
     ctx->visualizer_fx_frames = 0;
-    ctx->visualizer_fx_cooldown = 0;
-    ctx->visualizer_periodic_fx_next = 0.0;
+    ctx->music_active = 0;
+    le_music_stream_reset(&ctx->music_stream);
     if (!ctx->test_active && !ctx->pattern_active)
         apply_base_layer(ctx, now);
 }
@@ -2088,15 +2521,17 @@ static void set_visualizer_enabled(struct daemon_context *ctx, int enabled,
     ctx->visualizer_fx_kind = 0;
     ctx->visualizer_fx_frames = 0;
     ctx->visualizer_fx_phase = 0;
-    ctx->visualizer_fx_cooldown = 0;
-    ctx->visualizer_periodic_fx_next = 0.0;
     ctx->visualizer_energy_ema = 0;
     ctx->visualizer_flux_ema = 0;
+    ctx->music_active = 0;
+    le_music_stream_reset(&ctx->music_stream);
 }
 
 static void start_test(struct daemon_context *ctx, double now)
 {
     stop_pattern(ctx, NULL, now);
+    if (ctx->music_active)
+        le_music_director_interrupt(&ctx->music_director);
     if (!ctx->test_active) {
         ctx->test_saved = ctx->state.current;
         ctx->test_saved_animation = ctx->animation_active;
@@ -2130,6 +2565,7 @@ static void update_animation(struct daemon_context *ctx, double now)
     }
 
     expire_visualizer(ctx, now);
+    sleep_tick(ctx, now);
     if (ctx->meter_active && now >= ctx->meter_expires) {
         ctx->meter_active = 0;
         ctx->meter_owner[0] = '\0';
@@ -2164,8 +2600,37 @@ static void update_animation(struct daemon_context *ctx, double now)
     } else if (ctx->animation_active) {
         apply_animated(ctx, now);
     } else if (visualizer_was_active) {
-        hardware_apply(ctx, &ctx->state.current);
+        apply_base_state(ctx, now);
+    } else if (ctx->sleep_active &&
+               ctx->state.sleep_mode == SLEEP_MODE_PULSE) {
+        apply_sleep_light(ctx, now);
     }
+}
+
+static unsigned int sleep_remaining_ms(const struct daemon_context *ctx)
+{
+    double now, remaining;
+    if (!ctx->sleep_active || ctx->sleep_expires <= 0.0)
+        return 0U;
+    now = monotonic_seconds();
+    remaining = ctx->sleep_expires - now;
+    if (remaining <= 0.0)
+        return 0U;
+    if (remaining > 4294967.0)
+        return 4294967U;
+    return (unsigned int)(remaining * 1000.0 + 0.5);
+}
+
+static const char *idle_mode_name(int mode)
+{
+    return mode == IDLE_MODE_INDICATOR ? "indicator" :
+           mode == IDLE_MODE_ALWAYS ? "always" : "off";
+}
+
+static const char *sleep_mode_name(int mode)
+{
+    return mode == SLEEP_MODE_SOLID ? "solid" :
+           mode == SLEEP_MODE_PULSE ? "pulse" : "off";
 }
 
 static int status_json(const struct daemon_context *ctx, char *out,
@@ -2186,6 +2651,14 @@ static int status_json(const struct daemon_context *ctx, char *out,
         "\"meter_active\":%s,\"meter_value\":%u,\"meter_owner\":\"%s\","
         "\"night\":{\"enabled\":%s,\"active\":%s,"
         "\"start_minute\":%d,\"end_minute\":%d},"
+        "\"idle_mode\":\"%s\","
+        "\"sleep_light\":{\"mode\":\"%s\",\"active\":%s,\"brightness\":%u,"
+        "\"period_ms\":%u,\"timer_minutes\":%d,\"remaining_ms\":%u,"
+        "\"restore_on_boot\":%s},"
+        "\"output\":{\"effective_brightness\":%u,\"frame_load\":%u,"
+        "\"max_load\":%u,\"limited\":%s,\"slew_limited\":%s},"
+        "\"music\":{\"active\":%s,\"grammar\":\"%s\",\"effect\":\"%s\","
+        "\"session\":%u},"
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"profiles\":{",
         ctx->state.current.r, ctx->state.current.g, ctx->state.current.b,
@@ -2207,6 +2680,22 @@ static int status_json(const struct daemon_context *ctx, char *out,
         ctx->state.night_enabled ? "true" : "false",
         night_mode_active(&ctx->state) ? "true" : "false",
         ctx->state.night_start_minute, ctx->state.night_end_minute,
+        idle_mode_name(ctx->state.idle_mode),
+        sleep_mode_name(ctx->state.sleep_mode),
+        ctx->sleep_active ? "true" : "false", ctx->state.sleep_brightness,
+        ctx->state.sleep_period_ms, ctx->state.sleep_timer_minutes,
+        (unsigned int)sleep_remaining_ms(ctx),
+        ctx->state.sleep_restore_on_boot ? "true" : "false",
+        ctx->output_diag.effective_brightness, ctx->output_diag.frame_load,
+        ctx->output_diag.max_load,
+        ctx->output_diag.limited ? "true" : "false",
+        ctx->output_diag.slew_limited ? "true" : "false",
+        ctx->music_active ? "true" : "false",
+        ctx->music_active ? le_music_grammar_name(ctx->music_director.grammar)
+                          : "none",
+        ctx->music_active ? le_music_effect_name(ctx->music_director.effect)
+                          : "none",
+        ctx->music_session,
         ctx->state.boot.r, ctx->state.boot.g,
         ctx->state.boot.b, ctx->state.boot.brightness);
     if (n < 0 || (size_t)n >= out_size)
@@ -2367,8 +2856,12 @@ static int handle_request(struct daemon_context *ctx, int fd,
             return send_response(fd, request.id, 1, "{\"pattern\":\"none\"}", NULL);
         }
         if (!strcmp(pattern, "pulse") || !strcmp(pattern, "flash") ||
-            !strcmp(pattern, "full_ring_flash")) {
-            int kind = !strcmp(pattern, "pulse") ? PATTERN_PULSE : PATTERN_FLASH;
+            !strcmp(pattern, "full_ring_flash") ||
+            !strcmp(pattern, "solid")) {
+            int kind = !strcmp(pattern, "pulse") ? PATTERN_PULSE :
+                       !strcmp(pattern, "solid") ? PATTERN_SOLID : PATTERN_FLASH;
+            int pattern_profile;
+
             if (get_arg_unsigned(&request, "r", &r, 255) != 0 ||
                 get_arg_unsigned(&request, "g", &g, 255) != 0 ||
                 get_arg_unsigned(&request, "b", &b, 255) != 0 ||
@@ -2376,6 +2869,28 @@ static int handle_request(struct daemon_context *ctx, int fd,
                 get_arg_unsigned(&request, "repeats", &repeats, 100) != 0)
                 return send_response(fd, request.id, 0, NULL,
                                      "pattern requires r, g, b, brightness and repeats");
+            /*
+             * An optional "profile" takes the brightness from that state
+             * theme instead of the literal above. The wake indicator uses it
+             * so that turning the ring down to zero for idle does not also
+             * silence the one thing that says the device started listening --
+             * the user sets that level by editing the Listening theme, which
+             * the settings page already offers, rather than through a knob
+             * invented for this.
+             *
+             * Only the brightness is taken. The colour stays the caller's, so
+             * the wake pulse remains red rather than becoming the theme's idle
+             * colour. A profile brightness of zero is honoured: someone who
+             * turns the indicator off means it.
+             *
+             * Unlike "animate", nothing here is written to state.current or
+             * persisted -- a transient indicator must leave the saved ring
+             * settings as it found them.
+             */
+            if (get_arg_profile_field(&request, "profile",
+                                      &pattern_profile) == 0)
+                brightness =
+                    (unsigned int)ctx->state.profiles[pattern_profile].brightness;
             colour.r = r;
             colour.g = g;
             colour.b = b;
@@ -2462,10 +2977,37 @@ static int handle_request(struct daemon_context *ctx, int fd,
             return send_response(fd, request.id, 0, NULL,
                                  "visualizer requires a valid action and owner");
         if (!strcmp(action, "frame")) {
+            struct le_music_features features;
+            int parsed;
+
             if (get_arg_levels(&request, levels) != 0 ||
                 get_arg_unsigned(&request, "brightness", &brightness, 100) != 0)
                 return send_response(fd, request.id, 0, NULL,
                                      "visualizer frame requires 12 hex levels and brightness in 0..100");
+            parsed = le_music_parse_v2(request.args.start,
+                                       (size_t)(request.args.end -
+                                                request.args.start),
+                                       &features);
+            if (parsed < 0)
+                return send_response(fd, request.id, 0, NULL,
+                                     "malformed v2 feature frame");
+            if (parsed == 1) {
+                /* Stale/duplicate/reordered frames are accepted silently but
+                   do not mutate scene state. */
+                int accepted = le_music_stream_accept(&ctx->music_stream,
+                                                      &features);
+                if (accepted)
+                    start_music_v2(ctx, &features, brightness, owner, now);
+                return send_response(fd, request.id, 1,
+                                     ctx->visualizer_active
+                                         ? (accepted
+                                            ? "{\"visualizer_active\":true,\"accepted\":true}"
+                                            : "{\"visualizer_active\":true,\"accepted\":false}")
+                                         : (accepted
+                                            ? "{\"visualizer_active\":false,\"accepted\":true}"
+                                            : "{\"visualizer_active\":false,\"accepted\":false}"),
+                                     NULL);
+            }
             start_visualizer(ctx, levels, brightness, owner, now);
             return send_response(fd, request.id, 1,
                                  ctx->visualizer_active
@@ -2500,6 +3042,146 @@ static int handle_request(struct daemon_context *ctx, int fd,
         apply_animated(ctx, now);
         persist_state(&ctx->state);
         return send_response(fd, request.id, 1, "{}", NULL);
+    }
+
+    if (strcmp(request.command, "set_idle_mode") == 0) {
+        char mode[16];
+        int previous_idle_mode = ctx->state.idle_mode;
+
+        if (!request.have_args ||
+            json_get_string(request.args, "mode", mode, sizeof(mode)) != 0)
+            return send_response(fd, request.id, 0, NULL,
+                                 "set_idle_mode requires a mode");
+        if (!strcmp(mode, "off"))
+            ctx->state.idle_mode = IDLE_MODE_OFF;
+        else if (!strcmp(mode, "indicator"))
+            ctx->state.idle_mode = IDLE_MODE_INDICATOR;
+        else if (!strcmp(mode, "always"))
+            ctx->state.idle_mode = IDLE_MODE_ALWAYS;
+        else
+            return send_response(fd, request.id, 0, NULL,
+                                 "idle mode must be off, indicator or always");
+        /*
+         * Persist before reporting success.  If the state cannot be saved,
+         * revert the in-memory mode so the daemon keeps the idle behaviour it
+         * will actually restore on the next boot -- reporting success left the
+         * owner believing the mode had stuck when the next restart dropped it.
+         */
+        if (persist_state(&ctx->state) != 0) {
+            ctx->state.idle_mode = previous_idle_mode;
+            return send_response(fd, request.id, 0, NULL,
+                                 "cannot persist idle mode");
+        }
+        if (!ctx->visualizer_active && !ctx->animation_active &&
+            !ctx->pattern_active && !ctx->test_active && !ctx->meter_active &&
+            !ctx->startup_animation_active)
+            apply_base_state(ctx, now);
+        return send_response(fd, request.id, 1, "{\"idle_mode\":true}", NULL);
+    }
+
+    if (strcmp(request.command, "sleep_light") == 0) {
+        char mode[16];
+        unsigned long value;
+        unsigned int new_brightness = ctx->state.sleep_brightness;
+        unsigned int new_period = ctx->state.sleep_period_ms;
+        int new_timer = ctx->state.sleep_timer_minutes;
+        int new_restore = ctx->state.sleep_restore_on_boot;
+        int new_mode;
+        struct json_span span;
+
+        if (!request.have_args ||
+            json_get_string(request.args, "mode", mode, sizeof(mode)) != 0)
+            return send_response(fd, request.id, 0, NULL,
+                                 "sleep_light requires a mode");
+        if (!strcmp(mode, "off"))
+            new_mode = SLEEP_MODE_OFF;
+        else if (!strcmp(mode, "solid"))
+            new_mode = SLEEP_MODE_SOLID;
+        else if (!strcmp(mode, "pulse"))
+            new_mode = SLEEP_MODE_PULSE;
+        else
+            return send_response(fd, request.id, 0, NULL,
+                                 "sleep_light mode must be off, solid or pulse");
+        /*
+         * Optional fields: when present they must parse and be in range.  A
+         * malformed or out-of-range value is rejected rather than clamped or
+         * silently ignored, so the caller learns the request was not honoured.
+         */
+        if (json_object_find(request.args, "brightness", &span) == 1) {
+            if (json_get_unsigned(request.args, "brightness", &value) != 0 ||
+                value > SLEEP_BRIGHTNESS_MAX)
+                return send_response(fd, request.id, 0, NULL,
+                                     "sleep_light brightness must be 0..20");
+            new_brightness = (unsigned int)value;
+        }
+        if (json_object_find(request.args, "period_ms", &span) == 1) {
+            if (json_get_unsigned(request.args, "period_ms", &value) != 0 ||
+                value < SLEEP_PERIOD_MIN_MS || value > SLEEP_PERIOD_MAX_MS)
+                return send_response(fd, request.id, 0, NULL,
+                                     "sleep_light period_ms must be 3000..15000");
+            new_period = (unsigned int)value;
+        }
+        if (json_object_find(request.args, "timer_minutes", &span) == 1) {
+            if (json_get_unsigned(request.args, "timer_minutes", &value) != 0 ||
+                value > (unsigned long)SLEEP_TIMER_MAX_MINUTES)
+                return send_response(fd, request.id, 0, NULL,
+                                     "sleep_light timer_minutes must be 0..720");
+            new_timer = (int)value;
+        }
+        if (json_object_find(request.args, "restore_on_boot", &span) == 1 &&
+            json_get_boolean(request.args, "restore_on_boot", &new_restore) != 0)
+            return send_response(fd, request.id, 0, NULL,
+                                 "sleep_light restore_on_boot must be true or false");
+
+        {
+            struct led_state previous = ctx->state;
+            int previous_sleep_active = ctx->sleep_active;
+            double previous_sleep_expires = ctx->sleep_expires;
+            double previous_sleep_started = ctx->sleep_started;
+
+            ctx->state.sleep_mode = new_mode;
+            ctx->state.sleep_brightness = new_brightness;
+            ctx->state.sleep_period_ms = new_period;
+            ctx->state.sleep_timer_minutes = new_timer;
+            ctx->state.sleep_restore_on_boot = new_restore ? 1 : 0;
+            if (new_mode == SLEEP_MODE_OFF) {
+                ctx->sleep_active = 0;
+                ctx->sleep_expires = 0.0;
+            } else {
+                /* A fresh activation restarts the absolute pulse phase; a
+                   pre-emption/resume does not (that is handled by the base
+                   layer redrawing from the same start time). */
+                if (!ctx->sleep_active)
+                    ctx->sleep_started = now;
+                ctx->sleep_active = 1;
+                ctx->sleep_expires = new_timer > 0
+                                   ? now + (double)new_timer * 60.0 : 0.0;
+            }
+            /*
+             * Persist before reporting success.  If the state cannot be saved,
+             * revert the in-memory change so the daemon keeps the settings it
+             * will actually restore on the next boot -- reporting success left
+             * the owner believing a setting (e.g. restore_on_boot) had stuck
+             * when the next restart silently dropped it.
+             */
+            if (persist_state(&ctx->state) != 0) {
+                ctx->state = previous;
+                ctx->sleep_active = previous_sleep_active;
+                ctx->sleep_expires = previous_sleep_expires;
+                ctx->sleep_started = previous_sleep_started;
+                return send_response(fd, request.id, 0, NULL,
+                                     "cannot persist sleep light state");
+            }
+        }
+        if (!ctx->visualizer_active && !ctx->animation_active &&
+            !ctx->pattern_active && !ctx->test_active && !ctx->meter_active &&
+            !ctx->startup_animation_active)
+            apply_base_layer(ctx, now);
+        return send_response(fd, request.id, 1,
+                             new_mode == SLEEP_MODE_OFF
+                                 ? "{\"sleep_light\":\"off\"}"
+                                 : "{\"sleep_light\":\"active\"}",
+                             NULL);
     }
 
     return send_response(fd, request.id, 0, NULL, "unknown command");
@@ -2666,7 +3348,7 @@ static int make_listener(const char *path)
     address.sun_family = AF_UNIX;
     memcpy(address.sun_path, path, strlen(path) + 1);
     if (bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        listen(fd, MAX_CLIENTS) != 0 || chmod(path, 0660) != 0 ||
+        listen(fd, LED_LISTEN_BACKLOG) != 0 || chmod(path, 0660) != 0 ||
         set_nonblocking(fd) != 0) {
         le_log_error( "cannot create LED socket %s: %s", path,
                     strerror(errno));
@@ -2789,6 +3471,18 @@ int main(int argc, char **argv)
 
     default_state(&ctx.state);
     load_state(&ctx.state);
+    finish_idle_policy_upgrade(&ctx.state);
+    /* Sleep light persists its settings but starts off unless the owner
+       explicitly opted into restoring it.  Boot diagnostics remain higher
+       priority: the base layer is the lowest owner. */
+    if (ctx.state.sleep_restore_on_boot &&
+        ctx.state.sleep_mode != SLEEP_MODE_OFF) {
+        ctx.sleep_active = 1;
+        ctx.sleep_started = monotonic_seconds();
+        ctx.sleep_expires = ctx.state.sleep_timer_minutes > 0
+                          ? ctx.sleep_started +
+                            (double)ctx.state.sleep_timer_minutes * 60.0 : 0.0;
+    }
     /*
      * Do not overwrite the restored ring colour with the boot profile.
      *
@@ -2806,7 +3500,7 @@ int main(int argc, char **argv)
     hardware_detect(&ctx.hw, force_stub);
     if (hardware_claim(&ctx.hw) != 0)
         return EXIT_FAILURE;
-    hardware_apply(&ctx, &ctx.state.current);
+    apply_base_state(&ctx, monotonic_seconds());
     if (startup_animation_requested && !path_is_file(ctx.startup_ready_path)) {
         ctx.startup_animation_active = 1;
         ctx.startup_animation_frame = 0;
@@ -2851,8 +3545,23 @@ int main(int argc, char **argv)
         else if (ctx.test_active || ctx.animation_active || ctx.pattern_active ||
                  ctx.visualizer_active || ctx.meter_active)
             timeout = FRAME_MS;
-        else if (ctx.state.night_enabled)
+        else if (ctx.sleep_active &&
+                 ctx.state.sleep_mode == SLEEP_MODE_PULSE)
+            timeout = FRAME_MS;
+        else if (ctx.sleep_active && ctx.sleep_expires > 0.0) {
+            double remaining = (ctx.sleep_expires - now) * 1000.0;
+            timeout = remaining <= 1.0 ? 1 : (int)remaining;
+        } else if (ctx.sleep_persist_pending) {
+            /* Wake for the owed sleep-state write instead of blocking. */
+            double remaining = (ctx.sleep_persist_next - now) * 1000.0;
+            timeout = remaining <= 1.0 ? 1 : (int)remaining;
+        } else if (ctx.state.night_enabled)
             timeout = night_schedule_timeout(&ctx, now);
+        {
+            int flush_timeout = output_flush_timeout(&ctx, now);
+            if (flush_timeout >= 0 && (timeout < 0 || flush_timeout < timeout))
+                timeout = flush_timeout;
+        }
 
         for (j = 0; j < MAX_CLIENTS; j++) {
             if (ctx.clients[j].fd >= 0) {
@@ -2882,14 +3591,19 @@ int main(int argc, char **argv)
         now = monotonic_seconds();
         if (ctx.startup_animation_active || ctx.test_active ||
             ctx.animation_active || ctx.pattern_active ||
-            ctx.visualizer_active || ctx.meter_active)
+            ctx.visualizer_active || ctx.meter_active ||
+            (ctx.sleep_active &&
+             ctx.state.sleep_mode == SLEEP_MODE_PULSE))
             update_animation(&ctx, now);
+        sleep_tick(&ctx, now);
         night_schedule_tick(&ctx, now);
+        (void)output_flush(&ctx, monotonic_seconds(), 0);
     }
 
     for (i = 0; i < MAX_CLIENTS; i++)
         close_client(&ctx.clients[i]);
     hardware_apply(&ctx, &(struct colour){0, 0, 0, 0});
+    (void)output_flush(&ctx, monotonic_seconds(), 1);
     if (ctx.listen_fd >= 0)
         close(ctx.listen_fd);
     unlink(ctx.socket_path);

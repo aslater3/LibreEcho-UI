@@ -30,7 +30,7 @@ static void *worker(void *opaque)
             ? playback->play(playback->context, text) : -1;
         pthread_mutex_lock(&playback->mutex);
         playback->playing = 0;
-        if (result != 0)
+        if (result != 0 && !playback->cancelled)
             playback->failed = 1;
         if (playback->count == 0)
             pthread_cond_broadcast(&playback->idle);
@@ -83,7 +83,7 @@ int le_voice_playback_enqueue(struct le_voice_playback *playback,
     if (length >= LE_VOICE_REPLY_SEGMENT_MAX)
         return -1;
     pthread_mutex_lock(&playback->mutex);
-    if (!playback->running ||
+    if (!playback->running || playback->cancelled ||
         playback->count >= LE_VOICE_PLAYBACK_QUEUE) {
         result = -1;
     } else {
@@ -108,6 +108,7 @@ int le_voice_playback_begin_turn(struct le_voice_playback *playback)
     if (playback->running && playback->count == 0 &&
         !playback->playing) {
         playback->failed = 0;
+        playback->cancelled = 0;
         result = 0;
     }
     pthread_mutex_unlock(&playback->mutex);
@@ -156,6 +157,37 @@ int le_voice_playback_wait_idle(struct le_voice_playback *playback,
         result = -1;
     pthread_mutex_unlock(&playback->mutex);
     return result;
+}
+
+void le_voice_playback_cancel(struct le_voice_playback *playback)
+{
+    if (!playback)
+        return;
+    pthread_mutex_lock(&playback->mutex);
+    playback->cancelled = 1;
+    playback->count = 0;
+    playback->read_index = playback->write_index;
+    if (!playback->playing)
+        pthread_cond_broadcast(&playback->idle);
+    pthread_mutex_unlock(&playback->mutex);
+}
+
+int le_voice_playback_cancelled(struct le_voice_playback *playback)
+{
+    int cancelled;
+    pthread_mutex_lock(&playback->mutex);
+    cancelled = playback->cancelled;
+    pthread_mutex_unlock(&playback->mutex);
+    return cancelled;
+}
+
+int le_voice_playback_pending(struct le_voice_playback *playback)
+{
+    int pending;
+    pthread_mutex_lock(&playback->mutex);
+    pending = playback->playing || playback->count != 0;
+    pthread_mutex_unlock(&playback->mutex);
+    return pending;
 }
 
 void le_voice_playback_stop(struct le_voice_playback *playback)

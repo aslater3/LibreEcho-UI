@@ -31,6 +31,7 @@ int main(void)
     char capture_args_path[160];
     char mixer_path[160];
     char mixer_args_path[160];
+    char config_path[160];
     const int expected[7] = {16483, 16746, 17517, 17039,
                              16218, 16339, 14777};
     struct le_adapter *adapter = NULL;
@@ -53,6 +54,8 @@ int main(void)
              directory);
     snprintf(mixer_args_path, sizeof(mixer_args_path),
              "%s/mixer.args", directory);
+    snprintf(config_path, sizeof(config_path), "%s/web-config.json",
+             directory);
     CHECK(mkdir(directory, 0700) == 0);
     CHECK(mkdir(dt_directory, 0700) == 0);
     for (i = 0; i < 7; ++i) {
@@ -96,9 +99,20 @@ int main(void)
         CHECK(chmod(mixer_path, 0700) == 0);
     }
 
+    {
+        FILE *file = fopen(config_path, "w");
+        CHECK(file != NULL);
+        CHECK(fprintf(file, "{\"volume\": 40, \"microphone_gain\": 50}\n") > 0);
+        CHECK(fclose(file) == 0);
+    }
+
     child = fork();
     CHECK(child >= 0);
     if (child == 0) {
+        /* A stale boot-time gain must not win over the saved one. */
+        if (setenv("LE_MIC_CAPTURE_GAIN", "65", 1) ||
+            setenv("LE_MIC_CONFIG", config_path, 1))
+            _exit(127);
         execl("./build/libreecho-micd", "libreecho-micd",
               "--foreground", "--socket", socket_path,
               "--idme-dir", "/missing-idme", "--dt-idme-dir", dt_directory,
@@ -156,6 +170,13 @@ int main(void)
     CHECK(strstr(response, "invalid raw microphone channel") != NULL);
     le_adapter_close(adapter);
     adapter = NULL;
+    {
+        /* The owner changes the gain after micd started. */
+        FILE *file = fopen(config_path, "w");
+        CHECK(file != NULL);
+        CHECK(fprintf(file, "{\"microphone_gain\":85,\"volume\":40}\n") > 0);
+        CHECK(fclose(file) == 0);
+    }
     {
         struct sockaddr_un address;
         ssize_t count;
@@ -224,8 +245,13 @@ int main(void)
         CHECK(strstr(response,
               "ADC_D MICPGA Volume Ctrl\n40\n40\n") != NULL);
         CHECK(strstr(response, "SpiTimeStamps\n0\n") != NULL);
+        CHECK(strstr(response,
+              "ADC_D MICPGA Volume Ctrl\n68\n68\n") != NULL);
+        CHECK(strstr(response,
+              "ADC_D MICPGA Volume Ctrl\n52\n52\n") == NULL);
     }
     puts("micd: stock Radar ADC profile is applied before capture");
+    puts("micd: capture start applies the gain saved after boot");
 
 cleanup:
     if (stream_fd >= 0)
@@ -241,6 +267,7 @@ cleanup:
     unlink(capture_path);
     unlink(mixer_args_path);
     unlink(mixer_path);
+    unlink(config_path);
     unlink(socket_path);
     for (i = 0; i < 7; ++i) {
         snprintf(path, sizeof(path), "%s/miccal.%d", directory, i);

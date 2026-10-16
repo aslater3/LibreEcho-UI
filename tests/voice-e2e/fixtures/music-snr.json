@@ -1,0 +1,144 @@
+{
+ "rate": 16000,
+ "lead_seconds": 2.0,
+ "source": "tests/voice-e2e/fixtures/alexa-what-time.wav",
+ "speech_window_ms": [
+  1050,
+  2850
+ ],
+ "source_speech_rms": 2677.7,
+ "fixtures": [
+  {
+   "fixture": "music-clean.wav",
+   "tag": "clean",
+   "requested_snr_db": null,
+   "mix_scale": 1.0,
+   "speech_rms_in_window": 2677.7,
+   "bed_rms_in_window": 0.0,
+   "measured_snr_db": null,
+   "peak": 20636,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music-+20.wav",
+   "tag": "+20",
+   "requested_snr_db": 20.0,
+   "mix_scale": 1.0,
+   "speech_rms_in_window": 2677.7,
+   "bed_rms_in_window": 267.8,
+   "measured_snr_db": 20.0,
+   "peak": 20439,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music-+12.wav",
+   "tag": "+12",
+   "requested_snr_db": 12.0,
+   "mix_scale": 1.0,
+   "speech_rms_in_window": 2677.7,
+   "bed_rms_in_window": 672.6,
+   "measured_snr_db": 12.0,
+   "peak": 20861,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music-+06.wav",
+   "tag": "+06",
+   "requested_snr_db": 6.0,
+   "mix_scale": 1.0,
+   "speech_rms_in_window": 2677.7,
+   "bed_rms_in_window": 1342.1,
+   "measured_snr_db": 6.0,
+   "peak": 21675,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music-+03.wav",
+   "tag": "+03",
+   "requested_snr_db": 3.0,
+   "mix_scale": 1.0,
+   "speech_rms_in_window": 2677.7,
+   "bed_rms_in_window": 1895.7,
+   "measured_snr_db": 3.0,
+   "peak": 22348,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music-+00.wav",
+   "tag": "+00",
+   "requested_snr_db": 0.0,
+   "mix_scale": 1.0,
+   "speech_rms_in_window": 2677.7,
+   "bed_rms_in_window": 2677.7,
+   "measured_snr_db": 0.0,
+   "peak": 23786,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music--03.wav",
+   "tag": "-03",
+   "requested_snr_db": -3.0,
+   "mix_scale": 1.0,
+   "speech_rms_in_window": 2677.7,
+   "bed_rms_in_window": 3782.4,
+   "measured_snr_db": -3.0,
+   "peak": 27676,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music--06.wav",
+   "tag": "-06",
+   "requested_snr_db": -6.0,
+   "mix_scale": 0.8391,
+   "speech_rms_in_window": 2246.8,
+   "bed_rms_in_window": 4483.0,
+   "measured_snr_db": -6.0,
+   "peak": 32767,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music--12.wav",
+   "tag": "-12",
+   "requested_snr_db": -12.0,
+   "mix_scale": 0.4211,
+   "speech_rms_in_window": 1127.5,
+   "bed_rms_in_window": 4488.9,
+   "measured_snr_db": -12.0,
+   "peak": 32767,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music--18.wav",
+   "tag": "-18",
+   "requested_snr_db": -18.0,
+   "mix_scale": 0.2112,
+   "speech_rms_in_window": 565.5,
+   "bed_rms_in_window": 4491.8,
+   "measured_snr_db": -18.0,
+   "peak": 32767,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music--24.wav",
+   "tag": "-24",
+   "requested_snr_db": -24.0,
+   "mix_scale": 0.1059,
+   "speech_rms_in_window": 283.5,
+   "bed_rms_in_window": 4493.3,
+   "measured_snr_db": -24.0,
+   "peak": 32767,
+   "seconds": 6.067
+  },
+  {
+   "fixture": "music-bedonly.wav",
+   "tag": "bedonly",
+   "requested_snr_db": "bed",
+   "mix_scale": 1.0,
+   "speech_rms_in_window": 2677.7,
+   "bed_rms_in_window": 2677.7,
+   "measured_snr_db": null,
+   "peak": 19521,
+   "seconds": 6.067
+  }
+ ]
+}
