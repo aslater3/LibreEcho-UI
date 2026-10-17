@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +36,7 @@ static const char *update_fetch_path(void){const char *p=getenv("LIBREECHO_UPDAT
 static int update_fetch_supported(const struct api_context*c){return !strcmp(le_backend_mode(c->backend),"linux")&&!access(update_path(),X_OK)&&!access(update_fetch_path(),X_OK);}
 
 static int key_from_file(const char*,const char*,char*,size_t);
+static int boot_chain_token(const char*,size_t,size_t);
 int api_update_upload_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){if(strcmp(q->path,"/api/v1/system/update/upload")||strcmp(q->method,"POST")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(strcmp(le_backend_mode(c->backend),"linux")||access("/usr/local/sbin/libreecho-update",X_OK)){err(r,501,LE_NOT_SUPPORTED,"Signed OTA updates are unavailable on this image");return 0;}return 1;}
 int api_update_fetch_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){int apply=!strcmp(q->path,"/api/v1/system/update/apply"),path_ok=!strcmp(q->path,"/api/v1/system/update/check")||apply;char status[64]="";if(!path_ok||strcmp(q->method,"POST")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return 0;}if(apply&&(!key_from_file("/data/libreecho/update/check-status","status",status,sizeof(status))||strcmp(status,"update-available"))){err(r,409,LE_BUSY,"No checked update is currently available");return 0;}return 1;}
 int api_update_channel_authorize(struct api_context*c,const struct api_request*q,struct api_response*r,char*channel,size_t channel_size){if(strcmp(q->method,"PUT")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(!body_ok(q,r))return 0;if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return 0;}if(!channel||json_get_string(q->body,"channel",channel,channel_size)!=1||(strcmp(channel,"stable")&&strcmp(channel,"dev"))||json_duplicate_key(q->body,q->body_len,"channel")){err(r,400,LE_INVALID,"Channel must be stable or dev");return 0;}return 1;}
@@ -49,6 +51,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
     char check_status[64]="not-checked",check_error[96]="";
     char source[64]="github-releases",channel[32]="stable",reachable[16]="unknown";
     char automatic_text[16]="0";
+    char latest_format[16]="",latest_target[96]="",pending_format[16]="",pending_target[96]="";
     char last_check_text[24]="0",last_success_text[24]="0";
     char escaped_state[128],escaped_version[192],escaped_installed[192];
     char escaped_rollback[192],escaped_latest[192],escaped_check_status[128];
@@ -61,7 +64,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         !access("/usr/local/sbin/libreecho-bootctl",X_OK)&&
         !access("/usr/local/sbin/libreecho-update",X_OK)&&
         !access("/usr/local/sbin/libreecho-update-fetch",X_OK);
-    int progress=0,pending=0,automatic=0,allow_unsigned=0;
+    int progress=0,pending=0,automatic=0,allow_unsigned=0,immutable_v3=0;
     long last_check=0,last_success=0;
 
     if(supported){
@@ -94,6 +97,23 @@ static void update_status_json(struct api_context*c,struct api_response*r)
                       last_success_text,sizeof(last_success_text));
         key_from_file("/data/libreecho/update/automatic-updates","enabled",
                       automatic_text,sizeof(automatic_text));
+        /* Optional 0.13.21 bridge keys: an OTA v3 (0.14 immutable target)
+           offer or pending install.  Absent on v1/v2, so older states keep
+           rendering exactly as before; unknown or oversized values drop. */
+        key_from_file("/data/libreecho/update/check-status","ota_format",
+                      latest_format,sizeof(latest_format));
+        key_from_file("/data/libreecho/update/check-status","target_release",
+                      latest_target,sizeof(latest_target));
+        key_from_file("/data/libreecho/update/pending","ota_format",
+                      pending_format,sizeof(pending_format));
+        key_from_file("/data/libreecho/update/pending","target_release",
+                      pending_target,sizeof(pending_target));
+        if(strcmp(latest_format,"v1")&&strcmp(latest_format,"v2")&&strcmp(latest_format,"v3"))latest_format[0]=0;
+        if(strcmp(pending_format,"v1")&&strcmp(pending_format,"v2")&&strcmp(pending_format,"v3"))pending_format[0]=0;
+        if(!boot_chain_token(latest_target,strlen(latest_target),65))latest_target[0]=0;
+        if(!boot_chain_token(pending_target,strlen(pending_target),65))pending_target[0]=0;
+        if(!pending&&!strcmp(pending_format,"v3")&&pending_target[0]){pending=1;snprintf(version,sizeof(version),"%s",pending_target);}
+        if(!latest_version[0]&&!strcmp(latest_format,"v3")&&latest_target[0])snprintf(latest_version,sizeof(latest_version),"%s",latest_target);
         automatic=!strcmp(automatic_text,"1");
         progress=atoi(progress_text);
         if(progress<0||progress>100)progress=0;
@@ -132,7 +152,7 @@ static void update_status_json(struct api_context*c,struct api_response*r)
        this UI ships ahead of the matching platform change. */
     if(supported&&(f=popen("/usr/local/sbin/libreecho-update capabilities 2>/dev/null","r"))){
         char cap[64];
-        while(fgets(cap,sizeof(cap),f)){cap[strcspn(cap,"\r\n")]=0;if(!strcmp(cap,"allow-unsigned"))allow_unsigned=1;}
+        while(fgets(cap,sizeof(cap),f)){cap[strcspn(cap,"\r\n")]=0;if(!strcmp(cap,"allow-unsigned"))allow_unsigned=1;else if(!strcmp(cap,"immutable-target-v3"))immutable_v3=1;}
         pclose(f);
     }
     le_feature_transaction_state_read(&transaction);
@@ -156,15 +176,68 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         "\"automatic_updates\":%s,"
         "\"rollback_available\":%s,\"rollback_version\":\"%s\","
         "\"allow_unsigned\":%s,\"max_upload_bytes\":33554432,"
+        "\"latest_ota_format\":\"%s\",\"latest_target_release\":\"%s\","
+        "\"pending_ota_format\":\"%s\",\"pending_target_release\":\"%s\","
+        "\"immutable_target_v3\":%s,"
         "\"components\":%s,\"transaction_state\":\"%s\",\"last_transaction_result\":\"%s\",\"authority_provenance\":%s},"
         "\"error\":null}",supported?"true":"false",current,inactive,escaped_state,
         progress,pending?"true":"false",escaped_version,escaped_installed,
         escaped_latest,escaped_channel,escaped_source,escaped_reachable,
         escaped_check_status,escaped_check_error,last_check,last_success,
         automatic?"true":"false",supported?"true":"false",escaped_rollback,
-        allow_unsigned?"true":"false",components,escaped_transaction_state,
+        allow_unsigned?"true":"false",latest_format,latest_target,
+        pending_format,pending_target,immutable_v3?"true":"false",components,escaped_transaction_state,
         escaped_last_result,authority);
 }
+/* Boot-chain check and opt-in repair (0.13.21 bridge).  libreecho-boot-chain
+   prints bounded key=value lines; only the documented keys are accepted, each
+   value must be a bounded [A-Za-z0-9._,:-] token, and enumerated values the
+   daemon does not know collapse to a safe fallback instead of passing through.
+   The tool runs in a forked API worker (see http_server.c) under a hard
+   deadline, so neither endpoint can stall the poll loop. */
+#define LE_BOOT_CHAIN_OUTPUT_MAX 4096
+#define LE_BOOT_CHAIN_STATUS_TIMEOUT_MS 20000
+#define LE_BOOT_CHAIN_START_TIMEOUT_MS 15000
+struct boot_chain_status{char schema[8],layout[24],chain[24],board[24],board_confidence[16],board_evidence[128],expdb[24],repair[16],reason[64],package[40],phase[48],recovery[24],profile[16],emmc_life[32];};
+static const char *boot_chain_path(void){const char *p=getenv("LIBREECHO_BOOT_CHAIN");return p&&*p?p:"/usr/local/sbin/libreecho-boot-chain";}
+static int boot_chain_supported(const struct api_context*c){return !strcmp(le_backend_mode(c->backend),"linux")&&!access(boot_chain_path(),X_OK);}
+static long boot_chain_now_ms(void){struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))return 0;return (long)t.tv_sec*1000L+t.tv_nsec/1000000L;}
+/* Returns the tool's exit status, -1 when it could not run, died or overran
+   the deadline (it is then killed), and -2 when its output overflowed the
+   bounded buffer.  repair-start detaches a worker that may inherit the pipe,
+   so reading stops once the direct child has exited and the pipe is drained
+   rather than waiting for EOF. */
+static int boot_chain_run(const char*action,const char*board,char*output,size_t size,long timeout_ms){int fds[2],status=0,reaped=0,pipe_open=1,overflow=0;size_t used=0;long deadline=boot_chain_now_ms()+timeout_ms;pid_t child;if(!output||size<2)return -1;output[0]=0;if(pipe(fds)<0)return -1;child=fork();if(child<0){close(fds[0]);close(fds[1]);return -1;}if(child==0){int null=open("/dev/null",O_RDONLY);close(fds[0]);if(null>=0){dup2(null,STDIN_FILENO);close(null);}if(dup2(fds[1],STDOUT_FILENO)<0||dup2(fds[1],STDERR_FILENO)<0)_exit(127);close(fds[1]);if(board)execl(boot_chain_path(),boot_chain_path(),action,"--board",board,(char*)0);else execl(boot_chain_path(),boot_chain_path(),action,(char*)0);_exit(127);}close(fds[1]);fcntl(fds[0],F_SETFL,O_NONBLOCK);for(;;){if(!reaped){pid_t w=waitpid(child,&status,WNOHANG);if(w==child)reaped=1;else if(w<0&&errno!=EINTR){reaped=1;status=-1;}}while(pipe_open){char buf[512];ssize_t n=read(fds[0],buf,sizeof(buf));if(n>0){size_t count=(size_t)n;if(used+count>=size){overflow=1;count=used<size-1?size-1-used:0;}memcpy(output+used,buf,count);used+=count;output[used]=0;continue;}if(n==0)pipe_open=0;else if(errno==EINTR)continue;break;}if(reaped)break;if(boot_chain_now_ms()>=deadline){kill(child,SIGKILL);while(waitpid(child,&status,0)<0&&errno==EINTR){}close(fds[0]);return -1;}{struct pollfd pfd;pfd.fd=fds[0];pfd.events=POLLIN;pfd.revents=0;if(poll(&pfd,pipe_open?1:0,50)<0&&errno!=EINTR){/* retry on the next deadline check */}}}close(fds[0]);if(overflow)return -2;if(status==-1||!WIFEXITED(status))return -1;return WEXITSTATUS(status);}
+static int boot_chain_token(const char*s,size_t n,size_t size){size_t i;if(n>=size)return 0;for(i=0;i<n;i++){char ch=s[i];if(!((ch>='A'&&ch<='Z')||(ch>='a'&&ch<='z')||(ch>='0'&&ch<='9')||ch=='.'||ch=='_'||ch==','||ch==':'||ch=='-'))return 0;}return 1;}
+static int boot_chain_one_of(const char*value,const char*const*set){for(;*set;set++)if(!strcmp(value,*set))return 1;return 0;}
+/* Last ERROR:<token> line; an invalid token leaves reason empty. */
+static void boot_chain_error_token(const char*output,char*reason,size_t size){const char*line=output;reason[0]=0;while(line&&*line){size_t n=strcspn(line,"\r\n");if(n>6&&!strncmp(line,"ERROR:",6)&&boot_chain_token(line+6,n-6,size)){memcpy(reason,line+6,n-6);reason[n-6]=0;}line+=n;while(*line=='\r'||*line=='\n')line++;}}
+static int boot_chain_has_line(const char*output,const char*want){const char*line=output;size_t w=strlen(want);while(line&&*line){size_t n=strcspn(line,"\r\n");if(n==w&&!strncmp(line,want,w))return 1;line+=n;while(*line=='\r'||*line=='\n')line++;}return 0;}
+/* Returns 0 for a complete schema=1 report, -1 when malformed. */
+static int boot_chain_parse(const char*output,struct boot_chain_status*s){static const char*const layouts[]={"legacy-amonet","stock","unknown",0};static const char*const chains[]={"legacy-0.13","kaeru-radar-v1","kaeru-biscuit-v2","unknown",0};static const char*const boards[]={"radar_puffin","biscuit","unknown",0};static const char*const confidences[]={"confirmed","unconfirmed",0};static const char*const expdbs[]={"fastboot-marker","kaeru","empty","other",0};static const char*const repairs[]={"available","not-needed","blocked","in-progress","failed","done",0};static const char*const packages[]={"amonet-radar-v1.0.0.zip","amonet-biscuit-v2.0.0.zip","",0};static const char*const recoveries[]={"twrp-radar","twrp-biscuit","other","unknown",0};static const char*const profiles[]={"ota","development","unknown",0};struct{const char*key;char*value;size_t size;const char*const*set;const char*fallback;}f[14];const char*line=output;unsigned seen=0;size_t i,count=sizeof(f)/sizeof(f[0]);memset(s,0,sizeof(*s));
+ f[0].key="schema";f[0].value=s->schema;f[0].size=sizeof(s->schema);f[0].set=0;f[0].fallback="";
+ f[1].key="layout";f[1].value=s->layout;f[1].size=sizeof(s->layout);f[1].set=layouts;f[1].fallback="unknown";
+ f[2].key="chain";f[2].value=s->chain;f[2].size=sizeof(s->chain);f[2].set=chains;f[2].fallback="unknown";
+ f[3].key="board";f[3].value=s->board;f[3].size=sizeof(s->board);f[3].set=boards;f[3].fallback="unknown";
+ f[4].key="board_confidence";f[4].value=s->board_confidence;f[4].size=sizeof(s->board_confidence);f[4].set=confidences;f[4].fallback="unconfirmed";
+ f[5].key="board_evidence";f[5].value=s->board_evidence;f[5].size=sizeof(s->board_evidence);f[5].set=0;f[5].fallback="";
+ f[6].key="expdb";f[6].value=s->expdb;f[6].size=sizeof(s->expdb);f[6].set=expdbs;f[6].fallback="other";
+ f[7].key="repair";f[7].value=s->repair;f[7].size=sizeof(s->repair);f[7].set=repairs;f[7].fallback="unknown";
+ f[8].key="reason";f[8].value=s->reason;f[8].size=sizeof(s->reason);f[8].set=0;f[8].fallback="";
+ f[9].key="package";f[9].value=s->package;f[9].size=sizeof(s->package);f[9].set=packages;f[9].fallback="";
+ f[10].key="phase";f[10].value=s->phase;f[10].size=sizeof(s->phase);f[10].set=0;f[10].fallback="";
+ f[11].key="recovery";f[11].value=s->recovery;f[11].size=sizeof(s->recovery);f[11].set=recoveries;f[11].fallback="unknown";
+ f[12].key="profile";f[12].value=s->profile;f[12].size=sizeof(s->profile);f[12].set=profiles;f[12].fallback="unknown";
+ f[13].key="emmc_life";f[13].value=s->emmc_life;f[13].size=sizeof(s->emmc_life);f[13].set=0;f[13].fallback="";
+ for(i=0;i<count;i++)snprintf(f[i].value,f[i].size,"%s",f[i].fallback);
+ while(line&&*line){size_t n=strcspn(line,"\r\n");const char*eq=memchr(line,'=',n);if(eq){size_t k=(size_t)(eq-line),v=n-k-1;for(i=0;i<count;i++)if(strlen(f[i].key)==k&&!strncmp(line,f[i].key,k))break;if(i<count){if(seen&(1u<<i)||!boot_chain_token(eq+1,v,f[i].size))return -1;memcpy(f[i].value,eq+1,v);f[i].value[v]=0;if(f[i].set&&!boot_chain_one_of(f[i].value,f[i].set))snprintf(f[i].value,f[i].size,"%s",f[i].fallback);seen|=1u<<i;}}line+=n;while(*line=='\r'||*line=='\n')line++;}
+ if(!(seen&1u)||strcmp(s->schema,"1")||!(seen&(1u<<2))||!(seen&(1u<<7)))return -1;
+ /* A board the tool could not confirm never carries a repair offer. */
+ if(!strcmp(s->repair,"available")&&(strcmp(s->board_confidence,"confirmed")||!strcmp(s->board,"unknown"))){snprintf(s->repair,sizeof(s->repair),"blocked");if(!s->reason[0])snprintf(s->reason,sizeof(s->reason),"board_unconfirmed");}
+ return 0;}
+static void err_reason(struct api_response*r,int status,int rc,const char*msg,const char*reason){char e[256];if(!reason||!reason[0]){err(r,status,rc,msg);return;}json_escape(e,sizeof(e),msg);out(r,status,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"%s\",\"reason\":\"%s\",\"message\":\"%s\"}}",le_result_code(rc),reason,e);}
+static void boot_chain_status_json(struct api_context*c,const struct api_request*q,struct api_response*r){char output[LE_BOOT_CHAIN_OUTPUT_MAX],reason[64];struct boot_chain_status s;int rc;if(strcmp(q->method,"GET")){method_not_allowed(r);return;}if(!boot_chain_supported(c)){err(r,501,LE_NOT_SUPPORTED,"Boot-chain status is unavailable on this image");return;}rc=boot_chain_run("status",0,output,sizeof(output),LE_BOOT_CHAIN_STATUS_TIMEOUT_MS);if(rc==-2){err(r,502,LE_IO,"The boot-chain tool returned malformed output");return;}if(rc!=0){boot_chain_error_token(rc>0?output:"",reason,sizeof(reason));err_reason(r,503,LE_IO,"Boot-chain status could not be read",reason);return;}if(boot_chain_parse(output,&s)){err(r,502,LE_IO,"The boot-chain tool returned malformed output");return;}out(r,200,"{\"ok\":true,\"data\":{\"supported\":true,\"schema\":1,\"layout\":\"%s\",\"chain\":\"%s\",\"board\":\"%s\",\"board_confidence\":\"%s\",\"board_evidence\":\"%s\",\"expdb\":\"%s\",\"repair\":\"%s\",\"reason\":\"%s\",\"package\":\"%s\",\"phase\":\"%s\",\"recovery\":\"%s\",\"profile\":\"%s\",\"emmc_life\":\"%s\",\"twrp_present\":%s},\"error\":null}",s.layout,s.chain,s.board,s.board_confidence,s.board_evidence,s.expdb,s.repair,s.reason,s.package,s.phase,s.recovery,s.profile,s.emmc_life,!strncmp(s.recovery,"twrp-",5)||(!strcmp(s.recovery,"unknown")&&!strncmp(s.chain,"kaeru-",6))?"true":"false");}
+static void boot_chain_repair_json(struct api_context*c,const struct api_request*q,struct api_response*r){char confirmation[32],board[24],output[LE_BOOT_CHAIN_OUTPUT_MAX],reason[64];int rc;if(strcmp(q->method,"POST")){method_not_allowed(r);return;}if(strcmp(q->confirm,"confirm-device-action")){err(r,403,LE_AUTH,"A valid destructive-action confirmation token is required");return;}if(!q->body||json_get_string_top_level(q->body,"confirm",confirmation,sizeof(confirmation))!=1||strcmp(confirmation,"REPAIR-BOOTLOADER")||json_duplicate_key(q->body,q->body_len,"confirm")){err(r,400,LE_INVALID,"Body must include confirm REPAIR-BOOTLOADER");return;}/* The owner names the physical unit; the tool refuses unless that agrees with the hardware evidence. */if(json_get_string_top_level(q->body,"board",board,sizeof(board))!=1||(strcmp(board,"radar_puffin")&&strcmp(board,"biscuit"))||json_duplicate_key(q->body,q->body_len,"board")){err(r,400,LE_INVALID,"Body must include board radar_puffin or biscuit");return;}if(!boot_chain_supported(c)){err(r,501,LE_NOT_SUPPORTED,"Bootloader repair is unavailable on this image");return;}rc=boot_chain_run("repair-start",board,output,sizeof(output),LE_BOOT_CHAIN_START_TIMEOUT_MS);if(rc==-2){err(r,502,LE_IO,"The boot-chain tool returned malformed output");return;}if(rc==-1){err(r,503,LE_IO,"Bootloader repair could not start");return;}boot_chain_error_token(output,reason,sizeof(reason));if(reason[0]){api_log(c,"warning","Bootloader repair refused");err_reason(r,409,LE_BUSY,"Bootloader repair was refused",reason);return;}if(rc!=0){err(r,503,LE_IO,"Bootloader repair could not start");return;}if(!boot_chain_has_line(output,"started=1")){err(r,502,LE_IO,"The boot-chain tool returned malformed output");return;}api_log(c,"warning","Bootloader repair started");out(r,202,"{\"ok\":true,\"data\":{\"started\":true,\"repair\":\"in-progress\"},\"error\":null}");}
 static int agent_command(const char*command,const char*args,char*output,size_t size){struct le_adapter*agent=le_adapter_connect(LE_ADAPTER_AGENT_SOCK,15000);int rc;if(!agent)return LE_NOT_SUPPORTED;if(!strcmp(command,"respond"))le_adapter_set_io_timeout(agent,120000);rc=le_adapter_call(agent,command,args,output,size);le_adapter_close(agent);return rc==LE_ADAPTER_OK?LE_OK:rc==LE_ADAPTER_ERR_REJECTED?LE_INVALID:LE_IO;}
 static void agent_result(struct api_response*r,const char*command,const char*args){char data[LE_ADAPTER_MSG_MAX];int rc=agent_command(command,args,data,sizeof(data));if(rc)err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?503:502,rc,rc==LE_NOT_SUPPORTED?"Voice assistant service is unavailable":rc==LE_INVALID?data:"Voice assistant service request failed");else ok(r,data);}
 static int wifi_scan_json(struct api_response*r,const struct le_wifi_scan*s){size_t i,n=0;char ssid[LE_TEXT*2],security[64],capabilities[256],band[64];int written;if(!r||!s)return -1;written=snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"networks\":[");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;for(i=0;i<s->count&&i<LE_MAX_WIFI;i++){json_escape(ssid,sizeof(ssid),s->networks[i].ssid);json_escape(security,sizeof(security),s->networks[i].security);json_escape(capabilities,sizeof(capabilities),s->networks[i].capabilities[0]?s->networks[i].capabilities:"unknown");json_escape(band,sizeof(band),s->networks[i].band[0]?s->networks[i].band:"unknown");written=snprintf(r->body+n,sizeof(r->body)-n,"%s{\"ssid\":\"%s\",\"security\":\"%s\",\"capabilities\":\"%s\",\"signal\":%d,\"rssi_dbm\":%d,\"frequency_mhz\":%d,\"channel\":%d,\"band\":\"%s\",\"wpa2_attempt\":%s}",i?",":"",ssid,security,capabilities,s->networks[i].signal,s->networks[i].rssi_dbm,s->networks[i].frequency_mhz,s->networks[i].channel,band,s->networks[i].wpa2_attempt?"true":"false");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;n+=(size_t)written;}written=snprintf(r->body+n,sizeof(r->body)-n,"]},\"error\":null}");if(written<0||(size_t)written>=sizeof(r->body)-n)return -1;r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n+(size_t)written;return 0;}
@@ -1185,6 +1258,8 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  if(!strcmp(p,"/api/v1/privacy")){if(!strcmp(q->method,"PUT")){if(json_get_bool(q->body,"local_only",&v)>0)c->privacy_local_only=v;if(json_get_bool(q->body,"diagnostic_telemetry",&v)>0)c->privacy_telemetry=v;if(json_get_bool(q->body,"crash_reports",&v)>0)c->privacy_crash_reports=v;{char retention[16];if(json_get_string(q->body,"audio_retention",retention,sizeof(retention))>0)c->privacy_audio_retention=strcmp(retention,"none")!=0;}}out(r,200,"{\"ok\":true,\"data\":{\"local_only\":%s,\"audio_retention\":\"%s\",\"diagnostic_telemetry\":%s,\"log_retention_hours\":%d,\"crash_reports\":%s},\"error\":null}",c->privacy_local_only?"true":"false",c->privacy_audio_retention?"24h":"none",c->privacy_telemetry?"true":"false",c->privacy_log_hours,c->privacy_crash_reports?"true":"false");return;}if(!strcmp(p,"/api/v1/buttons")){ok(r,"{\"short_press\":\"start_listening\",\"long_press\":\"pairing_mode\",\"hardware_mute\":true}");return;}if(!strncmp(p,"/api/v1/integrations",20)){if(!strcmp(q->method,"PUT")){int enabled;if(json_get_bool(q->body,"enabled",&enabled)<1){err(r,400,LE_INVALID,"Enabled must be a boolean");return;}if(strstr(p,"home-assistant")){if(enabled)c->integrations|=1u;else c->integrations&=~1u;}else if(strstr(p,"mqtt")){if(enabled)c->integrations|=2u;else c->integrations&=~2u;}else if(strstr(p,"rest")){c->net_api_lan=enabled;}else if(strstr(p,"airplay2")){rc=le_set_airplay_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"AirPlay 2 control could not be applied");return;}if(enabled)c->integrations|=16u;else c->integrations&=~16u;}else if(strstr(p,"bluetooth")){rc=le_set_bluetooth_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth control could not be applied");return;}if(enabled)c->integrations|=8u;else c->integrations&=~8u;}else{err(r,404,LE_INVALID,"Integration was not found");return;}}out(r,200,"{\"ok\":true,\"data\":{\"items\":[{\"id\":\"home-assistant\",\"name\":\"Home Assistant\",\"enabled\":%s},{\"id\":\"mqtt\",\"name\":\"MQTT\",\"enabled\":%s},{\"id\":\"rest\",\"name\":\"Local REST API\",\"enabled\":%s,\"forced\":%s},{\"id\":\"bluetooth\",\"name\":\"Bluetooth audio\",\"enabled\":%s},{\"id\":\"airplay2\",\"name\":\"AirPlay 2\",\"enabled\":%s}]},\"error\":null}",(c->integrations&1u)?"true":"false",(c->integrations&2u)?"true":"false",(c->allow_insecure_lan||c->net_api_lan)?"true":"false",c->allow_insecure_lan?"true":"false",(c->integrations&8u)?"true":"false",(c->integrations&16u)?"true":"false");return;}
  if(!strcmp(p,"/api/v1/system")&&!strcmp(q->method,"GET")){system_json(c,r);return;}
  if(!strcmp(p,"/api/v1/system/boot")){if(strcmp(q->method,"GET")){method_not_allowed(r);return;}boot_control_json(r);return;}
+ if(!strcmp(p,"/api/v1/system/boot-chain")){boot_chain_status_json(c,q,r);return;}
+ if(!strcmp(p,"/api/v1/system/boot-chain/repair")){boot_chain_repair_json(c,q,r);return;}
  if(!strcmp(p,"/api/v1/provenance")&&!strcmp(q->method,"GET")){provenance_json(r);return;}
  if(!strcmp(p,"/api/v1/system/update")&&!strcmp(q->method,"GET")){update_status_json(c,r);return;}
  if(!strcmp(p,"/api/v1/system/update/automatic")){int enabled;if(strcmp(q->method,"PUT")){method_not_allowed(r);return;}if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return;}if(json_get_bool(q->body,"enabled",&enabled)<1){err(r,400,LE_INVALID,"Enabled must be a boolean");return;}rc=run_init_command(update_fetch_path(),enabled?"enable-automatic":"disable-automatic");if(rc){err(r,503,rc,"Automatic update preference could not be saved");return;}api_log(c,"info",enabled?"Automatic OTA installation enabled":"Automatic OTA installation disabled");update_status_json(c,r);return;}
