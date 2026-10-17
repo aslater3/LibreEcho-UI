@@ -881,6 +881,99 @@ directories are accepted, while any unexpected deletion or durability failure
 aborts the reboot and returns HTTP 503. Unprivileged Linux deployments and
 backends without destructive-action support return HTTP 501.
 
+#### GET /api/v1/system/boot-chain
+
+Reports the bootloader (boot-chain) state from
+`/usr/local/sbin/libreecho-boot-chain status`, which is read-only. Units
+installed by 0.13 run an older Amonet chain (`legacy-0.13`); the opt-in repair
+below moves them to the board's community Kaeru chain, which installs TWRP.
+
+The daemon accepts only the documented `key=value` lines; unknown keys and
+other output lines are ignored. Each value must be a token of
+`[A-Za-z0-9._,:-]` within the field's length limit. A duplicate key, an invalid
+or oversized token, more than 4 KiB of output, or a missing `schema=1`,
+`chain` or `repair` line returns HTTP 502 instead of passing anything through.
+Enumerated values the daemon does not know become `unknown` (`other` for
+`expdb`, `unconfirmed` for `board_confidence`, empty for `package`).
+`repair: "available"` is reported only for a board the tool confirmed by
+hardware evidence; otherwise it becomes `blocked` with reason
+`board_unconfirmed`. `twrp_present` is true when `recovery` is `twrp-*` (or,
+when the tool does not report `recovery`, when `chain` is `kaeru-*`).
+
+| Field | Values |
+| --- | --- |
+| `layout` | `legacy-amonet`, `stock`, `unknown` |
+| `chain` | `legacy-0.13`, `kaeru-radar-v1`, `kaeru-biscuit-v2`, `unknown` |
+| `board` | `radar_puffin`, `biscuit`, `unknown` |
+| `board_confidence` | `confirmed`, `unconfirmed` |
+| `board_evidence` | comma-separated tokens, e.g. `idme-prefix:radar,gpt-end:ambiguous` |
+| `expdb` | `fastboot-marker`, `kaeru`, `empty`, `other` |
+| `repair` | `available`, `not-needed`, `blocked`, `in-progress`, `failed`, `done`, `unknown` |
+| `reason` | token such as `board_unconfirmed`, `board_mismatch`, `layout_not_legacy`, `bootloader_unrecognised`, `slot_unconfirmed`, `low_space`, `download_failed`, `package_mismatch`, `write_failed_restored`, `write_failed_unrestored`, `emmc_readonly` |
+| `package` | `amonet-radar-v1.0.0.zip`, `amonet-biscuit-v2.0.0.zip`, or empty |
+| `phase` | progress token while a repair runs |
+| `recovery` | `twrp-radar`, `twrp-biscuit`, `other`, `unknown` |
+| `profile` | `ota`, `development`, `unknown` |
+| `emmc_life` | eMMC wear token |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "supported": true,
+    "schema": 1,
+    "layout": "legacy-amonet",
+    "chain": "legacy-0.13",
+    "board": "radar_puffin",
+    "board_confidence": "confirmed",
+    "board_evidence": "idme-prefix:radar,gpt-end:radar",
+    "expdb": "fastboot-marker",
+    "repair": "available",
+    "reason": "",
+    "package": "amonet-radar-v1.0.0.zip",
+    "phase": "",
+    "recovery": "other",
+    "profile": "ota",
+    "emmc_life": "0x01",
+    "twrp_present": false
+  },
+  "error": null
+}
+```
+
+The mock backend, or an image without the tool, returns HTTP 501
+`not_supported`. A tool failure returns HTTP 503 `io_error`, with
+`error.reason` when the tool printed `ERROR:<token>`.
+
+#### POST /api/v1/system/boot-chain/repair
+
+Starts the opt-in bootloader repair. Requires `X-LibreEcho-CSRF` and
+`X-LibreEcho-Confirm: confirm-device-action`, plus this exact body. The owner
+names the physical unit (`radar_puffin` is the Echo 2nd Gen, `biscuit` the Echo
+Dot 2nd Gen) as a signal independent of the device's own hardware evidence:
+
+```json
+{"confirm":"REPAIR-BOOTLOADER","board":"radar_puffin"}
+```
+
+The daemon runs `libreecho-boot-chain repair-start --board <board>`, which
+checks its gate, detaches the repair and returns at once; progress is then
+reported by `GET /api/v1/system/boot-chain`. The repair takes about a minute
+and reboots the device, which must stay plugged in.
+
+**Response (HTTP 202):**
+```json
+{"ok":true,"data":{"started":true,"repair":"in-progress"},"error":null}
+```
+
+Errors: 403 for a missing CSRF token or confirmation header; 400 when
+`confirm` or `board` is missing, duplicated or not exact; 409 `busy` with the
+tool's `error.reason` token (for example `board_mismatch`) when it refuses; 501
+when unsupported; 502 for malformed tool output; 503 when the tool could not
+run. Both boot-chain endpoints run in a bounded API worker with a hard deadline,
+so they never block the request loop.
+
 #### PUT /api/v1/system/update/channel
 
 Select the signed GitHub Releases channel. Changing the channel clears the
@@ -903,6 +996,23 @@ is true, clients may send `X-LibreEcho-Allow-Unsigned: 1` for this upload only.
 That bypasses signature verification for the selected package; fetched and
 automatic updates never honor the header. The UI explicitly warns about this
 trust decision before uploading.
+
+#### GET /api/v1/system/update: OTA v3 (0.14) fields
+
+`GET /api/v1/system/update` also reports these optional OTA v3 fields, added in
+0.13.21. Each is empty or false when the update helper does not write it, so
+v1/v2 updates display as before:
+
+- `latest_ota_format` and `latest_target_release`: the `ota_format` (`v1`,
+  `v2` or `v3`) and `target_release` keys of the update check status.
+- `pending_ota_format` and `pending_target_release`: the same keys for a
+  pending installation.
+- `immutable_target_v3`: true when `libreecho-update capabilities` lists
+  `immutable-target-v3`.
+
+Unknown formats and target releases that are not `[A-Za-z0-9._,:-]` tokens of up
+to 64 characters are dropped. If a v3 offer or pending install has no
+`latest_version` or `version` key, its `target_release` is used in its place.
 
 #### GET /api/v1/system/timezone
 

@@ -94,6 +94,8 @@ python3 tests/test_feature_provenance_http.py
 sh tests/test_source_provenance.sh
 sh tests/test_ota_channel_contract.sh
 sh tests/test_update_failure_contract.sh
+sh tests/test_boot_chain_api.sh
+node tests/test_boot_chain_ui.js
 sh tests/test_stt_listening_config_contract.sh
 sh tests/test_pr95_followups_contract.sh
 sh tests/test_setup_connectivity_contract.sh

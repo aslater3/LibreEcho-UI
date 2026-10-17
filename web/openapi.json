@@ -2182,6 +2182,280 @@
       }
     }
   },
+  "/system/boot-chain": {
+   "get": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Read bootloader (boot-chain) state",
+    "description": "Runs the read-only `libreecho-boot-chain status` in a bounded worker and returns its documented keys. Unknown keys are ignored; every value must be a bounded [A-Za-z0-9._,:-] token, and enumerated values the daemon does not know become unknown (or other/unconfirmed/empty). A duplicate key, invalid token, oversized output or missing schema=1/chain/repair is a 502. repair=available is only reported for a board confirmed by hardware evidence.",
+    "responses": {
+     "200": {
+      "description": "Boot-chain state.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "required": [
+              "supported",
+              "schema",
+              "chain",
+              "board",
+              "board_confidence",
+              "repair",
+              "twrp_present"
+             ],
+             "properties": {
+              "supported": {
+               "type": "boolean"
+              },
+              "schema": {
+               "type": "integer",
+               "enum": [
+                1
+               ]
+              },
+              "layout": {
+               "type": "string",
+               "enum": [
+                "legacy-amonet",
+                "stock",
+                "unknown"
+               ]
+              },
+              "chain": {
+               "type": "string",
+               "enum": [
+                "legacy-0.13",
+                "kaeru-radar-v1",
+                "kaeru-biscuit-v2",
+                "unknown"
+               ]
+              },
+              "board": {
+               "type": "string",
+               "enum": [
+                "radar_puffin",
+                "biscuit",
+                "unknown"
+               ]
+              },
+              "board_confidence": {
+               "type": "string",
+               "enum": [
+                "confirmed",
+                "unconfirmed"
+               ]
+              },
+              "board_evidence": {
+               "type": "string",
+               "description": "Comma-separated evidence tokens, e.g. idme-prefix:radar,gpt-end:ambiguous."
+              },
+              "expdb": {
+               "type": "string",
+               "enum": [
+                "fastboot-marker",
+                "kaeru",
+                "empty",
+                "other"
+               ]
+              },
+              "repair": {
+               "type": "string",
+               "enum": [
+                "available",
+                "not-needed",
+                "blocked",
+                "in-progress",
+                "failed",
+                "done",
+                "unknown"
+               ]
+              },
+              "reason": {
+               "type": "string",
+               "description": "Why the repair is blocked or failed, e.g. board_unconfirmed, board_mismatch, layout_not_legacy, bootloader_unrecognised, slot_unconfirmed, low_space, download_failed, package_mismatch, write_failed_restored, write_failed_unrestored, emmc_readonly."
+              },
+              "package": {
+               "type": "string",
+               "enum": [
+                "amonet-radar-v1.0.0.zip",
+                "amonet-biscuit-v2.0.0.zip",
+                ""
+               ]
+              },
+              "phase": {
+               "type": "string"
+              },
+              "recovery": {
+               "type": "string",
+               "enum": [
+                "twrp-radar",
+                "twrp-biscuit",
+                "other",
+                "unknown"
+               ]
+              },
+              "profile": {
+               "type": "string",
+               "enum": [
+                "ota",
+                "development",
+                "unknown"
+               ]
+              },
+              "emmc_life": {
+               "type": "string"
+              },
+              "twrp_present": {
+               "type": "boolean",
+               "description": "True when recovery is twrp-*, or (recovery unreported) chain is kaeru-*."
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
+     },
+     "405": {
+      "description": "Only GET is supported."
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/system/boot-chain/repair": {
+   "post": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Start the opt-in bootloader repair (installs TWRP)",
+    "description": "Runs `libreecho-boot-chain repair-start --board <board>`, which checks its gate, detaches and returns at once; progress is reported by GET /system/boot-chain. The owner names the physical unit (radar_puffin = Echo 2nd Gen, biscuit = Echo Dot 2nd Gen) as a signal independent of the device's hardware evidence. The repair takes about a minute and reboots the device, which must stay plugged in. A tool refusal is a 409 carrying error.reason.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     },
+     {
+      "$ref": "#/components/parameters/Confirm"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "confirm",
+         "board"
+        ],
+        "additionalProperties": false,
+        "properties": {
+         "confirm": {
+          "type": "string",
+          "enum": [
+           "REPAIR-BOOTLOADER"
+          ]
+         },
+         "board": {
+          "type": "string",
+          "enum": [
+           "radar_puffin",
+           "biscuit"
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "Repair started.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Envelope"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "data": {
+             "type": "object",
+             "properties": {
+              "started": {
+               "type": "boolean",
+               "enum": [
+                true
+               ]
+              },
+              "repair": {
+               "type": "string",
+               "enum": [
+                "in-progress"
+               ]
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "description": "Only POST is supported."
+     },
+     "409": {
+      "description": "The tool refused the repair; error.reason carries its token.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Envelope"
+        }
+       }
+      }
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/system/factory-reset": {
    "post": {
     "tags": [
@@ -2334,7 +2608,7 @@
      "System"
     ],
     "summary": "Read signed A/B update and source-check state",
-    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, whether the installed update helper supports unsigned manual uploads, and canonical bounded components plus transaction_state and last_transaction_result observations. data.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity.",
+    "description": "Reports installed and latest verified versions, GitHub Release reachability, check timestamps and errors, pending activation, slots, rollback state, whether the installed update helper supports unsigned manual uploads, and canonical bounded components plus transaction_state and last_transaction_result observations. data.authority_provenance is a separate asynchronous observation from the existing Platform signature verifier, binding current canonical bytes to their signed authorizing release/source. This is not original build provenance or running-process identity. Missing, invalid, stale, or timed-out evidence is unavailable with no inferred identity. OTA v3 (0.14 immutable target, 0.13.21 bridge): latest_ota_format/latest_target_release and pending_ota_format/pending_target_release echo the optional ota_format (v1, v2 or v3) and target_release keys of the check and pending state (empty when absent, so v1/v2 display is unchanged), and immutable_target_v3 is true when the update helper lists the immutable-target-v3 capability.",
     "responses": {
      "200": {
       "description": "Successful response including separately verified signed authority (or explicitly unavailable authority).",
@@ -2970,7 +3244,7 @@
      },
      "reason": {
       "type": "string",
-      "description": "Sanitized installer reason token when an OTA update is rejected"
+      "description": "Sanitized tool reason token when an OTA update or bootloader repair is rejected"
      },
      "message": {
       "type": "string"
