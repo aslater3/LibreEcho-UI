@@ -126,6 +126,7 @@ const state = vm.runInThisContext('state');
 const ledPage = vm.runInThisContext('ledPage');
 const audioPage = vm.runInThisContext('audioPage');
 const networkPage = vm.runInThisContext('networkPage');
+const devicePage = vm.runInThisContext('devicePage');
 const systemPage = vm.runInThisContext('systemPage');
 const bindVoiceHistory = vm.runInThisContext('bindVoiceHistory');
 const voiceHistoryLoad = vm.runInThisContext('voiceHistoryLoad');
@@ -143,7 +144,7 @@ function defaultRoute(path, method) {
     if (path === '/audio') return AUDIO;
     if (path === '/network') return NETWORK;
     if (path === '/status') return { device_state: 'online', uptime_seconds: 1 };
-    if (path === '/device') return { name: 'LibreEcho', hostname: 'libreecho', os_version: '0.14.0' };
+    if (path === '/device') return { name: 'LibreEcho', hostname: 'libreecho', os_version: '0.14.0', room: 'Kitchen <b>' };
     if (path === '/system/features') return {};
     if (path === '/system/update') return { supported: false };
     if (path === '/assistant/latency') return { turns: [], history_generation: 1 };
@@ -255,6 +256,35 @@ async function caseLedDiagnosticsEscaped() {
     const html = content.innerHTML;
     has(html, '&lt;img src=x onerror=1&gt;', 'music grammar text is escaped in the diagnostics');
     check(!html.includes('<img src=x'), 'music grammar cannot inject markup');
+}
+
+/* #64: the optional room is edited on the Device page and saved on its own,
+   so it works whatever the assistant's state; bad input never reaches the API. */
+async function caseDeviceRoom() {
+    resetDom(); resetCalls();
+    state.page = 'Device'; state.renderGeneration++;
+    await devicePage(); clearTimers();
+    const html = content.innerHTML;
+    has(html, 'id="room"', 'Device page renders the room field');
+    has(html, 'value="Kitchen &lt;b&gt;"', 'the stored room is shown, escaped');
+    has(html, 'maxlength="48"', 'the room field is bounded to the server limit');
+    has(html, 'id="save-room"', 'the room has its own Save');
+    $app('#room').value = '  Living room  ';
+    await $app('#save-room').onclick(); clearTimers();
+    checkEqual(JSON.stringify(lastBody('/device', 'PUT')), JSON.stringify({ room: 'Living room' }), 'Save PUTs the trimmed room to /device');
+    const put = callsFor('/device', 'PUT')[0];
+    check(put && put.headers && put.headers['X-LibreEcho-CSRF'] !== undefined, 'the room PUT carries the CSRF header');
+    for (const bad of ['x'.repeat(49), 'Hall\nNext', 'Say "hi"', 'a\\b', 'é'.repeat(25)]) {
+        resetCalls();
+        $app('#room').value = bad;
+        await $app('#save-room').onclick(); clearTimers();
+        checkEqual(callsFor('/device', 'PUT').length, 0, `an invalid room is refused before any request (${JSON.stringify(bad).slice(0, 20)})`);
+        has($app('#toast').textContent, 'at most 48', 'the refusal says why');
+    }
+    resetCalls();
+    $app('#room').value = '';
+    await $app('#save-room').onclick(); clearTimers();
+    checkEqual(JSON.stringify(lastBody('/device', 'PUT')), JSON.stringify({ room: '' }), 'an empty room clears it');
 }
 
 async function caseNurserySounds() {
@@ -784,6 +814,7 @@ async function main() {
     const cases = [
         ['LED idle/sleep controls and diagnostics', caseLedControls],
         ['LED diagnostics escape untrusted text', caseLedDiagnosticsEscaped],
+        ['device room field (#64)', caseDeviceRoom],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],
         ['recent voice newest-first cap of 10', caseRecentVoiceCollection],

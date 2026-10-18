@@ -114,6 +114,40 @@ for body in \
         -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data "$body")
     [ "$code" = 400 ]
 done
+# #64: the optional room is a device setting owned by the web daemon, so it
+# persists, exports and restores without agentd, and bad input changes nothing.
+curl -fsS "$URL/api/v1/device" | jq -e '.ok and .data.room == ""' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/device" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"room":"Kitchen"}' | jq -e '.ok and .data.room == "Kitchen"' >/dev/null
+jq -e '.room == "Kitchen"' "$CFG" >/dev/null
+curl -fsS "$URL/api/v1/config/export" | jq -e '.data.room == "Kitchen"' >/dev/null
+for body in '{"room":"0123456789012345678901234567890123456789012345678"}' \
+            '{"room":"Hall\nNext"}' '{"room":"Say \"hi\""}' '{"room":7}' '{}'; do
+    code=$(curl -sS -o /tmp/le-room-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/device" \
+        -H "$CSRF" -H 'Content-Type: application/json' --data "$body")
+    [ "$code" = 400 ]
+done
+code=$(curl -sS -o /tmp/le-room-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/device" \
+    -H 'Content-Type: application/json' --data '{"room":"Hall"}')
+[ "$code" = 403 ]
+curl -fsS "$URL/api/v1/device" | jq -e '.data.room == "Kitchen"' >/dev/null
+# Exactly 48 bytes is accepted; multi-byte UTF-8 counts in bytes.
+curl -fsS -X PUT "$URL/api/v1/device" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"room":"012345678901234567890123456789012345678901234567"}' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/device" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"room":"Kinderzimmer – oben"}' | jq -e '.data.room == "Kinderzimmer – oben"' >/dev/null
+room_export=$(curl -fsS "$URL/api/v1/config/export" | jq -c '.data | .room = "Hall"')
+curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" \
+    -H 'Content-Type: application/json' --data "$room_export" >/dev/null
+curl -fsS "$URL/api/v1/device" | jq -e '.data.room == "Hall"' >/dev/null
+bad_room_export=$(printf '%s' "$room_export" | jq -c '.room = "Hall\nNext"')
+code=$(curl -sS -o /tmp/le-room-import.out -w '%{http_code}' -X POST "$URL/api/v1/config/import" \
+    -H "$CSRF" -H 'Content-Type: application/json' --data "$bad_room_export")
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/device" | jq -e '.data.room == "Hall"' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/device" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"room":""}' | jq -e '.data.room == ""' >/dev/null
+jq -e '.room == ""' "$CFG" >/dev/null
 mode=$(stat -c '%a' "$CFG" 2>/dev/null || stat -f '%Lp' "$CFG")
 [ "$mode" = 600 ]
 echo 'config: ok'
