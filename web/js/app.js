@@ -542,8 +542,7 @@ async function nurseryPage(){const generation=state.renderGeneration,page=state.
       '</select></label><label class="field"><span>Microphone</span><select id="baby-channel">'+microphoneOptions(first)+
       '</select></label><p class="muted">The Echo array transports nine packed 24-bit lanes at 16 kHz. Hardware testing confirms that lanes 1–7 carry the seven microphones; lanes 8–9 are inactive or reserved.</p>'+
       '<div class="notice unsupported"><strong>Stock calibration</strong><span>'+(d.calibration&&d.calibration.complete?'Seven logical mic gains were found in '+esc(d.calibration.source)+'. Raw monitoring remains uncalibrated until the microphones’ logical geometry order is verified.':'No complete seven-entry miccal set is available; using the stock fallback value 16384 for metadata only.')+'</span></div>'+
-      (d.simulated?'<div class="notice unsupported"><strong>Preview only</strong><span>The mock backend exposes a source list but cannot produce live microphone audio.</span></div>':'')+
-      '</div>')+
+      (d.simulated?'<div class="notice unsupported"><strong>Preview only</strong><span>The mock backend exposes a source list but cannot produce live microphone audio.</span></div>':''))+
     panel('Listen in',range('Browser playback volume',35,'baby-volume')+
       '<div class="status-line"><span class="status-dot" id="baby-dot"></span><span id="baby-status" aria-live="polite">Stopped</span></div>'+
       '<div class="button-row">'+action('Start listening','baby-start','primary-btn')+action('Stop','baby-stop')+'</div>'+

@@ -279,6 +279,20 @@ async function caseNurserySounds() {
     has(html, 'Your master volume is not changed', 'the level copy states the master volume is untouched');
     has(html, 'id="noise-heartbeat-options" hidden', 'heartbeat-only options are hidden for a noise source');
     has(html, 'id="noise-fade"', 'sleep-sounds panel offers a fade field');
+    {
+        /* A stray </div> once closed the page grid early and pushed the
+           panels after it out of the layout. */
+        state.page = 'Nursery'; state.renderGeneration++;
+        routes['/baby-monitor'] = { sources: [{ id: '0:24', name: 'Array', card: 0, device: 24, microphones: [{ channel: 0, name: 'Mic 1' }] }], calibration: { complete: false } };
+        await nurseryPage(); clearTimers();
+        const full = content.innerHTML;
+        delete routes['/baby-monitor'];
+        checkEqual((full.match(/<div\b/g) || []).length, (full.match(/<\/div>/g) || []).length,
+            'Nursery markup has balanced <div> tags with a microphone source present');
+        check(full.includes('Microphone source') && full.includes('Listen in') && full.includes('Sleep sounds'), 'all three Nursery panels render with a source present');
+        state.page = 'Nursery'; state.renderGeneration++;
+        await nurseryPage(); clearTimers();
+    }
     has(html, '<option value="heartbeat"', 'heartbeat source is selectable');
 
     $app('#noise-colour').value = 'heartbeat';
