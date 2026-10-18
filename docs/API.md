@@ -1113,9 +1113,9 @@ succeeded.
     "bt_mac_configured": "",
     "internet": true,
     "dhcp": true,
-    "ssh": false,
+    "ssh": true,
     "ssh_available": true,
-    "ssh_state": "disabled-by-config",
+    "ssh_state": "ready",
     "api_lan": false,
     "api_lan_effective": false,
     "api_lan_forced": false
@@ -1125,7 +1125,8 @@ succeeded.
 ```
 
 `ssh` is the owner's SSH switch (saved in `web-config.json`; the Platform SSH
-supervisor follows it within about 2 seconds). `ssh_available` says whether this
+supervisor follows it within about 2 seconds). It is on by default; only a saved
+`false` turns SSH off. `ssh_available` says whether this
 image carries SSH at all, and `ssh_state` is the supervisor's non-secret
 `account_state`: `ready`, `disabled-by-config`, `waiting-for-valid-webui-users`
 (switched on but no valid web account yet; accounts named `root`, `.`, `..` or
