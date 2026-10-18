@@ -530,6 +530,10 @@ when configured, local API authentication.
 
 ### Baby Monitor
 
+The web UI shows this on the **Nursery** page (renamed from Baby Monitor in
+0.14.1, with the old `/baby-monitor` page address redirecting), alongside the
+sleep sounds from `POST /api/v1/audio/noise`. The API paths are unchanged.
+
 #### GET /api/v1/baby-monitor/stream
 
 Streams selected microphone PCM for local browser playback. The response is

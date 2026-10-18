@@ -4,7 +4,8 @@
  * Exercises the shipped generator header directly (no audiod, no ALSA, no
  * device): amplitude cap, level/tempo validation clamps, deterministic output,
  * exact finite duration, fade-in, pre-timer fade-out, the heartbeat's smooth
- * double pulse, the optional bed, and the bounded stop ramp.
+ * double pulse and its audibility on a small speaker, the optional bed, and
+ * the bounded stop ramp.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -220,6 +221,83 @@ static void test_input_validation(void)
     CHECK(le_sleep_gen_init(&g, LE_SLEEP_SOURCE_BROWN, LE_SLEEP_BED_BROWN, 60, 50,
                             0, 0, 1) == 0);
     CHECK(g.bed == LE_SLEEP_BED_NONE);
+}
+
+/*
+ * Issue LibreEcho-Platform#253: the heartbeat must audibly pulse on an Echo driver.  A
+ * second-order 150 Hz high-pass stands in for the small speaker.  The old
+ * 48-55 Hz sine pulses kept ~14% of their RMS through it, and a brown bed
+ * ran as loud as the beat, so the beat-to-gap contrast was ~1.0: a steady
+ * hiss with no audible pulse.  Pin both properties.
+ */
+static double speaker_hp(double x, double *z)
+{
+    const double w = tan(3.14159265358979323846 * 150.0 / LE_SLEEP_RATE);
+    const double n = 1.0 / (1.0 + 1.41421356237 * w + w * w);
+    const double a1 = 2.0 * (w * w - 1.0) * n;
+    const double a2 = (1.0 - 1.41421356237 * w + w * w) * n;
+    double y = n * x + z[0];
+
+    z[0] = -2.0 * n * x - a1 * y + z[1];
+    z[1] = n * x - a2 * y;
+    return y;
+}
+
+/* RMS of the beat window (first 0.14 s) and the gap (0.45 s to beat end),
+   over beats 2..5, optionally through the speaker model. */
+static void beat_gap_rms(int bed, int bpm, int speaker, double *beat_rms,
+                         double *gap_rms, double *raw_beat_rms)
+{
+    static int16_t pcm[6 * LE_SLEEP_RATE * LE_SLEEP_CHANNELS];
+    struct le_sleep_gen g;
+    double z[2] = {0.0, 0.0}, beat = 60.0 / bpm, bs = 0, gs = 0, rs = 0;
+    long bn = 0, gn = 0, i, frames = 6L * LE_SLEEP_RATE;
+
+    CHECK(le_sleep_gen_init(&g, LE_SLEEP_SOURCE_HEARTBEAT, bed, bpm, 100, 0, 0,
+                            31) == 0);
+    CHECK(le_sleep_gen_fill(&g, pcm, (size_t)frames) == (size_t)frames);
+    for (i = 0; i < frames; ++i) {
+        double x = pcm[i * LE_SLEEP_CHANNELS], y = speaker ? speaker_hp(x, z) : x;
+        double t = fmod((double)i / LE_SLEEP_RATE, beat);
+
+        if (i < 2L * LE_SLEEP_RATE)
+            continue;
+        if (t < 0.14) {
+            bs += y * y;
+            rs += x * x;
+            ++bn;
+        } else if (t > 0.45 && t < beat - 0.02) {
+            gs += y * y;
+            ++gn;
+        }
+    }
+    *beat_rms = sqrt(bs / bn);
+    *gap_rms = sqrt(gs / gn);
+    if (raw_beat_rms)
+        *raw_beat_rms = sqrt(rs / bn);
+}
+
+static void test_heartbeat_audible_on_small_speaker(void)
+{
+    double beat, gap, raw, pink_gap, brown_gap;
+    int bpm;
+
+    /* The thump keeps most of its energy above the speaker's corner. */
+    beat_gap_rms(LE_SLEEP_BED_NONE, 60, 1, &beat, &gap, &raw);
+    CHECK(beat / raw > 0.35);
+    CHECK(gap < 1.0);
+    /* With either background, the beat stands well clear of the gap at
+       every tempo, through the speaker. */
+    for (bpm = LE_SLEEP_TEMPO_MIN; bpm <= LE_SLEEP_TEMPO_MAX; bpm += 30) {
+        beat_gap_rms(LE_SLEEP_BED_BROWN, bpm, 1, &beat, &gap, NULL);
+        CHECK(beat > 3.0 * gap);
+        beat_gap_rms(LE_SLEEP_BED_PINK, bpm, 1, &beat, &gap, NULL);
+        CHECK(beat > 2.5 * gap);
+    }
+    /* Pink and brown backgrounds sit at the same loudness (was 4x apart). */
+    beat_gap_rms(LE_SLEEP_BED_PINK, 60, 0, &beat, &pink_gap, NULL);
+    beat_gap_rms(LE_SLEEP_BED_BROWN, 60, 0, &beat, &brown_gap, NULL);
+    CHECK(pink_gap < 1.25 * brown_gap && brown_gap < 1.25 * pink_gap);
 }
 
 /* The heartbeat + bed combination is real audio, not a silent path. */
@@ -475,6 +553,7 @@ int main(void)
     test_heartbeat_envelope();
     test_input_validation();
     test_heartbeat_with_bed();
+    test_heartbeat_audible_on_small_speaker();
     test_stop_ramp();
     test_stop_continuity_inside_fade_in();
     test_stop_continuity_inside_timer_fade();

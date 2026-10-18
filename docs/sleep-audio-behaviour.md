@@ -9,9 +9,19 @@ Platform engine source.
 
 `src/adapter/sleep_generator.h` synthesises, with no bundled sample:
 
-- white / pink / brown noise, and a low-frequency heartbeat with a soft double
-  pulse under a `sin^2` window (exactly zero at both pulse edges);
-- an optional low-level pink/brown bed under the heartbeat only;
+- white / pink / brown noise;
+- a heartbeat "lub-dub": two thumps whose pitch falls (120 to 60 Hz and 140 to
+  75 Hz) carried with their 2nd and 3rd harmonics, under a `sin^2` attack into
+  a `cos^2`-tapered exponential decay (exactly zero, with zero slope, at both
+  edges).  Both thumps end by 0.40 s, so every tempo has true silence between
+  beats.  The harmonics matter: an Echo driver cannot reproduce the
+  fundamental, and the original 48-55 Hz sine pulses were largely inaudible
+  on it (issue LibreEcho-Platform#253);
+- an optional pink/brown bed under the heartbeat only, shown in the UI as the
+  "background whoosh".  Each colour is scaled to unit RMS so pink and brown
+  match in loudness, and the bed swells with every beat (25% at rest, full
+  over the first 0.5 s of the beat) so the rhythm carries through the
+  background, the way womb sound does;
 - interleaved S16 stereo at 48000 Hz (the media-bus rate, so nothing is
   resampled).
 
@@ -83,7 +93,9 @@ same period they were mixed.
 ## Verification
 
 - `tests/test_sleep_generator.c` -- cap, determinism, duration, fades,
-  heartbeat envelope, validation, the bounded stop ramp, the regression that a
+  heartbeat envelope, the heartbeat's audibility through a 150 Hz small-speaker
+  high-pass (thump energy kept, beat-to-gap contrast at every tempo with either
+  bed, pink/brown level match), validation, the bounded stop ramp, the regression that a
   stop inside the fade-in or an in-progress timer fade starts from the current
   gain (no upward step), that the applied envelope is monotonically
   non-increasing after a stop (never above the stop-time gain, never rising,
