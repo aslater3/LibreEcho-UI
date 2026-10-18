@@ -438,6 +438,8 @@ render the existing unsupported state without logging an HTTP error.
     "startup_sound": true,
     "amplifier_on": true,
     "output_available": true,
+    "tts_engine": "sherpa",
+    "tts_voice_settings": "audio",
     "tts_voice": "southern-female",
     "tts_voices": [
       { "id": "southern-female", "name": "Southern English — female" },
@@ -448,9 +450,22 @@ render the existing unsupported state without logging an HTTP error.
 }
 ```
 
+`tts_engine` is the engine that actually speaks: `sherpa` (on device),
+`wyoming` (the Wyoming server configured in `/voice-pipeline` custom mode) or
+`home-assistant` (the Assist pipeline). `tts_voice_settings` names where that
+engine's voice is set: `audio` (this endpoint), `voice-pipeline` or
+`home-assistant`. `tts_voice` and `tts_voices` always describe the engine in use:
+the local voices for `sherpa`, the configured Wyoming voice as a single entry for
+`wyoming`, and an empty list with an empty `tts_voice` for `home-assistant`.
+
 #### PUT /api/v1/audio
 
 Update audio settings.
+
+`tts_voice` changes the on-device voice and is accepted only while `tts_engine`
+is `sherpa`. In the other modes it returns `409`, and nothing else in the request
+is applied; the Wyoming voice is set with `PUT /api/v1/voice-pipeline`
+(`tts_voice`). An over-long or malformed `tts_voice` returns `400`.
 
 **Request:**
 ```json

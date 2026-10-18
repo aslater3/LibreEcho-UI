@@ -474,7 +474,7 @@
      "Audio"
     ],
     "summary": "Read audio state",
-    "description": "Returns available audio state. On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error.",
+    "description": "Returns available audio state. On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error. tts_engine reports which engine speaks (sherpa = on-device, wyoming = Wyoming server, home-assistant = Assist pipeline) and tts_voice_settings where its voice is set (audio, voice-pipeline, home-assistant). tts_voice and tts_voices describe that engine's voice: the local picker list only for sherpa, the configured Wyoming voice for wyoming, and an empty list for home-assistant.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -489,6 +489,7 @@
      "Audio"
     ],
     "summary": "Update volume, microphone state, or announcement voice",
+    "description": "tts_voice selects the on-device voice and is only accepted while tts_engine is sherpa. In custom (Wyoming) or Home Assistant mode a tts_voice returns 409 and nothing in the request is applied; set the Wyoming voice through PUT /voice-pipeline instead. An over-long or malformed tts_voice returns 400.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -502,6 +503,9 @@
       "$ref": "#/components/responses/Success"
      },
      "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
       "$ref": "#/components/responses/Error"
      }
     }
