@@ -33,7 +33,7 @@ struct le_backend_ops {
     positional-init reason as everything above; a backend that leaves one null
     reports the feature unsupported. */
  int (*noise_start_ex)(struct le_backend*,const struct le_noise_request*);
- int (*led_idle_mode)(struct le_backend*,const char*);
+ int (*led_idle_mode)(struct le_backend*,const char*,int);
  int (*led_sleep)(struct le_backend*,const struct le_led_sleep_request*);
  int (*recovery_configure)(struct le_backend*,int,int,int);
  int (*recovery_prepare)(struct le_backend*,char*,size_t);
