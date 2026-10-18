@@ -300,6 +300,45 @@ static void test_heartbeat_audible_on_small_speaker(void)
     CHECK(pink_gap < 1.25 * brown_gap && brown_gap < 1.25 * pink_gap);
 }
 
+/*
+ * The main noise colours must not lean on the output clamp.  The old brown
+ * spent 57% of its samples on it (a distorted square wave) and pink 1.8%.
+ * Through the small-speaker model pink and brown also land at a similar
+ * level, and brown stays the deeper of the two (it loses more to the
+ * high-pass than pink does).
+ */
+static void test_noise_colours_unclipped(void)
+{
+    const int colours[3] = {LE_SLEEP_SOURCE_WHITE, LE_SLEEP_SOURCE_PINK,
+                            LE_SLEEP_SOURCE_BROWN};
+    double heard[3], kept[3];
+    int c;
+
+    for (c = 0; c < 3; ++c) {
+        struct le_sleep_gen g;
+        double z[2] = {0.0, 0.0}, raw = 0.0, hp = 0.0;
+        long i, clipped = 0, frames = 30L * LE_SLEEP_RATE;
+
+        CHECK(le_sleep_gen_init(&g, colours[c], LE_SLEEP_BED_NONE, 60, 100,
+                                0, 0, 41) == 0);
+        for (i = 0; i < frames; ++i) {
+            double v = le_sleep_noise(&g, colours[c]), y;
+
+            if (v >= 1.0 || v <= -1.0)
+                ++clipped;
+            v = v > 1.0 ? 1.0 : v < -1.0 ? -1.0 : v;
+            y = speaker_hp(v, z);
+            raw += v * v;
+            hp += y * y;
+        }
+        CHECK(clipped * 10000L < frames);            /* under 0.01% */
+        heard[c] = sqrt(hp / frames);
+        kept[c] = heard[c] / sqrt(raw / frames);
+    }
+    CHECK(heard[1] < 1.25 * heard[2] && heard[2] < 1.25 * heard[1]);
+    CHECK(kept[2] < kept[1]);                        /* brown is deeper */
+}
+
 /* The heartbeat + bed combination is real audio, not a silent path. */
 static void test_heartbeat_with_bed(void)
 {
@@ -554,6 +593,7 @@ int main(void)
     test_input_validation();
     test_heartbeat_with_bed();
     test_heartbeat_audible_on_small_speaker();
+    test_noise_colours_unclipped();
     test_stop_ramp();
     test_stop_continuity_inside_fade_in();
     test_stop_continuity_inside_timer_fade();

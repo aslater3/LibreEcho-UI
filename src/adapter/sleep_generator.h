@@ -105,6 +105,23 @@ static inline uint32_t le_sleep_random(uint32_t *state)
     return x;
 }
 
+/*
+ * Main-source colour scaling.  Each colour is scaled so its peaks sit inside
+ * -1..1 with ~4.5 sigma of headroom, so the clamp in le_sleep_gen_fill is a
+ * safety net rather than part of the sound.  The old brown (leak 0.995, x6)
+ * ran at 1.7 RMS and spent 57% of samples on the clamp -- a distorted square
+ * wave -- and pink (x0.25) clipped 1.8% of samples.
+ *
+ * Brown's leak sets its low corner.  At 0.995 (38 Hz) nearly all of its
+ * energy sat below what an Echo driver reproduces, so an unclipped version
+ * was almost inaudible; 0.98 puts the corner at ~150 Hz, where the speaker
+ * rolls off, and keeps the brown -6 dB/octave slope across the band it does
+ * play.  Pink and brown then land at the same level through the speaker.
+ */
+#define LE_SLEEP_BROWN_LEAK 0.98
+#define LE_SLEEP_BROWN_SCALE 1.56
+#define LE_SLEEP_PINK_SCALE 0.125
+
 /* One normalised (-1..1) noise sample of the requested colour. */
 static inline double le_sleep_noise(struct le_sleep_gen *g, int colour)
 {
@@ -115,14 +132,15 @@ static inline double le_sleep_noise(struct le_sleep_gen *g, int colour)
         g->brown = g->brown + white * 0.05;
         if (g->brown > 1.0) g->brown = 1.0;
         if (g->brown < -1.0) g->brown = -1.0;
-        g->brown *= 0.995;
-        return g->brown * 6.0;
+        g->brown *= LE_SLEEP_BROWN_LEAK;
+        return g->brown * LE_SLEEP_BROWN_SCALE;
     }
     if (colour == LE_SLEEP_SOURCE_PINK) {
         g->pink_a = 0.99765 * g->pink_a + white * 0.0990460;
         g->pink_b = 0.96300 * g->pink_b + white * 0.2965164;
         g->pink_c = 0.57000 * g->pink_c + white * 1.0526913;
-        return (g->pink_a + g->pink_b + g->pink_c + white * 0.1848) * 0.25;
+        return (g->pink_a + g->pink_b + g->pink_c + white * 0.1848) *
+               LE_SLEEP_PINK_SCALE;
     }
     return white;
 }

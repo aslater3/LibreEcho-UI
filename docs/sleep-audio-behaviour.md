@@ -9,7 +9,11 @@ Platform engine source.
 
 `src/adapter/sleep_generator.h` synthesises, with no bundled sample:
 
-- white / pink / brown noise;
+- white / pink / brown noise, each scaled so its peaks fit inside full scale
+  with ~4.5 sigma of headroom; the output clamp is a safety net, not part of
+  the sound.  Brown's leaky integrator has its corner at ~150 Hz (leak 0.98),
+  where an Echo driver rolls off, so it stays audible without clipping; the
+  earlier brown (leak 0.995, x6) clipped 57% of its samples and pink 1.8%;
 - a heartbeat "lub-dub": two thumps whose pitch falls (120 to 60 Hz and 140 to
   75 Hz) carried with their 2nd and 3rd harmonics, under a `sin^2` attack into
   a `cos^2`-tapered exponential decay (exactly zero, with zero slope, at both
@@ -95,7 +99,9 @@ same period they were mixed.
 - `tests/test_sleep_generator.c` -- cap, determinism, duration, fades,
   heartbeat envelope, the heartbeat's audibility through a 150 Hz small-speaker
   high-pass (thump energy kept, beat-to-gap contrast at every tempo with either
-  bed, pink/brown level match), validation, the bounded stop ramp, the regression that a
+  bed, pink/brown level match), that the main noise colours stay off the
+  clamp (<0.01% of samples) with pink and brown level-matched through the
+  speaker model, validation, the bounded stop ramp, the regression that a
   stop inside the fade-in or an in-progress timer fade starts from the current
   gain (no upward step), that the applied envelope is monotonically
   non-increasing after a stop (never above the stop-time gain, never rising,
