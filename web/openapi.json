@@ -1426,10 +1426,74 @@
      "Discovery"
     ],
     "summary": "Read API configuration metadata",
-    "description": "Returns the compile-time LibreEcho OS version alongside authentication and request metadata. The os_version value is sourced from the release VERSION file during the daemon build.",
+    "description": "Returns the compile-time LibreEcho OS version alongside authentication and request metadata. The os_version value is sourced from the release VERSION file during the daemon build. ui_theme (classic|setup) and color_mode (dark|light, or empty when not chosen on the device) are the saved appearance, public so pages can apply it before sign-in.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     }
+    }
+   }
+  },
+  "/ui/preferences": {
+   "get": {
+    "tags": [
+     "Device"
+    ],
+    "summary": "Read the saved appearance",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "Device"
+    ],
+    "summary": "Set the appearance (ui_theme and/or color_mode)",
+    "description": "Either or both of ui_theme (classic|setup) and color_mode (dark|light). Any other member, a duplicate, an unknown value or an empty object is 400 and nothing changes. Saved in web-config.json and carried by configuration export/import.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+         "ui_theme": {
+          "type": "string",
+          "enum": [
+           "classic",
+           "setup"
+          ]
+         },
+         "color_mode": {
+          "type": "string",
+          "enum": [
+           "dark",
+           "light"
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "500": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }
