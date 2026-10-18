@@ -257,6 +257,36 @@ async function caseLedDiagnosticsEscaped() {
     check(!html.includes('<img src=x'), 'music grammar cannot inject markup');
 }
 
+/* #24: the SSH switch says when the image has no SSH, and reports what the
+   supervisor is really doing; older daemons that send neither field get no note. */
+async function caseSshStatusNote() {
+    const saved = { ssh_available: NETWORK.ssh_available, ssh_state: NETWORK.ssh_state };
+    try {
+        Object.assign(NETWORK, { ssh_available: false, ssh_state: 'unavailable' });
+        resetDom(); resetCalls(); state.page = 'Network'; state.renderGeneration++;
+        await networkPage(); clearTimers();
+        has(content.innerHTML, 'SSH is not included in this build.', 'an image without SSH says so');
+        check(/id="ssh"[^>]*disabled/.test(content.innerHTML), 'the SSH switch is disabled when the image has no SSH');
+        Object.assign(NETWORK, { ssh_available: true, ssh_state: 'waiting-for-valid-webui-users' });
+        resetDom(); state.renderGeneration++;
+        await networkPage(); clearTimers();
+        has(content.innerHTML, 'remove them to use SSH', 'a waiting SSH explains reserved account names');
+        check(!/id="ssh"[^>]*disabled/.test(content.innerHTML), 'the SSH switch is usable when the image has SSH');
+        Object.assign(NETWORK, { ssh_available: true, ssh_state: '<img src=x>' });
+        resetDom(); state.renderGeneration++;
+        await networkPage(); clearTimers();
+        check(!content.innerHTML.includes('<img src=x>'), 'an unknown SSH state is escaped');
+        delete NETWORK.ssh_available; delete NETWORK.ssh_state;
+        resetDom(); state.renderGeneration++;
+        await networkPage(); clearTimers();
+        check(!content.innerHTML.includes('SSH is'), 'an older daemon without SSH status gets no note');
+    } finally {
+        Object.assign(NETWORK, saved);
+        if (saved.ssh_available === undefined) delete NETWORK.ssh_available;
+        if (saved.ssh_state === undefined) delete NETWORK.ssh_state;
+    }
+}
+
 async function caseNurserySounds() {
     resetDom(); resetCalls();
     state.page = 'Audio'; state.renderGeneration++;
@@ -784,6 +814,7 @@ async function main() {
     const cases = [
         ['LED idle/sleep controls and diagnostics', caseLedControls],
         ['LED diagnostics escape untrusted text', caseLedDiagnosticsEscaped],
+        ['SSH status note (#24)', caseSshStatusNote],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],
         ['recent voice newest-first cap of 10', caseRecentVoiceCollection],

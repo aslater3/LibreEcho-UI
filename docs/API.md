@@ -1045,6 +1045,8 @@ succeeded.
     "internet": true,
     "dhcp": true,
     "ssh": false,
+    "ssh_available": true,
+    "ssh_state": "disabled-by-config",
     "api_lan": false,
     "api_lan_effective": false,
     "api_lan_forced": false
@@ -1052,6 +1054,14 @@ succeeded.
   "error": null
 }
 ```
+
+`ssh` is the owner's SSH switch (saved in `web-config.json`; the Platform SSH
+supervisor follows it within about 2 seconds). `ssh_available` says whether this
+image carries SSH at all, and `ssh_state` is the supervisor's non-secret
+`account_state`: `ready`, `disabled-by-config`, `waiting-for-valid-webui-users`
+(switched on but no valid web account yet; accounts named `root`, `.`, `..` or
+`libreecho-ssh` keep SSH stopped and cannot be created), `stopped`, or
+`unavailable`. SSH accounts are the web accounts, never root.
 
 `connectivity` is one of `unknown`, `healthy`, `degraded`, `recovering`, or
 `disconnected`. `gateway_reachable` is `null` until a probe can be completed.
@@ -1763,7 +1773,8 @@ last 80 records and drained non-blocking from `/dev/kmsg`.
 ```
 
 This exists because switching the USB port to host mode removes the ADB gadget,
-which is the only shell this image offers — there is no SSH server. The kernel
+which is the only root shell this image offers (SSH, when included, signs in as
+non-root web accounts). The kernel
 log therefore becomes unreadable over USB at precisely the moment it matters,
 such as when checking whether an attached drive enumerated. Reading it over the
 network closes that gap.
