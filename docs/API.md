@@ -281,6 +281,31 @@ changed by the user. A selected hostname is stored in
 `/data/libreecho/config/web-config.json` and takes precedence on later boots.
 Device-specific identifiers are not included in public API examples.
 
+#### GET /api/v1/news
+#### PUT /api/v1/news
+#### POST /api/v1/news/refresh
+
+LibreEcho News (#121): a short curated list of releases, progress,
+announcements and security notes. It is **off by default** because it contacts
+the network on its own. When on, the device fetches the public `news-v1.json`
+from `https://dl.libreecho.org/news/news-v1.json`, then the GitHub release asset
+`news-feed/news-v1.json`, only when a client asks for news: at most every 12
+hours, an hour after a failure, and no sooner than 5 minutes for a manual
+refresh. The request carries no cookies, query string or device identifiers. A
+document is accepted only if it is at most 32 KiB, `schema` is
+`libreecho-news-v1`, it has at most 20 items with unique `[a-z0-9._-]` ids,
+`YYYY-MM-DD` dates, plain-text titles and summaries, and `https://` links on
+`github.com`, `libreecho.org` or `dl.libreecho.org`; otherwise the last good copy
+is kept. Items of an unknown type are skipped.
+
+GET returns `{enabled, supported, state, last_success_epoch, last_attempt_epoch,
+last_error, items:[{id,type,date,title,summary,url,severity?}]}`, newest first,
+where `state` is `disabled`, `fresh`, `stale`, `refreshing`, `never` or
+`unsupported`. It never waits for the network: if a refresh is due it starts one
+in the background and reports `refreshing`. PUT `{"enabled": bool}` turns news
+on or off (off deletes the cached copy). POST `/news/refresh` returns `202`,
+`429` within 5 minutes of the last attempt, `409` while news is off.
+
 ### Audio
 
 #### GET /api/v1/playback
