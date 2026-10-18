@@ -511,6 +511,20 @@
     }
    }
   },
+  "/audio/voices": {
+   "get": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "List the voices the speaking engine offers",
+    "description": "engine, source (local|wyoming|none), active, reachable, truncated and voices[{id,name,language,installed}]. Wyoming servers are asked with describe (bounded, cached 60 s, at most 64 voices); the local engine reads the TTS payload's voices.json or lists its two built-in voices.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     }
+    }
+   }
+  },
   "/audio/announce": {
    "post": {
     "tags": [

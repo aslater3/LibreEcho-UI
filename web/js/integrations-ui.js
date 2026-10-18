@@ -107,6 +107,19 @@ function pipelineStatus(pipeline) {
   </dl>`;
 }
 
+/* Voice catalogue (#63): suggest the voices the configured Wyoming server really has, so a mistyped voice name is visible. */
+async function loadWyomingVoices(){
+  const list=$('#wyoming-voices'),note=$('#wyoming-voices-note');
+  if(!list||!note)return;
+  let v;try{v=await api('/audio/voices')}catch(_){return}
+  if(!v||v.source!=='wyoming'){note.textContent='';return}
+  if(!v.reachable){note.textContent='The Wyoming speech server did not answer, so its voices cannot be listed.';return}
+  list.innerHTML=(v.voices||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.name)}${x.language?' ('+esc(x.language)+')':''}${x.installed?'':' — not downloaded'}</option>`).join('');
+  const current=($('#tts-voice')||{}).value||'';
+  const known=(v.voices||[]).some(x=>x.id===current);
+  note.textContent=`Your Wyoming server offers ${(v.voices||[]).length}${v.truncated?'+':''} voice${(v.voices||[]).length===1?'':'s'}.`+(current&&!known?` "${current}" is not one of them.`:'');
+}
+
 function localAssistantBody(a,selected,pipeline) {
   const configured=Boolean(a.base_url);
   const stt=pipeline?.stt||{},tts=pipeline?.tts||{};
@@ -126,7 +139,7 @@ function localAssistantBody(a,selected,pipeline) {
       ${field('Whisper Wyoming endpoint',stt.wyoming_uri||'','stt-wyoming-uri','text','placeholder="tcp://198.51.100.10:10300"')}
       ${field('Whisper model',stt.model||'whisper-small','stt-model')}
       ${field('Piper Wyoming endpoint',tts.wyoming_uri||'','tts-wyoming-uri','text','placeholder="tcp://198.51.100.10:10200"')}
-      ${field('Piper voice',tts.voice||'en_GB-alan-medium','tts-voice')}
+      ${field('Piper voice',tts.voice||'en_GB-alan-medium','tts-voice','text','list="wyoming-voices" autocomplete="off"')}<datalist id="wyoming-voices"></datalist><p class="muted" id="wyoming-voices-note"></p>
       <label class="field"><span>Voice response prompt</span><textarea id="local-prompt" rows="8">${esc(a.prompt||'')}</textarea></label>
       ${saveButton('save-local-assistant')}
       ${!selected?'<p class="muted">Saving selects Local LLM without enabling the voice loop. Use the switch above when you are ready to test it.</p>':''}
@@ -547,6 +560,7 @@ async function integrationsPage() {
     bindHomeLocation(a);
 
     bindDirty(['#local-base-url','#local-model','#local-clock-format','#local-prompt','#local-api-key','#stt-wyoming-uri','#stt-model','#tts-wyoming-uri','#tts-voice'],'#save-local-assistant');
+    loadWyomingVoices().catch(()=>{});
     $('#save-local-assistant').onclick=async()=>{
       if(state.busy)return;
       setBusy(true);
