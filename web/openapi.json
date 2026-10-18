@@ -1453,6 +1453,64 @@
     }
    }
   },
+  "/local-services": {
+   "get": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Read the persistent local services state",
+    "description": "available, enabled, path_safe, state and services[{name,state}] from the Platform supervisor's status. Names and states only.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Switch persistent local services on or off",
+    "description": "enabled is a single top-level boolean. On creates /data/libreecho/local/services (0700) and the enabled marker and clears the boot-loop guard; off removes the marker. A symlinked or non-directory root is 409.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "enabled"
+        ],
+        "properties": {
+         "enabled": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "500": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/config/export": {
    "get": {
     "tags": [

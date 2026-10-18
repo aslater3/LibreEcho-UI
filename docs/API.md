@@ -281,6 +281,23 @@ changed by the user. A selected hostname is stored in
 `/data/libreecho/config/web-config.json` and takes precedence on later boots.
 Device-specific identifiers are not included in public API examples.
 
+#### GET /api/v1/local-services
+#### PUT /api/v1/local-services
+
+Persistent local services (#170): the owner's own programs under
+`/data/libreecho/local/services`, run by the Platform supervisor once
+`/data/libreecho/local/enabled` exists. GET returns
+`{available, enabled, path_safe, state, services:[{name, state}], path}`:
+`available` is whether this build has the supervisor, `path_safe` is false when
+`/data/libreecho/local` is a symlink or not a directory, and `state` /
+`services` come from the supervisor's status (`running`, `disabled`,
+`not-running`, `skipped:boot-loop-guard`, `skipped:path-unsafe`; per service
+`running`, `down`, `failed`, `exited:<code>`). Only names and states are
+reported. PUT `{"enabled": true|false}` (a single top-level boolean, CSRF
+required) creates or removes the marker; switching on creates the directory
+layout (mode 0700) and clears the boot-loop guard. A symlinked or non-directory
+root is refused with `409` and never followed.
+
 ### Audio
 
 #### GET /api/v1/playback
