@@ -250,6 +250,27 @@ async function caseLedControls() {
     checkEqual(callsFor('/led/sleep', 'PUT').length, 0, 'an out-of-range sleep brightness is rejected without a request');
 }
 
+async function caseActionButtonNoise() {
+    /* The action button can be a sleep-sound switch (LibreEcho-Platform#253). */
+    resetDom(); resetCalls();
+    state.page = 'LED & Buttons'; state.renderGeneration++;
+    await ledPage(); clearTimers();
+    has(content.innerHTML, '<option >Sleep sound on/off</option>', 'Action button offers Sleep sound on/off');
+    has(content.innerHTML, 'starts white noise that plays until the next press', 'the help text explains the toggle');
+    $app('#action-behaviour').value = 'Sleep sound on/off';
+    await $app('#save-buttons').onclick();
+    clearTimers();
+    const body = lastBody('/buttons', 'PUT');
+    checkEqual(body && body.action, 'noise', 'saving Sleep sound on/off PUTs action "noise"');
+
+    routes['/buttons'] = Object.assign({}, BUTTONS, { action: 'noise' });
+    resetDom();
+    state.page = 'LED & Buttons'; state.renderGeneration++;
+    await ledPage(); clearTimers();
+    delete routes['/buttons'];
+    has(content.innerHTML, '<option selected>Sleep sound on/off</option>', 'a saved "noise" action shows as Sleep sound on/off');
+}
+
 async function caseLedDiagnosticsEscaped() {
     resetDom(); resetCalls();
     routes['/led'] = Object.assign({}, LED, { music: { active: true, grammar: '<img src=x onerror=1>', effect: 'ok', session: 3 } });
@@ -836,6 +857,7 @@ async function main() {
     const watchdog = setTimeout(() => { console.error('feature batch UI: timed out'); process.exit(1); }, 30000);
     const cases = [
         ['LED idle/sleep controls and diagnostics', caseLedControls],
+        ['action button sleep-sound toggle', caseActionButtonNoise],
         ['LED diagnostics escape untrusted text', caseLedDiagnosticsEscaped],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
         ['nursery legacy route', caseNurseryLegacyRoute],

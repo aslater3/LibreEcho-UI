@@ -11,7 +11,7 @@ schema_checks = {
         {tuple(case['required']) for case in schema.get('anyOf', [])} ==
         {(key,) for key in schema['properties']} and schema.get('minProperties') == 1,
     'schema preserves target action choices':
-        set(schema['properties']['action']['enum']) == {'sound', 'listen', 'playpause', 'disabled'},
+        set(schema['properties']['action']['enum']) == {'sound', 'noise', 'listen', 'playpause', 'disabled'},
     'schema documents validation and persistence failures':
         '400' in operation['responses'] and '503' in operation['responses'],
 }

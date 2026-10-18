@@ -188,6 +188,17 @@ int main(void)
             "PUT persists button settings without an explicit save");
     }
 
+    CHECK(request(&context, "PUT", "{\"action\":\"noise\"}", &response) == 200 &&
+          !strcmp(context.button_action, "noise"),
+          "the sleep-sound toggle action is accepted");
+    {
+        char saved[16384], action[24] = "";
+        CHECK(config_read(config_path, saved, sizeof(saved)) > 0 &&
+              json_get_string(saved, "button_action", action, sizeof(action)) > 0 &&
+              !strcmp(action, "noise"),
+              "the sleep-sound toggle action is persisted for buttond");
+    }
+
     CHECK(request(&context, "PUT", "{\"action\":\"playpause\",\"action_sounds\":\"doorbell,listen\"}",
                   &response) == 200,
           "listen and playpause actions remain accepted");

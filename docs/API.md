@@ -1955,8 +1955,11 @@ Update any supported button setting. The request is persisted after every
 successful update. `tones` controls the short rising/falling press cues;
 `action` controls the separate action-button behavior, and `action_brightness`
 and `mute_brightness` are LED-ring brightness values from 0 to 100. The
-currently wired action is `sound`; `listen`, `playpause`, and `disabled` are
+wired actions are `sound` and `noise`; `listen`, `playpause`, and `disabled` are
 accepted settings with the corresponding behavior reported by the daemon.
+`noise` makes the action button a sleep-sound switch: a press while no sleep
+sound is playing starts white noise with no timer (level 40), and a press while
+any sleep sound is playing stops it.
 `action_sounds` is a comma-separated list of installed sound names in rotation
 order. Each name follows the same 1–48-character lowercase-name rule as the
 preview endpoint; an empty string is valid and means no sound is played.
