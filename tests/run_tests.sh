@@ -246,6 +246,7 @@ sh tests/run_recovery_backend_integration.sh
 sh tests/test_feature_batch_api.sh
 sh tests/test_feature_batch_noise_heartbeat.sh
 node tests/test_feature_batch_ui.js
+node tests/test_theme_ui.js
 sh tests/test_feature_batch_build.sh
 sh tests/test_radio_icy_metadata.sh
 HELIX_OBJS="build/helix-aac/aacdec.o build/helix-aac/aactabs.o build/helix-aac/bitstream.o build/helix-aac/buffers.o build/helix-aac/dct4.o build/helix-aac/decelmnt.o build/helix-aac/dequant.o build/helix-aac/fft.o build/helix-aac/filefmt.o build/helix-aac/huffmanaac.o build/helix-aac/hufftabs.o build/helix-aac/imdct.o build/helix-aac/noiseless.o build/helix-aac/pns.o build/helix-aac/sbr.o build/helix-aac/sbrfft.o build/helix-aac/sbrfreq.o build/helix-aac/sbrhfadj.o build/helix-aac/sbrhfgen.o build/helix-aac/sbrhuff.o build/helix-aac/sbrimdct.o build/helix-aac/sbrmath.o build/helix-aac/sbrqmf.o build/helix-aac/sbrside.o build/helix-aac/sbrtabs.o build/helix-aac/stproc.o build/helix-aac/tns.o build/helix-aac/trigtabs.o"
