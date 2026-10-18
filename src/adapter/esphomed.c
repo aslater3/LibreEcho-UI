@@ -42,6 +42,8 @@ struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uin
 struct state {
  struct client clients[CLIENTS];struct io jobs[JOBS],wake,mic,timer_cleanup;
  const char *config_path,*status_path,*audio_path,*wake_path,*radio_path,*timer_path,*led_path,*mdns_path,*bus_path,*privacy_path,*ca_path,*idme_path;
+ /* Optional room from web-config (#64), offered to Home Assistant as the suggested area when it adds this device. */
+ char room[49];
  char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake;
  uint64_t now,turn_deadline,turn_limit,last_audio_status,last_status_poll,wake_retry,mdns_retry,ring_first,ring_end,capture_next,timer_retry;
  int16_t ring[RING_SAMPLES];unsigned char mic_rx[24+2560];size_t mic_n;int mic_ack;
@@ -126,7 +128,7 @@ static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(es
  * alive until RUN_END so its delayed event cannot address a new capture. */
 static void completed(void){if(!S.tts_done)(void)announce_done(1);S.tts_done=1;if(S.pipeline&&!S.run_end)return;char conv[128];int cont=S.continue_turn;snprintf(conv,sizeof conv,"%s",S.conversation);turn_clear("success",0);if(cont&&!mic_muted()){snprintf(S.conversation,sizeof S.conversation,"%s",conv);(void)voice_start(S.ring_end,1);}}
 static int valid_proto(const void *p,size_t n){struct ep_reader r;struct ep_field f;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0){}return r.error?-1:0;}
-static void device_info(struct client *c){unsigned char b[512];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,2,S.name);ep_string(&w,3,S.mac);ep_string(&w,4,"2026.9.0");ep_string(&w,6,"radar-puffin");ep_string(&w,8,"libreecho.satellite");ep_string(&w,9,"0.14.0");ep_string(&w,12,"LibreEcho");ep_string(&w,13,S.friendly);ep_uint(&w,17,61);ep_uint(&w,19,1);ep_uint(&w,26,!S.provisioned);(void)send_writer(c,10,&w);}
+static void device_info(struct client *c){unsigned char b[512];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,2,S.name);ep_string(&w,3,S.mac);ep_string(&w,4,"2026.9.0");ep_string(&w,6,"radar-puffin");ep_string(&w,8,"libreecho.satellite");ep_string(&w,9,"0.14.0");ep_string(&w,12,"LibreEcho");ep_string(&w,13,S.friendly);if(S.room[0])ep_string(&w,16,S.room);ep_uint(&w,17,61);ep_uint(&w,19,1);ep_uint(&w,26,!S.provisioned);(void)send_writer(c,10,&w);}
 static void entities(struct client *c){unsigned char b[768],nested[80];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,1,"media_player");ep_fixed32(&w,2,MEDIA_KEY);ep_string(&w,3,"Media player");ep_uint(&w,8,1);
  /* aioesphomeapi 46.2.0: PAUSE, VOLUME_SET/MUTE, PLAY_MEDIA, STOP, PLAY, MEDIA_ANNOUNCE. */
  ep_uint(&w,11,(1U<<0)|(1U<<2)|(1U<<3)|(1U<<9)|(1U<<12)|(1U<<14)|(1U<<20));
@@ -272,6 +274,7 @@ static int load_configuration(void){char b[16384],key[45],mac[64],name[64],wake[
  S.provisioned=!!key[0];memset(S.psk,0,32);if(S.provisioned&&(mbedtls_base64_decode(S.psk,32,&z,(unsigned char*)key,44)||z!=32)){mbedtls_platform_zeroize(key,sizeof key);return -1;}mbedtls_platform_zeroize(key,sizeof key);mbedtls_platform_zeroize(&cfg,sizeof cfg);
  if(!S.name[0]){if(json_get_string(b,"hostname",name,sizeof name)<=0)snprintf(name,sizeof name,"libreecho");if(strlen(name)>31||!name[0])return -1;for(size_t i=0;name[i];i++)if(!(isalnum((unsigned char)name[i])||name[i]=='-'))return -1;snprintf(S.name,sizeof S.name,"%.31s",name);}
  if(!S.friendly[0])snprintf(S.friendly,sizeof S.friendly,"%s",S.name);
+ {char room[64];S.room[0]=0;if(json_get_string(b,"room",room,sizeof room)==1&&strlen(room)<=48){size_t i;for(i=0;room[i]&&(unsigned char)room[i]>=0x20&&room[i]!=0x7f&&room[i]!='"'&&room[i]!='\\';i++){}if(!room[i])snprintf(S.room,sizeof S.room,"%s",room);}}
  if(!S.mac[0]){if(json_get_string(b,"wifi_mac",mac,sizeof mac)>0&&mac[0]){if(normalize_mac(mac,S.mac))return -1;}else{static const char *fields[]={"mac_addr","macaddr","wifi_mac","wifi_mac_addr","mac"};int found=0;for(unsigned i=0;i<5;i++){char path[512];if(snprintf(path,sizeof path,"%s/%s/value",S.idme_path,fields[i])>=(int)sizeof path)return -1;if(config_read(path,mac,sizeof mac)>0&&!normalize_mac(mac,S.mac)){found=1;break;}}if(!found)return -1;}}
  return 0;
 }
