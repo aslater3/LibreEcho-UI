@@ -1150,6 +1150,19 @@ static int append(char *out, size_t size, size_t *used, const char *format, ...)
     return 1;
 }
 
+/* OTA v3 (Platform libreecho-generation-transaction) records carry no phase=
+   key: pending, installed and the archived rolled-back copy all use schema=3
+   with slot, transaction_id and manifest_sha256 (issue #355). */
+static int v3_transaction_record(const char *text, char *tx, size_t tx_size)
+{
+    char value[128];
+    return text_value(text, "schema", value, sizeof(value)) && !strcmp(value, "3") &&
+           text_value(text, "slot", value, sizeof(value)) &&
+           (!strcmp(value, "a") || !strcmp(value, "b")) &&
+           text_value(text, "manifest_sha256", value, sizeof(value)) &&
+           text_value(text, "transaction_id", tx, tx_size);
+}
+
 void le_feature_transaction_state_read(le_feature_transaction_state *state)
 {
     char path[256], pending_text[LE_FEATURE_RECORD_MAX + 1U];
@@ -1168,9 +1181,10 @@ void le_feature_transaction_state_read(le_feature_transaction_state *state)
                    read_bounded_status(path, pending_text, sizeof(pending_text)) :
                    LE_FILE_UNAVAILABLE;
     if (pending_file == LE_FILE_READY) {
-        pending_valid = text_value(pending_text, "transaction_id", pending_tx, sizeof(pending_tx)) &&
-                        text_value(pending_text, "phase", value, sizeof(value)) &&
-                        (!strcmp(value, "prepared") || !strcmp(value, "confirmed"));
+        pending_valid = v3_transaction_record(pending_text, pending_tx, sizeof(pending_tx)) ||
+                        (text_value(pending_text, "transaction_id", pending_tx, sizeof(pending_tx)) &&
+                         text_value(pending_text, "phase", value, sizeof(value)) &&
+                         (!strcmp(value, "prepared") || !strcmp(value, "confirmed")));
         if (!pending_valid)
             inconsistent = 1;
     } else if (pending_file == LE_FILE_UNAVAILABLE) {
@@ -1194,9 +1208,10 @@ void le_feature_transaction_state_read(le_feature_transaction_state *state)
                      read_bounded_status(path, installed_text, sizeof(installed_text)) :
                      LE_FILE_UNAVAILABLE;
     if (installed_file == LE_FILE_READY) {
-        installed_valid = text_value(installed_text, "transaction_id", installed_tx, sizeof(installed_tx)) &&
-                          text_value(installed_text, "phase", value, sizeof(value)) &&
-                          !strcmp(value, "installed");
+        installed_valid = v3_transaction_record(installed_text, installed_tx, sizeof(installed_tx)) ||
+                          (text_value(installed_text, "transaction_id", installed_tx, sizeof(installed_tx)) &&
+                           text_value(installed_text, "phase", value, sizeof(value)) &&
+                           !strcmp(value, "installed"));
         if (!installed_valid)
             inconsistent = 1;
     } else if (installed_file == LE_FILE_UNAVAILABLE) {
@@ -1236,9 +1251,10 @@ void le_feature_transaction_state_read(le_feature_transaction_state *state)
         snprintf(state->last_result, sizeof(state->last_result), "unknown");
     } else if (rollback_file == LE_FILE_READY) {
         /* Platform archives pending verbatim before confirmation, not a new phase. */
-        if (!text_value(rollback_text, "transaction_id", value, sizeof(value)) ||
-            !text_value(rollback_text, "phase", value, sizeof(value)) ||
-            strcmp(value, "prepared")) {
+        if (!v3_transaction_record(rollback_text, value, sizeof(value)) &&
+            (!text_value(rollback_text, "transaction_id", value, sizeof(value)) ||
+             !text_value(rollback_text, "phase", value, sizeof(value)) ||
+             strcmp(value, "prepared"))) {
             snprintf(state->state, sizeof(state->state), "unknown");
             snprintf(state->last_result, sizeof(state->last_result), "unknown");
             return;
