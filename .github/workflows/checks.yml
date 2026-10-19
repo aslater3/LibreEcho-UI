@@ -4,10 +4,10 @@ on:
   # Keep the older release lines and everyday development in the local lane,
   # but never treat browser smoke as full source verification for 0.14.
   pull_request:
-    branches: ['release/0.14.0', 'release/0.14.1']
+    branches: ['release/0.14.0', 'release/0.14.1', 'release/0.14.2']
     paths-ignore: ['**/*.md', 'docs/**']
   push:
-    branches: ['release/0.14.0', 'release/0.14.1']
+    branches: ['release/0.14.0', 'release/0.14.1', 'release/0.14.2']
     paths-ignore: ['**/*.md', 'docs/**']
   workflow_dispatch:
 
