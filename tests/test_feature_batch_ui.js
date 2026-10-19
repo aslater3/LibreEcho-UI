@@ -125,6 +125,9 @@ for (const file of ['web/js/bluetooth.js', 'web/js/integrations-ui.js', 'web/js/
 const state = vm.runInThisContext('state');
 const ledPage = vm.runInThisContext('ledPage');
 const audioPage = vm.runInThisContext('audioPage');
+const nurseryPage = vm.runInThisContext('nurseryPage');
+const pageFromLocation = vm.runInThisContext('pageFromLocation');
+const navItems = vm.runInThisContext('navItems');
 const networkPage = vm.runInThisContext('networkPage');
 const systemPage = vm.runInThisContext('systemPage');
 const bindVoiceHistory = vm.runInThisContext('bindVoiceHistory');
@@ -141,6 +144,7 @@ function defaultRoute(path, method) {
     if (path === '/led') return LED;
     if (path === '/buttons') return BUTTONS;
     if (path === '/audio') return AUDIO;
+    if (path === '/baby-monitor') return { sources: [] };
     if (path === '/network') return NETWORK;
     if (path === '/status') return { device_state: 'online', uptime_seconds: 1 };
     if (path === '/device') return { name: 'LibreEcho', hostname: 'libreecho', os_version: '0.14.0' };
@@ -246,6 +250,27 @@ async function caseLedControls() {
     checkEqual(callsFor('/led/sleep', 'PUT').length, 0, 'an out-of-range sleep brightness is rejected without a request');
 }
 
+async function caseActionButtonNoise() {
+    /* The action button can be a sleep-sound switch (LibreEcho-Platform#253). */
+    resetDom(); resetCalls();
+    state.page = 'LED & Buttons'; state.renderGeneration++;
+    await ledPage(); clearTimers();
+    has(content.innerHTML, '<option >Sleep sound on/off</option>', 'Action button offers Sleep sound on/off');
+    has(content.innerHTML, 'starts white noise that plays until the next press', 'the help text explains the toggle');
+    $app('#action-behaviour').value = 'Sleep sound on/off';
+    await $app('#save-buttons').onclick();
+    clearTimers();
+    const body = lastBody('/buttons', 'PUT');
+    checkEqual(body && body.action, 'noise', 'saving Sleep sound on/off PUTs action "noise"');
+
+    routes['/buttons'] = Object.assign({}, BUTTONS, { action: 'noise' });
+    resetDom();
+    state.page = 'LED & Buttons'; state.renderGeneration++;
+    await ledPage(); clearTimers();
+    delete routes['/buttons'];
+    has(content.innerHTML, '<option selected>Sleep sound on/off</option>', 'a saved "noise" action shows as Sleep sound on/off');
+}
+
 async function caseLedDiagnosticsEscaped() {
     resetDom(); resetCalls();
     routes['/led'] = Object.assign({}, LED, { music: { active: true, grammar: '<img src=x onerror=1>', effect: 'ok', session: 3 } });
@@ -258,29 +283,65 @@ async function caseLedDiagnosticsEscaped() {
 }
 
 async function caseNurserySounds() {
+    /* Issue LibreEcho-Platform#253: sleep sounds moved off the Audio page onto Nursery. */
     resetDom(); resetCalls();
     state.page = 'Audio'; state.renderGeneration++;
     await audioPage(); clearTimers();
+    check(!content.innerHTML.includes('id="noise-colour"'), 'Audio page no longer carries the sleep-sounds panel');
+
+    resetDom(); resetCalls();
+    state.page = 'Nursery'; state.renderGeneration++;
+    await nurseryPage(); clearTimers();
     const html = content.innerHTML;
-    has(html, 'Nursery sounds', 'Audio page renders the nursery-sounds panel');
-    has(html, 'Heartbeat tempo', 'nursery panel offers the heartbeat tempo field');
-    has(html, 'id="noise-bed"', 'nursery panel offers a noise bed selector');
-    has(html, 'id="noise-fade"', 'nursery panel offers a fade field');
-    has(html, 'normal audio output at the master volume', 'nursery copy states the normal endpoint/volume behaviour');
+    has(html, 'Sleep sounds', 'Nursery page renders the sleep-sounds panel');
+    has(html, 'Heart rate (beats per minute', 'heartbeat tempo is labelled as a heart rate');
+    has(html, 'Background whoosh', 'the bed is labelled as a background whoosh');
+    check(!/\bBed\b/.test(html), 'the unexplained "Bed" label is gone');
+    has(html, 'Your master volume is not changed', 'the level copy states the master volume is untouched');
+    has(html, 'id="noise-heartbeat-options" hidden', 'heartbeat-only options are hidden for a noise source');
+    has(html, 'id="noise-fade"', 'sleep-sounds panel offers a fade field');
+    {
+        /* A stray </div> once closed the page grid early and pushed the
+           panels after it out of the layout. */
+        state.page = 'Nursery'; state.renderGeneration++;
+        routes['/baby-monitor'] = { sources: [{ id: '0:24', name: 'Array', card: 0, device: 24, microphones: [{ channel: 0, name: 'Mic 1' }] }], calibration: { complete: false } };
+        await nurseryPage(); clearTimers();
+        const full = content.innerHTML;
+        delete routes['/baby-monitor'];
+        checkEqual((full.match(/<div\b/g) || []).length, (full.match(/<\/div>/g) || []).length,
+            'Nursery markup has balanced <div> tags with a microphone source present');
+        check(full.includes('Microphone source') && full.includes('Listen in') && full.includes('Sleep sounds'), 'all three Nursery panels render with a source present');
+        state.page = 'Nursery'; state.renderGeneration++;
+        await nurseryPage(); clearTimers();
+    }
     has(html, '<option value="heartbeat"', 'heartbeat source is selectable');
 
     $app('#noise-colour').value = 'heartbeat';
+    $app('#noise-colour').onchange();
+    checkEqual($app('#noise-heartbeat-options').hidden, false, 'choosing Heartbeat reveals heart rate and background');
     $app('#noise-bed').value = 'brown';
     $app('#noise-level').value = '30';
     $app('#noise-minutes').value = '60';
     $app('#noise-tempo').value = '72';
     $app('#noise-fade').value = '120';
+    const monitorReads = callsFor('/baby-monitor', 'GET').length;
     await $app('#noise-start').onclick();
     clearTimers();
     const body = lastBody('/audio/noise', 'POST');
     checkEqual(JSON.stringify(body),
-        JSON.stringify({ colour: 'heartbeat', source: 'heartbeat', bed: 'brown', level: 30, minutes: 60, tempo: 72, fade_seconds: 120 }),
-        'starting nursery sounds POSTs source/bed/tempo/fade/timer/level');
+        JSON.stringify({ colour: 'heartbeat', source: 'heartbeat', bed: 'brown', level: 30, minutes: 60, fade_seconds: 120, tempo: 72 }),
+        'starting a heartbeat POSTs source/bed/tempo/fade/timer/level');
+    checkEqual(callsFor('/baby-monitor', 'GET').length, monitorReads,
+        'starting a sleep sound refreshes its panel only, so a live monitor stream keeps its controls');
+
+    /* A plain noise sends no heart rate and no background, whatever the hidden fields hold. */
+    resetCalls();
+    $app('#noise-colour').value = 'pink';
+    $app('#noise-tempo').value = '5';
+    await $app('#noise-start').onclick();
+    clearTimers();
+    const plain = lastBody('/audio/noise', 'POST');
+    check(plain && plain.bed === 'none' && !('tempo' in plain), 'a noise source omits tempo and sends no background');
 
     /* A fade longer than the timer is rejected before any request. */
     resetCalls();
@@ -294,7 +355,20 @@ async function caseNurserySounds() {
     checkEqual(state.busy, false, 'the page is not busy before Stop');
     await $app('#noise-stop').onclick();
     clearTimers();
-    checkEqual(callsFor('/audio/noise', 'DELETE').length, 1, 'Stop DELETEs the nursery sounds endpoint');
+    checkEqual(callsFor('/audio/noise', 'DELETE').length, 1, 'Stop DELETEs the sleep-sounds endpoint');
+    check(callsFor('/audio/noise', 'DELETE')[0].headers['X-LibreEcho-CSRF'] !== undefined, 'Stop carries the CSRF header');
+}
+
+async function caseNurseryLegacyRoute() {
+    const replaced = [];
+    const saved = { loc: globalThis.location, hist: globalThis.history };
+    globalThis.location = { pathname: '/baby-monitor', hash: '', host: 'fake-device' };
+    globalThis.history = { pushState() {}, replaceState(_s, _t, url) { replaced.push(url); } };
+    try {
+        checkEqual(pageFromLocation(), 'Nursery', 'the old /baby-monitor address opens the Nursery page');
+        checkEqual(replaced[0], '/nursery', 'the old address is rewritten to /nursery');
+        checkEqual(navItems().some(([n]) => n === 'Baby Monitor'), false, 'the menu no longer lists Baby Monitor');
+    } finally { globalThis.location = saved.loc; globalThis.history = saved.hist; }
 }
 
 async function caseUsbCapabilityGate() {
@@ -783,8 +857,10 @@ async function main() {
     const watchdog = setTimeout(() => { console.error('feature batch UI: timed out'); process.exit(1); }, 30000);
     const cases = [
         ['LED idle/sleep controls and diagnostics', caseLedControls],
+        ['action button sleep-sound toggle', caseActionButtonNoise],
         ['LED diagnostics escape untrusted text', caseLedDiagnosticsEscaped],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
+        ['nursery legacy route', caseNurseryLegacyRoute],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],
         ['recent voice newest-first cap of 10', caseRecentVoiceCollection],
         ['recent voice canonical ISO timestamp rendering', caseRecentVoiceCanonicalTimestamp],

@@ -222,10 +222,17 @@ async function caseNurserySounds(browser) {
   const context = await browser.newContext();
   const page = await context.newPage();
   const requests = recordRequests(page);
+  /* Issue LibreEcho-Platform#253: sleep sounds live on the Nursery page, not Audio, and the old
+     /baby-monitor address still lands there. */
   await page.goto(`${baseURL}/audio`);
   await waitForPage(page, 'Audio');
+  checkEqual(await page.locator('#noise-colour').count(), 0, 'Audio page no longer carries the sleep-sounds panel');
+  await page.goto(`${baseURL}/baby-monitor`);
+  await waitForPage(page, 'Nursery');
+  check(new URL(page.url()).pathname === '/nursery', 'the old /baby-monitor address is rewritten to /nursery');
 
-  check(await page.locator('#noise-colour').count() === 1, 'Audio page renders the nursery-sounds panel');
+  check(await page.locator('#noise-colour').count() === 1, 'Nursery page renders the sleep-sounds panel');
+  check(await page.locator('#noise-tempo').isHidden(), 'heart rate is hidden until Heartbeat is chosen');
   check((await page.locator('#noise-tempo').getAttribute('min')) === '40' &&
     (await page.locator('#noise-tempo').getAttribute('max')) === '100', 'tempo is bounded 40-100 bpm');
 
@@ -240,8 +247,8 @@ async function caseNurserySounds(browser) {
   await page.click('#noise-start');
   await page.waitForResponse(r => r.url().includes('/api/v1/audio/noise') && r.request().method() === 'POST', { timeout: 5000 });
   checkEqual(lastBody(requests, '/audio/noise', 'POST'),
-    JSON.stringify({ colour: 'heartbeat', source: 'heartbeat', bed: 'brown', level: 30, minutes: 60, tempo: 72, fade_seconds: 120 }),
-    'starting nursery sounds POSTs source/bed/tempo/fade/timer/level');
+    JSON.stringify({ colour: 'heartbeat', source: 'heartbeat', bed: 'brown', level: 30, minutes: 60, fade_seconds: 120, tempo: 72 }),
+    'starting a heartbeat POSTs source/bed/tempo/fade/timer/level');
 
   const audio = await (await context.request.get(serverGet('/api/v1/audio'))).json();
   check(audio.data.noise && audio.data.noise.source === 'heartbeat' && audio.data.noise.bed === 'brown' &&

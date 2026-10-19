@@ -277,7 +277,7 @@ async function preparePage(browser, origin) {
 async function openBabyMonitor(page) {
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await waitForPage(page, 'Overview');
-  await selectPage(page, 'Baby Monitor');
+  await selectPage(page, 'Nursery');
   await page.locator('#baby-start').waitFor({ state: 'visible', timeout: 5000 });
 }
 
@@ -338,7 +338,7 @@ async function unlockAndStreamSuite(browser) {
 
       assert.equal(await page.locator('#baby-source option').count(), 1, 'the capture endpoint should be listed');
       assert.equal(await page.locator('#baby-channel option').count(), 2, 'the microphone lanes should be listed');
-      pass('the Baby Monitor page renders the source and lane controls');
+      pass('the Nursery page renders the source and lane controls');
 
       /* Safari can take a while to open the output, so resume() must be allowed
          to resolve late without the page racing ahead of it. */
@@ -540,7 +540,7 @@ async function interruptedRecoverySuite(browser) {
 
       await selectPage(page, 'Overview');
       await waitForAllClosed(page);
-      pass('leaving the Baby Monitor page releases the audio graph');
+      pass('leaving the Nursery page releases the audio graph');
 
       assert.deepEqual(failures, [], `browser failures:\n${failures.join('\n')}`);
     } finally {
