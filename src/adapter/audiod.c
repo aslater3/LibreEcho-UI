@@ -925,8 +925,9 @@ static const char *control_name_or_default(const struct audio_control *control,
 #endif
 /* Music volume leveling (the audio engine's AVL).  The owner's choice is
  * persisted here ("on"/"off"); the engine follows the RAM flag file, which
- * exists only while leveling is off.  A missing or unreadable choice means on,
- * the stock behaviour. */
+ * exists only while leveling is off.  A missing or unreadable choice means
+ * off: the 0.14.3 leveler pumps on real music (it is not yet stock-accurate),
+ * so it is an explicit, experimental opt-in until it is reworked (0.15). */
 #ifndef LE_VOLUME_LEVELING_PATH
 #define LE_VOLUME_LEVELING_PATH "/data/libreecho/config/volume-leveling"
 #endif
@@ -1265,13 +1266,13 @@ static int volume_leveling_load(void)
     ssize_t n;
 
     if (fd < 0)
-        return 1;
+        return 0;
     n = read(fd, text, sizeof(text) - 1);
     close(fd);
     if (n <= 0)
-        return 1;
+        return 0;
     text[n] = '\0';
-    return strcmp(text, "off\n") != 0 && strcmp(text, "off") != 0;
+    return strcmp(text, "on\n") == 0 || strcmp(text, "on") == 0;
 }
 
 /* Drive the engine's RAM flag.  Returns 0 when the flag matches. */

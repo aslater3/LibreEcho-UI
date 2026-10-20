@@ -474,7 +474,7 @@
      "Audio"
     ],
     "summary": "Read audio state",
-    "description": "Returns available audio state, including volume_leveling (music automatic volume leveling, true by default). On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error.",
+    "description": "Returns available audio state, including volume_leveling (experimental music automatic volume leveling, false by default). On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -489,7 +489,7 @@
      "Audio"
     ],
     "summary": "Update volume, microphone state, announcement voice, or music volume leveling",
-  "description": "Accepts any of volume (0-100), microphone_gain (0-100), microphone_muted (boolean), tts_voice, and volume_leveling (boolean: stock-style music automatic volume leveling, on by default; persisted). A non-boolean volume_leveling is rejected with 400.",
+  "description": "Accepts any of volume (0-100), microphone_gain (0-100), microphone_muted (boolean), tts_voice, and volume_leveling (boolean: experimental stock-style music automatic volume leveling, off by default; persisted). A non-boolean volume_leveling is rejected with 400.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
