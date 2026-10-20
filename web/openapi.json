@@ -2202,8 +2202,8 @@
     "tags": [
      "LED and buttons"
     ],
-    "summary": "Set the idle LED mode (set_idle_mode)",
-    "description": "mode is required and must be one of off, indicator or always; a missing or unknown mode is 400. The default is indicator (the two front-centre pixels, green, 20% brightness, while idle and listening for the wake word). Returns the extended LED state.",
+    "summary": "Set the idle LED mode and idle auto-off (set_idle_mode)",
+    "description": "mode is required and must be one of off, indicator or always; a missing or unknown mode is 400. The default is indicator (the two front-centre pixels, green, 20% brightness, while idle and listening for the wake word). Optional auto_off_minutes (0, 5, 10, 30 or 60; 0 disables) turns the idle light off after that much inactivity; any other value is 400 and omitting it keeps the stored value. Mute, setup, errors, voice, playback and the sleep light are never suppressed. GET /led reports idle_auto_off_minutes and idle_asleep. Returns the extended LED state.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"

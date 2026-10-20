@@ -99,6 +99,12 @@
    device starts 0.14 the same way and later owner choices are kept. */
 #define IDLE_POLICY_VERSION 2U
 
+static int idle_auto_off_minutes_valid(unsigned int minutes)
+{
+    return minutes == 0U || minutes == 5U || minutes == 10U ||
+           minutes == 30U || minutes == 60U;
+}
+
 /* Sleep-light bounds (#101).  Server-side, not advisory. */
 #define SLEEP_MODE_OFF   0
 #define SLEEP_MODE_SOLID 1
@@ -152,6 +158,9 @@ struct led_state {
     /* Not persisted: set by load_state() when a state file predating
        IDLE_POLICY_VERSION was upgraded and must be written back. */
     int idle_policy_upgraded;
+    /* Idle auto-off (UI #323): minutes of inactivity after which the base idle
+       ring goes dark; 0 disables it.  One of 0, 5, 10, 30 or 60. */
+    int idle_auto_off_minutes;
     /* Sleep light settings (#101); persisted but not automatically active. */
     int sleep_mode;
     unsigned int sleep_brightness;
@@ -218,6 +227,9 @@ struct daemon_context {
     int animation_profile;
     double animation_started;
     int startup_animation_active;
+    /* Idle auto-off (UI #323), runtime only. */
+    double idle_last_activity;
+    int idle_base_asleep;
     char startup_ready_path[MAX_PATH];
     unsigned int startup_animation_frame;
     double startup_animation_next_frame;
@@ -1457,6 +1469,9 @@ static void load_state(struct led_state *state)
                 mode = v;
             if (get_arg_unsigned(&r, "policy", &v, 0xffffU) == 0)
                 policy = v;
+            if (get_arg_unsigned(&r, "auto_off_minutes", &v, 60U) == 0 &&
+                idle_auto_off_minutes_valid(v))
+                state->idle_auto_off_minutes = (int)v;
         }
         if (policy >= IDLE_POLICY_VERSION) {
             state->idle_mode = (int)mode;
@@ -1519,7 +1534,7 @@ static int persist_state(const struct led_state *state)
         "{\"current\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"night\":{\"enabled\":%d,\"start_minute\":%d,\"end_minute\":%d},"
-        "\"idle\":{\"mode\":%d,\"policy\":%u},"
+        "\"idle\":{\"mode\":%d,\"policy\":%u,\"auto_off_minutes\":%d},"
         "\"sleep\":{\"mode\":%d,\"brightness\":%u,\"period_ms\":%u,"
         "\"timer_minutes\":%d,\"restore_on_boot\":%d},"
         "\"profiles\":{",
@@ -1527,7 +1542,8 @@ static int persist_state(const struct led_state *state)
         state->current.brightness, state->boot.r, state->boot.g, state->boot.b,
         state->boot.brightness, state->night_enabled,
         state->night_start_minute, state->night_end_minute,
-        state->idle_mode, IDLE_POLICY_VERSION, state->sleep_mode,
+        state->idle_mode, IDLE_POLICY_VERSION, state->idle_auto_off_minutes,
+        state->sleep_mode,
         state->sleep_brightness, state->sleep_period_ms,
         state->sleep_timer_minutes, state->sleep_restore_on_boot);
     if (n < 0 || (size_t)n >= sizeof(text))
@@ -2141,6 +2157,14 @@ static void apply_base_state(struct daemon_context *ctx, double now)
         apply_sleep_light(ctx, now);
         return;
     }
+    if (ctx->idle_base_asleep) {
+        /* Idle auto-off (#323) darkens only this resting base; anything drawn
+           above it (mute, setup, errors, voice, playback) is unaffected. */
+        for (i = 0; i < RING_PIXELS; i++)
+            pixels[i] = (struct pixel){0, 0, 0};
+        output_pixels(ctx, pixels, 0U);
+        return;
+    }
     if (ctx->state.idle_mode == IDLE_MODE_ALWAYS) {
         hardware_apply(ctx, &ctx->state.current);
         return;
@@ -2157,6 +2181,62 @@ static void apply_base_state(struct daemon_context *ctx, double now)
     }
     /* IDLE_MODE_OFF: an explicitly dark resting ring. */
     output_pixels(ctx, pixels, 0U);
+}
+
+/*
+ * Idle auto-off (UI #323).  Any request other than a status read is activity:
+ * a button, the wake word, playback frames, a meter, an announcement or the
+ * owner changing a setting.  Activity restarts the countdown and wakes a
+ * sleeping base.  When the countdown expires the base idle ring goes dark; the
+ * sleep light suspends the countdown, and idle "off" has nothing to darken.
+ */
+static int base_layer_visible(const struct daemon_context *ctx)
+{
+    return !ctx->visualizer_active && !ctx->animation_active &&
+           !ctx->pattern_active && !ctx->test_active && !ctx->meter_active &&
+           !ctx->startup_animation_active;
+}
+
+static double idle_auto_off_deadline(const struct daemon_context *ctx)
+{
+    if (ctx->state.idle_auto_off_minutes <= 0 || ctx->idle_base_asleep ||
+        ctx->sleep_active || ctx->state.idle_mode == IDLE_MODE_OFF)
+        return -1.0;
+    return ctx->idle_last_activity +
+           (double)ctx->state.idle_auto_off_minutes * 60.0;
+}
+
+static void idle_note_activity(struct daemon_context *ctx, double now)
+{
+    ctx->idle_last_activity = now;
+    if (!ctx->idle_base_asleep)
+        return;
+    ctx->idle_base_asleep = 0;
+    if (base_layer_visible(ctx))
+        apply_base_state(ctx, now);
+}
+
+static void idle_auto_off_tick(struct daemon_context *ctx, double now)
+{
+    double deadline = idle_auto_off_deadline(ctx);
+
+    if (deadline < 0.0 || now < deadline)
+        return;
+    ctx->idle_base_asleep = 1;
+    if (base_layer_visible(ctx))
+        apply_base_state(ctx, now);
+}
+
+/* Milliseconds until the auto-off deadline, or -1 when none is pending. */
+static int idle_auto_off_timeout(const struct daemon_context *ctx, double now)
+{
+    double deadline = idle_auto_off_deadline(ctx), remaining;
+
+    if (deadline < 0.0)
+        return -1;
+    remaining = (deadline - now) * 1000.0;
+    return remaining <= 1.0 ? 1 : remaining >= 2147483647.0 ? 2147483647 :
+           (int)remaining;
 }
 
 static void apply_base_layer(struct daemon_context *ctx, double now)
@@ -2652,6 +2732,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
         "\"night\":{\"enabled\":%s,\"active\":%s,"
         "\"start_minute\":%d,\"end_minute\":%d},"
         "\"idle_mode\":\"%s\","
+        "\"idle_auto_off\":{\"minutes\":%d,\"asleep\":%s},"
         "\"sleep_light\":{\"mode\":\"%s\",\"active\":%s,\"brightness\":%u,"
         "\"period_ms\":%u,\"timer_minutes\":%d,\"remaining_ms\":%u,"
         "\"restore_on_boot\":%s},"
@@ -2681,6 +2762,8 @@ static int status_json(const struct daemon_context *ctx, char *out,
         night_mode_active(&ctx->state) ? "true" : "false",
         ctx->state.night_start_minute, ctx->state.night_end_minute,
         idle_mode_name(ctx->state.idle_mode),
+        ctx->state.idle_auto_off_minutes,
+        ctx->idle_base_asleep ? "true" : "false",
         sleep_mode_name(ctx->state.sleep_mode),
         ctx->sleep_active ? "true" : "false", ctx->state.sleep_brightness,
         ctx->state.sleep_period_ms, ctx->state.sleep_timer_minutes,
@@ -2767,6 +2850,16 @@ static int handle_request(struct daemon_context *ctx, int fd,
         return send_response(fd, request.id, 1, data, NULL);
     }
 
+    /* Patterns and meters count when one is shown, or when a stop ends one
+       that was showing: a sender that clears an owner it never set must not
+       hold the ring awake.  Every other request is activity on receipt. */
+    if (strcmp(request.command, "pattern") != 0 &&
+        strcmp(request.command, "meter") != 0)
+        idle_note_activity(ctx, now);
+
+    if (strcmp(request.command, "activity") == 0)
+        return send_response(fd, request.id, 1, "{\"activity\":true}", NULL);
+
     if (strcmp(request.command, "set_colour") == 0) {
         if (get_arg_unsigned(&request, "r", &r, 255) != 0 ||
             get_arg_unsigned(&request, "g", &g, 255) != 0 ||
@@ -2852,7 +2945,14 @@ static int handle_request(struct daemon_context *ctx, int fd,
         if (json_get_string(request.args, "owner", owner, sizeof(owner)) != 0)
             owner[0] = '\0';
         if (!strcmp(pattern, "stop")) {
+            int was_active = ctx->pattern_active;
+            char was_owner[sizeof(ctx->pattern_owner)];
+
+            memcpy(was_owner, ctx->pattern_owner, sizeof(was_owner));
             stop_pattern(ctx, owner, now);
+            if (was_active && (!ctx->pattern_active ||
+                               strcmp(was_owner, ctx->pattern_owner)))
+                idle_note_activity(ctx, now);
             return send_response(fd, request.id, 1, "{\"pattern\":\"none\"}", NULL);
         }
         if (!strcmp(pattern, "pulse") || !strcmp(pattern, "flash") ||
@@ -2895,6 +2995,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
             colour.g = g;
             colour.b = b;
             colour.brightness = brightness;
+            idle_note_activity(ctx, now);
             start_pattern(ctx, kind, &colour, repeats, owner, now);
             update_pattern(ctx, now);
             return send_response(fd, request.id, 1, "{\"pattern_active\":true}", NULL);
@@ -2937,6 +3038,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
                             sizeof(pattern)) == 0 && !strcmp(pattern, "stop")) {
             if (ctx->meter_active &&
                 (!owner[0] || !strcmp(owner, ctx->meter_owner))) {
+                idle_note_activity(ctx, now);
                 ctx->meter_active = 0;
                 ctx->meter_owner[0] = '\0';
                 if (!ctx->test_active && !ctx->pattern_active)
@@ -2958,6 +3060,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
         colour.g = g;
         colour.b = b;
         colour.brightness = brightness;
+        idle_note_activity(ctx, now);
         start_meter(ctx, value, &colour, hold, owner, now);
         if (!ctx->test_active && !ctx->pattern_active)
             apply_meter(ctx);
@@ -3047,6 +3150,9 @@ static int handle_request(struct daemon_context *ctx, int fd,
     if (strcmp(request.command, "set_idle_mode") == 0) {
         char mode[16];
         int previous_idle_mode = ctx->state.idle_mode;
+        int previous_auto_off = ctx->state.idle_auto_off_minutes;
+        unsigned int auto_off = (unsigned int)previous_auto_off;
+        struct json_span auto_off_field;
 
         if (!request.have_args ||
             json_get_string(request.args, "mode", mode, sizeof(mode)) != 0)
@@ -3061,6 +3167,15 @@ static int handle_request(struct daemon_context *ctx, int fd,
         else
             return send_response(fd, request.id, 0, NULL,
                                  "idle mode must be off, indicator or always");
+        if (json_object_find(request.args, "auto_off_minutes",
+                             &auto_off_field) == 1 &&
+            (get_arg_unsigned(&request, "auto_off_minutes", &auto_off, 60U) != 0 ||
+             !idle_auto_off_minutes_valid(auto_off))) {
+            ctx->state.idle_mode = previous_idle_mode;
+            return send_response(fd, request.id, 0, NULL,
+                                 "auto_off_minutes must be 0, 5, 10, 30 or 60");
+        }
+        ctx->state.idle_auto_off_minutes = (int)auto_off;
         /*
          * Persist before reporting success.  If the state cannot be saved,
          * revert the in-memory mode so the daemon keeps the idle behaviour it
@@ -3069,6 +3184,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
          */
         if (persist_state(&ctx->state) != 0) {
             ctx->state.idle_mode = previous_idle_mode;
+            ctx->state.idle_auto_off_minutes = previous_auto_off;
             return send_response(fd, request.id, 0, NULL,
                                  "cannot persist idle mode");
         }
@@ -3536,6 +3652,7 @@ int main(int argc, char **argv)
         size_t j;
 
         night_schedule_tick(&ctx, now);
+        idle_auto_off_tick(&ctx, now);
         fds[0].fd = ctx.listen_fd;
         fds[0].events = POLLIN;
         fds[0].revents = 0;
@@ -3559,8 +3676,12 @@ int main(int argc, char **argv)
             timeout = night_schedule_timeout(&ctx, now);
         {
             int flush_timeout = output_flush_timeout(&ctx, now);
+            int auto_off_timeout = idle_auto_off_timeout(&ctx, now);
             if (flush_timeout >= 0 && (timeout < 0 || flush_timeout < timeout))
                 timeout = flush_timeout;
+            if (auto_off_timeout >= 0 &&
+                (timeout < 0 || auto_off_timeout < timeout))
+                timeout = auto_off_timeout;
         }
 
         for (j = 0; j < MAX_CLIENTS; j++) {

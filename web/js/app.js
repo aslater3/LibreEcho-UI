@@ -2157,11 +2157,15 @@ function musicDiagHtml(m){
   `<dt>Effect</dt><dd>${esc(m.effect||'none')}</dd>`+
   `<dt>Producer session</dt><dd>${Number(m.session??0)}</dd></dl>`);
 }
+/* Idle auto-off (#323): minutes of inactivity before the idle light goes dark; 0 keeps it on. */
+const IDLE_AUTO_OFF=[[0,'Never'],[5,'5 minutes'],[10,'10 minutes'],[30,'30 minutes'],[60,'1 hour']];
 function ledBasePanels(l){
  const idle=l.idle_mode||'indicator';
  return panel('Idle behaviour',
   `<label class="field"><span>When the ring is idle</span><select id="led-idle-mode">${IDLE_MODES.map(([v,lab])=>opt(v,lab,idle)).join('')}</select></label>`+
   `<p class="muted">Green front light (the default) lights the two front LEDs dimly in green so you can see the device is on and listening for the wake word. All off keeps the ring dark until something happens. Whole ring on keeps the ring lit in the chosen colour. Wake word, volume and alerts light the ring in every mode.</p>`+
+  `<label class="field"><span>Turn the idle light off after</span><select id="led-idle-auto-off">${IDLE_AUTO_OFF.map(([v,lab])=>opt(String(v),lab,String(l.idle_auto_off_minutes||0))).join('')}</select></label>`+
+  `<p class="muted">After this long with nothing happening the idle light goes dark; a button press, the wake word, playback or a volume change brings it back. Mute, setup and errors always show.${idle==='off'?' Has no effect while the idle ring is All off.':''}${l.idle_asleep?' The idle light is off now.':''}</p>`+
   saveButton('save-led-idle'))+
   sleepLightHtml(l.sleep_light)+
   outputDiagHtml(l.output)+
@@ -2169,7 +2173,7 @@ function ledBasePanels(l){
 }
 function bindLedBase(){
  const idle=$('#save-led-idle');
- if(idle){bindDirty(['#led-idle-mode'],'#save-led-idle');idle.onclick=()=>mutate('/led/idle',{mode:$('#led-idle-mode').value},'Idle behaviour saved')}
+ if(idle){bindDirty(['#led-idle-mode','#led-idle-auto-off'],'#save-led-idle');idle.onclick=()=>{const body={mode:$('#led-idle-mode').value};if($('#led-idle-auto-off'))body.auto_off_minutes=Number($('#led-idle-auto-off').value);return mutate('/led/idle',body,'Idle behaviour saved')}}
  const sleep=$('#save-led-sleep');
  if(sleep){bindDirty(['#led-sleep-mode','#led-sleep-brightness','#led-sleep-period','#led-sleep-timer','#led-sleep-restore'],'#save-led-sleep');sleep.onclick=()=>{
   const brightness=Number($('#led-sleep-brightness').value);
