@@ -54,9 +54,9 @@ printf '%s' "$export_body" | jq -e '.data.manifest.sections | index("ssh") != nu
 ! printf '%s' "$export_body" | grep -q "$salt"
 ! printf '%s' "$export_body" | grep -q '/data/libreecho/config/users'
 
-sed -i 's/^enabled=1$/enabled=0/; s/^account_state=ready$/account_state=disabled-by-config/' "$TMP/ssh.status"
-curl -fsS "$URL/api/v1/network" -H "$AUTH" | jq -e '.data.ssh_state == "disabled-by-config"' >/dev/null
-curl -fsS -X POST "$URL/api/v1/diagnostics/export" -H "$AUTH" -H "$CSRF" -H 'Content-Type: application/json' --data '{}' | jq -e '.data.ssh.enabled == false and .data.ssh.account_state == "disabled-by-config"' >/dev/null
+sed -i 's/^enabled=1$/enabled=0/; s/^account_state=ready$/account_state=disabled/' "$TMP/ssh.status"
+curl -fsS "$URL/api/v1/network" -H "$AUTH" | jq -e '.data.ssh_state == "disabled"' >/dev/null
+curl -fsS -X POST "$URL/api/v1/diagnostics/export" -H "$AUTH" -H "$CSRF" -H 'Content-Type: application/json' --data '{}' | jq -e '.data.ssh.enabled == false and .data.ssh.account_state == "disabled"' >/dev/null
 
 # Anything but a short lowercase token is not reported.
 sed -i 's/^account_state=.*$/account_state=ready"><script>/' "$TMP/ssh.status"

@@ -1128,7 +1128,7 @@ succeeded.
 supervisor follows it within about 2 seconds). It is on by default; only a saved
 `false` turns SSH off. `ssh_available` says whether this
 image carries SSH at all, and `ssh_state` is the supervisor's non-secret
-`account_state`: `ready`, `disabled-by-config`, `waiting-for-valid-webui-users`
+`account_state`: `ready`, `disabled`, `waiting-for-valid-webui-users`
 (switched on but no valid web account yet; accounts named `root`, `.`, `..` or
 `libreecho-ssh` keep SSH stopped and cannot be created), `stopped`, or
 `unavailable`. SSH accounts are the web accounts, never root.
