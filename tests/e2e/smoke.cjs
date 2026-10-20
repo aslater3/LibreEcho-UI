@@ -243,7 +243,7 @@ async function desktopSuite(browser) {
   await checkPwa(context, page);
 
   const destinations = [
-    'Device', 'Users', 'Audio', 'Baby Monitor', 'Wake Word', 'LED & Buttons',
+    'Device', 'Users', 'Audio', 'Nursery', 'Wake Word', 'LED & Buttons',
     'Network', 'Bluetooth', 'Privacy', 'Integrations', 'System', 'Logs', 'About'
   ];
   for (const destination of destinations) await selectPage(page, destination);
