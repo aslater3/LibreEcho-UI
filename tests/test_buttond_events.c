@@ -70,6 +70,7 @@ static void mock_daemon(int listen_fd, const char *log_path, int audio)
     FILE *log = fopen(log_path, "w");
     int volume = 50;
     int muted = 0;
+    int noise = 0;
 
 
     assert(log != NULL);
@@ -93,14 +94,18 @@ static void mock_daemon(int listen_fd, const char *log_path, int audio)
         fflush(log);
         if (audio && strstr(request, "\"cmd\":\"status\"")) {
             snprintf(response, sizeof(response),
-                     "{\"v\":1,\"id\":1,\"ok\":true,\"data\":{\"volume\":%d,\"muted\":%s}}\n",
-                     volume, muted ? "true" : "false");
+                     "{\"v\":1,\"id\":1,\"ok\":true,\"data\":{\"volume\":%d,\"muted\":%s,\"noise_active\":%s}}\n",
+                     volume, muted ? "true" : "false", noise ? "true" : "false");
         } else {
             if (audio && strstr(request, "\"cmd\":\"set_volume\"")) {
                 const char *value = strstr(request, "\"volume\":");
                 if (value)
                     volume = atoi(value + strlen("\"volume\":"));
             }
+            if (audio && strstr(request, "\"cmd\":\"noise_start\""))
+                noise = 1;
+            if (audio && strstr(request, "\"cmd\":\"noise_stop\""))
+                noise = 0;
             if (audio && strstr(request, "\"cmd\":\"set_mute\""))
                 muted = strstr(request, "\"muted\":true") != NULL;
             snprintf(response, sizeof(response),
@@ -197,6 +202,22 @@ int main(void)
     handle_key(&ctx, KEY_HELP, 1);
     assert(ctx.action_index == 0);
 
+    /* Action "noise" is a sleep-sound switch: on, then off on the next press,
+       reading the state from audiod each time. */
+    strcpy(ctx.action, "noise");
+    assert(action_noise_toggle(&ctx) == 1);         /* nothing playing: start */
+    assert(log_contains(audio_log, "\"cmd\":\"noise_start\""));
+    assert(log_contains(audio_log, "\"source\":\"white\""));
+    assert(log_contains(audio_log, "\"minutes\":0"));  /* until stopped */
+    assert(!log_contains(audio_log, "\"cmd\":\"noise_stop\""));
+    assert(action_noise_toggle(&ctx) == 0);         /* playing: stop */
+    assert(log_contains(audio_log, "\"cmd\":\"noise_stop\""));
+    handle_key(&ctx, KEY_HELP, 1);                  /* through the dispatcher: on */
+    handle_key(&ctx, KEY_HELP, 2);                  /* autorepeat must not toggle */
+    handle_key(&ctx, KEY_HELP, 0);
+    assert(action_noise_toggle(&ctx) == 0);         /* so it is still on: stop */
+    assert(ctx.action_index == 0);                  /* the sound rotation is untouched */
+
     /* Read saved preferences and force an already-muted ring to be refreshed. */
     snprintf(test_config_path, sizeof(test_config_path), "%s/config.json", directory);
     { FILE *saved = fopen(test_config_path, "w");
@@ -228,6 +249,6 @@ int main(void)
     assert(buttond_fixture_opens > 0);
 
 
-    puts("button event dispatch: volume, KEY_POWER mute sync, and KEY_HELP rotation: ok");
+    puts("button event dispatch: volume, KEY_POWER mute sync, KEY_HELP rotation and sleep-sound toggle: ok");
     return 0;
 }

@@ -140,7 +140,7 @@ struct context {
     int indicator_warned;          /* mute state the ring is currently showing; -1 unknown */
     int audio_poll_warned;       /* so an unreachable audiod is reported once, not every tick */
     int tones;                   /* press cues; read from the web config, on by default */
-    char action[24];             /* what the action button does; only "sound" is wired */
+    char action[24];             /* what the action button does: "sound" and "noise" are wired */
     /*
      * The sounds the action button rotates through, as a comma-separated list
      * of names in the order they play. Curated in the UI, so a press walks
@@ -572,6 +572,39 @@ static void play_sample(struct context *ctx, const char *name)
     snprintf(args, sizeof(args), "{\"name\":\"%s\"}", name);
     (void)le_adapter_call(adapter, "sample", args, NULL, 0);
     le_adapter_close(adapter);
+}
+
+/*
+ * Action "noise": the button is a sleep-sound switch. A press stops whatever
+ * sleep sound is playing (audiod ramps it down), or starts white noise with no
+ * timer, so it plays until the next press. The state is read from audiod at
+ * each press rather than remembered here, so a sound started or stopped from
+ * the web page is toggled correctly too.
+ */
+#define ACTION_NOISE_START_ARGS \
+    "{\"source\":\"white\",\"bed\":\"none\",\"level\":40,\"minutes\":0}"
+
+static int action_noise_toggle(struct context *ctx)
+{
+    char data[1024];
+    int active;
+
+    if (audio_call(ctx, "status", NULL, data, sizeof(data)) != LE_ADAPTER_OK ||
+        json_get_bool(data, "noise_active", &active) < 1) {
+        le_log_warn("buttond: sleep sound state unavailable; action ignored");
+        return -1;
+    }
+    if (active) {
+        if (audio_call(ctx, "noise_stop", NULL, NULL, 0) != LE_ADAPTER_OK)
+            return -1;
+        le_log_info("buttond: action button stopped the sleep sound");
+        return 0;
+    }
+    if (audio_call(ctx, "noise_start", ACTION_NOISE_START_ARGS, NULL, 0) !=
+        LE_ADAPTER_OK)
+        return -1;
+    le_log_info("buttond: action button started white noise");
+    return 1;
 }
 
 #define CUE_LOW_HZ   660U
@@ -1015,6 +1048,11 @@ static void handle_key(struct context *ctx, int code, int value)
             le_log_info("buttond: action button (%s)", ctx->action);
             if (!strcmp(ctx->action, "disabled"))
                 return;
+            if (!strcmp(ctx->action, "noise")) {
+                (void)action_noise_toggle(ctx);
+                action_flourish(ctx);
+                return;
+            }
             if (strcmp(ctx->action, "sound")) {
                 /* Chosen in the UI but not built yet. Say so once per press
                    rather than doing nothing silently, which is the failure

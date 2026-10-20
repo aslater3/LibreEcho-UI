@@ -112,6 +112,73 @@ static void render_once(char *out, size_t size)
     assert(out[0] == '[');
 }
 
+/* Issue #355: OTA v3 (libreecho-generation-transaction) writes schema-3
+   pending/installed/rolled-back records with no phase= key. */
+static void test_v3_transaction_records(void)
+{
+    static const char *invalid[] = {
+        "schema=3\nslot=b\nmanifest_sha256=abc\n",
+        "schema=3\nslot=c\ntransaction_id=txn-v3\nmanifest_sha256=abc\n",
+        "schema=3\nslot=b\ntransaction_id=txn-v3\n",
+        "schema=4\nslot=b\ntransaction_id=txn-v3\nmanifest_sha256=abc\n",
+        "slot=b\ntransaction_id=txn-v3\nmanifest_sha256=abc\n"
+    };
+    char installed[1024], pending[1024], rolled_back[1024];
+    le_feature_transaction_state transaction;
+    size_t i;
+    setup();
+    join_path(installed, sizeof(installed), update_root, "/installed");
+    join_path(pending, sizeof(pending), update_root, "/pending");
+    join_path(rolled_back, sizeof(rolled_back), update_root, "/rolled-back");
+
+    /* Committed install, as observed on a 0.14.0 device. */
+    write_file(installed, "schema=3\nslot=b\ntransaction_id=txn-543403a62e22a333a651fb52\n"
+               "version=0.14.0\nupdate_channel=stable\nmanifest_sha256=abc\n");
+    le_feature_transaction_state_read(&transaction);
+    assert(!strcmp(transaction.state, "none"));
+    assert(!strcmp(transaction.last_result, "installed"));
+
+    /* Earlier rollback history does not override the committed install. */
+    write_file(rolled_back, "schema=3\nslot=a\ntransaction_id=txn-24e9c79ebdda247477a1a0d2\nmanifest_sha256=def\n");
+    le_feature_transaction_state_read(&transaction);
+    assert(!strcmp(transaction.state, "none"));
+    assert(!strcmp(transaction.last_result, "installed"));
+
+    /* Candidate booted and awaiting commit. */
+    write_file(pending, "schema=3\nslot=a\ntransaction_id=txn-candidate\nmanifest_sha256=fed\n");
+    le_feature_transaction_state_read(&transaction);
+    assert(!strcmp(transaction.state, "pending"));
+    assert(!strcmp(transaction.last_result, "pending"));
+    assert(transaction.pending && !transaction.reboot_required);
+    assert(unlink(pending) == 0);
+
+    /* Rollback with no committed install yet. */
+    assert(unlink(installed) == 0);
+    le_feature_transaction_state_read(&transaction);
+    assert(!strcmp(transaction.state, "rollback"));
+    assert(!strcmp(transaction.last_result, "rolled-back"));
+    assert(transaction.rollback);
+
+    /* Malformed schema-3 records still fail closed. */
+    for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        write_file(installed, invalid[i]);
+        le_feature_transaction_state_read(&transaction);
+        assert(!strcmp(transaction.state, "unknown"));
+        assert(!strcmp(transaction.last_result, "unknown"));
+        write_file(pending, invalid[i]);
+        assert(unlink(installed) == 0);
+        le_feature_transaction_state_read(&transaction);
+        assert(!strcmp(transaction.state, "unknown"));
+        assert(unlink(pending) == 0);
+        write_file(rolled_back, invalid[i]);
+        le_feature_transaction_state_read(&transaction);
+        assert(!strcmp(transaction.state, "unknown"));
+        assert(!transaction.rollback);
+    }
+    assert(unlink(rolled_back) == 0);
+    le_feature_provenance_shutdown();
+}
+
 static void write_v3_feature(const char *generations, const char *tx);
 
 static void test_incremental_hash_progress(void)
@@ -989,6 +1056,7 @@ int main(void)
     test_rollback_record_validation();
     test_candidate_control_namespace_fails_closed();
     test_authority_identity_and_transaction_precedence();
+    test_v3_transaction_records();
     test_v3_generation_feature_root();
     test_generation_hash_persists_across_restart();
     test_flat_feature_tree_is_not_persisted();

@@ -10,9 +10,11 @@
  * What it generates, all procedurally and with no bundled sample:
  *
  *   - white / pink / brown noise, the colours shipped for issue #54;
-   *   - a low-frequency heartbeat with a soft double pulse and a smooth,
+   *   - a heartbeat "lub-dub" of two pitch-falling thumps carried with their
+ *     harmonics so a small speaker reproduces them, with a smooth,
  *     always-zero-at-the-edges envelope so beats cannot click;
- *   - an optional low-level pink/brown bed under the heartbeat.
+ *   - an optional pink/brown background (bed) under the heartbeat that swells
+ *     with each beat.
  *
  * Determinism: the noise feed is a seeded xorshift32 and the heartbeat is a
  * closed-form phase, so a fixed seed reproduces the stream byte for byte.
@@ -63,7 +65,13 @@
 
 #define LE_SLEEP_RATE 48000
 #define LE_SLEEP_CHANNELS 2
-#define LE_SLEEP_BED_GAIN 0.3
+/* Bed level at the top of its swell, relative to a full-scale beat.  Each bed
+   colour is first scaled to unit RMS (measured: brown leaky integrator 0.288,
+   pink filter sum 1.72), so pink and brown sit at the same loudness; before
+   this the brown bed ran 4x louder than pink and buried the pulse. */
+#define LE_SLEEP_BED_GAIN 0.25
+#define LE_SLEEP_BED_BROWN_NORM 3.47
+#define LE_SLEEP_BED_PINK_NORM 0.58
 
 struct le_sleep_gen {
     int source;
@@ -97,6 +105,23 @@ static inline uint32_t le_sleep_random(uint32_t *state)
     return x;
 }
 
+/*
+ * Main-source colour scaling.  Each colour is scaled so its peaks sit inside
+ * -1..1 with ~4.5 sigma of headroom, so the clamp in le_sleep_gen_fill is a
+ * safety net rather than part of the sound.  The old brown (leak 0.995, x6)
+ * ran at 1.7 RMS and spent 57% of samples on the clamp -- a distorted square
+ * wave -- and pink (x0.25) clipped 1.8% of samples.
+ *
+ * Brown's leak sets its low corner.  At 0.995 (38 Hz) nearly all of its
+ * energy sat below what an Echo driver reproduces, so an unclipped version
+ * was almost inaudible; 0.98 puts the corner at ~150 Hz, where the speaker
+ * rolls off, and keeps the brown -6 dB/octave slope across the band it does
+ * play.  Pink and brown then land at the same level through the speaker.
+ */
+#define LE_SLEEP_BROWN_LEAK 0.98
+#define LE_SLEEP_BROWN_SCALE 1.56
+#define LE_SLEEP_PINK_SCALE 0.125
+
 /* One normalised (-1..1) noise sample of the requested colour. */
 static inline double le_sleep_noise(struct le_sleep_gen *g, int colour)
 {
@@ -107,14 +132,15 @@ static inline double le_sleep_noise(struct le_sleep_gen *g, int colour)
         g->brown = g->brown + white * 0.05;
         if (g->brown > 1.0) g->brown = 1.0;
         if (g->brown < -1.0) g->brown = -1.0;
-        g->brown *= 0.995;
-        return g->brown * 6.0;
+        g->brown *= LE_SLEEP_BROWN_LEAK;
+        return g->brown * LE_SLEEP_BROWN_SCALE;
     }
     if (colour == LE_SLEEP_SOURCE_PINK) {
         g->pink_a = 0.99765 * g->pink_a + white * 0.0990460;
         g->pink_b = 0.96300 * g->pink_b + white * 0.2965164;
         g->pink_c = 0.57000 * g->pink_c + white * 1.0526913;
-        return (g->pink_a + g->pink_b + g->pink_c + white * 0.1848) * 0.25;
+        return (g->pink_a + g->pink_b + g->pink_c + white * 0.1848) *
+               LE_SLEEP_PINK_SCALE;
     }
     return white;
 }
@@ -128,47 +154,94 @@ static inline double le_sleep_bed_noise(struct le_sleep_gen *g)
         if (g->bed_brown > 1.0) g->bed_brown = 1.0;
         if (g->bed_brown < -1.0) g->bed_brown = -1.0;
         g->bed_brown *= 0.995;
-        return g->bed_brown * 6.0;
+        return g->bed_brown * LE_SLEEP_BED_BROWN_NORM;
     }
     g->bed_pink_a = 0.99765 * g->bed_pink_a + white * 0.0990460;
     g->bed_pink_b = 0.96300 * g->bed_pink_b + white * 0.2965164;
     g->bed_pink_c = 0.57000 * g->bed_pink_c + white * 1.0526913;
-    return (g->bed_pink_a + g->bed_pink_b + g->bed_pink_c + white * 0.1848) * 0.25;
+    return (g->bed_pink_a + g->bed_pink_b + g->bed_pink_c + white * 0.1848) *
+           LE_SLEEP_BED_PINK_NORM;
 }
 
 /*
- * Soft double pulse. "lub" starts at the beat and "dub" a third of a beat
- * later; each is a low sine under a sin^2 window, so the envelope is exactly
- * zero at both edges and the pulse cannot click. The window is applied to the
- * carrier rather than the sample history, so consecutive beats stay
- * phase-continuous with silence between them.
+ * One heart sound: a short thump whose pitch falls from hi_hz to lo_hz,
+ * carried with its 2nd and 3rd harmonics.  An Echo driver cannot reproduce
+ * the ~60 Hz fundamental, so the harmonics (120-360 Hz) are what make the beat
+ * audible there; the ear still hears the low "thud" through them.  The
+ * envelope is a sin^2 attack of `attack` (fraction of len) into an exponential
+ * decay tapered by cos^2, so it starts and ends at exactly zero with zero slope
+ * and cannot click.  The phase is the closed-form integral of the falling
+ * pitch, so the waveform is deterministic and continuous.
  */
+static inline double le_sleep_thump(double t, double start, double len,
+                                    double hi_hz, double lo_hz)
+{
+    const double pi = 3.14159265358979323846, attack = 0.08, decay = 3.0;
+    double u, tau, env, phase;
+
+    if (t < start || t >= start + len)
+        return 0.0;
+    tau = t - start;
+    u = tau / len;
+    if (u < attack) {
+        env = sin(0.5 * pi * u / attack);
+        env *= env;
+    } else {
+        double w = (u - attack) / (1.0 - attack), c = cos(0.5 * pi * w);
+
+        env = exp(-decay * w) * c * c;
+    }
+    phase = 2.0 * pi * (lo_hz * tau +
+                        (hi_hz - lo_hz) * len / 6.0 * (1.0 - exp(-6.0 * tau / len)));
+    return env * 0.6 * (sin(phase) + 0.6 * sin(2.0 * phase) +
+                        0.3 * sin(3.0 * phase));
+}
+
+/* Seconds within the current beat. */
+static inline double le_sleep_beat_time(const struct le_sleep_gen *g)
+{
+    long beat = (long)(g->beat_frames > 1.0 ? g->beat_frames : 1.0);
+
+    return (double)(g->frames_done % beat) / (double)LE_SLEEP_RATE;
+}
+
+/*
+ * The "lub-dub": S1 at the beat, a softer, shorter S2 0.3 s later.  Both end
+ * by 0.40 s, inside the shortest beat (0.6 s at 100 BPM), so there is true
+ * silence between beats at every tempo.
+ */
+#define LE_SLEEP_LUB_END 0.14
+#define LE_SLEEP_DUB_START 0.30
+#define LE_SLEEP_DUB_END 0.40
 static inline double le_sleep_heartbeat(const struct le_sleep_gen *g)
 {
-    /* Seconds within the current beat. */
-    double t = (double)g->beat_frames > 0.0
-        ? (double)(g->frames_done % (long)(g->beat_frames > 1.0
-                                           ? g->beat_frames : 1.0))
-          / (double)LE_SLEEP_RATE : 0.0;
-    const double lub_start = 0.0, lub_end = 0.10, lub_hz = 55.0;
-    const double dub_start = 0.30, dub_end = 0.385, dub_hz = 48.0;
-    double value = 0.0;
+    double t = le_sleep_beat_time(g);
 
-    if (t >= lub_start && t < lub_end) {
-        double u = (t - lub_start) / (lub_end - lub_start);
+    return le_sleep_thump(t, 0.0, LE_SLEEP_LUB_END, 120.0, 60.0) +
+           0.7 * le_sleep_thump(t, LE_SLEEP_DUB_START,
+                                LE_SLEEP_DUB_END - LE_SLEEP_DUB_START,
+                                140.0, 75.0);
+}
 
-        value += sin(3.14159265358979323846 * u) *
-                 sin(3.14159265358979323846 * u) *
-                 sin(2.0 * 3.14159265358979323846 * lub_hz * t);
+/*
+ * Background (bed) gain within a beat.  Womb sound is not a steady hiss under
+ * a separate pulse: the whoosh itself swells with every heartbeat.  The bed
+ * therefore rests at LE_SLEEP_BED_FLOOR of its level and swells to full over
+ * the lub-dub (a sin^2 bump across the first 0.5 s, zero-slope at both ends),
+ * so the rhythm is carried by the background too and survives a speaker that
+ * loses the thump's lowest partials.
+ */
+#define LE_SLEEP_BED_FLOOR 0.25
+#define LE_SLEEP_BED_SWELL_SECONDS 0.5
+static inline double le_sleep_bed_swell(const struct le_sleep_gen *g)
+{
+    double t = le_sleep_beat_time(g), s = 0.0;
+
+    if (t < LE_SLEEP_BED_SWELL_SECONDS) {
+        s = sin(3.14159265358979323846 * t / LE_SLEEP_BED_SWELL_SECONDS);
+        s *= s;
     }
-    if (t >= dub_start && t < dub_end) {
-        double u = (t - dub_start) / (dub_end - dub_start);
-
-        value += 0.7 * sin(3.14159265358979323846 * u) *
-                 sin(3.14159265358979323846 * u) *
-                 sin(2.0 * 3.14159265358979323846 * dub_hz * t);
-    }
-    return value;
+    return LE_SLEEP_BED_FLOOR + (1.0 - LE_SLEEP_BED_FLOOR) * s;
 }
 
 /*
@@ -307,7 +380,8 @@ static inline size_t le_sleep_gen_fill(struct le_sleep_gen *g, int16_t *out,
         if (g->source == LE_SLEEP_SOURCE_HEARTBEAT) {
             value = le_sleep_heartbeat(g);
             if (g->bed != LE_SLEEP_BED_NONE)
-                value += le_sleep_bed_noise(g) * LE_SLEEP_BED_GAIN;
+                value += le_sleep_bed_noise(g) * LE_SLEEP_BED_GAIN *
+                         le_sleep_bed_swell(g);
         } else {
             value = le_sleep_noise(g, g->source);
         }
