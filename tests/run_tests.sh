@@ -296,6 +296,10 @@ cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic
     -Isrc -Isrc/adapter tests/test_radio_resample.c src/adapter/radio_resample.c \
     -lm -o build/test-radio-resample
 ./build/test-radio-resample
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_bt_media_resample.c src/adapter/radio_resample.c \
+    -lm -o build/test-bt-media-resample
+./build/test-bt-media-resample
 make build/test-voice-aec build/test-voice-reference build/test-spoken-time
 ./build/test-voice-aec
 ./build/test-voice-reference
