@@ -284,6 +284,7 @@ struct audio_hw {
     int amplifier_on;
     char system_audio_bus[PATH_MAX];
     int volume_leveling;     /* music AVL in the audio engine, persisted */
+    long long last_leveling_check_ms;
 };
 
 struct client {
@@ -1280,6 +1281,11 @@ static int volume_leveling_apply(int enabled)
 {
     if (enabled)
         return unlink(LE_AVL_DISABLED_PATH) == 0 || errno == ENOENT ? 0 : -1;
+    /* At boot audiod can start before /run/libreecho-audio exists; create it
+     * like the master-volume publisher does instead of silently leaving the
+     * engine leveling while the owner's choice says off. */
+    if (ensure_socket_parent(LE_AVL_DISABLED_PATH) < 0)
+        return -1;
     {
         int fd = open(LE_AVL_DISABLED_PATH,
                       O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
@@ -2693,6 +2699,25 @@ static void usage(const char *program)
             program);
 }
 
+/* Keep the engine's RAM flag in step with the owner's choice.  The flag can
+ * be missing at boot or after something recreates the runtime directory;
+ * re-assert it at the bounded poll cadence (one access() per tick). */
+static void volume_leveling_reconcile(struct audio_hw *audio, long long now_ms)
+{
+    int present;
+
+    if (now_ms <= 0 || (audio->last_leveling_check_ms != 0 &&
+        now_ms - audio->last_leveling_check_ms < VOLUME_GUARD_POLL_MS))
+        return;
+    audio->last_leveling_check_ms = now_ms;
+    present = access(LE_AVL_DISABLED_PATH, F_OK) == 0;
+    if (present == !audio->volume_leveling)
+        return;
+    if (volume_leveling_apply(audio->volume_leveling) == 0)
+        le_log_info("audiod: volume leveling flag re-applied (%s)",
+                    audio->volume_leveling ? "on" : "off");
+}
+
 static void retry_startup_volume(struct audio_hw *audio, long long now_ms)
 {
     if (!audio->volume_publish_pending || audio->airplay_restore_pending ||
@@ -2792,6 +2817,7 @@ int main(int argc, char **argv)
         /* Startup can beat the audio-engine directory or codec. Retry at the
          * bounded poll cadence; never override an outstanding AirPlay restore. */
         retry_startup_volume(&audio, monotonic_millis());
+        volume_leveling_reconcile(&audio, monotonic_millis());
 
         pollfds[0].fd = listen_fd;
         pollfds[0].events = POLLIN;
