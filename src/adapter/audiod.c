@@ -931,7 +931,8 @@ static const char *control_name_or_default(const struct audio_control *control,
 #define LE_VOLUME_LEVELING_PATH "/data/libreecho/config/volume-leveling"
 #endif
 #ifndef LE_AVL_DISABLED_PATH
-#define LE_AVL_DISABLED_PATH LE_MASTER_VOLUME_DIR "/avl.disabled"
+/* The engine watches this beside master.volume (LE_MASTER_VOLUME_DIR). */
+#define LE_AVL_DISABLED_PATH "/run/libreecho-audio/avl.disabled"
 #endif
 static int volume_leveling_load(void);
 static int volume_leveling_apply(int enabled);
