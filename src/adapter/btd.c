@@ -902,6 +902,58 @@ static void led_pattern(const char *name, unsigned int r, unsigned int g,
     le_adapter_close(adapter);
 }
 
+#define MASTER_VOLUME_PATH "/run/libreecho-audio/master.volume"
+
+/* AVRCP SetAbsoluteVolume: the phone's slider sets the speaker master through
+ * audiod, the same owner the buttons, web UI and AirPlay use. */
+static int apply_phone_volume(void *context, int percent)
+{
+    struct le_adapter *adapter;
+    char args[32], response[128];
+    int result;
+
+    (void)context;
+    adapter = le_adapter_connect(LE_ADAPTER_AUDIO_SOCK, 100);
+    if (!adapter) {
+        le_log_warn("btd: audiod unavailable for absolute volume");
+        return -1;
+    }
+    le_adapter_set_io_timeout(adapter, 250);
+    snprintf(args, sizeof(args), "{\"volume\":%d}", percent);
+    result = le_adapter_call(adapter, "set_volume", args, response,
+                             sizeof(response));
+    le_adapter_close(adapter);
+    if (result != LE_ADAPTER_OK) {
+        le_log_warn("btd: absolute volume %d rejected (%d)", percent, result);
+        return -1;
+    }
+    le_log_info("btd: absolute volume -> %d", percent);
+    return 0;
+}
+
+/* The logical master audiod publishes (0..100); -1 when unreadable. */
+static int read_master_volume(void)
+{
+    char text[8];
+    char *end;
+    long value;
+    ssize_t n;
+    int fd = open(MASTER_VOLUME_PATH, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+
+    if (fd < 0)
+        return -1;
+    n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    text[n] = '\0';
+    value = strtol(text, &end, 10);
+    if (end == text || (*end != '\n' && *end != '\0') || value < 0 ||
+        value > 100)
+        return -1;
+    return (int)value;
+}
+
 static void pairing_clear(struct bt_context *context)
 {
     memset(&context->pairing, 0, sizeof(context->pairing));
@@ -2379,6 +2431,9 @@ int main(int argc, char **argv)
     (void)load_keys_into_controller(&context);
     if (le_profile_open(&context.profiles, LIBREECHO_BT_NAME) == 0) {
         context.profiles_opened = 1;
+        le_profile_set_volume_handler(&context.profiles, apply_phone_volume,
+                                      NULL);
+        le_profile_set_local_volume(&context.profiles, read_master_volume());
         le_log_info("btd: Bluetooth profile services registered");
     } else {
         le_log_warn("btd: Bluetooth profile services unavailable: %s",
@@ -2422,6 +2477,21 @@ int main(int argc, char **argv)
         if (profile_count)
             le_profile_poll_events(&context.profiles, pollfds + profile_base,
                                    fd_map, profile_count);
+        if (context.profiles_opened) {
+            /* Buttons, web UI and AirPlay move the master; the loop wakes per
+             * media packet, so sample the file at most every 250 ms. */
+            static long long next_volume_ms;
+            struct timespec now;
+
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if ((long long)now.tv_sec * 1000 + now.tv_nsec / 1000000 >=
+                next_volume_ms) {
+                next_volume_ms = (long long)now.tv_sec * 1000 +
+                                 now.tv_nsec / 1000000 + 250;
+                le_profile_set_local_volume(&context.profiles,
+                                            read_master_volume());
+            }
+        }
         if (pollfds[0].revents & POLLIN) {
             int client = le_adapter_accept(listener);
             if (client < 0) {

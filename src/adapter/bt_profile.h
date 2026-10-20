@@ -38,6 +38,9 @@ struct le_profiles {
     int registered_avrcp;
     int stream_active;
     uint64_t media_frames_written;
+    int volume_percent;                 /* speaker master 0..100, -1 unknown */
+    int (*volume_set)(void *context, int percent);
+    void *volume_context;
     void *sessions;
     char service_name[64];
 };
@@ -58,6 +61,17 @@ int le_profile_poll_setup(struct le_profiles *p, struct pollfd *pollfds,
                           int max_fds, int *fd_map);
 void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
                             const int *fd_map, int count);
+
+/*
+ * AVRCP absolute volume (category 2).  The handler applies a phone's
+ * SetAbsoluteVolume to the speaker master (returns 0 on success); btd reports
+ * local master changes with le_profile_set_local_volume so registered phones
+ * receive VOLUME_CHANGED.
+ */
+void le_profile_set_volume_handler(struct le_profiles *p,
+                                   int (*set)(void *context, int percent),
+                                   void *context);
+void le_profile_set_local_volume(struct le_profiles *p, int percent);
 
 int le_profile_registered_sdp(const struct le_profiles *p);
 int le_profile_registered_a2dp_sink(const struct le_profiles *p);
@@ -86,5 +100,15 @@ ssize_t le_profile_test_avrcp_exchange(struct le_profiles *p,
                                        size_t request_len,
                                        uint8_t *response,
                                        size_t response_max);
+
+/* Register VOLUME_CHANGED, then apply a local master change; returns the
+ * CHANGED notification bytes (interim receives the interim response). */
+ssize_t le_profile_test_avrcp_local_volume(struct le_profiles *p,
+                                           const uint8_t *request,
+                                           size_t request_len, int percent,
+                                           uint8_t *interim,
+                                           size_t interim_max,
+                                           uint8_t *changed,
+                                           size_t changed_max);
 
 #endif /* LIBREECHO_BT_PROFILE_H */
