@@ -438,7 +438,7 @@ render the existing unsupported state without logging an HTTP error.
     "startup_sound": true,
     "amplifier_on": true,
     "output_available": true,
-    "volume_leveling": true,
+    "volume_leveling": false,
     "tts_voice": "southern-female",
     "tts_voices": [
       { "id": "southern-female", "name": "Southern English — female" },
@@ -465,8 +465,10 @@ Update audio settings.
 ```
 
 All fields are optional. `volume_leveling` switches the audio engine's
-stock-style music automatic volume leveling (AVL) on or off. It is on by
-default, persisted across restarts, and applies only to music (Bluetooth,
+stock-style music automatic volume leveling (AVL) on or off. It is
+**experimental and off by default** (the current leveler can make loudness
+surge on some music; a stock-accurate rework is planned), persisted across
+restarts, and applies only to music (Bluetooth,
 media and AirPlay), never to announcements, alarms or system sounds. A
 non-boolean value is rejected with `400`.
 

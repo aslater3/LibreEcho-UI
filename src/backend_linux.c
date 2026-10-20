@@ -1274,8 +1274,8 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
     if (json_get_int(response, "microphone_gain", &v) > 0) { o->microphone_gain = v; found = 1; }
     if (json_get_int(response, "notification_volume", &v) > 0) { o->notification_volume = v; found = 1; }
     if (json_get_bool(response, "muted", &v) > 0) { o->muted = v; found = 1; }
-    /* Older audiod builds do not report it; leveling is then on (stock). */
-    o->volume_leveling = 1;
+    /* Older audiod builds do not report it; leveling is then off (default). */
+    o->volume_leveling = 0;
     if (json_get_bool(response, "volume_leveling", &v) > 0) o->volume_leveling = v;
     else if (json_get_bool(response, "microphone_muted", &v) > 0) { o->muted = v; found = 1; }
     if (json_get_bool(response, "startup_sound", &v) > 0) { o->startup_sound = v; found = 1; }

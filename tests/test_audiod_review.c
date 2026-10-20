@@ -766,7 +766,10 @@ static void test_volume_leveling(void)
     ssize_t n;
 
     unlink(LE_VOLUME_LEVELING_PATH); unlink(LE_AVL_DISABLED_PATH);
-    require_condition(volume_leveling_load() == 1, "missing choice means leveling on (stock)");
+    require_condition(volume_leveling_load() == 0, "missing choice means leveling off (experimental opt-in)");
+    require_condition(volume_leveling_apply(volume_leveling_load()) == 0 &&
+                      access(LE_AVL_DISABLED_PATH, F_OK) == 0, "startup without a choice turns the engine leveler off");
+    unlink(LE_AVL_DISABLED_PATH);
     memset(&audio, 0, sizeof(audio)); audio.volume_leveling = 1;
     mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
     require_condition(strstr(response, "\"volume_leveling\":true") != NULL, "status reports leveling on");

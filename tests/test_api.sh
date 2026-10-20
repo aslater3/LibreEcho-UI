@@ -463,13 +463,13 @@ code=$(curl -sS -o /tmp/le-announce-mock.out -w '%{http_code}' -X POST "$URL/api
 code=$(curl -sS -o /tmp/le-announce-stop.out -w '%{http_code}' -X POST "$URL/api/v1/audio/announce/stop" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
 [ "$code" = 501 ]
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"northern-male"}' | grep -q '"tts_voice":"northern-male"'
-# Music volume leveling: on by default, switchable, boolean-only.
-curl -fsS "$URL/api/v1/audio" | grep -q '"volume_leveling":true'
-curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume_leveling":false}' | grep -q '"volume_leveling":false'
+# Music volume leveling: experimental, off by default, switchable, boolean-only.
 curl -fsS "$URL/api/v1/audio" | grep -q '"volume_leveling":false'
-code=$(curl -sS -o /tmp/le-leveling-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume_leveling":"off"}')
-[ "$code" = 400 ] || { echo "volume_leveling accepted a non-boolean ($code)" >&2; exit 1; }
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume_leveling":true}' | grep -q '"volume_leveling":true'
+curl -fsS "$URL/api/v1/audio" | grep -q '"volume_leveling":true'
+code=$(curl -sS -o /tmp/le-leveling-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume_leveling":"on"}')
+[ "$code" = 400 ] || { echo "volume_leveling accepted a non-boolean ($code)" >&2; exit 1; }
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume_leveling":false}' | grep -q '"volume_leveling":false'
 code=$(curl -sS -o /tmp/le-voice-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"not-a-voice"}')
 [ "$code" = 400 ]
 echo 'api: ok'
