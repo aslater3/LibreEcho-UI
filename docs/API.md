@@ -1611,11 +1611,30 @@ Returns API configuration.
     "csrf_token": "<64-character per-boot token>",
     "authentication": "development-disabled",
     "bind_policy": "lan-development",
-    "max_request_body": 16384
+    "max_request_body": 16384,
+    "ui_theme": "classic",
+    "color_mode": ""
   },
   "error": null
 }
 ```
+
+`ui_theme` (`classic` or `setup`) and `color_mode` (`dark`, `light`, or `""`
+when not chosen on the device) are the saved appearance, public so that pages
+can apply it before sign-in. They are cosmetic and carry nothing sensitive.
+
+#### GET /api/v1/ui/preferences
+#### PUT /api/v1/ui/preferences
+
+Read or set the appearance (#188): `{"ui_theme":"classic"|"setup","color_mode":"dark"|"light"}`.
+A PUT may send either field or both; any other member, a duplicate, an unknown
+value or an empty object is `400`, and nothing is changed. The values are saved
+in `web-config.json` and carried by configuration export/import. `setup` applies
+the setup wizard's palette to the control centre in dark mode; light mode keeps
+the classic light theme. Until the owner picks a `color_mode`, each browser keeps
+its own light/dark choice; the header ☼ button saves one.
+
+**Response:** `{"ui_theme":"setup","color_mode":"dark"}`.
 
 #### GET /api/v1/config/export
 
