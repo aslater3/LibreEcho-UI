@@ -8,7 +8,8 @@
 #define LE_MASTER_VOLUME_PATH LE_MASTER_VOLUME_DIR "/master.volume"
 #define LE_SOUND_DIR "/tmp/libreecho-audiod-review-sounds"
 #define LE_VOLUME_LEVELING_PATH "/tmp/libreecho-audiod-review-volume-leveling"
-#define LE_AVL_DISABLED_PATH "/tmp/libreecho-audiod-review-avl.disabled"
+#define LE_AVL_DISABLED_DIR "/tmp/libreecho-audiod-review-run"
+#define LE_AVL_DISABLED_PATH LE_AVL_DISABLED_DIR "/avl.disabled"
 #include <sys/syscall.h>
 #include <stdarg.h>
 static int review_ioctl(int fd, unsigned long request, ...);
@@ -797,6 +798,25 @@ static void test_volume_leveling(void)
                     response, sizeof(response));
     require_condition(strstr(response, "\"ok\":false") != NULL && audio.volume_leveling == 1, "non-boolean is rejected");
     unlink(LE_VOLUME_LEVELING_PATH); unlink(LE_AVL_DISABLED_PATH);
+
+    /* Boot race: the runtime directory does not exist yet. */
+    rmdir(LE_AVL_DISABLED_DIR);
+    require_condition(volume_leveling_apply(0) == 0 && access(LE_AVL_DISABLED_PATH, F_OK) == 0,
+                      "off creates the missing runtime directory and the flag");
+    /* Self-healing: a flag lost while off is re-created; a stray flag while on is removed. */
+    memset(&audio, 0, sizeof(audio)); audio.volume_leveling = 0;
+    unlink(LE_AVL_DISABLED_PATH); rmdir(LE_AVL_DISABLED_DIR);
+    volume_leveling_reconcile(&audio, 1000);
+    require_condition(access(LE_AVL_DISABLED_PATH, F_OK) == 0, "reconcile restores a lost off flag");
+    unlink(LE_AVL_DISABLED_PATH);
+    volume_leveling_reconcile(&audio, 1100);
+    require_condition(access(LE_AVL_DISABLED_PATH, F_OK) != 0, "reconcile is rate-limited to the poll cadence");
+    volume_leveling_reconcile(&audio, 1300);
+    require_condition(access(LE_AVL_DISABLED_PATH, F_OK) == 0, "reconcile repairs at the next tick");
+    audio.volume_leveling = 1;
+    volume_leveling_reconcile(&audio, 1600);
+    require_condition(access(LE_AVL_DISABLED_PATH, F_OK) != 0, "reconcile removes a stray flag while on");
+    unlink(LE_AVL_DISABLED_PATH); rmdir(LE_AVL_DISABLED_DIR);
 }
 
 int main(void)
