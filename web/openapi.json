@@ -1344,7 +1344,7 @@
      "LED and buttons"
     ],
     "summary": "Update button mappings, cues, action, and brightness",
-    "description": "At least one recognized button field is required. All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `listen`, `playpause`, or `disabled`; `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Missing, malformed, or out-of-range settings return 400. Persistence failure returns 503 and preserves prior preferences.",
+    "description": "At least one recognized button field is required. All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `noise`, `listen`, `playpause`, or `disabled` (`noise` toggles a sleep sound: white noise until the next press); `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Missing, malformed, or out-of-range settings return 400. Persistence failure returns 503 and preserves prior preferences.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1383,6 +1383,7 @@
           "type": "string",
           "enum": [
            "sound",
+           "noise",
            "listen",
            "playpause",
            "disabled"

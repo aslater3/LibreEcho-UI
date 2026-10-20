@@ -185,7 +185,7 @@ globalThis.fetch = (url, options = {}) => {
 vm.runInThisContext(fs.readFileSync(path.join(ROOT, 'web/js/app.js'), 'utf8'), { filename: 'app.js' });
 const state = vm.runInThisContext('state');
 const babyStream = vm.runInThisContext('babyStream');
-const babyMonitorPage = vm.runInThisContext('babyMonitorPage');
+const nurseryPage = vm.runInThisContext('nurseryPage');
 
 /* ------------------------------------------------------------- utilities */
 
@@ -263,13 +263,13 @@ function reset() {
     deferredStream = null;
     resumeImpl = null;
     state.token = '';
-    state.page = 'Baby Monitor';
+    state.page = 'Nursery';
     state.renderGeneration++;
 }
 async function mountPage() {
-    state.page = 'Baby Monitor';
+    state.page = 'Nursery';
     state.renderGeneration++;
-    await babyMonitorPage();
+    await nurseryPage();
     return { start: el('#baby-start'), stop: el('#baby-stop') };
 }
 /* Click Start and keep the (never-resolving-until-stop) handler promise alive. */
