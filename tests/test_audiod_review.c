@@ -7,6 +7,9 @@
 #define LE_MASTER_VOLUME_DIR "/tmp/libreecho-audiod-review-runtime"
 #define LE_MASTER_VOLUME_PATH LE_MASTER_VOLUME_DIR "/master.volume"
 #define LE_SOUND_DIR "/tmp/libreecho-audiod-review-sounds"
+#define LE_VOLUME_LEVELING_PATH "/tmp/libreecho-audiod-review-volume-leveling"
+#define LE_AVL_DISABLED_DIR "/tmp/libreecho-audiod-review-run"
+#define LE_AVL_DISABLED_PATH LE_AVL_DISABLED_DIR "/avl.disabled"
 #include <sys/syscall.h>
 #include <stdarg.h>
 static int review_ioctl(int fd, unsigned long request, ...);
@@ -754,6 +757,68 @@ static void test_pending_restore_beats_stale_config(void)
     unlink(LE_AIRPLAY_RESTORE_PATH);
 }
 
+/* Music volume leveling: persisted owner choice drives the engine's RAM flag. */
+static void test_volume_leveling(void)
+{
+    struct audio_hw audio;
+    struct stat st;
+    char response[1024], text[8];
+    int fd;
+    ssize_t n;
+
+    unlink(LE_VOLUME_LEVELING_PATH); unlink(LE_AVL_DISABLED_PATH);
+    require_condition(volume_leveling_load() == 0, "missing choice means leveling off (experimental opt-in)");
+    require_condition(volume_leveling_apply(volume_leveling_load()) == 0 &&
+                      access(LE_AVL_DISABLED_PATH, F_OK) == 0, "startup without a choice turns the engine leveler off");
+    unlink(LE_AVL_DISABLED_PATH);
+    memset(&audio, 0, sizeof(audio)); audio.volume_leveling = 1;
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"volume_leveling\":true") != NULL, "status reports leveling on");
+
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_volume_leveling\",\"args\":{\"enabled\":false}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.volume_leveling == 0, "leveling switched off");
+    require_condition(access(LE_AVL_DISABLED_PATH, F_OK) == 0, "off creates the engine flag");
+    require_condition(stat(LE_VOLUME_LEVELING_PATH, &st) == 0 && (st.st_mode & 0777) == 0600, "choice persisted 0600");
+    fd = open(LE_VOLUME_LEVELING_PATH, O_RDONLY); n = read(fd, text, sizeof(text) - 1); close(fd);
+    require_condition(n == 4 && !memcmp(text, "off\n", 4), "choice persisted as off");
+    require_condition(volume_leveling_load() == 0, "persisted off survives a restart");
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"volume_leveling\":false") != NULL, "status reports leveling off");
+
+    unlink(LE_AVL_DISABLED_PATH);  /* a reboot clears /run */
+    require_condition(volume_leveling_apply(volume_leveling_load()) == 0 &&
+                      access(LE_AVL_DISABLED_PATH, F_OK) == 0, "startup re-applies a persisted off");
+
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_volume_leveling\",\"args\":{\"enabled\":true}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.volume_leveling == 1 &&
+                      access(LE_AVL_DISABLED_PATH, F_OK) != 0 && volume_leveling_load() == 1, "leveling switched back on");
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_volume_leveling\",\"args\":{\"enabled\":\"no\"}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":false") != NULL && audio.volume_leveling == 1, "non-boolean is rejected");
+    unlink(LE_VOLUME_LEVELING_PATH); unlink(LE_AVL_DISABLED_PATH);
+
+    /* Boot race: the runtime directory does not exist yet. */
+    rmdir(LE_AVL_DISABLED_DIR);
+    require_condition(volume_leveling_apply(0) == 0 && access(LE_AVL_DISABLED_PATH, F_OK) == 0,
+                      "off creates the missing runtime directory and the flag");
+    /* Self-healing: a flag lost while off is re-created; a stray flag while on is removed. */
+    memset(&audio, 0, sizeof(audio)); audio.volume_leveling = 0;
+    unlink(LE_AVL_DISABLED_PATH); rmdir(LE_AVL_DISABLED_DIR);
+    volume_leveling_reconcile(&audio, 1000);
+    require_condition(access(LE_AVL_DISABLED_PATH, F_OK) == 0, "reconcile restores a lost off flag");
+    unlink(LE_AVL_DISABLED_PATH);
+    volume_leveling_reconcile(&audio, 1100);
+    require_condition(access(LE_AVL_DISABLED_PATH, F_OK) != 0, "reconcile is rate-limited to the poll cadence");
+    volume_leveling_reconcile(&audio, 1300);
+    require_condition(access(LE_AVL_DISABLED_PATH, F_OK) == 0, "reconcile repairs at the next tick");
+    audio.volume_leveling = 1;
+    volume_leveling_reconcile(&audio, 1600);
+    require_condition(access(LE_AVL_DISABLED_PATH, F_OK) != 0, "reconcile removes a stray flag while on");
+    unlink(LE_AVL_DISABLED_PATH); rmdir(LE_AVL_DISABLED_DIR);
+}
+
 int main(void)
 {
     struct audio_hw audio;
@@ -854,6 +919,7 @@ int main(void)
     test_restart_precedence();
     test_logical_restart_input();
     test_logical_master_status();
+    test_volume_leveling();
     test_airplay_restore();
     test_airplay_restart_recovery();
     test_pending_restore_beats_stale_config();

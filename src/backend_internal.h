@@ -46,6 +46,8 @@ struct le_backend_ops {
  int (*network_portal)(struct le_backend*,struct le_network_state*);
  /* Restart into the bootloader's installer (fastboot). Appended last for the same positional-init reason; null reports unsupported. */
  int (*reboot_bootloader)(struct le_backend*);
+ /* Music volume leveling on/off. Appended last for the positional-init reason; null reports unsupported. */
+ int (*volume_leveling)(struct le_backend*,int);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

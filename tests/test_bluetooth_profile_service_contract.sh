@@ -65,6 +65,13 @@ assert '(LE_AVDTP_PKT_SINGLE << 2)' in profile
 assert '(message_type & 0x03)' in profile
 assert '(signal_id & 0x3f)' in profile
 assert profile.count('frames = pcm_written /') == 2
+
+# AVRCP absolute volume: advertise category 2 and route the phone's slider to
+# the speaker master through audiod, like AirPlay senders.
+assert '0x0033); /* TG features: cat 1, cat 2' in profile
+assert 'LE_AVRCP_PDU_SET_ABSOLUTE_VOLUME' in profile
+assert 'LE_AVRCP_EVENT_VOLUME_CHANGED' in profile
+assert 'le_profile_set_volume_handler' in header
 assert profile.count('sizeof(int16_t) * (mono ? 1U : 2U)') == 2
 PY
 
