@@ -282,6 +282,51 @@ async function caseLedDiagnosticsEscaped() {
     check(!html.includes('<img src=x'), 'music grammar cannot inject markup');
 }
 
+/* #63: the Audio page only offers the local voice picker when the on-device
+   engine speaks. Over Wyoming or Home Assistant it shows the real voice and
+   where it is set, and offers no Save that would be a silent no-op. */
+async function caseAnnouncementVoiceFollowsEngine() {
+    const saved = { tts_engine: AUDIO.tts_engine, tts_voice: AUDIO.tts_voice, tts_voices: AUDIO.tts_voices };
+    try {
+        Object.assign(AUDIO, { tts_engine: 'sherpa', tts_voice: 'northern-male',
+            tts_voices: [{ id: 'southern-female', name: 'Southern English — female' }, { id: 'northern-male', name: 'Northern English — male' }] });
+        resetDom(); resetCalls();
+        state.page = 'Audio'; state.renderGeneration++;
+        await audioPage(); clearTimers();
+        let html = content.innerHTML;
+        has(html, 'id="tts-voice"', 'local engine: voice picker is offered');
+        has(html, '<option value="northern-male" selected>', 'local engine: the loaded voice is selected');
+        has(html, 'id="save-voice"', 'local engine: voice Save is offered');
+        check(!html.includes('British voice'), 'voice copy no longer claims every voice is British');
+        $app('#tts-voice').value = 'southern-female';
+        await $app('#save-voice').onclick(); clearTimers();
+        checkEqual(JSON.stringify(lastBody('/audio', 'PUT')), JSON.stringify({ tts_voice: 'southern-female' }), 'local engine: Save PUTs the chosen voice');
+
+        Object.assign(AUDIO, { tts_engine: 'wyoming', tts_voice: 'en_US-hfc_female-<b>medium',
+            tts_voices: [{ id: 'en_US-hfc_female-<b>medium', name: 'en_US-hfc_female-<b>medium' }] });
+        resetDom(); resetCalls();
+        state.page = 'Audio'; state.renderGeneration++;
+        await audioPage(); clearTimers();
+        html = content.innerHTML;
+        check(!html.includes('id="tts-voice"'), 'Wyoming engine: no local voice picker');
+        check(!html.includes('id="save-voice"'), 'Wyoming engine: no no-op voice Save');
+        has(html, 'en_US-hfc_female-&lt;b&gt;medium', 'Wyoming engine: shows the voice that really speaks, escaped');
+        has(html, 'Wyoming server', 'Wyoming engine: names the engine');
+        has(html, 'data-voice-page="Integrations"', 'Wyoming engine: links to where the voice is set');
+
+        Object.assign(AUDIO, { tts_engine: 'home-assistant', tts_voice: '', tts_voices: [] });
+        resetDom(); resetCalls();
+        state.page = 'Audio'; state.renderGeneration++;
+        await audioPage(); clearTimers();
+        html = content.innerHTML;
+        check(!html.includes('id="tts-voice"') && !html.includes('id="save-voice"'), 'Home Assistant engine: no local voice picker or Save');
+        has(html, 'Home Assistant Assist pipeline', 'Home Assistant engine: says where the voice is chosen');
+        checkEqual(callsFor('/audio', 'PUT').length, 0, 'rendering never writes a voice');
+    } finally {
+        Object.assign(AUDIO, saved);
+    }
+}
+
 async function caseNurserySounds() {
     /* Issue LibreEcho-Platform#253: sleep sounds moved off the Audio page onto Nursery. */
     resetDom(); resetCalls();
@@ -860,6 +905,7 @@ async function main() {
         ['action button sleep-sound toggle', caseActionButtonNoise],
         ['LED diagnostics escape untrusted text', caseLedDiagnosticsEscaped],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
+        ['announcement voice follows the speaking engine (#63)', caseAnnouncementVoiceFollowsEngine],
         ['nursery legacy route', caseNurseryLegacyRoute],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],
         ['recent voice newest-first cap of 10', caseRecentVoiceCollection],

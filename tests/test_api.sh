@@ -465,4 +465,25 @@ code=$(curl -sS -o /tmp/le-announce-stop.out -w '%{http_code}' -X POST "$URL/api
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"northern-male"}' | grep -q '"tts_voice":"northern-male"'
 code=$(curl -sS -o /tmp/le-voice-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"not-a-voice"}')
 [ "$code" = 400 ]
+# #63: /audio reports the engine that actually speaks. The local picker only
+# applies to the on-device engine; over Wyoming or Home Assistant a voice change
+# there would be a silent no-op, so it is refused and nothing is written.
+curl -fsS "$URL/api/v1/audio" | jq -e '.data.tts_engine == "sherpa" and .data.tts_voice_settings == "audio" and .data.tts_voice == "northern-male" and (.data.tts_voices | length == 2)' >/dev/null
+code=$(curl -sS -o /tmp/le-voice-long.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"a-voice-id-that-is-far-longer-than-the-limit"}')
+[ "$code" = 400 ]
+voice_local_only=$(curl -fsS "$URL/api/v1/privacy" | jq -r '.data.local_only')
+curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data '{"local_only":false}' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"mode":"custom","stt_wyoming_uri":"tcp://127.0.0.1:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://127.0.0.1:10200","tts_voice":"en_US-hfc_female-medium"}' >/dev/null
+curl -fsS "$URL/api/v1/audio" | jq -e '.data.tts_engine == "wyoming" and .data.tts_voice_settings == "voice-pipeline" and .data.tts_voice == "en_US-hfc_female-medium" and .data.tts_voices == [{"id":"en_US-hfc_female-medium","name":"en_US-hfc_female-medium"}]' >/dev/null
+code=$(curl -sS -o /tmp/le-voice-wyoming.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"southern-female"}')
+[ "$code" = 409 ]
+jq -e '.ok == false and (.error.message | test("Voice assistant"))' /tmp/le-voice-wyoming.out >/dev/null
+# Other /audio fields in the same body are not applied either when the voice is refused.
+code=$(curl -sS -o /tmp/le-voice-wyoming2.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume":11,"tts_voice":"southern-female"}')
+[ "$code" = 409 ]
+curl -fsS "$URL/api/v1/audio" | jq -e '.data.volume != 11' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" -H 'Content-Type: application/json' --data '{"mode":"local"}' >/dev/null
+curl -fsS "$URL/api/v1/audio" | jq -e '.data.tts_engine == "sherpa" and .data.tts_voice == "northern-male"' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' --data "{\"local_only\":$voice_local_only}" >/dev/null
 echo 'api: ok'
