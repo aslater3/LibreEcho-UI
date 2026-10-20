@@ -283,6 +283,7 @@ struct audio_hw {
     int startup_sound;
     int amplifier_on;
     char system_audio_bus[PATH_MAX];
+    int volume_leveling;     /* music AVL in the audio engine, persisted */
 };
 
 struct client {
@@ -922,6 +923,19 @@ static const char *control_name_or_default(const struct audio_control *control,
 #ifndef LE_MASTER_VOLUME_DIR
 #define LE_MASTER_VOLUME_DIR "/run/libreecho-audio"
 #endif
+/* Music volume leveling (the audio engine's AVL).  The owner's choice is
+ * persisted here ("on"/"off"); the engine follows the RAM flag file, which
+ * exists only while leveling is off.  A missing or unreadable choice means on,
+ * the stock behaviour. */
+#ifndef LE_VOLUME_LEVELING_PATH
+#define LE_VOLUME_LEVELING_PATH "/data/libreecho/config/volume-leveling"
+#endif
+#ifndef LE_AVL_DISABLED_PATH
+/* The engine watches this beside master.volume (LE_MASTER_VOLUME_DIR). */
+#define LE_AVL_DISABLED_PATH "/run/libreecho-audio/avl.disabled"
+#endif
+static int volume_leveling_load(void);
+static int volume_leveling_apply(int enabled);
 /* How often the guard re-reads the mixer while idle, in milliseconds. */
 #define VOLUME_GUARD_POLL_MS 250
 
@@ -1212,6 +1226,11 @@ static void audio_init(struct audio_hw *audio, int card)
     /* Boot playback is a hard-disabled image policy.  Keep the UI truthful
      * even when an older persistent config still requests a startup sound. */
     audio->startup_sound = 0;
+    /* Before any hardware probing, so the engine follows the owner's choice
+     * even when the codec is not available yet. */
+    audio->volume_leveling = volume_leveling_load();
+    if (volume_leveling_apply(audio->volume_leveling) < 0)
+        le_log_warn("audiod: volume leveling flag could not be applied");
     (void)snprintf(audio->system_audio_bus, sizeof(audio->system_audio_bus),
                    "%s", LE_SYSTEM_AUDIO_BUS);
     (void)snprintf(audio->ctl_path, sizeof(audio->ctl_path),
@@ -1237,6 +1256,64 @@ static void audio_init(struct audio_hw *audio, int card)
     apply_persisted_levels(audio);
     audio->volume_publish_pending = 1;
     audio->output_available = 0;
+}
+
+static int volume_leveling_load(void)
+{
+    char text[8];
+    int fd = open(LE_VOLUME_LEVELING_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    ssize_t n;
+
+    if (fd < 0)
+        return 1;
+    n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0)
+        return 1;
+    text[n] = '\0';
+    return strcmp(text, "off\n") != 0 && strcmp(text, "off") != 0;
+}
+
+/* Drive the engine's RAM flag.  Returns 0 when the flag matches. */
+static int volume_leveling_apply(int enabled)
+{
+    if (enabled)
+        return unlink(LE_AVL_DISABLED_PATH) == 0 || errno == ENOENT ? 0 : -1;
+    {
+        int fd = open(LE_AVL_DISABLED_PATH,
+                      O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
+        if (fd < 0)
+            return -1;
+        close(fd);
+    }
+    return 0;
+}
+
+/* Atomic, fsynced 0600 write of the owner's choice. */
+static int volume_leveling_save(int enabled)
+{
+    char temp[sizeof(LE_VOLUME_LEVELING_PATH) + 16];
+    const char *text = enabled ? "on\n" : "off\n";
+    size_t length = strlen(text);
+    int fd;
+
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_VOLUME_LEVELING_PATH) >=
+        (int)sizeof(temp))
+        return -1;
+    fd = mkstemp(temp);
+    if (fd < 0)
+        return -1;
+    if (fchmod(fd, 0600) < 0 || write(fd, text, length) != (ssize_t)length ||
+        fsync(fd) < 0) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    if (close(fd) < 0 || rename(temp, LE_VOLUME_LEVELING_PATH) < 0) {
+        unlink(temp);
+        return -1;
+    }
+    return 0;
 }
 
 static void stop_noise(struct audio_hw *audio);
@@ -2102,7 +2179,7 @@ static int handle_request(struct audio_hw *audio, char *message,
     unsigned long id;
     long value;
     int boolean;
-    char data[512];
+    char data[768];
 
     if (parse_request(message, &id, command, sizeof(command)) < 0)
         return response_error(response, response_size, 0, "malformed request");
@@ -2116,6 +2193,7 @@ static int handle_request(struct audio_hw *audio, char *message,
                        "{\"volume\":%d,\"microphone_gain\":%d,"
                        "\"notification_volume\":%d,\"muted\":%s,"
                        "\"startup_sound\":%s,\"amplifier_on\":%s,"
+                       "\"volume_leveling\":%s,"
                        "\"output_available\":%s,"
                        "\"noise_active\":%s,\"noise_colour\":\"%s\","
                        "\"noise_source\":\"%s\",\"noise_bed\":\"%s\","
@@ -2125,6 +2203,7 @@ static int handle_request(struct audio_hw *audio, char *message,
                        audio->muted ? "true" : "false",
                        audio->startup_sound ? "true" : "false",
                        audio->amplifier_on ? "true" : "false",
+                       audio->volume_leveling ? "true" : "false",
                        audio->output_available ? "true" : "false",
                        audio->noise_pid > 0 ? "true" : "false",
                        noise_source_name(audio->noise_source),
@@ -2277,6 +2356,17 @@ static int handle_request(struct audio_hw *audio, char *message,
         le_log_info("audiod: set_gain %d -> %d", audio->gain, (int)value);
         if (audio_set_gain(audio, (int)value) < 0)
             return response_error(response, response_size, id, "microphone gain unavailable");
+        return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "set_volume_leveling")) {
+        if (json_bool(message, "enabled", &boolean) < 0)
+            return response_error(response, response_size, id, "enabled must be boolean");
+        if (volume_leveling_save(boolean) < 0)
+            return response_error(response, response_size, id, "volume leveling could not be saved");
+        if (volume_leveling_apply(boolean) < 0)
+            return response_error(response, response_size, id, "volume leveling could not be applied");
+        audio->volume_leveling = boolean;
+        le_log_info("audiod: volume leveling %s", boolean ? "on" : "off");
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "set_mute")) {
