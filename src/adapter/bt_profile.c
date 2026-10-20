@@ -14,6 +14,7 @@
 #include "bt_profile.h"
 #include "bt-sbc/sbc.h"
 #include "log.h"
+#include "radio_resample.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -194,6 +195,7 @@ struct le_avdtp_session {
     int streaming;
     struct sbc_struct sbc;
     int sbc_ready;
+    struct le_radio_resampler resampler;
     uint8_t signal_buf[2048];
     size_t signal_used;
     uint8_t media_buf[65536];
@@ -1118,15 +1120,16 @@ static void sbc_decode_chunk(struct le_profiles *p,
             }
             media_write(p, output, out_frames);
         } else if (pcm_written) {
-            /* Resample non-48k streams to the fixed 48 kHz media bus with
-             * nearest-neighbour sampling; the bus contract does not allow
-             * other rates. */
-            unsigned int source_rate;
+            /* Resample non-48k streams to the fixed 48 kHz media bus.  The
+             * resampler state persists across SBC frames: restarting the phase
+             * every 128-sample frame emitted 140 frames instead of 139.3 at
+             * 44.1 kHz, which overran the bus (dropped chunks) and modulated
+             * the signal at the frame rate (audible crackle). */
             int16_t output[LE_MEDIA_CHUNK_FRAMES * 2];
-            size_t out_frames = 0;
-            size_t frames;
+            int source_rate;
             int mono;
-            size_t i;
+            size_t frames;
+            int out_frames;
 
             switch (session->sbc.frequency) {
             case SBC_FREQ_16000: source_rate = 16000; break;
@@ -1137,16 +1140,12 @@ static void sbc_decode_chunk(struct le_profiles *p,
             mono = session->sbc.mode == SBC_MODE_MONO;
             frames = pcm_written /
                 (sizeof(int16_t) * (mono ? 1U : 2U));
-            for (i = 0; i < LE_MEDIA_CHUNK_FRAMES; ++i) {
-                size_t src = (i * source_rate) / LE_MEDIA_RATE;
-                if (src >= frames)
-                    break;
-                output[out_frames * 2] = pcm[src * (mono ? 1 : 2)];
-                output[out_frames * 2 + 1] = mono ? pcm[src] :
-                    pcm[src * 2 + 1];
-                out_frames++;
-            }
-            media_write(p, output, out_frames);
+            out_frames = le_radio_resample(&session->resampler, pcm,
+                                           (int)frames,
+                                           mono ? 1 : 2, source_rate, output,
+                                           LE_MEDIA_CHUNK_FRAMES);
+            if (out_frames > 0)
+                media_write(p, output, (size_t)out_frames);
         }
     }
     if (offset) {
@@ -1278,6 +1277,7 @@ static void avdtp_handle_set_configuration(struct le_profiles *p,
                 return;
             }
             session->sbc_ready = 1;
+            le_radio_resample_reset(&session->resampler);
             switch ((value[2] >> 4) & 0x0f) {
             case 0x08: session->sbc.frequency = SBC_FREQ_16000; break;
             case 0x04: session->sbc.frequency = SBC_FREQ_32000; break;
