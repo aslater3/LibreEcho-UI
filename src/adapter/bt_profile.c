@@ -85,9 +85,12 @@
 #define LE_AVRCP_PDU_GET_CAPABILITIES 0x10
 #define LE_AVRCP_PDU_GET_ELEMENT_ATTRIBUTES 0x20
 #define LE_AVRCP_PDU_REGISTER_NOTIFICATION 0x31
+#define LE_AVRCP_PDU_SET_ABSOLUTE_VOLUME 0x50
 #define LE_CAP_ID_COMPANIES 0x02
 #define LE_CAP_ID_EVENTS 0x03
 #define LE_AVRCP_EVENT_PLAYBACK_STATUS 0x01
+#define LE_AVRCP_EVENT_VOLUME_CHANGED 0x0d
+#define LE_AVRCP_STATUS_CHANGED 0x0d
 #define LE_AVRCP_STATUS_STABLE 0x0c
 #define LE_AVRCP_STATUS_NOT_IMPLEMENTED 0x08
 #define LE_AVRCP_STATUS_ACCEPTED 0x09
@@ -201,6 +204,8 @@ struct le_avrcp_session {
     int fd;
     uint8_t buf[2048];
     size_t used;
+    int volume_registered;   /* a VOLUME_CHANGED notification is pending */
+    uint8_t volume_transaction;
 };
 
 struct le_profile_sessions {
@@ -559,7 +564,8 @@ static void build_record_set(struct le_profile_sessions *sessions,
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
                               LE_SDP_ATTR_FEATURES);
         offset = sdp_put_uint16(record->data, sizeof(record->data), offset,
-                                0x0031); /* TG features */
+                                0x0033); /* TG features: cat 1, cat 2
+                                          * (absolute volume), settings, groups */
         record->length = offset;
     }
 
@@ -1603,7 +1609,35 @@ static void avrcp_send_passthrough(struct le_avrcp_session *session,
     (void)ignore_write(session->fd, packet, packet_length);
 }
 
-static void avrcp_session_read(struct le_avrcp_session *session)
+/* AVRCP absolute volume is 0..0x7f; the speaker master is 0..100. */
+static uint8_t volume_percent_to_avrcp(int percent)
+{
+    if (percent < 0)
+        percent = 50;
+    if (percent > 100)
+        percent = 100;
+    return (uint8_t)((percent * 0x7f + 50) / 100);
+}
+
+static int volume_avrcp_to_percent(uint8_t absolute)
+{
+    return ((absolute & 0x7f) * 100 + 0x3f) / 0x7f;
+}
+
+static void avrcp_send_volume_changed(struct le_avrcp_session *session,
+                                      uint8_t transaction, uint8_t status,
+                                      int percent)
+{
+    uint8_t payload[2];
+
+    payload[0] = LE_AVRCP_EVENT_VOLUME_CHANGED;
+    payload[1] = volume_percent_to_avrcp(percent);
+    avrcp_send_pdu(session, transaction, LE_AVRCP_PDU_REGISTER_NOTIFICATION,
+                   status, payload, sizeof(payload));
+}
+
+static void avrcp_session_read(struct le_profiles *p,
+                               struct le_avrcp_session *session)
 {
     uint8_t *buffer = session->buf;
     ssize_t received = read(session->fd, buffer + session->used,
@@ -1613,6 +1647,7 @@ static void avrcp_session_read(struct le_avrcp_session *session)
         close(session->fd);
         session->fd = -1;
         session->used = 0;
+        session->volume_registered = 0;
         return;
     }
     session->used += (size_t)received;
@@ -1647,7 +1682,7 @@ static void avrcp_session_read(struct le_avrcp_session *session)
                 break;
             switch (pdu_id) {
             case LE_AVRCP_PDU_GET_CAPABILITIES: {
-                uint8_t payload[5];
+                uint8_t payload[6];
                 size_t offset = 0;
 
                 if (pdu_length != 1 || (buffer[13] != 0x02 && buffer[13] != 0x03)) {
@@ -1657,13 +1692,14 @@ static void avrcp_session_read(struct le_avrcp_session *session)
                     break;
                 }
                 payload[offset++] = buffer[13]; /* requested capability only */
-                payload[offset++] = 1;
+                payload[offset++] = buffer[13] == 0x02 ? 1 : 2;
                 if (buffer[13] == 0x02) { /* company IDs */
                     payload[offset++] = (uint8_t)((LE_AVRCP_COMPANY_BLUETOOTH >> 16) & 0xff);
                     payload[offset++] = (uint8_t)((LE_AVRCP_COMPANY_BLUETOOTH >> 8) & 0xff);
                     payload[offset++] = (uint8_t)(LE_AVRCP_COMPANY_BLUETOOTH & 0xff);
                 } else { /* supported events */
                     payload[offset++] = LE_AVRCP_EVENT_PLAYBACK_STATUS;
+                    payload[offset++] = LE_AVRCP_EVENT_VOLUME_CHANGED;
                 }
                 avrcp_send_pdu(session, transaction, pdu_id,
                                LE_AVRCP_STATUS_STABLE, payload, offset);
@@ -1679,8 +1715,47 @@ static void avrcp_session_read(struct le_avrcp_session *session)
                 /* Respond with STOPPED playback status; the event never
                  * changes for a sink that has no local transport state. */
                 uint8_t payload[1] = { 0x00 };
+
+                if (pdu_length >= 1 &&
+                    buffer[13] == LE_AVRCP_EVENT_VOLUME_CHANGED) {
+                    /* Interim now; CHANGED when the local master moves. */
+                    session->volume_registered = 1;
+                    session->volume_transaction = transaction;
+                    avrcp_send_volume_changed(session, transaction,
+                                              LE_AVRCP_STATUS_INTERIM,
+                                              p->volume_percent);
+                    break;
+                }
                 avrcp_send_pdu(session, transaction, pdu_id,
                                LE_AVRCP_STATUS_INTERIM, payload, 1);
+                break;
+            }
+            case LE_AVRCP_PDU_SET_ABSOLUTE_VOLUME: {
+                /* The phone's slider drives the speaker master, exactly as an
+                 * AirPlay sender does, and the phone then streams full-scale
+                 * PCM instead of attenuating it before SBC. */
+                uint8_t payload[1];
+                int percent;
+
+                if (pdu_length != 1) {
+                    payload[0] = 0x01; /* invalid parameter */
+                    avrcp_send_pdu(session, transaction, pdu_id,
+                                   LE_AVRCP_STATUS_REJECTED, payload, 1);
+                    break;
+                }
+                percent = volume_avrcp_to_percent(buffer[13]);
+                if (!p->volume_set ||
+                    p->volume_set(p->volume_context, percent) != 0) {
+                    payload[0] = 0x03; /* internal error */
+                    avrcp_send_pdu(session, transaction, pdu_id,
+                                   LE_AVRCP_STATUS_REJECTED, payload, 1);
+                    break;
+                }
+                /* Our own write is not a local change to report back. */
+                p->volume_percent = percent;
+                payload[0] = (uint8_t)(buffer[13] & 0x7f);
+                avrcp_send_pdu(session, transaction, pdu_id,
+                               LE_AVRCP_STATUS_ACCEPTED, payload, 1);
                 break;
             }
             default:
@@ -1913,6 +1988,7 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
             }
             sessions->avrcp[slot].fd = client;
             sessions->avrcp[slot].used = 0;
+            sessions->avrcp[slot].volume_registered = 0;
             break;
         }
         default:
@@ -1924,7 +2000,7 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
             } else if (fd_map[i] >= 30 && fd_map[i] < 30 + LE_MAX_AVDTP_SESSIONS) {
                 avdtp_media_read(p, &sessions->avdtp[fd_map[i] - 30]);
             } else if (fd_map[i] >= 40 && fd_map[i] < 40 + LE_MAX_AVRCP_SESSIONS) {
-                avrcp_session_read(&sessions->avrcp[fd_map[i] - 40]);
+                avrcp_session_read(p, &sessions->avrcp[fd_map[i] - 40]);
             }
             break;
         }
@@ -1976,6 +2052,7 @@ int le_profile_test_init(struct le_profiles *p, const char *service_name)
     p->avdtp_listener = -1;
     p->avrcp_listener = -1;
     p->media_bus_fd = -1;
+    p->volume_percent = -1;
     snprintf(p->service_name, sizeof(p->service_name), "%s",
              service_name && service_name[0] ? service_name : "LibreEcho");
     sessions = calloc(1, sizeof(*sessions));
@@ -2137,9 +2214,10 @@ ssize_t le_profile_test_avrcp_exchange(struct le_profiles *p,
         goto close_pair;
     session->fd = fds[0];
     session->used = 0;
+    session->volume_registered = 0;
     if (write(fds[1], request, request_len) != (ssize_t)request_len)
         goto done;
-    avrcp_session_read(session);
+    avrcp_session_read(p, session);
     pollfd.fd = fds[1];
     pollfd.events = POLLIN;
     pollfd.revents = 0;
@@ -2157,4 +2235,89 @@ close_pair:
     close(fds[0]);
     close(fds[1]);
     return -1;
+}
+
+void le_profile_set_volume_handler(struct le_profiles *p,
+                                   int (*set)(void *context, int percent),
+                                   void *context)
+{
+    p->volume_set = set;
+    p->volume_context = context;
+}
+
+void le_profile_set_local_volume(struct le_profiles *p, int percent)
+{
+    struct le_profile_sessions *sessions = p ? p->sessions : NULL;
+    int i;
+
+    if (!sessions || percent < 0 || percent > 100 ||
+        percent == p->volume_percent)
+        return;
+    p->volume_percent = percent;
+    /* A notification completes once; the phone re-registers after CHANGED. */
+    for (i = 0; i < LE_MAX_AVRCP_SESSIONS; ++i) {
+        struct le_avrcp_session *session = &sessions->avrcp[i];
+
+        if (session->fd < 0 || !session->volume_registered)
+            continue;
+        session->volume_registered = 0;
+        avrcp_send_volume_changed(session, session->volume_transaction,
+                                  LE_AVRCP_STATUS_CHANGED, percent);
+    }
+}
+
+ssize_t le_profile_test_avrcp_local_volume(struct le_profiles *p,
+                                           const uint8_t *request,
+                                           size_t request_len, int percent,
+                                           uint8_t *interim,
+                                           size_t interim_max,
+                                           uint8_t *changed,
+                                           size_t changed_max)
+{
+    struct le_profile_sessions *sessions = p ? p->sessions : NULL;
+    struct le_avrcp_session *session = NULL;
+    struct pollfd pollfd;
+    int fds[2];
+    int slot;
+    ssize_t result = -1;
+
+    if (!sessions || !request || !request_len || !interim || !changed)
+        return -1;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0)
+        return -1;
+    for (slot = 0; slot < LE_MAX_AVRCP_SESSIONS; ++slot) {
+        if (sessions->avrcp[slot].fd < 0) {
+            session = &sessions->avrcp[slot];
+            break;
+        }
+    }
+    if (!session) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    session->fd = fds[0];
+    session->used = 0;
+    session->volume_registered = 0;
+    if (write(fds[1], request, request_len) != (ssize_t)request_len)
+        goto done;
+    avrcp_session_read(p, session);
+    pollfd.fd = fds[1];
+    pollfd.events = POLLIN;
+    pollfd.revents = 0;
+    if (poll(&pollfd, 1, 2000) <= 0 ||
+        read(fds[1], interim, interim_max) <= 0)
+        goto done;
+    le_profile_set_local_volume(p, percent);
+    pollfd.revents = 0;
+    if (poll(&pollfd, 1, 2000) > 0)
+        result = read(fds[1], changed, changed_max);
+
+done:
+    close(fds[0]);
+    close(fds[1]);
+    session->fd = -1;
+    session->used = 0;
+    session->volume_registered = 0;
+    return result;
 }

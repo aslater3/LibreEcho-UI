@@ -52,6 +52,12 @@ int le_profile_registered_sdp(const struct le_profiles *p) { (void)p; return 0; 
 int le_profile_registered_a2dp_sink(const struct le_profiles *p) { (void)p; return 0; }
 int le_profile_registered_avrcp(const struct le_profiles *p) { (void)p; return 0; }
 int le_profile_stream_active(const struct le_profiles *p) { (void)p; return 0; }
+void le_profile_set_volume_handler(struct le_profiles *p,
+                                   int (*set)(void *context, int percent),
+                                   void *context)
+{ (void)p; (void)set; (void)context; }
+void le_profile_set_local_volume(struct le_profiles *p, int percent)
+{ (void)p; (void)percent; }
 
 /* A table full of the worst case the controller can hand us: every slot taken,
  * every entry both freshly discovered and bonded, and a 63-character EIR name

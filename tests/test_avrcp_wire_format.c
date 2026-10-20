@@ -14,6 +14,15 @@
 #include "adapter/bt_profile.h"
 
 static int failures;
+static int handler_percent = -1;
+static int handler_result;
+
+static int volume_handler(void *context, int percent)
+{
+    (void)context;
+    handler_percent = percent;
+    return handler_result;
+}
 
 static void check(int condition, const char *what)
 {
@@ -68,8 +77,8 @@ int main(void)
     };
     static const uint8_t get_events_response[] = {
         0x92, 0x11, 0x0e, 0x0c, 0x48, 0x00,
-        0x00, 0x19, 0x58, 0x10, 0x00, 0x00, 0x03,
-        0x03, 0x01, 0x01
+        0x00, 0x19, 0x58, 0x10, 0x00, 0x00, 0x04,
+        0x03, 0x02, 0x01, 0x0d
     };
     /* Standard PLAY press and release include the operation-data-length
      * operand, which is zero for these ordinary commands. */
@@ -142,6 +151,58 @@ int main(void)
         check_avctp_response_header(response, 15, "PLAY release response");
         check(memcmp(response, release_response, sizeof(release_response)) == 0,
               "PLAY release preserves the release flag and zero data length");
+    }
+
+    /* Absolute volume (AVRCP 1.4 category 2): CONTROL SetAbsoluteVolume. */
+    {
+        static const uint8_t set_volume[] = {
+            0x30, 0x11, 0x0e, 0x00, 0x48, 0x00,
+            0x00, 0x19, 0x58, 0x50, 0x00, 0x00, 0x01, 0x40
+        };
+        static const uint8_t set_volume_response[] = {
+            0x32, 0x11, 0x0e, 0x09, 0x48, 0x00,
+            0x00, 0x19, 0x58, 0x50, 0x00, 0x00, 0x01, 0x40
+        };
+        static const uint8_t register_volume[] = {
+            0x40, 0x11, 0x0e, 0x03, 0x48, 0x00,
+            0x00, 0x19, 0x58, 0x31, 0x00, 0x00, 0x05,
+            0x0d, 0x00, 0x00, 0x00, 0x00
+        };
+        uint8_t interim[64], changed[64];
+
+        le_profile_set_volume_handler(&profiles, volume_handler, NULL);
+        handler_result = 0;
+        length = le_profile_test_avrcp_exchange(&profiles, set_volume,
+                                                sizeof(set_volume), response,
+                                                sizeof(response));
+        check(length == (ssize_t)sizeof(set_volume_response) &&
+              memcmp(response, set_volume_response,
+                     sizeof(set_volume_response)) == 0,
+              "SetAbsoluteVolume is ACCEPTED echoing the volume");
+        check(handler_percent == 50,
+              "SetAbsoluteVolume 0x40 sets the speaker master to 50%");
+
+        handler_result = -1;
+        length = le_profile_test_avrcp_exchange(&profiles, set_volume,
+                                                sizeof(set_volume), response,
+                                                sizeof(response));
+        check(length == 14 && response[3] == 0x0a && response[13] == 0x03,
+              "SetAbsoluteVolume is REJECTED when audiod refuses it");
+
+        length = le_profile_test_avrcp_local_volume(
+            &profiles, register_volume, sizeof(register_volume), 100,
+            interim, sizeof(interim), changed, sizeof(changed));
+        check(interim[3] == 0x0f && interim[9] == 0x31 && interim[12] == 2 &&
+              interim[13] == 0x0d && interim[14] == 0x40,
+              "VOLUME_CHANGED registration answers INTERIM with the master");
+        check(length == 15 && (changed[0] >> 4) == 4 && changed[3] == 0x0d &&
+              changed[13] == 0x0d && changed[14] == 0x7f,
+              "a local master change sends CHANGED on the registered label");
+
+        length = le_profile_test_avrcp_local_volume(
+            &profiles, register_volume, sizeof(register_volume), 100,
+            interim, sizeof(interim), changed, sizeof(changed));
+        check(length < 0, "an unchanged master sends no notification");
     }
 
     le_profile_test_cleanup(&profiles);
