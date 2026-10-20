@@ -4,6 +4,7 @@
 #define le_adapter_connect test_adapter_connect
 #define le_adapter_call test_adapter_call
 #define le_adapter_close test_adapter_close
+#define le_adapter_set_io_timeout test_adapter_set_io_timeout
 #define le_log test_log
 #define main btd_main
 #include "adapter/btd.c"
@@ -11,6 +12,7 @@
 #undef le_adapter_connect
 #undef le_adapter_call
 #undef le_adapter_close
+#undef le_adapter_set_io_timeout
 #undef le_log
 
 #define CHECK(expr) do { \
@@ -31,6 +33,8 @@ struct le_adapter *test_adapter_connect(const char *path, int timeout)
     return (struct le_adapter *)&adapter_token;
 }
 void test_adapter_close(struct le_adapter *adapter) { (void)adapter; }
+void test_adapter_set_io_timeout(struct le_adapter *adapter, int timeout_ms)
+{ (void)adapter; (void)timeout_ms; }
 int test_adapter_call(struct le_adapter *adapter, const char *cmd,
                       const char *args, char *out, size_t size)
 {
@@ -68,6 +72,12 @@ int le_profile_registered_sdp(const struct le_profiles *p) { (void)p; return 0; 
 int le_profile_registered_a2dp_sink(const struct le_profiles *p) { (void)p; return 0; }
 int le_profile_registered_avrcp(const struct le_profiles *p) { (void)p; return 0; }
 int le_profile_stream_active(const struct le_profiles *p) { (void)p; return 0; }
+void le_profile_set_volume_handler(struct le_profiles *p,
+                                   int (*set)(void *context, int percent),
+                                   void *context)
+{ (void)p; (void)set; (void)context; }
+void le_profile_set_local_volume(struct le_profiles *p, int percent)
+{ (void)p; (void)percent; }
 
 /* Directories reliably reject writes even when the test runs as root.
  * Test both fopen failure (.tmp is a directory) and rename failure (the
