@@ -458,6 +458,17 @@ engine's voice is set: `audio` (this endpoint), `voice-pipeline` or
 the local voices for `sherpa`, the configured Wyoming voice as a single entry for
 `wyoming`, and an empty list with an empty `tts_voice` for `home-assistant`.
 
+#### GET /api/v1/audio/voices
+
+The voices the speaking engine actually offers (#63):
+`{engine, source, active, reachable, truncated, voices:[{id, name, language, installed}]}`.
+For `wyoming` the web daemon asks the configured server (`describe`, 500 ms to
+connect, 1.5 s for the reply, cached for a minute); `reachable` is false when it
+does not answer, and at most 64 voices are listed (`truncated`). For `sherpa` it
+reads the TTS payload's `voices.json` (the Wyoming `info` shape) and otherwise
+lists the two voices every 0.14 payload carries. `home-assistant` lists none:
+Home Assistant chooses the voice.
+
 #### PUT /api/v1/audio
 
 Update audio settings.
