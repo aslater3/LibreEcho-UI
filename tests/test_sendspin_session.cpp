@@ -13,7 +13,9 @@
 //   * an engine restart yields a fresh epoch; the session adopts it and keeps its
 //     monotonic generation;
 //   * a stalled engine bounds write() by the clamped per-op timeout (no hang);
-//   * poll() reports the engine's own timing, never a fabricated finish.
+//   * poll() reports the engine's own timing, never a fabricated finish;
+//   * a timed-out OPEN/FINISH is resumed, never resent, so a slow engine
+//     still completes the lifecycle.
 
 #include "engine_sink_session.h"
 #include "sendspin_engine_fixture.h"
@@ -202,6 +204,45 @@ void test_stalled_engine_bounds_write() {
     server.stop();
 }
 
+
+// A real engine answers control ops only between poll wakeups and after
+// blocking PCM steps (open, amp settle), which can exceed one bounded op. A
+// timed-out OPEN/FINISH must stay in flight and be resumed, never resent: a
+// duplicate OPEN of the same generation would be rejected as stale.
+void test_slow_engine_resumes_control_ops() {
+    std::string path = unique_socket_path("sess");
+    EngineServer server;
+    CHECK(server.start(path), "server start");
+
+    EngineSinkSession s(make_config(path));
+    CHECK(s.connect() == SinkResult::Ok, "connect");
+
+    server.pause();
+    CHECK(s.start_stream() == SinkResult::Timeout, "OPEN times out on a stalled engine");
+    CHECK(!s.streaming(), "not armed while OPEN is in flight");
+    CHECK(s.start_stream() == SinkResult::Timeout, "resumed OPEN still bounded");
+    server.resume();
+    SinkResult r = SinkResult::Timeout;
+    for (int i = 0; i < 50 && r == SinkResult::Timeout; ++i) r = s.start_stream();
+    CHECK(r == SinkResult::Ok, "resumed OPEN adopts the late ACK");
+    CHECK(s.generation() == 1u, "the in-flight generation was not resent or skipped");
+    CHECK(write_frames(s, 512, 20) == 512u * kBytesPerFrame, "audio accepted after resumed OPEN");
+
+    server.pause();
+    bool completed = false;
+    CHECK(s.stop_stream(&completed) == SinkResult::Timeout, "FINISH times out on a stalled engine");
+    server.resume();
+    r = SinkResult::Timeout;
+    for (int i = 0; i < 50 && r == SinkResult::Timeout; ++i) r = s.stop_stream(&completed);
+    CHECK(r == SinkResult::Ok, "resumed FINISH adopts the late ACK");
+
+    CHECK(s.start_stream() == SinkResult::Ok, "next stream opens normally");
+    CHECK(s.generation() == 2u, "next generation follows the resumed one");
+
+    s.disconnect();
+    server.stop();
+}
+
 }  // namespace
 
 int main() {
@@ -213,6 +254,7 @@ int main() {
     test_reconnect_same_engine_keeps_generation();
     test_engine_restart_new_epoch();
     test_stalled_engine_bounds_write();
+    test_slow_engine_resumes_control_ops();
 
     if (libreecho::sendspin::test::g_failures != 0) {
         std::fprintf(stderr,

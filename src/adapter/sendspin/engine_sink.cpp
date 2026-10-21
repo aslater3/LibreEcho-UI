@@ -57,9 +57,15 @@ void EngineSink::close_socket_locked() {
     pending_frames_ = 0;
     pending_ready_ = false;
     cached_progress_us_ = 0;
+    inflight_open_generation_ = 0;
+    inflight_finish_ = false;
 }
 
 void EngineSink::fence_locked() {
+    // An abandoned OPEN may still be acknowledged later; a fresh OPEN of the
+    // same generation then draws STALE_GENERATION and the session advances.
+    inflight_open_generation_ = 0;
+    inflight_finish_ = false;
     armed_ = false;
     pending_frames_ = 0;
     pending_ready_ = false;
@@ -299,11 +305,16 @@ SinkResult EngineSink::open(uint32_t generation, uint32_t timeout_ms) {
     le_audio_sink_put_u32(payload + 16, 0);
 
     const int64_t deadline = now_us() + static_cast<int64_t>(timeout_ms) * 1000;
-    SinkResult r = send_datagram(LE_AUDIO_SINK_TYPE_OPEN, payload,
-                                 sizeof(payload), deadline);
-    if (r != SinkResult::Ok) {
-        last_result_ = r;
-        return r;
+    SinkResult r = SinkResult::Ok;
+    if (inflight_open_generation_ != generation) {
+        inflight_open_generation_ = 0;
+        r = send_datagram(LE_AUDIO_SINK_TYPE_OPEN, payload, sizeof(payload),
+                          deadline);
+        if (r != SinkResult::Ok) {
+            last_result_ = r;
+            return r;
+        }
+        inflight_open_generation_ = generation;
     }
 
     for (int guard = 0; guard < 8; ++guard) {
@@ -312,15 +323,23 @@ SinkResult EngineSink::open(uint32_t generation, uint32_t timeout_ms) {
         uint32_t len = 0;
         r = recv_datagram(&type, &pl, &len, deadline);
         if (r != SinkResult::Ok) {
+            // Timeout keeps the OPEN in flight for a resuming retry.
+            if (r != SinkResult::Timeout) inflight_open_generation_ = 0;
             last_result_ = r;
             return r;
         }
         if (type == LE_AUDIO_SINK_TYPE_ERROR) {
+            inflight_open_generation_ = 0;
             if (len >= 4) last_error_ = le_audio_sink_get_u32(pl);
             last_result_ = SinkResult::Rejected;
             return last_result_;
         }
         if (type != LE_AUDIO_SINK_TYPE_OPEN_ACK) continue;
+        // A late ACK for an OPEN abandoned before this generation is stale.
+        if (len == LE_AUDIO_SINK_OPEN_ACK_PAYLOAD_BYTES &&
+            le_audio_sink_get_u32(pl + 8) < generation)
+            continue;
+        inflight_open_generation_ = 0;
         if (len != LE_AUDIO_SINK_OPEN_ACK_PAYLOAD_BYTES) {
             last_result_ = SinkResult::Malformed;
             return last_result_;
@@ -503,10 +522,13 @@ SinkResult EngineSink::finish(uint64_t exact_total_frames, uint32_t timeout_ms,
     }
 
     const int64_t deadline = now_us() + static_cast<int64_t>(timeout_ms) * 1000;
+    const bool resuming =
+        inflight_finish_ && inflight_finish_total_ == exact_total_frames;
+    if (!resuming) inflight_finish_ = false;
     // The caller's exact total is its acknowledged prefix at entry. A DATA
     // already sent before natural end may gain its authenticated CREDIT now.
     // Resolve that single bounded tail before declaring the engine total.
-    if (pending_frames_ && exact_total_frames == next_frame_) {
+    if (!resuming && pending_frames_ && exact_total_frames == next_frame_) {
         SinkResult pending = await_pending_locked(deadline);
         if (pending != SinkResult::Ok) { last_result_ = pending; return pending; }
         commit_pending_locked();
@@ -519,11 +541,16 @@ SinkResult EngineSink::finish(uint64_t exact_total_frames, uint32_t timeout_ms,
     le_audio_sink_put_u32(payload + 16, last_accepted_sequence_);
     le_audio_sink_put_u32(payload + 20, 0);
 
-    SinkResult r = send_datagram(LE_AUDIO_SINK_TYPE_FINISH, payload,
-                                 sizeof(payload), deadline);
-    if (r != SinkResult::Ok) {
-        last_result_ = r;
-        return r;
+    SinkResult r = SinkResult::Ok;
+    if (!resuming) {
+        r = send_datagram(LE_AUDIO_SINK_TYPE_FINISH, payload, sizeof(payload),
+                          deadline);
+        if (r != SinkResult::Ok) {
+            last_result_ = r;
+            return r;
+        }
+        inflight_finish_ = true;
+        inflight_finish_total_ = exact_total_frames;
     }
 
     for (int guard = 0; guard < 8; ++guard) {
@@ -532,15 +559,19 @@ SinkResult EngineSink::finish(uint64_t exact_total_frames, uint32_t timeout_ms,
         uint32_t len = 0;
         r = recv_datagram(&type, &pl, &len, deadline);
         if (r != SinkResult::Ok) {
+            // Timeout keeps the FINISH in flight for a resuming retry.
+            if (r != SinkResult::Timeout) inflight_finish_ = false;
             last_result_ = r;
             return r;
         }
         if (type == LE_AUDIO_SINK_TYPE_ERROR) {
+            inflight_finish_ = false;
             if (len >= 4) last_error_ = le_audio_sink_get_u32(pl);
             last_result_ = SinkResult::Rejected;
             return last_result_;
         }
         if (type != LE_AUDIO_SINK_TYPE_FINISH_ACK) continue;
+        inflight_finish_ = false;
         if (len != LE_AUDIO_SINK_FINISH_ACK_PAYLOAD_BYTES) {
             last_result_ = SinkResult::Malformed;
             return last_result_;

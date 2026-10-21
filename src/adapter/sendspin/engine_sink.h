@@ -112,7 +112,9 @@ public:
 
     // OPEN a strictly increasing generation and validate OPEN_ACK (status,
     // geometry, readiness) before adopting the engine epoch. On success the
-    // cumulative source cursor and sequence restart at zero.
+    // cumulative source cursor and sequence restart at zero. Timeout leaves
+    // the OPEN in flight: calling open() again with the same generation
+    // resumes waiting for its ACK without retransmitting.
     SinkResult open(uint32_t generation, uint32_t timeout_ms);
 
     // The SDK sync-thread entry point. `length` is a whole number of frames'
@@ -124,6 +126,8 @@ public:
     // Declare the exact cumulative total for the live generation and await
     // FINISH_ACK. `completed_out` (optional) reports the engine's completion
     // flag, which is set only once the physical playhead has passed the tail.
+    // Timeout leaves the FINISH in flight; a retry with the same total resumes
+    // waiting for its ACK without retransmitting.
     SinkResult finish(uint64_t exact_total_frames, uint32_t timeout_ms,
                       bool* completed_out);
 
@@ -172,6 +176,15 @@ private:
     SinkResult last_result_ = SinkResult::Ok;
     uint32_t capacity_frames_ = 0;
     uint32_t period_frames_ = 0;
+
+    // A control request already on the wire whose reply missed its deadline.
+    // The engine is single-threaded and may take longer than one bounded op
+    // to answer (PCM open, amp settle). Never resend: a retry with the same
+    // identity waits for the original reply instead of issuing a duplicate
+    // the engine would reject as stale. Cleared by any reply or socket loss.
+    uint32_t inflight_open_generation_ = 0;
+    bool inflight_finish_ = false;
+    uint64_t inflight_finish_total_ = 0;
 
     // Exactly one transmitted DATA may await its CREDIT across SDK deadlines.
     // Never retransmit it; return credit only against the identical PCM prefix.

@@ -200,7 +200,12 @@ int parse_args(int argc, char** argv, Options* opts) {
 // cleanly. Never leaves a stream armed and never touches a PCM device.
 int run_check(const Options& opts) {
     EngineSinkSession session(opts.session);
+    // Each op is bounded; resume a timed-out OPEN/FINISH (never resent) for
+    // up to ~2 s while the engine opens or closes its PCM.
+    constexpr int kCheckResumes = 40;
     SinkResult r = session.start_stream();
+    for (int i = 0; r == SinkResult::Timeout && i < kCheckResumes; ++i)
+        r = session.start_stream();
     if (r != SinkResult::Ok) {
         std::fprintf(stderr,
                      "sendspind: engine not ready at %s (start_stream -> %d, err=%u)\n",
@@ -211,7 +216,9 @@ int run_check(const Options& opts) {
     const uint32_t epoch = session.epoch();
     const uint32_t generation = session.generation();
     bool completed = false;
-    const SinkResult stopped = session.stop_stream(&completed);
+    SinkResult stopped = session.stop_stream(&completed);
+    for (int i = 0; stopped == SinkResult::Timeout && i < kCheckResumes; ++i)
+        stopped = session.stop_stream(&completed);
     session.disconnect();
     if (stopped != SinkResult::Ok) {
         std::fprintf(stderr,

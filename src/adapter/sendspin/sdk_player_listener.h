@@ -90,7 +90,9 @@ public:
         pending_finish_ = false;
         reset_feedback_locked();
         ++stream_starts_;
-        session_.start_stream();
+        // The engine may still be opening its PCM; a timed-out OPEN stays in
+        // flight and the feedback loop resumes it (bounded per call).
+        pending_start_ = session_.start_stream() == SinkResult::Timeout;
     }
 
     // Requires the authenticated downstream SDK lifecycle patches. Natural
@@ -99,6 +101,7 @@ public:
     void on_stream_end(::sendspin::SendspinStreamEndReason reason) override {
         std::lock_guard<std::recursive_mutex> guard(mu_);
         ++stream_ends_;
+        pending_start_ = false;
         if (reason == ::sendspin::SendspinStreamEndReason::NATURAL) {
             pending_finish_ = session_.stop_stream() != SinkResult::Ok;
         } else {
@@ -133,7 +136,9 @@ public:
             return 0;
         }
         reset_feedback_locked();
-        if (session_.start_stream() != SinkResult::Ok) session_.disconnect();
+        const SinkResult started = session_.start_stream();
+        pending_start_ = started == SinkResult::Timeout;
+        if (started != SinkResult::Ok && !pending_start_) session_.disconnect();
         return retired;
     }
 
@@ -168,6 +173,12 @@ public:
     bool pump_feedback() {
         std::lock_guard<std::recursive_mutex> guard(mu_);
         if (role_ == nullptr) return false;
+        if (pending_start_) {
+            const auto result = session_.start_stream();
+            if (result == SinkResult::Timeout) return false;
+            pending_start_ = false;
+            if (result != SinkResult::Ok) return false;
+        }
         if (pending_finish_) {
             const auto result = session_.stop_stream();
             if (result == SinkResult::Ok || result == SinkResult::NotOpen) pending_finish_ = false;
@@ -220,6 +231,7 @@ private:
     }
     mutable std::recursive_mutex mu_;
     bool pending_finish_ = false;
+    bool pending_start_ = false;
     bool have_boundary_ = false;
     uint32_t boundary_token_ = 0;
     EngineSinkSession& session_;
