@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <thread>
 using namespace sendspin;
@@ -83,21 +84,56 @@ int main(int argc,char** argv) {
             "encrypted loopback connection and time sync");
     REQUIRE(server.send_app_json(stream_start_pcm_json()),"SDK stream/start");
     REQUIRE(pump(client,listener,[&]{return session.streaming();},3000),"real engine generation opened");
-    int64_t timestamp=platform_time_us()+100000;
+    // A real Sendspin server streams ahead of the play time; the SDK rightly
+    // drops chunks whose timestamp has passed. Pace this fixture server by
+    // wall time, not by loop iterations: the client pump blocks on engine
+    // credit (and runs several times slower under sanitizers), so sending one
+    // chunk per pump let timestamps fall seconds into the past and only SDK
+    // priming silence reached the engine. Keep a fixed lead that fits the
+    // 64 KiB (~340 ms) player buffer.
+    constexpr int64_t chunk_frames=960, chunk_us=20000, lead_us=200000;
+    int64_t timestamp=platform_time_us()+lead_us;
     uint64_t first=0;
     int64_t minimum_send_ahead_us=INT64_MAX;
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(6);
+    // SENDSPIN_SDK_TRACE=1 prints a 250 ms timeline of sent/credited/decoded
+    // frames, to tell fixture pacing from engine credit from SDK sync drops.
+    const bool trace=std::getenv("SENDSPIN_SDK_TRACE")!=nullptr;
+    const int64_t trace_start_us=platform_time_us();
+    int64_t next_trace_us=trace_start_us;
     while((session.accepted_frames()<8192 || listener.nonzero_bytes.load()==0) &&
           std::chrono::steady_clock::now()<deadline) {
-        minimum_send_ahead_us=std::min(minimum_send_ahead_us,timestamp-platform_time_us());
-        REQUIRE(server.send_pcm(timestamp,960,first),"encrypted PCM message");
-        first+=960; timestamp+=20000;
-        listener.pump_feedback(); pump_for(client,20);
+        const int64_t t0=platform_time_us();
+        while(timestamp<platform_time_us()+lead_us) {
+            minimum_send_ahead_us=std::min(minimum_send_ahead_us,timestamp-platform_time_us());
+            REQUIRE(server.send_pcm(timestamp,chunk_frames,first),"encrypted PCM message");
+            first+=chunk_frames; timestamp+=chunk_us;
+        }
+        const int64_t t1=platform_time_us();
+        listener.pump_feedback();
+        const int64_t t2=platform_time_us();
+        pump_for(client,20);
+        const int64_t t3=platform_time_us();
+        if(trace && t3-t0>100000)
+            std::fprintf(stderr,"STALL send_us=%lld feedback_us=%lld pump_us=%lld\n",
+                static_cast<long long>(t1-t0),static_cast<long long>(t2-t1),
+                static_cast<long long>(t3-t2));
+        if(trace && platform_time_us()>=next_trace_us) {
+            next_trace_us=platform_time_us()+250000;
+            std::fprintf(stderr,"TRACE t_ms=%lld sent=%llu accepted=%llu nonzero_bytes=%llu ahead_us=%lld\n",
+                static_cast<long long>((platform_time_us()-trace_start_us)/1000),
+                static_cast<unsigned long long>(first),
+                static_cast<unsigned long long>(session.accepted_frames()),
+                static_cast<unsigned long long>(listener.nonzero_bytes.load()),
+                static_cast<long long>(timestamp-platform_time_us()));
+        }
     }
     std::printf("PCM_SEND minimum_ahead_us=%lld sent_frames=%llu nonzero_bytes=%llu\n",
         static_cast<long long>(minimum_send_ahead_us),
         static_cast<unsigned long long>(first),
         static_cast<unsigned long long>(listener.nonzero_bytes.load()));
+    // Name a fixture-pacing failure as such rather than as a product failure.
+    REQUIRE(minimum_send_ahead_us>0,"fixture server kept every PCM chunk ahead of its play time");
     REQUIRE(session.accepted_frames()>=8192,"SDK decoded PCM credited by real engine");
     REQUIRE(listener.nonzero_bytes.load()>0,"decoded server PCM, not just SDK priming silence, was acknowledged");
     libreecho::sendspin::EngineSinkTiming observed{};
