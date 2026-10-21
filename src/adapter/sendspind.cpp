@@ -200,12 +200,17 @@ int parse_args(int argc, char** argv, Options* opts) {
 // cleanly. Never leaves a stream armed and never touches a PCM device.
 int run_check(const Options& opts) {
     EngineSinkSession session(opts.session);
-    // Each op is bounded; resume a timed-out OPEN/FINISH (never resent) for
-    // up to ~2 s while the engine opens or closes its PCM.
-    constexpr int kCheckResumes = 40;
+    // Each op is bounded; resume a timed-out OPEN/FINISH (never resent)
+    // within a wall-clock budget. On the Radar an OPEN starts the PCM
+    // (mixer arm, amp settle, open, prepare) and the engine answers the
+    // following FINISH only after ~1.5 s.
+    const auto budget_end =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto in_budget = [&] {
+        return std::chrono::steady_clock::now() < budget_end;
+    };
     SinkResult r = session.start_stream();
-    for (int i = 0; r == SinkResult::Timeout && i < kCheckResumes; ++i)
-        r = session.start_stream();
+    while (r == SinkResult::Timeout && in_budget()) r = session.start_stream();
     if (r != SinkResult::Ok) {
         std::fprintf(stderr,
                      "sendspind: engine not ready at %s (start_stream -> %d, err=%u)\n",
@@ -217,7 +222,7 @@ int run_check(const Options& opts) {
     const uint32_t generation = session.generation();
     bool completed = false;
     SinkResult stopped = session.stop_stream(&completed);
-    for (int i = 0; stopped == SinkResult::Timeout && i < kCheckResumes; ++i)
+    while (stopped == SinkResult::Timeout && in_budget())
         stopped = session.stop_stream(&completed);
     session.disconnect();
     if (stopped != SinkResult::Ok) {
