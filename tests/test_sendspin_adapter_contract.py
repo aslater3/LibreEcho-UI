@@ -483,6 +483,13 @@ class NativeBridgeCompanionTests(unittest.TestCase):
         runner = RUN_TESTS.read_text(encoding="utf-8")
         self.assertIn("LIBREECHO_SENDPIN_SINK", runner)
 
+    def test_companion_registers_a_network_provider(self) -> None:
+        # The SDK never starts its WebSocket listener without a network
+        # provider that reports ready; --run would silently never listen.
+        src = (UI / "src/adapter/sendspind.cpp").read_text(encoding="utf-8")
+        self.assertIn("set_network_provider(", src)
+        self.assertIn("is_network_ready() override", src)
+
     def test_bridge_is_not_linked_into_the_c99_daemon(self) -> None:
         makefile = MAKEFILE.read_text(encoding="utf-8")
         prefix = makefile.split("test-sendspin-sink:", 1)[0]
