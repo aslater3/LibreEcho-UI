@@ -38,6 +38,9 @@
 #include <thread>
 
 #include <sendspin/client.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <sendspin/config.h>
 #include <sendspin/player_role.h>
 
@@ -241,6 +244,25 @@ int run_check(const Options& opts) {
 }
 
 #ifdef SENDPIN_COMPANION_SDK
+// The SDK starts its WebSocket listener only once a network provider reports
+// ready; without one, --run never listens. Ready means an up, non-loopback
+// IPv4/IPv6 interface. It is polled only until the listener has started.
+struct HostNetworkProvider : ::sendspin::SendspinNetworkProvider {
+    bool is_network_ready() override {
+        struct ifaddrs* list = nullptr;
+        if (::getifaddrs(&list) != 0) return false;
+        bool ready = false;
+        for (struct ifaddrs* i = list; i != nullptr && !ready; i = i->ifa_next) {
+            if (i->ifa_addr == nullptr) continue;
+            const int family = i->ifa_addr->sa_family;
+            ready = (family == AF_INET || family == AF_INET6) &&
+                    (i->ifa_flags & IFF_UP) && !(i->ifa_flags & IFF_LOOPBACK);
+        }
+        ::freeifaddrs(list);
+        return ready;
+    }
+};
+
 int run_companion(const Options& opts) {
     EngineSinkSession session(opts.session);
     if (session.connect() != SinkResult::Ok) {
@@ -253,6 +275,8 @@ int run_companion(const Options& opts) {
     cfg.name = opts.name;
     cfg.server_port = static_cast<uint16_t>(opts.port);
     ::sendspin::SendspinClient client(cfg);
+    HostNetworkProvider network;
+    client.set_network_provider(&network);
 
     libreecho::sendspin::SdkPlayerListener listener(session, nullptr);
     ::sendspin::PlayerRoleConfig player_cfg;
