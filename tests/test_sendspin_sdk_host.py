@@ -65,18 +65,15 @@ def compile_engine(platform, work, sanitize):
     _exit(g_audit_denied ? 5 : 0);''')
     # A period must consume real model time: an instantaneous fake pcm_writei
     # otherwise runs at the engine poll cadence (not 48 kHz), creating a false
-    # clock-drift/priming-only success. This modifies the fake, not run_engine.
-    paced = """    notify('W');
-    return (int)accepted;"""
-    if paced not in source:
-        raise RuntimeError('Platform fake PCM write contract changed')
-    source = source.replace(paced, """    {
-        const uint64_t ns = (uint64_t)accepted * 1000000000u / DEFAULT_RATE;
-        struct timespec duration = {(time_t)(ns / 1000000000u), (long)(ns % 1000000000u)};
-        while (nanosleep(&duration, &duration) != 0 && errno == EINTR && !stopping) {}
-    }
-    notify('W');
-    return (int)accepted;""")
+    # clock-drift/priming-only success. The Platform fake's opt-in real-time
+    # drain (LE_FAKE_PCM_REALTIME, set in engine_cycle) models the hardware
+    # ring: it drains at 48 kHz, pcm_writei blocks only until the frames fit,
+    # and pcm_get_htimestamp reports the true space. Sleeping a full period
+    # inside every write instead modelled a zero-depth ring. Then the engine's
+    # idle poll stacked on top of each period, so the loop ran at ~2/3 of real
+    # time and starved the SDK, a failure the 2-period device ring cannot have.
+    if 'LE_FAKE_PCM_REALTIME' not in source:
+        raise RuntimeError('Platform fake PCM lacks the real-time drain model')
     source += '''
 /* Test-only calibration: the fake PCM has a known zero-latency model. This
  * linker wrapper is not part of the production engine or deployed artifact.
@@ -92,6 +89,10 @@ struct le_audio_timing *__wrap_le_audio_timing_create(
 }
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
+    /* Serve /etc/libreecho/{target,audio-profile} from the rendered sandbox
+     * profile, exactly as the Platform loop driver does; unset, those reads
+     * are (correctly) audited as host access. */
+    g_profile_dir = getenv("LE_AUDIO_ENGINE_SENDSPIN_PROFILE_DIR");
     child_main(argv[1], SCEN_FINISH, -1, -1);
     return 0;
 }
@@ -116,12 +117,21 @@ def engine_cycle(platform, build, work, sanitize):
     root = work / 'r'
     root.mkdir()
     (root / 'master.volume').write_text('80\n')
+    sys.path.insert(0, str(platform / 'tools/mt8163-arm32'))
+    import libreecho_platform_targets as targets
+    profile = work / 'profile'
+    profile.mkdir()
+    (profile / 'target').write_bytes(targets.identity_bytes('radar_puffin'))
+    (profile / 'audio-profile').write_bytes(targets.audio_profile_bytes('radar_puffin'))
+    engine_env = dict(os.environ, LE_AUDIO_ENGINE_SENDSPIN_PROFILE_DIR=str(profile),
+                      LE_FAKE_PCM_REALTIME='1')
     socket = root / 'sendspin.sock'
     if len(os.fsencode(socket)) > 107:
         raise RuntimeError('scratch path exceeds AF_UNIX bound; use a shorter scratch parent')
     engine_log = work / 'engine-output.log'
     with engine_log.open('wb') as output:
-        proc = subprocess.Popen([str(binary), str(root)], stdout=output, stderr=output)
+        proc = subprocess.Popen([str(binary), str(root)], stdout=output, stderr=output,
+                                env=engine_env)
         try:
             deadline = time.monotonic() + 5
             while not socket.exists():
