@@ -490,6 +490,19 @@ class NativeBridgeCompanionTests(unittest.TestCase):
         self.assertIn("set_network_provider(", src)
         self.assertIn("is_network_ready() override", src)
 
+    def test_unpaired_access_is_opt_in_development_only(self) -> None:
+        # Unpaired (Sentinel) access authenticates nothing. It is only
+        # reachable through an explicit development flag, never by default,
+        # and no service definition may pass that flag.
+        src = (UI / "src/adapter/sendspind.cpp").read_text(encoding="utf-8")
+        self.assertIn("bool dev_allow_unpaired = false;", src)
+        self.assertEqual(src.count("initial_unpaired_access_enabled = true"), 1)
+        self.assertIn("if (opts.dev_allow_unpaired) {", src)
+        for path in UI.rglob("*"):
+            if path.is_file() and path.suffix in {".service", ".sh", ".conf", ".init", ".rc"}:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                self.assertNotIn("--dev-allow-unpaired", text, str(path))
+
     def test_bridge_is_not_linked_into_the_c99_daemon(self) -> None:
         makefile = MAKEFILE.read_text(encoding="utf-8")
         prefix = makefile.split("test-sendspin-sink:", 1)[0]

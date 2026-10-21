@@ -82,7 +82,9 @@ void usage(std::FILE* out) {
         "  --name STR                Sendspin display name for --run\n"
         "  --check                   connect/open/verify the engine, then shut down\n"
         "  --run                     run the SDK companion until SIGINT/SIGTERM\n"
-        "  --quiet                   suppress the readiness line\n",
+        "  --quiet                   suppress the readiness line\n"
+        "  --dev-allow-unpaired      DEVELOPMENT ONLY: accept unpaired (Sentinel)\n"
+        "                            servers; anyone on the LAN can stream audio\n",
         LE_AUDIO_SINK_DEFAULT_SOCKET_PATH, kSessionMaxOpTimeoutMs,
         kSessionMaxOpTimeoutMs);
 }
@@ -103,6 +105,8 @@ struct Options {
     bool check = false;
     bool run = false;
     bool quiet = false;
+    // Development only. Never set by the shipped service definition.
+    bool dev_allow_unpaired = false;
 };
 
 // Returns 0 on success, 2 on a usage/validation error.
@@ -176,6 +180,8 @@ int parse_args(int argc, char** argv, Options* opts) {
             opts->run = true;
         } else if (std::strcmp(a, "--quiet") == 0) {
             opts->quiet = true;
+        } else if (std::strcmp(a, "--dev-allow-unpaired") == 0) {
+            opts->dev_allow_unpaired = true;
         } else {
             std::fprintf(stderr, "sendspind: unknown option '%s'\n", a);
             usage(stderr);
@@ -184,6 +190,10 @@ int parse_args(int argc, char** argv, Options* opts) {
     }
     if (opts->check && opts->run) {
         std::fprintf(stderr, "sendspind: --check and --run are mutually exclusive\n");
+        return 2;
+    }
+    if (opts->dev_allow_unpaired && !opts->run) {
+        std::fprintf(stderr, "sendspind: --dev-allow-unpaired applies only to --run\n");
         return 2;
     }
     if (!opts->check && !opts->run) {
@@ -274,6 +284,14 @@ int run_companion(const Options& opts) {
     ::sendspin::SendspinClientConfig cfg;
     cfg.name = opts.name;
     cfg.server_port = static_cast<uint16_t>(opts.port);
+    if (opts.dev_allow_unpaired) {
+        // No persistence provider is registered, so every start is a first
+        // boot and this seed takes effect; nothing outlives the process.
+        cfg.initial_unpaired_access_enabled = true;
+        std::fprintf(stderr,
+                     "sendspind: WARNING development mode: unpaired servers accepted; "
+                     "any host on the network can stream audio to this device\n");
+    }
     ::sendspin::SendspinClient client(cfg);
     HostNetworkProvider network;
     client.set_network_provider(&network);
