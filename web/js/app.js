@@ -495,11 +495,11 @@ function drawDoa(d){const status=$('#doa-status');if(!status)return false;
  if(!d||!d.running||!Array.isArray(d.beams)||!d.beams.length){status.textContent=d&&d.reason?'Idle: '+d.reason:'Idle';wedges.innerHTML='';trail.innerHTML='';doaView.trail=[];arrow.setAttribute('x2','100');arrow.setAttribute('y2','100');sel.setAttribute('r','0');['#doa-direction','#doa-contrast','#doa-beam'].forEach(id=>{$(id).textContent='—'});return true}
  const snr=doaView.mode==='snr',peak=Math.max(...d.beams.map(b=>Number(b.power_db)||-200)),half=180/d.beams.length;
  wedges.innerHTML=d.beams.map(b=>{const v=snr?(Number(b.snr_db)||0)/DOA_SNR_RANGE_DB:1-(peak-(Number(b.power_db)||-200))/DOA_RANGE_DB,f=Math.max(.06,Math.min(1,v));
-  return `<path d="${doaWedge(Number(b.deg)||0,80*f,half)}" class="doa-wedge" style="opacity:${(.25+.75*f).toFixed(2)}"/>`}).join('');
+  return `<path d="${doaWedge(Number(b.deg)||0,80*f,half)}" class="doa-wedge" opacity="${(.25+.75*f).toFixed(2)}"/>`}).join('');
  const contrast=Number(d.contrast_db)||0,directional=contrast>=DOA_MIN_CONTRAST_DB,doa=Number(d.doa_deg)||0;
  if(directional){const [x,y]=doaPoint(doa,86);arrow.setAttribute('x2',x.toFixed(1));arrow.setAttribute('y2',y.toFixed(1));doaView.trail.push(doa)}else{arrow.setAttribute('x2','100');arrow.setAttribute('y2','100')}
  if(doaView.trail.length>DOA_TRAIL)doaView.trail.splice(0,doaView.trail.length-DOA_TRAIL);
- trail.innerHTML=doaView.trail.map((deg,i)=>{const [x,y]=doaPoint(deg,70);return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.6" class="doa-dot" style="opacity:${((i+1)/doaView.trail.length*.8).toFixed(2)}"/>`}).join('');
+ trail.innerHTML=doaView.trail.map((deg,i)=>{const [x,y]=doaPoint(deg,70);return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.6" class="doa-dot" opacity="${((i+1)/doaView.trail.length*.8).toFixed(2)}"/>`}).join('');
  const [sx,sy]=doaPoint(Number(d.selected_deg)||0,80);sel.setAttribute('cx',sx.toFixed(1));sel.setAttribute('cy',sy.toFixed(1));sel.setAttribute('r','6');
  status.textContent=(d.simulated?'Simulated (mock backend)':'Live')+(d.age_ms>1000?', stale by '+Math.round(d.age_ms/1000)+' s':'');
  $('#doa-direction').textContent=directional?Math.round(doa)+'° — '+doaDirectionName(doa):'No clear direction';

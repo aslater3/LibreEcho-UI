@@ -113,6 +113,10 @@ const arrowTip = () => {
   /* The strongest beam gets the longest wedge. */
   const radii = [...document.querySelector('#doa-wedges').innerHTML.matchAll(/A([\d.]+) /g)].map(m => Number(m[1]));
   assert.strictEqual(radii.indexOf(Math.max(...radii)), 3, 'the 90 deg wedge was not the longest');
+  /* The UI's CSP is style-src 'self': inline style attributes are blocked. */
+  for (const id of ['#doa-wedges', '#doa-trail'])
+    assert(!/style=/.test(document.querySelector(id).innerHTML), id + ' uses an inline style the CSP blocks');
+  assert(!/style=/.test(content.innerHTML), 'the panel uses an inline style the CSP blocks');
 
   /* A diffuse field: no arrow and no direction claimed. */
   drawDoa(beams(200, 2));
