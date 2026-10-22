@@ -4,10 +4,9 @@
 #include <string.h>
 
 /*
- * The MT8163 transport advertises packed S24_3LE with 16 useful bits in the
- * low part of each word.  Preserve that observed alignment when converting to
- * the S16 consumer contract; shifting right by eight would discard the live
- * microphone signal.
+ * The MT8163 transport advertises packed S24_3LE carrying 16 useful bits,
+ * left-justified in each word.  Convert to the S16 consumer contract by
+ * taking the top 16 bits (see below).
  */
 int16_t le_voice_unpack_s24_3le(const uint8_t sample[3])
 {
