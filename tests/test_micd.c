@@ -1,4 +1,8 @@
 #include "adapter/adapter.h"
+#include "adapter/mic_array_render.h"
+
+#include <math.h>
+#include <poll.h>
 
 #include <errno.h>
 #include <signal.h>
@@ -12,6 +16,59 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Seconds of directional capture the beam test feeds micd. */
+#define BEAM_TEST_SECONDS 3
+#define BEAM_TEST_AZIMUTH 90.0
+
+/*
+ * Writes BEAM_TEST_SECONDS of nine-lane 24-bit capture holding broadband
+ * bursts from BEAM_TEST_AZIMUTH, as the array would hear them.
+ */
+static int write_directional_capture(const char *path)
+{
+    static struct le_array_render render;
+    unsigned int seed = 12345;
+    FILE *file = fopen(path, "wb");
+    long i;
+
+    if (!file)
+        return -1;
+    le_array_render_init(&render, BEAM_TEST_AZIMUTH);
+    for (i = 0; i < 16000L * BEAM_TEST_SECONDS; ++i) {
+        unsigned char frame[27];
+        int on = (i % 9600) < 4000;
+        unsigned int c;
+
+        seed = seed * 1103515245U + 12345U;
+        le_array_render_push(&render,
+                             on ? (float)((int)((seed >> 16) % 12001) - 6000)
+                                : 0.0f);
+        for (c = 0; c < 9; ++c) {
+            long v = 0;
+            if (c < LE_ARRAY_RENDER_MICS) {
+                seed = seed * 1103515245U + 12345U;
+                v = lrintf(le_array_render_lane(&render, c)) +
+                    (long)((seed >> 16) % 41) - 20;
+            }
+            v *= 256; /* 16 valid bits at the top of the 24-bit word */
+            frame[c * 3] = (unsigned char)(v & 0xff);
+            frame[c * 3 + 1] = (unsigned char)((v >> 8) & 0xff);
+            frame[c * 3 + 2] = (unsigned char)((v >> 16) & 0xff);
+        }
+        if (fwrite(frame, 1, sizeof(frame), file) != sizeof(frame)) {
+            fclose(file);
+            return -1;
+        }
+    }
+    return fclose(file);
+}
+
+static double azimuth_error(double a, double b)
+{
+    double e = fmod(fabs(a - b), 360.0);
+    return e > 180.0 ? 360.0 - e : e;
+}
 
 #define CHECK(x) do { \
     if (!(x)) { \
@@ -32,6 +89,7 @@ int main(void)
     char mixer_path[160];
     char mixer_args_path[160];
     char config_path[160];
+    char beam_capture_path[160];
     const int expected[7] = {16483, 16746, 17517, 17039,
                              16218, 16339, 14777};
     struct le_adapter *adapter = NULL;
@@ -56,6 +114,8 @@ int main(void)
              "%s/mixer.args", directory);
     snprintf(config_path, sizeof(config_path), "%s/web-config.json",
              directory);
+    snprintf(beam_capture_path, sizeof(beam_capture_path),
+             "%s/beam-capture.s24", directory);
     CHECK(mkdir(directory, 0700) == 0);
     CHECK(mkdir(dt_directory, 0700) == 0);
     for (i = 0; i < 7; ++i) {
@@ -141,15 +201,18 @@ int main(void)
     CHECK(strstr(response, "\"inactive_transport_channels\":[7,8]") != NULL);
     CHECK(strstr(response, "\"configured\":true") != NULL);
     CHECK(strstr(response, "\"mapping_available\":true") != NULL);
-    CHECK(strstr(response, "\"selected_logical_mics\":[0,3]") != NULL);
+    CHECK(strstr(response, "\"selected_logical_mics\":[0,1,3,4]") != NULL);
     CHECK(strstr(response,
-                 "\"relative_delay_samples\":{\"0\":4,\"3\":0}") != NULL);
+                 "\"relative_delay_samples\":{}") != NULL);
     CHECK(strstr(response, "\"applied_to_raw_stream\":false") != NULL);
     CHECK(strstr(response,
                  "\"applied_to_calibrated_stream\":true") != NULL);
     CHECK(strstr(response,
-                 "\"stage\":\"measured-delay-and-sum\"") != NULL);
+                 "\"stage\":\"fixed-beam-select\"") != NULL);
     CHECK(strstr(response, "\"beamforming\":true") != NULL);
+    CHECK(strstr(response,
+                 "\"ring_azimuth_deg\":[150,210,270,330,30,90]") != NULL);
+    CHECK(strstr(response, "\"centre_lane\":6,\"ring_radius_mm\":36") != NULL);
     CHECK(strstr(response, "\"vad\":\"native-energy-baseline\"") != NULL);
     CHECK(strstr(response, "\"wake_word\":false") != NULL);
     le_adapter_close(adapter);
@@ -159,7 +222,13 @@ int main(void)
                           response, sizeof(response)) ==
           LE_ADAPTER_ERR_REJECTED);
     CHECK(strstr(response, "logical microphone mapping") != NULL);
-    puts("micd: status exposes the measured 0/3 delay-and-sum stream");
+    puts("micd: status exposes the measured geometry and fixed-beam pipeline");
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "beams", "{}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"running\":false") != NULL);
     le_adapter_close(adapter);
     adapter = NULL;
     adapter = le_adapter_connect(socket_path, 250);
@@ -251,6 +320,96 @@ int main(void)
               "ADC_D MICPGA Volume Ctrl\n52\n52\n") == NULL);
     }
     puts("micd: stock Radar ADC profile is applied before capture");
+    {
+        /*
+         * Beam view: a calibrated mono stream fed sound from one direction
+         * must report that direction through "beams" while it runs, and
+         * report nothing once it stops.
+         */
+        struct sockaddr_un address;
+        const char request[] =
+            "{\"v\":1,\"id\":34,\"cmd\":\"stream_mono\",\"args\":{}}\n";
+        char sink[4096];
+        double doa = -1.0;
+        int running_seen = 0;
+        FILE *file;
+
+        CHECK(write_directional_capture(beam_capture_path) == 0);
+        file = fopen(capture_path, "w");
+        CHECK(file != NULL);
+        CHECK(fprintf(file, "#!/bin/sh\ncat '%s'\nsleep 2\n",
+                      beam_capture_path) > 0);
+        CHECK(fclose(file) == 0);
+        for (i = 0; i < 100; ++i) {
+            /* The raw stream worker from the previous check must be gone. */
+            adapter = le_adapter_connect(socket_path, 250);
+            CHECK(adapter != NULL);
+            CHECK(le_adapter_call(adapter, "status", "{}", response,
+                                  sizeof(response)) == LE_ADAPTER_OK);
+            le_adapter_close(adapter);
+            adapter = NULL;
+            if (strstr(response, "\"capture\":{\"active\":false"))
+                break;
+            nanosleep(&pause_time, NULL);
+        }
+        stream_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(stream_fd >= 0);
+        memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        strncpy(address.sun_path, socket_path, sizeof(address.sun_path) - 1);
+        CHECK(connect(stream_fd, (struct sockaddr *)&address,
+                      sizeof(address)) == 0);
+        CHECK(write(stream_fd, request, sizeof(request) - 1) ==
+              (ssize_t)(sizeof(request) - 1));
+        for (i = 0; i < 200; ++i) {
+            struct pollfd descriptor = {stream_fd, POLLIN, 0};
+            const char *field;
+
+            /* Drain the mono audio so the worker never blocks on us. */
+            while (poll(&descriptor, 1, 5) > 0 &&
+                   read(stream_fd, sink, sizeof(sink)) > 0)
+                ;
+            adapter = le_adapter_connect(socket_path, 250);
+            CHECK(adapter != NULL);
+            CHECK(le_adapter_call(adapter, "beams", "{}", response,
+                                  sizeof(response)) == LE_ADAPTER_OK);
+            le_adapter_close(adapter);
+            adapter = NULL;
+            field = strstr(response, "\"hops\":");
+            if (strstr(response, "\"running\":true") && field &&
+                strtol(field + 7, NULL, 10) >
+                    (long)(16000L * BEAM_TEST_SECONDS / 128 - 4)) {
+                running_seen = 1;
+                field = strstr(response, "\"doa_deg\":");
+                CHECK(field != NULL);
+                doa = strtod(field + 10, NULL);
+                CHECK(strstr(response, "\"beams\":[{\"deg\":0,") != NULL);
+                break;
+            }
+            nanosleep(&pause_time, NULL);
+        }
+        CHECK(running_seen);
+        if (azimuth_error(doa, BEAM_TEST_AZIMUTH) > 20.0)
+            fprintf(stderr, "micd: beams reported %.1f deg for a source at "
+                    "%.0f deg: %s\n", doa, BEAM_TEST_AZIMUTH, response);
+        CHECK(azimuth_error(doa, BEAM_TEST_AZIMUTH) <= 20.0);
+        close(stream_fd);
+        stream_fd = -1;
+        for (i = 0; i < 250; ++i) {
+            adapter = le_adapter_connect(socket_path, 250);
+            CHECK(adapter != NULL);
+            CHECK(le_adapter_call(adapter, "beams", "{}", response,
+                                  sizeof(response)) == LE_ADAPTER_OK);
+            le_adapter_close(adapter);
+            adapter = NULL;
+            if (strstr(response, "\"running\":false"))
+                break;
+            nanosleep(&pause_time, NULL);
+        }
+        CHECK(strstr(response, "\"running\":false") != NULL);
+        printf("micd: beams report a source at %.0f deg as %.1f deg, "
+               "and clear when the stream stops\n", BEAM_TEST_AZIMUTH, doa);
+    }
     puts("micd: capture start applies the gain saved after boot");
 
 cleanup:
@@ -268,6 +427,7 @@ cleanup:
     unlink(mixer_args_path);
     unlink(mixer_path);
     unlink(config_path);
+    unlink(beam_capture_path);
     unlink(socket_path);
     for (i = 0; i < 7; ++i) {
         snprintf(path, sizeof(path), "%s/miccal.%d", directory, i);

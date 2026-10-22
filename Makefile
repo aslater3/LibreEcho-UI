@@ -35,13 +35,13 @@ NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
-MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/adapter_server.c src/log.c
+MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/mic_beamformer.c src/adapter/adapter_server.c src/log.c
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
 	src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
 	src/adapter/led_music_director.c src/adapter/led_music_render.c
 BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
 WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/service_env.c src/adapter/adapter_client.c src/json.c src/log.c
-CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c
+CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c src/adapter/mic_array_render.c
 RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/radio_opus.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
 # Optional Ogg Opus decode. The default build keeps radio_opus.c as its honest
 # stub and links nothing extra; supplying RADIOD_OPUS_PREFIX -- the pinned
@@ -151,7 +151,7 @@ $(BUILD)/libreecho-audiod: $(AUDIOD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AUDIOD_OBJECTS) $(LDFLAGS) -lm -o $@
 
 $(BUILD)/libreecho-micd: $(MICD_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(MICD_OBJECTS) $(LDFLAGS) -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(MICD_OBJECTS) $(LDFLAGS) -lm -o $@
 
 $(BUILD)/libreecho-ledd: $(LEDD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LEDD_OBJECTS) $(LDFLAGS) -o $@
@@ -166,7 +166,7 @@ $(BUILD)/libreecho-timerd: $(TIMERD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(TIMERD_OBJECTS) $(LDFLAGS) -o $@
 
 $(BUILD)/libreecho-capture-mux: $(CAPTURE_MUX_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(CAPTURE_MUX_OBJECTS) $(LDFLAGS) -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(CAPTURE_MUX_OBJECTS) $(LDFLAGS) -lm -o $@
 
 # RADIOD_TLS_LIBS is empty unless a TLS build supplies it; the libraries must
 # follow the objects so a static link resolves in one pass.

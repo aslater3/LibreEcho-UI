@@ -1053,6 +1053,23 @@
     }
    }
   },
+  "/microphones/beams": {
+   "get": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Live beam powers and rough direction of arrival",
+    "description": "Snapshot of micd's fixed beamformer, refreshed every 8 ms hop while a beamformed stream is running (the wake word service keeps one open). Each of the 12 beams reports smoothed speech-band power (power_db, dB relative to a full-scale tone) and power over its running noise floor (snr_db). doa_deg is the strongest beam refined by parabolic interpolation over its neighbours; contrast_db is how far that beam stands above the average beam (near 0 dB means a diffuse field). selected_deg is the beam feeding the voice pipeline. Angles are degrees clockwise from the front (volume-down side) viewed from above. running is false when no beamformed stream is open. The mock backend returns a simulated source circling the device, flagged simulated. No audio is returned.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/baby-monitor/stream": {
    "get": {
     "tags": [
