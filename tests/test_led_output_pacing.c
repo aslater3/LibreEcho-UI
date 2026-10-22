@@ -140,7 +140,7 @@ int main(void)
     ctx.hw_next_write = now - 0.001;
     require_condition(output_flush(&ctx, now, 0) == 1, "due frame must flush");
     require_condition(frame_written() > 0, "due frame reaches the hardware");
-    require_condition(ctx.hw_written[0].b == ctx.rendered_pixels[0].b &&
+    require_condition(ctx.hw_written[0].b == ctx.rendered_fine[0].b &&
                       ctx.hw_written[0].g == 0,
                       "the newest frame wins; intermediate frames coalesce");
     require_condition(output_flush_timeout(&ctx, now) == -1,

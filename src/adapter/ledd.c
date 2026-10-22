@@ -181,6 +181,7 @@ struct hardware {
     char blue_path[MAX_PATH];
     char brightness_path[MAX_PATH];
     char is31_frame_path[MAX_PATH];
+    char is31_scaled_path[MAX_PATH]; /* empty: kernel lacks scaled_frame */
     char is31_boot_animation_path[MAX_PATH];
 };
 
@@ -282,6 +283,10 @@ struct daemon_context {
        second, so it could not service the visualiser socket and the ring
        froze.  Identical frames are skipped and writes are paced to at most
        half the bus time; the newest frame is always written eventually. */
+    /* What the hardware layer writes, in twelfths of a PWM code (see
+       FINE_UNITS).  Usually rendered_pixels * 12; the sleep pulse fills in
+       levels between codes, reached through the IS31 current scale. */
+    struct pixel rendered_fine[RING_PIXELS];
     struct pixel hw_written[RING_PIXELS];
     int hw_written_valid;
     int hw_pending;
@@ -437,6 +442,72 @@ static int write_is31_pixels(const struct hardware *hw,
     return write_text_file(hw->is31_frame_path, frame);
 }
 
+/*
+ * Fine output levels (#364).  The IS31FL3236 drives each channel at PWM code
+ * c (0..255) and one of four currents, Imax/(s+1) for s = 0..3, latched
+ * together.  The emitted level is c/(s+1) codes, so twelfths of a code (the
+ * LCM of 1..4) represent every reachable level exactly.  At the dim end that
+ * is 12 levels up to code 2 instead of 2.
+ */
+#define FINE_UNITS 12U
+#define IS31_SCALE_MAX 3U
+
+/* Map a fine level to (code, scale).  Prefer the highest current that hits
+   the level exactly, since full current is the calibrated reference; a level
+   no scale reaches exactly (only possible from a caller bug) is rounded to
+   the nearest full-current code. */
+static void fine_to_is31(unsigned int fine, unsigned int *code,
+                         unsigned int *scale)
+{
+    unsigned int s;
+
+    for (s = 0U; s <= IS31_SCALE_MAX; s++) {
+        unsigned int step = FINE_UNITS / (s + 1U); /* fine units per code */
+
+        if (fine % step == 0U && fine / step <= 255U) {
+            *code = fine / step;
+            *scale = s;
+            return;
+        }
+    }
+    *code = (fine + FINE_UNITS / 2U) / FINE_UNITS;
+    if (*code > 255U)
+        *code = 255U;
+    *scale = 0U;
+}
+
+static unsigned int fine_to_code(unsigned int fine)
+{
+    unsigned int code = (fine + FINE_UNITS / 2U) / FINE_UNITS;
+    return code > 255U ? 255U : code;
+}
+
+static int write_is31_scaled(const struct hardware *hw,
+                             const struct pixel fine[RING_PIXELS])
+{
+    unsigned int code[IS31_CHANNELS], scale[IS31_CHANNELS];
+    char text[IS31_CHANNELS * 4 + 2];
+    size_t i;
+    int used = 0;
+
+    for (i = 0; i < RING_PIXELS; i++) {
+        fine_to_is31(fine[i].r, &code[i * 3U], &scale[i * 3U]);
+        fine_to_is31(fine[i].g, &code[i * 3U + 1U], &scale[i * 3U + 1U]);
+        fine_to_is31(fine[i].b, &code[i * 3U + 2U], &scale[i * 3U + 2U]);
+    }
+    for (i = 0; i < IS31_CHANNELS * 2U; i++) {
+        unsigned int v = i < IS31_CHANNELS ? code[i] : scale[i - IS31_CHANNELS];
+        int added = snprintf(text + used, sizeof(text) - (size_t)used, "%02x", v);
+
+        if (added < 0 || (size_t)added >= sizeof(text) - (size_t)used)
+            return -1;
+        used += added;
+    }
+    text[used++] = '\n';
+    text[used] = '\0';
+    return write_text_file(hw->is31_scaled_path, text);
+}
+
 /* ---------------------------- Hardware layer --------------------------- */
 
 static unsigned int scale_channel(unsigned int channel, unsigned int brightness)
@@ -496,11 +567,18 @@ static int hardware_write_rgb(const struct hardware *hw, unsigned int r,
 }
 
 static int hardware_write_pixels(const struct hardware *hw,
-                                 const struct pixel pixels[RING_PIXELS])
+                                 const struct pixel fine[RING_PIXELS])
 {
+    struct pixel pixels[RING_PIXELS];
     unsigned int r = 0, g = 0, b = 0;
     size_t i;
 
+    if (hw->kind == HW_IS31FL3236 && hw->is31_scaled_path[0] != '\0')
+        return write_is31_scaled(hw, fine);
+    for (i = 0; i < RING_PIXELS; i++)
+        pixels[i] = (struct pixel){fine_to_code(fine[i].r),
+                                   fine_to_code(fine[i].g),
+                                   fine_to_code(fine[i].b)};
     if (hw->kind == HW_IS31FL3236)
         return write_is31_pixels(hw, pixels);
     for (i = 0; i < RING_PIXELS; i++) {
@@ -574,7 +652,7 @@ static int output_flush(struct daemon_context *ctx, double now, int force)
     if (!ctx->hw_pending)
         return 0;
     if (ctx->hw_written_valid &&
-        memcmp(ctx->hw_written, ctx->rendered_pixels,
+        memcmp(ctx->hw_written, ctx->rendered_fine,
                sizeof(ctx->hw_written)) == 0) {
         ctx->hw_pending = 0;
         return 0;
@@ -582,11 +660,11 @@ static int output_flush(struct daemon_context *ctx, double now, int force)
     if (!force && now < ctx->hw_next_write)
         return 0;
     started = monotonic_seconds();
-    if (hardware_write_pixels(&ctx->hw, ctx->rendered_pixels) != 0) {
+    if (hardware_write_pixels(&ctx->hw, ctx->rendered_fine) != 0) {
         le_log_warn("LED hardware write failed; retaining state in memory");
         ctx->hw_written_valid = 0;
     } else {
-        memcpy(ctx->hw_written, ctx->rendered_pixels, sizeof(ctx->hw_written));
+        memcpy(ctx->hw_written, ctx->rendered_fine, sizeof(ctx->hw_written));
         ctx->hw_written_valid = 1;
     }
     ctx->hw_pending = 0;
@@ -615,7 +693,9 @@ static int output_flush_timeout(const struct daemon_context *ctx, double now)
     return remaining <= 1.0 ? 1 : (int)remaining + 1;
 }
 
-static void output_commit_transfer(struct daemon_context *ctx,
+/* Render a logical frame into rendered_pixels/rendered_fine without
+   writing it; output_commit_transfer() also flushes. */
+static void output_render_transfer(struct daemon_context *ctx,
                                    const struct led_rgb logical[RING_PIXELS],
                                    unsigned int brightness,
                                    enum led_output_transfer transfer)
@@ -626,9 +706,21 @@ static void output_commit_transfer(struct daemon_context *ctx,
     led_output_process_transfer(led_output_default_calibration(),
                                 &ctx->output_state, logical, brightness,
                                 transfer, out, &ctx->output_diag);
-    for (i = 0; i < RING_PIXELS; i++)
+    for (i = 0; i < RING_PIXELS; i++) {
         ctx->rendered_pixels[i] = (struct pixel){out[i].r, out[i].g, out[i].b};
+        ctx->rendered_fine[i] = (struct pixel){out[i].r * FINE_UNITS,
+                                               out[i].g * FINE_UNITS,
+                                               out[i].b * FINE_UNITS};
+    }
     ctx->hw_pending = 1;
+}
+
+static void output_commit_transfer(struct daemon_context *ctx,
+                                   const struct led_rgb logical[RING_PIXELS],
+                                   unsigned int brightness,
+                                   enum led_output_transfer transfer)
+{
+    output_render_transfer(ctx, logical, brightness, transfer);
     (void)output_flush(ctx, monotonic_seconds(), 0);
 }
 
@@ -888,6 +980,7 @@ static void detect_is31(struct hardware *hw)
     struct dirent *entry;
     char base[MAX_PATH];
     char frame[MAX_PATH];
+    char scaled[MAX_PATH];
     char boot_animation[MAX_PATH];
 
     dir = opendir(SYSFS_I2C_DIR);
@@ -902,14 +995,17 @@ static void detect_is31(struct hardware *hw)
                          "boot_animation") ||
             !path_is_file(frame) || !path_is_file(boot_animation))
             continue;
-        strncpy(hw->is31_frame_path, frame, sizeof(hw->is31_frame_path) - 1);
-        hw->is31_frame_path[sizeof(hw->is31_frame_path) - 1] = '\0';
-        strncpy(hw->is31_boot_animation_path, boot_animation,
-                sizeof(hw->is31_boot_animation_path) - 1);
-        hw->is31_boot_animation_path[
-            sizeof(hw->is31_boot_animation_path) - 1] = '\0';
+        /* Same-size MAX_PATH buffers, NUL-terminated by append_path(). */
+        memcpy(hw->is31_frame_path, frame, sizeof(hw->is31_frame_path));
+        hw->is31_scaled_path[0] = '\0';
+        if (append_path(scaled, sizeof(scaled), base, "scaled_frame") &&
+            path_is_file(scaled))
+            memcpy(hw->is31_scaled_path, scaled, sizeof(hw->is31_scaled_path));
+        memcpy(hw->is31_boot_animation_path, boot_animation,
+               sizeof(hw->is31_boot_animation_path));
         hw->kind = HW_IS31FL3236;
-        le_log_info("using IS31FL3236 LED backend (%s)", frame);
+        le_log_info("using IS31FL3236 LED backend (%s%s)", frame,
+                    hw->is31_scaled_path[0] ? ", current-scaled levels" : "");
         break;
     }
     closedir(dir);
@@ -2072,10 +2168,14 @@ static void start_meter(struct daemon_context *ctx, unsigned int value,
  * help; the hardware has no finer step.
  *
  * Instead the target is followed in continuous PWM units along the same
- * gamma-2 curve and spread over the ring: between codes lo and lo+1, the
- * fraction is shown by how many of the 12 pixels sit at lo+1, filled in a
- * fixed order that spreads them round the ring.  The ring's average then
- * moves in twelfths of a code.  The trough and crest use exactly the codes the
+ * gamma-2 curve.  When the kernel offers the IS31 current scale
+ * (scaled_frame), each channel can also show c/2, c/3 and c/4 codes, so the
+ * breath steps through the fine levels between codes (12 up to code 2 rather
+ * than 2) and each LED changes by at most a quarter of a code at the bottom.
+ * What is left between two reachable levels is spread over the ring: the
+ * fraction is shown by how many of the 12 pixels sit on the upper level,
+ * filled in a fixed order that spreads them round the ring.  Without the
+ * current scale the same dither runs between whole codes.  The trough and crest use exactly the codes the
  * stepped pulse used, so the brightness cap, the never-black trough and the
  * peak are unchanged.
  */
@@ -2089,8 +2189,22 @@ static unsigned int sleep_pulse_code(unsigned int channel, unsigned int percent)
     return led_output_gamma((channel * percent + 50U) / 100U);
 }
 
-static void sleep_pulse_channel(unsigned int channel, unsigned int brightness,
-                                double wave, unsigned char out[RING_PIXELS])
+/* Is this fine level something the hardware can show exactly?  With the
+   kernel's scaled_frame every c/(s+1) is; otherwise only whole codes. */
+static int fine_level_reachable(const struct hardware *hw, unsigned int fine)
+{
+    if (fine % FINE_UNITS == 0U)
+        return 1;
+    if (hw->kind != HW_IS31FL3236 || hw->is31_scaled_path[0] == '\0')
+        return 0;
+    return (fine % 6U == 0U && fine <= 255U * 6U) ||
+           (fine % 4U == 0U && fine <= 255U * 4U) ||
+           (fine % 3U == 0U && fine <= 255U * 3U);
+}
+
+static void sleep_pulse_channel(const struct hardware *hw, unsigned int channel,
+                                unsigned int brightness, double wave,
+                                unsigned int out[RING_PIXELS])
 {
     const double floor_wave = (double)SLEEP_PULSE_FLOOR_PERCENT / 100.0;
     unsigned int lo_code = sleep_pulse_code(
@@ -2099,39 +2213,64 @@ static void sleep_pulse_channel(unsigned int channel, unsigned int brightness,
     double shape = (wave * wave - floor_wave * floor_wave) /
                    (1.0 - floor_wave * floor_wave);
     double target;
-    unsigned int base, lit, i;
+    unsigned int below, above, lit, i;
 
     if (shape < 0.0)
         shape = 0.0;
     if (shape > 1.0)
         shape = 1.0;
-    target = (double)lo_code + (double)(hi_code - lo_code) * shape;
-    base = (unsigned int)target;
-    lit = (unsigned int)((target - (double)base) * RING_PIXELS + 0.5);
-    if (base >= hi_code) {
-        base = hi_code;
-        lit = 0U;
+    /* Follow the breath in fine units, then dither between the two nearest
+       levels the hardware can show: the fraction sets how many of the 12
+       pixels sit on the upper one. */
+    target = ((double)lo_code + (double)(hi_code - lo_code) * shape) *
+             (double)FINE_UNITS;
+    below = (unsigned int)target;
+    if (below >= hi_code * FINE_UNITS) {
+        below = hi_code * FINE_UNITS;
+        above = below;
+    } else {
+        while (!fine_level_reachable(hw, below))
+            below--;
+        above = below + 1U;
+        while (!fine_level_reachable(hw, above))
+            above++;
     }
+    lit = above == below ? 0U
+        : (unsigned int)((target - (double)below) / (double)(above - below) *
+                         RING_PIXELS + 0.5);
     for (i = 0; i < RING_PIXELS; i++)
-        out[sleep_dither_order[i]] = (unsigned char)(base + (i < lit ? 1U : 0U));
+        out[sleep_dither_order[i]] = i < lit ? above : below;
 }
 
 static void sleep_pulse_render(struct daemon_context *ctx,
                                const struct colour *c, double wave)
 {
     struct colour capped = night_capped(ctx, *c);
-    unsigned char r[RING_PIXELS], g[RING_PIXELS], b[RING_PIXELS];
+    unsigned int r[RING_PIXELS], g[RING_PIXELS], b[RING_PIXELS];
     struct led_rgb frame[RING_PIXELS];
+    int exact = 1;
     size_t i;
 
-    sleep_pulse_channel(capped.r, capped.brightness, wave, r);
-    sleep_pulse_channel(capped.g, capped.brightness, wave, g);
-    sleep_pulse_channel(capped.b, capped.brightness, wave, b);
+    sleep_pulse_channel(&ctx->hw, capped.r, capped.brightness, wave, r);
+    sleep_pulse_channel(&ctx->hw, capped.g, capped.brightness, wave, g);
+    sleep_pulse_channel(&ctx->hw, capped.b, capped.brightness, wave, b);
     for (i = 0; i < RING_PIXELS; i++)
-        frame[i] = (struct led_rgb){r[i], g[i], b[i]};
+        frame[i] = (struct led_rgb){fine_to_code(r[i]), fine_to_code(g[i]),
+                                    fine_to_code(b[i])};
     /* Already in PWM units: linear transfer at full brightness, so only the
        calibration gain and frame budget apply on top. */
-    output_commit_transfer(ctx, frame, 100U, LE_OUTPUT_TRANSFER_LINEAR);
+    output_render_transfer(ctx, frame, 100U, LE_OUTPUT_TRANSFER_LINEAR);
+    /* When those left the frame alone (the default calibration, a sleep
+       light far under the budget), show the fine levels instead.  Otherwise
+       keep the adjusted whole codes rather than bypass them. */
+    for (i = 0; i < RING_PIXELS && exact; i++)
+        exact = ctx->rendered_pixels[i].r == frame[i].r &&
+                ctx->rendered_pixels[i].g == frame[i].g &&
+                ctx->rendered_pixels[i].b == frame[i].b;
+    if (exact)
+        for (i = 0; i < RING_PIXELS; i++)
+            ctx->rendered_fine[i] = (struct pixel){r[i], g[i], b[i]};
+    (void)output_flush(ctx, monotonic_seconds(), 0);
 }
 
 /* Sleep light (#101): a low-priority persistent owner.  The pulse phase is
