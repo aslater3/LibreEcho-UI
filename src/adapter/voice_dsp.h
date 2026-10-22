@@ -25,11 +25,16 @@
  * level such hardware actually produces.
  */
 #define LE_VOICE_VAD_MAX_FLOOR_RMS 16384U
+/*
+ * The four microphones the stock speech front end uses: rear-left, rear-right,
+ * front-right and front-left (see mic_array_geometry.h).  They are averaged
+ * with no delay.  The capture lanes arrive in step, so any delay applied here
+ * would only be correct for one source direction and would comb-filter every
+ * other one.  A steered or fixed-beam stage replaces this average when it
+ * exists.
+ */
 #define LE_VOICE_WAKE_MIC_MASK \
     ((1U << 0) | (1U << 1) | (1U << 3) | (1U << 4))
-#define LE_VOICE_BEAM_CHANNEL_EARLY 0
-#define LE_VOICE_BEAM_CHANNEL_LATE 3
-#define LE_VOICE_BEAM_DELAY_SAMPLES 4
 
 enum le_voice_calibration_mode {
     LE_VOICE_CALIBRATION_OFF = 0,
@@ -46,12 +51,6 @@ struct le_voice_calibration {
 struct le_voice_highpass {
     int32_t previous_input;
     int32_t previous_output;
-};
-
-struct le_voice_beamformer {
-    int16_t early_delay[LE_VOICE_BEAM_DELAY_SAMPLES];
-    unsigned int write_index;
-    unsigned int primed;
 };
 
 struct le_voice_vad {
@@ -87,11 +86,6 @@ int16_t le_voice_mix_selected(
     const int16_t logical[LE_VOICE_LOGICAL_CHANNELS],
     unsigned int selected_mask);
 
-void le_voice_beamformer_init(struct le_voice_beamformer *beamformer);
-int16_t le_voice_beamformer_sample(
-    struct le_voice_beamformer *beamformer,
-    const int16_t logical[LE_VOICE_LOGICAL_CHANNELS]);
-
 void le_voice_highpass_init(struct le_voice_highpass *filter);
 int16_t le_voice_highpass_sample(struct le_voice_highpass *filter,
                                  int16_t input);
@@ -101,14 +95,6 @@ void le_voice_process_interleaved(
     size_t frames,
     const struct le_voice_calibration *calibration,
     unsigned int selected_mask,
-    struct le_voice_highpass *highpass,
-    int16_t *mono);
-
-void le_voice_process_beamformed_interleaved(
-    const uint8_t *raw,
-    size_t frames,
-    const struct le_voice_calibration *calibration,
-    struct le_voice_beamformer *beamformer,
     struct le_voice_highpass *highpass,
     int16_t *mono);
 

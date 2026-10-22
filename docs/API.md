@@ -240,7 +240,7 @@ Returns device information.
         "transport_channels": 2,
         "format": "pcm_s24_3le",
         "valid_bits": 16,
-        "beamforming": "measured delay-and-sum on logical mics 0 and 3",
+        "beamforming": "12 fixed superdirective beams on mics 0, 1, 3 and 4 with SNR-based beam selection",
         "high_pass_hz": 80,
         "digital_gain": "4.0x",
         "response": "flat within 0.5 dB, 200 Hz to 7 kHz",
@@ -537,6 +537,61 @@ access to the model, PCM FIFO, ALSA device, or amplifier.
 Use `POST /api/v1/audio/announce/stop` with `{}` to interrupt the active
 announcement. State-changing API calls require the normal CSRF header and,
 when configured, local API authentication.
+
+### Microphone beams
+
+#### GET /api/v1/microphones/beams
+
+A live snapshot of micd's fixed beamformer, for checking that beamforming
+works and roughly where sound is coming from. The **Audio** page draws it as
+the *Direction of arrival* preview under **Microphones**, polling about four
+times a second. No audio is returned.
+
+micd refreshes the snapshot every 8 ms hop while a beamformed stream is
+running; the wake word service keeps one open. Angles are degrees clockwise
+from the front (the volume-down side) viewed from above, the same frame as
+`calibration.geometry` in `GET /api/v1/baby-monitor`.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "running": true,
+    "age_ms": 3,
+    "hops": 51234,
+    "hop_ms": 8,
+    "switches": 17,
+    "reference": "0 deg front (volume down), clockwise viewed from above",
+    "selected_deg": 90,
+    "locked": false,
+    "doa_deg": 88.4,
+    "peak_db": -41.2,
+    "contrast_db": 5.1,
+    "beams": [
+      { "deg": 0, "power_db": -46.0, "snr_db": 1.2 },
+      { "deg": 30, "power_db": -43.9, "snr_db": 3.0 }
+    ]
+  },
+  "error": null
+}
+```
+
+- `beams`: one entry per beam (12). `power_db` is smoothed speech-band
+  (312 Hz–4 kHz) power in dB relative to a full-scale tone; `snr_db` is that
+  power over the beam's running noise floor, which is what beam selection
+  scores, so steady sources such as music fade from it within a few seconds.
+- `doa_deg`: the strongest beam refined by a parabola through it and its two
+  neighbours. Treat it as a rough direction: with the stock four microphones
+  the beams are broad below about 1 kHz.
+- `contrast_db`: how far the strongest beam stands above the average beam.
+  Near 0 dB the sound field is diffuse and `doa_deg` means little.
+- `selected_deg`: the beam currently feeding the voice pipeline; `locked` is
+  true when it has been pinned rather than chosen automatically.
+- `running` is `false` (with a `reason`) when no beamformed stream is open.
+- The mock backend returns a simulated source circling the device every 20 s,
+  with `"simulated": true`.
+
+`503` when micd is not running or its beam state cannot be read.
 
 ### Baby Monitor
 
