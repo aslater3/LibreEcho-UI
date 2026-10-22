@@ -2252,6 +2252,8 @@ on the Linux backend:
 
 (Use query parameter or path to specify integration: `?integration=home-assistant`)
 
+The `mqtt` entry stores a setting only: the image has no MQTT client yet, so the web UI does not show it.
+
 **Response (200):**
 ```json
 {

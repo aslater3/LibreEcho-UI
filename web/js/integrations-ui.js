@@ -428,6 +428,8 @@ function bindHomeAssistantSetup() {
   save.onclick=()=>mutate('/home-assistant',{url:input.value.trim()||HOME_ASSISTANT_DEFAULT_URL},'Home Assistant address saved');
 }
 
+const HIDDEN_INTEGRATIONS=new Set(['mqtt']);
+
 async function integrationsPage() {
   const generation=state.renderGeneration,page=state.page;
   const [d,a,pipeline,live,homeAssistant]=await Promise.all([
@@ -445,11 +447,17 @@ async function integrationsPage() {
    * listed so the absence is visible, but renders no toggle or save button --
    * enabling it could only ever fail. The handler loop below skips those rows.
    */
+  /*
+   * MQTT is listed by the API but the image has no MQTT client, so its switch
+   * stored a setting nothing read (#369). Keep it off the page until a client
+   * ships; the API entry stays so existing callers are unaffected.
+   */
+  const shown=d.items.filter(x=>!HIDDEN_INTEGRATIONS.has(x.id));
   const homeAssistantEnabled=d.items.some(x=>x.id==='home-assistant'&&x.enabled);
   const homeAssistantState=homeAssistantVoiceStatus(homeAssistantEnabled,pipeline);
   const transitionError=pipeline?.restart?.error
     ?`<p class="notice" role="alert">Voice pipeline error: ${esc(pipeline.restart.error)}</p>`:'';
-  const integrations=d.items.map(x=>collapsiblePanel(x.name,
+  const integrations=shown.map(x=>collapsiblePanel(x.name,
     `<p class="muted">${integrationBlurb(x)}</p>
     ${x.installed===false?'':toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
     <div class="status-line"><span class="status-dot ${x.id==='home-assistant'?(homeAssistantState.okay?'ok':''):(x.enabled?'ok':'')}"></span><span>${esc(x.id==='home-assistant'&&x.installed!==false?homeAssistantState.status:integrationStatus(x))}</span></div>
@@ -595,7 +603,7 @@ async function integrationsPage() {
   }
 
   if(homeAssistantEnabled){bindHomeAssistantSetup();bindProvenanceCopy();}
-  d.items.forEach(x=>{
+  shown.forEach(x=>{
     const save=$('#save-int-'+x.id);
     if(!save)return;                       /* not installed: nothing rendered to bind */
     bindDirty(['#int-'+x.id],'#save-int-'+x.id);
