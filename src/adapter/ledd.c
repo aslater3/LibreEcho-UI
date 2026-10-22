@@ -75,7 +75,15 @@
 #define METER_TRACK_PERCENT 6U
 #define VISUALIZER_TIMEOUT_SECONDS 0.42
 #define STARTUP_READY_PATH "/run/libreecho/startup-ready"
-#define STARTUP_FRAME_MS 88
+/* Boot comet: one soft segment rolls round the ring.  The head position is
+   continuous in time, so each frame blends the segment across neighbouring
+   pixels instead of jumping a whole pixel per frame. */
+#define STARTUP_FRAME_MS FRAME_MS
+#define STARTUP_REVOLUTION_S 1.2
+#define STARTUP_HEAD_PIXELS 1.0
+#define STARTUP_TAIL_PIXELS 4.0
+#define STARTUP_FLOOR 64U
+#define STARTUP_PEAK 255U
 #define NIGHT_POLL_MS 60000
 
 /* Idle base ring modes (#110).  The indicator is the default: a resting
@@ -220,7 +228,7 @@ struct daemon_context {
     double animation_started;
     int startup_animation_active;
     char startup_ready_path[MAX_PATH];
-    unsigned int startup_animation_frame;
+    double startup_animation_started;
     double startup_animation_next_frame;
     int pattern_active;
     int pattern_kind;
@@ -482,6 +490,25 @@ static unsigned int fine_to_code(unsigned int fine)
     return code > 255U ? 255U : code;
 }
 
+/* Is this fine level something the hardware can show exactly?  With the
+   kernel's scaled_frame every c/(s+1) is; otherwise only whole codes. */
+static int fine_level_reachable(const struct hardware *hw, unsigned int fine)
+{
+    if (fine % FINE_UNITS == 0U)
+        return 1;
+    if (hw->kind != HW_IS31FL3236 || hw->is31_scaled_path[0] == '\0')
+        return 0;
+    return (fine % 6U == 0U && fine <= 255U * 6U) ||
+           (fine % 4U == 0U && fine <= 255U * 4U) ||
+           (fine % 3U == 0U && fine <= 255U * 3U);
+}
+
+/* Spatial dither order: spreads the "upper level" pixels evenly round the
+   ring, so a uniform colour between two levels reads as one in-between level. */
+static const unsigned char sleep_dither_order[RING_PIXELS] = {
+    0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11
+};
+
 static int write_is31_scaled(const struct hardware *hw,
                              const struct pixel fine[RING_PIXELS])
 {
@@ -715,20 +742,176 @@ static void output_render_transfer(struct daemon_context *ctx,
     ctx->hw_pending = 1;
 }
 
+/*
+ * Smoothed drive levels for every gamma-transfer frame (#364 follow-up).
+ *
+ * The integer path rounds each channel to a whole PWM code after the gamma-2
+ * transfer, so anything that fades or pulses at low brightness steps visibly
+ * (a pulse at 20% red only spans a handful of codes).  When the kernel offers
+ * the IS31 current scale, follow the exact gamma-2 curve in fine units
+ * instead, and pick the nearest level the chip can show.  A uniform ring is
+ * also dithered spatially between the two nearest levels, as the sleep pulse
+ * does, so its average lands between them too.
+ *
+ * The integer frame is still rendered first and remains what status reports.
+ * The fine levels replace it only when that frame came straight from the
+ * transfer (no budget or slew scaling); a scaled frame keeps whole codes
+ * rather than bypass the limits.  Non-boosting: no channel exceeds its whole
+ * code, and a lit channel never drops to black.
+ */
+static double smooth_fine_target(unsigned int channel, double brightness,
+                                 unsigned int gain)
+{
+    double v;
+
+    if (brightness > 100.0)
+        brightness = 100.0;
+    if (brightness < 0.0)
+        brightness = 0.0;
+    v = (double)(channel > 255U ? 255U : channel) * brightness / 100.0;
+    if (gain < 255U)
+        v = v * (double)gain / 255.0;
+    if (v > 255.0)
+        v = 255.0;
+    return v * v / 255.0 * (double)FINE_UNITS;
+}
+
+static void smooth_bracket(const struct hardware *hw, double target,
+                           unsigned int ceiling, unsigned int *below,
+                           unsigned int *above)
+{
+    unsigned int lo, hi;
+
+    if (target < 0.0)
+        target = 0.0;
+    lo = (unsigned int)target;
+    if (lo >= ceiling) {
+        *below = *above = ceiling;
+        return;
+    }
+    while (lo > 0U && !fine_level_reachable(hw, lo))
+        lo--;
+    hi = lo + 1U;
+    while (hi < ceiling && !fine_level_reachable(hw, hi))
+        hi++;
+    *below = lo;
+    *above = hi;
+}
+
+static unsigned int smooth_floor_level(const struct hardware *hw,
+                                       unsigned int fine, unsigned int code)
+{
+    unsigned int least = 1U;
+
+    if (code == 0U)
+        return 0U;
+    if (fine > 0U)
+        return fine;
+    while (!fine_level_reachable(hw, least))
+        least++;
+    return least;
+}
+
+static void output_smooth_fine(struct daemon_context *ctx,
+                               const struct led_rgb logical[RING_PIXELS],
+                               double brightness)
+{
+    const struct led_output_calibration *cal = led_output_default_calibration();
+    struct pixel fine[RING_PIXELS];
+    unsigned int gains[3];
+    int uniform = 1;
+    size_t i, k;
+
+    if (ctx->hw.kind != HW_IS31FL3236 || ctx->hw.is31_scaled_path[0] == '\0')
+        return;
+    if (ctx->output_diag.limited || ctx->output_diag.slew_limited)
+        return;
+    gains[0] = cal->gain_r;
+    gains[1] = cal->gain_g;
+    gains[2] = cal->gain_b;
+    for (i = 1; i < RING_PIXELS && uniform; i++)
+        uniform = logical[i].r == logical[0].r && logical[i].g == logical[0].g &&
+                  logical[i].b == logical[0].b;
+
+    for (k = 0; k < 3U; k++) {
+        unsigned int lit = 0U, below, above;
+
+        for (i = 0; i < RING_PIXELS; i++) {
+            unsigned int channel = k == 0U ? logical[i].r
+                                 : k == 1U ? logical[i].g : logical[i].b;
+            unsigned int code = k == 0U ? ctx->rendered_pixels[i].r
+                              : k == 1U ? ctx->rendered_pixels[i].g
+                                        : ctx->rendered_pixels[i].b;
+            double target = smooth_fine_target(channel, brightness, gains[k]);
+            unsigned int level;
+
+            smooth_bracket(&ctx->hw, target, code * FINE_UNITS, &below, &above);
+            if (uniform) {
+                if (i == 0U)
+                    lit = above == below ? 0U
+                        : (unsigned int)((target - (double)below) /
+                                         (double)(above - below) *
+                                         RING_PIXELS + 0.5);
+                level = 0U;
+                {
+                    size_t slot;
+                    for (slot = 0; slot < RING_PIXELS; slot++)
+                        if (sleep_dither_order[slot] == i)
+                            break;
+                    level = slot < lit ? above : below;
+                }
+            } else {
+                level = target - (double)below <= (double)above - target
+                      ? below : above;
+            }
+            level = smooth_floor_level(&ctx->hw, level, code);
+            if (k == 0U) fine[i].r = level;
+            else if (k == 1U) fine[i].g = level;
+            else fine[i].b = level;
+        }
+    }
+    memcpy(ctx->rendered_fine, fine, sizeof(fine));
+}
+
+static void output_commit_level(struct daemon_context *ctx,
+                                const struct led_rgb logical[RING_PIXELS],
+                                double brightness)
+{
+    unsigned int whole;
+
+    if (brightness < 0.0)
+        brightness = 0.0;
+    if (brightness > 100.0)
+        brightness = 100.0;
+    whole = (unsigned int)(brightness + 0.5);
+    output_render_transfer(ctx, logical, whole, LE_OUTPUT_TRANSFER_GAMMA);
+    output_smooth_fine(ctx, logical, brightness);
+    (void)output_flush(ctx, monotonic_seconds(), 0);
+}
+
+/* Kept for the output-pacing test harness, which drives a whole-number
+   frame through the same gamma route as the daemon. */
+static void output_commit(struct daemon_context *ctx,
+                          const struct led_rgb logical[RING_PIXELS],
+                          unsigned int brightness) __attribute__((unused));
+static void output_commit(struct daemon_context *ctx,
+                          const struct led_rgb logical[RING_PIXELS],
+                          unsigned int brightness)
+{
+    output_commit_level(ctx, logical, (double)brightness);
+}
+
 static void output_commit_transfer(struct daemon_context *ctx,
                                    const struct led_rgb logical[RING_PIXELS],
                                    unsigned int brightness,
                                    enum led_output_transfer transfer)
 {
+    if (transfer == LE_OUTPUT_TRANSFER_GAMMA) {
+        output_commit_level(ctx, logical, (double)brightness);
+        return;
+    }
     output_render_transfer(ctx, logical, brightness, transfer);
     (void)output_flush(ctx, monotonic_seconds(), 0);
-}
-
-static void output_commit(struct daemon_context *ctx,
-                          const struct led_rgb logical[RING_PIXELS],
-                          unsigned int brightness)
-{
-    output_commit_transfer(ctx, logical, brightness, LE_OUTPUT_TRANSFER_GAMMA);
 }
 
 static void night_cap_pixels(const struct daemon_context *ctx,
@@ -760,15 +943,24 @@ static void night_cap_pixels(const struct daemon_context *ctx,
 
 /* A solid colour across the ring: brightness is the colour's own master cap,
    further capped by night mode, then applied by the output stage. */
-static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
+static void hardware_apply_level(struct daemon_context *ctx,
+                                 const struct colour *c, double brightness)
 {
     struct colour capped = night_capped(ctx, *c);
     struct led_rgb logical[RING_PIXELS];
     size_t i;
 
+    /* night_capped() only lowers the whole-number cap; keep the fraction. */
+    if (brightness > (double)capped.brightness)
+        brightness = (double)capped.brightness;
     for (i = 0; i < RING_PIXELS; i++)
         logical[i] = (struct led_rgb){capped.r, capped.g, capped.b};
-    output_commit(ctx, logical, capped.brightness);
+    output_commit_level(ctx, logical, brightness);
+}
+
+static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
+{
+    hardware_apply_level(ctx, c, (double)c->brightness);
 }
 
 /* A logical per-pixel frame (0..255 per channel, no brightness baked in). */
@@ -865,15 +1057,60 @@ static int night_schedule_timeout(const struct daemon_context *ctx,
     return timeout > NIGHT_POLL_MS ? NIGHT_POLL_MS : timeout;
 }
 
-static void apply_startup_animation(struct daemon_context *ctx)
+/* 0..1 smooth falloff: 1 at x=0, 0 at x>=1 (half a cosine). */
+static double startup_soft_edge(double x)
 {
-    struct pixel pixels[RING_PIXELS];
+    const double pi = 3.14159265358979323846;
+
+    if (x <= 0.0)
+        return 1.0;
+    if (x >= 1.0)
+        return 0.0;
+    return 0.5 + 0.5 * sine_approx(pi * x + pi / 2.0);
+}
+
+/* Comet level of a pixel `behind` pixels behind the head (negative = ahead).
+   A short soft leading edge, then a longer tail fading back to the floor. */
+static double startup_comet_level(double behind)
+{
+    if (behind < 0.0)
+        return startup_soft_edge(-behind / STARTUP_HEAD_PIXELS);
+    return startup_soft_edge(behind / STARTUP_TAIL_PIXELS);
+}
+
+static void startup_comet_frame(double elapsed, struct pixel pixels[RING_PIXELS])
+{
+    double turns = elapsed / STARTUP_REVOLUTION_S;
+    double head;
     size_t i;
 
-    for (i = 0; i < RING_PIXELS; i++)
-        pixels[i] = (struct pixel){0, 64, 0};
-    pixels[ctx->startup_animation_frame % RING_PIXELS] =
-        (struct pixel){0, 255, 0};
+    if (turns < 0.0)
+        turns = 0.0;
+    turns -= (double)(unsigned long)turns;
+    head = turns * (double)RING_PIXELS;
+    for (i = 0; i < RING_PIXELS; i++) {
+        double behind = head - (double)i;
+        double level;
+
+        /* Shortest signed distance round the ring, in [-N/2, N/2). */
+        while (behind >= (double)RING_PIXELS / 2.0)
+            behind -= (double)RING_PIXELS;
+        while (behind < -(double)RING_PIXELS / 2.0)
+            behind += (double)RING_PIXELS;
+        level = startup_comet_level(behind);
+        pixels[i] = (struct pixel){
+            0,
+            (unsigned int)((double)STARTUP_FLOOR +
+                           (double)(STARTUP_PEAK - STARTUP_FLOOR) * level + 0.5),
+            0};
+    }
+}
+
+static void apply_startup_animation(struct daemon_context *ctx, double now)
+{
+    struct pixel pixels[RING_PIXELS];
+
+    startup_comet_frame(now - ctx->startup_animation_started, pixels);
     output_pixels(ctx, pixels, 100U);
 }
 
@@ -1755,9 +1992,8 @@ static void apply_animated(struct daemon_context *ctx, double now)
         phase -= 1.0;
     wave = 0.5 + 0.5 * sine_approx(phase * 6.28318530717958647692);
     multiplier = 0.30 + 0.70 * wave;
-    output.brightness = (unsigned int)((double)ctx->state.current.brightness *
-                                       multiplier + 0.5);
-    hardware_apply(ctx, &output);
+    hardware_apply_level(ctx, &output,
+                         (double)ctx->state.current.brightness * multiplier);
 }
 
 static unsigned int visualizer_energy(unsigned int level)
@@ -2179,27 +2415,11 @@ static void start_meter(struct daemon_context *ctx, unsigned int value,
  * stepped pulse used, so the brightness cap, the never-black trough and the
  * peak are unchanged.
  */
-static const unsigned char sleep_dither_order[RING_PIXELS] = {
-    0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11
-};
 
 /* Old integer path, kept for the endpoints: percent -> logical -> gamma. */
 static unsigned int sleep_pulse_code(unsigned int channel, unsigned int percent)
 {
     return led_output_gamma((channel * percent + 50U) / 100U);
-}
-
-/* Is this fine level something the hardware can show exactly?  With the
-   kernel's scaled_frame every c/(s+1) is; otherwise only whole codes. */
-static int fine_level_reachable(const struct hardware *hw, unsigned int fine)
-{
-    if (fine % FINE_UNITS == 0U)
-        return 1;
-    if (hw->kind != HW_IS31FL3236 || hw->is31_scaled_path[0] == '\0')
-        return 0;
-    return (fine % 6U == 0U && fine <= 255U * 6U) ||
-           (fine % 4U == 0U && fine <= 255U * 4U) ||
-           (fine % 3U == 0U && fine <= 255U * 3U);
 }
 
 static void sleep_pulse_channel(const struct hardware *hw, unsigned int channel,
@@ -2507,7 +2727,9 @@ static void update_pattern(struct daemon_context *ctx, double now)
         double wave;
         while (phase >= 1.0) phase -= 1.0;
         wave = 0.20 + 0.80 * (0.5 + 0.5 * sine_approx(phase * 6.28318530717958647692));
-        output.brightness = (unsigned int)((double)ctx->pattern_colour.brightness * wave + 0.5);
+        hardware_apply_level(ctx, &output,
+                             (double)ctx->pattern_colour.brightness * wave);
+        return;
     } else if (ctx->pattern_kind == PATTERN_FLASH) {
         unsigned int cycle = (unsigned int)(elapsed / 0.20);
         on = (cycle % 2U) == 0;
@@ -2766,9 +2988,7 @@ static void update_animation(struct daemon_context *ctx, double now)
         }
         if (now < ctx->startup_animation_next_frame)
             return;
-        apply_startup_animation(ctx);
-        ctx->startup_animation_frame =
-            (ctx->startup_animation_frame + 1) % RING_PIXELS;
+        apply_startup_animation(ctx, now);
         ctx->startup_animation_next_frame = now + STARTUP_FRAME_MS / 1000.0;
         return;
     }
@@ -3712,9 +3932,9 @@ int main(int argc, char **argv)
     apply_base_state(&ctx, monotonic_seconds());
     if (startup_animation_requested && !path_is_file(ctx.startup_ready_path)) {
         ctx.startup_animation_active = 1;
-        ctx.startup_animation_frame = 0;
-        ctx.startup_animation_next_frame = monotonic_seconds();
-        apply_startup_animation(&ctx);
+        ctx.startup_animation_started = monotonic_seconds();
+        ctx.startup_animation_next_frame = ctx.startup_animation_started;
+        apply_startup_animation(&ctx, ctx.startup_animation_started);
         le_log_info("green startup animation started");
     }
 
