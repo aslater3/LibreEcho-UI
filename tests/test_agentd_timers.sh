@@ -17,9 +17,15 @@ dir=$(mktemp -d)
 agent_sock="$dir/agent.sock"
 timer_sock="$dir/timer.sock"
 
+# Wait for both daemons to exit before removing their directory: timerd
+# finalizes its state file on SIGTERM, and deleting the directory while it
+# does so made rm fail ("Directory not empty") and the passing test exit 1.
 cleanup() {
     for name in agentd timerd; do
         [ -f "$dir/$name.pid" ] && kill "$(cat "$dir/$name.pid")" 2>/dev/null || true
+    done
+    for name in agentd timerd; do
+        [ -f "$dir/$name.pid" ] && wait "$(cat "$dir/$name.pid")" 2>/dev/null || true
     done
     rm -rf "$dir"
 }

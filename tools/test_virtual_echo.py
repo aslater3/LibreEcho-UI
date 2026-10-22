@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import socket
 import subprocess
 import tempfile
 import time
@@ -72,6 +73,24 @@ def test_persisted_auth_root() -> None:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+    assert_port_released(port)
+
+
+def assert_port_released(port: int) -> None:
+    """Stopping the runner must take the sandboxed daemon with it.
+
+    The daemon used to outlive the runner and keep answering on the port, so
+    the next run's tests talked to a stale server and failed with 401.
+    """
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                pass
+        except OSError:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"libreecho-web still listening on {port} after the runner stopped")
 
 
 def main() -> int:
