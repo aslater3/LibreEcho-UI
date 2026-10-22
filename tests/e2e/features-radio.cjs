@@ -265,7 +265,7 @@ async function main() {
     audio: {
       capture: { rate_hz: 16000, raw_channels: 9, microphones: 7, transport_channels: 2,
         format: 'pcm_s24_3le', valid_bits: 16,
-        beamforming: 'measured delay-and-sum on logical mics 0 and 3',
+        beamforming: '12 fixed superdirective beams on mics 0, 1, 3 and 4 with SNR-based beam selection',
         high_pass_hz: 80, digital_gain: '4.0x',
         response: 'flat within 0.5 dB, 200 Hz to 7 kHz',
         noise_floor_dbfs: -65.3, thd_n_percent_max: 0.2, clipping_from_input_amplitude: 16000 },

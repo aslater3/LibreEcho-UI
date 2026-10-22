@@ -177,6 +177,7 @@ node tests/test_assistant_clock_format_ui.js
 node tests/test_chatgpt_auth_gate_ui.js
 node tests/test_home_location_lookup_ui.js
 node tests/test_mute_lamp_ui.js
+node tests/test_doa_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -280,15 +281,20 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -lm -o build/test-airplay-led-bridge-refresh
 ./build/test-airplay-led-bridge-refresh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
-    -Isrc -Isrc/adapter tests/test_micd.c \
+    -Isrc -Isrc/adapter tests/test_micd.c src/adapter/mic_array_render.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
-    -o build/test-micd
+    -lm -o build/test-micd
 ./build/test-micd
 sh tests/test_waked_init_model.sh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_voice_dsp.c src/adapter/voice_dsp.c \
     -o build/test-voice-dsp
 ./build/test-voice-dsp
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_mic_beamformer.c \
+    src/adapter/mic_beamformer.c src/adapter/voice_dsp.c \
+    -lm -o build/test-mic-beamformer
+./build/test-mic-beamformer
 # M_PI is not in C99, and glibc hides it under a strict _POSIX_C_SOURCE, so this
 # built only on toolchains whose headers leak it. It failed to compile on glibc
 # and took every test after it down with it.
