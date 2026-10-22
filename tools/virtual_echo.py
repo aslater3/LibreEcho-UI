@@ -146,6 +146,11 @@ def write_state(root: Path, state: State) -> None:
 def run_web(root: Path, host: str, port: int, web: Path) -> subprocess.Popen[bytes]:
     # bwrap makes the production absolute /run and /var/run paths private while
     # leaving the host filesystem read-only to the guest process.
+    # --unshare-pid makes bwrap the init of a private PID namespace, so the
+    # kernel kills the daemon whenever the sandbox goes. Without it,
+    # --die-with-parent does not reach libreecho-web (the user-namespace exec
+    # clears its parent-death signal), and a stopped or killed runner leaked a
+    # live server on its port for the next test run to hit.
     runtime, data = root / "run" / "libreecho", root / "data"
     for p in (runtime, data / "libreecho" / "config", data / "libreecho" / "userdata"):
         p.mkdir(parents=True, exist_ok=True)
@@ -156,7 +161,7 @@ def run_web(root: Path, host: str, port: int, web: Path) -> subprocess.Popen[byt
     if not config_path.exists():
         config_path.write_text("{}\n")
         os.chmod(config_path, 0o600)
-    cmd = ["bwrap", "--die-with-parent", "--unshare-user-try", "--new-session", "--ro-bind", "/", "/",
+    cmd = ["bwrap", "--die-with-parent", "--unshare-user-try", "--unshare-pid", "--new-session", "--ro-bind", "/", "/",
            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run",
            "--dir", "/run/libreecho", "--bind", str(runtime), "/run/libreecho",
            "--bind", str(data / "libreecho"), "/tmp/virtual-data",
