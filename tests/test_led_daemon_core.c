@@ -363,6 +363,188 @@ int main(void)
     require_condition(max_channel(&ctx) == peak_b,
                       "resume must continue the wave, not replay it");
 
+    /* ---- 5b. Default-brightness pulse is smooth, not two steps (#364). -- */
+    reset(&ctx);
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
+               "{\"mode\":\"pulse\",\"brightness\":8,\"period_ms\":4000}}");
+    require_condition(response_ok() && ctx.sleep_active,
+                      "default pulse sleep light must activate");
+    {
+        /* The stepped pulse drove red code 1 at the trough and 2 at the
+           crest; those endpoints and the cap must not move. */
+        unsigned int trough = led_output_gamma((255U * 1U + 50U) / 100U);
+        unsigned int crest = led_output_gamma((255U * 8U + 50U) / 100U);
+        unsigned int seen[12 * 2 + 1] = {0};
+        unsigned int distinct = 0U, previous = 0U, k, i;
+        int monotonic = 1;
+
+        for (k = 0U; k <= 100U; k++) {
+            /* Phase 0.75 is the trough, 0.25 the crest: walk trough->crest. */
+            double t = ctx.sleep_started + 4.0 * (0.75 + 0.5 * k / 100.0);
+            unsigned int sum = 0U;
+
+            apply_sleep_light(&ctx, t);
+            for (i = 0U; i < RING_PIXELS; i++) {
+                require_condition(ctx.rendered_pixels[i].r >= trough &&
+                                      ctx.rendered_pixels[i].r <= crest,
+                                  "a dithered pixel left the stepped pulse's range");
+                sum += ctx.rendered_pixels[i].r;
+            }
+            if (k == 0U)
+                require_condition(sum == trough * RING_PIXELS,
+                                  "the trough must stay at the old code");
+            if (k == 100U)
+                require_condition(sum == crest * RING_PIXELS,
+                                  "the crest must stay at the old code");
+            if (k > 0U && sum < previous)
+                monotonic = 0;
+            previous = sum;
+            if (sum < sizeof(seen) / sizeof(seen[0]) && !seen[sum]++)
+                distinct++;
+        }
+        require_condition(monotonic, "the rising half of the breath must not dip");
+        require_condition(distinct >= 10U,
+                          "the ring average must move in fine steps, not jump 1->2");
+    }
+
+    /* ---- 5c. With the kernel's current scale, the pulse uses the fine
+       levels between codes (#364). ------------------------------------- */
+    {
+        unsigned int fine, code, scale, k, i, distinct = 0U, previous = 0U;
+        unsigned int trough = led_output_gamma((255U * 1U + 50U) / 100U);
+        unsigned int crest = led_output_gamma((255U * 8U + 50U) / 100U);
+        unsigned int seen[2U * 12U * 12U + 1U] = {0};
+        unsigned int max_step = 0U;
+        int monotonic = 1;
+        char frame_file[] = "/tmp/libreecho-ledd-frame-XXXXXX";
+        char scaled_file[] = "/tmp/libreecho-ledd-scaled-XXXXXX";
+        char text[256];
+        FILE *fp;
+        int fd;
+
+        /* Every reachable level maps to a (code, scale) that emits it
+           exactly, preferring the highest current. */
+        for (fine = 0U; fine <= 255U * FINE_UNITS; fine++) {
+            reset(&ctx);
+            ctx.hw.kind = HW_IS31FL3236;
+            snprintf(ctx.hw.is31_scaled_path, sizeof(ctx.hw.is31_scaled_path),
+                     "x");
+            if (!fine_level_reachable(&ctx.hw, fine))
+                continue;
+            fine_to_is31(fine, &code, &scale);
+            require_condition(scale <= 3U && code <= 255U &&
+                                  code * FINE_UNITS == fine * (scale + 1U),
+                              "a fine level must map to an exact code/scale");
+            require_condition(fine % FINE_UNITS != 0U || scale == 0U,
+                              "whole codes must stay at full current");
+        }
+
+        fd = mkstemp(frame_file);
+        require_condition(fd >= 0, "create fake frame file");
+        close(fd);
+        fd = mkstemp(scaled_file);
+        require_condition(fd >= 0, "create fake scaled_frame file");
+        close(fd);
+        reset(&ctx);
+        ctx.hw.kind = HW_IS31FL3236;
+        snprintf(ctx.hw.is31_frame_path, sizeof(ctx.hw.is31_frame_path), "%s",
+                 frame_file);
+        snprintf(ctx.hw.is31_scaled_path, sizeof(ctx.hw.is31_scaled_path),
+                 "%s", scaled_file);
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
+                   "{\"mode\":\"pulse\",\"brightness\":8,\"period_ms\":4000}}");
+        require_condition(response_ok() && ctx.sleep_active,
+                          "scaled pulse sleep light must activate");
+        for (k = 0U; k <= 200U; k++) {
+            double t = ctx.sleep_started + 4.0 * (0.75 + 0.5 * k / 200.0);
+            unsigned int sum = 0U, lo = ~0U, hi = 0U;
+
+            apply_sleep_light(&ctx, t);
+            for (i = 0U; i < RING_PIXELS; i++) {
+                fine = ctx.rendered_fine[i].r;
+                require_condition(fine >= trough * FINE_UNITS &&
+                                      fine <= crest * FINE_UNITS,
+                                  "a fine pixel left the pulse's range");
+                require_condition(fine_level_reachable(&ctx.hw, fine),
+                                  "a pixel asked for a level the chip lacks");
+                require_condition(ctx.rendered_pixels[i].r == fine_to_code(fine),
+                                  "status pixels must be the rounded level");
+                sum += fine;
+                if (fine < lo) lo = fine;
+                if (fine > hi) hi = fine;
+            }
+            /* Two neighbouring levels at most, a quarter code apart at
+               the bottom of the breath. */
+            if (hi - lo > max_step)
+                max_step = hi - lo;
+            if (k == 0U)
+                require_condition(sum == trough * FINE_UNITS * RING_PIXELS,
+                                  "the scaled trough must stay at the old code");
+            if (k == 200U)
+                require_condition(sum == crest * FINE_UNITS * RING_PIXELS,
+                                  "the scaled crest must stay at the old code");
+            if (k > 0U && sum < previous)
+                monotonic = 0;
+            previous = sum;
+            sum /= RING_PIXELS; /* mean, in fine units, rounded down */
+            if (sum < sizeof(seen) / sizeof(seen[0]) && !seen[sum]++)
+                distinct++;
+        }
+        require_condition(monotonic, "the scaled breath must not dip");
+        require_condition(max_step <= FINE_UNITS / 4U,
+                          "neighbouring pixels must differ by a quarter code at most");
+        require_condition(distinct >= 10U,
+                          "the scaled breath must pass through the fine levels");
+
+        /* The hardware gets the scaled frame: 36 codes then 36 scales, and
+           each channel re-emits the rendered level. */
+        require_condition(truncate(scaled_file, 0) == 0, "truncate scaled");
+        apply_sleep_light(&ctx, ctx.sleep_started + 4.0 * 0.80);
+        ctx.hw_written_valid = 0;
+        ctx.hw_pending = 1;
+        require_condition(output_flush(&ctx, monotonic_seconds(), 1) == 1,
+                          "forced flush must write");
+        fp = fopen(scaled_file, "r");
+        require_condition(fp != NULL && fgets(text, sizeof(text), fp) != NULL,
+                          "scaled_frame must be written");
+        fclose(fp);
+        require_condition(strlen(text) == 36U * 4U + 1U && text[144] == '\n',
+                          "scaled_frame is 144 hex characters and a newline");
+        for (i = 0U; i < 36U; i++) {
+            unsigned int c, s, want;
+            const struct pixel *px = &ctx.rendered_fine[i / 3U];
+
+            require_condition(sscanf(text + i * 2U, "%2x", &c) == 1 &&
+                                  sscanf(text + 72U + i * 2U, "%2x", &s) == 1,
+                              "scaled_frame must be hex");
+            want = i % 3U == 0U ? px->r : i % 3U == 1U ? px->g : px->b;
+            require_condition(s <= 3U && c * FINE_UNITS == want * (s + 1U),
+                              "each channel must emit its rendered level");
+        }
+        fp = fopen(frame_file, "r");
+        require_condition(fp != NULL && fgetc(fp) == EOF,
+                          "the legacy frame file must not be written too");
+        fclose(fp);
+
+        /* Without scaled_frame the legacy 36-byte frame carries whole codes. */
+        ctx.hw.is31_scaled_path[0] = '\0';
+        apply_sleep_light(&ctx, ctx.sleep_started + 4.0 * 0.80);
+        for (i = 0U; i < RING_PIXELS; i++)
+            require_condition(ctx.rendered_fine[i].r % FINE_UNITS == 0U,
+                              "an old kernel must only get whole codes");
+        ctx.hw_written_valid = 0;
+        ctx.hw_pending = 1;
+        require_condition(output_flush(&ctx, monotonic_seconds(), 1) == 1,
+                          "legacy forced flush must write");
+        fp = fopen(frame_file, "r");
+        require_condition(fp != NULL && fgets(text, sizeof(text), fp) != NULL &&
+                              strlen(text) == 73U,
+                          "legacy frame must be 72 hex characters");
+        fclose(fp);
+        unlink(frame_file);
+        unlink(scaled_file);
+    }
+
     /* ---- 6. Sleep timer expiry selects off and returns to base. --------- */
     reset(&ctx);
     fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
