@@ -2064,6 +2064,76 @@ static void start_meter(struct daemon_context *ctx, unsigned int value,
         le_music_director_interrupt(&ctx->music_director);
 }
 
+/*
+ * Smooth sleep pulse (#364).  The IS31FL3236 has 8-bit PWM and the output is
+ * gamma 2, so at sleep brightness the whole breath spans almost no PWM codes:
+ * at the default 8% the red channel only ever drives 1 or 2, and the ring
+ * visibly jumps between the two.  Rounding the brightness more finely cannot
+ * help; the hardware has no finer step.
+ *
+ * Instead the target is followed in continuous PWM units along the same
+ * gamma-2 curve and spread over the ring: between codes lo and lo+1, the
+ * fraction is shown by how many of the 12 pixels sit at lo+1, filled in a
+ * fixed order that spreads them round the ring.  The ring's average then
+ * moves in twelfths of a code.  The trough and crest use exactly the codes the
+ * stepped pulse used, so the brightness cap, the never-black trough and the
+ * peak are unchanged.
+ */
+static const unsigned char sleep_dither_order[RING_PIXELS] = {
+    0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11
+};
+
+/* Old integer path, kept for the endpoints: percent -> logical -> gamma. */
+static unsigned int sleep_pulse_code(unsigned int channel, unsigned int percent)
+{
+    return led_output_gamma((channel * percent + 50U) / 100U);
+}
+
+static void sleep_pulse_channel(unsigned int channel, unsigned int brightness,
+                                double wave, unsigned char out[RING_PIXELS])
+{
+    const double floor_wave = (double)SLEEP_PULSE_FLOOR_PERCENT / 100.0;
+    unsigned int lo_code = sleep_pulse_code(
+        channel, (unsigned int)((double)brightness * floor_wave + 0.5));
+    unsigned int hi_code = sleep_pulse_code(channel, brightness);
+    double shape = (wave * wave - floor_wave * floor_wave) /
+                   (1.0 - floor_wave * floor_wave);
+    double target;
+    unsigned int base, lit, i;
+
+    if (shape < 0.0)
+        shape = 0.0;
+    if (shape > 1.0)
+        shape = 1.0;
+    target = (double)lo_code + (double)(hi_code - lo_code) * shape;
+    base = (unsigned int)target;
+    lit = (unsigned int)((target - (double)base) * RING_PIXELS + 0.5);
+    if (base >= hi_code) {
+        base = hi_code;
+        lit = 0U;
+    }
+    for (i = 0; i < RING_PIXELS; i++)
+        out[sleep_dither_order[i]] = (unsigned char)(base + (i < lit ? 1U : 0U));
+}
+
+static void sleep_pulse_render(struct daemon_context *ctx,
+                               const struct colour *c, double wave)
+{
+    struct colour capped = night_capped(ctx, *c);
+    unsigned char r[RING_PIXELS], g[RING_PIXELS], b[RING_PIXELS];
+    struct led_rgb frame[RING_PIXELS];
+    size_t i;
+
+    sleep_pulse_channel(capped.r, capped.brightness, wave, r);
+    sleep_pulse_channel(capped.g, capped.brightness, wave, g);
+    sleep_pulse_channel(capped.b, capped.brightness, wave, b);
+    for (i = 0; i < RING_PIXELS; i++)
+        frame[i] = (struct led_rgb){r[i], g[i], b[i]};
+    /* Already in PWM units: linear transfer at full brightness, so only the
+       calibration gain and frame budget apply on top. */
+    output_commit_transfer(ctx, frame, 100U, LE_OUTPUT_TRANSFER_LINEAR);
+}
+
 /* Sleep light (#101): a low-priority persistent owner.  The pulse phase is
    absolute from activation, so pre-emption and resume are continuous rather
    than restarting the waveform. */
@@ -2085,8 +2155,8 @@ static void apply_sleep_light(struct daemon_context *ctx, double now)
         wave = (double)SLEEP_PULSE_FLOOR_PERCENT / 100.0 +
                (1.0 - (double)SLEEP_PULSE_FLOOR_PERCENT / 100.0) *
                (0.5 + 0.5 * sine_approx(phase * 6.28318530717958647692));
-        c.brightness = (unsigned int)
-            ((double)c.brightness * wave + 0.5);
+        sleep_pulse_render(ctx, &c, wave);
+        return;
     }
     hardware_apply(ctx, &c);
 }

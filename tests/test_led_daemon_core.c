@@ -363,6 +363,50 @@ int main(void)
     require_condition(max_channel(&ctx) == peak_b,
                       "resume must continue the wave, not replay it");
 
+    /* ---- 5b. Default-brightness pulse is smooth, not two steps (#364). -- */
+    reset(&ctx);
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
+               "{\"mode\":\"pulse\",\"brightness\":8,\"period_ms\":4000}}");
+    require_condition(response_ok() && ctx.sleep_active,
+                      "default pulse sleep light must activate");
+    {
+        /* The stepped pulse drove red code 1 at the trough and 2 at the
+           crest; those endpoints and the cap must not move. */
+        unsigned int trough = led_output_gamma((255U * 1U + 50U) / 100U);
+        unsigned int crest = led_output_gamma((255U * 8U + 50U) / 100U);
+        unsigned int seen[12 * 2 + 1] = {0};
+        unsigned int distinct = 0U, previous = 0U, k, i;
+        int monotonic = 1;
+
+        for (k = 0U; k <= 100U; k++) {
+            /* Phase 0.75 is the trough, 0.25 the crest: walk trough->crest. */
+            double t = ctx.sleep_started + 4.0 * (0.75 + 0.5 * k / 100.0);
+            unsigned int sum = 0U;
+
+            apply_sleep_light(&ctx, t);
+            for (i = 0U; i < RING_PIXELS; i++) {
+                require_condition(ctx.rendered_pixels[i].r >= trough &&
+                                      ctx.rendered_pixels[i].r <= crest,
+                                  "a dithered pixel left the stepped pulse's range");
+                sum += ctx.rendered_pixels[i].r;
+            }
+            if (k == 0U)
+                require_condition(sum == trough * RING_PIXELS,
+                                  "the trough must stay at the old code");
+            if (k == 100U)
+                require_condition(sum == crest * RING_PIXELS,
+                                  "the crest must stay at the old code");
+            if (k > 0U && sum < previous)
+                monotonic = 0;
+            previous = sum;
+            if (sum < sizeof(seen) / sizeof(seen[0]) && !seen[sum]++)
+                distinct++;
+        }
+        require_condition(monotonic, "the rising half of the breath must not dip");
+        require_condition(distinct >= 10U,
+                          "the ring average must move in fine steps, not jump 1->2");
+    }
+
     /* ---- 6. Sleep timer expiry selects off and returns to base. --------- */
     reset(&ctx);
     fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
