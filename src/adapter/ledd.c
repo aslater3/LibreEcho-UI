@@ -75,7 +75,15 @@
 #define METER_TRACK_PERCENT 6U
 #define VISUALIZER_TIMEOUT_SECONDS 0.42
 #define STARTUP_READY_PATH "/run/libreecho/startup-ready"
-#define STARTUP_FRAME_MS 88
+/* Boot comet: one soft segment rolls round the ring.  The head position is
+   continuous in time, so each frame blends the segment across neighbouring
+   pixels instead of jumping a whole pixel per frame. */
+#define STARTUP_FRAME_MS FRAME_MS
+#define STARTUP_REVOLUTION_S 1.2
+#define STARTUP_HEAD_PIXELS 1.0
+#define STARTUP_TAIL_PIXELS 4.0
+#define STARTUP_FLOOR 64U
+#define STARTUP_PEAK 255U
 #define NIGHT_POLL_MS 60000
 
 /* Idle base ring modes (#110).  The indicator is the default: a resting
@@ -220,7 +228,7 @@ struct daemon_context {
     double animation_started;
     int startup_animation_active;
     char startup_ready_path[MAX_PATH];
-    unsigned int startup_animation_frame;
+    double startup_animation_started;
     double startup_animation_next_frame;
     int pattern_active;
     int pattern_kind;
@@ -865,15 +873,60 @@ static int night_schedule_timeout(const struct daemon_context *ctx,
     return timeout > NIGHT_POLL_MS ? NIGHT_POLL_MS : timeout;
 }
 
-static void apply_startup_animation(struct daemon_context *ctx)
+/* 0..1 smooth falloff: 1 at x=0, 0 at x>=1 (half a cosine). */
+static double startup_soft_edge(double x)
 {
-    struct pixel pixels[RING_PIXELS];
+    const double pi = 3.14159265358979323846;
+
+    if (x <= 0.0)
+        return 1.0;
+    if (x >= 1.0)
+        return 0.0;
+    return 0.5 + 0.5 * sine_approx(pi * x + pi / 2.0);
+}
+
+/* Comet level of a pixel `behind` pixels behind the head (negative = ahead).
+   A short soft leading edge, then a longer tail fading back to the floor. */
+static double startup_comet_level(double behind)
+{
+    if (behind < 0.0)
+        return startup_soft_edge(-behind / STARTUP_HEAD_PIXELS);
+    return startup_soft_edge(behind / STARTUP_TAIL_PIXELS);
+}
+
+static void startup_comet_frame(double elapsed, struct pixel pixels[RING_PIXELS])
+{
+    double turns = elapsed / STARTUP_REVOLUTION_S;
+    double head;
     size_t i;
 
-    for (i = 0; i < RING_PIXELS; i++)
-        pixels[i] = (struct pixel){0, 64, 0};
-    pixels[ctx->startup_animation_frame % RING_PIXELS] =
-        (struct pixel){0, 255, 0};
+    if (turns < 0.0)
+        turns = 0.0;
+    turns -= (double)(unsigned long)turns;
+    head = turns * (double)RING_PIXELS;
+    for (i = 0; i < RING_PIXELS; i++) {
+        double behind = head - (double)i;
+        double level;
+
+        /* Shortest signed distance round the ring, in [-N/2, N/2). */
+        while (behind >= (double)RING_PIXELS / 2.0)
+            behind -= (double)RING_PIXELS;
+        while (behind < -(double)RING_PIXELS / 2.0)
+            behind += (double)RING_PIXELS;
+        level = startup_comet_level(behind);
+        pixels[i] = (struct pixel){
+            0,
+            (unsigned int)((double)STARTUP_FLOOR +
+                           (double)(STARTUP_PEAK - STARTUP_FLOOR) * level + 0.5),
+            0};
+    }
+}
+
+static void apply_startup_animation(struct daemon_context *ctx, double now)
+{
+    struct pixel pixels[RING_PIXELS];
+
+    startup_comet_frame(now - ctx->startup_animation_started, pixels);
     output_pixels(ctx, pixels, 100U);
 }
 
@@ -2766,9 +2819,7 @@ static void update_animation(struct daemon_context *ctx, double now)
         }
         if (now < ctx->startup_animation_next_frame)
             return;
-        apply_startup_animation(ctx);
-        ctx->startup_animation_frame =
-            (ctx->startup_animation_frame + 1) % RING_PIXELS;
+        apply_startup_animation(ctx, now);
         ctx->startup_animation_next_frame = now + STARTUP_FRAME_MS / 1000.0;
         return;
     }
@@ -3712,9 +3763,9 @@ int main(int argc, char **argv)
     apply_base_state(&ctx, monotonic_seconds());
     if (startup_animation_requested && !path_is_file(ctx.startup_ready_path)) {
         ctx.startup_animation_active = 1;
-        ctx.startup_animation_frame = 0;
-        ctx.startup_animation_next_frame = monotonic_seconds();
-        apply_startup_animation(&ctx);
+        ctx.startup_animation_started = monotonic_seconds();
+        ctx.startup_animation_next_frame = ctx.startup_animation_started;
+        apply_startup_animation(&ctx, ctx.startup_animation_started);
         le_log_info("green startup animation started");
     }
 
