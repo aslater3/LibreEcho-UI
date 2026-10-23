@@ -545,6 +545,70 @@ int main(void)
         unlink(scaled_file);
     }
 
+    /* ---- 5d. Every gamma frame takes the smoothed route when the kernel
+       has scaled_frame: a low-brightness pulse pattern moves through fine
+       levels instead of whole codes, never exceeds the integer frame, and a
+       kernel without scaled_frame still gets whole codes. -------------- */
+    {
+        char scaled_file[] = "/tmp/libreecho-ledd-scaled2-XXXXXX";
+        unsigned int k, i, distinct = 0U, previous = 0U, max_step = 0U;
+        unsigned int seen[255U * 12U * 12U + 1U];
+        int monotonic = 1, fd;
+
+        memset(seen, 0, sizeof(seen));
+        fd = mkstemp(scaled_file);
+        require_condition(fd >= 0, "create fake scaled_frame file");
+        close(fd);
+        reset(&ctx);
+        ctx.hw.kind = HW_IS31FL3236;
+        snprintf(ctx.hw.is31_scaled_path, sizeof(ctx.hw.is31_scaled_path),
+                 "%s", scaled_file);
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+                   "{\"name\":\"pulse\",\"r\":255,\"g\":180,\"b\":0,"
+                   "\"brightness\":15,\"repeats\":0,\"owner\":\"evt\"}}");
+        require_condition(response_ok() && ctx.pattern_active,
+                          "a pulse pattern must take the ring");
+        /* Rising half of the 1.5 s pulse: phase 0.75 -> 1.25. */
+        for (k = 0U; k <= 200U; k++) {
+            double t = ctx.pattern_started + 1.5 * (0.75 + 0.5 * k / 200.0);
+            unsigned int sum = 0U;
+
+            update_pattern(&ctx, t);
+            for (i = 0U; i < RING_PIXELS; i++) {
+                unsigned int fine = ctx.rendered_fine[i].r;
+
+                require_condition(fine_level_reachable(&ctx.hw, fine),
+                                  "a smoothed pixel asked for a level the chip lacks");
+                require_condition(fine <= ctx.rendered_pixels[i].r * FINE_UNITS,
+                                  "smoothing must never boost past the whole code");
+                require_condition(ctx.rendered_pixels[i].r == 0U || fine > 0U,
+                                  "smoothing must never turn a lit channel off");
+                sum += fine;
+            }
+            if (k > 0U && sum + FINE_UNITS < previous)
+                monotonic = 0;
+            if (k > 0U && sum > previous && sum - previous > max_step)
+                max_step = sum - previous;
+            previous = sum;
+            if (!seen[sum]++)
+                distinct++;
+        }
+        require_condition(monotonic, "the smoothed pulse must not dip while rising");
+        require_condition(distinct >= 60U,
+                          "the smoothed pulse must pass through many fine levels");
+        require_condition(max_step <= 3U * FINE_UNITS * RING_PIXELS / 4U,
+                          "the smoothed pulse must not jump between frames");
+
+        /* A kernel without scaled_frame gets whole codes, as before. */
+        ctx.hw.is31_scaled_path[0] = '\0';
+        update_pattern(&ctx, ctx.pattern_started + 1.5 * 0.9);
+        for (i = 0U; i < RING_PIXELS; i++)
+            require_condition(ctx.rendered_fine[i].r ==
+                                  ctx.rendered_pixels[i].r * FINE_UNITS,
+                              "an old kernel must only get whole codes");
+        unlink(scaled_file);
+    }
+
     /* ---- 6. Sleep timer expiry selects off and returns to base. --------- */
     reset(&ctx);
     fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
