@@ -47,7 +47,7 @@
 #ifndef BUTTOND_PRIVACY_STATE_PATH
 #define BUTTOND_PRIVACY_STATE_PATH "/sys/devices/platform/amz_privacy/privacy_state"
 /*
- * The kernel's mute lamp control (LibreEcho-Linux-6.1: mute_lamp in the
+ * The kernel's mute lamp control (LibreEcho-Linux: mute_lamp in the
  * amz_privacy driver). Optional: an image built without it, or a kernel where
  * the physical latch owns the lamp, leaves the ring as the only indicator.
  */
