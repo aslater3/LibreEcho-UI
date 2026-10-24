@@ -33,6 +33,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -394,6 +395,97 @@ void test_natural_tail_is_reported_exactly_once() {
 // P3 arithmetic: the played-finish derivation must never overflow, underflow,
 // or fabricate a timestamp, and must reject inconsistent cursors. Derived from
 // the real SDK/engine contract (frames -> us at the frozen 48 kHz ABI).
+// Server mute through the real listener into the real engine sink: Sendspin
+// PCM ramps to silence and back, a new stream while muted starts silent, and
+// the SDK's buffer is never scaled in place (it may be re-presented).
+std::vector<int16_t> engine_take(EngineServer& server, EngineSinkSession& session,
+                                 size_t frames) {
+    std::vector<int16_t> out(frames * 2, 0);
+    const uint32_t epoch = session.epoch();
+    const uint32_t gen = session.generation();
+    server.with_sink([&](le_audio_sink* sink) {
+        uint64_t first = 0;
+        if (le_audio_sink_render(sink, out.data(), frames, &first) == frames)
+            le_audio_sink_commit(sink, epoch, gen, frames);
+    });
+    return out;
+}
+
+void test_server_mute_is_source_only_and_ramped() {
+    const std::string path = unique_socket_path("mute");
+    EngineServer server;
+    BRIDGE_CHECK(server.start(path), "engine server start");
+    EngineSinkSession session(make_session_config(path));
+    SendspinClientConfig cfg;
+    cfg.name = "LibreEcho bridge mute";
+    SendspinClient client(std::move(cfg));
+    PlayerRole& player = client.add_player(make_pcm_player_config());
+    SdkPlayerListener listener(session, &player);
+    listener.on_stream_start();
+    BRIDGE_CHECK(session.streaming(), "stream open");
+
+    const size_t kFrames = 1000;
+    const std::vector<int16_t> loud(kFrames * 2, 10000);
+    auto offer = [&](std::vector<int16_t>& pcm) {
+        return listener.on_audio_write(reinterpret_cast<uint8_t*>(pcm.data()),
+                                       pcm.size() * sizeof(int16_t), 1000);
+    };
+
+    std::vector<int16_t> a = loud;
+    BRIDGE_CHECK(offer(a) == kFrames * kFrameBytes, "unmuted block accepted");
+    auto heard = engine_take(server, session, kFrames);
+    BRIDGE_CHECK(heard.front() == 10000 && heard.back() == 10000, "unmuted audio altered");
+
+    listener.on_mute_changed(true);
+    BRIDGE_CHECK(listener.muted(), "mute not recorded");
+    std::vector<int16_t> b = loud;
+    BRIDGE_CHECK(offer(b) == kFrames * kFrameBytes, "muted block accepted");
+    BRIDGE_CHECK(b == loud, "listener scaled the SDK buffer in place");
+    heard = engine_take(server, session, kFrames);
+    BRIDGE_CHECK(heard[0] == 10000 && heard[2] > 9000 && heard[2] < 10000,
+                 "mute did not ramp from full level at the next accepted frame");
+    BRIDGE_CHECK(heard[2 * 300] == 0 && heard.back() == 0, "muted audio reached the engine");
+
+    listener.on_mute_changed(false);
+    std::vector<int16_t> c = loud;
+    BRIDGE_CHECK(offer(c) == kFrames * kFrameBytes, "unmuted block accepted again");
+    heard = engine_take(server, session, kFrames);
+    BRIDGE_CHECK(heard.front() < 1000, "unmute jumped to full level");
+    BRIDGE_CHECK(heard[2 * 300] == 10000 && heard.back() == 10000, "unmute did not restore level");
+
+    // A new stream while muted starts silent, with no ramp from full level.
+    listener.on_mute_changed(true);
+    listener.on_stream_start();
+    std::vector<int16_t> d = loud;
+    BRIDGE_CHECK(offer(d) == kFrames * kFrameBytes, "new-stream block accepted");
+    heard = engine_take(server, session, kFrames);
+    BRIDGE_CHECK(heard.front() == 0 && heard.back() == 0, "new stream while muted was audible");
+}
+
+// A refused server volume makes the next poll report the real device level.
+void test_refused_server_volume_reports_device_level() {
+    const std::string dir = scratch_dir();
+    const std::string master = dir + "/vol-master";
+    FILE* f = std::fopen(master.c_str(), "w");
+    BRIDGE_CHECK(f != nullptr, "master file");
+    if (f == nullptr) return;
+    std::fputs("30\n", f);
+    std::fclose(f);
+    libreecho::sendspin::VolumeBridgeConfig vcfg;
+    vcfg.audio_socket = dir + "/no-audiod.sock";  // unreachable
+    vcfg.master_path = master;
+    libreecho::sendspin::VolumeBridge volume(vcfg);
+    BRIDGE_CHECK(volume.poll_local_change() == std::optional<uint8_t>(30), "initial level");
+
+    EngineSinkSession session(make_session_config(unique_socket_path("vol")));
+    SdkPlayerListener listener(session, nullptr);
+    listener.set_volume_bridge(&volume);
+    listener.on_volume_changed(70);
+    BRIDGE_CHECK(volume.poll_local_change() == std::optional<uint8_t>(30),
+                 "refused server volume left the server believing it applied");
+    std::remove(master.c_str());
+}
+
 void test_timing_arithmetic_bounds() {
     uint64_t us = 0;
     BRIDGE_CHECK(!SdkPlayerListener::frames_to_us(UINT64_MAX, &us),
@@ -794,6 +886,8 @@ int main(int argc, char** argv) {
     test_feedback_pair_is_the_played_cursor_finish();
     test_natural_tail_is_reported_exactly_once();
     test_timing_arithmetic_bounds();
+    test_server_mute_is_source_only_and_ramped();
+    test_refused_server_volume_reports_device_level();
     run_sdk_bridge_lifecycle(blocked_mode);
 
     if (g_failures != 0) {

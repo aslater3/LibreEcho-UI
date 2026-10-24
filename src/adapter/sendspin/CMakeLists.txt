@@ -95,6 +95,17 @@ add_test(NAME sendspin_sdk_adapter COMMAND sendspin_adapter_tests)
 # pinned SDK player role and the EngineSinkSession bridge; SENDPIN_COMPANION_SDK
 # enables the --run path (the dependency-free Makefile lane builds the --check
 # shape without the SDK).
+# The volume bridge talks to audiod through the UI's own C adapter client.
+add_library(sendspin_volume_bridge STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/volume_bridge.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../adapter_client.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../log.c")
+target_include_directories(sendspin_volume_bridge PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+target_compile_definitions(sendspin_volume_bridge PRIVATE _POSIX_C_SOURCE=200809L)
+
 add_executable(sendspind
     "${CMAKE_CURRENT_SOURCE_DIR}/../sendspind.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/engine_sink.cpp"
@@ -102,7 +113,7 @@ add_executable(sendspind
 target_include_directories(sendspind PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/..")
-target_link_libraries(sendspind PRIVATE sendspin Threads::Threads)
+target_link_libraries(sendspind PRIVATE sendspin sendspin_volume_bridge Threads::Threads)
 target_compile_definitions(sendspind PRIVATE SENDPIN_COMPANION_SDK=1)
 target_compile_options(sendspind PRIVATE -Wall -Wextra)
 
@@ -118,7 +129,7 @@ if(SENDSPIN_PLATFORM_DIR)
                 "${AIRPLAY}/audio_sink.c")
     target_include_directories(sendspin_engine_bridge PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${AIRPLAY}")
     target_compile_definitions(sendspin_engine_bridge PRIVATE _POSIX_C_SOURCE=200809L)
-    target_link_libraries(sendspin_engine_bridge PUBLIC Threads::Threads)
+    target_link_libraries(sendspin_engine_bridge PUBLIC sendspin_volume_bridge Threads::Threads)
     foreach(pair "bridge;test_sendspin_bridge_sdk.cpp" "lifecycle;test_sendspin_sdk_lifecycle.cpp"
                  "late_credit;test_sendspin_late_credit.cpp")
         list(GET pair 0 name)

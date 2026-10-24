@@ -64,6 +64,9 @@ volatile sig_atomic_t g_stop = 0;
 // amp settle, first period), measured at ~1.42 s on the Echo Dot.
 constexpr uint16_t kEngineOutputStartMs = 1500;
 
+// How often the device volume is checked for local changes.
+constexpr int kVolumePollMs = 250;
+
 void on_signal(int) { g_stop = 1; }
 #endif
 
@@ -301,6 +304,8 @@ int run_companion(const Options& opts) {
     client.set_network_provider(&network);
 
     libreecho::sendspin::SdkPlayerListener listener(session, nullptr);
+    libreecho::sendspin::VolumeBridge volume{libreecho::sendspin::VolumeBridgeConfig{}};
+    listener.set_volume_bridge(&volume);
     ::sendspin::PlayerRoleConfig player_cfg;
     player_cfg.audio_formats.push_back(
         {::sendspin::SendspinCodecFormat::PCM, 2, 48000, 16});
@@ -320,6 +325,8 @@ int run_companion(const Options& opts) {
     ::sendspin::PlayerRole& player = client.add_player(player_cfg);
     player.set_listener(&listener);
     listener.set_role(&player);
+    // The server learns the device's own level; there is no unity fallback.
+    if (const auto level = volume.poll_local_change()) player.update_volume(*level);
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -337,9 +344,15 @@ int run_companion(const Options& opts) {
         std::fflush(stdout);
     }
 
+    auto next_volume_poll = std::chrono::steady_clock::now();
     while (!g_stop) {
         client.loop();
         listener.pump_feedback();
+        // Local volume changes (buttons, web UI, AirPlay) reach the server.
+        if (std::chrono::steady_clock::now() >= next_volume_poll) {
+            next_volume_poll += std::chrono::milliseconds(kVolumePollMs);
+            if (const auto level = volume.poll_local_change()) player.update_volume(*level);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 

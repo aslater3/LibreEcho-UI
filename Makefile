@@ -255,6 +255,11 @@ test-sendspin-sink:
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_session.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-session
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_session_concurrency.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-session-concurrency
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_late_credit.cpp $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-late-credit
+	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L $(SENDPIN_C99FLAGS) -Isrc -Isrc/adapter -c src/adapter/adapter_client.c -o $(BUILD)/sendspin-adapter_client.o
+	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L $(SENDPIN_C99FLAGS) -Isrc -c src/log.c -o $(BUILD)/sendspin-log.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -Isrc -c src/adapter/sendspin/volume_bridge.cpp -o $(BUILD)/sendspin-volume_bridge.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -Itests tests/test_sendspin_volume.cpp $(BUILD)/sendspin-volume_bridge.o $(BUILD)/sendspin-adapter_client.o $(BUILD)/sendspin-log.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-volume
+	$(BUILD)/test-sendspin-volume
 	$(BUILD)/test-sendspin-late-credit
 	$(BUILD)/test-sendspin-sink
 	$(BUILD)/test-sendspin-lifecycle
