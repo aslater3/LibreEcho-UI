@@ -66,11 +66,9 @@ if [ "$sendspin_enabled_at_boot" -eq 1 ]; then
     ARGS="$ARGS --sendspin-on-start"
 fi
 
-# Bind one host control socket into the sandbox: ledd (visualiser) and audiod
-# (Sendspin volume). airplayd re-attaches each after its daemon restarts.
-mount_control_socket() {
-    source_socket=/run/libreecho/$1
-    target_socket=$RUNTIME_ROOT/run/libreecho/$1
+mount_led_socket() {
+    source_socket=/run/libreecho/led.sock
+    target_socket=$RUNTIME_ROOT/run/libreecho/led.sock
     if grep -q " $target_socket " /proc/mounts 2>/dev/null; then
         return 0
     fi
@@ -80,14 +78,14 @@ mount_control_socket() {
         count=$((count + 1))
     done
     [ -S "$source_socket" ] || {
-        echo "libreecho-airplayd: control socket $1 unavailable" >&2
+        echo "libreecho-airplayd: LED control socket unavailable" >&2
         return 0
     }
     mkdir -p "$(dirname "$target_socket")"
     : >"$target_socket"
     mount --bind "$source_socket" "$target_socket" || {
         rm -f "$target_socket"
-        echo "libreecho-airplayd: control socket $1 bind failed" >&2
+        echo "libreecho-airplayd: LED control socket bind failed" >&2
         return 0
     }
 }
@@ -158,8 +156,7 @@ mount_runtime() {
     create_support_mounts || return 1
     configure_service_name
     stage_airplay_services
-    mount_control_socket led.sock
-    mount_control_socket audio.sock
+    mount_led_socket
 }
 
 # The payload ships a fixed service name, so two LibreEcho units on one LAN
@@ -247,10 +244,8 @@ mdns_status() {
 unmount_runtime() {
     umount "$RUNTIME_ROOT/run/dbus/system_bus_socket" 2>/dev/null || true
     rm -f "$RUNTIME_ROOT/run/dbus/system_bus_socket" 2>/dev/null || true
-    for control in led.sock audio.sock; do
-        umount "$RUNTIME_ROOT/run/libreecho/$control" 2>/dev/null || true
-        rm -f "$RUNTIME_ROOT/run/libreecho/$control" 2>/dev/null || true
-    done
+    umount "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
+    rm -f "$RUNTIME_ROOT/run/libreecho/led.sock" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run/libreecho-audio" 2>/dev/null || true
     umount "$RUNTIME_ROOT/var" 2>/dev/null || true
     umount "$RUNTIME_ROOT/run" 2>/dev/null || true

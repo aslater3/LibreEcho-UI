@@ -5,8 +5,8 @@ Runs the real airplayd, built with a fake chroot helper, against a scratch
 runtime root holding a fake engine (serving the Sendspin sink socket) and a
 fake player that records each start. No root, mounts, network or hardware.
 
-Checks: disabled by default; --sendspin-on-start starts it with production
-arguments only; set_sendspin_enabled stops/starts it; an older payload without
+Checks: disabled by default; --sendspin-on-start starts it, from the mounted
+payload, with production arguments only (name and state file); set_sendspin_enabled stops/starts it; an older payload without
 the player reports unavailable and refuses enable without disturbing the
 engine; a crashing player backs off; an engine restart stops the player and
 starts a fresh one; the AirPlay receiver toggle leaves it running; shutdown
@@ -45,17 +45,21 @@ open(os.path.join(audio, 'media.pcm'), 'w').close()
 open(os.path.join(root, 'engine.pid'), 'w').write(str(os.getpid()))
 while True: time.sleep(1)
 '''
+# The player runs directly from the mounted payload (no chroot).
 FAKE_PLAYER = '''#!/bin/sh
-echo "$$ $*" >> "$LE_FAKE_ROOT/sendspind.log"
-[ -e "$LE_FAKE_ROOT/crash" ] && exit 1
+root=${0%/usr/local/sbin/libreecho-sendspind}
+echo "$$ $*" >> "$root/sendspind.log"
+[ -e "$root/crash" ] && exit 1
 exec sleep 1000
 '''
+STATE_FILE = '/tmp/le-ss-svc-state-never-written'
 
 
 def build_airplayd(work, chroot):
     binary = work / 'airplayd'
     subprocess.run(['cc', '-std=c99', '-D_POSIX_C_SOURCE=200809L', '-D_DEFAULT_SOURCE',
-                    f'-DAIRPLAY_CHROOT="{chroot}"', '-Isrc', '-Isrc/adapter', '-O1',
+                    f'-DAIRPLAY_CHROOT="{chroot}"', f'-DSENDSPIN_STATE_FILE="{STATE_FILE}"',
+                    '-Isrc', '-Isrc/adapter', '-O1',
                     *SOURCES, '-o', str(binary)], cwd=ROOT, check=True, timeout=180)
     return binary
 
@@ -178,7 +182,7 @@ class SendspinService(unittest.TestCase):
         self.assertTrue(wait(lambda: self.running_player() is not None), 'player never started')
         args = self.starts()[-1].split()[1:]
         self.assertEqual(args[:3], ['--run', '--quiet', '--name'])
-        self.assertEqual(len(args), 4, 'unexpected player arguments')
+        self.assertEqual(args[4:], ['--state-file', STATE_FILE])
         self.assertNotIn('--dev-allow-unpaired', args)
         self.assertTrue(self.status()['sendspin_running'])
 

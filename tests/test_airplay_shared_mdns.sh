@@ -46,7 +46,7 @@ grep -Fq 'nqptp_path' "$SOURCE"
 grep -Fq 'metadata_fifo_open' "$SOURCE"
 grep -Fq 'ARGS="$ARGS --enable-on-start"' "$SCRIPT"
 grep -Fq 'integrations & 16' "$SCRIPT"
-grep -Fq 'mount_control_socket led.sock' "$SCRIPT"
+grep -Fq 'source_socket=/run/libreecho/led.sock' "$SCRIPT"
 
 # The controller may not sweep unrelated processes.
 if grep -Fq 'killall' "$SCRIPT" "$SOURCE"; then

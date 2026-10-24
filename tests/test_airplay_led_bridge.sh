@@ -3,17 +3,12 @@ set -eu
 
 script=init/libreecho-airplayd.init
 sh -n "$script"
-# ledd (visualiser) and audiod (Sendspin volume) sockets are bridged alike.
-grep -Fq 'source_socket=/run/libreecho/$1' "$script"
-grep -Fq 'target_socket=$RUNTIME_ROOT/run/libreecho/$1' "$script"
+grep -Fq 'source_socket=/run/libreecho/led.sock' "$script"
+grep -Fq 'target_socket=$RUNTIME_ROOT/run/libreecho/led.sock' "$script"
 grep -Fq 'mount --bind "$source_socket" "$target_socket"' "$script"
-grep -Fq 'mount_control_socket led.sock' "$script"
-grep -Fq 'mount_control_socket audio.sock' "$script"
-grep -Fq 'for control in led.sock audio.sock; do' "$script"
-grep -Fq 'umount "$RUNTIME_ROOT/run/libreecho/$control"' "$script"
-# Daemon restarts replace the socket inode; airplayd re-points both bridges.
+grep -Fq 'umount "$RUNTIME_ROOT/run/libreecho/led.sock"' "$script"
+# ledd restarts replace the socket inode; airplayd re-points the bridge.
 grep -Fq 'airplay_led_bridge_poll(&ctx);' src/adapter/airplayd.c
-grep -Fq 'LE_ADAPTER_LED_SOCK, LE_ADAPTER_AUDIO_SOCK' src/adapter/airplayd.c
 grep -Fq 'CONFIG=${CONFIG:-/data/libreecho/config/web-config.json}' "$script"
 grep -Fq 'airplay_enabled_at_boot=1' "$script"
 grep -Fq 'persistent AirPlay disable' "$script"

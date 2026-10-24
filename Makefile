@@ -260,6 +260,9 @@ test-sendspin-sink:
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -Isrc -c src/adapter/sendspin/volume_bridge.cpp -o $(BUILD)/sendspin-volume_bridge.o
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -Itests tests/test_sendspin_volume.cpp $(BUILD)/sendspin-volume_bridge.o $(BUILD)/sendspin-adapter_client.o $(BUILD)/sendspin-log.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-volume
 	$(BUILD)/test-sendspin-volume
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -c src/adapter/sendspin/blob_store.cpp -o $(BUILD)/sendspin-blob_store.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin tests/test_sendspin_blob_store.cpp $(BUILD)/sendspin-blob_store.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-blob-store
+	$(BUILD)/test-sendspin-blob-store
 	$(BUILD)/test-sendspin-late-credit
 	$(BUILD)/test-sendspin-sink
 	$(BUILD)/test-sendspin-lifecycle

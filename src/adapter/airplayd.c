@@ -104,6 +104,11 @@ static volatile sig_atomic_t running = 1;
 #define SENDSPIN_HEALTHY_RUN_MS 30000u
 /* The engine's Sendspin sink, inside the runtime's shared audio directory. */
 #define SENDSPIN_SINK_RELATIVE "/run/libreecho-audio/sendspin.sock"
+/* The player's identity and pairings. One plain file: the boot-time data
+ * contract of older images rejects unknown directories under config/. */
+#ifndef SENDSPIN_STATE_FILE
+#define SENDSPIN_STATE_FILE "/data/libreecho/config/sendspin-state"
+#endif
 
 /* The AirPlay sandbox reaches ledd through a bind mount of the single socket
  * file (see libreecho-airplayd.init). A bind mount pins the inode, so when
@@ -152,36 +157,29 @@ static uint64_t airplay_monotonic_ms(void)
     return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
 }
 
-/* The sandbox reaches ledd (visualiser) and audiod (Sendspin volume) through
- * bind-mounted sockets; both are re-attached after their daemon restarts. */
 static void airplay_led_bridge_poll(const struct airplay_ctx *ctx)
 {
-    static const char *const sockets[] = { LE_ADAPTER_LED_SOCK, LE_ADAPTER_AUDIO_SOCK };
     static uint64_t last_check_ms;
-    static int last_failed[sizeof(sockets) / sizeof(sockets[0])];
+    static int last_failed;
     char target[256];
     uint64_t now = airplay_monotonic_ms();
-    size_t i;
     int result;
 
     if (last_check_ms && now - last_check_ms < AIRPLAY_LED_BRIDGE_CHECK_MS)
         return;
     last_check_ms = now;
-    for (i = 0; i < sizeof(sockets) / sizeof(sockets[0]); ++i) {
-        if (snprintf(target, sizeof(target), "%s%s", ctx->runtime_root,
-                     sockets[i]) >= (int)sizeof(target))
-            continue;
-        result = airplay_led_bridge_refresh(sockets[i], target);
-        if (result > 0) {
-            le_log_info("airplayd: socket bridge re-attached to the live %s", sockets[i]);
-            last_failed[i] = 0;
-        } else if (result < 0 && !last_failed[i]) {
-            le_log_warn("airplayd: socket bridge re-attach failed for %s: %s",
-                        sockets[i], strerror(errno));
-            last_failed[i] = 1;
-        } else if (result == 0) {
-            last_failed[i] = 0;
-        }
+    if (snprintf(target, sizeof(target), "%s%s", ctx->runtime_root,
+                 LE_ADAPTER_LED_SOCK) >= (int)sizeof(target))
+        return;
+    result = airplay_led_bridge_refresh(LE_ADAPTER_LED_SOCK, target);
+    if (result > 0) {
+        le_log_info("airplayd: LED socket bridge re-attached to the live ledd socket");
+        last_failed = 0;
+    } else if (result < 0 && !last_failed) {
+        le_log_warn("airplayd: LED socket bridge re-attach failed: %s", strerror(errno));
+        last_failed = 1;
+    } else if (result == 0) {
+        last_failed = 0;
     }
 }
 
@@ -1347,8 +1345,7 @@ static int runtime_path_ok(const struct airplay_ctx *ctx, const char *relative,
 /* The payload really carries the player; older airplay2 payloads do not. */
 static int sendspin_available(const struct airplay_ctx *ctx)
 {
-    return access(AIRPLAY_CHROOT, X_OK) == 0 &&
-           runtime_path_ok(ctx, ctx->sendspin_path, X_OK);
+    return runtime_path_ok(ctx, ctx->sendspin_path, X_OK);
 }
 
 static int sendspin_sink_ready(const struct airplay_ctx *ctx)
@@ -1361,20 +1358,26 @@ static int sendspin_sink_ready(const struct airplay_ctx *ctx)
     return stat(path, &st) == 0 && S_ISSOCK(st.st_mode);
 }
 
+/* The player is a static executable shipped in the payload and runs from the
+ * mounted payload outside the sandbox: it needs none of the payload's
+ * libraries, and does need audiod's socket and its state file on /data. */
 static pid_t spawn_sendspin(const struct airplay_ctx *ctx)
 {
-    char name[96];
+    char name[96], path[256];
     pid_t pid;
 
     /* Advertise the device's own host name, as AirPlay does. */
     if (gethostname(name, sizeof(name)) != 0 || !name[0])
         snprintf(name, sizeof(name), "LibreEcho");
     name[sizeof(name) - 1] = '\0';
+    if (snprintf(path, sizeof(path), "%s%s", ctx->runtime_root, ctx->sendspin_path) >=
+        (int)sizeof(path))
+        return -1;
     pid = fork();
     if (pid != 0)
         return pid;
-    execl(AIRPLAY_CHROOT, AIRPLAY_CHROOT, "chroot", ctx->runtime_root,
-          ctx->sendspin_path, "--run", "--quiet", "--name", name, (char *)NULL);
+    execl(path, path, "--run", "--quiet", "--name", name,
+          "--state-file", SENDSPIN_STATE_FILE, (char *)NULL);
     _exit(127);
 }
 
