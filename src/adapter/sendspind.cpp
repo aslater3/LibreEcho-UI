@@ -60,6 +60,10 @@ constexpr uint32_t kMaxPort = 65535;
 #ifdef SENDPIN_COMPANION_SDK
 volatile sig_atomic_t g_stop = 0;
 
+// Allowance for the engine to start its output from idle (open, prepare,
+// amp settle, first period), measured at ~1.42 s on the Echo Dot.
+constexpr uint16_t kEngineOutputStartMs = 1500;
+
 void on_signal(int) { g_stop = 1; }
 #endif
 
@@ -300,7 +304,19 @@ int run_companion(const Options& opts) {
     ::sendspin::PlayerRoleConfig player_cfg;
     player_cfg.audio_formats.push_back(
         {::sendspin::SendspinCodecFormat::PCM, 2, 48000, 16});
-    player_cfg.audio_buffer_capacity = 64 * 1024;
+    // Keep the SDK's default buffer (~1 MB, ~5 s of 48 kHz PCM). The server is
+    // asked to stay min_buffer_ms (500 ms) ahead, and that audio must fit the
+    // buffer: at 64 KiB (~270 ms advertised) a real server overran it and the
+    // SDK dropped most chunks ("Failed to send audio chunk").
+    // The server schedules a stream's first chunk only required_lead_time_ms
+    // ahead, and drops what the player is not ready for. Starting the shared
+    // engine's output from idle takes ~1.4 s on the Echo Dot, almost all of
+    // it in the kernel's pcm_prepare() codec power-up, so the SDK's own
+    // pipeline lead (150 ms) lost the first second of every stream.
+    player_cfg.required_lead_time_ms = static_cast<uint16_t>(
+        ::sendspin::PlayerRoleConfig::pipeline_lead_time_ms(
+            player_cfg.extra_startup_silence_ms) +
+        kEngineOutputStartMs);
     ::sendspin::PlayerRole& player = client.add_player(player_cfg);
     player.set_listener(&listener);
     listener.set_role(&player);
