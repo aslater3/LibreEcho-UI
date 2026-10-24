@@ -156,10 +156,12 @@ def engine_cycle(platform, build, work, sanitize):
     if proc.returncode != 0:
         raise RuntimeError(f'production engine fixture exited {proc.returncode}')
     data = (root / 'engine.log').read_bytes()
-    magic, count, denied = struct.unpack_from('=III', data)
+    # Platform's struct engine_log header: magic, count, audit_denied,
+    # rt_underruns (the real-time ring ran dry before a write).
+    magic, count, denied, _underruns = struct.unpack_from('=IIII', data)
     if magic != 0x4C4F4F50 or denied != 0 or count > 16384:
         raise RuntimeError('invalid engine audit log or host hardware access attempted')
-    events = [struct.unpack_from('=IIIIi', data, 12 + i * 20) for i in range(count)]
+    events = [struct.unpack_from('=IIIIi', data, 16 + i * 20) for i in range(count)]
     opens = [e for e in events if e[0] == 1]
     closes = [e for e in events if e[0] == 4]
     writes = [e for e in events if e[0] == 3]
