@@ -54,11 +54,15 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
+#include <vector>
 
 #include <sendspin/player_role.h>
 
 #include "engine_sink_session.h"
+#include "pcm_mute.h"
+#include "volume_bridge.h"
 
 namespace libreecho {
 namespace sendspin {
@@ -70,6 +74,9 @@ public:
 
     void set_role(::sendspin::PlayerRole* role) { std::lock_guard<std::recursive_mutex> guard(mu_); role_ = role; }
 
+    // Main loop only, like every VolumeBridge call; set before client start.
+    void set_volume_bridge(VolumeBridge* bridge) { volume_ = bridge; }
+
     // --- SDK sync thread ---------------------------------------------------
 
     // Returns the engine-acknowledged BYTES (whole frames, <= length). Bytes
@@ -79,6 +86,18 @@ public:
                           uint32_t timeout_ms) override {
         std::lock_guard<std::recursive_mutex> guard(mu_);
         if (!session_.streaming()) return 0;
+        // Source-only mute, applied to a copy: the SDK re-presents frames the
+        // engine did not accept, so the input must stay unscaled.
+        const size_t frames = length / LE_AUDIO_SINK_BYTES_PER_FRAME;
+        if (frames != 0 && (mute_.muted() || mute_.gain_at(session_.accepted_frames()) !=
+                                                 PcmMute::kUnity)) {
+            scratch_.resize(frames * LE_AUDIO_SINK_OUTPUT_CHANNELS);
+            std::memcpy(scratch_.data(), data, frames * LE_AUDIO_SINK_BYTES_PER_FRAME);
+            mute_.apply(scratch_.data(), scratch_.data(), frames,
+                        LE_AUDIO_SINK_OUTPUT_CHANNELS, session_.accepted_frames());
+            return session_.write(reinterpret_cast<uint8_t*>(scratch_.data()),
+                                  frames * LE_AUDIO_SINK_BYTES_PER_FRAME, timeout_ms);
+        }
         return session_.write(data, length, timeout_ms);
     }
 
@@ -89,6 +108,7 @@ public:
         have_boundary_ = false;
         pending_finish_ = false;
         reset_feedback_locked();
+        mute_.reset_stream();
         ++stream_starts_;
         // The engine may still be opening its PCM; a timed-out OPEN stays in
         // flight and the feedback loop resumes it (bounded per call).
@@ -109,6 +129,22 @@ public:
             session_.cancel_stream();
         }
     }
+
+    // Server mute silences Sendspin audio only (alarms, timers and voice
+    // still play), ramping from the next frame the engine accepts.
+    void on_mute_changed(bool muted) override {
+        std::lock_guard<std::recursive_mutex> guard(mu_);
+        mute_.set_muted(muted, session_.accepted_frames());
+    }
+
+    // Server volume is the device master volume, set through audiod. Not
+    // under mu_: a slow audiod must never stall the sync thread's writes.
+    // If audiod refuses, the next local poll reports the real device level.
+    void on_volume_changed(uint8_t volume) override {
+        if (volume_ != nullptr && !volume_->apply_server_volume(volume)) volume_->forget();
+    }
+
+    bool muted() const { std::lock_guard<std::recursive_mutex> guard(mu_); return mute_.muted(); }
 
     // Informational main-loop notification only. Fencing here is too late:
     // the sync thread may already have delivered post-seek PCM.
@@ -136,6 +172,7 @@ public:
             return 0;
         }
         reset_feedback_locked();
+        mute_.reset_stream();
         const SinkResult started = session_.start_stream();
         pending_start_ = started == SinkResult::Timeout;
         if (started != SinkResult::Ok && !pending_start_) session_.disconnect();
@@ -242,6 +279,9 @@ private:
     uint64_t report_count_ = 0;
     uint64_t stream_starts_ = 0;
     uint64_t stream_ends_ = 0;
+    PcmMute mute_;
+    std::vector<int16_t> scratch_;
+    VolumeBridge* volume_ = nullptr;
 };
 
 }  // namespace sendspin
