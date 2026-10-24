@@ -78,6 +78,19 @@ jcheck "status connected" \
 if grep -q 'SP:\|token' "$TMP/body"; then bad "status leak" "status carries pairing material"; else ok; fi
 jq -e '(.integrations // 0) as $m | ($m / 64 | floor) % 2 == 1' "$CFG" >/dev/null 2>&1 && ok || bad "persisted" "bit 64 not in saved integrations"
 
+echo "== restart keeps the saved state =="
+kill "$dev_pid"; wait "$dev_pid" 2>/dev/null
+"$BIN" --backend mock --config "$CFG" --web-root "$ROOT/web" --listen "127.0.0.1:$PORT" --seed 42 \
+    >"$TMP/dev2.log" 2>&1 &
+dev_pid=$!
+i=0
+while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do
+    i=$((i + 1)); [ "$i" -lt 150 ] || { echo "web did not restart" >&2; exit 1; }
+    sleep 0.1
+done
+AUTH="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
+jcheck "enabled after restart" '.data.enabled and .data.state=="connected"' "$URL/api/v1/sendspin"
+
 echo "== pairing token =="
 check "pairing without CSRF" 403 -X POST "$URL/api/v1/sendspin/pairing"
 jcheck "pairing token" '.data.pairing_token | startswith("SP:")' -X POST "$URL/api/v1/sendspin/pairing" -H "$AUTH"
