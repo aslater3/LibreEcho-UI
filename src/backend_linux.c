@@ -2607,6 +2607,69 @@ static int airplay_set(struct le_backend *b, int enabled)
     return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_enabled", args);
 }
 
+/* The Sendspin player's own control socket (status and pairing token). */
+#define LE_SENDSPIN_SOCK "/run/libreecho/sendspin.sock"
+
+static int sendspin(struct le_backend *b, struct le_sendspin_state *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc;
+    (void)b;
+    memset(o, 0, sizeof(*o));
+    rc = adapter_command(LE_ADAPTER_AIRPLAY_SOCK, "status", NULL,
+                         response, sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    (void)json_get_bool(response, "sendspin_available", &o->installed);
+    (void)json_get_bool(response, "sendspin_enabled", &o->enabled);
+    (void)json_get_bool(response, "sendspin_running", &o->running);
+    if (!o->running ||
+        adapter_command(LE_SENDSPIN_SOCK, "status", NULL, response,
+                        sizeof(response)) != LE_OK)
+        return LE_OK;
+    {
+        char trust[16] = "";
+        (void)json_get_bool(response, "listening", &o->listening);
+        (void)json_get_bool(response, "discoverable", &o->discoverable);
+        (void)json_get_bool(response, "connected", &o->connected);
+        (void)json_get_bool(response, "streaming", &o->streaming);
+        (void)json_get_bool(response, "time_synced", &o->time_synced);
+        (void)json_get_bool(response, "muted", &o->muted);
+        (void)json_get_int(response, "volume", &o->volume);
+        (void)json_get_string(response, "trust", trust, sizeof(trust));
+        (void)json_get_string(response, "server", o->server, sizeof(o->server));
+        o->paired = o->connected && !strcmp(trust, "paired");
+    }
+    return LE_OK;
+}
+
+static int sendspin_set(struct le_backend *b, int enabled)
+{
+    char args[32];
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_sendspin_enabled", args);
+}
+
+static int sendspin_pairing_token(struct le_backend *b, char *out, size_t size)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc;
+    (void)b;
+    rc = adapter_command(LE_SENDSPIN_SOCK, "pairing_token", NULL, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_string(response, "token", out, size) < 1 || strncmp(out, "SP:", 3)) {
+        memset(out, 0, size);
+        return LE_IO;
+    }
+    memset(response, 0, sizeof(response));
+    return LE_OK;
+}
+
 static int playback(struct le_backend *b, struct le_playback_state *o)
 {
     struct le_airplay_state airplay_state;
@@ -3146,7 +3209,8 @@ static const struct le_backend_ops ops = {
     recovery_configure, recovery_prepare, recovery_stop,
     network_portal,
     linux_reboot_bootloader,
-    volume_leveling
+    volume_leveling,
+    sendspin, sendspin_set, sendspin_pairing_token
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

@@ -2276,6 +2276,64 @@ installed, `stopped` when installed but disabled, `ready` when enabled, and
 `playing` during playback. `device_name` is the name shown by Spotify and is
 JSON-escaped, including when it contains quotes or backslashes.
 
+#### GET /api/v1/sendspin
+
+Returns the Sendspin player status (Music Assistant multiroom). Read-only;
+other methods return `405`.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "installed": true,
+    "enabled": true,
+    "running": true,
+    "state": "connected",
+    "listening": true,
+    "discoverable": true,
+    "connected": true,
+    "paired": true,
+    "streaming": false,
+    "time_synced": true,
+    "volume": 64,
+    "muted": false,
+    "server": "Music Assistant"
+  },
+  "error": null
+}
+```
+
+`installed` reports whether the audio feature carries the player; `enabled` is
+the `sendspin` integration (bit 64 of `integrations`, off by default). `state`
+is `unavailable` (not installed), `disabled`, `starting` (enabled but the player
+is not yet listening), `waiting` (listening and advertised over mDNS, no server
+connected), `connected` or `playing`. The other fields come from the running
+player: `volume` is `null` while it is not running, `server` is the connected
+server's JSON-escaped name or `null`, and `paired` is true when that server
+connected with a stored pairing. Status never contains pairing material.
+
+Sendspin volume is the device volume: a server volume change is applied like
+the volume buttons, and local changes are reported back to the server. A
+server mute silences Sendspin audio only; alarms, timers and voice still play.
+
+#### POST /api/v1/sendspin/pairing
+
+Returns the player's pairing token, to paste into Music Assistant (or show as
+a QR code) to pair this player. Requires authentication and the CSRF header
+like every changing request.
+
+**Response:**
+```json
+{ "ok": true, "data": { "pairing_token": "SP:..." }, "error": null }
+```
+
+- **409** — Sendspin is disabled.
+- **503** — the player is not running yet.
+
+The token is never part of status, logs or configuration export, and clients
+must not store it.
+
 #### PUT /api/v1/integrations
 
 Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.
@@ -2318,7 +2376,8 @@ The `mqtt` entry stores a setting only: the image has no MQTT client yet, so the
       { "id": "home-assistant", "name": "Home Assistant", "enabled": true },
       { "id": "mqtt", "name": "MQTT", "enabled": false },
       { "id": "rest", "name": "Local REST API", "enabled": true, "forced": false },
-      { "id": "bluetooth", "name": "Bluetooth audio", "enabled": false }
+      { "id": "bluetooth", "name": "Bluetooth audio", "enabled": false },
+      { "id": "sendspin", "name": "Sendspin (Music Assistant)", "enabled": false, "installed": true }
     ]
   },
   "error": null
