@@ -165,6 +165,7 @@ python3 tests/test_config_persist_contract.py
 python3 tests/test_web_ui_behaviour_contract.py
 node tests/test_reboot_reconnect.js
 node tests/test_kernel_log_ui.js
+node tests/test_sendspin_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
