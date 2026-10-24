@@ -112,7 +112,7 @@ int main(int argc, char **argv) {
     run(command)
     return binary
 
-def engine_cycle(platform, build, work, sanitize):
+def engine_cycle(platform, build, work, sanitize, first_audio_delay_ms=0):
     binary = compile_engine(platform, work, sanitize)
     root = work / 'r'
     root.mkdir()
@@ -138,7 +138,8 @@ def engine_cycle(platform, build, work, sanitize):
                 if proc.poll() is not None or time.monotonic() >= deadline:
                     raise RuntimeError('real audio engine did not bind its private sink socket')
                 time.sleep(0.01)
-            client = subprocess.run([str(build / 'sendspin_engine_sdk_tests'), str(socket)],
+            client = subprocess.run([str(build / 'sendspin_engine_sdk_tests'), str(socket),
+                                     str(first_audio_delay_ms)],
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, timeout=30)
             print(client.stdout, end='', flush=True)
@@ -225,6 +226,11 @@ def main():
     engine_work = work / 'engine-loop'
     engine_work.mkdir()
     engine_cycle(platform, build, engine_work, args.sanitize)
+    # Grouped join: the first programme chunk arrives ~2 s after stream/start,
+    # past the engine's 32-period (~1.4 s) priming bound.
+    late_work = work / 'engine-late'
+    late_work.mkdir()
+    engine_cycle(platform, build, late_work, args.sanitize, first_audio_delay_ms=2000)
     print('Sendspin host SDK lane PASS (not ARM, not hardware)', flush=True)
     return 0
 

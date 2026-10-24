@@ -62,7 +62,13 @@ static int failures=0;
     std::fprintf(stderr,"FAIL: %s\n",message); ++failures; } } while(0)
 
 int main(int argc,char** argv) {
-    if(argc!=2) return 2;
+    if(argc!=2 && argc!=3) return 2;
+    // Optional: hold the first programme chunk back this long after
+    // stream/start. A grouped server schedules the first chunk only after every
+    // member has synced, so a member can sit on an open, empty generation for
+    // longer than the engine's priming bound (the grouped Dot stall).
+    const int first_audio_delay_ms=argc==3?std::atoi(argv[2]):0;
+    if(first_audio_delay_ms<0 || first_audio_delay_ms>10000) return 2;
     EngineSinkSessionConfig sink_cfg; sink_cfg.socket_path=argv[1];
     sink_cfg.control_timeout_ms=50; sink_cfg.max_write_timeout_ms=20;
     EngineSinkSession session(sink_cfg);
@@ -84,6 +90,10 @@ int main(int argc,char** argv) {
             "encrypted loopback connection and time sync");
     REQUIRE(server.send_app_json(stream_start_pcm_json()),"SDK stream/start");
     REQUIRE(pump(client,listener,[&]{return session.streaming();},3000),"real engine generation opened");
+    if(first_audio_delay_ms>0) {
+        (void)pump(client,listener,[]{return false;},first_audio_delay_ms);
+        REQUIRE(session.streaming(),"generation stayed open across the late first chunk");
+    }
     // A real Sendspin server streams ahead of the play time; the SDK rightly
     // drops chunks whose timestamp has passed. Pace this fixture server by
     // wall time, not by loop iterations: the client pump blocks on engine
@@ -96,12 +106,17 @@ int main(int argc,char** argv) {
     uint64_t first=0;
     int64_t minimum_send_ahead_us=INT64_MAX;
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(6);
+    std::printf("FIRST_AUDIO_DELAY_MS %d\n",first_audio_delay_ms);
     // SENDSPIN_SDK_TRACE=1 prints a 250 ms timeline of sent/credited/decoded
     // frames, to tell fixture pacing from engine credit from SDK sync drops.
     const bool trace=std::getenv("SENDSPIN_SDK_TRACE")!=nullptr;
     const int64_t trace_start_us=platform_time_us();
     int64_t next_trace_us=trace_start_us;
-    while((session.accepted_frames()<8192 || listener.nonzero_bytes.load()==0) &&
+    // The late case must keep playing after the first chunk, not just start:
+    // the grouped Dot played ~1 s and then went quiet.
+    const uint64_t programme_frames=first_audio_delay_ms>0?48000:0;
+    while((session.accepted_frames()<8192 || listener.nonzero_bytes.load()==0 ||
+           first<programme_frames) &&
           std::chrono::steady_clock::now()<deadline) {
         const int64_t t0=platform_time_us();
         while(timestamp<platform_time_us()+lead_us) {
@@ -136,6 +151,10 @@ int main(int argc,char** argv) {
     REQUIRE(minimum_send_ahead_us>0,"fixture server kept every PCM chunk ahead of its play time");
     REQUIRE(session.accepted_frames()>=8192,"SDK decoded PCM credited by real engine");
     REQUIRE(listener.nonzero_bytes.load()>0,"decoded server PCM, not just SDK priming silence, was acknowledged");
+    // Every programme sample is non-zero; allow the final lead still in flight.
+    if(programme_frames)
+        REQUIRE(listener.nonzero_bytes.load()>=(programme_frames-12000)*4,
+                "late-start programme kept flowing for a full second");
     libreecho::sendspin::EngineSinkTiming observed{};
     const auto poll_result=session.poll(&observed);
     std::printf("ENGINE_PROGRESS result=%d valid=%d submitted=%llu played=%llu queued=%u finish=%llu acknowledged=%llu reports=%llu\n",
