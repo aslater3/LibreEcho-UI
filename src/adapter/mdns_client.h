@@ -15,6 +15,9 @@
  * Link mdns_client.c AND mdns_lease.c (the shared bounded wire encoder). */
 int le_mdns_register_esphome(const char *path, unsigned int port,
                              const struct le_mdns_esphome_metadata *metadata);
+/* Nonblocking Sendspin player registration AFTER its listener is ready. The
+ * caller holds the returned fd for as long as the record should exist. */
+int le_mdns_register_sendspin(const char *path, unsigned int port, const char *name);
 /* Transitional obsolete Wyoming entry points: always -1, never advertise.
  * Kept only until old callers are removed by the parent integration. */
 int le_mdns_register_wyoming(const char *path, unsigned int port);

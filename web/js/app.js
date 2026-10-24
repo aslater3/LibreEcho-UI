@@ -1843,7 +1843,19 @@ function integrationBlurb(x){
  if(x.id==='spotify')return 'Appear as a speaker in the Spotify app. Requires a Spotify Premium account; playback is handled on the device and audio never leaves your network.';
  if(x.id==='airplay2')return 'Appear as an AirPlay 2 speaker. This is also how Tidal, Apple Music and anything else without an open protocol can play here \u2014 cast from the app.';
  if(x.id==='bluetooth')return 'Pair a phone or laptop and play to this device directly. A second route for apps with no open casting protocol, including Tidal.';
+ if(x.id==='sendspin')return 'Join Music Assistant as a Sendspin speaker for synchronized multiroom audio. Pair it once with its token; volume follows Music Assistant both ways, and a mute there silences music but not alarms or timers.';
  return 'Optional local integration; no cloud connection required.';
+}
+/* One line of player status for the Sendspin card; the server name is the
+   connected server's own, so it is escaped. */
+function sendspinStateText(s){
+ const server=s.server?esc(s.server):'Music Assistant';
+ if(s.state==='unavailable')return 'Not installed in this image';
+ if(s.state==='disabled')return 'Not configured';
+ if(s.state==='starting')return 'Starting the player\u2026';
+ if(s.state==='waiting')return s.discoverable?'Waiting for Music Assistant. This speaker is discoverable on your network.':'Starting network discovery\u2026';
+ if(s.state==='playing')return 'Playing from '+server;
+ return 'Connected to '+server+(s.paired?'':' (not paired yet)');
 }
 function integrationStatus(x){
  if(x.installed===false)return 'Not installed in this image';
