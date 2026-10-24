@@ -44,6 +44,7 @@
 #include <sendspin/config.h>
 #include <sendspin/player_role.h>
 
+#include "sendspin/sdk_persistence.h"
 #include "sendspin/sdk_player_listener.h"
 #endif
 
@@ -90,6 +91,8 @@ void usage(std::FILE* out) {
         "  --check                   connect/open/verify the engine, then shut down\n"
         "  --run                     run the SDK companion until SIGINT/SIGTERM\n"
         "  --quiet                   suppress the readiness line\n"
+        "  --state-file PATH         0600 file holding the player identity and\n"
+        "                            pairings (--run; without it nothing persists)\n"
         "  --dev-allow-unpaired      DEVELOPMENT ONLY: accept unpaired (Sentinel)\n"
         "                            servers; anyone on the LAN can stream audio\n",
         LE_AUDIO_SINK_DEFAULT_SOCKET_PATH, kSessionMaxOpTimeoutMs,
@@ -112,6 +115,7 @@ struct Options {
     bool check = false;
     bool run = false;
     bool quiet = false;
+    std::string state_file;
     // Development only. Never set by the shipped service definition.
     bool dev_allow_unpaired = false;
 };
@@ -187,6 +191,8 @@ int parse_args(int argc, char** argv, Options* opts) {
             opts->run = true;
         } else if (std::strcmp(a, "--quiet") == 0) {
             opts->quiet = true;
+        } else if (std::strcmp(a, "--state-file") == 0 && i + 1 < argc) {
+            opts->state_file = argv[++i];
         } else if (std::strcmp(a, "--dev-allow-unpaired") == 0) {
             opts->dev_allow_unpaired = true;
         } else {
@@ -299,7 +305,29 @@ int run_companion(const Options& opts) {
                      "sendspind: WARNING development mode: unpaired servers accepted; "
                      "any host on the network can stream audio to this device\n");
     }
+    // Identity and pairings persist across restarts; corrupt state stops the
+    // player rather than silently minting a new identity.
+    std::optional<libreecho::sendspin::SdkPersistence> persistence;
+    if (!opts.state_file.empty()) {
+        std::string error;
+        auto store = libreecho::sendspin::BlobStore::open(opts.state_file, &error);
+        if (!store) {
+            std::fprintf(stderr, "sendspind: state unavailable (%s)\n", error.c_str());
+            session.disconnect();
+            return 3;
+        }
+        persistence.emplace(std::move(*store));
+        std::string bad;
+        if (!persistence->verify_state(cfg.max_pairing_records, &bad)) {
+            std::fprintf(stderr,
+                         "sendspind: stored Sendspin state '%s' is corrupt; refusing to start "
+                         "(unpair or reset Sendspin to recover)\n", bad.c_str());
+            session.disconnect();
+            return 3;
+        }
+    }
     ::sendspin::SendspinClient client(cfg);
+    if (persistence) client.set_persistence_provider(&*persistence);
     HostNetworkProvider network;
     client.set_network_provider(&network);
 

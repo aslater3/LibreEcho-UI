@@ -10,8 +10,6 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = Path(os.environ.get('SCRIPT', ROOT / 'init/libreecho-airplayd.init'))
 
-BRIDGES = ['bridge:led.sock', 'bridge:audio.sock']
-
 class RuntimeMounts(unittest.TestCase):
     def run_case(self, mounted=(), fail=''):
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,12 +69,11 @@ done
                      FAIL_TARGET=str(runtime)+fail if fail else '-',
                      AVAHI_CONFIG_SNAPSHOT=str(root/'avahi.conf'),
                      AVAHI_SERVICES_SOURCE=str(root/'absent'))
-            # Record the optional control-socket bridges (ledd, audiod)
-            # separately from mounts.
+            # Record the optional LED bridge boundary separately from mounts.
             # The production mount_runtime must reach it on every successful
             # path, even when the transaction engine already mounted the root.
             program = '\n'.join(helpers) + '''
-mount_control_socket() { printf 'bridge:%s\\n' "$1" >> "$LED_LOG"; }
+mount_led_socket() { printf '%s\\n' led-bridge >> "$LED_LOG"; }
 mount_runtime
 '''
             proc=subprocess.run(['sh','-c',program],env=env,capture_output=True,text=True,timeout=5)
@@ -89,19 +86,19 @@ mount_runtime
         for suffix in ['/dev','/proc','/sys','/run','/var','/dev/shm','/run/libreecho-audio','/run/dbus/system_bus_socket']:
             self.assertIn(root+suffix+'\n',log)
         self.assertNotIn('-t squashfs',log)
-        self.assertEqual(led, BRIDGES)
+        self.assertEqual(led, ['led-bridge'])
 
     def test_complete_runtime_is_idempotent(self):
         rc,log,_,led=self.run_case(['','/dev','/proc','/sys','/run','/var','/dev/shm','/run/libreecho-audio','/run/dbus/system_bus_socket'])
         self.assertEqual(rc,0);self.assertEqual(log,'')
-        self.assertEqual(led, BRIDGES)
+        self.assertEqual(led, ['led-bridge'])
 
     def test_partial_attempt_does_not_treat_run_as_completion(self):
         rc,log,root,led=self.run_case(['','/dev','/proc','/sys','/run'])
         self.assertEqual(rc,0)
         self.assertIn('libreecho-airplay-var '+root+'/var',log)
         self.assertNotIn('libreecho-airplay-run ',log)
-        self.assertEqual(led, BRIDGES)
+        self.assertEqual(led, ['led-bridge'])
 
     def test_support_failure_is_propagated(self):
         for suffix in ['/dev','/proc','/sys','/run','/var','/dev/shm','/run/libreecho-audio','/run/dbus/system_bus_socket']:
@@ -114,6 +111,6 @@ mount_runtime
         rc,log,_,led=self.run_case()
         self.assertEqual(rc,0);self.assertIn('-t squashfs',log)
         self.assertIn('libreecho-airplay-run ',log)
-        self.assertEqual(led, BRIDGES)
+        self.assertEqual(led, ['led-bridge'])
 
 if __name__=='__main__':unittest.main()

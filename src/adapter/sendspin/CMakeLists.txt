@@ -98,6 +98,7 @@ add_test(NAME sendspin_sdk_adapter COMMAND sendspin_adapter_tests)
 # The volume bridge talks to audiod through the UI's own C adapter client.
 add_library(sendspin_volume_bridge STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/volume_bridge.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/blob_store.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../adapter_client.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../log.c")
 target_include_directories(sendspin_volume_bridge PUBLIC
@@ -143,6 +144,12 @@ if(SENDSPIN_PLATFORM_DIR)
         add_test(NAME sendspin_${name} COMMAND sendspin_${name}_tests)
         set_tests_properties(sendspin_${name} PROPERTIES TIMEOUT 60)
     endforeach()
+    add_executable(sendspin_persistence_tests "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/test_sendspin_persistence.cpp")
+    target_include_directories(sendspin_persistence_tests PRIVATE "${SENDSPIN_SDK_DIR}/src")
+    target_link_libraries(sendspin_persistence_tests PRIVATE sendspin_volume_bridge sendspin Threads::Threads)
+    target_compile_options(sendspin_persistence_tests PRIVATE -Wall -Wextra)
+    add_test(NAME sendspin_persistence COMMAND sendspin_persistence_tests)
+    set_tests_properties(sendspin_persistence PROPERTIES TIMEOUT 60)
     add_executable(sendspin_engine_sdk_tests "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/test_sendspin_engine_sdk.cpp")
     target_include_directories(sendspin_engine_sdk_tests PRIVATE
         "${SENDSPIN_SDK_DIR}/tests" "${SENDSPIN_SDK_DIR}/src")
