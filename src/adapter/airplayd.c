@@ -62,6 +62,7 @@ struct airplay_ctx {
     char audio_path[128];
     char engine_path[128];
     char sendspin_path[128];
+    char sendspin_state[128];
     char config_path[128];
     char mdns_socket[128];
     char volume_root[128];
@@ -1377,7 +1378,7 @@ static pid_t spawn_sendspin(const struct airplay_ctx *ctx)
     if (pid != 0)
         return pid;
     execl(path, path, "--run", "--quiet", "--name", name,
-          "--state-file", SENDSPIN_STATE_FILE, (char *)NULL);
+          "--state-file", ctx->sendspin_state, (char *)NULL);
     _exit(127);
 }
 
@@ -1641,6 +1642,7 @@ int main(int argc, char **argv)
     snprintf(ctx.audio_path, sizeof(ctx.audio_path), "/usr/local/sbin/libreecho-airplay-audio");
     snprintf(ctx.engine_path, sizeof(ctx.engine_path), "/usr/local/sbin/libreecho-audio-engine");
     snprintf(ctx.sendspin_path, sizeof(ctx.sendspin_path), "/usr/local/sbin/libreecho-sendspind");
+    snprintf(ctx.sendspin_state, sizeof(ctx.sendspin_state), "%s", SENDSPIN_STATE_FILE);
     snprintf(ctx.config_path, sizeof(ctx.config_path), "/etc/libreecho/airplay2.conf");
     snprintf(ctx.mdns_socket, sizeof(ctx.mdns_socket), "%s", LE_MDNS_SOCKET);
     snprintf(ctx.volume_root, sizeof(ctx.volume_root), "%s", "/run/libreecho-audio");
@@ -1655,11 +1657,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--audio") && i + 1 < argc) snprintf(ctx.audio_path, sizeof(ctx.audio_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--engine") && i + 1 < argc) snprintf(ctx.engine_path, sizeof(ctx.engine_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--sendspin") && i + 1 < argc) snprintf(ctx.sendspin_path, sizeof(ctx.sendspin_path), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--sendspin-state") && i + 1 < argc) snprintf(ctx.sendspin_state, sizeof(ctx.sendspin_state), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--sendspin-on-start")) ctx.sendspin_wanted = 1;
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) snprintf(ctx.config_path, sizeof(ctx.config_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--metadata") && i + 1 < argc) snprintf(ctx.metadata_path, sizeof(ctx.metadata_path), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--mdns-socket") && i + 1 < argc) snprintf(ctx.mdns_socket, sizeof(ctx.mdns_socket), "%s", argv[++i]);
-        else { fprintf(stderr, "Usage: %s [--foreground] [--enable-on-start] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--audio PATH] [--engine PATH] [--sendspin PATH] [--sendspin-on-start] [--config PATH] [--metadata PATH] [--mdns-socket PATH]\n", argv[0]); return 1; }
+        else { fprintf(stderr, "Usage: %s [--foreground] [--enable-on-start] [--socket PATH] [--root PATH] [--nqptp PATH] [--shairport-sync PATH] [--audio PATH] [--engine PATH] [--sendspin PATH] [--sendspin-state PATH] [--sendspin-on-start] [--config PATH] [--metadata PATH] [--mdns-socket PATH]\n", argv[0]); return 1; }
     }
     (void)foreground;
     le_log_init("airplayd", argc, argv);

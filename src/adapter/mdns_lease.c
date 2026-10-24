@@ -178,13 +178,14 @@ int le_mdns_lease_withdraw(struct le_mdns_lease *lease, int owner_fd)
     lease->filename[0] = 0; lease->owner_fd = -1;
     return 0;
 }
+static int publish(struct le_mdns_lease *lease, int owner_fd, const char *prefix,
+                   const char *xml, size_t used);
 int le_mdns_lease_register_esphome(struct le_mdns_lease *lease, int owner_fd,
                                   unsigned int port,
                                   const struct le_mdns_esphome_metadata *metadata)
 {
-    char xml[4096] = "", name[64], temp[64], port_text[16];
-    int fd, result = -1;
-    size_t used = 0, written = 0, i;
+    char xml[4096] = "", port_text[16];
+    size_t used = 0, i;
     if (!lease || owner_fd < 0 || port < 1 || port > 65535 || !metadata_valid(metadata) ||
         (lease->owner_fd >= 0 && lease->owner_fd != owner_fd) || lease->generation == ULONG_MAX) return -1;
     (void)snprintf(port_text, sizeof(port_text), "%u", port);
@@ -201,9 +202,19 @@ int le_mdns_lease_register_esphome(struct le_mdns_lease *lease, int owner_fd,
     ADD("</service></service-group>\n");
 #undef ADD
 #undef XML
+    return publish(lease, owner_fd, "esphome", xml, used);
+}
+
+/* Write one generation of a lease's service file and retire the previous. */
+static int publish(struct le_mdns_lease *lease, int owner_fd, const char *prefix,
+                   const char *xml, size_t used)
+{
+    char name[64], temp[64];
+    int fd, result = -1;
+    size_t written = 0;
     ++lease->generation;
-    (void)snprintf(name, sizeof(name), "esphome-%lu.service", lease->generation);
-    (void)snprintf(temp, sizeof(temp), "esphome-%lu.tmp", lease->generation);
+    (void)snprintf(name, sizeof(name), "%s-%lu.service", prefix, lease->generation);
+    (void)snprintf(temp, sizeof(temp), "%s-%lu.tmp", prefix, lease->generation);
     fd = openat(lease->directory_fd, temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     if (fd < 0) return -1;
     while (written < used) {
@@ -225,4 +236,83 @@ out:
     if (fd >= 0) (void)close(fd);
     (void)unlinkat(lease->directory_fd, temp, 0);
     return result;
+}
+
+
+static int sendspin_name_valid(const char *name)
+{
+    size_t n;
+    if (!name) return 0;
+    n = strnlen(name, 64);
+    return n > 0 && n < 64 && utf8_valid((const unsigned char *)name, n);
+}
+int le_mdns_sendspin_encode(char *message, size_t capacity, unsigned int port,
+                            const char *name)
+{
+    static const char digits[] = "0123456789abcdef";
+    size_t used, j, length;
+    int n;
+    if (!message || !port || port > 65535 || !sendspin_name_valid(name)) return -1;
+    if (capacity > LE_MDNS_SENDSPIN_PACKET_MAX) capacity = LE_MDNS_SENDSPIN_PACKET_MAX;
+    n = snprintf(message, capacity, "SENDSPIN/1 %u name=", port);
+    if (n < 0 || (size_t)n >= capacity) return -1;
+    used = (size_t)n;
+    length = strlen(name);
+    if (used + length * 2 + 2 > capacity) return -1;
+    for (j = 0; j < length; ++j) {
+        message[used++] = digits[(unsigned char)name[j] >> 4];
+        message[used++] = digits[(unsigned char)name[j] & 15];
+    }
+    message[used++] = '\n'; message[used] = 0;
+    return (int)used;
+}
+int le_mdns_sendspin_decode(const char *message, size_t length, unsigned int *port,
+                            char *name, size_t name_capacity)
+{
+    char parsed[64];
+    size_t p = 11, value, size, j;
+    unsigned int number = 0;
+    if (!message || !port || !name || name_capacity < sizeof(parsed) ||
+        length < 20 || length >= LE_MDNS_SENDSPIN_PACKET_MAX ||
+        memcmp(message, "SENDSPIN/1 ", 11) || message[length - 1] != '\n' ||
+        memchr(message, 0, length) || message[p] < '1' || message[p] > '9') return -1;
+    while (p < length && message[p] >= '0' && message[p] <= '9') {
+        number = number * 10 + (unsigned int)(message[p++] - '0');
+        if (number > 65535) return -1;
+    }
+    if (length - p < 6 || memcmp(message + p, " name=", 6)) return -1;
+    value = p + 6;
+    size = length - 1 - value;
+    if (!size || size % 2 || size / 2 >= sizeof(parsed)) return -1;
+    for (j = 0; j < size / 2; ++j) {
+        int high = hex((unsigned char)message[value + j * 2]);
+        int low = hex((unsigned char)message[value + j * 2 + 1]);
+        if (high < 0 || low < 0) return -1;
+        parsed[j] = (char)(high * 16 + low);
+    }
+    parsed[j] = 0;
+    if (strlen(parsed) != j || !sendspin_name_valid(parsed)) return -1;
+    memcpy(name, parsed, j + 1); *port = number;
+    return 0;
+}
+int le_mdns_lease_register_sendspin(struct le_mdns_lease *lease, int owner_fd,
+                                   unsigned int port, const char *name)
+{
+    char xml[1024] = "", port_text[16];
+    size_t used = 0;
+    if (!lease || owner_fd < 0 || port < 1 || port > 65535 || !sendspin_name_valid(name) ||
+        (lease->owner_fd >= 0 && lease->owner_fd != owner_fd) || lease->generation == ULONG_MAX) return -1;
+    (void)snprintf(port_text, sizeof(port_text), "%u", port);
+#define ADD(text) do { if (append(xml, sizeof(xml), &used, text) < 0) return -1; } while (0)
+#define XML(text) do { if (append_xml(xml, sizeof(xml), &used, text) < 0) return -1; } while (0)
+    ADD("<?xml version=\"1.0\"?><!DOCTYPE service-group SYSTEM \"avahi-service.dtd\">\n"
+        "<service-group><name replace-wildcards=\"no\">");
+    XML(name);
+    ADD("</name><service><type>_sendspin._tcp</type><port>"); ADD(port_text); ADD("</port>");
+    ADD("<txt-record>path=" LE_MDNS_SENDSPIN_PATH "</txt-record><txt-record>name=");
+    XML(name);
+    ADD("</txt-record></service></service-group>\n");
+#undef ADD
+#undef XML
+    return publish(lease, owner_fd, "sendspin", xml, used);
 }

@@ -44,6 +44,8 @@
 #include <sendspin/config.h>
 #include <sendspin/player_role.h>
 
+#include "sendspin/control_server.h"
+#include "sendspin/discovery_lease.h"
 #include "sendspin/sdk_persistence.h"
 #include "sendspin/sdk_player_listener.h"
 #endif
@@ -91,6 +93,8 @@ void usage(std::FILE* out) {
         "  --check                   connect/open/verify the engine, then shut down\n"
         "  --run                     run the SDK companion until SIGINT/SIGTERM\n"
         "  --quiet                   suppress the readiness line\n"
+        "  --control-socket PATH     local status/pairing socket for the Web UI\n"
+        "                            (--run; default /run/libreecho/sendspin.sock)\n"
         "  --state-file PATH         0600 file holding the player identity and\n"
         "                            pairings (--run; without it nothing persists)\n"
         "  --dev-allow-unpaired      DEVELOPMENT ONLY: accept unpaired (Sentinel)\n"
@@ -116,6 +120,7 @@ struct Options {
     bool run = false;
     bool quiet = false;
     std::string state_file;
+    std::string control_socket = "/run/libreecho/sendspin.sock";
     // Development only. Never set by the shipped service definition.
     bool dev_allow_unpaired = false;
 };
@@ -191,6 +196,8 @@ int parse_args(int argc, char** argv, Options* opts) {
             opts->run = true;
         } else if (std::strcmp(a, "--quiet") == 0) {
             opts->quiet = true;
+        } else if (std::strcmp(a, "--control-socket") == 0 && i + 1 < argc) {
+            opts->control_socket = argv[++i];
         } else if (std::strcmp(a, "--state-file") == 0 && i + 1 < argc) {
             opts->state_file = argv[++i];
         } else if (std::strcmp(a, "--dev-allow-unpaired") == 0) {
@@ -372,18 +379,76 @@ int run_companion(const Options& opts) {
         std::fflush(stdout);
     }
 
+    // Advertised as _sendspin._tcp through the shared supervisor, only while
+    // the WebSocket listener is up.
+    libreecho::sendspin::DiscoveryConfig discovery_cfg;
+    discovery_cfg.port = static_cast<uint16_t>(opts.port);
+    discovery_cfg.name = opts.name;
+    libreecho::sendspin::DiscoveryLease discovery(discovery_cfg);
+
+    // Status and the pairing token for the authenticated Web UI only.
+    libreecho::sendspin::ControlServer control;
+    if (!opts.control_socket.empty() && !control.open(opts.control_socket))
+        std::fprintf(stderr, "sendspind: control socket %s unavailable\n",
+                     opts.control_socket.c_str());
+    const auto handle_control = [&](const std::string& command, const char*,
+                                    std::string* error) -> std::optional<std::string> {
+        using libreecho::sendspin::json_string;
+        if (command == "status") {
+            const bool connected = client.is_connected();
+            const auto server = connected ? client.get_server_information() : std::nullopt;
+            std::string data = "{";
+            data += "\"listening\":";
+            data += libreecho::sendspin::DiscoveryLease::port_listening("/proc/net", discovery_cfg.port)
+                        ? "true" : "false";
+            data += ",\"discoverable\":";
+            data += discovery.accepted() ? "true" : "false";
+            data += ",\"connected\":";
+            data += connected ? "true" : "false";
+            data += ",\"trust\":";
+            data += !connected ? "null"
+                    : client.get_current_trust() == ::sendspin::ConnectionTrust::USER
+                        ? "\"paired\"" : "\"unpaired\"";
+            data += ",\"server\":";
+            data += server ? json_string(server->name) : "null";
+            data += ",\"streaming\":";
+            data += session.streaming() ? "true" : "false";
+            data += ",\"time_synced\":";
+            data += client.is_time_synced() ? "true" : "false";
+            data += ",\"volume\":" + std::to_string(player.get_volume());
+            data += ",\"muted\":";
+            data += player.get_muted() ? "true" : "false";
+            data += ",\"client_id\":" + json_string(client.client_id());
+            return data + "}";
+        }
+        if (command == "pairing_token") {
+            const auto token = client.pairing_token();
+            if (!token) {
+                *error = "pairing token unavailable";
+                return std::nullopt;
+            }
+            return "{\"token\":" + json_string(*token) + "}";
+        }
+        return std::nullopt;
+    };
+
     auto next_volume_poll = std::chrono::steady_clock::now();
     while (!g_stop) {
         client.loop();
         listener.pump_feedback();
+        control.poll(handle_control);
         // Local volume changes (buttons, web UI, AirPlay) reach the server.
         if (std::chrono::steady_clock::now() >= next_volume_poll) {
             next_volume_poll += std::chrono::milliseconds(kVolumePollMs);
             if (const auto level = volume.poll_local_change()) player.update_volume(*level);
+            discovery.poll(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()));
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
+    discovery.withdraw();
     client.stop();
     session.disconnect();
     if (!opts.quiet) {

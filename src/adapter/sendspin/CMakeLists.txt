@@ -99,13 +99,22 @@ add_test(NAME sendspin_sdk_adapter COMMAND sendspin_adapter_tests)
 add_library(sendspin_volume_bridge STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/volume_bridge.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/blob_store.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/discovery_lease.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/control_server.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../adapter_server.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../mdns_client.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../mdns_lease.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../adapter_client.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../log.c")
 target_include_directories(sendspin_volume_bridge PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/.."
     "${CMAKE_CURRENT_SOURCE_DIR}/../..")
-target_compile_definitions(sendspin_volume_bridge PRIVATE _POSIX_C_SOURCE=200809L)
+# mdns_client.c defines _GNU_SOURCE itself; the rest need POSIX 2008.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/../adapter_client.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../adapter_server.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../log.c" "${CMAKE_CURRENT_SOURCE_DIR}/../mdns_lease.c"
+    PROPERTIES COMPILE_DEFINITIONS _POSIX_C_SOURCE=200809L)
 
 add_executable(sendspind
     "${CMAKE_CURRENT_SOURCE_DIR}/../sendspind.cpp"

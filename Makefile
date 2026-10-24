@@ -206,6 +206,7 @@ test-mdns:
 	python3 tests/test_mdns_client.py
 	python3 tests/test_mdns_wyoming.py
 	python3 tests/test_mdns_esphome.py
+	python3 tests/test_mdns_sendspin.py
 
 # Sendspin adapter contract: dependency-free, safe for the default suite. It pins
 # the offline/player-only CMake shape and that the heavy SDK lane stays opt-in.
@@ -263,6 +264,15 @@ test-sendspin-sink:
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -c src/adapter/sendspin/blob_store.cpp -o $(BUILD)/sendspin-blob_store.o
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin tests/test_sendspin_blob_store.cpp $(BUILD)/sendspin-blob_store.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-blob-store
 	$(BUILD)/test-sendspin-blob-store
+	$(CROSS_COMPILE)$(CC) $(SENDPIN_C99FLAGS) -Isrc/adapter -c src/adapter/mdns_client.c -o $(BUILD)/sendspin-mdns_client.o
+	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L $(SENDPIN_C99FLAGS) -Isrc/adapter -c src/adapter/mdns_lease.c -o $(BUILD)/sendspin-mdns_lease.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -c src/adapter/sendspin/discovery_lease.cpp -o $(BUILD)/sendspin-discovery_lease.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin tests/test_sendspin_discovery.cpp $(BUILD)/sendspin-discovery_lease.o $(BUILD)/sendspin-mdns_client.o $(BUILD)/sendspin-mdns_lease.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-discovery
+	$(BUILD)/test-sendspin-discovery
+	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L $(SENDPIN_C99FLAGS) -Isrc -Isrc/adapter -c src/adapter/adapter_server.c -o $(BUILD)/sendspin-adapter_server.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -c src/adapter/sendspin/control_server.cpp -o $(BUILD)/sendspin-control_server.o
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -Isrc/adapter tests/test_sendspin_control.cpp $(BUILD)/sendspin-control_server.o $(BUILD)/sendspin-adapter_server.o $(BUILD)/sendspin-adapter_client.o $(BUILD)/sendspin-log.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-control
+	$(BUILD)/test-sendspin-control
 	$(BUILD)/test-sendspin-late-credit
 	$(BUILD)/test-sendspin-sink
 	$(BUILD)/test-sendspin-lifecycle
