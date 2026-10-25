@@ -591,9 +591,10 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
                           json_bool(playback.system_active), json_bool(playback.announcement_active),
                           json_bool(playback.alarm_active), json_bool(playback.metadata_available));
     }
-    (void)diag_append(&w, "\"privacy\":{\"local_only\":%s,\"audio_retention\":%s,\"diagnostic_telemetry\":%s,\"crash_reports\":%s,\"hardware_mute_capable\":true},",
+    (void)diag_append(&w, "\"privacy\":{\"local_only\":%s,\"audio_retention\":%s,\"diagnostic_telemetry\":%s,\"crash_reports\":%s,\"active_device_ping\":%s,\"hardware_mute_capable\":true},",
                       json_bool(c->privacy_local_only), json_bool(c->privacy_audio_retention),
-                      json_bool(c->privacy_telemetry), json_bool(c->privacy_crash_reports));
+                      json_bool(c->privacy_telemetry), json_bool(c->privacy_crash_reports),
+                      json_bool(c->privacy_active_ping));
     append_boot_control(&w);
     (void)append_logs(&w, c);
     (void)diag_append(&w, "\"manifest\":{\"sections\":[\"release_identity\",\"runtime\",\"network\",\"audio\",\"wake_word\",\"bluetooth\",\"playback\",\"privacy\",\"boot_control\",\"logs\"],\"redactions\":[\"wifi_credentials\",\"ssid_bssid\",\"ip_addresses\",\"bluetooth_addresses\",\"owner_identifiers\",\"tokens_cookies\",\"private_paths\",\"media_metadata\"],\"omitted\":[\"private_keys\",\"ota_signing_material\",\"raw_pstore\",\"arbitrary_request_paths\"]}},\"error\":null}");
