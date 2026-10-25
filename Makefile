@@ -224,6 +224,13 @@ test-sendspin-sdk:
 	python3 "$(SENDSPIN_PLATFORM_DIR)/tools/mt8163-arm32/sendspin/test_sdk_build.py" -v
 
 # Verified host SDK + production-engine-loop lane, distinct from ARM/QEMU.
+# Two grouped players (real engine + sendspind each) against the pinned
+# aiosendspin server: click alignment with and without DAC clock drift.
+# Opt-in; SENDSPIN_SERVER_PYTHON is a Python with aiosendspin's dependencies.
+.PHONY: test-sendspin-interop
+test-sendspin-interop:
+	SENDSPIN_PLATFORM_DIR="$(SENDSPIN_PLATFORM_DIR)" SENDSPIN_ARCHIVE_DIR="$(SENDSPIN_ARCHIVE_DIR)" SENDSPIN_SERVER_PYTHON="$(SENDSPIN_SERVER_PYTHON)" python3 -B tests/test_sendspin_interop.py
+
 .PHONY: test-sendspin-host test-sendspin-host-sanitize
 test-sendspin-host:
 	SENDSPIN_PLATFORM_DIR="$(SENDSPIN_PLATFORM_DIR)" SENDSPIN_ARCHIVE_DIR="$(SENDSPIN_ARCHIVE_DIR)" python3 -B tests/test_sendspin_sdk_host.py
