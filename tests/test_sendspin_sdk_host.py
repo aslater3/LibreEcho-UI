@@ -193,7 +193,6 @@ def main():
         parser.error('required provisioning: ' + ', '.join(missing))
     platform = Path(os.environ['SENDSPIN_PLATFORM_DIR']).resolve()
     archives = Path(os.environ['SENDSPIN_ARCHIVE_DIR']).resolve()
-    tools = platform / 'tools/mt8163-arm32/sendspin'
     # Never fall back to /tmp. Environment TMPDIR, or the user cache, is the
     # only scratch parent; an overlong socket path is an explicit failure.
     parent = Path(os.environ.get('SENDSPIN_HOST_SCRATCH', os.environ.get('TMPDIR',
@@ -201,6 +200,23 @@ def main():
     parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='ssh-', dir=parent))
     print('Sendspin SDK evidence directory:', work, flush=True)
+    build, _, _ = build_sdk_tree(platform, archives, work, args.sanitize)
+    run(['ctest', '--test-dir', build, '--output-on-failure'], timeout=180)
+    engine_work = work / 'engine-loop'
+    engine_work.mkdir()
+    engine_cycle(platform, build, engine_work, args.sanitize)
+    # Grouped join: the first programme chunk arrives ~2 s after stream/start,
+    # past the engine's 32-period (~1.4 s) priming bound.
+    late_work = work / 'engine-late'
+    late_work.mkdir()
+    engine_cycle(platform, build, late_work, args.sanitize, first_audio_delay_ms=2000)
+    print('Sendspin host SDK lane PASS (not ARM, not hardware)', flush=True)
+    return 0
+
+def build_sdk_tree(platform, archives, work, sanitize, targets=None):
+    """Stage the verified pinned sources and configure/build the CMake tree.
+    Returns (build dir, stage dir, lock)."""
+    tools = platform / 'tools/mt8163-arm32/sendspin'
     source = load('sendspin_sources_host', tools / 'verify_sendspin_sources.py')
     lock = source.load_lock(tools / 'SOURCE.lock')
     patches = source.load_patch_inventory(lock, tools / 'SOURCE.lock', tools / 'patches')
@@ -216,23 +232,16 @@ def main():
     for name, variable in [('ArduinoJson', 'ARDUINOJSON'), ('micro-flac', 'MICRO_FLAC'),
                            ('IXWebSocket', 'IXWEBSOCKET'), ('noise-c', 'NOISE_C')]:
         command.append('-DSENDSPIN_' + variable + '_DIR=' + str(stage / lock[name]['path']))
-    if args.sanitize:
+    if sanitize:
         flags = '-fsanitize=address,undefined -fno-omit-frame-pointer -g'
         command += ['-DCMAKE_C_FLAGS=' + flags, '-DCMAKE_CXX_FLAGS=' + flags,
                     '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined']
     run(command)
-    run(['cmake', '--build', build, '-j4'], timeout=300)
-    run(['ctest', '--test-dir', build, '--output-on-failure'], timeout=180)
-    engine_work = work / 'engine-loop'
-    engine_work.mkdir()
-    engine_cycle(platform, build, engine_work, args.sanitize)
-    # Grouped join: the first programme chunk arrives ~2 s after stream/start,
-    # past the engine's 32-period (~1.4 s) priming bound.
-    late_work = work / 'engine-late'
-    late_work.mkdir()
-    engine_cycle(platform, build, late_work, args.sanitize, first_audio_delay_ms=2000)
-    print('Sendspin host SDK lane PASS (not ARM, not hardware)', flush=True)
-    return 0
+    build_command = ['cmake', '--build', build, '-j4']
+    for target in targets or []:
+        build_command += ['--target', target]
+    run(build_command, timeout=300)
+    return build, stage, lock
 
 if __name__ == '__main__':
     try:
