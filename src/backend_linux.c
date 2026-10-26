@@ -2670,6 +2670,12 @@ static int sendspin_pairing_token(struct le_backend *b, char *out, size_t size)
     return LE_OK;
 }
 
+static int sendspin_reset_pairing(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "reset_sendspin_pairing", "{}");
+}
+
 static int playback(struct le_backend *b, struct le_playback_state *o)
 {
     struct le_airplay_state airplay_state;
@@ -3210,7 +3216,7 @@ static const struct le_backend_ops ops = {
     network_portal,
     linux_reboot_bootloader,
     volume_leveling,
-    sendspin, sendspin_set, sendspin_pairing_token
+    sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

@@ -9,7 +9,7 @@
 #include <string.h>
 #include <time.h>
 
-struct mock_state { int integrations_spotify; int sendspin_enabled; char spotify_device_name[64]; struct le_audio_state audio;struct le_led_state led;struct le_network_state net;struct le_wake_word_state wake;struct le_bluetooth_state bluetooth;struct le_airplay_state airplay;struct le_playback_state playback;struct le_wifi_scan scan;char device_name[64],config_path[384],pending_ssid[64],fail_next[32],power[24];unsigned rng;time_t started,connect_at,recover_at,bt_scan_ends;int temp_base,update_progress,wake_available; struct le_timer_entry timers[16];long long timer_due[16];int timer_count;unsigned next_timer_id,timer_missed;};
+struct mock_state { int integrations_spotify; int sendspin_enabled; int sendspin_unpaired; char spotify_device_name[64]; struct le_audio_state audio;struct le_led_state led;struct le_network_state net;struct le_wake_word_state wake;struct le_bluetooth_state bluetooth;struct le_airplay_state airplay;struct le_playback_state playback;struct le_wifi_scan scan;char device_name[64],config_path[384],pending_ssid[64],fail_next[32],power[24];unsigned rng;time_t started,connect_at,recover_at,bt_scan_ends;int temp_base,update_progress,wake_available; struct le_timer_entry timers[16];long long timer_due[16];int timer_count;unsigned next_timer_id,timer_missed;};
 /* How long a mock Bluetooth discovery runs before the controller reports it
  * finished. Short enough for a browser test, long enough to observe. */
 #define MOCK_BT_SCAN_SECONDS 3
@@ -123,8 +123,9 @@ static int bluetooth_connectable_mock(struct le_backend*b,int enabled){if(enable
 static int bluetooth_pairing_mode_mock(struct le_backend*b,int enabled){if(enabled!=0&&enabled!=1)return LE_INVALID;M(b)->bluetooth.pairing_mode=enabled;M(b)->bluetooth.connectable=enabled;M(b)->bluetooth.discoverable=enabled;M(b)->bluetooth.bondable=enabled;return LE_OK;}
 /* Sendspin: installed, follows its own toggle, and reports a connected,
    synchronized player while enabled. The token is a fixed fake. */
-static int sendspin_mock(struct le_backend*b,struct le_sendspin_state*o){memset(o,0,sizeof(*o));o->installed=1;o->enabled=M(b)->sendspin_enabled;o->running=o->enabled;if(o->running){o->listening=o->discoverable=o->connected=o->paired=o->time_synced=1;o->volume=M(b)->audio.volume;strcpy(o->server,"Music Assistant (mock)");}return LE_OK;}
+static int sendspin_mock(struct le_backend*b,struct le_sendspin_state*o){memset(o,0,sizeof(*o));o->installed=1;o->enabled=M(b)->sendspin_enabled;o->running=o->enabled;if(o->running){o->listening=o->discoverable=1;o->volume=M(b)->audio.volume;if(!M(b)->sendspin_unpaired){o->connected=o->paired=o->time_synced=1;strcpy(o->server,"Music Assistant (mock)");}}return LE_OK;}
 static int sendspin_set_mock(struct le_backend*b,int enabled){if(enabled!=0&&enabled!=1)return LE_INVALID;if(fail(M(b),"sendspin"))return LE_IO;M(b)->sendspin_enabled=enabled;return LE_OK;}
+static int sendspin_reset_pairing_mock(struct le_backend*b){if(fail(M(b),"sendspin"))return LE_IO;M(b)->sendspin_unpaired=1;return LE_OK;}
 static int sendspin_pairing_token_mock(struct le_backend*b,char*out,size_t size){if(!M(b)->sendspin_enabled)return LE_IO;snprintf(out,size,"%s","SP:MOCKPAIRINGTOKEN0000000000000000");return LE_OK;}
 static int airplay(struct le_backend*b,struct le_airplay_state*o){*o=M(b)->airplay;o->available=1;return LE_OK;}static int airplay_set(struct le_backend*b,int enabled){if(enabled!=0&&enabled!=1)return LE_INVALID;if(fail(M(b),"airplay"))return LE_IO;M(b)->airplay.enabled=enabled;M(b)->airplay.nqptp_running=enabled;M(b)->airplay.shairport_running=enabled;return LE_OK;}
 static int playback(struct le_backend*b,struct le_playback_state*o){*o=M(b)->playback;return LE_OK;}
@@ -285,5 +286,5 @@ static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,
  0,
  reboot_bootloader,
  volume_leveling_mock,
- sendspin_mock, sendspin_set_mock, sendspin_pairing_token_mock};
+ sendspin_mock, sendspin_set_mock, sendspin_pairing_token_mock, sendspin_reset_pairing_mock};
 int le_mock_create(struct le_backend*b,const char*mock,const char*cfg,unsigned seed){struct mock_state*m=calloc(1,sizeof(*m));if(!m)return LE_IO;defaults(m,seed);load_profile(m,mock,seed);if(cfg){strncpy(m->config_path,cfg,sizeof(m->config_path)-1);load(m,cfg);}b->data=m;b->ops=&ops;return LE_OK;}

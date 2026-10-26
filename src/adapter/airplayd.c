@@ -1449,6 +1449,44 @@ static void sendspin_poll(struct airplay_ctx *ctx)
     le_log_info("airplayd: Sendspin player started");
 }
 
+/* Forget every paired server: stop the player, then remove its state file
+ * (pairing records, Pairing PSK and identity), so the next start provisions
+ * a fresh identity and a new pairing token.  The player is stopped first so
+ * it cannot rewrite what was removed.  A running intent restarts it through
+ * the normal poll.  Absent state is already reset. */
+static int sendspin_reset_pairing(struct airplay_ctx *ctx)
+{
+    char dir[sizeof(ctx->sendspin_state)];
+    char *slash;
+    int fd;
+
+    if (ctx->sendspin_pid > 0) {
+        stop_child(&ctx->sendspin_pid);
+        le_log_info("airplayd: Sendspin player stopped for a pairing reset");
+    }
+    if (unlink(ctx->sendspin_state) != 0 && errno != ENOENT)
+        return -1;
+    /* Make the removal durable before reporting success. */
+    snprintf(dir, sizeof(dir), "%s", ctx->sendspin_state);
+    slash = strrchr(dir, '/');
+    if (slash) {
+        if (slash == dir)
+            slash[1] = '\0';
+        else
+            *slash = '\0';
+        fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (fd >= 0) {
+            (void)fsync(fd);
+            close(fd);
+        }
+    }
+    ctx->sendspin_backoff_ms = SENDSPIN_BACKOFF_MIN_MS;
+    ctx->sendspin_next_start_ms = 0;
+    sendspin_poll(ctx);
+    le_log_info("airplayd: Sendspin pairing reset");
+    return 0;
+}
+
 static pid_t spawn_engine(const struct airplay_ctx *ctx)
 {
     pid_t pid = fork();
@@ -1629,6 +1667,12 @@ static int request(struct airplay_ctx *ctx, char *message,
         ctx->sendspin_next_start_ms = 0;
         sendspin_poll(ctx);
         le_log_info("airplayd: Sendspin %s", enabled ? "enabled" : "disabled");
+        return le_adapter_respond_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "reset_sendspin_pairing")) {
+        if (sendspin_reset_pairing(ctx) < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "Sendspin pairing could not be reset");
         return le_adapter_respond_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "refresh_hostname")) {
