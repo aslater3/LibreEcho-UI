@@ -444,6 +444,24 @@ int run_companion(const Options& opts) {
             discovery.poll(static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count()));
+#ifdef LE_SENDSPIND_CLOCK_TRACE
+            // Development-only (never in release builds): the time filter's
+            // server->client map, sampled at two points (it is linear), and the
+            // last played-frame report, all on CLOCK_MONOTONIC (steady_clock).
+            if (client.is_time_synced()) {
+                if (FILE* log = std::fopen("/tmp/le-ss/clock-trace.log", "a")) {
+                    const long long mono = static_cast<long long>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count());
+                    std::fprintf(log, "mono_us=%lld c0=%lld c1=%lld reported=%llu report_us=%lld\n",
+                                 mono, static_cast<long long>(client.get_client_time(0)),
+                                 static_cast<long long>(client.get_client_time(1000000000000LL)),
+                                 static_cast<unsigned long long>(listener.reported_frames()),
+                                 static_cast<long long>(listener.last_report_timestamp_us()));
+                    std::fclose(log);
+                }
+            }
+#endif
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
