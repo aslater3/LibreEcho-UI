@@ -92,7 +92,7 @@ jobs:
             --prefix "$RUNNER_TEMP/libreecho-playwright" \
             --no-save \
             --no-package-lock \
-            playwright@1.63.0
+            playwright@1.64.1
           "$RUNNER_TEMP/libreecho-playwright/node_modules/.bin/playwright" install --with-deps chromium
 
       - name: Run browser E2E checks
@@ -156,7 +156,7 @@ jobs:
             --prefix "$RUNNER_TEMP/libreecho-playwright" \
             --no-save \
             --no-package-lock \
-            playwright@1.55.0
+            playwright@1.64.1
           "$RUNNER_TEMP/libreecho-playwright/node_modules/.bin/playwright" install --with-deps webkit
 
       # WebKit is the engine iOS Safari uses, so this is the closest host-side
