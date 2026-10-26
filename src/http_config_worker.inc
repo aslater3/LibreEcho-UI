@@ -33,7 +33,7 @@ static int refresh_setup_completed(struct api_context *api)
         json_get_int(saved, "wake_sensitivity", &sensitivity) != 1 ||
         sensitivity < 0 || sensitivity > 100 ||
         json_get_int(saved, "integrations", &integrations) != 1 ||
-        integrations < 0 || integrations > 63)
+        integrations < 0 || integrations > 127)
         return -1;
     /* Only setup-owned fields are imported. Never replace live authentication,
        sessions, or the entire context with a stale forked copy. */
