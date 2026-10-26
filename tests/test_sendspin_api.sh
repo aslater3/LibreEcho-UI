@@ -95,9 +95,16 @@ echo "== pairing token =="
 check "pairing without CSRF" 403 -X POST "$URL/api/v1/sendspin/pairing"
 jcheck "pairing token" '.data.pairing_token | startswith("SP:")' -X POST "$URL/api/v1/sendspin/pairing" -H "$AUTH"
 
+echo "== forget paired servers =="
+check "unpair without CSRF" 403 -X POST "$URL/api/v1/sendspin/unpair"
+check "unpair GET" 405 "$URL/api/v1/sendspin/unpair"
+jcheck "unpair" '.data.reset == true' -X POST "$URL/api/v1/sendspin/unpair" -H "$AUTH"
+jcheck "unpaired after reset" '.data.enabled and (.data.paired | not) and (.data.connected | not)' "$URL/api/v1/sendspin"
+
 echo "== disable =="
 check "toggle off" 200 -X PUT "$URL/api/v1/integrations/sendspin" -H "$AUTH" -H "$JSON" --data '{"enabled":false}'
 jcheck "status disabled again" '.data.state=="disabled"' "$URL/api/v1/sendspin"
+jcheck "unpair while disabled" '.data.reset == true' -X POST "$URL/api/v1/sendspin/unpair" -H "$AUTH"
 
 echo "== authentication =="
 ACFG="$TMP/auth.json"
@@ -115,6 +122,7 @@ done
 ACSRF="X-LibreEcho-CSRF: $(curl -fsS "$AUTH_URL/api/v1/config" | jq -r '.data.csrf_token')"
 check "status needs auth" 401 "$AUTH_URL/api/v1/sendspin"
 check "pairing needs auth" 401 -X POST "$AUTH_URL/api/v1/sendspin/pairing" -H "$ACSRF"
+check "unpair needs auth" 401 -X POST "$AUTH_URL/api/v1/sendspin/unpair" -H "$ACSRF"
 check "status with auth" 200 "$AUTH_URL/api/v1/sendspin" -H 'Authorization: Bearer test-token-0123456789abcdef'
 
 echo "sendspin api: $PASS passed, $FAIL failed"

@@ -52,6 +52,7 @@ struct le_backend_ops {
  int (*sendspin)(struct le_backend*,struct le_sendspin_state*);
  int (*sendspin_set)(struct le_backend*,int);
  int (*sendspin_pairing_token)(struct le_backend*,char*,size_t);
+ int (*sendspin_reset_pairing)(struct le_backend*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

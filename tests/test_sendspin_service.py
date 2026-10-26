@@ -237,6 +237,33 @@ class SendspinService(unittest.TestCase):
         self.assertTrue(wait(lambda: self.running_player() not in (None, player), 15),
                         'player not restarted against the new engine')
 
+    def pairing_state(self):
+        state = Path(tempfile.mkdtemp(prefix='s', dir=self.tmp.name)) / 'sendspin-state'
+        state.write_text('libreecho-sendspin-state 1\n')
+        return state
+
+    def test_reset_pairing_forgets_state_and_restarts(self):
+        state = self.pairing_state()
+        self.start('--sendspin-on-start', '--sendspin-state', str(state))
+        self.assertTrue(wait(lambda: self.running_player() is not None))
+        first = self.running_player()
+        self.assertTrue(call(self.sock, 'reset_sendspin_pairing')['ok'])
+        # The player is stopped before its state goes, so it cannot rewrite it.
+        self.assertFalse(alive(first), 'player kept running across the reset')
+        self.assertFalse(state.exists(), 'pairing state survived the reset')
+        self.assertTrue(wait(lambda: self.running_player() not in (None, first)),
+                        'player not restarted after the reset')
+
+    def test_reset_pairing_while_disabled(self):
+        state = self.pairing_state()
+        self.start('--sendspin-state', str(state))
+        self.assertTrue(call(self.sock, 'reset_sendspin_pairing')['ok'])
+        self.assertFalse(state.exists(), 'pairing state survived the reset')
+        time.sleep(1.5)
+        self.assertEqual(self.starts(), [], 'reset started a disabled player')
+        # Nothing to forget is still a successful reset.
+        self.assertTrue(call(self.sock, 'reset_sendspin_pairing')['ok'])
+
     def test_shutdown_stops_player(self):
         self.start('--sendspin-on-start')
         self.assertTrue(wait(lambda: self.running_player() is not None))

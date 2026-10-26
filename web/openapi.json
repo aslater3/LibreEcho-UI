@@ -1956,6 +1956,37 @@
     }
    }
   },
+  "/sendspin/unpair": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Forget paired Sendspin servers",
+    "description": "Forgets every server paired with the player: the player is stopped, its pairing state removed and, when enabled, restarted with a new identity and a new pairing token, so each server has to pair again. Allowed while Sendspin is disabled (it only clears state). Returns data.reset=true. Authenticated and CSRF-checked like every changing request; 501 when the image has no Sendspin player, 503 when the reset could not be applied.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/integrations": {
    "get": {
     "tags": [

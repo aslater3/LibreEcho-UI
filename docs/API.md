@@ -2279,6 +2279,22 @@ like every changing request.
 The token is never part of status, logs or configuration export, and clients
 must not store it.
 
+#### POST /api/v1/sendspin/unpair
+
+Forgets every server paired with the player. The player is stopped, its
+pairing state is removed and, when Sendspin is enabled, it restarts with a new
+identity and a new pairing token, so each server has to pair again. Allowed
+while Sendspin is disabled (it only clears state). Requires authentication
+and the CSRF header.
+
+**Response:**
+```json
+{ "ok": true, "data": { "reset": true }, "error": null }
+```
+
+- **501** — this image has no Sendspin player.
+- **503** — the reset could not be applied.
+
 #### PUT /api/v1/integrations
 
 Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.

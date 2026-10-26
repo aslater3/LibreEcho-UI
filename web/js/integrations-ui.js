@@ -621,9 +621,18 @@ async function sendspinDetail(){
   if(!host)return;                           /* the page changed meanwhile */
   host.innerHTML=`<div class="status-line"><span class="status-dot ${s.connected?'ok':''}"></span><span>${sendspinStateText(s)}</span></div>
     <p class="muted">Music Assistant finds this speaker on your network. To add it, pair it there with this speaker's pairing token.</p>
-    <div class="button-row"><button class="secondary-btn" id="sendspin-pair">Show pairing token</button></div>
+    <div class="button-row"><button class="secondary-btn" id="sendspin-pair">Show pairing token</button><button class="secondary-btn" id="sendspin-unpair">Forget paired servers</button></div>
     <div id="sendspin-token" hidden></div>`;
   $('#sendspin-pair').onclick=showSendspinToken;
+  $('#sendspin-unpair').onclick=forgetSendspinServers;
+}
+/* Clears every pairing and issues a new token; servers must pair again. */
+async function forgetSendspinServers(){
+  if(!confirm('Forget every Music Assistant server paired with this speaker?\n\nThe speaker gets a new pairing token, and each server has to pair again with it.'))return;
+  try{await api('/sendspin/unpair',{method:'POST',body:'{}'});}
+  catch(e){toast(e.message,true);return;}
+  toast('Paired servers forgotten. Pair again with the new token.');
+  await sendspinDetail();
 }
 async function showSendspinToken(){
   let token;

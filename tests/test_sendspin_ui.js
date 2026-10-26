@@ -51,6 +51,7 @@ globalThis.api=async(path,options={})=>{
   if(path==='/home-assistant'||path==='/privacy'||path==='/assistant'||path==='/live')return {};
   if(path==='/sendspin'){if(status instanceof Error)throw status;return status;}
   if(path==='/sendspin/pairing'&&method==='POST')return {pairing_token:TOKEN};
+  if(path==='/sendspin/unpair'&&method==='POST')return {reset:true};
   if(path.startsWith('/integrations/')||path==='/home-location')return {};
   throw Error('Unexpected API path '+path);
 };
@@ -84,6 +85,19 @@ const posts=()=>requests.filter(r=>r.path==='/sendspin/pairing');
   assert(!JSON.stringify(state).includes('TESTTOKEN'));
   document.querySelector('#sendspin-token-hide').onclick();
   assert(!html.includes('TESTTOKEN'),'Hide left the token on the page');
+
+  // Forget paired servers: only after the owner confirms, then reported.
+  const unpairs=()=>requests.filter(r=>r.path==='/sendspin/unpair');
+  assert(html.includes('id="sendspin-unpair"'));
+  let asked='';
+  globalThis.confirm=m=>{asked=m;return false;};
+  await document.querySelector('#sendspin-unpair').onclick();
+  assert(asked.includes('pair')&&unpairs().length===0,'unpair sent without confirmation');
+  globalThis.confirm=()=>true;
+  await document.querySelector('#sendspin-unpair').onclick();
+  assert.equal(unpairs().length,1);
+  assert(toasts.some(t=>!t.bad&&/forgot|forgotten/i.test(t.m)),'unpair not reported');
+  globalThis.confirm=()=>false;
 
   // Other states.
   for(const [s,text] of [[{...connected,state:'waiting',connected:false,server:null},'Waiting for Music Assistant'],
