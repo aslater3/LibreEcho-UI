@@ -3,7 +3,7 @@
 #
 # Starts the real web daemon in mock mode against fixture files laid out the
 # way Platform's libreecho-ping writes them, and checks that GET /api/v1/privacy
-# reports the ping as always on, carries the exact next payload verbatim, and
+# reports the ping and the owner's on/off switch, carries the exact next payload verbatim, and
 # never relays a tampered payload file as JSON.  Also pins the setup and
 # Privacy page copy and the setup defaults.
 set -eu
@@ -37,7 +37,7 @@ curl -fsS "$URL/api/v1/privacy" > "$WORK/privacy.json"
 jq -e --argjson want "$PAYLOAD" '
     .ok and
     .data.active_device_ping.enabled == true and
-    .data.active_device_ping.can_disable == false and
+    .data.active_device_ping.can_disable == true and
     .data.active_device_ping.ip_stored == false and
     .data.active_device_ping.endpoint == "https://stats.libreecho.org/v1/ping" and
     .data.active_device_ping.user_agent == "libreecho-ping/1" and
@@ -46,14 +46,35 @@ jq -e --argjson want "$PAYLOAD" '
     ([.data.active_device_ping.fields[].name] == ["v","hw","ver","ch","build","wk","mo","yr","w","m","y","i"]) and
     (.data | has("diagnostic_telemetry") and has("crash_reports"))' "$WORK/privacy.json" >/dev/null
 
-# The ping block is read-only: PUT cannot switch it off.
+# Echoing the read-only block back does not switch the ping: only the
+# top-level active_device_ping_enabled does.
 CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
 curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' \
     --data '{"active_device_ping":{"enabled":false},"diagnostic_telemetry":false,"crash_reports":false}' >/dev/null
 curl -fsS "$URL/api/v1/privacy" | jq -e '
     .data.active_device_ping.enabled == true and
     .data.diagnostic_telemetry == false and .data.crash_reports == false' >/dev/null
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"active_device_ping_enabled":"no"}')
+[ "$code" = 400 ]
+# The owner switches it off; libreecho-ping reads the saved key.
+curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"active_device_ping_enabled":false}' | jq -e '.data.active_device_ping.enabled == false' >/dev/null
+grep -Eq '"privacy_active_ping"[[:space:]]*:[[:space:]]*false' "$WORK/config.json"
+curl -fsS "$URL/api/v1/config/export" | jq -e '.data.privacy_active_ping == false or .privacy_active_ping == false' >/dev/null
 stop
+# The choice survives a restart, and the sender's "disabled" result is shown.
+printf 'schema=1\nresult=disabled\nhttp=\nperiod=2026-W41\n' > "$WORK/state/ping-status"
+start
+curl -fsS "$URL/api/v1/privacy" | jq -e '
+    .data.active_device_ping.enabled == false and
+    .data.active_device_ping.last.result == "disabled"' >/dev/null
+CSRF="X-LibreEcho-CSRF: $(curl -fsS "$URL/api/v1/config" | jq -r '.data.csrf_token')"
+curl -fsS -X PUT "$URL/api/v1/privacy" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"active_device_ping_enabled":true}' | jq -e '.data.active_device_ping.enabled == true' >/dev/null
+grep -Eq '"privacy_active_ping"[[:space:]]*:[[:space:]]*true' "$WORK/config.json"
+stop
+printf 'schema=1\nresult=sent\nhttp=204\nperiod=2026-W41\npayload=%s\n' "$PAYLOAD" > "$WORK/state/ping-status"
 
 # A new install's first ping carries "i":1; it is relayed verbatim too.
 FIRST='{"v":1,"hw":"biscuit","ver":"0.14.0","ch":"stable","wk":"2026-W41","mo":"2026-10","yr":"2026","w":1,"m":1,"y":1,"i":1}'
@@ -88,13 +109,16 @@ curl -fsS -X POST "$URL/api/v1/setup" -H "$CSRF" -H 'Content-Type: application/j
 curl -fsS "$URL/api/v1/privacy" | jq -e '.data.diagnostic_telemetry == true and .data.crash_reports == true' >/dev/null
 stop
 
-# Copy and defaults: the ping is disclosed and the two opt-outs start ticked.
+# Copy and defaults: the ping is disclosed with its off switch, and the two
+# consent opt-outs start ticked.
 grep -q 'Once a week LibreEcho sends one anonymous ping to stats.libreecho.org' web/setup.html
-grep -q 'This ping cannot be turned off' web/setup.html
+grep -q 'You can switch it off on the Privacy page' web/setup.html
+! grep -q 'cannot be turned off' web/setup.html web/js/privacy-ui.js
 grep -q '<input id="setup-telemetry" type="checkbox" checked>' web/setup.html
 grep -q '<input id="setup-crash-reports" type="checkbox" checked>' web/setup.html
 grep -q 'diagnostic_telemetry:true,crash_reports:true}}' web/js/setup.js
-grep -q 'This ping cannot be turned off' web/js/privacy-ui.js
+grep -q "toggle('Send the weekly active-device count'" web/js/privacy-ui.js
+grep -q 'active_device_ping_enabled:enabled' web/js/privacy-ui.js
 grep -q 'activePingPanel(p.active_device_ping)' web/js/privacy-ui.js
 ! grep -q 'No cloud dependency is enabled by default' web/js/app.js web/js/privacy-ui.js
 echo "active-device ping disclosure: ok"
