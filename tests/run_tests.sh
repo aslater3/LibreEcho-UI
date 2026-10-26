@@ -16,6 +16,9 @@ PORT=${LIBREECHO_TEST_PORT:-18082}
 URL="http://127.0.0.1:$PORT"
 CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete"
+# Radio stations are stored beside the configuration; a previous run leaves
+# them behind and test_api.sh expects none.
+rm -f ./build/radio-stations.json ./build/radio-stations.json.bak ./build/radio-stations.json.tmp
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
 make build/test-update-identity
