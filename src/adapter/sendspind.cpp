@@ -333,6 +333,10 @@ int run_companion(const Options& opts) {
             return 3;
         }
     }
+#ifdef LE_SENDSPIND_CLOCK_TRACE
+    // Development builds also log the SDK's per-chunk sync decisions.
+    ::sendspin::SendspinClient::set_log_level(::sendspin::LogLevel::VERBOSE);
+#endif
     ::sendspin::SendspinClient client(cfg);
     if (persistence) client.set_persistence_provider(&*persistence);
     HostNetworkProvider network;
