@@ -53,9 +53,11 @@
 #define LIBREECHO_SENDPIN_SDK_PLAYER_LISTENER_H
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include <sendspin/player_role.h>
@@ -84,22 +86,18 @@ public:
     // never counted; the SDK re-issues the unaccepted tail.
     size_t on_audio_write(uint8_t* data, size_t length,
                           uint32_t timeout_ms) override {
-        std::lock_guard<std::recursive_mutex> guard(mu_);
-        if (!session_.streaming()) return 0;
-        // Source-only mute, applied to a copy: the SDK re-presents frames the
-        // engine did not accept, so the input must stay unscaled.
-        const size_t frames = length / LE_AUDIO_SINK_BYTES_PER_FRAME;
-        if (frames != 0 && (mute_.muted() || mute_.gain_at(session_.accepted_frames()) !=
-                                                 PcmMute::kUnity)) {
-            scratch_.resize(frames * LE_AUDIO_SINK_OUTPUT_CHANNELS);
-            std::memcpy(scratch_.data(), data, frames * LE_AUDIO_SINK_BYTES_PER_FRAME);
-            mute_.apply(scratch_.data(), scratch_.data(), frames,
-                        LE_AUDIO_SINK_OUTPUT_CHANNELS, session_.accepted_frames());
-            return session_.write(reinterpret_cast<uint8_t*>(scratch_.data()),
-                                  frames * LE_AUDIO_SINK_BYTES_PER_FRAME, timeout_ms);
-        }
-        return session_.write(data, length, timeout_ms);
+        bool full = false;
+        const size_t accepted = write_locked(data, length, timeout_ms, &full);
+        // A full engine queue frees a period at a time. Wait a little before
+        // the SDK offers again (outside the lock, so feedback keeps flowing):
+        // offering at once only floods the engine with refusals.
+        if (full && accepted < length && timeout_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(
+                std::min<uint32_t>(timeout_ms, kFullBackoffMs)));
+        return accepted;
     }
+
+    static constexpr uint32_t kFullBackoffMs = 4;
 
     // --- SDK main loop -----------------------------------------------------
 
@@ -260,6 +258,28 @@ public:
     uint64_t report_count() const { std::lock_guard<std::recursive_mutex> guard(mu_); return report_count_; }
 
 private:
+    size_t write_locked(uint8_t* data, size_t length, uint32_t timeout_ms, bool* full) {
+        std::lock_guard<std::recursive_mutex> guard(mu_);
+        if (!session_.streaming()) return 0;
+        size_t accepted;
+        // Source-only mute, applied to a copy: the SDK re-presents frames the
+        // engine did not accept, so the input must stay unscaled.
+        const size_t frames = length / LE_AUDIO_SINK_BYTES_PER_FRAME;
+        if (frames != 0 && (mute_.muted() || mute_.gain_at(session_.accepted_frames()) !=
+                                                 PcmMute::kUnity)) {
+            scratch_.resize(frames * LE_AUDIO_SINK_OUTPUT_CHANNELS);
+            std::memcpy(scratch_.data(), data, frames * LE_AUDIO_SINK_BYTES_PER_FRAME);
+            mute_.apply(scratch_.data(), scratch_.data(), frames,
+                        LE_AUDIO_SINK_OUTPUT_CHANNELS, session_.accepted_frames());
+            accepted = session_.write(reinterpret_cast<uint8_t*>(scratch_.data()),
+                                      frames * LE_AUDIO_SINK_BYTES_PER_FRAME, timeout_ms);
+        } else {
+            accepted = session_.write(data, length, timeout_ms);
+        }
+        *full = session_.last_write_full();
+        return accepted;
+    }
+
     void reset_feedback_locked() {
         reported_frames_ = 0;
         last_report_timestamp_us_ = 0;

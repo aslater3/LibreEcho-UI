@@ -13,6 +13,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#ifdef LE_SENDSPIND_CLOCK_TRACE
+#include <cstdio>
+#endif
 
 #include <poll.h>
 #include <sys/socket.h>
@@ -266,6 +269,9 @@ SinkResult EngineSink::connect(const std::string& socket_path,
     next_frame_ = 0;
     capacity_frames_ = 0;
     period_frames_ = 0;
+    capacity_bound_ = 0;
+    capacity_bound_known_ = false;
+    last_write_full_ = false;
     last_error_ = 0;
     last_result_ = SinkResult::Ok;
     return SinkResult::Ok;
@@ -372,6 +378,9 @@ SinkResult EngineSink::open(uint32_t generation, uint32_t timeout_ms) {
         pending_frames_ = 0;
         pending_ready_ = false;
         cached_progress_us_ = 0;
+        capacity_bound_ = 0;
+        capacity_bound_known_ = false;  // a new generation starts empty
+        last_write_full_ = false;
         armed_ = true;
         last_error_ = 0;
         period_frames_ = le_audio_sink_get_u32(pl + 20);
@@ -420,6 +429,8 @@ SinkResult EngineSink::pending_credit_locked(const uint8_t* pl, uint32_t len) {
         return SinkResult::Rejected;
     }
     pending_ready_ = true;
+    capacity_bound_ = le_audio_sink_get_u32(pl + 24);
+    capacity_bound_known_ = true;
     return SinkResult::Ok;
 }
 
@@ -465,6 +476,8 @@ size_t EngineSink::on_audio_write(const uint8_t* pcm, size_t length,
     }
     const int64_t deadline = now_us() + static_cast<int64_t>(timeout_ms) * 1000;
     size_t accepted_bytes = 0;
+    bool probed = false;
+    last_write_full_ = false;
     while (accepted_bytes < length) {
         const uint8_t* src = pcm + accepted_bytes;
         const size_t remaining = length - accepted_bytes;
@@ -478,8 +491,22 @@ size_t EngineSink::on_audio_write(const uint8_t* pcm, size_t length,
                 break;
             }
         } else {
-            const uint32_t chunk = static_cast<uint32_t>(std::min<size_t>(
+            uint32_t chunk = static_cast<uint32_t>(std::min<size_t>(
                 remaining / LE_AUDIO_SINK_BYTES_PER_FRAME, LE_AUDIO_SINK_MAX_DATA_FRAMES));
+            // Never offer more than the engine last said it could take. A
+            // queue last seen full gets one probe per call: offering again
+            // at once only floods the engine with refusals, which crowd out
+            // the DATA it can accept.
+            if (capacity_bound_known_) {
+                if (capacity_bound_ > 0) {
+                    chunk = std::min(chunk, capacity_bound_);
+                } else if (probed) {
+                    last_write_full_ = true;
+                    break;
+                } else {
+                    probed = true;
+                }
+            }
             uint8_t payload[LE_AUDIO_SINK_DATA_PREFIX_BYTES +
                             LE_AUDIO_SINK_MAX_DATA_FRAMES * LE_AUDIO_SINK_BYTES_PER_FRAME];
             le_audio_sink_put_u32(payload + 0, epoch_);
@@ -499,13 +526,38 @@ size_t EngineSink::on_audio_write(const uint8_t* pcm, size_t length,
             std::memcpy(pending_pcm_, src, bytes);
         }
         SinkResult r = await_pending_locked(deadline);
+        if (r == SinkResult::Rejected && last_error_ == LE_AUDIO_SINK_ERR_CAPACITY) {
+            capacity_bound_ = 0;
+            capacity_bound_known_ = true;
+            last_write_full_ = true;
+        }
         if (r != SinkResult::Ok) { last_result_ = r; break; }
         accepted_bytes += pending_frames_ * LE_AUDIO_SINK_BYTES_PER_FRAME;
         commit_pending_locked();
         last_result_ = SinkResult::Ok;
         if (now_us() >= deadline) break;
     }
+#ifdef LE_SENDSPIND_CLOCK_TRACE
+    // Development-only (never in release builds): one line per SDK write.
+    {
+        static FILE* log = std::fopen("/tmp/le-ss/write-trace.log", "a");
+        if (log) {
+            std::fprintf(log, "start_us=%lld frames=%zu accepted=%zu took_us=%lld result=%d\n",
+                         static_cast<long long>(deadline - static_cast<int64_t>(timeout_ms) * 1000),
+                         length / LE_AUDIO_SINK_BYTES_PER_FRAME,
+                         accepted_bytes / LE_AUDIO_SINK_BYTES_PER_FRAME,
+                         static_cast<long long>(now_us() - (deadline - static_cast<int64_t>(timeout_ms) * 1000)),
+                         static_cast<int>(last_result_));
+            std::fflush(log);
+        }
+    }
+#endif
     return accepted_bytes;
+}
+
+bool EngineSink::last_write_full() const {
+    std::lock_guard<std::mutex> guard(mu_);
+    return last_write_full_;
 }
 
 SinkResult EngineSink::finish(uint64_t exact_total_frames, uint32_t timeout_ms,

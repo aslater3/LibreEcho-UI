@@ -116,6 +116,8 @@ public:
     // Sync-thread entry point. Bounded, frame-aligned byte return; 0 on any
     // non-accepting outcome. Never invents bytes.
     size_t write(const uint8_t* pcm, size_t length, uint32_t timeout_ms);
+    // The last write stopped on a full engine queue (see EngineSink).
+    bool last_write_full() const { return sink_.last_write_full(); }
 
     // Main-loop progress poll for the live/opened generation.
     SinkResult poll(EngineSinkTiming* out);
