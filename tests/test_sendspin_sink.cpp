@@ -21,6 +21,7 @@
 #include "sendspin_engine_fixture.h"
 
 #include <cstdint>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -168,6 +169,55 @@ void test_bounded_partial_acceptance_is_whole_frames() {
           "cumulative accepted matches the bounded prefix");
     CHECK(client.last_error() == LE_AUDIO_SINK_ERR_CAPACITY,
           "capacity rejection recorded, not silently dropped");
+    CHECK(client.last_write_full(), "a full engine queue is reported to the caller");
+
+    client.disconnect();
+    server.stop();
+}
+
+// The CREDIT's capacity_remaining sizes the next DATA: an offer fills the
+// engine queue exactly, a full queue costs one rejected probe (not a flood),
+// and a drained queue is refilled.
+void test_fills_exactly_to_capacity_and_reports_full() {
+    std::string path = unique_socket_path("sink");
+    EngineServer server;
+    const uint32_t capacity = 3000;  // not a multiple of the period
+    CHECK(server.start(path, capacity), "server start");
+
+    EngineSink client;
+    CHECK(client.connect(path, 2000) == SinkResult::Ok, "connect");
+    CHECK(client.open(1, 2000) == SinkResult::Ok, "open");
+
+    const size_t frames = 4096;
+    std::vector<int16_t> pcm(frames * 2);
+    fill_pattern(pcm.data(), frames);
+    size_t accepted = client.on_audio_write(reinterpret_cast<uint8_t*>(pcm.data()),
+                                            frames * kBytesPerFrame, 3000);
+    CHECK(accepted == capacity * kBytesPerFrame, "offer filled the queue exactly to capacity");
+    CHECK(client.sequence() == 2u, "the tail DATA was sized to the remaining capacity");
+    CHECK(client.last_write_full(), "full after filling to capacity");
+
+    // Full: the next offer returns at once with nothing, and says so.
+    const auto t0 = std::chrono::steady_clock::now();
+    size_t again = client.on_audio_write(reinterpret_cast<uint8_t*>(pcm.data()) +
+                                             accepted, (frames - capacity) * kBytesPerFrame, 3000);
+    const auto took = std::chrono::steady_clock::now() - t0;
+    CHECK(again == 0, "nothing accepted while full");
+    CHECK(client.last_write_full(), "full reported");
+    CHECK(took < std::chrono::milliseconds(200), "a full queue does not hold the caller to its deadline");
+
+    // The engine drains a period: the next offer is accepted again.
+    std::vector<int16_t> out(LE_AUDIO_SINK_PERIOD_FRAMES * 2, 0);
+    uint64_t first = 0;
+    CHECK(le_audio_sink_render(server.sink(), out.data(), LE_AUDIO_SINK_PERIOD_FRAMES, &first) ==
+              LE_AUDIO_SINK_PERIOD_FRAMES, "engine rendered one period");
+    CHECK(le_audio_sink_commit(server.sink(), client.epoch(), client.generation(),
+                               LE_AUDIO_SINK_PERIOD_FRAMES) == LE_AUDIO_SINK_OK,
+          "engine committed the rendered period");
+    accepted = client.on_audio_write(reinterpret_cast<uint8_t*>(pcm.data()) + capacity * kBytesPerFrame,
+                                     (frames - capacity) * kBytesPerFrame, 3000);
+    CHECK(accepted == (frames - capacity) * kBytesPerFrame, "drained space accepted the rest");
+    CHECK(!client.last_write_full(), "an offer that fits is not reported full");
 
     client.disconnect();
     server.stop();
@@ -409,6 +459,7 @@ int main() {
     test_connect_and_open_round_trip();
     test_acknowledged_bytes_are_exact_and_ordered();
     test_bounded_partial_acceptance_is_whole_frames();
+    test_fills_exactly_to_capacity_and_reports_full();
     test_stalled_engine_returns_zero_not_queued_bytes();
     test_malformed_open_ack_is_rejected();
     test_stale_or_bad_credit_never_counts();

@@ -145,6 +145,9 @@ public:
     uint32_t sequence() const;         // last acknowledged DATA sequence
     uint32_t last_error() const;       // engine status of the last Rejected
     SinkResult last_result() const;    // outcome of the last operation
+    // True when the last on_audio_write() stopped because the engine queue is
+    // full; the caller should wait briefly rather than offer again at once.
+    bool last_write_full() const;
     bool open_generation() const;      // armed and accepting audio
 
 private:
@@ -176,6 +179,13 @@ private:
     SinkResult last_result_ = SinkResult::Ok;
     uint32_t capacity_frames_ = 0;
     uint32_t period_frames_ = 0;
+    // capacity_remaining from the last accepted CREDIT.  The engine only
+    // drains its queue, so this is a lower bound on the space free now: a
+    // DATA sized to it cannot be refused for capacity.  Zero means full when
+    // last seen; the next offer then sends one probe.
+    uint32_t capacity_bound_ = 0;
+    bool capacity_bound_known_ = false;
+    bool last_write_full_ = false;
 
     // A control request already on the wire whose reply missed its deadline.
     // The engine is single-threaded and may take longer than one bounded op
