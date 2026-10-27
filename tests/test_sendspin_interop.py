@@ -127,15 +127,24 @@ def scenario(args, ctx, label, ppm_a, ppm_b, seconds, bound_ms, extra_b_us=0, ex
     finally:
         stop(procs)
     a, b = onsets(log_a), onsets(log_b)
+    # The players advertise FLAC first: the pinned server must stream FLAC,
+    # which the SDK decodes before the engine sink.
+    codecs = {}
+    for name in ('player-a', 'player-b'):
+        text = (work / f'{name}-sendspind.log').read_text(errors='replace')
+        codecs[name] = sorted(set(m.split(',')[0].strip() for m in
+                                  text.split('Processed new codec header:')[1:]))
     offsets = pair_offsets(a, b)
     settled = offsets[CLICKS_SKIPPED:]
     result = dict(scenario=label, ppm=[ppm_a, ppm_b], clicks_sent=seconds, clicks_a=len(a),
                   clicks_b=len(b), paired=len(offsets),
                   settled_median_ms=round(statistics.median(settled), 3) if settled else None,
                   settled_max_abs_ms=round(max(abs(x) for x in settled), 3) if settled else None,
-                  bound_ms=bound_ms, offsets_ms=[round(x, 3) for x in offsets])
+                  bound_ms=bound_ms, codecs=codecs, offsets_ms=[round(x, 3) for x in offsets])
     print('interop', json.dumps(result), flush=True)
     problems = []
+    if any(c != ['flac'] for c in codecs.values()):
+        problems.append(f'stream was not FLAC: {codecs}')
     if min(len(a), len(b), len(offsets)) < seconds:
         problems.append(f'clicks lost (sent {seconds}, a {len(a)}, b {len(b)}, paired {len(offsets)})')
     if expect_ms is not None:
