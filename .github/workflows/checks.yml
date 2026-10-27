@@ -84,13 +84,13 @@ jobs:
           mkdir -p "$TMPDIR"
           src="$RUNNER_TEMP/mbedtls-src"
           prefix="$RUNNER_TEMP/mbedtls"
-          archive="$RUNNER_TEMP/mbedtls-3.6.4.tar.bz2"
+          archive="$RUNNER_TEMP/mbedtls-3.6.7.tar.bz2"
           # Same release archive and integrity pin as Platform SOURCE.lock.
           curl --fail --location --retry 3 \
-            https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.4/mbedtls-3.6.4.tar.bz2 \
+            https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2 \
             --output "$archive"
           printf '%s  %s\n' \
-            ec35b18a6c593cf98c3e30db8b98ff93e8940a8c4e690e66b41dfc011d678110 \
+            a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6 \
             "$archive" | sha256sum --check --strict
           mkdir -p "$src"
           tar -xjf "$archive" --strip-components=1 -C "$src"

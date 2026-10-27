@@ -222,7 +222,7 @@ $(BUILD)/libreecho-esphomed: $(ESPHOMED_OBJECTS) | check-esphomed-crypto
 # Full pinned interoperability is mandatory here; --host-only is never a normal
 # repository test mode. The runner verifies the installed aioesphomeapi pin.
 test-esphome: $(BUILD)/libreecho-radiod $(BUILD)/test-esphome-radio-controls $(BUILD)/test-esphome-remote-timer
-	@test -n "$(ESPHOMED_TEST_TLS_PREFIX)" || { printf '%s\n' 'Set ESPHOMED_TEST_TLS_PREFIX to a staged mbedTLS 3.6.4 prefix' >&2; exit 1; }
+	@test -n "$(ESPHOMED_TEST_TLS_PREFIX)" || { printf '%s\n' 'Set ESPHOMED_TEST_TLS_PREFIX to a staged mbedTLS 3.6.7 prefix' >&2; exit 1; }
 	python3 tests/test_esphomed_run.py --tls-prefix "$(ESPHOMED_TEST_TLS_PREFIX)" --crypto-python "$(ESPHOMED_CRYPTO_PYTHON)" --aio-python "$(ESPHOMED_AIO_PYTHON)"
 	ESPHOMED_TEST_TLS_PREFIX="$(ESPHOMED_TEST_TLS_PREFIX)" python3 tests/test_esphome_control.py
 	ESPHOMED_TEST_TLS_PREFIX="$(ESPHOMED_TEST_TLS_PREFIX)" python3 tests/test_esphome_control_http.py
