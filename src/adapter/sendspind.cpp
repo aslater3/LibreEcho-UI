@@ -346,6 +346,12 @@ int run_companion(const Options& opts) {
     libreecho::sendspin::VolumeBridge volume{libreecho::sendspin::VolumeBridgeConfig{}};
     listener.set_volume_bridge(&volume);
     ::sendspin::PlayerRoleConfig player_cfg;
+    // FLAC first: lossless at roughly half the PCM bit rate on the device's
+    // Wi-Fi, decoded by the SDK's pinned micro-flac before the engine sink.
+    // PCM stays as the fallback for servers without FLAC. 48 kHz only: the
+    // engine runs at 48 kHz, so the server resamples.
+    player_cfg.audio_formats.push_back(
+        {::sendspin::SendspinCodecFormat::FLAC, 2, 48000, 16});
     player_cfg.audio_formats.push_back(
         {::sendspin::SendspinCodecFormat::PCM, 2, 48000, 16});
     // Keep the SDK's default buffer (~1 MB, ~5 s of 48 kHz PCM). The server is
