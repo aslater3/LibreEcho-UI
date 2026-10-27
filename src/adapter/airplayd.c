@@ -62,6 +62,7 @@ struct airplay_ctx {
     char audio_path[128];
     char engine_path[128];
     char config_path[128];
+    char nqptp_udp_table[128];
     char mdns_socket[128];
     char volume_root[128];
     char master_socket[128];
@@ -1184,6 +1185,44 @@ static int child_alive(pid_t pid)
     return pid > 0 && kill(pid, 0) == 0;
 }
 
+/* NQPTP binds its control port (UDP 9000) on loopback before it serves
+ * clients. 1.2.9 no longer creates /dev/shm/nqptp at startup -- each client's
+ * region is made when that client first names it -- so the bound control port,
+ * not the shared-memory file, is the readiness signal for every version. */
+#define NQPTP_CONTROL_PORT 9000
+static int nqptp_control_bound(const char *table)
+{
+    char line[256], address[9];
+    unsigned int port;
+    int bound = 0;
+    FILE *f = fopen(table, "r");
+    if (!f)
+        return 0;
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return 0;
+    }
+    while (!bound && fgets(line, sizeof(line), f))
+        bound = sscanf(line, " %*u: %8[0-9A-Fa-f]:%x", address, &port) == 2 &&
+                port == NQPTP_CONTROL_PORT &&
+                (!strcmp(address, "0100007F") || !strcmp(address, "00000000"));
+    fclose(f);
+    return bound;
+}
+
+static int wait_for_nqptp(const struct airplay_ctx *ctx, int attempts)
+{
+    int i;
+    for (i = 0; i < attempts; ++i) {
+        if (!child_alive(ctx->nqptp_pid))
+            return 0;
+        if (nqptp_control_bound(ctx->nqptp_udp_table))
+            return 1;
+        usleep(100000);
+    }
+    return 0;
+}
+
 static int child_running(pid_t *pid)
 {
     int status;
@@ -1360,7 +1399,7 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
     ctx->nqptp_pid = spawn_nqptp(ctx);
     if (ctx->nqptp_pid < 0)
         goto fail;
-    if (!wait_for_runtime_file(ctx, "/dev/shm/nqptp", 30))
+    if (!wait_for_nqptp(ctx, 50))
         goto fail;
     ctx->audio_pid = spawn_audio(ctx);
     if (ctx->audio_pid < 0)
@@ -1507,6 +1546,7 @@ int main(int argc, char **argv)
     snprintf(ctx.audio_path, sizeof(ctx.audio_path), "/usr/local/sbin/libreecho-airplay-audio");
     snprintf(ctx.engine_path, sizeof(ctx.engine_path), "/usr/local/sbin/libreecho-audio-engine");
     snprintf(ctx.config_path, sizeof(ctx.config_path), "/etc/libreecho/airplay2.conf");
+    snprintf(ctx.nqptp_udp_table, sizeof(ctx.nqptp_udp_table), "/proc/net/udp");
     snprintf(ctx.mdns_socket, sizeof(ctx.mdns_socket), "%s", LE_MDNS_SOCKET);
     snprintf(ctx.volume_root, sizeof(ctx.volume_root), "%s", "/run/libreecho-audio");
     snprintf(ctx.master_socket, sizeof(ctx.master_socket), "%s", LE_ADAPTER_AUDIO_SOCK);
