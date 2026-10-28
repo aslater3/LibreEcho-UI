@@ -1,8 +1,13 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "news.h"
 #include "json.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /* Item links may only point at the project's own public sites. */
 int le_news_url_allowed(const char *url)
@@ -191,4 +196,22 @@ int le_news_items_json(const struct le_news_item *items, size_t count, char *out
     }
     n = snprintf(out + used, size - used, "]");
     return n < 0 || (size_t)n >= size - used ? -1 : 0;
+}
+
+pid_t le_news_download(const char *curl, const char *ca, const char *url, const char *path)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, 1);
+            dup2(devnull, 2);
+        }
+        execl(curl, "curl", "--silent", "--fail", "--location", "--proto", "=https",
+              "--proto-redir", "=https", "--tlsv1.2", "--cacert", ca,
+              "--connect-timeout", "10", "--max-time", "30", "--max-filesize", "32768",
+              "-A", "libreecho-news/1", "-o", path, url, (char *)NULL);
+        _exit(127);
+    }
+    return pid;
 }

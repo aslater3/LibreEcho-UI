@@ -7,6 +7,7 @@
  * browser renders the normalised items, never the downloaded bytes.
  */
 #include <stddef.h>
+#include <sys/types.h>
 
 #define LE_NEWS_MAX_BYTES 32768
 #define LE_NEWS_MAX_ITEMS 20
@@ -26,4 +27,9 @@ int le_news_items_json(const struct le_news_item *items, size_t count, char *out
 
 /* A feed URL host the device and browser accept for item links. */
 int le_news_url_allowed(const char *url);
+
+/* Start downloading url to path with curl (HTTPS only, TLS 1.2+, the given CA
+   bundle, 30 s and LE_NEWS_MAX_BYTES limits), output silenced. Returns the
+   child's pid for the caller to wait on, or -1 if fork fails. */
+pid_t le_news_download(const char *curl, const char *ca, const char *url, const char *path);
 #endif
