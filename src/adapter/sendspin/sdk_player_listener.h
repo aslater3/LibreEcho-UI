@@ -256,6 +256,8 @@ public:
     uint32_t last_report_frames() const { std::lock_guard<std::recursive_mutex> guard(mu_); return last_report_frames_; }
     int64_t last_report_timestamp_us() const { std::lock_guard<std::recursive_mutex> guard(mu_); return last_report_timestamp_us_; }
     uint64_t report_count() const { std::lock_guard<std::recursive_mutex> guard(mu_); return report_count_; }
+    // A stream is open on the engine sink (between stream start and its end).
+    bool streaming() const { std::lock_guard<std::recursive_mutex> guard(mu_); return session_.streaming(); }
 
 private:
     size_t write_locked(uint8_t* data, size_t length, uint32_t timeout_ms, bool* full) {

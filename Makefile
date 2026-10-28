@@ -280,6 +280,8 @@ test-sendspin-sink:
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -c src/adapter/sendspin/control_server.cpp -o $(BUILD)/sendspin-control_server.o
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -Isrc/adapter tests/test_sendspin_control.cpp $(BUILD)/sendspin-control_server.o $(BUILD)/sendspin-adapter_server.o $(BUILD)/sendspin-adapter_client.o $(BUILD)/sendspin-log.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-control
 	$(BUILD)/test-sendspin-control
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin tests/test_sendspin_lead_policy.cpp $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-lead-policy
+	$(BUILD)/test-sendspin-lead-policy
 	$(BUILD)/test-sendspin-late-credit
 	$(BUILD)/test-sendspin-sink
 	$(BUILD)/test-sendspin-lifecycle

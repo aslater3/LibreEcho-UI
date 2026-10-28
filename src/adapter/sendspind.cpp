@@ -46,6 +46,7 @@
 
 #include "sendspin/control_server.h"
 #include "sendspin/discovery_lease.h"
+#include "sendspin/lead_policy.h"
 #include "sendspin/sdk_persistence.h"
 #include "sendspin/sdk_player_listener.h"
 #endif
@@ -66,6 +67,12 @@ volatile sig_atomic_t g_stop = 0;
 // Allowance for the engine to start its output from idle (open, prepare,
 // amp settle, first period), measured at ~1.42 s on the Echo Dot.
 constexpr uint16_t kEngineOutputStartMs = 1500;
+
+// The engine keeps its output running this long after the last live Sendspin
+// generation (Platform SENDPIN_OUTPUT_HOLD_US). Within it, less a margin, a
+// seek or resume reuses the running output and needs only the pipeline lead.
+constexpr int64_t kEngineOutputHoldUs = 5000000;
+constexpr int64_t kEngineOutputHoldMarginUs = 1000000;
 
 // How often the device volume is checked for local changes.
 constexpr int kVolumePollMs = 250;
@@ -370,6 +377,12 @@ int run_companion(const Options& opts) {
     ::sendspin::PlayerRole& player = client.add_player(player_cfg);
     player.set_listener(&listener);
     listener.set_role(&player);
+    // Short lead while the engine output is warm (streaming, or within its
+    // post-stream hold): seeks and resumes then restart in ~0.2 s, not ~1.7 s.
+    libreecho::sendspin::LeadPolicy lead_policy(
+        ::sendspin::PlayerRoleConfig::pipeline_lead_time_ms(player_cfg.extra_startup_silence_ms),
+        kEngineOutputHoldUs, kEngineOutputHoldMarginUs);
+    uint16_t applied_lead_override = 0;
     // The server learns the device's own level; there is no unity fallback.
     if (const auto level = volume.poll_local_change()) player.update_volume(*level);
 
@@ -447,6 +460,16 @@ int run_companion(const Options& opts) {
         client.loop();
         listener.pump_feedback();
         control.poll(handle_control);
+        {
+            const uint16_t lead = lead_policy.update(
+                listener.streaming(),
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            if (lead != applied_lead_override) {
+                player.set_required_lead_time_ms(lead);
+                applied_lead_override = lead;
+            }
+        }
         // Local volume changes (buttons, web UI, AirPlay) reach the server.
         if (std::chrono::steady_clock::now() >= next_volume_poll) {
             next_volume_poll += std::chrono::milliseconds(kVolumePollMs);
