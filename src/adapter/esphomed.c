@@ -274,7 +274,7 @@ static int load_configuration(void){char b[16384],key[45],mac[64],name[64],wake[
  S.provisioned=!!key[0];memset(S.psk,0,32);if(S.provisioned&&(mbedtls_base64_decode(S.psk,32,&z,(unsigned char*)key,44)||z!=32)){mbedtls_platform_zeroize(key,sizeof key);return -1;}mbedtls_platform_zeroize(key,sizeof key);mbedtls_platform_zeroize(&cfg,sizeof cfg);
  if(!S.name[0]){if(json_get_string(b,"hostname",name,sizeof name)<=0)snprintf(name,sizeof name,"libreecho");if(strlen(name)>31||!name[0])return -1;for(size_t i=0;name[i];i++)if(!(isalnum((unsigned char)name[i])||name[i]=='-'))return -1;snprintf(S.name,sizeof S.name,"%.31s",name);}
  if(!S.friendly[0])snprintf(S.friendly,sizeof S.friendly,"%s",S.name);
- {char room[64];S.room[0]=0;if(json_get_string(b,"room",room,sizeof room)==1&&strlen(room)<=48){size_t i;for(i=0;room[i]&&(unsigned char)room[i]>=0x20&&room[i]!=0x7f&&room[i]!='"'&&room[i]!='\\';i++){}if(!room[i])snprintf(S.room,sizeof S.room,"%s",room);}}
+ {char room[64];S.room[0]=0;if(json_get_string(b,"room",room,sizeof room)==1&&strlen(room)<=48){size_t i;for(i=0;room[i]&&(unsigned char)room[i]>=0x20&&room[i]!=0x7f&&room[i]!='"'&&room[i]!='\\';i++){}if(!room[i]&&i<sizeof S.room)memcpy(S.room,room,i+1);}}
  if(!S.mac[0]){if(json_get_string(b,"wifi_mac",mac,sizeof mac)>0&&mac[0]){if(normalize_mac(mac,S.mac))return -1;}else{static const char *fields[]={"mac_addr","macaddr","wifi_mac","wifi_mac_addr","mac"};int found=0;for(unsigned i=0;i<5;i++){char path[512];if(snprintf(path,sizeof path,"%s/%s/value",S.idme_path,fields[i])>=(int)sizeof path)return -1;if(config_read(path,mac,sizeof mac)>0&&!normalize_mac(mac,S.mac)){found=1;break;}}if(!found)return -1;}}
  return 0;
 }
