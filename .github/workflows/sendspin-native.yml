@@ -1,0 +1,90 @@
+name: Sendspin native lanes
+
+# The Sendspin player's C++20 bridge and its SDK integration are tested by
+# opt-in lanes that the default suite cannot run (they need the Platform audio
+# engine sources and the pinned SDK archives): the engine-sink client against
+# the real C99 engine (plain, ASan+UBSan, TSan), the host SDK lane through the
+# real engine loop, and two-player interop with the pinned server oracle.
+
+on:
+  pull_request:
+    branches: ['release/0.14.5', 'release/0.15.0', 'feature/**']
+    paths:
+      - 'src/adapter/sendspin/**'
+      - 'src/adapter/sendspind.cpp'
+      - 'tests/test_sendspin_*'
+      - 'tests/sendspin_engine_fixture.h'
+      - 'tests/ci/**'
+      - 'Makefile'
+      - '.github/workflows/sendspin-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sendspin-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sendspin_native:
+    name: Sendspin native lanes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out UI source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve the matching Platform branch
+        id: platform
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          BASE_REF: ${{ github.base_ref || 'release/0.14.5' }}
+        run: |
+          set -euo pipefail
+          repo=https://github.com/aslater3/LibreEcho-Platform.git
+          has() { git ls-remote --exit-code --heads "$repo" "$1" >/dev/null 2>&1; }
+          ref=
+          # Coordinated feature lanes: feature/<stem>-ui pairs with feature/<stem>-platform.
+          for branch in "$HEAD_REF" "$BASE_REF"; do
+            case "$branch" in
+              feature/*-ui)
+                candidate="${branch%-ui}-platform"
+                if has "$candidate"; then ref=$candidate; break; fi ;;
+            esac
+          done
+          if [ -z "$ref" ]; then
+            if has "$BASE_REF"; then ref=$BASE_REF; else ref=release/0.14.5; fi
+          fi
+          echo "Platform ref: $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out Platform source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: aslater3/LibreEcho-Platform
+          ref: ${{ steps.platform.outputs.ref }}
+          path: platform
+          persist-credentials: false
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential cmake python3-venv ca-certificates
+          # ThreadSanitizer cannot map its shadow memory with the runner
+          # kernel's default ASLR entropy.
+          sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Run Sendspin native lanes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/t"
+          TMPDIR="$RUNNER_TEMP/t" SENDSPIN_PLATFORM_DIR="$GITHUB_WORKSPACE/platform" \
+            bash tests/ci/sendspin_native.sh
