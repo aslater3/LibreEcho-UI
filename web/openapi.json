@@ -1782,10 +1782,54 @@
      "Device"
     ],
     "summary": "Read device identity and audio capability",
-    "description": "Identity plus an optional `audio` object describing capture, output and streaming capability. `audio` and every member of it are optional: older daemons omit it and the mock backend does not synthesize one, so clients render what is present. An empty `audio.streaming.decoders` means the device cannot decode compressed streams itself; `audio.streaming.available` lists the transports that deliver already-decoded audio.",
+    "description": "Identity plus an optional `audio` object describing capture, output and streaming capability. `audio` and every member of it are optional: older daemons omit it and the mock backend does not synthesize one, so clients render what is present. An empty `audio.streaming.decoders` means the device cannot decode compressed streams itself; `audio.streaming.available` lists the transports that deliver already-decoded audio. `room` is the optional room this device is in (empty when unset).",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "Device"
+    ],
+    "summary": "Set or clear the room this device is in",
+    "description": "Stored in web-config.json, independent of the assistant mode. Told to the local assistant each turn and sent to Home Assistant as the ESPHome suggested_area. Included in configuration export/import.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "room"
+        ],
+        "properties": {
+         "room": {
+          "type": "string",
+          "maxLength": 48,
+          "description": "At most 48 bytes of UTF-8 on one line, without quotes or backslashes. Empty clears it.",
+          "example": "Kitchen"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "500": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }

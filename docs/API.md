@@ -226,6 +226,7 @@ Returns device information.
   "data": {
     "name": "LibreEcho",
     "hostname": "libreecho",
+    "room": "Kitchen",
     "model": "LibreEcho device",
     "serial": "unavailable",
     "os_version": "LibreEcho OS",
@@ -297,6 +298,20 @@ reported. PUT `{"enabled": true|false}` (a single top-level boolean, CSRF
 required) creates or removes the marker; switching on creates the directory
 layout (mode 0700) and clears the boot-loop guard. A symlinked or non-directory
 root is refused with `409` and never followed.
+
+`room` is the optional room this device is in, or `""` when unset.
+
+#### PUT /api/v1/device
+
+Set or clear the optional room (`{"room":"Kitchen"}`; `""` clears it). The room
+is at most 48 bytes of UTF-8 on one line, without quotes or backslashes; other
+input returns `400` and changes nothing. It is stored in `web-config.json`, so it
+works whatever the assistant mode. The local assistant tells the model "The
+device is in the Kitchen." on each turn, and in Home Assistant mode it is sent as
+the ESPHome `suggested_area` when Home Assistant adds the device. It is included
+in configuration export and restored by import.
+
+**Response:** device information (same as GET).
 
 ### Audio
 

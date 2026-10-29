@@ -10,6 +10,8 @@ int main(int argc, char **argv)
     const char *capture = getenv("LE_TEST_CURL_CAPTURE");
     const char *append = getenv("LE_TEST_CURL_APPEND");
     const char *mode = getenv("LE_TEST_CURL_MODE");
+    /* Optional: the newest request body (stdin), so a test can read the prompt. */
+    const char *body_capture = getenv("LE_TEST_CURL_BODY");
     char buffer[16384];
     char body[16384];
     size_t config_used = 0;
@@ -75,6 +77,14 @@ int main(int argc, char **argv)
         body_used += count;
     }
     body[body_used] = '\0';
+    if (body_capture) {
+        FILE *saved = fopen(body_capture, "w");
+
+        if (saved) {
+            fputs(body, saved);
+            fclose(saved);
+        }
+    }
     if ((mode && !strcmp(mode, "sse")) ||
         (!mode && response_route)) {
         const char *reply = strstr(body, "Previous assistant:")
