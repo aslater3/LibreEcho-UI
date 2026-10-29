@@ -129,6 +129,7 @@ const nurseryPage = vm.runInThisContext('nurseryPage');
 const pageFromLocation = vm.runInThisContext('pageFromLocation');
 const navItems = vm.runInThisContext('navItems');
 const networkPage = vm.runInThisContext('networkPage');
+const devicePage = vm.runInThisContext('devicePage');
 const systemPage = vm.runInThisContext('systemPage');
 const bindVoiceHistory = vm.runInThisContext('bindVoiceHistory');
 const voiceHistoryLoad = vm.runInThisContext('voiceHistoryLoad');
@@ -310,6 +311,28 @@ async function caseSshStatusNote() {
         if (saved.ssh_available === undefined) delete NETWORK.ssh_available;
         if (saved.ssh_state === undefined) delete NETWORK.ssh_state;
     }
+}
+
+/* #27: recovery / reflash mode reuses the one-shot reboot-bootloader path,
+   with both confirmation headers, in its own panel away from the destructive
+   power actions. */
+async function caseRecoveryMode() {
+    resetDom(); resetCalls();
+    state.page = 'Device'; state.renderGeneration++;
+    await devicePage(); clearTimers();
+    const html = content.innerHTML;
+    has(html, 'Recovery and reflash', 'Device page renders the recovery and reflash panel');
+    has(html, 'without opening the case', 'the panel says no case opening is needed');
+    has(html, 'LibreEcho itself is not changed', 'the panel says only a one-time flag is set');
+    has(html, 'hold the mute button', 'the panel gives the hardware fallback');
+    const power = html.slice(html.indexOf('Power controls'), html.indexOf('Recovery and reflash'));
+    check(!power.includes('power-bootloader'), 'recovery mode is not among the destructive power buttons');
+    await $app('#power-bootloader').onclick(); clearTimers();
+    const call = callsFor('/system/reboot-bootloader', 'POST')[0];
+    check(!!call, 'the button POSTs the existing reboot-bootloader action');
+    check(call && call.headers['X-LibreEcho-Confirm'] === 'confirm-device-action', 'the request carries the confirm header');
+    check(call && call.headers['X-LibreEcho-CSRF'] !== undefined, 'the request carries the CSRF header');
+    checkEqual(callsFor('/system/factory-reset').length + callsFor('/system/reboot').length, 0, 'no other power action is sent');
 }
 
 async function caseNurserySounds() {
@@ -890,6 +913,7 @@ async function main() {
         ['action button sleep-sound toggle', caseActionButtonNoise],
         ['LED diagnostics escape untrusted text', caseLedDiagnosticsEscaped],
         ['SSH status note (#24)', caseSshStatusNote],
+        ['recovery / reflash mode (#27)', caseRecoveryMode],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
         ['nursery legacy route', caseNurseryLegacyRoute],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],
