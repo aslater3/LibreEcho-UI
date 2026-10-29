@@ -16,6 +16,9 @@ PORT=${LIBREECHO_TEST_PORT:-18082}
 URL="http://127.0.0.1:$PORT"
 CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete"
+# Radio stations are stored beside the configuration; a previous run leaves
+# them behind and test_api.sh expects none.
+rm -f ./build/radio-stations.json ./build/radio-stations.json.bak ./build/radio-stations.json.tmp
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 ./build/test-unit
 make build/test-update-identity
@@ -165,6 +168,7 @@ python3 tests/test_config_persist_contract.py
 python3 tests/test_web_ui_behaviour_contract.py
 node tests/test_reboot_reconnect.js
 node tests/test_kernel_log_ui.js
+node tests/test_sendspin_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
@@ -269,6 +273,8 @@ sh tests/test_airplay_setup_persistence.sh
 sh tests/test_airplay_mount_failure.sh
 python3 tests/test_airplay_premounted_runtime.py
 python3 tests/test_airplayd_accept_backlog.py
+python3 tests/test_sendspin_service.py
+sh tests/test_sendspin_api.sh
 python3 tests/test_wyoming_discovery_port.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \
@@ -599,4 +605,23 @@ code=$(curl -sS -o "$TMPDIR/le-origin.out" -w '%{http_code}' -X PUT "$URL/api/v1
 [ "$code" = 403 ]
 curl -fsS -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H "$CSRF" -H 'Origin: http://device.test' -H 'Content-Type: application/json' --data '{"hostname":"allowed"}' >/dev/null
 echo 'authentication and origin: ok'
+# Sendspin adapter contract is dependency-free and always runs. The heavy pinned
+# SDK build is a separate opt-in lane that fails closed when unprovisioned; it is
+# never forced into the default suite.
+python3 tests/test_sendspin_adapter_contract.py
+if [ "${LIBREECHO_SENDSPIN_SDK:-0}" = "1" ]; then
+    : "${SENDSPIN_PLATFORM_DIR:?set SENDSPIN_PLATFORM_DIR for the Sendspin SDK lane}"
+    python3 "$SENDSPIN_PLATFORM_DIR/tools/mt8163-arm32/sendspin/test_sdk_build.py" -v
+fi
+if [ "${LIBREECHO_SENDSPIN_HOST:-0}" = "1" ]; then
+    : "${SENDSPIN_PLATFORM_DIR:?set SENDSPIN_PLATFORM_DIR for the host SDK lane}"
+    : "${SENDSPIN_ARCHIVE_DIR:?set SENDSPIN_ARCHIVE_DIR for the host SDK lane}"
+    make test-sendspin-host
+fi
+# The C++20 engine-sink client lane is a separate opt-in (needs a C++20 compiler
+# and the Platform airplay sources); it is never forced onto the C99-only default.
+if [ "${LIBREECHO_SENDPIN_SINK:-0}" = "1" ]; then
+    : "${SENDSPIN_PLATFORM_DIR:?set SENDSPIN_PLATFORM_DIR for the Sendspin sink lane}"
+    make test-sendspin-sink
+fi
 echo 'all tests: ok'

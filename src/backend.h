@@ -139,6 +139,15 @@ struct le_airplay_state {
     char playback_state[24], source[32];
     char title[LE_MEDIA_TEXT+1], artist[LE_MEDIA_TEXT+1], album[LE_MEDIA_TEXT+1];
 };
+/* Sendspin player (Music Assistant multiroom). installed/enabled/running come
+   from the audio controller; the rest from the player itself and are false
+   or empty when it is not running. Pairing secrets are never part of this. */
+struct le_sendspin_state {
+    int installed, enabled, running;
+    int listening, discoverable, connected, paired, streaming, time_synced;
+    int volume, muted;
+    char server[64];
+};
 /* What radiod is doing. title and station are whatever the stream said about
    itself over ICY; both are empty when it said nothing, and nothing here
    invents a substitute. */
@@ -192,6 +201,11 @@ int le_get_wake_word_state(struct le_backend*,struct le_wake_word_state*); int l
 int le_get_bluetooth_state(struct le_backend*,struct le_bluetooth_state*); int le_set_bluetooth_enabled(struct le_backend*,int);
 int le_bluetooth_scan(struct le_backend*,int); int le_bluetooth_pair(struct le_backend*,const char*,int,int); int le_bluetooth_unpair(struct le_backend*,const char*,int); int le_bluetooth_disconnect(struct le_backend*,const char*,int); int le_bluetooth_pairing_response(struct le_backend*,const char*,int,const char*,unsigned int,const char*); int le_bluetooth_set_discoverable(struct le_backend*,int); int le_bluetooth_set_connectable(struct le_backend*,int); int le_bluetooth_set_pairing_mode(struct le_backend*,int);
 int le_get_airplay_state(struct le_backend*,struct le_airplay_state*); int le_set_airplay_enabled(struct le_backend*,int);
+int le_get_sendspin_state(struct le_backend*,struct le_sendspin_state*); int le_set_sendspin_enabled(struct le_backend*,int);
+/* The player's pairing token, for the authenticated pairing flow only. */
+int le_sendspin_pairing_token(struct le_backend*,char*,size_t);
+/* Forget every paired server; the player restarts with a new pairing token. */
+int le_sendspin_reset_pairing(struct le_backend*);
 int le_get_playback_state(struct le_backend*,struct le_playback_state*);
 int le_get_timers(struct le_backend*,struct le_timer_list*); int le_add_timer(struct le_backend*,int,const char*,unsigned*); int le_cancel_timer(struct le_backend*,unsigned); int le_dismiss_timers(struct le_backend*,int*);
 int le_reboot(struct le_backend*); int le_reboot_bootloader(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);

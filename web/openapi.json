@@ -1916,6 +1916,94 @@
     }
    }
   },
+  "/sendspin": {
+   "get": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Read Sendspin player status",
+    "description": "Status of the Sendspin player (Music Assistant multiroom). installed: the audio feature carries the player; enabled: integrations bit 64; state is unavailable, disabled, starting, waiting (listening and discoverable, no server), connected or playing. listening, discoverable, connected, paired, streaming and time_synced come from the running player; volume is null while it is not running; server is the connected server's JSON-escaped name or null. Never contains pairing material. Read-only; other methods receive 405.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sendspin/pairing": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Get the Sendspin pairing token",
+    "description": "Returns data.pairing_token, the player's SP:-prefixed Pairing PSK token, to paste into Music Assistant (or show as a QR code) to pair this player. Authenticated and CSRF-checked like every changing request; 409 while Sendspin is disabled, 503 when the player is not running. The token is never part of status, logs or configuration export; clients must not store it.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sendspin/unpair": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Forget paired Sendspin servers",
+    "description": "Forgets every server paired with the player: the player is stopped, its pairing state removed and, when enabled, restarted with a new identity and a new pairing token, so each server has to pair again. Allowed while Sendspin is disabled (it only clears state). Returns data.reset=true. Authenticated and CSRF-checked like every changing request; 501 when the image has no Sendspin player, 503 when the reset could not be applied.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/integrations": {
    "get": {
     "tags": [
