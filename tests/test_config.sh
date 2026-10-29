@@ -114,6 +114,35 @@ for body in \
         -X PUT "$URL/api/v1/buttons" -H "$CSRF" -H 'Content-Type: application/json' --data "$body")
     [ "$code" = 400 ]
 done
+# #188: appearance is cosmetic and public, saved in web-config, and strict.
+curl -fsS "$URL/api/v1/config" | jq -e '.data.ui_theme == "classic" and .data.color_mode == ""' >/dev/null
+curl -fsS "$URL/api/v1/ui/preferences" | jq -e '.ok and .data.ui_theme == "classic" and .data.color_mode == ""' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/ui/preferences" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"ui_theme":"setup"}' | jq -e '.data.ui_theme == "setup" and .data.color_mode == ""' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/ui/preferences" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"color_mode":"light"}' | jq -e '.data.ui_theme == "setup" and .data.color_mode == "light"' >/dev/null
+jq -e '.ui_theme == "setup" and .color_mode == "light"' "$CFG" >/dev/null
+curl -fsS "$URL/api/v1/config" | jq -e '.data.ui_theme == "setup" and .data.color_mode == "light"' >/dev/null
+for body in '{}' '{"ui_theme":"neon"}' '{"color_mode":"auto"}' '{"ui_theme":1}' \
+            '{"ui_theme":"setup","extra":true}' '{"ui_theme":"setup","ui_theme":"classic"}' '[]'; do
+    code=$(curl -sS -o /tmp/le-ui-prefs.out -w '%{http_code}' -X PUT "$URL/api/v1/ui/preferences" \
+        -H "$CSRF" -H 'Content-Type: application/json' --data "$body")
+    [ "$code" = 400 ]
+done
+code=$(curl -sS -o /tmp/le-ui-prefs-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/ui/preferences" \
+    -H 'Content-Type: application/json' --data '{"ui_theme":"classic"}')
+[ "$code" = 403 ]
+curl -fsS "$URL/api/v1/ui/preferences" | jq -e '.data.ui_theme == "setup" and .data.color_mode == "light"' >/dev/null
+prefs_export=$(curl -fsS "$URL/api/v1/config/export" | jq -c '.data')
+printf '%s' "$prefs_export" | jq -e '.ui_theme == "setup" and .color_mode == "light"' >/dev/null
+curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data "$(printf '%s' "$prefs_export" | jq -c '.ui_theme = "classic" | .color_mode = "dark"')" >/dev/null
+curl -fsS "$URL/api/v1/ui/preferences" | jq -e '.data.ui_theme == "classic" and .data.color_mode == "dark"' >/dev/null
+code=$(curl -sS -o /tmp/le-ui-prefs-import.out -w '%{http_code}' -X POST "$URL/api/v1/config/import" \
+    -H "$CSRF" -H 'Content-Type: application/json' \
+    --data "$(printf '%s' "$prefs_export" | jq -c '.ui_theme = "neon"')")
+[ "$code" = 400 ]
+curl -fsS "$URL/api/v1/ui/preferences" | jq -e '.data.ui_theme == "classic"' >/dev/null
 mode=$(stat -c '%a' "$CFG" 2>/dev/null || stat -f '%Lp' "$CFG")
 [ "$mode" = 600 ]
 echo 'config: ok'

@@ -335,6 +335,35 @@ async function caseRecoveryMode() {
     checkEqual(callsFor('/system/factory-reset').length + callsFor('/system/reboot').length, 0, 'no other power action is sent');
 }
 
+/* #188: the System page offers the setup colour scheme, saved on the device,
+   and the header light/dark button also saves the choice on the device. */
+async function caseAppearance() {
+    routes['/ui/preferences'] = method => (method === 'GET' ? { ui_theme: 'setup', color_mode: 'dark' } : {});
+    const savedUpdate = routes['/system/update'];
+    routes['/system/update'] = { supported: true, current_slot: 'a', inactive_slot: 'b', state: 'idle', progress: 0, channel: 'stable', latest_version: '0.14.0', automatic_updates: false, rollback_available: false, source_reachable: 'true' };
+    try {
+        resetDom(); resetCalls();
+        state.page = 'System'; state.renderGeneration++;
+        await systemPage(); await settle(5); clearTimers();
+        const html = content.innerHTML;
+        has(html, 'Appearance', 'System page renders the Appearance panel');
+        check(/id="ui-theme-setup"[^>]*checked/.test(html), 'the saved setup theme renders switched on');
+        $app('#ui-theme-setup').checked = false;
+        await $app('#save-appearance').onclick(); clearTimers();
+        checkEqual(JSON.stringify(lastBody('/ui/preferences', 'PUT')), JSON.stringify({ ui_theme: 'classic' }), 'saving PUTs the chosen theme');
+        const put = callsFor('/ui/preferences', 'PUT')[0];
+        check(put && put.headers['X-LibreEcho-CSRF'] !== undefined, 'the appearance PUT carries the CSRF header');
+        resetCalls();
+        routes['/ui/preferences'] = () => { throw new Error('unavailable'); };
+        state.renderGeneration++;
+        await systemPage(); await settle(5); clearTimers();
+        check(!content.innerHTML.includes('id="save-appearance"'), 'an older daemon without preferences shows no Appearance panel');
+    } finally {
+        delete routes['/ui/preferences'];
+        if (savedUpdate === undefined) delete routes['/system/update']; else routes['/system/update'] = savedUpdate;
+    }
+}
+
 async function caseNurserySounds() {
     /* Issue LibreEcho-Platform#253: sleep sounds moved off the Audio page onto Nursery. */
     resetDom(); resetCalls();
@@ -914,6 +943,7 @@ async function main() {
         ['LED diagnostics escape untrusted text', caseLedDiagnosticsEscaped],
         ['SSH status note (#24)', caseSshStatusNote],
         ['recovery / reflash mode (#27)', caseRecoveryMode],
+        ['appearance panel (#188)', caseAppearance],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
         ['nursery legacy route', caseNurseryLegacyRoute],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],
