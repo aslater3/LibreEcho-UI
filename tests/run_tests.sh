@@ -20,6 +20,8 @@ rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete"
 # them behind and test_api.sh expects none.
 rm -f ./build/radio-stations.json ./build/radio-stations.json.bak ./build/radio-stations.json.tmp
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_news.c src/news.c src/json.c -o build/test-news
+./build/test-news
 ./build/test-unit
 make build/test-update-identity
 ./build/test-update-identity
@@ -448,6 +450,7 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_auth_bootstrap.sh
 kill "$pid"
 sh tests/test_ssh_status.sh
 sh tests/test_local_services_api.sh
+sh tests/test_news_api.sh
 wait "$pid" 2>/dev/null || true
 pid=0
 pid=0

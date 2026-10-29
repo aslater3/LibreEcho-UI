@@ -130,6 +130,7 @@ const pageFromLocation = vm.runInThisContext('pageFromLocation');
 const navItems = vm.runInThisContext('navItems');
 const networkPage = vm.runInThisContext('networkPage');
 const devicePage = vm.runInThisContext('devicePage');
+const newsHtml = vm.runInThisContext('newsHtml');
 const systemPage = vm.runInThisContext('systemPage');
 const bindVoiceHistory = vm.runInThisContext('bindVoiceHistory');
 const voiceHistoryLoad = vm.runInThisContext('voiceHistoryLoad');
@@ -424,6 +425,30 @@ async function caseDeviceRoom() {
     $app('#room').value = '';
     await $app('#save-room').onclick(); clearTimers();
     checkEqual(JSON.stringify(lastBody('/device', 'PUT')), JSON.stringify({ room: '' }), 'an empty room clears it');
+}
+
+/* #121: the news card says what turning it on fetches, escapes feed text and
+   only links to the project's own HTTPS sites. */
+async function caseNewsCard() {
+    let html = newsHtml({ enabled: false, state: 'disabled', items: [] });
+    has(html, 'id="news-on"', 'news off offers Turn on');
+    has(html, 'nothing about this device is sent', 'news off explains what is fetched');
+    const items = [
+        { id: 'a', type: 'release', date: '2026-10-16', title: '0.14 <img src=x>', summary: 'S', url: 'https://github.com/aslater3/LibreEcho/releases' },
+        { id: 'b', type: 'security', date: '2026-10-15', title: 'Bad link', summary: '', url: 'https://evil.example/x' },
+        { id: 'c', type: 'progress', date: '2026-10-14', title: 'C', summary: '', url: 'https://libreecho.org/c' },
+        { id: 'd', type: 'progress', date: '2026-10-13', title: 'Fourth', summary: '', url: 'https://libreecho.org/d' }
+    ];
+    html = newsHtml({ enabled: true, state: 'stale', last_success_epoch: 1760000000, items });
+    check(!html.includes('<img src=x>'), 'feed titles are escaped');
+    has(html, 'href="https://github.com/aslater3/LibreEcho/releases"', 'project links are kept');
+    check(!html.includes('evil.example'), 'links to other hosts are dropped');
+    has(html, 'Bad link', 'an item with a dropped link still shows as text');
+    has(html, "couldn't refresh", 'stale news says so quietly');
+    check(!html.includes('Fourth'), 'only the newest three show by default');
+    has(html, 'id="news-more"', 'Show all is offered when there are more');
+    check(newsHtml({ enabled: true, state: 'fresh', items }, true).includes('Fourth'), 'Show all shows every item');
+    has(newsHtml(null), 'News unavailable', 'a failed news request shows a quiet note');
 }
 
 async function caseNurserySounds() {
@@ -1008,6 +1033,7 @@ async function main() {
         ['appearance panel (#188)', caseAppearance],
         ['local services panel (#170)', caseLocalServices],
         ['device room field (#64)', caseDeviceRoom],
+        ['news card (#121)', caseNewsCard],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
         ['nursery legacy route', caseNurseryLegacyRoute],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],

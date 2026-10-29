@@ -1575,6 +1575,91 @@
     }
    }
   },
+  "/news": {
+   "get": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Read LibreEcho News",
+    "description": "Off by default. When on, returns the validated cached feed and starts a background refresh if one is due (12 h, 1 h after a failure). Never waits for the network.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Turn LibreEcho News on or off",
+    "description": "enabled is a single top-level boolean. Off deletes the cached copy.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "enabled"
+        ],
+        "properties": {
+         "enabled": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "500": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/news/refresh": {
+   "post": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Refresh LibreEcho News now",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "202": {
+      "$ref": "#/components/responses/Success"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "429": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/config/export": {
    "get": {
     "tags": [
