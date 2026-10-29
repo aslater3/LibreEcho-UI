@@ -1470,7 +1470,7 @@
      "Device"
     ],
     "summary": "Set the appearance (ui_theme and/or color_mode)",
-    "description": "Either or both of ui_theme (classic|setup) and color_mode (dark|light). Any other member, a duplicate, an unknown value or an empty object is 400 and nothing changes. Saved in web-config.json and carried by configuration export/import.",
+    "description": "Either or both of ui_theme (classic|setup) and color_mode (dark|light, or empty to clear the device choice so each browser keeps its own). A body echoing GET is accepted. Any other member, a duplicate, an unknown value or an empty object is 400 and nothing changes. Saved in web-config.json and carried by configuration export/import.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1496,7 +1496,8 @@
           "type": "string",
           "enum": [
            "dark",
-           "light"
+           "light",
+           ""
           ]
          }
         }

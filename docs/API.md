@@ -1759,7 +1759,9 @@ can apply it before sign-in. They are cosmetic and carry nothing sensitive.
 #### GET /api/v1/ui/preferences
 #### PUT /api/v1/ui/preferences
 
-Read or set the appearance (#188): `{"ui_theme":"classic"|"setup","color_mode":"dark"|"light"}`.
+Read or set the appearance (#188): `{"ui_theme":"classic"|"setup","color_mode":"dark"|"light"|""}`.
+`color_mode` is `""` until the owner picks one; a PUT with `"color_mode":""`
+clears the device choice again, so a client can save back the body GET returned.
 A PUT may send either field or both; any other member, a duplicate, an unknown
 value or an empty object is `400`, and nothing is changed. The values are saved
 in `web-config.json` and carried by configuration export/import. `setup` applies

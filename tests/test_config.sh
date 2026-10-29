@@ -133,6 +133,27 @@ code=$(curl -sS -o /tmp/le-ui-prefs-csrf.out -w '%{http_code}' -X PUT "$URL/api/
     -H 'Content-Type: application/json' --data '{"ui_theme":"classic"}')
 [ "$code" = 403 ]
 curl -fsS "$URL/api/v1/ui/preferences" | jq -e '.data.ui_theme == "setup" and .data.color_mode == "light"' >/dev/null
+# An empty color_mode means "not chosen on the device": GET reports it, so a PUT
+# echoing GET (or clearing the choice) is accepted; other invalid values are not.
+curl -fsS -X PUT "$URL/api/v1/ui/preferences" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"color_mode":""}' | jq -e '.data.ui_theme == "setup" and .data.color_mode == ""' >/dev/null
+curl -fsS "$URL/api/v1/ui/preferences" | jq -e '.data.ui_theme == "setup" and .data.color_mode == ""' >/dev/null
+jq -e '.ui_theme == "setup" and .color_mode == ""' "$CFG" >/dev/null
+prefs_get=$(curl -fsS "$URL/api/v1/ui/preferences" | jq -c '.data')
+[ "$prefs_get" = '{"ui_theme":"setup","color_mode":""}' ]
+curl -fsS -X PUT "$URL/api/v1/ui/preferences" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data "$prefs_get" | jq -e '.data.ui_theme == "setup" and .data.color_mode == ""' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/ui/preferences" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"ui_theme":"classic","color_mode":""}' | jq -e '.data.ui_theme == "classic" and .data.color_mode == ""' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/ui/preferences" -H "$CSRF" -H 'Content-Type: application/json' \
+    --data '{"ui_theme":"setup","color_mode":"light"}' | jq -e '.data.ui_theme == "setup" and .data.color_mode == "light"' >/dev/null
+for body in '{"color_mode":"neon"}' '{"color_mode":"blue"}' '{"ui_theme":"classic","color_mode":"neon"}' \
+            '{"ui_theme":"","color_mode":""}' '{"color_mode":" "}'; do
+    code=$(curl -sS -o /tmp/le-ui-prefs.out -w '%{http_code}' -X PUT "$URL/api/v1/ui/preferences" \
+        -H "$CSRF" -H 'Content-Type: application/json' --data "$body")
+    [ "$code" = 400 ]
+done
+curl -fsS "$URL/api/v1/ui/preferences" | jq -e '.data.ui_theme == "setup" and .data.color_mode == "light"' >/dev/null
 prefs_export=$(curl -fsS "$URL/api/v1/config/export" | jq -c '.data')
 printf '%s' "$prefs_export" | jq -e '.ui_theme == "setup" and .color_mode == "light"' >/dev/null
 curl -fsS -X POST "$URL/api/v1/config/import" -H "$CSRF" -H 'Content-Type: application/json' \
