@@ -368,6 +368,35 @@ async function caseAppearance() {
     }
 }
 
+/* #170: the System page switches the owner's local services and shows their state. */
+async function caseLocalServices() {
+    routes['/local-services'] = method => (method === 'GET'
+        ? { available: true, enabled: true, path_safe: true, state: 'running', services: [{ name: 'dropbear', state: 'running' }, { name: '<b>x', state: 'failed' }] }
+        : {});
+    const savedUpdate = routes['/system/update'];
+    routes['/system/update'] = { supported: true, current_slot: 'a', inactive_slot: 'b', state: 'idle', progress: 0, channel: 'stable', latest_version: '0.14.0', automatic_updates: false, rollback_available: false, source_reachable: 'true' };
+    try {
+        resetDom(); resetCalls();
+        state.page = 'System'; state.renderGeneration++;
+        await systemPage(); await settle(5); clearTimers();
+        const html = content.innerHTML;
+        has(html, 'Local services', 'System page renders the local services panel');
+        check(/id="local-services"[^>]*checked/.test(html), 'the switch reflects the device state');
+        has(html, '<dt>dropbear</dt>', 'services are listed by name');
+        check(!html.includes('<b>x'), 'service names are escaped');
+        $app('#local-services').checked = false;
+        await $app('#save-local-services').onclick(); clearTimers();
+        checkEqual(JSON.stringify(lastBody('/local-services', 'PUT')), JSON.stringify({ enabled: false }), 'saving PUTs the switch');
+        routes['/local-services'] = () => ({ available: false, enabled: false, path_safe: true, state: 'unavailable', services: [] });
+        resetDom(); state.renderGeneration++;
+        await systemPage(); await settle(5); clearTimers();
+        check(/id="local-services"[^>]*disabled/.test(content.innerHTML), 'the switch is disabled when the build has no supervisor');
+    } finally {
+        delete routes['/local-services'];
+        if (savedUpdate === undefined) delete routes['/system/update']; else routes['/system/update'] = savedUpdate;
+    }
+}
+
 async function caseNurserySounds() {
     /* Issue LibreEcho-Platform#253: sleep sounds moved off the Audio page onto Nursery. */
     resetDom(); resetCalls();
@@ -948,6 +977,7 @@ async function main() {
         ['SSH status note (#24)', caseSshStatusNote],
         ['recovery / reflash mode (#27)', caseRecoveryMode],
         ['appearance panel (#188)', caseAppearance],
+        ['local services panel (#170)', caseLocalServices],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
         ['nursery legacy route', caseNurseryLegacyRoute],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],

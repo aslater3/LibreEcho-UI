@@ -447,6 +447,7 @@ sleep 1
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_bootstrap.sh
 kill "$pid"
 sh tests/test_ssh_status.sh
+sh tests/test_local_services_api.sh
 wait "$pid" 2>/dev/null || true
 pid=0
 pid=0
