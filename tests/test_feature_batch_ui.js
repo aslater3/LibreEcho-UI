@@ -167,7 +167,7 @@ function lastBody(path, method) { const c = callsFor(path, method); return c.len
 /* --------------------------------------------------------------- fixtures */
 
 const LED = {
-    idle_mode: 'indicator',
+    idle_mode: 'indicator', idle_auto_off_minutes: 10, idle_asleep: true,
     sleep_light: { mode: 'pulse', active: true, brightness: 8, period_ms: 8000, timer_minutes: 120, remaining_ms: 600000, restore_on_boot: true },
     output: { effective_brightness: 12, frame_load: 900, max_load: 1000, limited: true, slew_limited: false },
     music: { active: true, grammar: 'pulse', effect: 'kaleidoscope', session: 7 },
@@ -227,10 +227,14 @@ async function caseLedControls() {
     check(/<option value="indicator" selected>/.test(html), 'idle mode renders the current value selected');
     check(/<option value="pulse" selected>/.test(html), 'sleep mode renders the current value selected');
 
+    check(/<option value="10" selected>/.test(html), 'idle auto-off renders the stored time selected (#323)');
+    has(html, 'Mute, setup and errors always show', 'idle auto-off states what is never suppressed');
+    has(html, 'The idle light is off now.', 'idle auto-off reports when the light is currently off');
     $app('#led-idle-mode').value = 'always';
+    $app('#led-idle-auto-off').value = '30';
     await $app('#save-led-idle').onclick();
     clearTimers();
-    checkEqual(JSON.stringify(lastBody('/led/idle', 'PUT')), JSON.stringify({ mode: 'always' }), 'saving idle behaviour PUTs the mode');
+    checkEqual(JSON.stringify(lastBody('/led/idle', 'PUT')), JSON.stringify({ mode: 'always', auto_off_minutes: 30 }), 'saving idle behaviour PUTs the mode and auto-off time');
 
     $app('#led-sleep-mode').value = 'solid';
     $app('#led-sleep-brightness').value = '4';

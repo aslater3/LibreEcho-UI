@@ -1320,10 +1320,18 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
 static int volume(struct le_backend *b, int value)
 {
     char args[64];
+    int rc;
     (void)b;
     if (value < 0 || value > 100) return LE_INVALID;
     snprintf(args, sizeof(args), "{\"volume\":%d}", value);
-    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_volume", args);
+    rc = adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_volume", args);
+    if (rc != LE_OK)
+        return rc;
+    /* A volume change from the web UI is activity for the LED idle auto-off
+       (#323). Best effort: ledd being busy or absent never fails the change. */
+    (void)adapter_json_command_timeout(LE_ADAPTER_LED_SOCK, "activity",
+                                       "{\"source\":\"volume\"}", 200);
+    return LE_OK;
 }
 
 static int gain(struct le_backend *b, int value)
@@ -1561,6 +1569,16 @@ static int led(struct le_backend *b, struct le_led_state *o)
             o->idle_mode = 2;
         else
             o->idle_mode = 0;
+    }
+    if (json_object(response, "idle_auto_off", object, sizeof(object))) {
+        int minutes = 0, asleep = 0;
+
+        if (json_get_int(object, "minutes", &minutes) > 0 &&
+            (minutes == 0 || minutes == 5 || minutes == 10 ||
+             minutes == 30 || minutes == 60))
+            o->idle_auto_off_minutes = minutes;
+        if (json_get_bool(object, "asleep", &asleep) > 0)
+            o->idle_asleep = asleep;
     }
     if (json_object(response, "sleep_light", object, sizeof(object))) {
         if (json_get_string(object, "mode", o->sleep_light.mode,
@@ -3111,15 +3129,22 @@ static int noise_start_ex(struct le_backend *b, const struct le_noise_request *r
     return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "noise_start", args);
 }
 
-static int led_idle_mode(struct le_backend *b, const char *mode)
+static int led_idle_mode(struct le_backend *b, const char *mode, int auto_off)
 {
-    char args[64];
+    char args[96];
 
     (void)b;
     if (!mode || (strcmp(mode, "off") && strcmp(mode, "indicator") &&
                   strcmp(mode, "always")))
         return LE_INVALID;
-    snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
+    if (auto_off != -1 && auto_off != 0 && auto_off != 5 && auto_off != 10 &&
+        auto_off != 30 && auto_off != 60)
+        return LE_INVALID;
+    if (auto_off >= 0)
+        snprintf(args, sizeof(args),
+                 "{\"mode\":\"%s\",\"auto_off_minutes\":%d}", mode, auto_off);
+    else
+        snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
     return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_idle_mode", args);
 }
 

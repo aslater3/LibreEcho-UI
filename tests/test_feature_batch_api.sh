@@ -96,6 +96,10 @@ check "noise HEAD-ish OPTIONS method" 405 -X OPTIONS "$URL/api/v1/audio/noise" -
 echo "== strict validation: led =="
 check "led/idle bad mode" 400 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data '{"mode":"bogus"}'
 check "led/idle missing mode" 400 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data '{}'
+for bad_minutes in 7 61 -1 '"5"' 5.5 true; do
+    check "led/idle auto_off_minutes $bad_minutes" 400 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data "{\"mode\":\"always\",\"auto_off_minutes\":$bad_minutes}"
+done
+check "led/idle duplicate auto_off_minutes" 400 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data '{"mode":"always","auto_off_minutes":5,"auto_off_minutes":10}'
 check "led/sleep bad mode" 400 -X PUT "$URL/api/v1/led/sleep" -H "$AUTH" -H "$JSON" --data '{"mode":"blink"}'
 check "led/sleep brightness range" 400 -X PUT "$URL/api/v1/led/sleep" -H "$AUTH" -H "$JSON" --data '{"mode":"solid","brightness":21}'
 check "led/sleep period range" 400 -X PUT "$URL/api/v1/led/sleep" -H "$AUTH" -H "$JSON" --data '{"mode":"solid","period_ms":1000}'
@@ -143,6 +147,13 @@ check "disable mock opus" 200 -X POST "$URL/api/v1/dev/mock" -H "$AUTH" -H "$JSO
 echo "== success: led =="
 check "led/idle set" 200 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data '{"mode":"indicator"}'
 jcheck "led idle_mode reflected" '.data.idle_mode == "indicator"' "$URL/api/v1/led"
+jcheck "led idle auto-off defaults off" '.data.idle_auto_off_minutes == 0 and .data.idle_asleep == false' "$URL/api/v1/led"
+check "led/idle auto-off set" 200 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data '{"mode":"indicator","auto_off_minutes":30}'
+jcheck "led idle auto-off reflected" '.data.idle_auto_off_minutes == 30 and .data.idle_mode == "indicator"' "$URL/api/v1/led"
+check "led/idle mode only keeps auto-off" 200 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data '{"mode":"always"}'
+jcheck "led idle auto-off kept" '.data.idle_auto_off_minutes == 30 and .data.idle_mode == "always"' "$URL/api/v1/led"
+check "led/idle auto-off cleared" 200 -X PUT "$URL/api/v1/led/idle" -H "$AUTH" -H "$JSON" --data '{"mode":"indicator","auto_off_minutes":0}'
+jcheck "led idle auto-off cleared reflected" '.data.idle_auto_off_minutes == 0' "$URL/api/v1/led"
 check "led/sleep set" 200 -X PUT "$URL/api/v1/led/sleep" -H "$AUTH" -H "$JSON" --data '{"mode":"pulse","brightness":6,"period_ms":6000,"timer_minutes":30,"restore_on_boot":true}'
 jcheck "led sleep_light reflected" '.data.sleep_light.mode == "pulse" and .data.sleep_light.brightness == 6 and .data.sleep_light.period_ms == 6000 and .data.sleep_light.timer_minutes == 30 and .data.sleep_light.restore_on_boot == true' "$URL/api/v1/led"
 jcheck "led existing controls preserved" '.data.visualizer_enabled == true and (.data.brightness | type == "number") and (.data.night.enabled | type == "boolean")' "$URL/api/v1/led"

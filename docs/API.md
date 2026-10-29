@@ -2596,7 +2596,8 @@ Endpoints added or extended for the 0.14 feature batch. All responses keep the
 recovery routes included) bypasses the management auth/CSRF gate.
 
 ### LED
-- `GET /api/v1/led` — `data` now also carries `idle_mode` and the `sleep_light`,
+- `GET /api/v1/led` — `data` now also carries `idle_mode`,
+  `idle_auto_off_minutes`, `idle_asleep` and the `sleep_light`,
   `output` and `music` objects matching `ledd` status. Existing controls
   (`colour`/`brightness`/`visualizer_enabled`/`night`/`profiles`) are preserved.
 - `PUT /api/v1/led/idle` — `{"mode":"off"|"indicator"|"always"}` (required) ->
@@ -2607,6 +2608,15 @@ recovery routes included) bypasses the management auth/CSRF gate.
   the idle mode of every existing device to `indicator` once (the persisted
   `idle.policy` marker records that this happened); a mode the owner chooses
   afterwards is kept across reboots and updates.
+  Optional `auto_off_minutes` (`0`, `5`, `10`, `30` or `60`; anything else,
+  including a fraction or a string, is `400`) turns the idle light off after that
+  long with no activity; `0` (the default) keeps it on, and omitting the field
+  keeps the stored value. Only the resting base goes dark: mute, setup/recovery,
+  errors, voice, Bluetooth pairing, announcements, playback and the sleep light
+  are never suppressed, and the sleep light suspends the countdown. Any LED
+  request other than a status read is activity (a pattern or meter stop only
+  when one was showing), and a web volume change sends `ledd` an `activity`
+  request. `idle_asleep` reports whether the idle light is off right now.
 - `PUT /api/v1/led/sleep` — `{"mode":"off"|"solid"|"pulse"}` (required) with
   optional `brightness` (0..20), `period_ms` (3000..15000), `timer_minutes`
   (0..720) and `restore_on_boot` (bool). A missing field keeps the current daemon

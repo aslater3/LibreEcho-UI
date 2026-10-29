@@ -275,7 +275,7 @@ int main(void)
             require_condition(!s.idle_policy_upgraded,
                               "the upgrade must be persisted on first boot");
             require_condition(state_file_contains(
-                                  "\"idle\":{\"mode\":1,\"policy\":2}"),
+                                  "\"idle\":{\"mode\":1,\"policy\":2,\"auto_off_minutes\":0}"),
                               "the upgraded idle policy must be written back");
             require_condition(s.current.brightness == 60U ||
                                   k == 2,
@@ -287,7 +287,7 @@ int main(void)
         fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
                    "{\"mode\":\"off\"}}");
         require_condition(response_ok(), "the owner may choose off");
-        require_condition(state_file_contains("\"idle\":{\"mode\":0,\"policy\":2}"),
+        require_condition(state_file_contains("\"idle\":{\"mode\":0,\"policy\":2,\"auto_off_minutes\":0}"),
                           "an owner choice must be saved under the new policy");
         memset(&s, 0, sizeof(s));
         default_state(&s);
@@ -830,6 +830,179 @@ int main(void)
         fire(&ctx, bad);
         require_condition(!response_ok(),
                           "a malformed v2 frame must be a hard error");
+    }
+
+    /* ---- 10. Idle auto-off (UI #323): only the resting base goes dark,
+       after the configured inactivity, and any real activity wakes it. ----- */
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+    require_condition(ctx.state.idle_auto_off_minutes == 0,
+                      "idle auto-off must be off by default");
+    ctx.idle_last_activity = 1000.0;
+    apply_base_state(&ctx, 1000.0);
+    idle_auto_off_tick(&ctx, 1000.0 + 3600.0 * 24.0);
+    require_condition(!ctx.idle_base_asleep && indicator_only(&ctx),
+                      "with auto-off disabled the indicator never sleeps");
+    require_condition(idle_auto_off_timeout(&ctx, 1000.0) == -1,
+                      "a disabled auto-off must not wake the poll loop");
+    ctx.state.idle_auto_off_minutes = 5;
+    require_condition(idle_auto_off_timeout(&ctx, 1000.0) == 300000,
+                      "the poll loop must wake exactly at the auto-off deadline");
+    idle_auto_off_tick(&ctx, 1299.0);
+    require_condition(!ctx.idle_base_asleep && indicator_only(&ctx),
+                      "the indicator stays on before the deadline");
+    idle_auto_off_tick(&ctx, 1300.0);
+    require_condition(ctx.idle_base_asleep && all_dark(&ctx),
+                      "the indicator goes dark at the deadline");
+    require_condition(idle_auto_off_timeout(&ctx, 1300.0) == -1,
+                      "a sleeping base needs no further wakeups");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}");
+    require_condition(response_ok() && ctx.idle_base_asleep,
+                      "a status read is not activity");
+    require_condition(strstr(last_response,
+                             "\"idle_auto_off\":{\"minutes\":5,\"asleep\":true}") != NULL,
+                      "status must report the auto-off setting and state");
+    /* A stop for an owner that holds nothing is not activity. */
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+               "{\"name\":\"stop\",\"owner\":\"esphome\"}}");
+    require_condition(response_ok() && ctx.idle_base_asleep,
+                      "stopping a pattern that was not running must not wake the ring");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"activity\",\"args\":{\"source\":\"volume\"}}");
+    require_condition(response_ok() && !ctx.idle_base_asleep && indicator_only(&ctx),
+                      "the activity command wakes the ring and repaints the indicator");
+
+    /* Always-on base sleeps too; the colour is restored on activity. */
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_ALWAYS;
+    ctx.state.idle_auto_off_minutes = 10;
+    ctx.state.current = (struct colour){0, 96, 255, 60};
+    ctx.idle_last_activity = 50.0;
+    apply_base_state(&ctx, 50.0);
+    require_condition(max_channel(&ctx) > 0U, "the always-on ring is lit");
+    idle_auto_off_tick(&ctx, 650.0);
+    require_condition(ctx.idle_base_asleep && all_dark(&ctx),
+                      "the always-on ring goes dark after the timeout");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_brightness\",\"args\":{\"brightness\":40}}");
+    require_condition(response_ok() && !ctx.idle_base_asleep && max_channel(&ctx) > 0U,
+                      "changing an LED setting is activity and relights the ring");
+
+    /* Every kind of real activity wakes a sleeping base. */
+    {
+        static const char *const wakers[] = {
+            "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":{\"name\":\"flash\",\"owner\":\"action\",\"r\":0,\"g\":0,\"b\":255,\"brightness\":60,\"repeats\":1}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":{\"name\":\"pulse\",\"owner\":\"wakeword\",\"r\":0,\"g\":0,\"b\":255,\"brightness\":60,\"repeats\":0}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"meter\",\"args\":{\"value\":40,\"owner\":\"volume\",\"r\":255,\"g\":255,\"b\":255,\"brightness\":60}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"visualizer\",\"args\":{\"action\":\"frame\",\"owner\":\"music\",\"levels\":\"ff0000ff0000ff0000ff0000\",\"brightness\":50}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"activity\"}"
+        };
+        size_t k;
+
+        for (k = 0; k < sizeof(wakers) / sizeof(wakers[0]); k++) {
+            reset(&ctx);
+            ctx.visualizer_enabled = 1;
+            ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+            ctx.state.idle_auto_off_minutes = 5;
+            ctx.idle_base_asleep = 1;
+            fire(&ctx, wakers[k]);
+            require_condition(response_ok() && !ctx.idle_base_asleep, wakers[k]);
+        }
+    }
+
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+    ctx.state.idle_auto_off_minutes = 5;
+    ctx.idle_base_asleep = 1;
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+               "{\"name\":\"flash\",\"owner\":\"action\"}}");
+    require_condition(!response_ok() && ctx.idle_base_asleep,
+                      "a rejected pattern request is not activity");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"meter\",\"args\":"
+               "{\"action\":\"stop\",\"owner\":\"volume\"}}");
+    require_condition(response_ok() && ctx.idle_base_asleep,
+                      "stopping a meter that was not showing is not activity");
+
+    /* Mute, setup and errors draw above the base and always show. */
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+    ctx.state.idle_auto_off_minutes = 5;
+    ctx.idle_base_asleep = 1;
+    apply_base_state(&ctx, 0.0);
+    require_condition(all_dark(&ctx), "the sleeping base is dark");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+               "{\"name\":\"solid\",\"owner\":\"mute\",\"r\":255,\"g\":0,\"b\":0,\"brightness\":60,\"repeats\":0}}");
+    update_animation(&ctx, monotonic_seconds());
+    require_condition(response_ok() && ctx.pattern_active && max_channel(&ctx) > 0U,
+                      "the mute lamp must light even when the base was asleep");
+
+    /* The sleep light owns the base: auto-off is suspended while it runs. */
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+    ctx.state.idle_auto_off_minutes = 5;
+    ctx.sleep_active = 1;
+    ctx.idle_last_activity = 0.0;
+    idle_auto_off_tick(&ctx, 100000.0);
+    require_condition(!ctx.idle_base_asleep && idle_auto_off_timeout(&ctx, 0.0) == -1,
+                      "the sleep light suspends idle auto-off");
+    /* Idle "off" has nothing to darken. */
+    ctx.sleep_active = 0;
+    ctx.state.idle_mode = IDLE_MODE_OFF;
+    idle_auto_off_tick(&ctx, 100000.0);
+    require_condition(!ctx.idle_base_asleep, "idle off has no auto-off countdown");
+
+    /* The setting persists with the idle mode, validates, and reverts on a
+       failed write; older state files load as disabled and keep their mode. */
+    reset(&ctx);
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
+               "{\"mode\":\"indicator\",\"auto_off_minutes\":10}}");
+    require_condition(response_ok() && ctx.state.idle_auto_off_minutes == 10,
+                      "a valid auto-off time is accepted");
+    require_condition(state_file_contains("\"idle\":{\"mode\":1,\"policy\":2,\"auto_off_minutes\":10}"),
+                      "the auto-off time is persisted with the idle mode");
+    {
+        static const char *const invalid[] = {
+            "{\"mode\":\"always\",\"auto_off_minutes\":7}",
+            "{\"mode\":\"always\",\"auto_off_minutes\":61}",
+            "{\"mode\":\"always\",\"auto_off_minutes\":-1}",
+            "{\"mode\":\"always\",\"auto_off_minutes\":\"5\"}"
+        };
+        size_t k;
+        char line[256];
+
+        for (k = 0; k < sizeof(invalid) / sizeof(invalid[0]); k++) {
+            snprintf(line, sizeof(line),
+                     "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":%s}", invalid[k]);
+            fire(&ctx, line);
+            require_condition(!response_ok() &&
+                                  ctx.state.idle_mode == IDLE_MODE_INDICATOR &&
+                                  ctx.state.idle_auto_off_minutes == 10,
+                              invalid[k]);
+        }
+    }
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":{\"mode\":\"always\"}}");
+    require_condition(response_ok() && ctx.state.idle_auto_off_minutes == 10,
+                      "changing only the mode keeps the auto-off time");
+    require_condition(mkdir(STATE_TMP_PATH, 0700) == 0,
+                      "blocking the state temp path must succeed");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
+               "{\"mode\":\"off\",\"auto_off_minutes\":30}}");
+    require_condition(!response_ok() && ctx.state.idle_mode == IDLE_MODE_ALWAYS &&
+                          ctx.state.idle_auto_off_minutes == 10,
+                      "a failed write reverts both the mode and the auto-off time");
+    require_condition(rmdir(STATE_TMP_PATH) == 0,
+                      "unblocking the state temp path must succeed");
+    {
+        struct led_state s;
+
+        boot_with_state(&s, "{\"idle\":{\"mode\":2,\"policy\":2,\"auto_off_minutes\":30}}");
+        require_condition(s.idle_mode == IDLE_MODE_ALWAYS && s.idle_auto_off_minutes == 30,
+                          "a stored auto-off time is restored at boot");
+        boot_with_state(&s, "{\"idle\":{\"mode\":0,\"policy\":2}}");
+        require_condition(s.idle_mode == IDLE_MODE_OFF && s.idle_auto_off_minutes == 0 &&
+                              !s.idle_policy_upgraded,
+                          "an older state file loads as disabled and keeps its mode");
+        boot_with_state(&s, "{\"idle\":{\"mode\":1,\"policy\":2,\"auto_off_minutes\":7}}");
+        require_condition(s.idle_auto_off_minutes == 0,
+                          "an invalid stored auto-off time is ignored");
     }
 
     puts("LED daemon core: ok");

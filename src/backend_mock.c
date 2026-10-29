@@ -216,11 +216,14 @@ static int noise_start_ex_mock(struct le_backend*b,const struct le_noise_request
  if(r->minutes>=0)
   m->audio.noise_remaining_seconds=r->minutes?(long)r->minutes*60:-1;
  return LE_OK;}
-static int led_idle_mode_mock(struct le_backend*b,const char*mode){
+static int led_idle_mode_mock(struct le_backend*b,const char*mode,int auto_off){
  struct mock_state*m=M(b);
  if(!mode||(strcmp(mode,"off")&&strcmp(mode,"indicator")&&strcmp(mode,"always")))
   return LE_INVALID;
+ if(auto_off!=-1&&auto_off!=0&&auto_off!=5&&auto_off!=10&&auto_off!=30&&auto_off!=60)
+  return LE_INVALID;
  m->led.idle_mode=!strcmp(mode,"indicator")?1:!strcmp(mode,"always")?2:0;
+ if(auto_off>=0)m->led.idle_auto_off_minutes=auto_off;
  return LE_OK;}
 static int led_sleep_mock(struct le_backend*b,const struct le_led_sleep_request*r){
  struct mock_state*m=M(b);
