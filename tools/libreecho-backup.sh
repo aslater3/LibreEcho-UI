@@ -313,7 +313,7 @@ write_manifest() {
   "components": ["config", "secrets"],
   "required": ["config/web-config.json", "config/users"],
   "secret_policy": "included-with-private-permissions; protect or encrypt archive out-of-band",
-  "excluded": ["factory-seed:/etc/libreecho", "payloads:/data/libreecho/features", "ota-generations:/data/libreecho/generations", "wake-models:/data/libreecho/wakeword-models", "ota:/data/libreecho/update", "release-identity:/data/libreecho/data-manifest.json", "runtime-guard:/data/libreecho/network-recovery-reboot.guard", "runtime:/run/libreecho", "logs:/var/log/libreecho", "transaction-files:config,secrets:*.tmp,*.tmp.*,*.new,*.bak", "config/wake-dump.raw", "config/wake-dump-seconds", "config/vendor-import-force-next-boot", "symlinked-state"]
+  "excluded": ["factory-seed:/etc/libreecho", "payloads:/data/libreecho/features", "ota-generations:/data/libreecho/generations", "wake-models:/data/libreecho/wakeword-models", "local-services:/data/libreecho/local", "ota:/data/libreecho/update", "release-identity:/data/libreecho/data-manifest.json", "runtime-guard:/data/libreecho/network-recovery-reboot.guard", "runtime:/run/libreecho", "logs:/var/log/libreecho", "transaction-files:config,secrets:*.tmp,*.tmp.*,*.new,*.bak", "config/wake-dump.raw", "config/wake-dump-seconds", "config/vendor-import-force-next-boot", "symlinked-state"]
 }
 EOF
 }

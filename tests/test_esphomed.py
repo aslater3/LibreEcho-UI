@@ -94,6 +94,7 @@ class Daemon(unittest.TestCase):
 class Fixture(Daemon):
  def test_hello_auth_device_list_ping_disconnect(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(b'fixture-satellite',b);self.assertIn(num(17,61),b)
+  self.assertNotIn(var((16<<3)|2),b,'no room configured: DeviceInfo has no suggested_area')
   self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(3)],[63,17,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
  def test_oversize_malformed_and_client_limit(self):
   self.hello();s2=self.connect();s3=self.connect();self.assertEqual(s3.recv(1),b'');s2.sendall(b'\0'+var(65537)+var(1));self.assertEqual(s2.recv(1),b'')
@@ -280,4 +281,14 @@ class ApiSavedLocalMode(Daemon):
   for i in range(0,6400,320):a.samples(i)
   time.sleep(.1);a.wake(4000);self.s.settimeout(.3)
   with self.assertRaises(TimeoutError):receive(self.s)
+ROOM_BASE={'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','voice_assistant_mode':1,'esphome_noise_key':''}
+class RoomSuggestedArea(Daemon):
+ # #64: the web UI's room is offered to Home Assistant as DeviceInfo.suggested_area (field 16).
+ config_fields=dict(ROOM_BASE,room='Living room')
+ def test_room_is_suggested_area(self):
+  self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(text(16,'Living room'),b)
+class RoomUnsafeNotSent(Daemon):
+ config_fields=dict(ROOM_BASE,room='Hall\nsecond line')
+ def test_unsafe_room_is_not_sent(self):
+  self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertNotIn(var((16<<3)|2),b);self.assertIn(b'fixture-satellite',b)
 if __name__=='__main__':unittest.main()

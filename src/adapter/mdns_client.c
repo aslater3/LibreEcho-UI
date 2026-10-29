@@ -31,16 +31,11 @@ static int probe_readable(int fd)
     return poll(&descriptor, 1, LE_MDNS_PROBE_TIMEOUT_MS) > 0;
 }
 
-int le_mdns_register_esphome(const char *path, unsigned int port,
-                             const struct le_mdns_esphome_metadata *metadata)
+static int send_registration(const char *path, const char *message, int length)
 {
     struct sockaddr_un address;
-    char message[LE_MDNS_ESPHOME_PACKET_MAX];
-    int fd, length;
-    if (!path || !path[0] || strlen(path) >= sizeof(address.sun_path))
-        return -1;
-    length = le_mdns_esphome_encode(message, sizeof(message), port, metadata);
-    if (length < 0)
+    int fd;
+    if (!path || !path[0] || strlen(path) >= sizeof(address.sun_path) || length < 0)
         return -1;
     memset(&address, 0, sizeof(address));
     address.sun_family = AF_UNIX;
@@ -54,6 +49,19 @@ int le_mdns_register_esphome(const char *path, unsigned int port,
         close(fd); return -1;
     }
     return fd;
+}
+int le_mdns_register_esphome(const char *path, unsigned int port,
+                             const struct le_mdns_esphome_metadata *metadata)
+{
+    char message[LE_MDNS_ESPHOME_PACKET_MAX];
+    return send_registration(path, message,
+                             le_mdns_esphome_encode(message, sizeof(message), port, metadata));
+}
+int le_mdns_register_sendspin(const char *path, unsigned int port, const char *name)
+{
+    char message[LE_MDNS_SENDSPIN_PACKET_MAX];
+    return send_registration(path, message,
+                             le_mdns_sendspin_encode(message, sizeof(message), port, name));
 }
 int le_mdns_register_wyoming(const char *path, unsigned int port)
 {

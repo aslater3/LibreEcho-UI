@@ -40,6 +40,8 @@
 #define DEFAULT_AUDIO_SOCKET LE_ADAPTER_AUDIO_SOCK
 #define DEFAULT_RADIO_SOCKET LE_ADAPTER_RADIO_SOCK
 #define DEFAULT_MEDIA_STATUS "/run/libreecho-audio/status.json"
+/* Owned by libreecho-web; agentd only reads the optional "room" from it. */
+#define DEFAULT_WEB_CONFIG "/data/libreecho/config/web-config.json"
 #define DEFAULT_TIMER_SOCKET "/run/libreecho/timer.sock"
 #define DEFAULT_TTS_SOCKET LE_ADAPTER_TTS_SOCK
 #define DEFAULT_WAKE_SOCKET LE_ADAPTER_WAKEWORD_SOCK
@@ -97,6 +99,7 @@ struct agent_state {
     char timer_socket[256];
     char radio_socket[256];
     char media_status[256];
+    char web_config_path[384];
     char wake_socket[256];
     char stt_socket[256];
     char tts_first_pcm_file[384];
@@ -1585,6 +1588,33 @@ static void refresh_weather(struct agent_state *state)
  * whatever situational facts are known.  The base prompt is left untouched
  * in the config so this never accumulates across turns.
  */
+/*
+ * The room is set on the web UI's Device page and stored in web-config.json
+ * (#64), which libreecho-web owns; it is read per turn so a change applies to
+ * the next question without restarting agentd. Anything that is not a short
+ * single line is ignored rather than spoken into the prompt.
+ */
+static void read_room(const struct agent_state *state, char *room, size_t size)
+{
+    char json[16384];
+    size_t i;
+
+    room[0] = '\0';
+    if (!state->web_config_path[0] ||
+        config_read(state->web_config_path, json, sizeof(json)) <= 0 ||
+        json_get_string_top_level(json, "room", room, size) != 1 ||
+        strlen(room) > 48) {
+        room[0] = '\0';
+        return;
+    }
+    for (i = 0; room[i]; ++i)
+        if ((unsigned char)room[i] < 0x20 || room[i] == 0x7f ||
+            room[i] == '"' || room[i] == '\\') {
+            room[0] = '\0';
+            return;
+        }
+}
+
 static void build_turn_prompt(struct agent_state *state, char *out,
                               size_t size)
 {
@@ -1603,6 +1633,14 @@ static void build_turn_prompt(struct agent_state *state, char *out,
         (void)snprintf(out + strlen(out), size - strlen(out),
                        " The device is located in %s.",
                        state->config.home_location);
+    {
+        char room[64];
+
+        read_room(state, room, sizeof(room));
+        if (room[0])
+            (void)snprintf(out + strlen(out), size - strlen(out),
+                           " The device is in the %s.", room);
+    }
     refresh_weather(state);
     if (state->weather_text[0])
         (void)snprintf(out + strlen(out), size - strlen(out),
@@ -2325,6 +2363,7 @@ int main(int argc, char **argv)
     strcpy(state.timer_socket, DEFAULT_TIMER_SOCKET);
     strcpy(state.radio_socket, DEFAULT_RADIO_SOCKET);
     strcpy(state.media_status, DEFAULT_MEDIA_STATUS);
+    strcpy(state.web_config_path, DEFAULT_WEB_CONFIG);
     strcpy(state.tts_socket, DEFAULT_TTS_SOCKET);
     strcpy(state.wake_socket, DEFAULT_WAKE_SOCKET);
     strcpy(state.stt_socket, DEFAULT_STT_SOCKET);
@@ -2338,6 +2377,9 @@ int main(int argc, char **argv)
                      "%s", argv[++i]);
         } else if (!strcmp(argv[i], "--config") && value) {
             snprintf(state.config_path, sizeof(state.config_path),
+                     "%s", argv[++i]);
+        } else if (!strcmp(argv[i], "--web-config") && value) {
+            snprintf(state.web_config_path, sizeof(state.web_config_path),
                      "%s", argv[++i]);
         } else if (!strcmp(argv[i], "--credentials") && value) {
             snprintf(state.credentials_path,
