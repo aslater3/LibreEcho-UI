@@ -183,6 +183,7 @@ node tests/test_assistant_clock_format_ui.js
 node tests/test_chatgpt_auth_gate_ui.js
 node tests/test_home_location_lookup_ui.js
 node tests/test_mute_lamp_ui.js
+node tests/test_reply_volume_ui.js
 node tests/test_doa_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py

@@ -29,7 +29,7 @@ def receive(s):
  return t,bytes(b)
 class Adapter:
  def __init__(self,path,kind):
-  self.kind=kind;self.calls=[];self.streams={};self.stop=False;self.clients=[];self.muted=False;self.fail=False
+  self.kind=kind;self.calls=[];self.streams={};self.stop=False;self.clients=[];self.muted=False;self.fail=False;self.reply=None
   self.sock=socket.socket(socket.AF_UNIX);self.sock.bind(str(path));self.sock.listen();self.sock.settimeout(.1)
   self.thread=threading.Thread(target=self.run);self.thread.start()
  def run(self):
@@ -50,7 +50,8 @@ class Adapter:
     self.streams[cmd]=c;data={'subscribed':True} if cmd=='subscribe' else {'streaming':True,'format':'pcm_s16_le','sample_rate':16000,'channels':1,'frame_header_bytes':24,'sample_indexed':True}
     c.sendall((json.dumps({'v':1,'id':req['id'],'ok':True,'data':data})+'\n').encode());return
    if cmd=='set_mute' and not self.fail:self.muted=req['args']['muted']
-   data={'muted':self.muted,'volume':66,'output_available':True} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}
+   if cmd=='set_reply_volume' and not self.fail:self.reply=req['args'].get('volume')
+   data={'muted':self.muted,'volume':66,'output_available':True,**({'reply_volume':self.reply,'reply_volume_custom':True} if self.reply is not None else {})} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}
    c.sendall((json.dumps({'v':1,'id':req['id'],'ok':not self.fail,'data':data})+'\n').encode())
   except (OSError,ValueError):pass
   finally:
@@ -95,7 +96,7 @@ class Fixture(Daemon):
  def test_hello_auth_device_list_ping_disconnect(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(b'fixture-satellite',b);self.assertIn(num(17,61),b)
   self.assertNotIn(var((16<<3)|2),b,'no room configured: DeviceInfo has no suggested_area')
-  self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(3)],[63,17,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
+  self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(4)],[63,17,49,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
  def test_oversize_malformed_and_client_limit(self):
   self.hello();s2=self.connect();s3=self.connect();self.assertEqual(s3.recv(1),b'');s2.sendall(b'\0'+var(65537)+var(1));self.assertEqual(s2.recv(1),b'')
   time.sleep(.05);s4=self.connect();s4.sendall(frame(9,b'\x08'+b'\xff'*10));self.assertEqual(s4.recv(1),b'')

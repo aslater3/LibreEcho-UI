@@ -496,6 +496,8 @@ render the existing unsupported state without logging an HTTP error.
     "amplifier_on": true,
     "output_available": true,
     "volume_leveling": false,
+    "reply_volume": 50,
+    "reply_volume_custom": false,
     "tts_voice": "southern-female",
     "tts_voices": [
       { "id": "southern-female", "name": "Southern English — female" },
@@ -517,7 +519,8 @@ Update audio settings.
   "microphone_gain": 80,
   "microphone_muted": false,
   "tts_voice": "southern-female",
-  "volume_leveling": true
+  "volume_leveling": true,
+  "reply_volume": 35
 }
 ```
 
@@ -528,6 +531,23 @@ surge on some music; a stock-accurate rework is planned), persisted across
 restarts, and applies only to music (Bluetooth,
 media and AirPlay), never to announcements, alarms or system sounds. A
 non-boolean value is rejected with `400`.
+
+`reply_volume` (integer `0`–`100`) gives spoken assistant replies (local and
+Home Assistant), announcements and chimes their own level, separate from the
+music: audiod persists it and publishes it as
+`/run/libreecho-audio/reply.volume`, and the audio engine plays the system and
+announcement buses at that level on the same curve as the master, while music,
+other media and alarms keep `volume`. Master volume `0` still silences
+everything. `"reply_volume_custom": false` returns replies to following the
+master (the default; the runtime file is then absent). GET reports
+`reply_volume` (equal to `volume` while following), `reply_volume_custom`, and
+`notification_volume` as the level replies actually use. An out-of-range or
+non-integer `reply_volume`, a non-boolean `reply_volume_custom`, or
+`reply_volume_custom: true` without `reply_volume` is rejected with `400`
+before anything changes. Home Assistant sees the same level as the `Reply
+volume` number entity (config category, 0–100 %); setting it there sets a
+separate level. The audible effect needs a LibreEcho-Platform audio engine
+that reads `reply.volume` (0.14.6 and later); older engines ignore it.
 
 **Response:** Updated audio state (same as GET).
 

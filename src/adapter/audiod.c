@@ -285,6 +285,11 @@ struct audio_hw {
     char system_audio_bus[PATH_MAX];
     int volume_leveling;     /* music AVL in the audio engine, persisted */
     long long last_leveling_check_ms;
+    /* Separate assistant-reply level (#409), persisted.  0: replies follow
+     * the master (the default); 1: reply_volume is their own level. */
+    int reply_volume_custom;
+    int reply_volume;
+    long long last_reply_check_ms;
 };
 
 struct client {
@@ -938,6 +943,20 @@ static const char *control_name_or_default(const struct audio_control *control,
 #endif
 static int volume_leveling_load(void);
 static int volume_leveling_apply(int enabled);
+/* Separate reply volume (#409).  The owner's level for assistant replies,
+ * announcements and chimes (the engine's system and announcement buses) is
+ * persisted here as a decimal 0..100; a missing or invalid file means replies
+ * follow the master volume, exactly as before.  While a level is set it is
+ * published beside master.volume as reply.volume in the same form; the file
+ * is absent while replies follow the master. */
+#ifndef LE_REPLY_VOLUME_PATH
+#define LE_REPLY_VOLUME_PATH "/data/libreecho/config/reply-volume"
+#endif
+#ifndef LE_REPLY_VOLUME_RUNTIME_PATH
+#define LE_REPLY_VOLUME_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/reply.volume"
+#endif
+static int reply_volume_load(int *volume);
+static int reply_volume_publish(int custom, int volume);
 /* How often the guard re-reads the mixer while idle, in milliseconds. */
 #define VOLUME_GUARD_POLL_MS 250
 
@@ -1233,6 +1252,9 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->volume_leveling = volume_leveling_load();
     if (volume_leveling_apply(audio->volume_leveling) < 0)
         le_log_warn("audiod: volume leveling flag could not be applied");
+    audio->reply_volume_custom = reply_volume_load(&audio->reply_volume) == 0;
+    if (reply_volume_publish(audio->reply_volume_custom, audio->reply_volume) < 0)
+        le_log_warn("audiod: reply volume could not be published");
     (void)snprintf(audio->system_audio_bus, sizeof(audio->system_audio_bus),
                    "%s", LE_SYSTEM_AUDIO_BUS);
     (void)snprintf(audio->ctl_path, sizeof(audio->ctl_path),
@@ -1317,6 +1339,95 @@ static int volume_leveling_save(int enabled)
         return -1;
     }
     if (close(fd) < 0 || rename(temp, LE_VOLUME_LEVELING_PATH) < 0) {
+        unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+/* Parse a strict decimal 0..100 with an optional single trailing newline. */
+static int parse_level_text(const char *text, int *value)
+{
+    char *end;
+    long parsed;
+
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if (errno || end == text || text[0] < '0' || text[0] > '9' ||
+        (*end != '\0' && strcmp(end, "\n") != 0) || parsed < 0 || parsed > 100)
+        return -1;
+    *value = (int)parsed;
+    return 0;
+}
+
+/* 0 with *volume set when the owner chose a reply level; -1 to follow. */
+static int reply_volume_load(int *volume)
+{
+    char text[8];
+    int fd = open(LE_REPLY_VOLUME_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    ssize_t n;
+
+    if (fd < 0)
+        return -1;
+    n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    text[n] = '\0';
+    return parse_level_text(text, volume);
+}
+
+/* Atomic, fsynced 0600 write of the owner's choice; follow removes it. */
+static int reply_volume_save(int custom, int volume)
+{
+    char temp[sizeof(LE_REPLY_VOLUME_PATH) + 16], text[8];
+    int fd, length;
+
+    if (!custom)
+        return unlink(LE_REPLY_VOLUME_PATH) == 0 || errno == ENOENT ? 0 : -1;
+    length = snprintf(text, sizeof(text), "%d\n", volume);
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_REPLY_VOLUME_PATH) >=
+        (int)sizeof(temp))
+        return -1;
+    fd = mkstemp(temp);
+    if (fd < 0)
+        return -1;
+    if (fchmod(fd, 0600) < 0 || write(fd, text, (size_t)length) != length ||
+        fsync(fd) < 0) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    if (close(fd) < 0 || rename(temp, LE_REPLY_VOLUME_PATH) < 0) {
+        unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+/* Drive the engine's runtime file.  Returns 0 when it matches the choice. */
+static int reply_volume_publish(int custom, int volume)
+{
+    char temp[sizeof(LE_REPLY_VOLUME_RUNTIME_PATH) + 16], text[8];
+    int fd, length;
+
+    if (!custom)
+        return unlink(LE_REPLY_VOLUME_RUNTIME_PATH) == 0 || errno == ENOENT ? 0 : -1;
+    if (ensure_volume_directory() < 0)
+        return -1;
+    length = snprintf(text, sizeof(text), "%d\n", volume);
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_REPLY_VOLUME_RUNTIME_PATH) >=
+        (int)sizeof(temp))
+        return -1;
+    fd = mkstemp(temp);
+    if (fd < 0)
+        return -1;
+    if (fchmod(fd, 0640) < 0 || write(fd, text, (size_t)length) != length) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    if (close(fd) < 0 || rename(temp, LE_REPLY_VOLUME_RUNTIME_PATH) < 0) {
         unlink(temp);
         return -1;
     }
@@ -2201,16 +2312,22 @@ static int handle_request(struct audio_hw *audio, char *message,
                        "\"notification_volume\":%d,\"muted\":%s,"
                        "\"startup_sound\":%s,\"amplifier_on\":%s,"
                        "\"volume_leveling\":%s,"
+                       "\"reply_volume\":%d,\"reply_volume_custom\":%s,"
                        "\"output_available\":%s,"
                        "\"noise_active\":%s,\"noise_colour\":\"%s\","
                        "\"noise_source\":\"%s\",\"noise_bed\":\"%s\","
                        "\"noise_tempo\":%d,\"noise_fade_seconds\":%ld,"
                        "\"noise_level\":%d,\"noise_remaining_seconds\":%ld}",
-                       audio->volume, audio->gain, audio->notification_volume,
+                       audio->volume, audio->gain,
+                       audio->reply_volume_custom ? audio->reply_volume
+                                                  : audio->notification_volume,
                        audio->muted ? "true" : "false",
                        audio->startup_sound ? "true" : "false",
                        audio->amplifier_on ? "true" : "false",
                        audio->volume_leveling ? "true" : "false",
+                       audio->reply_volume_custom ? audio->reply_volume
+                                                  : audio->volume,
+                       audio->reply_volume_custom ? "true" : "false",
                        audio->output_available ? "true" : "false",
                        audio->noise_pid > 0 ? "true" : "false",
                        noise_source_name(audio->noise_source),
@@ -2374,6 +2491,29 @@ static int handle_request(struct audio_hw *audio, char *message,
             return response_error(response, response_size, id, "volume leveling could not be applied");
         audio->volume_leveling = boolean;
         le_log_info("audiod: volume leveling %s", boolean ? "on" : "off");
+        return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "set_reply_volume")) {
+        /* {"volume":0-100} sets the reply level; {"custom":false} returns
+         * replies to the master volume. */
+        int custom = 1;
+        if (json_bool(message, "custom", &boolean) == 0) {
+            if (boolean)
+                return response_error(response, response_size, id, "custom:true needs a volume");
+            custom = 0;
+            value = audio->reply_volume;
+        } else if (json_long(message, "volume", &value) < 0 || value < 0 || value > 100)
+            return response_error(response, response_size, id, "volume must be 0-100");
+        if (reply_volume_save(custom, (int)value) < 0)
+            return response_error(response, response_size, id, "reply volume could not be saved");
+        if (reply_volume_publish(custom, (int)value) < 0)
+            return response_error(response, response_size, id, "reply volume could not be applied");
+        audio->reply_volume_custom = custom;
+        audio->reply_volume = (int)value;
+        if (custom)
+            le_log_info("audiod: reply volume %d", (int)value);
+        else
+            le_log_info("audiod: reply volume follows the master");
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "set_mute")) {
@@ -2718,6 +2858,39 @@ static void volume_leveling_reconcile(struct audio_hw *audio, long long now_ms)
                     audio->volume_leveling ? "on" : "off");
 }
 
+/* Keep the engine's reply.volume in step with the owner's choice: /run is
+ * cleared by a reboot and the directory can be recreated under audiod.  One
+ * small read per poll tick. */
+static void reply_volume_reconcile(struct audio_hw *audio, long long now_ms)
+{
+    char text[8];
+    int fd, current = -1, matches;
+    ssize_t n;
+
+    if (now_ms <= 0 || (audio->last_reply_check_ms != 0 &&
+        now_ms - audio->last_reply_check_ms < VOLUME_GUARD_POLL_MS))
+        return;
+    audio->last_reply_check_ms = now_ms;
+    fd = open(LE_REPLY_VOLUME_RUNTIME_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd >= 0) {
+        n = read(fd, text, sizeof(text) - 1);
+        close(fd);
+        if (n > 0) {
+            text[n] = '\0';
+            if (parse_level_text(text, &current) < 0)
+                current = -2;
+        } else {
+            current = -2;
+        }
+    }
+    matches = audio->reply_volume_custom ? current == audio->reply_volume
+                                         : current == -1;
+    if (matches)
+        return;
+    if (reply_volume_publish(audio->reply_volume_custom, audio->reply_volume) == 0)
+        le_log_info("audiod: reply volume re-published");
+}
+
 static void retry_startup_volume(struct audio_hw *audio, long long now_ms)
 {
     if (!audio->volume_publish_pending || audio->airplay_restore_pending ||
@@ -2818,6 +2991,7 @@ int main(int argc, char **argv)
          * bounded poll cadence; never override an outstanding AirPlay restore. */
         retry_startup_volume(&audio, monotonic_millis());
         volume_leveling_reconcile(&audio, monotonic_millis());
+        reply_volume_reconcile(&audio, monotonic_millis());
 
         pollfds[0].fd = listen_fd;
         pollfds[0].events = POLLIN;
