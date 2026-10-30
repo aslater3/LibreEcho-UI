@@ -63,6 +63,13 @@ int le_mdns_register_sendspin(const char *path, unsigned int port, const char *n
     return send_registration(path, message,
                              le_mdns_sendspin_encode(message, sizeof(message), port, name));
 }
+int le_mdns_register_libreecho(const char *path, unsigned int port,
+                               const struct le_mdns_libreecho_metadata *metadata)
+{
+    char message[LE_MDNS_LIBREECHO_PACKET_MAX];
+    return send_registration(path, message,
+                             le_mdns_libreecho_encode(message, sizeof(message), port, metadata));
+}
 int le_mdns_register_wyoming(const char *path, unsigned int port)
 {
     (void)path; (void)port; return -1;
