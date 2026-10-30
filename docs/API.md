@@ -1270,7 +1270,8 @@ as an mDNS legacy-unicast query and collects answers for one second; repeated
 requests within three seconds reuse the last answer. At most 16 devices are
 returned; `truncated` is true when more answered. A device that answers
 without an SRV record (port) is not listed. `self` marks this device's own
-record. `advertising` is true while this device holds its own lease.
+record: one that points at one of this device's IPv4 addresses and its HTTP
+port (not a hostname match, since Avahi renames a clashing record). `advertising` is true while this device holds its own lease.
 
 GET only; other methods answer 405. 503 `io_error` means no socket could be
 opened to search.

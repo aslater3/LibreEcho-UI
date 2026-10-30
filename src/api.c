@@ -21,6 +21,7 @@
 #include "peers.h"
 #include "adapter/mdns_client.h"
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1550,16 +1551,20 @@ void api_discovery_tick(struct api_context*c){long now=(long)time(NULL);struct l
 /* LIBREECHO_MDNS_QUERY_ADDR=a.b.c.d:port points the browse at a test
    responder instead of the mDNS group. */
 static int peers_destination(struct sockaddr_in*d){const char*e=getenv("LIBREECHO_MDNS_QUERY_ADDR");char host[32];const char*colon;unsigned long port;char*end;if(!e||!e[0])return 0;colon=strrchr(e,':');if(!colon||(size_t)(colon-e)>=sizeof(host))return 0;memcpy(host,e,(size_t)(colon-e));host[colon-e]=0;errno=0;port=strtoul(colon+1,&end,10);if(errno||*end||!port||port>65535)return 0;memset(d,0,sizeof(*d));d->sin_family=AF_INET;d->sin_port=htons((uint16_t)port);return inet_pton(AF_INET,host,&d->sin_addr)==1;}
+/* A record is this device when it points at one of this device's own IPv4
+   addresses and the plain HTTP port. The instance label is not used: two
+   devices left on the same hostname make Avahi rename one record ("name #2"),
+   so a name match would hide the other device and list this one as a peer. */
+static int peer_is_self(const struct api_context*c,const struct le_peer*p){struct ifaddrs*all=NULL,*it;struct in_addr a;int self=0;if(!c->http_port||p->port!=(unsigned)c->http_port||inet_pton(AF_INET,p->address,&a)!=1||getifaddrs(&all)<0)return 0;for(it=all;it&&!self;it=it->ifa_next)if(it->ifa_addr&&it->ifa_addr->sa_family==AF_INET&&((const struct sockaddr_in*)(const void*)it->ifa_addr)->sin_addr.s_addr==a.s_addr)self=1;freeifaddrs(all);return self;}
 #define LE_PEERS_BROWSE_MS 1000
 #define LE_PEERS_CACHE_S 3
 /* The browse waits up to a second on the single event loop, like a Wi-Fi
    scan, so it only runs when someone opens the list and repeated requests
    inside LE_PEERS_CACHE_S reuse the last answer. */
-static void peers_json(struct api_context*c,struct api_response*r){static struct le_peer list[LE_PEERS_MAX];static int count=-1,truncated;static long at;struct sockaddr_in dest;struct le_device_info d;char devices[LE_PEERS_MAX*480+4],name[160],room[160],version[80],self_host[LE_TEXT];size_t used=0,i;long now=(long)time(NULL);
+static void peers_json(struct api_context*c,struct api_response*r){static struct le_peer list[LE_PEERS_MAX];static int count=-1,truncated;static long at;struct sockaddr_in dest;char devices[LE_PEERS_MAX*480+4],name[160],room[160],version[80];size_t used=0,i;long now=(long)time(NULL);
  if(count<0||now-at>=LE_PEERS_CACHE_S||now<at){int t=0,have_dest=peers_destination(&dest);count=le_peers_browse(have_dest?&dest:NULL,LE_PEERS_BROWSE_MS,list,LE_PEERS_MAX,&t);truncated=t;at=(long)time(NULL);if(count<0){count=-1;err(r,503,LE_IO,"The local network could not be searched");return;}}
- memset(&d,0,sizeof(d));self_host[0]=0;if(!le_get_device_info(c->backend,&d))snprintf(self_host,sizeof(self_host),"%s",d.hostname);
  devices[used++]='[';devices[used]=0;
- for(i=0;i<(size_t)count;i++){int n;json_escape(name,sizeof(name),list[i].name);json_escape(room,sizeof(room),list[i].room);json_escape(version,sizeof(version),list[i].version);n=snprintf(devices+used,sizeof(devices)-used,"%s{\"name\":\"%s\",\"room\":\"%s\",\"version\":\"%s\",\"address\":\"%s\",\"port\":%u,\"url\":\"http://%s:%u/\",\"self\":%s}",i?",":"",name,room,version,list[i].address,list[i].port,list[i].address,list[i].port,self_host[0]&&!strcasecmp(self_host,list[i].name)?"true":"false");if(n<0||(size_t)n>=sizeof(devices)-used-1){truncated=1;break;}used+=(size_t)n;}
+ for(i=0;i<(size_t)count;i++){int n;json_escape(name,sizeof(name),list[i].name);json_escape(room,sizeof(room),list[i].room);json_escape(version,sizeof(version),list[i].version);n=snprintf(devices+used,sizeof(devices)-used,"%s{\"name\":\"%s\",\"room\":\"%s\",\"version\":\"%s\",\"address\":\"%s\",\"port\":%u,\"url\":\"http://%s:%u/\",\"self\":%s}",i?",":"",name,room,version,list[i].address,list[i].port,list[i].address,list[i].port,peer_is_self(c,&list[i])?"true":"false");if(n<0||(size_t)n>=sizeof(devices)-used-1){truncated=1;break;}used+=(size_t)n;}
  devices[used++]=']';devices[used]=0;
  out(r,200,"{\"ok\":true,\"data\":{\"discoverable\":%s,\"advertising\":%s,\"devices\":%s,\"truncated\":%s},\"error\":null}",c->discoverable?"true":"false",discovery_wanted(c)&&c->discovery_fd>=0?"true":"false",devices,truncated?"true":"false");}
 static void net_json(struct api_context*c,struct api_response*r){

@@ -39,17 +39,25 @@ def rr(name, rtype, data, ttl=120):
     return name + struct.pack('!HHIH', rtype, 0x8001, ttl, len(data)) + data
 
 
-def answer(query):
+def answer(query, self_port):
     qid = query[:2]
     instance = label('hall-echo') + SERVICE
-    other = label('libreecho-dev') + SERVICE      # the mock backend's own hostname
+    # This device's own record, renamed by Avahi after a hostname clash, and the
+    # other device that kept the mock backend's hostname ("libreecho-dev").
+    own = label('libreecho-dev #2') + SERVICE
+    twin = label('libreecho-dev') + SERVICE
     host = label('hall-echo') + b'\x05local\x00'
+    own_host = label('libreecho-dev-2') + b'\x05local\x00'
+    twin_host = label('libreecho-dev') + b'\x05local\x00'
     txt = b''.join(label(x) for x in ['version=0.14.6', 'room=Hall "B" & co', 'path=/'])
     records = [
-        rr(SERVICE, 12, instance), rr(SERVICE, 12, other),
+        rr(SERVICE, 12, instance), rr(SERVICE, 12, own), rr(SERVICE, 12, twin),
         rr(instance, 33, struct.pack('!HHH', 0, 0, 8080) + host), rr(instance, 16, txt),
-        rr(other, 33, struct.pack('!HHH', 0, 0, 8081) + host), rr(other, 16, label('version=0.14.6')),
+        rr(own, 33, struct.pack('!HHH', 0, 0, self_port) + own_host), rr(own, 16, label('version=0.14.6')),
+        rr(twin, 33, struct.pack('!HHH', 0, 0, self_port) + twin_host), rr(twin, 16, label('version=0.14.6')),
         rr(host, 1, socket.inet_aton('127.0.0.1')),
+        rr(own_host, 1, socket.inet_aton('127.0.0.1')),
+        rr(twin_host, 1, socket.inet_aton('192.0.2.30')),
     ]
     return qid + struct.pack('!HHHHH', 0x8400, 0, len(records), 0, 0) + b''.join(records)
 
@@ -62,6 +70,7 @@ class Responder(threading.Thread):
         self.sock.settimeout(0.2)
         self.port = self.sock.getsockname()[1]
         self.queries = 0
+        self.self_port = 0
         self.running = True
 
     def run(self):
@@ -73,7 +82,7 @@ class Responder(threading.Thread):
             except OSError:
                 return
             self.queries += 1
-            self.sock.sendto(answer(data), peer)
+            self.sock.sendto(answer(data, self.self_port), peer)
 
 
 class Supervisor(threading.Thread):
@@ -132,6 +141,7 @@ class NetworkPeers(unittest.TestCase):
         self.supervisor.start()
         self.config = self.dir / 'config.json'
         self.port = free_port()
+        self.responder.self_port = self.port
 
     def tearDown(self):
         self.responder.running = self.supervisor.running = False
@@ -187,13 +197,17 @@ class NetworkPeers(unittest.TestCase):
         self.assertTrue(data['discoverable'])
         self.assertFalse(data['truncated'])
         by_name = {d['name']: d for d in data['devices']}
-        self.assertEqual(sorted(by_name), ['hall-echo', 'libreecho-dev'])
+        self.assertEqual(sorted(by_name), ['hall-echo', 'libreecho-dev', 'libreecho-dev #2'])
         hall = by_name['hall-echo']
         self.assertEqual(hall, {'name': 'hall-echo', 'room': 'Hall "B" & co', 'version': '0.14.6',
                                 'address': '127.0.0.1', 'port': 8080, 'url': 'http://127.0.0.1:8080/',
                                 'self': False})
-        self.assertTrue(by_name['libreecho-dev']['self'])
-        self.assertEqual(by_name['libreecho-dev']['room'], '')
+        # Self is this device's address and HTTP port, not its hostname: the
+        # renamed own record is self, the other device on the same hostname is not.
+        self.assertTrue(by_name['libreecho-dev #2']['self'])
+        self.assertEqual(by_name['libreecho-dev #2']['room'], '')
+        self.assertFalse(by_name['libreecho-dev']['self'])
+        self.assertEqual(by_name['libreecho-dev']['address'], '192.0.2.30')
         queries = self.responder.queries
         # A second request inside the cache window does not browse again.
         self.get('/api/v1/network/peers')
