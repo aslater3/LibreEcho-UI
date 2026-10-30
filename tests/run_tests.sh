@@ -374,6 +374,8 @@ sh tests/test_timed.sh
 make test-lived
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
+# Device list (#413): browse and advertisement through the real daemon, own ports.
+python3 tests/test_network_peers.py
 sh tests/test_setup_first_run.sh
 # First-boot provisioning drives the real daemon over loopback with the mock
 # backend and owns its own ports, so it runs outside the shared server above.

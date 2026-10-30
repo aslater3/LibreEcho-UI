@@ -1234,6 +1234,7 @@ false.
   "hostname": "myecho",
   "ssh": false,
   "api_lan": true,
+  "discoverable": true,
   "wifi_mac": "<six hexadecimal octets>",
   "bt_mac": "<six hexadecimal octets>"
 }
@@ -1251,6 +1252,49 @@ The response fields `wifi_mac` and `bt_mac` report live interface values;
 `*_factory` reports board identity values when available; and `*_configured`
 reports persisted overrides. Empty strings mean that a value is unavailable or
 unset.
+
+`discoverable` (default `true`, persisted, also reported by `GET
+/api/v1/network`) lets other LibreEcho devices list this one. While it is on
+and the HTTP listener is reachable from the LAN (any bind other than
+loopback), the web daemon holds a `_libreecho._tcp` lease on the
+shared `libreecho-mdnsd` responder. The record's instance name is the
+hostname; its TXT records are `version` (LibreEcho version), `room` (may be
+empty) and `path=/`. Turning it off withdraws the record within a few seconds.
+A hostname or room change is re-advertised within about five seconds.
+
+#### GET /api/v1/network/peers
+
+Lists LibreEcho devices on the local network, with a link to each control
+centre (#413). The daemon sends one DNS-SD browse for `_libreecho._tcp.local`
+as an mDNS legacy-unicast query and collects answers for one second; repeated
+requests within three seconds reuse the last answer. At most 16 devices are
+returned; `truncated` is true when more answered. A device that answers
+without an SRV record (port) is not listed. `self` marks this device's own
+record: one that points at one of this device's IPv4 addresses and its HTTP
+port (not a hostname match, since Avahi renames a clashing record). `advertising` is true while this device holds its own lease.
+
+GET only; other methods answer 405. 503 `io_error` means no socket could be
+opened to search.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "discoverable": true,
+    "advertising": true,
+    "devices": [
+      {
+        "name": "kitchen-echo", "room": "Kitchen", "version": "0.14.6",
+        "address": "192.0.2.20", "port": 8080,
+        "url": "http://192.0.2.20:8080/", "self": false
+      }
+    ],
+    "truncated": false
+  },
+  "error": null
+}
+```
 
 #### GET /api/v1/network/wifi/scan
 

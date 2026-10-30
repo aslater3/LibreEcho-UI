@@ -2843,6 +2843,42 @@
     }
    }
   },
+  "/network/peers": {
+   "get": {
+    "tags": ["Network"],
+    "summary": "List other LibreEcho devices on the local network",
+    "description": "One bounded DNS-SD browse for _libreecho._tcp.local (mDNS legacy-unicast query; answers are collected for one second and repeated requests within three seconds reuse the last answer). At most 16 devices; truncated is true when more answered. Only devices with an SRV record are listed. self marks this device's own record (one of its IPv4 addresses and its HTTP port); advertising is true while this device holds its own lease. GET only.",
+    "responses": {
+     "200": {
+      "description": "Devices found on the local network",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": ["ok", "data", "error"],
+         "properties": {
+          "ok": {"type": "boolean"},
+          "data": {
+           "type": "object",
+           "required": ["discoverable", "advertising", "devices", "truncated"],
+           "properties": {
+            "discoverable": {"type": "boolean"},
+            "advertising": {"type": "boolean"},
+            "devices": {"type": "array", "maxItems": 16, "items": {"$ref": "#/components/schemas/NetworkPeer"}},
+            "truncated": {"type": "boolean"}
+           }
+          },
+          "error": {"$ref": "#/components/schemas/NullableApiError"}
+         }
+        }
+       }
+      }
+     },
+     "405": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
   "/network/recovery": {
    "put": {
     "tags": [
@@ -4221,6 +4257,10 @@
         "api_lan": {
          "type": "boolean"
         },
+        "discoverable": {
+         "type": "boolean",
+         "description": "Advertise this control centre as _libreecho._tcp so other LibreEcho devices can list it (default true)."
+        },
         "wifi_mac": {
          "type": "string",
          "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"
@@ -4633,7 +4673,24 @@
      },
      "api_lan_forced": {
       "type": "boolean"
+     },
+     "discoverable": {
+      "type": "boolean",
+      "description": "Persisted choice to advertise this control centre to other LibreEcho devices (_libreecho._tcp)."
      }
+    }
+   },
+   "NetworkPeer": {
+    "type": "object",
+    "required": ["name", "room", "version", "address", "port", "url", "self"],
+    "properties": {
+     "name": {"type": "string", "maxLength": 63, "description": "DNS-SD instance name (the device hostname)"},
+     "room": {"type": "string", "maxLength": 63, "description": "Room from TXT; empty when unset or unsafe"},
+     "version": {"type": "string", "maxLength": 31, "description": "LibreEcho version from TXT; empty when absent"},
+     "address": {"type": "string", "description": "IPv4 address of the device"},
+     "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+     "url": {"type": "string", "description": "Link to that device's control centre"},
+     "self": {"type": "boolean", "description": "True for this device's own record"}
     }
    },
    "ErrorEnvelope": {

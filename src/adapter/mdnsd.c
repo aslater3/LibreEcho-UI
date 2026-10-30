@@ -30,8 +30,14 @@
 #define MDNS_SENDSPIN_OWNER_EXE \
     "/run/libreecho/features/airplay2/root/usr/local/sbin/libreecho-sendspind"
 #endif
-enum owner_kind { OWNER_NONE = 0, OWNER_ESPHOME = 1, OWNER_SENDSPIN = 2 };
-#define CLIENTS 4
+/* The web control centre advertises itself so other LibreEcho devices can
+ * list it (_libreecho._tcp). */
+#ifndef MDNS_WEB_OWNER_EXE
+#define MDNS_WEB_OWNER_EXE "/usr/local/sbin/libreecho-web"
+#endif
+enum owner_kind { OWNER_NONE = 0, OWNER_ESPHOME = 1, OWNER_SENDSPIN = 2, OWNER_WEB = 3 };
+/* Three long-lived owners plus room for short status probes. */
+#define CLIENTS 6
 static volatile sig_atomic_t running = 1;
 static void stop_signal(int sig) { (void)sig; running = 0; }
 static long now_ms(void)
@@ -138,6 +144,7 @@ static int peer_owner(int fd)
     exe[n] = 0;
     if (!strcmp(exe, MDNS_OWNER_EXE)) return OWNER_ESPHOME;
     if (!strcmp(exe, MDNS_SENDSPIN_OWNER_EXE)) return OWNER_SENDSPIN;
+    if (!strcmp(exe, MDNS_WEB_OWNER_EXE)) return OWNER_WEB;
     return OWNER_NONE;
 }
 static int clear_stale(int fd)
@@ -150,6 +157,7 @@ static int clear_stale(int fd)
         if ((!strncmp(entry->d_name, "wyoming-", 8) ||
              !strncmp(entry->d_name, "esphome-", 8) ||
              !strncmp(entry->d_name, "sendspin-", 9) ||
+             !strncmp(entry->d_name, "libreecho-", 10) ||
              !strcmp(entry->d_name, "wyoming.service") ||
              !strcmp(entry->d_name, "esphome.service")) &&
             unlinkat(fd, entry->d_name, 0) < 0) result = -1;
@@ -188,7 +196,7 @@ int main(int argc, char **argv)
     const char *socket_path = "/run/libreecho/mdns.sock";
     char path[512];
     struct sockaddr_un address;
-    struct le_mdns_lease lease, sendspin_lease;
+    struct le_mdns_lease lease, sendspin_lease, web_lease;
     struct pollfd fds[CLIENTS + 1];
     int owner_pidfds[CLIENTS];
     long deadlines[CLIENTS] = {0}, retry = 0, bus_started = 0;
@@ -212,6 +220,7 @@ int main(int argc, char **argv)
     if (dir_fd < 0 || clear_stale(dir_fd) < 0) return 1;
     le_mdns_lease_init(&lease, dir_fd);
     le_mdns_lease_init(&sendspin_lease, dir_fd);
+    le_mdns_lease_init(&web_lease, dir_fd);
     server = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (server < 0) return 1;
     memset(&address, 0, sizeof(address));
@@ -245,6 +254,7 @@ int main(int argc, char **argv)
         }
         for (i = 1; i <= CLIENTS; ++i) {
             char message[LE_MDNS_ESPHOME_PACKET_MAX];
+            struct le_mdns_libreecho_metadata web_metadata;
             ssize_t n;
             int close_client = 0;
             struct le_mdns_lease *owned;
@@ -277,6 +287,17 @@ int main(int argc, char **argv)
                             if (avahi > 0 && kill(avahi, SIGHUP) < 0) retire(&avahi);
                             (void)send(fds[i].fd, "pending\n", 8, MSG_NOSIGNAL);
                         }
+                    } else if (n > 12 && !memcmp(message, "LIBREECHO/1 ", 12)) {
+                        if (owner_pidfds[i - 1] < 0) owner_pidfds[i - 1] = peer_pidfd(fds[i].fd);
+                        if (le_mdns_libreecho_decode(message, (size_t)n, &port, &web_metadata) < 0 ||
+                            !peer_still_owner(fds[i].fd, owner_pidfds[i - 1], OWNER_WEB) ||
+                            le_mdns_lease_register_libreecho(&web_lease, fds[i].fd, port,
+                                                             &web_metadata) < 0) {
+                            (void)send(fds[i].fd, "error\n", 6, MSG_NOSIGNAL); close_client = 1;
+                        } else {
+                            if (avahi > 0 && kill(avahi, SIGHUP) < 0) retire(&avahi);
+                            (void)send(fds[i].fd, "pending\n", 8, MSG_NOSIGNAL);
+                        }
                     } else {
                         if (owner_pidfds[i - 1] < 0) owner_pidfds[i - 1] = peer_pidfd(fds[i].fd);
                         if (le_mdns_esphome_decode(message, (size_t)n, &port, &metadata) < 0 ||
@@ -293,8 +314,10 @@ int main(int argc, char **argv)
             if (fds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) close_client = 1;
             /* Which lease, if any, this connection holds after this round. */
             owned = lease.owner_fd == fds[i].fd ? &lease
-                : sendspin_lease.owner_fd == fds[i].fd ? &sendspin_lease : NULL;
-            owned_kind = owned == &lease ? OWNER_ESPHOME : owned ? OWNER_SENDSPIN : OWNER_NONE;
+                : sendspin_lease.owner_fd == fds[i].fd ? &sendspin_lease
+                : web_lease.owner_fd == fds[i].fd ? &web_lease : NULL;
+            owned_kind = owned == &lease ? OWNER_ESPHOME : owned == &sendspin_lease ? OWNER_SENDSPIN
+                : owned ? OWNER_WEB : OWNER_NONE;
             if (owned && !peer_still_owner(fds[i].fd, owner_pidfds[i - 1], owned_kind))
                 close_client = 1;
             if (!owned && now >= deadlines[i - 1]) close_client = 1;
@@ -315,6 +338,8 @@ int main(int argc, char **argv)
     if (lease.owner_fd >= 0) (void)le_mdns_lease_withdraw(&lease, lease.owner_fd);
     if (sendspin_lease.owner_fd >= 0)
         (void)le_mdns_lease_withdraw(&sendspin_lease, sendspin_lease.owner_fd);
+    if (web_lease.owner_fd >= 0)
+        (void)le_mdns_lease_withdraw(&web_lease, web_lease.owner_fd);
     retire(&avahi); retire(&bus);
     for (i = 0; i <= CLIENTS; ++i) if (fds[i].fd >= 0) close(fds[i].fd);
     for (i = 0; i < CLIENTS; ++i) if (owner_pidfds[i] >= 0) close(owner_pidfds[i]);
