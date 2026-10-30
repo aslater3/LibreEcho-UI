@@ -1255,8 +1255,8 @@ unset.
 
 `discoverable` (default `true`, persisted, also reported by `GET
 /api/v1/network`) lets other LibreEcho devices list this one. While it is on
-and the HTTP listener is reachable from the LAN (not a loopback bind, and LAN
-API access in force), the web daemon holds a `_libreecho._tcp` lease on the
+and the HTTP listener is reachable from the LAN (any bind other than
+loopback), the web daemon holds a `_libreecho._tcp` lease on the
 shared `libreecho-mdnsd` responder. The record's instance name is the
 hostname; its TXT records are `version` (LibreEcho version), `room` (may be
 empty) and `path=/`. Turning it off withdraws the record within a few seconds.

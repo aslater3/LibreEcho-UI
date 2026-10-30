@@ -1530,7 +1530,8 @@ static void news_json(struct api_context*c,struct api_response*r){char cache[512
  out(r,200,"{\"ok\":true,\"data\":{\"enabled\":true,\"supported\":%s,\"state\":\"%s\",\"last_success_epoch\":%lld,\"last_attempt_epoch\":%lld,\"last_error\":\"%s\",\"items\":%s},\"error\":null}",supported?"true":"false",state,st.success,st.attempt,strcmp(st.result,"ok")?st.result:"",have?items_json:"[]");}
 static void news_clear(void){static const char*const names[]={"news-cache.json","news-cache.json.bak","news-cache.json.tmp","news-status","news-status.bak","news-status.tmp","news-download.tmp"};char path[512];size_t i;for(i=0;i<sizeof(names)/sizeof(names[0]);i++){news_path(path,sizeof(path),names[i]);unlink(path);}}
 /* Device list (#413). */
-static int discovery_wanted(const struct api_context*c){return c->discoverable&&c->http_lan&&c->http_port>0&&c->http_port<=65535&&(c->allow_insecure_lan||c->net_api_lan);}
+/* The api_lan switch is informational (nothing enforces it), so reachability is the listener bind itself. */
+static int discovery_wanted(const struct api_context*c){return c->discoverable&&c->http_lan&&c->http_port>0&&c->http_port<=65535;}
 void api_set_http_listener(struct api_context*c,int port,int lan){c->http_port=port;c->http_lan=lan?1:0;}
 static const char*discovery_socket(void){const char*e=getenv("LIBREECHO_MDNS_SOCKET");return e&&e[0]?e:LE_MDNS_SOCKET;}
 static void discovery_metadata(struct api_context*c,struct le_mdns_libreecho_metadata*m){struct le_device_info d;memset(m,0,sizeof(*m));memset(&d,0,sizeof(d));if(le_get_device_info(c->backend,&d)||!api_valid_hostname(d.hostname))snprintf(m->name,sizeof(m->name),"LibreEcho");else snprintf(m->name,sizeof(m->name),"%s",d.hostname);snprintf(m->version,sizeof(m->version),"%s",LE_OS_VERSION);snprintf(m->room,sizeof(m->room),"%s",c->room);}
