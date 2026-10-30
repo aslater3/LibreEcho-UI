@@ -14,6 +14,9 @@ void le_feature_provenance_test_cache(const char *path, const struct stat *st, i
                                       const char *hash);
 int le_feature_provenance_test_cached(const char *path, const struct stat *st);
 int le_feature_provenance_test_cache_slots(void);
+int le_feature_provenance_test_runtime_reserve(void);
+void le_feature_provenance_test_persist_load(void);
+void le_feature_provenance_test_persist_store(void);
 #endif
 
 static char root_template[] = "/tmp/libreecho-feature-test-XXXXXX";
@@ -1041,6 +1044,89 @@ static void test_eviction_keeps_persisted_digests(void)
     unsetenv("LIBREECHO_GENERATIONS_ROOT");
     le_feature_provenance_shutdown();
 }
+/* The Radar regression: after many OTAs the persisted cache held a digest in
+   every slot, so the two running daemons' executables evicted each other and
+   libreecho-web re-hashed a 34 MB binary continuously (one core at 100%). */
+static void test_full_persisted_cache_keeps_runtime_entries(void)
+{
+    static const char *digest = "0f6d5b80eac2c95711e382c1895f2e89ac758836c4e0ab29c43c016db431dc69";
+    char generations[1024], path[1400];
+    struct stat st;
+    int i, round, slots = le_feature_provenance_test_cache_slots(),
+        runtime = le_feature_provenance_test_runtime_reserve();
+    setup();
+    snprintf(generations, sizeof(generations), "%s/generations", root);
+    setenv("LIBREECHO_GENERATIONS_ROOT", generations, 1);
+    memset(&st, 0, sizeof(st));
+    st.st_size = 1;
+    for (i = 0; i < slots; ++i) {
+        st.st_ino = (ino_t)(1000 + i);
+        snprintf(path, sizeof(path), "%s/txn-%02d/features/f/payload.squashfs", generations, i);
+        le_feature_provenance_test_cache(path, &st, 1, digest);
+    }
+    /* Every running daemon executable is cached once and then stays cached
+       while the others are looked up and re-cached in turn. */
+    for (round = 0; round < 3; ++round)
+        for (i = 0; i < runtime; ++i) {
+            st.st_ino = (ino_t)(5000 + i);
+            snprintf(path, sizeof(path), "/proc/%d/exe", 100 + i);
+            if (round)
+                assert(le_feature_provenance_test_cached(path, &st));
+            else
+                le_feature_provenance_test_cache(path, &st, 1, digest);
+        }
+    /* Digests still fill everything outside the reserve. */
+    for (i = 0, round = 0; i < slots; ++i) {
+        st.st_ino = (ino_t)(1000 + i);
+        snprintf(path, sizeof(path), "%s/txn-%02d/features/f/payload.squashfs", generations, i);
+        round += le_feature_provenance_test_cached(path, &st);
+    }
+    assert(round == slots - runtime);
+    unsetenv("LIBREECHO_GENERATIONS_ROOT");
+    le_feature_provenance_shutdown();
+}
+
+/* Records for retired generations are dropped on load and never re-stored. */
+static void test_retired_generation_records_are_pruned(void)
+{
+    static const char *digest = "0f6d5b80eac2c95711e382c1895f2e89ac758836c4e0ab29c43c016db431dc69";
+    char generations[1024], cache[1024], live[1400], gone[1400], text[8192];
+    struct stat st, fake;
+    FILE *f;
+    size_t n;
+    setup();
+    snprintf(generations, sizeof(generations), "%s/generations", root);
+    mkdir_or_die(generations);
+    setenv("LIBREECHO_GENERATIONS_ROOT", generations, 1);
+    join_path(cache, sizeof(cache), update_root, "/feature-hash-cache");
+    snprintf(live, sizeof(live), "%s/live.squashfs", generations);
+    write_file(live, "payload");
+    assert(stat(live, &st) == 0);
+    snprintf(gone, sizeof(gone), "%s/txn-retired/features/tts/payload.squashfs", generations);
+    fake = st;
+    fake.st_ino = st.st_ino + 100000;
+    plant_record(cache, &fake, digest, gone);
+    write_record(cache, "a", &st, digest, live);
+    /* Same path as a live file but a different identity: also unusable. */
+    fake.st_ino = st.st_ino + 200000;
+    write_record(cache, "a", &fake, digest, live);
+    assert(chmod(cache, 0600) == 0);
+    le_feature_provenance_test_persist_load();
+    assert(le_feature_provenance_test_cached(live, &st));
+    assert(!le_feature_provenance_test_cached(gone, &fake));
+    /* The next store rewrites the file with the live record only. */
+    le_feature_provenance_test_cache(live, &st, 1, digest);
+    le_feature_provenance_test_persist_store();
+    f = fopen(cache, "r");
+    assert(f);
+    n = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[n] = 0;
+    assert(strstr(text, live) && !strstr(text, "txn-retired"));
+    assert(strchr(text, '\n') == text + n - 1);
+    unsetenv("LIBREECHO_GENERATIONS_ROOT");
+    le_feature_provenance_shutdown();
+}
 #endif
 
 int main(void)
@@ -1063,6 +1149,8 @@ int main(void)
 #ifdef LE_FEATURE_PROVENANCE_TESTING
     test_persistable_path_rejects_escapes();
     test_eviction_keeps_persisted_digests();
+    test_full_persisted_cache_keeps_runtime_entries();
+    test_retired_generation_records_are_pruned();
 #endif
     puts("feature provenance formatter: ok");
     return 0;

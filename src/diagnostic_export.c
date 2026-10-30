@@ -548,6 +548,30 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
                           json_bool(network.internet), json_bool(network.dhcp), network.signal,
                           network.rssi_dbm, network.liveness_failures);
     }
+    {
+        /* SSH (#24): only the supervisor's non-secret enums, never names or hashes. */
+        const char *status = getenv("LIBREECHO_SSH_STATUS");
+        char raw[64], enabled[16], state[48], auth[48], policy[64];
+
+        if (!status || !*status)
+            status = "/run/libreecho/ssh.status";
+        if (!read_key(status, "account_state", raw, sizeof(raw)) ||
+            !safe_token(state, sizeof(state), raw))
+            (void)diag_append(&w, "\"ssh\":{\"available\":false},");
+        else {
+            if (!read_key(status, "enabled", raw, sizeof(raw)) ||
+                !safe_token(enabled, sizeof(enabled), raw))
+                snprintf(enabled, sizeof(enabled), "unknown");
+            if (!read_key(status, "authentication", raw, sizeof(raw)) ||
+                !safe_token(auth, sizeof(auth), raw))
+                snprintf(auth, sizeof(auth), "unknown");
+            if (!read_key(status, "privilege_policy", raw, sizeof(raw)) ||
+                !safe_token(policy, sizeof(policy), raw))
+                snprintf(policy, sizeof(policy), "unknown");
+            (void)diag_append(&w, "\"ssh\":{\"available\":true,\"enabled\":%s,\"account_state\":\"%s\",\"authentication\":\"%s\",\"privilege_policy\":\"%s\"},",
+                              !strcmp(enabled, "1") ? "true" : "false", state, auth, policy);
+        }
+    }
     if (audio_rc)
         append_unavailable(&w, "audio");
     else
@@ -591,12 +615,13 @@ void diagnostics_export_json(struct api_context *c, struct api_response *r)
                           json_bool(playback.system_active), json_bool(playback.announcement_active),
                           json_bool(playback.alarm_active), json_bool(playback.metadata_available));
     }
-    (void)diag_append(&w, "\"privacy\":{\"local_only\":%s,\"audio_retention\":%s,\"diagnostic_telemetry\":%s,\"crash_reports\":%s,\"hardware_mute_capable\":true},",
+    (void)diag_append(&w, "\"privacy\":{\"local_only\":%s,\"audio_retention\":%s,\"diagnostic_telemetry\":%s,\"crash_reports\":%s,\"active_device_ping\":%s,\"hardware_mute_capable\":true},",
                       json_bool(c->privacy_local_only), json_bool(c->privacy_audio_retention),
-                      json_bool(c->privacy_telemetry), json_bool(c->privacy_crash_reports));
+                      json_bool(c->privacy_telemetry), json_bool(c->privacy_crash_reports),
+                      json_bool(c->privacy_active_ping));
     append_boot_control(&w);
     (void)append_logs(&w, c);
-    (void)diag_append(&w, "\"manifest\":{\"sections\":[\"release_identity\",\"runtime\",\"network\",\"audio\",\"wake_word\",\"bluetooth\",\"playback\",\"privacy\",\"boot_control\",\"logs\"],\"redactions\":[\"wifi_credentials\",\"ssid_bssid\",\"ip_addresses\",\"bluetooth_addresses\",\"owner_identifiers\",\"tokens_cookies\",\"private_paths\",\"media_metadata\"],\"omitted\":[\"private_keys\",\"ota_signing_material\",\"raw_pstore\",\"arbitrary_request_paths\"]}},\"error\":null}");
+    (void)diag_append(&w, "\"manifest\":{\"sections\":[\"release_identity\",\"runtime\",\"network\",\"ssh\",\"audio\",\"wake_word\",\"bluetooth\",\"playback\",\"privacy\",\"boot_control\",\"logs\"],\"redactions\":[\"wifi_credentials\",\"ssid_bssid\",\"ip_addresses\",\"bluetooth_addresses\",\"owner_identifiers\",\"tokens_cookies\",\"private_paths\",\"media_metadata\"],\"omitted\":[\"private_keys\",\"ota_signing_material\",\"raw_pstore\",\"arbitrary_request_paths\"]}},\"error\":null}");
     if (w.failed) {
         snprintf(r->body, sizeof(r->body), "{\"ok\":true,\"data\":{\"schema_version\":1,\"format\":\"libreecho-diagnostic-bundle\",\"bounded\":true,\"partial\":true,\"manifest\":{\"redactions\":[\"all-private-identifiers\"]}},\"error\":null}");
     }

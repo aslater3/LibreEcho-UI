@@ -16,6 +16,25 @@ static int valid_username(const char *username)
     return 1;
 }
 
+/*
+ * Names the SSH account contract reserves (#24): libreecho-ssh refuses root and
+ * the dot entries, and libreecho-ssh is its group. One such account keeps SSH
+ * fail-closed for every user, so new accounts may not use them. Existing files
+ * that already hold one still load, so the owner can sign in and remove it.
+ */
+static int reserved_username(const char *username)
+{
+    static const char *const reserved[] = { "root", ".", "..", "libreecho-ssh" };
+    char folded[LE_AUTH_USERNAME_MAX];
+    size_t i;
+
+    le_auth_fold_username(folded, sizeof(folded), username);
+    for (i = 0; i < sizeof(reserved) / sizeof(reserved[0]); ++i)
+        if (!strcmp(folded, reserved[i]))
+            return 1;
+    return 0;
+}
+
 static void random_hex(char *out, size_t bytes)
 {
     static const char hex[] = "0123456789abcdef";
@@ -80,7 +99,8 @@ int le_auth_add_user(struct le_auth_db *db, const char *path,
     struct le_auth_user users[LE_AUTH_MAX_USERS];
     char salt[65], digest[65], folded[LE_AUTH_USERNAME_MAX];
     size_t i, count;
-    if (!db || !path || !path[0] || !valid_username(username) || !password ||
+    if (!db || !path || !path[0] || !valid_username(username) ||
+        reserved_username(username) || !password ||
         strlen(password) < 8 || strlen(password) > LE_AUTH_PASSWORD_MAX ||
         db->user_count >= LE_AUTH_MAX_USERS)
         return -1;
@@ -195,6 +215,8 @@ int le_auth_add_users_line(struct le_auth_db *db, const char *path,
     end = strchr(salt, ':');
     *end = '\0';
     digest = end + 1;
+    if (reserved_username(user))
+        return -1;
     le_auth_fold_username(folded, sizeof(folded), user);
     count = db->user_count;
     if (count >= LE_AUTH_MAX_USERS)

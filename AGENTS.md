@@ -7,7 +7,8 @@ Read `docs/ARCHITECTURE.md` (system design), `docs/API.md` (HTTP API reference),
 ## Build and test
 
 - The core daemon and its tests are C99 only (`-std=c99`), POSIX 200809L. No new dependencies: no language runtime, package manager, database, or container.
-- Exception: the sherpa/onnx inference adapters — `src/adapter/stt_engine_sherpa.cpp`, `src/adapter/tts_engine_sherpa.cpp`, and `src/adapter/wake_engine_onnx.cpp` — are deliberately C++17 (`Makefile: -std=c++17`). Do not flag C++ usage there or try to convert them to C99; the rest of `src/adapter/` stays C99.
+- Exception: the sherpa/onnx inference adapters — `src/adapter/stt_engine_sherpa.cpp`, `src/adapter/tts_engine_sherpa.cpp`, and `src/adapter/wake_engine_onnx.cpp` — are deliberately C++17 (`Makefile: -std=c++17`). Do not flag C++ usage there or try to convert them to C99.
+- Exception: the separately built Sendspin companion in `src/adapter/sendspin/` and its entry point `src/adapter/sendspind.cpp`, together with their dedicated tests and build targets, may use C++20 and the pinned Sendspin SDK dependencies. SDK background threads are confined to this separate companion; the C99 HTTP daemon must not link these dependencies or adopt its threading model. The companion feeds the bounded shared audio sink and must not open a second ALSA/PCM device. This exception does not change the existing audio engine's sole PCM/amplifier ownership. All other `src/adapter/` code stays C99.
 - Build: `make` — full suite: `make test` (clean build + `tests/run_tests.sh`).
 - Workflow parity: CI also runs `node --check web/js/app.js` and `jq -e . web/openapi.json`; keep both valid when touching them.
 - Every API or behavioral change needs a test in `tests/` wired into `tests/run_tests.sh`.

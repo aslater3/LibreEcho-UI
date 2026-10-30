@@ -428,6 +428,8 @@ function bindHomeAssistantSetup() {
   save.onclick=()=>mutate('/home-assistant',{url:input.value.trim()||HOME_ASSISTANT_DEFAULT_URL},'Home Assistant address saved');
 }
 
+const HIDDEN_INTEGRATIONS=new Set(['mqtt']);
+
 async function integrationsPage() {
   const generation=state.renderGeneration,page=state.page;
   const [d,a,pipeline,live,homeAssistant]=await Promise.all([
@@ -445,15 +447,22 @@ async function integrationsPage() {
    * listed so the absence is visible, but renders no toggle or save button --
    * enabling it could only ever fail. The handler loop below skips those rows.
    */
+  /*
+   * MQTT is listed by the API but the image has no MQTT client, so its switch
+   * stored a setting nothing read (#369). Keep it off the page until a client
+   * ships; the API entry stays so existing callers are unaffected.
+   */
+  const shown=d.items.filter(x=>!HIDDEN_INTEGRATIONS.has(x.id));
   const homeAssistantEnabled=d.items.some(x=>x.id==='home-assistant'&&x.enabled);
   const homeAssistantState=homeAssistantVoiceStatus(homeAssistantEnabled,pipeline);
   const transitionError=pipeline?.restart?.error
     ?`<p class="notice" role="alert">Voice pipeline error: ${esc(pipeline.restart.error)}</p>`:'';
-  const integrations=d.items.map(x=>collapsiblePanel(x.name,
+  const integrations=shown.map(x=>collapsiblePanel(x.name,
     `<p class="muted">${integrationBlurb(x)}</p>
     ${x.installed===false?'':toggle('Enabled',x.enabled,'int-'+x.id,x.forced)}
     <div class="status-line"><span class="status-dot ${x.id==='home-assistant'?(homeAssistantState.okay?'ok':''):(x.enabled?'ok':'')}"></span><span>${esc(x.id==='home-assistant'&&x.installed!==false?homeAssistantState.status:integrationStatus(x))}</span></div>
     ${x.id==='home-assistant'?transitionError:''}
+    ${x.id==='sendspin'&&x.enabled&&x.installed!==false?'<div id="sendspin-detail" aria-live="polite"><p class="muted">Checking the player\u2026</p></div>':''}
     ${x.installed===false?'':saveButton('save-int-'+x.id)}`
   )).join('');
 
@@ -595,7 +604,7 @@ async function integrationsPage() {
   }
 
   if(homeAssistantEnabled){bindHomeAssistantSetup();bindProvenanceCopy();}
-  d.items.forEach(x=>{
+  shown.forEach(x=>{
     const save=$('#save-int-'+x.id);
     if(!save)return;                       /* not installed: nothing rendered to bind */
     bindDirty(['#int-'+x.id],'#save-int-'+x.id);
@@ -604,4 +613,44 @@ async function integrationsPage() {
       mutate('/integrations/'+x.id,{enabled:$('#int-'+x.id).checked},x.name+' changes saved');
     };
   });
+  if($('#sendspin-detail'))await sendspinDetail();
+}
+
+/*
+ * Sendspin card detail: live player status and the pairing token. The token is
+ * fetched only when the owner asks, shown in a read-only field with Copy and
+ * Hide, and never stored in localStorage, state or the page after Hide.
+ */
+async function sendspinDetail(){
+  let s;
+  try{s=await api('/sendspin');}
+  catch(e){const host=$('#sendspin-detail');if(host)host.innerHTML=`<p class="error-text">${esc(e.message)}</p>`;return;}
+  const host=$('#sendspin-detail');
+  if(!host)return;                           /* the page changed meanwhile */
+  host.innerHTML=`<div class="status-line"><span class="status-dot ${s.connected?'ok':''}"></span><span>${sendspinStateText(s)}</span></div>
+    <p class="muted">Music Assistant finds this speaker on your network. To add it, pair it there with this speaker's pairing token.</p>
+    <div class="button-row"><button class="secondary-btn" id="sendspin-pair">Show pairing token</button><button class="secondary-btn" id="sendspin-unpair">Forget paired servers</button></div>
+    <div id="sendspin-token" hidden></div>`;
+  $('#sendspin-pair').onclick=showSendspinToken;
+  $('#sendspin-unpair').onclick=forgetSendspinServers;
+}
+/* Clears every pairing and issues a new token; servers must pair again. */
+async function forgetSendspinServers(){
+  if(!confirm('Forget every Music Assistant server paired with this speaker?\n\nThe speaker gets a new pairing token, and each server has to pair again with it.'))return;
+  try{await api('/sendspin/unpair',{method:'POST',body:'{}'});}
+  catch(e){toast(e.message,true);return;}
+  toast('Paired servers forgotten. Pair again with the new token.');
+  await sendspinDetail();
+}
+async function showSendspinToken(){
+  let token;
+  try{token=(await api('/sendspin/pairing',{method:'POST',body:'{}'})).pairing_token;}
+  catch(e){toast(e.message,true);return;}
+  const box=$('#sendspin-token');
+  if(!box)return;
+  box.hidden=false;
+  box.innerHTML=`<label class="field"><span>Pairing token. Anyone with it can pair a server with this speaker, so keep it private.</span><input id="sendspin-token-value" readonly autocomplete="off" spellcheck="false" value="${esc(token)}"></label>
+    <div class="button-row"><button class="secondary-btn" id="sendspin-token-copy">Copy</button><button class="secondary-btn" id="sendspin-token-hide">Hide</button></div>`;
+  $('#sendspin-token-copy').onclick=async()=>{try{await copyTextCompat(token);toast('Pairing token copied');}catch(e){toast(e.message,true);}};
+  $('#sendspin-token-hide').onclick=()=>{box.innerHTML='';box.hidden=true;token='';};
 }

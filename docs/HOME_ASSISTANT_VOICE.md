@@ -27,6 +27,12 @@ voice. `waked`, `micd`, `audiod`, calibration and AEC remain device-side owners.
 Only final post-AEC mono 16-bit PCM at 16 kHz is sent upstream; raw microphone
 lanes are not exposed.
 
+If a room is set on the Device page, it is sent as the ESPHome
+`suggested_area`, so Home Assistant places the device in that area when it is
+first added, and Assist can then target "the lights" in that area. Home
+Assistant only applies a suggested area when the device is added; for a device
+that is already set up, change its area in Home Assistant.
+
 Disabling HA restores the previously selected **Local** or **Custom** mode and
 its settings. Custom Whisper/Piper addresses, model/voice choices and assistant
 configuration are not erased. There is no protocol selector, legacy satellite

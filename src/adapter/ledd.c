@@ -75,7 +75,15 @@
 #define METER_TRACK_PERCENT 6U
 #define VISUALIZER_TIMEOUT_SECONDS 0.42
 #define STARTUP_READY_PATH "/run/libreecho/startup-ready"
-#define STARTUP_FRAME_MS 88
+/* Boot comet: one soft segment rolls round the ring.  The head position is
+   continuous in time, so each frame blends the segment across neighbouring
+   pixels instead of jumping a whole pixel per frame. */
+#define STARTUP_FRAME_MS FRAME_MS
+#define STARTUP_REVOLUTION_S 1.2
+#define STARTUP_HEAD_PIXELS 1.0
+#define STARTUP_TAIL_PIXELS 4.0
+#define STARTUP_FLOOR 64U
+#define STARTUP_PEAK 255U
 #define NIGHT_POLL_MS 60000
 
 /* Idle base ring modes (#110).  The indicator is the default: a resting
@@ -98,6 +106,12 @@
    its idle mode to the indicator once and records this version, so every
    device starts 0.14 the same way and later owner choices are kept. */
 #define IDLE_POLICY_VERSION 2U
+
+static int idle_auto_off_minutes_valid(unsigned int minutes)
+{
+    return minutes == 0U || minutes == 5U || minutes == 10U ||
+           minutes == 30U || minutes == 60U;
+}
 
 /* Sleep-light bounds (#101).  Server-side, not advisory. */
 #define SLEEP_MODE_OFF   0
@@ -152,6 +166,9 @@ struct led_state {
     /* Not persisted: set by load_state() when a state file predating
        IDLE_POLICY_VERSION was upgraded and must be written back. */
     int idle_policy_upgraded;
+    /* Idle auto-off (UI #323): minutes of inactivity after which the base idle
+       ring goes dark; 0 disables it.  One of 0, 5, 10, 30 or 60. */
+    int idle_auto_off_minutes;
     /* Sleep light settings (#101); persisted but not automatically active. */
     int sleep_mode;
     unsigned int sleep_brightness;
@@ -181,6 +198,7 @@ struct hardware {
     char blue_path[MAX_PATH];
     char brightness_path[MAX_PATH];
     char is31_frame_path[MAX_PATH];
+    char is31_scaled_path[MAX_PATH]; /* empty: kernel lacks scaled_frame */
     char is31_boot_animation_path[MAX_PATH];
 };
 
@@ -218,8 +236,11 @@ struct daemon_context {
     int animation_profile;
     double animation_started;
     int startup_animation_active;
+    /* Idle auto-off (UI #323), runtime only. */
+    double idle_last_activity;
+    int idle_base_asleep;
     char startup_ready_path[MAX_PATH];
-    unsigned int startup_animation_frame;
+    double startup_animation_started;
     double startup_animation_next_frame;
     int pattern_active;
     int pattern_kind;
@@ -282,6 +303,10 @@ struct daemon_context {
        second, so it could not service the visualiser socket and the ring
        froze.  Identical frames are skipped and writes are paced to at most
        half the bus time; the newest frame is always written eventually. */
+    /* What the hardware layer writes, in twelfths of a PWM code (see
+       FINE_UNITS).  Usually rendered_pixels * 12; the sleep pulse fills in
+       levels between codes, reached through the IS31 current scale. */
+    struct pixel rendered_fine[RING_PIXELS];
     struct pixel hw_written[RING_PIXELS];
     int hw_written_valid;
     int hw_pending;
@@ -437,6 +462,91 @@ static int write_is31_pixels(const struct hardware *hw,
     return write_text_file(hw->is31_frame_path, frame);
 }
 
+/*
+ * Fine output levels (#364).  The IS31FL3236 drives each channel at PWM code
+ * c (0..255) and one of four currents, Imax/(s+1) for s = 0..3, latched
+ * together.  The emitted level is c/(s+1) codes, so twelfths of a code (the
+ * LCM of 1..4) represent every reachable level exactly.  At the dim end that
+ * is 12 levels up to code 2 instead of 2.
+ */
+#define FINE_UNITS 12U
+#define IS31_SCALE_MAX 3U
+
+/* Map a fine level to (code, scale).  Prefer the highest current that hits
+   the level exactly, since full current is the calibrated reference; a level
+   no scale reaches exactly (only possible from a caller bug) is rounded to
+   the nearest full-current code. */
+static void fine_to_is31(unsigned int fine, unsigned int *code,
+                         unsigned int *scale)
+{
+    unsigned int s;
+
+    for (s = 0U; s <= IS31_SCALE_MAX; s++) {
+        unsigned int step = FINE_UNITS / (s + 1U); /* fine units per code */
+
+        if (fine % step == 0U && fine / step <= 255U) {
+            *code = fine / step;
+            *scale = s;
+            return;
+        }
+    }
+    *code = (fine + FINE_UNITS / 2U) / FINE_UNITS;
+    if (*code > 255U)
+        *code = 255U;
+    *scale = 0U;
+}
+
+static unsigned int fine_to_code(unsigned int fine)
+{
+    unsigned int code = (fine + FINE_UNITS / 2U) / FINE_UNITS;
+    return code > 255U ? 255U : code;
+}
+
+/* Is this fine level something the hardware can show exactly?  With the
+   kernel's scaled_frame every c/(s+1) is; otherwise only whole codes. */
+static int fine_level_reachable(const struct hardware *hw, unsigned int fine)
+{
+    if (fine % FINE_UNITS == 0U)
+        return 1;
+    if (hw->kind != HW_IS31FL3236 || hw->is31_scaled_path[0] == '\0')
+        return 0;
+    return (fine % 6U == 0U && fine <= 255U * 6U) ||
+           (fine % 4U == 0U && fine <= 255U * 4U) ||
+           (fine % 3U == 0U && fine <= 255U * 3U);
+}
+
+/* Spatial dither order: spreads the "upper level" pixels evenly round the
+   ring, so a uniform colour between two levels reads as one in-between level. */
+static const unsigned char sleep_dither_order[RING_PIXELS] = {
+    0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11
+};
+
+static int write_is31_scaled(const struct hardware *hw,
+                             const struct pixel fine[RING_PIXELS])
+{
+    unsigned int code[IS31_CHANNELS], scale[IS31_CHANNELS];
+    char text[IS31_CHANNELS * 4 + 2];
+    size_t i;
+    int used = 0;
+
+    for (i = 0; i < RING_PIXELS; i++) {
+        fine_to_is31(fine[i].r, &code[i * 3U], &scale[i * 3U]);
+        fine_to_is31(fine[i].g, &code[i * 3U + 1U], &scale[i * 3U + 1U]);
+        fine_to_is31(fine[i].b, &code[i * 3U + 2U], &scale[i * 3U + 2U]);
+    }
+    for (i = 0; i < IS31_CHANNELS * 2U; i++) {
+        unsigned int v = i < IS31_CHANNELS ? code[i] : scale[i - IS31_CHANNELS];
+        int added = snprintf(text + used, sizeof(text) - (size_t)used, "%02x", v);
+
+        if (added < 0 || (size_t)added >= sizeof(text) - (size_t)used)
+            return -1;
+        used += added;
+    }
+    text[used++] = '\n';
+    text[used] = '\0';
+    return write_text_file(hw->is31_scaled_path, text);
+}
+
 /* ---------------------------- Hardware layer --------------------------- */
 
 static unsigned int scale_channel(unsigned int channel, unsigned int brightness)
@@ -496,11 +606,18 @@ static int hardware_write_rgb(const struct hardware *hw, unsigned int r,
 }
 
 static int hardware_write_pixels(const struct hardware *hw,
-                                 const struct pixel pixels[RING_PIXELS])
+                                 const struct pixel fine[RING_PIXELS])
 {
+    struct pixel pixels[RING_PIXELS];
     unsigned int r = 0, g = 0, b = 0;
     size_t i;
 
+    if (hw->kind == HW_IS31FL3236 && hw->is31_scaled_path[0] != '\0')
+        return write_is31_scaled(hw, fine);
+    for (i = 0; i < RING_PIXELS; i++)
+        pixels[i] = (struct pixel){fine_to_code(fine[i].r),
+                                   fine_to_code(fine[i].g),
+                                   fine_to_code(fine[i].b)};
     if (hw->kind == HW_IS31FL3236)
         return write_is31_pixels(hw, pixels);
     for (i = 0; i < RING_PIXELS; i++) {
@@ -574,7 +691,7 @@ static int output_flush(struct daemon_context *ctx, double now, int force)
     if (!ctx->hw_pending)
         return 0;
     if (ctx->hw_written_valid &&
-        memcmp(ctx->hw_written, ctx->rendered_pixels,
+        memcmp(ctx->hw_written, ctx->rendered_fine,
                sizeof(ctx->hw_written)) == 0) {
         ctx->hw_pending = 0;
         return 0;
@@ -582,11 +699,11 @@ static int output_flush(struct daemon_context *ctx, double now, int force)
     if (!force && now < ctx->hw_next_write)
         return 0;
     started = monotonic_seconds();
-    if (hardware_write_pixels(&ctx->hw, ctx->rendered_pixels) != 0) {
+    if (hardware_write_pixels(&ctx->hw, ctx->rendered_fine) != 0) {
         le_log_warn("LED hardware write failed; retaining state in memory");
         ctx->hw_written_valid = 0;
     } else {
-        memcpy(ctx->hw_written, ctx->rendered_pixels, sizeof(ctx->hw_written));
+        memcpy(ctx->hw_written, ctx->rendered_fine, sizeof(ctx->hw_written));
         ctx->hw_written_valid = 1;
     }
     ctx->hw_pending = 0;
@@ -615,7 +732,9 @@ static int output_flush_timeout(const struct daemon_context *ctx, double now)
     return remaining <= 1.0 ? 1 : (int)remaining + 1;
 }
 
-static void output_commit_transfer(struct daemon_context *ctx,
+/* Render a logical frame into rendered_pixels/rendered_fine without
+   writing it; output_commit_transfer() also flushes. */
+static void output_render_transfer(struct daemon_context *ctx,
                                    const struct led_rgb logical[RING_PIXELS],
                                    unsigned int brightness,
                                    enum led_output_transfer transfer)
@@ -626,17 +745,185 @@ static void output_commit_transfer(struct daemon_context *ctx,
     led_output_process_transfer(led_output_default_calibration(),
                                 &ctx->output_state, logical, brightness,
                                 transfer, out, &ctx->output_diag);
-    for (i = 0; i < RING_PIXELS; i++)
+    for (i = 0; i < RING_PIXELS; i++) {
         ctx->rendered_pixels[i] = (struct pixel){out[i].r, out[i].g, out[i].b};
+        ctx->rendered_fine[i] = (struct pixel){out[i].r * FINE_UNITS,
+                                               out[i].g * FINE_UNITS,
+                                               out[i].b * FINE_UNITS};
+    }
     ctx->hw_pending = 1;
+}
+
+/*
+ * Smoothed drive levels for every gamma-transfer frame (#364 follow-up).
+ *
+ * The integer path rounds each channel to a whole PWM code after the gamma-2
+ * transfer, so anything that fades or pulses at low brightness steps visibly
+ * (a pulse at 20% red only spans a handful of codes).  When the kernel offers
+ * the IS31 current scale, follow the exact gamma-2 curve in fine units
+ * instead, and pick the nearest level the chip can show.  A uniform ring is
+ * also dithered spatially between the two nearest levels, as the sleep pulse
+ * does, so its average lands between them too.
+ *
+ * The integer frame is still rendered first and remains what status reports.
+ * The fine levels replace it only when that frame came straight from the
+ * transfer (no budget or slew scaling); a scaled frame keeps whole codes
+ * rather than bypass the limits.  Non-boosting: no channel exceeds its whole
+ * code, and a lit channel never drops to black.
+ */
+static double smooth_fine_target(unsigned int channel, double brightness,
+                                 unsigned int gain)
+{
+    double v;
+
+    if (brightness > 100.0)
+        brightness = 100.0;
+    if (brightness < 0.0)
+        brightness = 0.0;
+    v = (double)(channel > 255U ? 255U : channel) * brightness / 100.0;
+    if (gain < 255U)
+        v = v * (double)gain / 255.0;
+    if (v > 255.0)
+        v = 255.0;
+    return v * v / 255.0 * (double)FINE_UNITS;
+}
+
+static void smooth_bracket(const struct hardware *hw, double target,
+                           unsigned int ceiling, unsigned int *below,
+                           unsigned int *above)
+{
+    unsigned int lo, hi;
+
+    if (target < 0.0)
+        target = 0.0;
+    lo = (unsigned int)target;
+    if (lo >= ceiling) {
+        *below = *above = ceiling;
+        return;
+    }
+    while (lo > 0U && !fine_level_reachable(hw, lo))
+        lo--;
+    hi = lo + 1U;
+    while (hi < ceiling && !fine_level_reachable(hw, hi))
+        hi++;
+    *below = lo;
+    *above = hi;
+}
+
+static unsigned int smooth_floor_level(const struct hardware *hw,
+                                       unsigned int fine, unsigned int code)
+{
+    unsigned int least = 1U;
+
+    if (code == 0U)
+        return 0U;
+    if (fine > 0U)
+        return fine;
+    while (!fine_level_reachable(hw, least))
+        least++;
+    return least;
+}
+
+static void output_smooth_fine(struct daemon_context *ctx,
+                               const struct led_rgb logical[RING_PIXELS],
+                               double brightness)
+{
+    const struct led_output_calibration *cal = led_output_default_calibration();
+    struct pixel fine[RING_PIXELS];
+    unsigned int gains[3];
+    int uniform = 1;
+    size_t i, k;
+
+    if (ctx->hw.kind != HW_IS31FL3236 || ctx->hw.is31_scaled_path[0] == '\0')
+        return;
+    if (ctx->output_diag.limited || ctx->output_diag.slew_limited)
+        return;
+    gains[0] = cal->gain_r;
+    gains[1] = cal->gain_g;
+    gains[2] = cal->gain_b;
+    for (i = 1; i < RING_PIXELS && uniform; i++)
+        uniform = logical[i].r == logical[0].r && logical[i].g == logical[0].g &&
+                  logical[i].b == logical[0].b;
+
+    for (k = 0; k < 3U; k++) {
+        unsigned int lit = 0U, below, above;
+
+        for (i = 0; i < RING_PIXELS; i++) {
+            unsigned int channel = k == 0U ? logical[i].r
+                                 : k == 1U ? logical[i].g : logical[i].b;
+            unsigned int code = k == 0U ? ctx->rendered_pixels[i].r
+                              : k == 1U ? ctx->rendered_pixels[i].g
+                                        : ctx->rendered_pixels[i].b;
+            double target = smooth_fine_target(channel, brightness, gains[k]);
+            unsigned int level;
+
+            smooth_bracket(&ctx->hw, target, code * FINE_UNITS, &below, &above);
+            if (uniform) {
+                if (i == 0U)
+                    lit = above == below ? 0U
+                        : (unsigned int)((target - (double)below) /
+                                         (double)(above - below) *
+                                         RING_PIXELS + 0.5);
+                level = 0U;
+                {
+                    size_t slot;
+                    for (slot = 0; slot < RING_PIXELS; slot++)
+                        if (sleep_dither_order[slot] == i)
+                            break;
+                    level = slot < lit ? above : below;
+                }
+            } else {
+                level = target - (double)below <= (double)above - target
+                      ? below : above;
+            }
+            level = smooth_floor_level(&ctx->hw, level, code);
+            if (k == 0U) fine[i].r = level;
+            else if (k == 1U) fine[i].g = level;
+            else fine[i].b = level;
+        }
+    }
+    memcpy(ctx->rendered_fine, fine, sizeof(fine));
+}
+
+static void output_commit_level(struct daemon_context *ctx,
+                                const struct led_rgb logical[RING_PIXELS],
+                                double brightness)
+{
+    unsigned int whole;
+
+    if (brightness < 0.0)
+        brightness = 0.0;
+    if (brightness > 100.0)
+        brightness = 100.0;
+    whole = (unsigned int)(brightness + 0.5);
+    output_render_transfer(ctx, logical, whole, LE_OUTPUT_TRANSFER_GAMMA);
+    output_smooth_fine(ctx, logical, brightness);
     (void)output_flush(ctx, monotonic_seconds(), 0);
 }
 
+/* Kept for the output-pacing test harness, which drives a whole-number
+   frame through the same gamma route as the daemon. */
+static void output_commit(struct daemon_context *ctx,
+                          const struct led_rgb logical[RING_PIXELS],
+                          unsigned int brightness) __attribute__((unused));
 static void output_commit(struct daemon_context *ctx,
                           const struct led_rgb logical[RING_PIXELS],
                           unsigned int brightness)
 {
-    output_commit_transfer(ctx, logical, brightness, LE_OUTPUT_TRANSFER_GAMMA);
+    output_commit_level(ctx, logical, (double)brightness);
+}
+
+static void output_commit_transfer(struct daemon_context *ctx,
+                                   const struct led_rgb logical[RING_PIXELS],
+                                   unsigned int brightness,
+                                   enum led_output_transfer transfer)
+{
+    if (transfer == LE_OUTPUT_TRANSFER_GAMMA) {
+        output_commit_level(ctx, logical, (double)brightness);
+        return;
+    }
+    output_render_transfer(ctx, logical, brightness, transfer);
+    (void)output_flush(ctx, monotonic_seconds(), 0);
 }
 
 static void night_cap_pixels(const struct daemon_context *ctx,
@@ -668,15 +955,24 @@ static void night_cap_pixels(const struct daemon_context *ctx,
 
 /* A solid colour across the ring: brightness is the colour's own master cap,
    further capped by night mode, then applied by the output stage. */
-static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
+static void hardware_apply_level(struct daemon_context *ctx,
+                                 const struct colour *c, double brightness)
 {
     struct colour capped = night_capped(ctx, *c);
     struct led_rgb logical[RING_PIXELS];
     size_t i;
 
+    /* night_capped() only lowers the whole-number cap; keep the fraction. */
+    if (brightness > (double)capped.brightness)
+        brightness = (double)capped.brightness;
     for (i = 0; i < RING_PIXELS; i++)
         logical[i] = (struct led_rgb){capped.r, capped.g, capped.b};
-    output_commit(ctx, logical, capped.brightness);
+    output_commit_level(ctx, logical, brightness);
+}
+
+static void hardware_apply(struct daemon_context *ctx, const struct colour *c)
+{
+    hardware_apply_level(ctx, c, (double)c->brightness);
 }
 
 /* A logical per-pixel frame (0..255 per channel, no brightness baked in). */
@@ -773,15 +1069,60 @@ static int night_schedule_timeout(const struct daemon_context *ctx,
     return timeout > NIGHT_POLL_MS ? NIGHT_POLL_MS : timeout;
 }
 
-static void apply_startup_animation(struct daemon_context *ctx)
+/* 0..1 smooth falloff: 1 at x=0, 0 at x>=1 (half a cosine). */
+static double startup_soft_edge(double x)
 {
-    struct pixel pixels[RING_PIXELS];
+    const double pi = 3.14159265358979323846;
+
+    if (x <= 0.0)
+        return 1.0;
+    if (x >= 1.0)
+        return 0.0;
+    return 0.5 + 0.5 * sine_approx(pi * x + pi / 2.0);
+}
+
+/* Comet level of a pixel `behind` pixels behind the head (negative = ahead).
+   A short soft leading edge, then a longer tail fading back to the floor. */
+static double startup_comet_level(double behind)
+{
+    if (behind < 0.0)
+        return startup_soft_edge(-behind / STARTUP_HEAD_PIXELS);
+    return startup_soft_edge(behind / STARTUP_TAIL_PIXELS);
+}
+
+static void startup_comet_frame(double elapsed, struct pixel pixels[RING_PIXELS])
+{
+    double turns = elapsed / STARTUP_REVOLUTION_S;
+    double head;
     size_t i;
 
-    for (i = 0; i < RING_PIXELS; i++)
-        pixels[i] = (struct pixel){0, 64, 0};
-    pixels[ctx->startup_animation_frame % RING_PIXELS] =
-        (struct pixel){0, 255, 0};
+    if (turns < 0.0)
+        turns = 0.0;
+    turns -= (double)(unsigned long)turns;
+    head = turns * (double)RING_PIXELS;
+    for (i = 0; i < RING_PIXELS; i++) {
+        double behind = head - (double)i;
+        double level;
+
+        /* Shortest signed distance round the ring, in [-N/2, N/2). */
+        while (behind >= (double)RING_PIXELS / 2.0)
+            behind -= (double)RING_PIXELS;
+        while (behind < -(double)RING_PIXELS / 2.0)
+            behind += (double)RING_PIXELS;
+        level = startup_comet_level(behind);
+        pixels[i] = (struct pixel){
+            0,
+            (unsigned int)((double)STARTUP_FLOOR +
+                           (double)(STARTUP_PEAK - STARTUP_FLOOR) * level + 0.5),
+            0};
+    }
+}
+
+static void apply_startup_animation(struct daemon_context *ctx, double now)
+{
+    struct pixel pixels[RING_PIXELS];
+
+    startup_comet_frame(now - ctx->startup_animation_started, pixels);
     output_pixels(ctx, pixels, 100U);
 }
 
@@ -888,6 +1229,7 @@ static void detect_is31(struct hardware *hw)
     struct dirent *entry;
     char base[MAX_PATH];
     char frame[MAX_PATH];
+    char scaled[MAX_PATH];
     char boot_animation[MAX_PATH];
 
     dir = opendir(SYSFS_I2C_DIR);
@@ -902,14 +1244,17 @@ static void detect_is31(struct hardware *hw)
                          "boot_animation") ||
             !path_is_file(frame) || !path_is_file(boot_animation))
             continue;
-        strncpy(hw->is31_frame_path, frame, sizeof(hw->is31_frame_path) - 1);
-        hw->is31_frame_path[sizeof(hw->is31_frame_path) - 1] = '\0';
-        strncpy(hw->is31_boot_animation_path, boot_animation,
-                sizeof(hw->is31_boot_animation_path) - 1);
-        hw->is31_boot_animation_path[
-            sizeof(hw->is31_boot_animation_path) - 1] = '\0';
+        /* Same-size MAX_PATH buffers, NUL-terminated by append_path(). */
+        memcpy(hw->is31_frame_path, frame, sizeof(hw->is31_frame_path));
+        hw->is31_scaled_path[0] = '\0';
+        if (append_path(scaled, sizeof(scaled), base, "scaled_frame") &&
+            path_is_file(scaled))
+            memcpy(hw->is31_scaled_path, scaled, sizeof(hw->is31_scaled_path));
+        memcpy(hw->is31_boot_animation_path, boot_animation,
+               sizeof(hw->is31_boot_animation_path));
         hw->kind = HW_IS31FL3236;
-        le_log_info("using IS31FL3236 LED backend (%s)", frame);
+        le_log_info("using IS31FL3236 LED backend (%s%s)", frame,
+                    hw->is31_scaled_path[0] ? ", current-scaled levels" : "");
         break;
     }
     closedir(dir);
@@ -1457,6 +1802,9 @@ static void load_state(struct led_state *state)
                 mode = v;
             if (get_arg_unsigned(&r, "policy", &v, 0xffffU) == 0)
                 policy = v;
+            if (get_arg_unsigned(&r, "auto_off_minutes", &v, 60U) == 0 &&
+                idle_auto_off_minutes_valid(v))
+                state->idle_auto_off_minutes = (int)v;
         }
         if (policy >= IDLE_POLICY_VERSION) {
             state->idle_mode = (int)mode;
@@ -1519,7 +1867,7 @@ static int persist_state(const struct led_state *state)
         "{\"current\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"boot_profile\":{\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":%u},"
         "\"night\":{\"enabled\":%d,\"start_minute\":%d,\"end_minute\":%d},"
-        "\"idle\":{\"mode\":%d,\"policy\":%u},"
+        "\"idle\":{\"mode\":%d,\"policy\":%u,\"auto_off_minutes\":%d},"
         "\"sleep\":{\"mode\":%d,\"brightness\":%u,\"period_ms\":%u,"
         "\"timer_minutes\":%d,\"restore_on_boot\":%d},"
         "\"profiles\":{",
@@ -1527,7 +1875,8 @@ static int persist_state(const struct led_state *state)
         state->current.brightness, state->boot.r, state->boot.g, state->boot.b,
         state->boot.brightness, state->night_enabled,
         state->night_start_minute, state->night_end_minute,
-        state->idle_mode, IDLE_POLICY_VERSION, state->sleep_mode,
+        state->idle_mode, IDLE_POLICY_VERSION, state->idle_auto_off_minutes,
+        state->sleep_mode,
         state->sleep_brightness, state->sleep_period_ms,
         state->sleep_timer_minutes, state->sleep_restore_on_boot);
     if (n < 0 || (size_t)n >= sizeof(text))
@@ -1659,9 +2008,8 @@ static void apply_animated(struct daemon_context *ctx, double now)
         phase -= 1.0;
     wave = 0.5 + 0.5 * sine_approx(phase * 6.28318530717958647692);
     multiplier = 0.30 + 0.70 * wave;
-    output.brightness = (unsigned int)((double)ctx->state.current.brightness *
-                                       multiplier + 0.5);
-    hardware_apply(ctx, &output);
+    hardware_apply_level(ctx, &output,
+                         (double)ctx->state.current.brightness * multiplier);
 }
 
 static unsigned int visualizer_energy(unsigned int level)
@@ -2064,6 +2412,103 @@ static void start_meter(struct daemon_context *ctx, unsigned int value,
         le_music_director_interrupt(&ctx->music_director);
 }
 
+/*
+ * Smooth sleep pulse (#364).  The IS31FL3236 has 8-bit PWM and the output is
+ * gamma 2, so at sleep brightness the whole breath spans almost no PWM codes:
+ * at the default 8% the red channel only ever drives 1 or 2, and the ring
+ * visibly jumps between the two.  Rounding the brightness more finely cannot
+ * help; the hardware has no finer step.
+ *
+ * Instead the target is followed in continuous PWM units along the same
+ * gamma-2 curve.  When the kernel offers the IS31 current scale
+ * (scaled_frame), each channel can also show c/2, c/3 and c/4 codes, so the
+ * breath steps through the fine levels between codes (12 up to code 2 rather
+ * than 2) and each LED changes by at most a quarter of a code at the bottom.
+ * What is left between two reachable levels is spread over the ring: the
+ * fraction is shown by how many of the 12 pixels sit on the upper level,
+ * filled in a fixed order that spreads them round the ring.  Without the
+ * current scale the same dither runs between whole codes.  The trough and crest use exactly the codes the
+ * stepped pulse used, so the brightness cap, the never-black trough and the
+ * peak are unchanged.
+ */
+
+/* Old integer path, kept for the endpoints: percent -> logical -> gamma. */
+static unsigned int sleep_pulse_code(unsigned int channel, unsigned int percent)
+{
+    return led_output_gamma((channel * percent + 50U) / 100U);
+}
+
+static void sleep_pulse_channel(const struct hardware *hw, unsigned int channel,
+                                unsigned int brightness, double wave,
+                                unsigned int out[RING_PIXELS])
+{
+    const double floor_wave = (double)SLEEP_PULSE_FLOOR_PERCENT / 100.0;
+    unsigned int lo_code = sleep_pulse_code(
+        channel, (unsigned int)((double)brightness * floor_wave + 0.5));
+    unsigned int hi_code = sleep_pulse_code(channel, brightness);
+    double shape = (wave * wave - floor_wave * floor_wave) /
+                   (1.0 - floor_wave * floor_wave);
+    double target;
+    unsigned int below, above, lit, i;
+
+    if (shape < 0.0)
+        shape = 0.0;
+    if (shape > 1.0)
+        shape = 1.0;
+    /* Follow the breath in fine units, then dither between the two nearest
+       levels the hardware can show: the fraction sets how many of the 12
+       pixels sit on the upper one. */
+    target = ((double)lo_code + (double)(hi_code - lo_code) * shape) *
+             (double)FINE_UNITS;
+    below = (unsigned int)target;
+    if (below >= hi_code * FINE_UNITS) {
+        below = hi_code * FINE_UNITS;
+        above = below;
+    } else {
+        while (!fine_level_reachable(hw, below))
+            below--;
+        above = below + 1U;
+        while (!fine_level_reachable(hw, above))
+            above++;
+    }
+    lit = above == below ? 0U
+        : (unsigned int)((target - (double)below) / (double)(above - below) *
+                         RING_PIXELS + 0.5);
+    for (i = 0; i < RING_PIXELS; i++)
+        out[sleep_dither_order[i]] = i < lit ? above : below;
+}
+
+static void sleep_pulse_render(struct daemon_context *ctx,
+                               const struct colour *c, double wave)
+{
+    struct colour capped = night_capped(ctx, *c);
+    unsigned int r[RING_PIXELS], g[RING_PIXELS], b[RING_PIXELS];
+    struct led_rgb frame[RING_PIXELS];
+    int exact = 1;
+    size_t i;
+
+    sleep_pulse_channel(&ctx->hw, capped.r, capped.brightness, wave, r);
+    sleep_pulse_channel(&ctx->hw, capped.g, capped.brightness, wave, g);
+    sleep_pulse_channel(&ctx->hw, capped.b, capped.brightness, wave, b);
+    for (i = 0; i < RING_PIXELS; i++)
+        frame[i] = (struct led_rgb){fine_to_code(r[i]), fine_to_code(g[i]),
+                                    fine_to_code(b[i])};
+    /* Already in PWM units: linear transfer at full brightness, so only the
+       calibration gain and frame budget apply on top. */
+    output_render_transfer(ctx, frame, 100U, LE_OUTPUT_TRANSFER_LINEAR);
+    /* When those left the frame alone (the default calibration, a sleep
+       light far under the budget), show the fine levels instead.  Otherwise
+       keep the adjusted whole codes rather than bypass them. */
+    for (i = 0; i < RING_PIXELS && exact; i++)
+        exact = ctx->rendered_pixels[i].r == frame[i].r &&
+                ctx->rendered_pixels[i].g == frame[i].g &&
+                ctx->rendered_pixels[i].b == frame[i].b;
+    if (exact)
+        for (i = 0; i < RING_PIXELS; i++)
+            ctx->rendered_fine[i] = (struct pixel){r[i], g[i], b[i]};
+    (void)output_flush(ctx, monotonic_seconds(), 0);
+}
+
 /* Sleep light (#101): a low-priority persistent owner.  The pulse phase is
    absolute from activation, so pre-emption and resume are continuous rather
    than restarting the waveform. */
@@ -2085,8 +2530,8 @@ static void apply_sleep_light(struct daemon_context *ctx, double now)
         wave = (double)SLEEP_PULSE_FLOOR_PERCENT / 100.0 +
                (1.0 - (double)SLEEP_PULSE_FLOOR_PERCENT / 100.0) *
                (0.5 + 0.5 * sine_approx(phase * 6.28318530717958647692));
-        c.brightness = (unsigned int)
-            ((double)c.brightness * wave + 0.5);
+        sleep_pulse_render(ctx, &c, wave);
+        return;
     }
     hardware_apply(ctx, &c);
 }
@@ -2141,6 +2586,14 @@ static void apply_base_state(struct daemon_context *ctx, double now)
         apply_sleep_light(ctx, now);
         return;
     }
+    if (ctx->idle_base_asleep) {
+        /* Idle auto-off (#323) darkens only this resting base; anything drawn
+           above it (mute, setup, errors, voice, playback) is unaffected. */
+        for (i = 0; i < RING_PIXELS; i++)
+            pixels[i] = (struct pixel){0, 0, 0};
+        output_pixels(ctx, pixels, 0U);
+        return;
+    }
     if (ctx->state.idle_mode == IDLE_MODE_ALWAYS) {
         hardware_apply(ctx, &ctx->state.current);
         return;
@@ -2157,6 +2610,62 @@ static void apply_base_state(struct daemon_context *ctx, double now)
     }
     /* IDLE_MODE_OFF: an explicitly dark resting ring. */
     output_pixels(ctx, pixels, 0U);
+}
+
+/*
+ * Idle auto-off (UI #323).  Any request other than a status read is activity:
+ * a button, the wake word, playback frames, a meter, an announcement or the
+ * owner changing a setting.  Activity restarts the countdown and wakes a
+ * sleeping base.  When the countdown expires the base idle ring goes dark; the
+ * sleep light suspends the countdown, and idle "off" has nothing to darken.
+ */
+static int base_layer_visible(const struct daemon_context *ctx)
+{
+    return !ctx->visualizer_active && !ctx->animation_active &&
+           !ctx->pattern_active && !ctx->test_active && !ctx->meter_active &&
+           !ctx->startup_animation_active;
+}
+
+static double idle_auto_off_deadline(const struct daemon_context *ctx)
+{
+    if (ctx->state.idle_auto_off_minutes <= 0 || ctx->idle_base_asleep ||
+        ctx->sleep_active || ctx->state.idle_mode == IDLE_MODE_OFF)
+        return -1.0;
+    return ctx->idle_last_activity +
+           (double)ctx->state.idle_auto_off_minutes * 60.0;
+}
+
+static void idle_note_activity(struct daemon_context *ctx, double now)
+{
+    ctx->idle_last_activity = now;
+    if (!ctx->idle_base_asleep)
+        return;
+    ctx->idle_base_asleep = 0;
+    if (base_layer_visible(ctx))
+        apply_base_state(ctx, now);
+}
+
+static void idle_auto_off_tick(struct daemon_context *ctx, double now)
+{
+    double deadline = idle_auto_off_deadline(ctx);
+
+    if (deadline < 0.0 || now < deadline)
+        return;
+    ctx->idle_base_asleep = 1;
+    if (base_layer_visible(ctx))
+        apply_base_state(ctx, now);
+}
+
+/* Milliseconds until the auto-off deadline, or -1 when none is pending. */
+static int idle_auto_off_timeout(const struct daemon_context *ctx, double now)
+{
+    double deadline = idle_auto_off_deadline(ctx), remaining;
+
+    if (deadline < 0.0)
+        return -1;
+    remaining = (deadline - now) * 1000.0;
+    return remaining <= 1.0 ? 1 : remaining >= 2147483647.0 ? 2147483647 :
+           (int)remaining;
 }
 
 static void apply_base_layer(struct daemon_context *ctx, double now)
@@ -2298,7 +2807,9 @@ static void update_pattern(struct daemon_context *ctx, double now)
         double wave;
         while (phase >= 1.0) phase -= 1.0;
         wave = 0.20 + 0.80 * (0.5 + 0.5 * sine_approx(phase * 6.28318530717958647692));
-        output.brightness = (unsigned int)((double)ctx->pattern_colour.brightness * wave + 0.5);
+        hardware_apply_level(ctx, &output,
+                             (double)ctx->pattern_colour.brightness * wave);
+        return;
     } else if (ctx->pattern_kind == PATTERN_FLASH) {
         unsigned int cycle = (unsigned int)(elapsed / 0.20);
         on = (cycle % 2U) == 0;
@@ -2557,9 +3068,7 @@ static void update_animation(struct daemon_context *ctx, double now)
         }
         if (now < ctx->startup_animation_next_frame)
             return;
-        apply_startup_animation(ctx);
-        ctx->startup_animation_frame =
-            (ctx->startup_animation_frame + 1) % RING_PIXELS;
+        apply_startup_animation(ctx, now);
         ctx->startup_animation_next_frame = now + STARTUP_FRAME_MS / 1000.0;
         return;
     }
@@ -2652,6 +3161,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
         "\"night\":{\"enabled\":%s,\"active\":%s,"
         "\"start_minute\":%d,\"end_minute\":%d},"
         "\"idle_mode\":\"%s\","
+        "\"idle_auto_off\":{\"minutes\":%d,\"asleep\":%s},"
         "\"sleep_light\":{\"mode\":\"%s\",\"active\":%s,\"brightness\":%u,"
         "\"period_ms\":%u,\"timer_minutes\":%d,\"remaining_ms\":%u,"
         "\"restore_on_boot\":%s},"
@@ -2681,6 +3191,8 @@ static int status_json(const struct daemon_context *ctx, char *out,
         night_mode_active(&ctx->state) ? "true" : "false",
         ctx->state.night_start_minute, ctx->state.night_end_minute,
         idle_mode_name(ctx->state.idle_mode),
+        ctx->state.idle_auto_off_minutes,
+        ctx->idle_base_asleep ? "true" : "false",
         sleep_mode_name(ctx->state.sleep_mode),
         ctx->sleep_active ? "true" : "false", ctx->state.sleep_brightness,
         ctx->state.sleep_period_ms, ctx->state.sleep_timer_minutes,
@@ -2767,6 +3279,16 @@ static int handle_request(struct daemon_context *ctx, int fd,
         return send_response(fd, request.id, 1, data, NULL);
     }
 
+    /* Patterns and meters count when one is shown, or when a stop ends one
+       that was showing: a sender that clears an owner it never set must not
+       hold the ring awake.  Every other request is activity on receipt. */
+    if (strcmp(request.command, "pattern") != 0 &&
+        strcmp(request.command, "meter") != 0)
+        idle_note_activity(ctx, now);
+
+    if (strcmp(request.command, "activity") == 0)
+        return send_response(fd, request.id, 1, "{\"activity\":true}", NULL);
+
     if (strcmp(request.command, "set_colour") == 0) {
         if (get_arg_unsigned(&request, "r", &r, 255) != 0 ||
             get_arg_unsigned(&request, "g", &g, 255) != 0 ||
@@ -2852,7 +3374,14 @@ static int handle_request(struct daemon_context *ctx, int fd,
         if (json_get_string(request.args, "owner", owner, sizeof(owner)) != 0)
             owner[0] = '\0';
         if (!strcmp(pattern, "stop")) {
+            int was_active = ctx->pattern_active;
+            char was_owner[sizeof(ctx->pattern_owner)];
+
+            memcpy(was_owner, ctx->pattern_owner, sizeof(was_owner));
             stop_pattern(ctx, owner, now);
+            if (was_active && (!ctx->pattern_active ||
+                               strcmp(was_owner, ctx->pattern_owner)))
+                idle_note_activity(ctx, now);
             return send_response(fd, request.id, 1, "{\"pattern\":\"none\"}", NULL);
         }
         if (!strcmp(pattern, "pulse") || !strcmp(pattern, "flash") ||
@@ -2895,6 +3424,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
             colour.g = g;
             colour.b = b;
             colour.brightness = brightness;
+            idle_note_activity(ctx, now);
             start_pattern(ctx, kind, &colour, repeats, owner, now);
             update_pattern(ctx, now);
             return send_response(fd, request.id, 1, "{\"pattern_active\":true}", NULL);
@@ -2937,6 +3467,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
                             sizeof(pattern)) == 0 && !strcmp(pattern, "stop")) {
             if (ctx->meter_active &&
                 (!owner[0] || !strcmp(owner, ctx->meter_owner))) {
+                idle_note_activity(ctx, now);
                 ctx->meter_active = 0;
                 ctx->meter_owner[0] = '\0';
                 if (!ctx->test_active && !ctx->pattern_active)
@@ -2958,6 +3489,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
         colour.g = g;
         colour.b = b;
         colour.brightness = brightness;
+        idle_note_activity(ctx, now);
         start_meter(ctx, value, &colour, hold, owner, now);
         if (!ctx->test_active && !ctx->pattern_active)
             apply_meter(ctx);
@@ -3047,6 +3579,9 @@ static int handle_request(struct daemon_context *ctx, int fd,
     if (strcmp(request.command, "set_idle_mode") == 0) {
         char mode[16];
         int previous_idle_mode = ctx->state.idle_mode;
+        int previous_auto_off = ctx->state.idle_auto_off_minutes;
+        unsigned int auto_off = (unsigned int)previous_auto_off;
+        struct json_span auto_off_field;
 
         if (!request.have_args ||
             json_get_string(request.args, "mode", mode, sizeof(mode)) != 0)
@@ -3061,6 +3596,15 @@ static int handle_request(struct daemon_context *ctx, int fd,
         else
             return send_response(fd, request.id, 0, NULL,
                                  "idle mode must be off, indicator or always");
+        if (json_object_find(request.args, "auto_off_minutes",
+                             &auto_off_field) == 1 &&
+            (get_arg_unsigned(&request, "auto_off_minutes", &auto_off, 60U) != 0 ||
+             !idle_auto_off_minutes_valid(auto_off))) {
+            ctx->state.idle_mode = previous_idle_mode;
+            return send_response(fd, request.id, 0, NULL,
+                                 "auto_off_minutes must be 0, 5, 10, 30 or 60");
+        }
+        ctx->state.idle_auto_off_minutes = (int)auto_off;
         /*
          * Persist before reporting success.  If the state cannot be saved,
          * revert the in-memory mode so the daemon keeps the idle behaviour it
@@ -3069,6 +3613,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
          */
         if (persist_state(&ctx->state) != 0) {
             ctx->state.idle_mode = previous_idle_mode;
+            ctx->state.idle_auto_off_minutes = previous_auto_off;
             return send_response(fd, request.id, 0, NULL,
                                  "cannot persist idle mode");
         }
@@ -3503,9 +4048,9 @@ int main(int argc, char **argv)
     apply_base_state(&ctx, monotonic_seconds());
     if (startup_animation_requested && !path_is_file(ctx.startup_ready_path)) {
         ctx.startup_animation_active = 1;
-        ctx.startup_animation_frame = 0;
-        ctx.startup_animation_next_frame = monotonic_seconds();
-        apply_startup_animation(&ctx);
+        ctx.startup_animation_started = monotonic_seconds();
+        ctx.startup_animation_next_frame = ctx.startup_animation_started;
+        apply_startup_animation(&ctx, ctx.startup_animation_started);
         le_log_info("green startup animation started");
     }
 
@@ -3536,6 +4081,7 @@ int main(int argc, char **argv)
         size_t j;
 
         night_schedule_tick(&ctx, now);
+        idle_auto_off_tick(&ctx, now);
         fds[0].fd = ctx.listen_fd;
         fds[0].events = POLLIN;
         fds[0].revents = 0;
@@ -3559,8 +4105,12 @@ int main(int argc, char **argv)
             timeout = night_schedule_timeout(&ctx, now);
         {
             int flush_timeout = output_flush_timeout(&ctx, now);
+            int auto_off_timeout = idle_auto_off_timeout(&ctx, now);
             if (flush_timeout >= 0 && (timeout < 0 || flush_timeout < timeout))
                 timeout = flush_timeout;
+            if (auto_off_timeout >= 0 &&
+                (timeout < 0 || auto_off_timeout < timeout))
+                timeout = auto_off_timeout;
         }
 
         for (j = 0; j < MAX_CLIENTS; j++) {

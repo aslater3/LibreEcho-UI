@@ -29,7 +29,18 @@ int le_mdns_esphome_encode(char *message, size_t capacity, unsigned int port,
 int le_mdns_esphome_decode(const char *message, size_t length, unsigned int *port,
                            struct le_mdns_esphome_metadata *metadata);
 
-/* A single fixed ESPHome owner. The supervisor owns the directory fd.
+/* Sendspin player (_sendspin._tcp, spec connection.md): the supervisor
+ * publishes the fixed TXT path=/sendspin and the friendly name. Wire:
+ * SENDSPIN/1 <decimal-port> name=<hex-UTF8>\n. The name is required, at most
+ * 63 UTF-8 bytes with no control characters. */
+#define LE_MDNS_SENDSPIN_PACKET_MAX 192
+#define LE_MDNS_SENDSPIN_PATH "/sendspin"
+int le_mdns_sendspin_encode(char *message, size_t capacity, unsigned int port,
+                            const char *name);
+int le_mdns_sendspin_decode(const char *message, size_t length, unsigned int *port,
+                            char *name, size_t name_capacity);
+
+/* One fixed owner per lease (ESPHome, Sendspin). The supervisor owns the directory fd.
  * Return values describe local file state, never confirmed publication. */
 struct le_mdns_lease {
     int directory_fd;
@@ -41,5 +52,7 @@ void le_mdns_lease_init(struct le_mdns_lease *lease, int directory_fd);
 int le_mdns_lease_register_esphome(struct le_mdns_lease *lease, int owner_fd,
                                   unsigned int port,
                                   const struct le_mdns_esphome_metadata *metadata);
+int le_mdns_lease_register_sendspin(struct le_mdns_lease *lease, int owner_fd,
+                                   unsigned int port, const char *name);
 int le_mdns_lease_withdraw(struct le_mdns_lease *lease, int owner_fd);
 #endif

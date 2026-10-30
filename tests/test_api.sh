@@ -90,9 +90,9 @@ curl -fsS "$URL/api/v1/system/features" | jq -e '.ok and .data.simulation == fal
 code=$(curl -sS -o /tmp/le-malformed-mac-type.out -w '%{http_code}' \
     -X PUT "$URL/api/v1/network" -H "$CSRF" \
     -H 'Content-Type: application/json' \
-    --data '{"ssh":true,"wifi_mac":123}')
+    --data '{"ssh":false,"wifi_mac":123}')
 [ "$code" = 400 ]
-curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.ssh == false' >/dev/null
+curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.ssh == true' >/dev/null
 mac64=$(python3 -c 'print("a" * 64)')
 code=$(curl -sS -o /tmp/le-malformed-mac-length.out -w '%{http_code}' \
     -X PUT "$URL/api/v1/network" -H "$CSRF" \
@@ -220,8 +220,13 @@ curl -fsS "$URL/api/v1/baby-monitor" | jq -e \
      .data.active_microphone_channels == 7 and
      .data.inactive_transport_channels == [7,8] and
      .data.calibration.fallback == 16384 and
-     .data.calibration.selected_logical_mics == [0,3] and
+     .data.calibration.selected_logical_mics == [0,1,3,4] and
      .data.calibration.applied_to_raw_stream == false' >/dev/null
+curl -fsS "$URL/api/v1/microphones/beams" | jq -e \
+    '.ok and .data.running and .data.simulated and
+     (.data.beams | length) == 12 and .data.beams[3].deg == 90 and
+     .data.doa_deg >= 0 and .data.doa_deg < 360 and
+     ([.data.beams[].power_db] | max) == .data.peak_db' >/dev/null
 code=$(curl -sS -o /tmp/le-baby-stream.out -w '%{http_code}' "$URL/api/v1/baby-monitor/stream?source=0:0")
 [ "$code" = 501 ]
 code=$(curl -sS -o /tmp/le-baby-stream-encoded.out -w '%{http_code}' "$URL/api/v1/baby-monitor/stream?source=0%3A24&channel=0")

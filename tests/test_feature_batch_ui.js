@@ -129,6 +129,8 @@ const nurseryPage = vm.runInThisContext('nurseryPage');
 const pageFromLocation = vm.runInThisContext('pageFromLocation');
 const navItems = vm.runInThisContext('navItems');
 const networkPage = vm.runInThisContext('networkPage');
+const devicePage = vm.runInThisContext('devicePage');
+const newsHtml = vm.runInThisContext('newsHtml');
 const systemPage = vm.runInThisContext('systemPage');
 const bindVoiceHistory = vm.runInThisContext('bindVoiceHistory');
 const voiceHistoryLoad = vm.runInThisContext('voiceHistoryLoad');
@@ -147,7 +149,7 @@ function defaultRoute(path, method) {
     if (path === '/baby-monitor') return { sources: [] };
     if (path === '/network') return NETWORK;
     if (path === '/status') return { device_state: 'online', uptime_seconds: 1 };
-    if (path === '/device') return { name: 'LibreEcho', hostname: 'libreecho', os_version: '0.14.0' };
+    if (path === '/device') return { name: 'LibreEcho', hostname: 'libreecho', os_version: '0.14.0', room: 'Kitchen <b>' };
     if (path === '/system/features') return {};
     if (path === '/system/update') return { supported: false };
     if (path === '/assistant/latency') return { turns: [], history_generation: 1 };
@@ -166,7 +168,7 @@ function lastBody(path, method) { const c = callsFor(path, method); return c.len
 /* --------------------------------------------------------------- fixtures */
 
 const LED = {
-    idle_mode: 'indicator',
+    idle_mode: 'indicator', idle_auto_off_minutes: 10, idle_asleep: true,
     sleep_light: { mode: 'pulse', active: true, brightness: 8, period_ms: 8000, timer_minutes: 120, remaining_ms: 600000, restore_on_boot: true },
     output: { effective_brightness: 12, frame_load: 900, max_load: 1000, limited: true, slew_limited: false },
     music: { active: true, grammar: 'pulse', effect: 'kaleidoscope', session: 7 },
@@ -226,10 +228,14 @@ async function caseLedControls() {
     check(/<option value="indicator" selected>/.test(html), 'idle mode renders the current value selected');
     check(/<option value="pulse" selected>/.test(html), 'sleep mode renders the current value selected');
 
+    check(/<option value="10" selected>/.test(html), 'idle auto-off renders the stored time selected (#323)');
+    has(html, 'Mute, setup and errors always show', 'idle auto-off states what is never suppressed');
+    has(html, 'The idle light is off now.', 'idle auto-off reports when the light is currently off');
     $app('#led-idle-mode').value = 'always';
+    $app('#led-idle-auto-off').value = '30';
     await $app('#save-led-idle').onclick();
     clearTimers();
-    checkEqual(JSON.stringify(lastBody('/led/idle', 'PUT')), JSON.stringify({ mode: 'always' }), 'saving idle behaviour PUTs the mode');
+    checkEqual(JSON.stringify(lastBody('/led/idle', 'PUT')), JSON.stringify({ mode: 'always', auto_off_minutes: 30 }), 'saving idle behaviour PUTs the mode and auto-off time');
 
     $app('#led-sleep-mode').value = 'solid';
     $app('#led-sleep-brightness').value = '4';
@@ -280,6 +286,169 @@ async function caseLedDiagnosticsEscaped() {
     const html = content.innerHTML;
     has(html, '&lt;img src=x onerror=1&gt;', 'music grammar text is escaped in the diagnostics');
     check(!html.includes('<img src=x'), 'music grammar cannot inject markup');
+}
+
+/* #24: the SSH switch says when the image has no SSH, and reports what the
+   supervisor is really doing; older daemons that send neither field get no note. */
+async function caseSshStatusNote() {
+    const saved = { ssh_available: NETWORK.ssh_available, ssh_state: NETWORK.ssh_state };
+    try {
+        Object.assign(NETWORK, { ssh_available: false, ssh_state: 'unavailable' });
+        resetDom(); resetCalls(); state.page = 'Network'; state.renderGeneration++;
+        await networkPage(); clearTimers();
+        has(content.innerHTML, 'SSH is not included in this build.', 'an image without SSH says so');
+        check(/id="ssh"[^>]*disabled/.test(content.innerHTML), 'the SSH switch is disabled when the image has no SSH');
+        Object.assign(NETWORK, { ssh_available: true, ssh_state: 'waiting-for-valid-webui-users' });
+        resetDom(); state.renderGeneration++;
+        await networkPage(); clearTimers();
+        has(content.innerHTML, 'remove them to use SSH', 'a waiting SSH explains reserved account names');
+        check(!/id="ssh"[^>]*disabled/.test(content.innerHTML), 'the SSH switch is usable when the image has SSH');
+        Object.assign(NETWORK, { ssh_available: true, ssh_state: '<img src=x>' });
+        resetDom(); state.renderGeneration++;
+        await networkPage(); clearTimers();
+        check(!content.innerHTML.includes('<img src=x>'), 'an unknown SSH state is escaped');
+        delete NETWORK.ssh_available; delete NETWORK.ssh_state;
+        resetDom(); state.renderGeneration++;
+        await networkPage(); clearTimers();
+        check(!content.innerHTML.includes('SSH is'), 'an older daemon without SSH status gets no note');
+    } finally {
+        Object.assign(NETWORK, saved);
+        if (saved.ssh_available === undefined) delete NETWORK.ssh_available;
+        if (saved.ssh_state === undefined) delete NETWORK.ssh_state;
+    }
+}
+
+/* #27: recovery / reflash mode reuses the one-shot reboot-bootloader path,
+   with both confirmation headers, in its own panel away from the destructive
+   power actions. */
+async function caseRecoveryMode() {
+    resetDom(); resetCalls();
+    state.page = 'Device'; state.renderGeneration++;
+    await devicePage(); clearTimers();
+    const html = content.innerHTML;
+    has(html, 'Recovery and reflash', 'Device page renders the recovery and reflash panel');
+    has(html, 'without opening the case', 'the panel says no case opening is needed');
+    has(html, 'LibreEcho itself is not changed', 'the panel says only a one-time flag is set');
+    has(html, 'hold the mute button', 'the panel gives the hardware fallback');
+    const power = html.slice(html.indexOf('Power controls'), html.indexOf('Recovery and reflash'));
+    check(!power.includes('power-bootloader'), 'recovery mode is not among the destructive power buttons');
+    await $app('#power-bootloader').onclick(); clearTimers();
+    const call = callsFor('/system/reboot-bootloader', 'POST')[0];
+    check(!!call, 'the button POSTs the existing reboot-bootloader action');
+    check(call && call.headers['X-LibreEcho-Confirm'] === 'confirm-device-action', 'the request carries the confirm header');
+    check(call && call.headers['X-LibreEcho-CSRF'] !== undefined, 'the request carries the CSRF header');
+    checkEqual(callsFor('/system/factory-reset').length + callsFor('/system/reboot').length, 0, 'no other power action is sent');
+}
+
+/* #188: the System page offers the setup colour scheme, saved on the device,
+   and the header light/dark button also saves the choice on the device. */
+async function caseAppearance() {
+    routes['/ui/preferences'] = method => (method === 'GET' ? { ui_theme: 'setup', color_mode: 'dark' } : {});
+    const savedUpdate = routes['/system/update'];
+    routes['/system/update'] = { supported: true, current_slot: 'a', inactive_slot: 'b', state: 'idle', progress: 0, channel: 'stable', latest_version: '0.14.0', automatic_updates: false, rollback_available: false, source_reachable: 'true' };
+    try {
+        resetDom(); resetCalls();
+        state.page = 'System'; state.renderGeneration++;
+        await systemPage(); await settle(5); clearTimers();
+        const html = content.innerHTML;
+        has(html, 'Appearance', 'System page renders the Appearance panel');
+        check(/id="ui-theme-setup"[^>]*checked/.test(html), 'the saved setup theme renders switched on');
+        $app('#ui-theme-setup').checked = false;
+        await $app('#save-appearance').onclick(); clearTimers();
+        checkEqual(JSON.stringify(lastBody('/ui/preferences', 'PUT')), JSON.stringify({ ui_theme: 'classic' }), 'saving PUTs the chosen theme');
+        const put = callsFor('/ui/preferences', 'PUT')[0];
+        check(put && put.headers['X-LibreEcho-CSRF'] !== undefined, 'the appearance PUT carries the CSRF header');
+        resetCalls();
+        routes['/ui/preferences'] = () => { throw new Error('unavailable'); };
+        state.renderGeneration++;
+        await systemPage(); await settle(5); clearTimers();
+        check(!content.innerHTML.includes('id="save-appearance"'), 'an older daemon without preferences shows no Appearance panel');
+    } finally {
+        delete routes['/ui/preferences'];
+        if (savedUpdate === undefined) delete routes['/system/update']; else routes['/system/update'] = savedUpdate;
+    }
+}
+
+/* #170: the System page switches the owner's local services and shows their state. */
+async function caseLocalServices() {
+    routes['/local-services'] = method => (method === 'GET'
+        ? { available: true, enabled: true, path_safe: true, state: 'running', services: [{ name: 'dropbear', state: 'running' }, { name: '<b>x', state: 'failed' }] }
+        : {});
+    const savedUpdate = routes['/system/update'];
+    routes['/system/update'] = { supported: true, current_slot: 'a', inactive_slot: 'b', state: 'idle', progress: 0, channel: 'stable', latest_version: '0.14.0', automatic_updates: false, rollback_available: false, source_reachable: 'true' };
+    try {
+        resetDom(); resetCalls();
+        state.page = 'System'; state.renderGeneration++;
+        await systemPage(); await settle(5); clearTimers();
+        const html = content.innerHTML;
+        has(html, 'Local services', 'System page renders the local services panel');
+        check(/id="local-services"[^>]*checked/.test(html), 'the switch reflects the device state');
+        has(html, '<dt>dropbear</dt>', 'services are listed by name');
+        check(!html.includes('<b>x'), 'service names are escaped');
+        $app('#local-services').checked = false;
+        await $app('#save-local-services').onclick(); clearTimers();
+        checkEqual(JSON.stringify(lastBody('/local-services', 'PUT')), JSON.stringify({ enabled: false }), 'saving PUTs the switch');
+        routes['/local-services'] = () => ({ available: false, enabled: false, path_safe: true, state: 'unavailable', services: [] });
+        resetDom(); state.renderGeneration++;
+        await systemPage(); await settle(5); clearTimers();
+        check(/id="local-services"[^>]*disabled/.test(content.innerHTML), 'the switch is disabled when the build has no supervisor');
+    } finally {
+        delete routes['/local-services'];
+        if (savedUpdate === undefined) delete routes['/system/update']; else routes['/system/update'] = savedUpdate;
+    }
+}
+
+/* #64: the optional room is edited on the Device page and saved on its own,
+   so it works whatever the assistant's state; bad input never reaches the API. */
+async function caseDeviceRoom() {
+    resetDom(); resetCalls();
+    state.page = 'Device'; state.renderGeneration++;
+    await devicePage(); clearTimers();
+    const html = content.innerHTML;
+    has(html, 'id="room"', 'Device page renders the room field');
+    has(html, 'value="Kitchen &lt;b&gt;"', 'the stored room is shown, escaped');
+    has(html, 'maxlength="48"', 'the room field is bounded to the server limit');
+    has(html, 'id="save-room"', 'the room has its own Save');
+    $app('#room').value = '  Living room  ';
+    await $app('#save-room').onclick(); clearTimers();
+    checkEqual(JSON.stringify(lastBody('/device', 'PUT')), JSON.stringify({ room: 'Living room' }), 'Save PUTs the trimmed room to /device');
+    const put = callsFor('/device', 'PUT')[0];
+    check(put && put.headers && put.headers['X-LibreEcho-CSRF'] !== undefined, 'the room PUT carries the CSRF header');
+    for (const bad of ['x'.repeat(49), 'Hall\nNext', 'Say "hi"', 'a\\b', 'é'.repeat(25)]) {
+        resetCalls();
+        $app('#room').value = bad;
+        await $app('#save-room').onclick(); clearTimers();
+        checkEqual(callsFor('/device', 'PUT').length, 0, `an invalid room is refused before any request (${JSON.stringify(bad).slice(0, 20)})`);
+        has($app('#toast').textContent, 'at most 48', 'the refusal says why');
+    }
+    resetCalls();
+    $app('#room').value = '';
+    await $app('#save-room').onclick(); clearTimers();
+    checkEqual(JSON.stringify(lastBody('/device', 'PUT')), JSON.stringify({ room: '' }), 'an empty room clears it');
+}
+
+/* #121: the news card says what turning it on fetches, escapes feed text and
+   only links to the project's own HTTPS sites. */
+async function caseNewsCard() {
+    let html = newsHtml({ enabled: false, state: 'disabled', items: [] });
+    has(html, 'id="news-on"', 'news off offers Turn on');
+    has(html, 'nothing about this device is sent', 'news off explains what is fetched');
+    const items = [
+        { id: 'a', type: 'release', date: '2026-10-16', title: '0.14 <img src=x>', summary: 'S', url: 'https://github.com/aslater3/LibreEcho/releases' },
+        { id: 'b', type: 'security', date: '2026-10-15', title: 'Bad link', summary: '', url: 'https://evil.example/x' },
+        { id: 'c', type: 'progress', date: '2026-10-14', title: 'C', summary: '', url: 'https://libreecho.org/c' },
+        { id: 'd', type: 'progress', date: '2026-10-13', title: 'Fourth', summary: '', url: 'https://libreecho.org/d' }
+    ];
+    html = newsHtml({ enabled: true, state: 'stale', last_success_epoch: 1760000000, items });
+    check(!html.includes('<img src=x>'), 'feed titles are escaped');
+    has(html, 'href="https://github.com/aslater3/LibreEcho/releases"', 'project links are kept');
+    check(!html.includes('evil.example'), 'links to other hosts are dropped');
+    has(html, 'Bad link', 'an item with a dropped link still shows as text');
+    has(html, "couldn't refresh", 'stale news says so quietly');
+    check(!html.includes('Fourth'), 'only the newest three show by default');
+    has(html, 'id="news-more"', 'Show all is offered when there are more');
+    check(newsHtml({ enabled: true, state: 'fresh', items }, true).includes('Fourth'), 'Show all shows every item');
+    has(newsHtml(null), 'News unavailable', 'a failed news request shows a quiet note');
 }
 
 async function caseNurserySounds() {
@@ -859,6 +1028,12 @@ async function main() {
         ['LED idle/sleep controls and diagnostics', caseLedControls],
         ['action button sleep-sound toggle', caseActionButtonNoise],
         ['LED diagnostics escape untrusted text', caseLedDiagnosticsEscaped],
+        ['SSH status note (#24)', caseSshStatusNote],
+        ['recovery / reflash mode (#27)', caseRecoveryMode],
+        ['appearance panel (#188)', caseAppearance],
+        ['local services panel (#170)', caseLocalServices],
+        ['device room field (#64)', caseDeviceRoom],
+        ['news card (#121)', caseNewsCard],
         ['nursery sounds source/bed/tempo/fade/timer', caseNurserySounds],
         ['nursery legacy route', caseNurseryLegacyRoute],
         ['USB .opus gated by advertised capability', caseUsbCapabilityGate],

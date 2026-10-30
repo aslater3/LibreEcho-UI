@@ -226,6 +226,7 @@ Returns device information.
   "data": {
     "name": "LibreEcho",
     "hostname": "libreecho",
+    "room": "Kitchen",
     "model": "LibreEcho device",
     "serial": "unavailable",
     "os_version": "LibreEcho OS",
@@ -240,7 +241,7 @@ Returns device information.
         "transport_channels": 2,
         "format": "pcm_s24_3le",
         "valid_bits": 16,
-        "beamforming": "measured delay-and-sum on logical mics 0 and 3",
+        "beamforming": "12 fixed superdirective beams on mics 0, 1, 3 and 4 with SNR-based beam selection",
         "high_pass_hz": 80,
         "digital_gain": "4.0x",
         "response": "flat within 0.5 dB, 200 Hz to 7 kHz",
@@ -280,6 +281,62 @@ On supported devices, the first-boot hostname is platform-defined and can be
 changed by the user. A selected hostname is stored in
 `/data/libreecho/config/web-config.json` and takes precedence on later boots.
 Device-specific identifiers are not included in public API examples.
+
+#### GET /api/v1/local-services
+#### PUT /api/v1/local-services
+
+Persistent local services (#170): the owner's own programs under
+`/data/libreecho/local/services`, run by the Platform supervisor once
+`/data/libreecho/local/enabled` exists. GET returns
+`{available, enabled, path_safe, state, services:[{name, state}], path}`:
+`available` is whether this build has the supervisor, `path_safe` is false when
+`/data/libreecho/local` is a symlink or not a directory, and `state` /
+`services` come from the supervisor's status (`running`, `disabled`,
+`not-running`, `skipped:boot-loop-guard`, `skipped:path-unsafe`; per service
+`running`, `down`, `failed`, `exited:<code>`). Only names and states are
+reported. PUT `{"enabled": true|false}` (a single top-level boolean, CSRF
+required) creates or removes the marker; switching on creates the directory
+layout (mode 0700) and clears the boot-loop guard. A symlinked or non-directory
+root is refused with `409` and never followed.
+
+`room` is the optional room this device is in, or `""` when unset.
+
+#### PUT /api/v1/device
+
+Set or clear the optional room (`{"room":"Kitchen"}`; `""` clears it). The room
+is at most 48 bytes of UTF-8 on one line, without quotes or backslashes; other
+input returns `400` and changes nothing. It is stored in `web-config.json`, so it
+works whatever the assistant mode. The local assistant tells the model "The
+device is in the Kitchen." on each turn, and in Home Assistant mode it is sent as
+the ESPHome `suggested_area` when Home Assistant adds the device. It is included
+in configuration export and restored by import.
+
+**Response:** device information (same as GET).
+
+#### GET /api/v1/news
+#### PUT /api/v1/news
+#### POST /api/v1/news/refresh
+
+LibreEcho News (#121): a short curated list of releases, progress,
+announcements and security notes. It is **off by default** because it contacts
+the network on its own. When on, the device fetches the public `news-v1.json`
+from `https://dl.libreecho.org/news/news-v1.json`, then the GitHub release asset
+`news-feed/news-v1.json`, only when a client asks for news: at most every 12
+hours, an hour after a failure, and no sooner than 5 minutes for a manual
+refresh. The request carries no cookies, query string or device identifiers. A
+document is accepted only if it is at most 32 KiB, `schema` is
+`libreecho-news-v1`, it has at most 20 items with unique `[a-z0-9._-]` ids,
+`YYYY-MM-DD` dates, plain-text titles and summaries, and `https://` links on
+`github.com`, `libreecho.org` or `dl.libreecho.org`; otherwise the last good copy
+is kept. Items of an unknown type are skipped.
+
+GET returns `{enabled, supported, state, last_success_epoch, last_attempt_epoch,
+last_error, items:[{id,type,date,title,summary,url,severity?}]}`, newest first,
+where `state` is `disabled`, `fresh`, `stale`, `refreshing`, `never` or
+`unsupported`. It never waits for the network: if a refresh is due it starts one
+in the background and reports `refreshing`. PUT `{"enabled": bool}` turns news
+on or off (off deletes the cached copy). POST `/news/refresh` returns `202`,
+`429` within 5 minutes of the last attempt, `409` while news is off.
 
 ### Audio
 
@@ -537,6 +594,61 @@ access to the model, PCM FIFO, ALSA device, or amplifier.
 Use `POST /api/v1/audio/announce/stop` with `{}` to interrupt the active
 announcement. State-changing API calls require the normal CSRF header and,
 when configured, local API authentication.
+
+### Microphone beams
+
+#### GET /api/v1/microphones/beams
+
+A live snapshot of micd's fixed beamformer, for checking that beamforming
+works and roughly where sound is coming from. The **Audio** page draws it as
+the *Direction of arrival* preview under **Microphones**, polling about four
+times a second. No audio is returned.
+
+micd refreshes the snapshot every 8 ms hop while a beamformed stream is
+running; the wake word service keeps one open. Angles are degrees clockwise
+from the front (the volume-down side) viewed from above, the same frame as
+`calibration.geometry` in `GET /api/v1/baby-monitor`.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "running": true,
+    "age_ms": 3,
+    "hops": 51234,
+    "hop_ms": 8,
+    "switches": 17,
+    "reference": "0 deg front (volume down), clockwise viewed from above",
+    "selected_deg": 90,
+    "locked": false,
+    "doa_deg": 88.4,
+    "peak_db": -41.2,
+    "contrast_db": 5.1,
+    "beams": [
+      { "deg": 0, "power_db": -46.0, "snr_db": 1.2 },
+      { "deg": 30, "power_db": -43.9, "snr_db": 3.0 }
+    ]
+  },
+  "error": null
+}
+```
+
+- `beams`: one entry per beam (12). `power_db` is smoothed speech-band
+  (312 Hz–4 kHz) power in dB relative to a full-scale tone; `snr_db` is that
+  power over the beam's running noise floor, which is what beam selection
+  scores, so steady sources such as music fade from it within a few seconds.
+- `doa_deg`: the strongest beam refined by a parabola through it and its two
+  neighbours. Treat it as a rough direction: with the stock four microphones
+  the beams are broad below about 1 kHz.
+- `contrast_db`: how far the strongest beam stands above the average beam.
+  Near 0 dB the sound field is diffuse and `doa_deg` means little.
+- `selected_deg`: the beam currently feeding the voice pipeline; `locked` is
+  true when it has been pinned rather than chosen automatically.
+- `running` is `false` (with a `reason`) when no beamformed stream is open.
+- The mock backend returns a simulated source circling the device every 20 s,
+  with `"simulated": true`.
+
+`503` when micd is not running or its beam state cannot be read.
 
 ### Baby Monitor
 
@@ -1058,7 +1170,9 @@ succeeded.
     "bt_mac_configured": "",
     "internet": true,
     "dhcp": true,
-    "ssh": false,
+    "ssh": true,
+    "ssh_available": true,
+    "ssh_state": "ready",
     "api_lan": false,
     "api_lan_effective": false,
     "api_lan_forced": false
@@ -1066,6 +1180,15 @@ succeeded.
   "error": null
 }
 ```
+
+`ssh` is the owner's SSH switch (saved in `web-config.json`; the Platform SSH
+supervisor follows it within about 2 seconds). It is on by default; only a saved
+`false` turns SSH off. `ssh_available` says whether this
+image carries SSH at all, and `ssh_state` is the supervisor's non-secret
+`account_state`: `ready`, `disabled`, `waiting-for-valid-webui-users`
+(switched on but no valid web account yet; accounts named `root`, `.`, `..` or
+`libreecho-ssh` keep SSH stopped and cannot be created), `stopped`, or
+`unavailable`. SSH accounts are the web accounts, never root.
 
 `connectivity` is one of `unknown`, `healthy`, `degraded`, `recovering`, or
 `disconnected`. `gateway_reachable` is `null` until a probe can be completed.
@@ -1621,11 +1744,32 @@ Returns API configuration.
     "csrf_token": "<64-character per-boot token>",
     "authentication": "development-disabled",
     "bind_policy": "lan-development",
-    "max_request_body": 16384
+    "max_request_body": 16384,
+    "ui_theme": "classic",
+    "color_mode": ""
   },
   "error": null
 }
 ```
+
+`ui_theme` (`classic` or `setup`) and `color_mode` (`dark`, `light`, or `""`
+when not chosen on the device) are the saved appearance, public so that pages
+can apply it before sign-in. They are cosmetic and carry nothing sensitive.
+
+#### GET /api/v1/ui/preferences
+#### PUT /api/v1/ui/preferences
+
+Read or set the appearance (#188): `{"ui_theme":"classic"|"setup","color_mode":"dark"|"light"|""}`.
+`color_mode` is `""` until the owner picks one; a PUT with `"color_mode":""`
+clears the device choice again, so a client can save back the body GET returned.
+A PUT may send either field or both; any other member, a duplicate, an unknown
+value or an empty object is `400`, and nothing is changed. The values are saved
+in `web-config.json` and carried by configuration export/import. `setup` applies
+the setup wizard's palette to the control centre in dark mode; light mode keeps
+the classic light theme. Until the owner picks a `color_mode`, each browser keeps
+its own light/dark choice; the header ☼ button saves one.
+
+**Response:** `{"ui_theme":"setup","color_mode":"dark"}`.
 
 #### GET /api/v1/config/export
 
@@ -1777,7 +1921,8 @@ last 80 records and drained non-blocking from `/dev/kmsg`.
 ```
 
 This exists because switching the USB port to host mode removes the ADB gadget,
-which is the only shell this image offers — there is no SSH server. The kernel
+which is the only root shell this image offers (SSH, when included, signs in as
+non-root web accounts). The kernel
 log therefore becomes unreadable over USB at precisely the moment it matters,
 such as when checking whether an attached drive enumerated. Reading it over the
 network closes that gap.
@@ -2221,6 +2366,80 @@ installed, `stopped` when installed but disabled, `ready` when enabled, and
 `playing` during playback. `device_name` is the name shown by Spotify and is
 JSON-escaped, including when it contains quotes or backslashes.
 
+#### GET /api/v1/sendspin
+
+Returns the Sendspin player status (Music Assistant multiroom). Read-only;
+other methods return `405`.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "installed": true,
+    "enabled": true,
+    "running": true,
+    "state": "connected",
+    "listening": true,
+    "discoverable": true,
+    "connected": true,
+    "paired": true,
+    "streaming": false,
+    "time_synced": true,
+    "volume": 64,
+    "muted": false,
+    "server": "Music Assistant"
+  },
+  "error": null
+}
+```
+
+`installed` reports whether the audio feature carries the player; `enabled` is
+the `sendspin` integration (bit 64 of `integrations`, off by default). `state`
+is `unavailable` (not installed), `disabled`, `starting` (enabled but the player
+is not yet listening), `waiting` (listening and advertised over mDNS, no server
+connected), `connected` or `playing`. The other fields come from the running
+player: `volume` is `null` while it is not running, `server` is the connected
+server's JSON-escaped name or `null`, and `paired` is true when that server
+connected with a stored pairing. Status never contains pairing material.
+
+Sendspin volume is the device volume: a server volume change is applied like
+the volume buttons, and local changes are reported back to the server. A
+server mute silences Sendspin audio only; alarms, timers and voice still play.
+
+#### POST /api/v1/sendspin/pairing
+
+Returns the player's pairing token, to paste into Music Assistant (or show as
+a QR code) to pair this player. Requires authentication and the CSRF header
+like every changing request.
+
+**Response:**
+```json
+{ "ok": true, "data": { "pairing_token": "SP:..." }, "error": null }
+```
+
+- **409** — Sendspin is disabled.
+- **503** — the player is not running yet.
+
+The token is never part of status, logs or configuration export, and clients
+must not store it.
+
+#### POST /api/v1/sendspin/unpair
+
+Forgets every server paired with the player. The player is stopped, its
+pairing state is removed and, when Sendspin is enabled, it restarts with a new
+identity and a new pairing token, so each server has to pair again. Allowed
+while Sendspin is disabled (it only clears state). Requires authentication
+and the CSRF header.
+
+**Response:**
+```json
+{ "ok": true, "data": { "reset": true }, "error": null }
+```
+
+- **501** — this image has no Sendspin player.
+- **503** — the reset could not be applied.
+
 #### PUT /api/v1/integrations
 
 Update integration toggles. The `rest` integration is the canonical LAN REST API access control: its `enabled` value mirrors the effective LAN API state, and its `forced` value is true when development binding keeps access enabled regardless of persisted `api_lan`.
@@ -2252,6 +2471,8 @@ on the Linux backend:
 
 (Use query parameter or path to specify integration: `?integration=home-assistant`)
 
+The `mqtt` entry stores a setting only: the image has no MQTT client yet, so the web UI does not show it.
+
 **Response (200):**
 ```json
 {
@@ -2261,7 +2482,8 @@ on the Linux backend:
       { "id": "home-assistant", "name": "Home Assistant", "enabled": true },
       { "id": "mqtt", "name": "MQTT", "enabled": false },
       { "id": "rest", "name": "Local REST API", "enabled": true, "forced": false },
-      { "id": "bluetooth", "name": "Bluetooth audio", "enabled": false }
+      { "id": "bluetooth", "name": "Bluetooth audio", "enabled": false },
+      { "id": "sendspin", "name": "Sendspin (Music Assistant)", "enabled": false, "installed": true }
     ]
   },
   "error": null
@@ -2433,7 +2655,8 @@ Endpoints added or extended for the 0.14 feature batch. All responses keep the
 recovery routes included) bypasses the management auth/CSRF gate.
 
 ### LED
-- `GET /api/v1/led` — `data` now also carries `idle_mode` and the `sleep_light`,
+- `GET /api/v1/led` — `data` now also carries `idle_mode`,
+  `idle_auto_off_minutes`, `idle_asleep` and the `sleep_light`,
   `output` and `music` objects matching `ledd` status. Existing controls
   (`colour`/`brightness`/`visualizer_enabled`/`night`/`profiles`) are preserved.
 - `PUT /api/v1/led/idle` — `{"mode":"off"|"indicator"|"always"}` (required) ->
@@ -2444,6 +2667,15 @@ recovery routes included) bypasses the management auth/CSRF gate.
   the idle mode of every existing device to `indicator` once (the persisted
   `idle.policy` marker records that this happened); a mode the owner chooses
   afterwards is kept across reboots and updates.
+  Optional `auto_off_minutes` (`0`, `5`, `10`, `30` or `60`; anything else,
+  including a fraction or a string, is `400`) turns the idle light off after that
+  long with no activity; `0` (the default) keeps it on, and omitting the field
+  keeps the stored value. Only the resting base goes dark: mute, setup/recovery,
+  errors, voice, Bluetooth pairing, announcements, playback and the sleep light
+  are never suppressed, and the sleep light suspends the countdown. Any LED
+  request other than a status read is activity (a pattern or meter stop only
+  when one was showing), and a web volume change sends `ledd` an `activity`
+  request. `idle_asleep` reports whether the idle light is off right now.
 - `PUT /api/v1/led/sleep` — `{"mode":"off"|"solid"|"pulse"}` (required) with
   optional `brightness` (0..20), `period_ms` (3000..15000), `timer_minutes`
   (0..720) and `restore_on_boot` (bool). A missing field keeps the current daemon

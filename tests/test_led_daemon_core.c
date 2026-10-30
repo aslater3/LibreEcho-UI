@@ -275,7 +275,7 @@ int main(void)
             require_condition(!s.idle_policy_upgraded,
                               "the upgrade must be persisted on first boot");
             require_condition(state_file_contains(
-                                  "\"idle\":{\"mode\":1,\"policy\":2}"),
+                                  "\"idle\":{\"mode\":1,\"policy\":2,\"auto_off_minutes\":0}"),
                               "the upgraded idle policy must be written back");
             require_condition(s.current.brightness == 60U ||
                                   k == 2,
@@ -287,7 +287,7 @@ int main(void)
         fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
                    "{\"mode\":\"off\"}}");
         require_condition(response_ok(), "the owner may choose off");
-        require_condition(state_file_contains("\"idle\":{\"mode\":0,\"policy\":2}"),
+        require_condition(state_file_contains("\"idle\":{\"mode\":0,\"policy\":2,\"auto_off_minutes\":0}"),
                           "an owner choice must be saved under the new policy");
         memset(&s, 0, sizeof(s));
         default_state(&s);
@@ -362,6 +362,252 @@ int main(void)
     apply_base_layer(&ctx, t0 + 0.75);
     require_condition(max_channel(&ctx) == peak_b,
                       "resume must continue the wave, not replay it");
+
+    /* ---- 5b. Default-brightness pulse is smooth, not two steps (#364). -- */
+    reset(&ctx);
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
+               "{\"mode\":\"pulse\",\"brightness\":8,\"period_ms\":4000}}");
+    require_condition(response_ok() && ctx.sleep_active,
+                      "default pulse sleep light must activate");
+    {
+        /* The stepped pulse drove red code 1 at the trough and 2 at the
+           crest; those endpoints and the cap must not move. */
+        unsigned int trough = led_output_gamma((255U * 1U + 50U) / 100U);
+        unsigned int crest = led_output_gamma((255U * 8U + 50U) / 100U);
+        unsigned int seen[12 * 2 + 1] = {0};
+        unsigned int distinct = 0U, previous = 0U, k, i;
+        int monotonic = 1;
+
+        for (k = 0U; k <= 100U; k++) {
+            /* Phase 0.75 is the trough, 0.25 the crest: walk trough->crest. */
+            double t = ctx.sleep_started + 4.0 * (0.75 + 0.5 * k / 100.0);
+            unsigned int sum = 0U;
+
+            apply_sleep_light(&ctx, t);
+            for (i = 0U; i < RING_PIXELS; i++) {
+                require_condition(ctx.rendered_pixels[i].r >= trough &&
+                                      ctx.rendered_pixels[i].r <= crest,
+                                  "a dithered pixel left the stepped pulse's range");
+                sum += ctx.rendered_pixels[i].r;
+            }
+            if (k == 0U)
+                require_condition(sum == trough * RING_PIXELS,
+                                  "the trough must stay at the old code");
+            if (k == 100U)
+                require_condition(sum == crest * RING_PIXELS,
+                                  "the crest must stay at the old code");
+            if (k > 0U && sum < previous)
+                monotonic = 0;
+            previous = sum;
+            if (sum < sizeof(seen) / sizeof(seen[0]) && !seen[sum]++)
+                distinct++;
+        }
+        require_condition(monotonic, "the rising half of the breath must not dip");
+        require_condition(distinct >= 10U,
+                          "the ring average must move in fine steps, not jump 1->2");
+    }
+
+    /* ---- 5c. With the kernel's current scale, the pulse uses the fine
+       levels between codes (#364). ------------------------------------- */
+    {
+        unsigned int fine, code, scale, k, i, distinct = 0U, previous = 0U;
+        unsigned int trough = led_output_gamma((255U * 1U + 50U) / 100U);
+        unsigned int crest = led_output_gamma((255U * 8U + 50U) / 100U);
+        unsigned int seen[2U * 12U * 12U + 1U] = {0};
+        unsigned int max_step = 0U;
+        int monotonic = 1;
+        char frame_file[] = "/tmp/libreecho-ledd-frame-XXXXXX";
+        char scaled_file[] = "/tmp/libreecho-ledd-scaled-XXXXXX";
+        char text[256];
+        FILE *fp;
+        int fd;
+
+        /* Every reachable level maps to a (code, scale) that emits it
+           exactly, preferring the highest current. */
+        for (fine = 0U; fine <= 255U * FINE_UNITS; fine++) {
+            reset(&ctx);
+            ctx.hw.kind = HW_IS31FL3236;
+            snprintf(ctx.hw.is31_scaled_path, sizeof(ctx.hw.is31_scaled_path),
+                     "x");
+            if (!fine_level_reachable(&ctx.hw, fine))
+                continue;
+            fine_to_is31(fine, &code, &scale);
+            require_condition(scale <= 3U && code <= 255U &&
+                                  code * FINE_UNITS == fine * (scale + 1U),
+                              "a fine level must map to an exact code/scale");
+            require_condition(fine % FINE_UNITS != 0U || scale == 0U,
+                              "whole codes must stay at full current");
+        }
+
+        fd = mkstemp(frame_file);
+        require_condition(fd >= 0, "create fake frame file");
+        close(fd);
+        fd = mkstemp(scaled_file);
+        require_condition(fd >= 0, "create fake scaled_frame file");
+        close(fd);
+        reset(&ctx);
+        ctx.hw.kind = HW_IS31FL3236;
+        snprintf(ctx.hw.is31_frame_path, sizeof(ctx.hw.is31_frame_path), "%s",
+                 frame_file);
+        snprintf(ctx.hw.is31_scaled_path, sizeof(ctx.hw.is31_scaled_path),
+                 "%s", scaled_file);
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"sleep_light\",\"args\":"
+                   "{\"mode\":\"pulse\",\"brightness\":8,\"period_ms\":4000}}");
+        require_condition(response_ok() && ctx.sleep_active,
+                          "scaled pulse sleep light must activate");
+        for (k = 0U; k <= 200U; k++) {
+            double t = ctx.sleep_started + 4.0 * (0.75 + 0.5 * k / 200.0);
+            unsigned int sum = 0U, lo = ~0U, hi = 0U;
+
+            apply_sleep_light(&ctx, t);
+            for (i = 0U; i < RING_PIXELS; i++) {
+                fine = ctx.rendered_fine[i].r;
+                require_condition(fine >= trough * FINE_UNITS &&
+                                      fine <= crest * FINE_UNITS,
+                                  "a fine pixel left the pulse's range");
+                require_condition(fine_level_reachable(&ctx.hw, fine),
+                                  "a pixel asked for a level the chip lacks");
+                require_condition(ctx.rendered_pixels[i].r == fine_to_code(fine),
+                                  "status pixels must be the rounded level");
+                sum += fine;
+                if (fine < lo) lo = fine;
+                if (fine > hi) hi = fine;
+            }
+            /* Two neighbouring levels at most, a quarter code apart at
+               the bottom of the breath. */
+            if (hi - lo > max_step)
+                max_step = hi - lo;
+            if (k == 0U)
+                require_condition(sum == trough * FINE_UNITS * RING_PIXELS,
+                                  "the scaled trough must stay at the old code");
+            if (k == 200U)
+                require_condition(sum == crest * FINE_UNITS * RING_PIXELS,
+                                  "the scaled crest must stay at the old code");
+            if (k > 0U && sum < previous)
+                monotonic = 0;
+            previous = sum;
+            sum /= RING_PIXELS; /* mean, in fine units, rounded down */
+            if (sum < sizeof(seen) / sizeof(seen[0]) && !seen[sum]++)
+                distinct++;
+        }
+        require_condition(monotonic, "the scaled breath must not dip");
+        require_condition(max_step <= FINE_UNITS / 4U,
+                          "neighbouring pixels must differ by a quarter code at most");
+        require_condition(distinct >= 10U,
+                          "the scaled breath must pass through the fine levels");
+
+        /* The hardware gets the scaled frame: 36 codes then 36 scales, and
+           each channel re-emits the rendered level. */
+        require_condition(truncate(scaled_file, 0) == 0, "truncate scaled");
+        apply_sleep_light(&ctx, ctx.sleep_started + 4.0 * 0.80);
+        ctx.hw_written_valid = 0;
+        ctx.hw_pending = 1;
+        require_condition(output_flush(&ctx, monotonic_seconds(), 1) == 1,
+                          "forced flush must write");
+        fp = fopen(scaled_file, "r");
+        require_condition(fp != NULL && fgets(text, sizeof(text), fp) != NULL,
+                          "scaled_frame must be written");
+        fclose(fp);
+        require_condition(strlen(text) == 36U * 4U + 1U && text[144] == '\n',
+                          "scaled_frame is 144 hex characters and a newline");
+        for (i = 0U; i < 36U; i++) {
+            unsigned int c, s, want;
+            const struct pixel *px = &ctx.rendered_fine[i / 3U];
+
+            require_condition(sscanf(text + i * 2U, "%2x", &c) == 1 &&
+                                  sscanf(text + 72U + i * 2U, "%2x", &s) == 1,
+                              "scaled_frame must be hex");
+            want = i % 3U == 0U ? px->r : i % 3U == 1U ? px->g : px->b;
+            require_condition(s <= 3U && c * FINE_UNITS == want * (s + 1U),
+                              "each channel must emit its rendered level");
+        }
+        fp = fopen(frame_file, "r");
+        require_condition(fp != NULL && fgetc(fp) == EOF,
+                          "the legacy frame file must not be written too");
+        fclose(fp);
+
+        /* Without scaled_frame the legacy 36-byte frame carries whole codes. */
+        ctx.hw.is31_scaled_path[0] = '\0';
+        apply_sleep_light(&ctx, ctx.sleep_started + 4.0 * 0.80);
+        for (i = 0U; i < RING_PIXELS; i++)
+            require_condition(ctx.rendered_fine[i].r % FINE_UNITS == 0U,
+                              "an old kernel must only get whole codes");
+        ctx.hw_written_valid = 0;
+        ctx.hw_pending = 1;
+        require_condition(output_flush(&ctx, monotonic_seconds(), 1) == 1,
+                          "legacy forced flush must write");
+        fp = fopen(frame_file, "r");
+        require_condition(fp != NULL && fgets(text, sizeof(text), fp) != NULL &&
+                              strlen(text) == 73U,
+                          "legacy frame must be 72 hex characters");
+        fclose(fp);
+        unlink(frame_file);
+        unlink(scaled_file);
+    }
+
+    /* ---- 5d. Every gamma frame takes the smoothed route when the kernel
+       has scaled_frame: a low-brightness pulse pattern moves through fine
+       levels instead of whole codes, never exceeds the integer frame, and a
+       kernel without scaled_frame still gets whole codes. -------------- */
+    {
+        char scaled_file[] = "/tmp/libreecho-ledd-scaled2-XXXXXX";
+        unsigned int k, i, distinct = 0U, previous = 0U, max_step = 0U;
+        unsigned int seen[255U * 12U * 12U + 1U];
+        int monotonic = 1, fd;
+
+        memset(seen, 0, sizeof(seen));
+        fd = mkstemp(scaled_file);
+        require_condition(fd >= 0, "create fake scaled_frame file");
+        close(fd);
+        reset(&ctx);
+        ctx.hw.kind = HW_IS31FL3236;
+        snprintf(ctx.hw.is31_scaled_path, sizeof(ctx.hw.is31_scaled_path),
+                 "%s", scaled_file);
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+                   "{\"name\":\"pulse\",\"r\":255,\"g\":180,\"b\":0,"
+                   "\"brightness\":15,\"repeats\":0,\"owner\":\"evt\"}}");
+        require_condition(response_ok() && ctx.pattern_active,
+                          "a pulse pattern must take the ring");
+        /* Rising half of the 1.5 s pulse: phase 0.75 -> 1.25. */
+        for (k = 0U; k <= 200U; k++) {
+            double t = ctx.pattern_started + 1.5 * (0.75 + 0.5 * k / 200.0);
+            unsigned int sum = 0U;
+
+            update_pattern(&ctx, t);
+            for (i = 0U; i < RING_PIXELS; i++) {
+                unsigned int fine = ctx.rendered_fine[i].r;
+
+                require_condition(fine_level_reachable(&ctx.hw, fine),
+                                  "a smoothed pixel asked for a level the chip lacks");
+                require_condition(fine <= ctx.rendered_pixels[i].r * FINE_UNITS,
+                                  "smoothing must never boost past the whole code");
+                require_condition(ctx.rendered_pixels[i].r == 0U || fine > 0U,
+                                  "smoothing must never turn a lit channel off");
+                sum += fine;
+            }
+            if (k > 0U && sum + FINE_UNITS < previous)
+                monotonic = 0;
+            if (k > 0U && sum > previous && sum - previous > max_step)
+                max_step = sum - previous;
+            previous = sum;
+            if (!seen[sum]++)
+                distinct++;
+        }
+        require_condition(monotonic, "the smoothed pulse must not dip while rising");
+        require_condition(distinct >= 60U,
+                          "the smoothed pulse must pass through many fine levels");
+        require_condition(max_step <= 3U * FINE_UNITS * RING_PIXELS / 4U,
+                          "the smoothed pulse must not jump between frames");
+
+        /* A kernel without scaled_frame gets whole codes, as before. */
+        ctx.hw.is31_scaled_path[0] = '\0';
+        update_pattern(&ctx, ctx.pattern_started + 1.5 * 0.9);
+        for (i = 0U; i < RING_PIXELS; i++)
+            require_condition(ctx.rendered_fine[i].r ==
+                                  ctx.rendered_pixels[i].r * FINE_UNITS,
+                              "an old kernel must only get whole codes");
+        unlink(scaled_file);
+    }
 
     /* ---- 6. Sleep timer expiry selects off and returns to base. --------- */
     reset(&ctx);
@@ -584,6 +830,179 @@ int main(void)
         fire(&ctx, bad);
         require_condition(!response_ok(),
                           "a malformed v2 frame must be a hard error");
+    }
+
+    /* ---- 10. Idle auto-off (UI #323): only the resting base goes dark,
+       after the configured inactivity, and any real activity wakes it. ----- */
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+    require_condition(ctx.state.idle_auto_off_minutes == 0,
+                      "idle auto-off must be off by default");
+    ctx.idle_last_activity = 1000.0;
+    apply_base_state(&ctx, 1000.0);
+    idle_auto_off_tick(&ctx, 1000.0 + 3600.0 * 24.0);
+    require_condition(!ctx.idle_base_asleep && indicator_only(&ctx),
+                      "with auto-off disabled the indicator never sleeps");
+    require_condition(idle_auto_off_timeout(&ctx, 1000.0) == -1,
+                      "a disabled auto-off must not wake the poll loop");
+    ctx.state.idle_auto_off_minutes = 5;
+    require_condition(idle_auto_off_timeout(&ctx, 1000.0) == 300000,
+                      "the poll loop must wake exactly at the auto-off deadline");
+    idle_auto_off_tick(&ctx, 1299.0);
+    require_condition(!ctx.idle_base_asleep && indicator_only(&ctx),
+                      "the indicator stays on before the deadline");
+    idle_auto_off_tick(&ctx, 1300.0);
+    require_condition(ctx.idle_base_asleep && all_dark(&ctx),
+                      "the indicator goes dark at the deadline");
+    require_condition(idle_auto_off_timeout(&ctx, 1300.0) == -1,
+                      "a sleeping base needs no further wakeups");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}");
+    require_condition(response_ok() && ctx.idle_base_asleep,
+                      "a status read is not activity");
+    require_condition(strstr(last_response,
+                             "\"idle_auto_off\":{\"minutes\":5,\"asleep\":true}") != NULL,
+                      "status must report the auto-off setting and state");
+    /* A stop for an owner that holds nothing is not activity. */
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+               "{\"name\":\"stop\",\"owner\":\"esphome\"}}");
+    require_condition(response_ok() && ctx.idle_base_asleep,
+                      "stopping a pattern that was not running must not wake the ring");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"activity\",\"args\":{\"source\":\"volume\"}}");
+    require_condition(response_ok() && !ctx.idle_base_asleep && indicator_only(&ctx),
+                      "the activity command wakes the ring and repaints the indicator");
+
+    /* Always-on base sleeps too; the colour is restored on activity. */
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_ALWAYS;
+    ctx.state.idle_auto_off_minutes = 10;
+    ctx.state.current = (struct colour){0, 96, 255, 60};
+    ctx.idle_last_activity = 50.0;
+    apply_base_state(&ctx, 50.0);
+    require_condition(max_channel(&ctx) > 0U, "the always-on ring is lit");
+    idle_auto_off_tick(&ctx, 650.0);
+    require_condition(ctx.idle_base_asleep && all_dark(&ctx),
+                      "the always-on ring goes dark after the timeout");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_brightness\",\"args\":{\"brightness\":40}}");
+    require_condition(response_ok() && !ctx.idle_base_asleep && max_channel(&ctx) > 0U,
+                      "changing an LED setting is activity and relights the ring");
+
+    /* Every kind of real activity wakes a sleeping base. */
+    {
+        static const char *const wakers[] = {
+            "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":{\"name\":\"flash\",\"owner\":\"action\",\"r\":0,\"g\":0,\"b\":255,\"brightness\":60,\"repeats\":1}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":{\"name\":\"pulse\",\"owner\":\"wakeword\",\"r\":0,\"g\":0,\"b\":255,\"brightness\":60,\"repeats\":0}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"meter\",\"args\":{\"value\":40,\"owner\":\"volume\",\"r\":255,\"g\":255,\"b\":255,\"brightness\":60}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"visualizer\",\"args\":{\"action\":\"frame\",\"owner\":\"music\",\"levels\":\"ff0000ff0000ff0000ff0000\",\"brightness\":50}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"activity\"}"
+        };
+        size_t k;
+
+        for (k = 0; k < sizeof(wakers) / sizeof(wakers[0]); k++) {
+            reset(&ctx);
+            ctx.visualizer_enabled = 1;
+            ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+            ctx.state.idle_auto_off_minutes = 5;
+            ctx.idle_base_asleep = 1;
+            fire(&ctx, wakers[k]);
+            require_condition(response_ok() && !ctx.idle_base_asleep, wakers[k]);
+        }
+    }
+
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+    ctx.state.idle_auto_off_minutes = 5;
+    ctx.idle_base_asleep = 1;
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+               "{\"name\":\"flash\",\"owner\":\"action\"}}");
+    require_condition(!response_ok() && ctx.idle_base_asleep,
+                      "a rejected pattern request is not activity");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"meter\",\"args\":"
+               "{\"action\":\"stop\",\"owner\":\"volume\"}}");
+    require_condition(response_ok() && ctx.idle_base_asleep,
+                      "stopping a meter that was not showing is not activity");
+
+    /* Mute, setup and errors draw above the base and always show. */
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+    ctx.state.idle_auto_off_minutes = 5;
+    ctx.idle_base_asleep = 1;
+    apply_base_state(&ctx, 0.0);
+    require_condition(all_dark(&ctx), "the sleeping base is dark");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+               "{\"name\":\"solid\",\"owner\":\"mute\",\"r\":255,\"g\":0,\"b\":0,\"brightness\":60,\"repeats\":0}}");
+    update_animation(&ctx, monotonic_seconds());
+    require_condition(response_ok() && ctx.pattern_active && max_channel(&ctx) > 0U,
+                      "the mute lamp must light even when the base was asleep");
+
+    /* The sleep light owns the base: auto-off is suspended while it runs. */
+    reset(&ctx);
+    ctx.state.idle_mode = IDLE_MODE_INDICATOR;
+    ctx.state.idle_auto_off_minutes = 5;
+    ctx.sleep_active = 1;
+    ctx.idle_last_activity = 0.0;
+    idle_auto_off_tick(&ctx, 100000.0);
+    require_condition(!ctx.idle_base_asleep && idle_auto_off_timeout(&ctx, 0.0) == -1,
+                      "the sleep light suspends idle auto-off");
+    /* Idle "off" has nothing to darken. */
+    ctx.sleep_active = 0;
+    ctx.state.idle_mode = IDLE_MODE_OFF;
+    idle_auto_off_tick(&ctx, 100000.0);
+    require_condition(!ctx.idle_base_asleep, "idle off has no auto-off countdown");
+
+    /* The setting persists with the idle mode, validates, and reverts on a
+       failed write; older state files load as disabled and keep their mode. */
+    reset(&ctx);
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
+               "{\"mode\":\"indicator\",\"auto_off_minutes\":10}}");
+    require_condition(response_ok() && ctx.state.idle_auto_off_minutes == 10,
+                      "a valid auto-off time is accepted");
+    require_condition(state_file_contains("\"idle\":{\"mode\":1,\"policy\":2,\"auto_off_minutes\":10}"),
+                      "the auto-off time is persisted with the idle mode");
+    {
+        static const char *const invalid[] = {
+            "{\"mode\":\"always\",\"auto_off_minutes\":7}",
+            "{\"mode\":\"always\",\"auto_off_minutes\":61}",
+            "{\"mode\":\"always\",\"auto_off_minutes\":-1}",
+            "{\"mode\":\"always\",\"auto_off_minutes\":\"5\"}"
+        };
+        size_t k;
+        char line[256];
+
+        for (k = 0; k < sizeof(invalid) / sizeof(invalid[0]); k++) {
+            snprintf(line, sizeof(line),
+                     "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":%s}", invalid[k]);
+            fire(&ctx, line);
+            require_condition(!response_ok() &&
+                                  ctx.state.idle_mode == IDLE_MODE_INDICATOR &&
+                                  ctx.state.idle_auto_off_minutes == 10,
+                              invalid[k]);
+        }
+    }
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":{\"mode\":\"always\"}}");
+    require_condition(response_ok() && ctx.state.idle_auto_off_minutes == 10,
+                      "changing only the mode keeps the auto-off time");
+    require_condition(mkdir(STATE_TMP_PATH, 0700) == 0,
+                      "blocking the state temp path must succeed");
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"set_idle_mode\",\"args\":"
+               "{\"mode\":\"off\",\"auto_off_minutes\":30}}");
+    require_condition(!response_ok() && ctx.state.idle_mode == IDLE_MODE_ALWAYS &&
+                          ctx.state.idle_auto_off_minutes == 10,
+                      "a failed write reverts both the mode and the auto-off time");
+    require_condition(rmdir(STATE_TMP_PATH) == 0,
+                      "unblocking the state temp path must succeed");
+    {
+        struct led_state s;
+
+        boot_with_state(&s, "{\"idle\":{\"mode\":2,\"policy\":2,\"auto_off_minutes\":30}}");
+        require_condition(s.idle_mode == IDLE_MODE_ALWAYS && s.idle_auto_off_minutes == 30,
+                          "a stored auto-off time is restored at boot");
+        boot_with_state(&s, "{\"idle\":{\"mode\":0,\"policy\":2}}");
+        require_condition(s.idle_mode == IDLE_MODE_OFF && s.idle_auto_off_minutes == 0 &&
+                              !s.idle_policy_upgraded,
+                          "an older state file loads as disabled and keeps its mode");
+        boot_with_state(&s, "{\"idle\":{\"mode\":1,\"policy\":2,\"auto_off_minutes\":7}}");
+        require_condition(s.idle_auto_off_minutes == 0,
+                          "an invalid stored auto-off time is ignored");
     }
 
     puts("LED daemon core: ok");

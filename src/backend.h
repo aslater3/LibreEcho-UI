@@ -80,6 +80,9 @@ struct le_led_state {
     uint8_t visualizer_levels[LE_LED_PIXELS];
     struct le_led_pixel pixels[LE_LED_PIXELS];
     int idle_mode;
+    /* Idle auto-off (UI #323): 0 (off), 5, 10, 30 or 60 minutes; whether the
+       base idle ring is currently dark because of it. */
+    int idle_auto_off_minutes, idle_asleep;
     struct le_led_sleep sleep_light;
     struct le_led_output output;
     struct le_led_music music;
@@ -139,6 +142,15 @@ struct le_airplay_state {
     char playback_state[24], source[32];
     char title[LE_MEDIA_TEXT+1], artist[LE_MEDIA_TEXT+1], album[LE_MEDIA_TEXT+1];
 };
+/* Sendspin player (Music Assistant multiroom). installed/enabled/running come
+   from the audio controller; the rest from the player itself and are false
+   or empty when it is not running. Pairing secrets are never part of this. */
+struct le_sendspin_state {
+    int installed, enabled, running;
+    int listening, discoverable, connected, paired, streaming, time_synced;
+    int volume, muted;
+    char server[64];
+};
 /* What radiod is doing. title and station are whatever the stream said about
    itself over ICY; both are empty when it said nothing, and nothing here
    invents a substitute. */
@@ -179,7 +191,8 @@ int le_get_system_status(struct le_backend*,struct le_system_status*); int le_ge
 int le_get_audio_state(struct le_backend*,struct le_audio_state*); int le_set_volume(struct le_backend*,int); int le_set_microphone_gain(struct le_backend*,int); int le_set_microphone_muted(struct le_backend*,int); int le_play_test_tone(struct le_backend*); int le_set_tts_voice(struct le_backend*,const char*); int le_set_volume_leveling(struct le_backend*,int); int le_announce(struct le_backend*,const char*); int le_stop_speech(struct le_backend*); int le_start_noise(struct le_backend*,const char*,int,int); int le_stop_noise(struct le_backend*); int le_simulate_audio(struct le_backend*,const char*); int le_radio_play(struct le_backend*,const char*); int le_radio_stop(struct le_backend*); int le_radio_playing(struct le_backend*,struct le_radio_status*);
 int le_start_noise_ex(struct le_backend*,const struct le_noise_request*);
 int le_get_led_state(struct le_backend*,struct le_led_state*); int le_set_led_colour(struct le_backend*,uint8_t,uint8_t,uint8_t); int le_set_led_brightness(struct le_backend*,int); int le_set_led_visualizer_enabled(struct le_backend*,int); int le_set_boot_led(struct le_backend*,const struct le_led_profile*); int le_set_led_profile(struct le_backend*,const char*,const struct le_led_profile*); int le_set_led_night(struct le_backend*,int,int,int); int le_run_led_test(struct le_backend*); int le_get_spotify_state(struct le_backend*,struct le_spotify_state*); int le_set_spotify_enabled(struct le_backend*,int); int le_get_light_state(struct le_backend*,struct le_light_state*);
-int le_set_led_idle_mode(struct le_backend*,const char*);
+/* auto_off_minutes: 0, 5, 10, 30 or 60; -1 leaves the stored value unchanged. */
+int le_set_led_idle_mode(struct le_backend*,const char*,int auto_off_minutes);
 int le_set_led_sleep(struct le_backend*,const struct le_led_sleep_request*);
  int le_play_sound_sample(struct le_backend*,const char*);int le_get_network_state(struct le_backend*,struct le_network_state*); int le_scan_wifi(struct le_backend*,struct le_wifi_scan*); int le_connect_wifi(struct le_backend*,const struct le_wifi_credentials*); int le_disconnect_wifi(struct le_backend*); int le_set_hostname(struct le_backend*,const char*);
 /* Portal probe with a bounded adapter I/O timeout (falls back to the normal
@@ -192,6 +205,11 @@ int le_get_wake_word_state(struct le_backend*,struct le_wake_word_state*); int l
 int le_get_bluetooth_state(struct le_backend*,struct le_bluetooth_state*); int le_set_bluetooth_enabled(struct le_backend*,int);
 int le_bluetooth_scan(struct le_backend*,int); int le_bluetooth_pair(struct le_backend*,const char*,int,int); int le_bluetooth_unpair(struct le_backend*,const char*,int); int le_bluetooth_disconnect(struct le_backend*,const char*,int); int le_bluetooth_pairing_response(struct le_backend*,const char*,int,const char*,unsigned int,const char*); int le_bluetooth_set_discoverable(struct le_backend*,int); int le_bluetooth_set_connectable(struct le_backend*,int); int le_bluetooth_set_pairing_mode(struct le_backend*,int);
 int le_get_airplay_state(struct le_backend*,struct le_airplay_state*); int le_set_airplay_enabled(struct le_backend*,int);
+int le_get_sendspin_state(struct le_backend*,struct le_sendspin_state*); int le_set_sendspin_enabled(struct le_backend*,int);
+/* The player's pairing token, for the authenticated pairing flow only. */
+int le_sendspin_pairing_token(struct le_backend*,char*,size_t);
+/* Forget every paired server; the player restarts with a new pairing token. */
+int le_sendspin_reset_pairing(struct le_backend*);
 int le_get_playback_state(struct le_backend*,struct le_playback_state*);
 int le_get_timers(struct le_backend*,struct le_timer_list*); int le_add_timer(struct le_backend*,int,const char*,unsigned*); int le_cancel_timer(struct le_backend*,unsigned); int le_dismiss_timers(struct le_backend*,int*);
 int le_reboot(struct le_backend*); int le_reboot_bootloader(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);

@@ -1320,10 +1320,18 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
 static int volume(struct le_backend *b, int value)
 {
     char args[64];
+    int rc;
     (void)b;
     if (value < 0 || value > 100) return LE_INVALID;
     snprintf(args, sizeof(args), "{\"volume\":%d}", value);
-    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_volume", args);
+    rc = adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_volume", args);
+    if (rc != LE_OK)
+        return rc;
+    /* A volume change from the web UI is activity for the LED idle auto-off
+       (#323). Best effort: ledd being busy or absent never fails the change. */
+    (void)adapter_json_command_timeout(LE_ADAPTER_LED_SOCK, "activity",
+                                       "{\"source\":\"volume\"}", 200);
+    return LE_OK;
 }
 
 static int gain(struct le_backend *b, int value)
@@ -1561,6 +1569,16 @@ static int led(struct le_backend *b, struct le_led_state *o)
             o->idle_mode = 2;
         else
             o->idle_mode = 0;
+    }
+    if (json_object(response, "idle_auto_off", object, sizeof(object))) {
+        int minutes = 0, asleep = 0;
+
+        if (json_get_int(object, "minutes", &minutes) > 0 &&
+            (minutes == 0 || minutes == 5 || minutes == 10 ||
+             minutes == 30 || minutes == 60))
+            o->idle_auto_off_minutes = minutes;
+        if (json_get_bool(object, "asleep", &asleep) > 0)
+            o->idle_asleep = asleep;
     }
     if (json_object(response, "sleep_light", object, sizeof(object))) {
         if (json_get_string(object, "mode", o->sleep_light.mode,
@@ -2607,6 +2625,75 @@ static int airplay_set(struct le_backend *b, int enabled)
     return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_enabled", args);
 }
 
+/* The Sendspin player's own control socket (status and pairing token). */
+#define LE_SENDSPIN_SOCK "/run/libreecho/sendspin.sock"
+
+static int sendspin(struct le_backend *b, struct le_sendspin_state *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc;
+    (void)b;
+    memset(o, 0, sizeof(*o));
+    rc = adapter_command(LE_ADAPTER_AIRPLAY_SOCK, "status", NULL,
+                         response, sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    (void)json_get_bool(response, "sendspin_available", &o->installed);
+    (void)json_get_bool(response, "sendspin_enabled", &o->enabled);
+    (void)json_get_bool(response, "sendspin_running", &o->running);
+    if (!o->running ||
+        adapter_command(LE_SENDSPIN_SOCK, "status", NULL, response,
+                        sizeof(response)) != LE_OK)
+        return LE_OK;
+    {
+        char trust[16] = "";
+        (void)json_get_bool(response, "listening", &o->listening);
+        (void)json_get_bool(response, "discoverable", &o->discoverable);
+        (void)json_get_bool(response, "connected", &o->connected);
+        (void)json_get_bool(response, "streaming", &o->streaming);
+        (void)json_get_bool(response, "time_synced", &o->time_synced);
+        (void)json_get_bool(response, "muted", &o->muted);
+        (void)json_get_int(response, "volume", &o->volume);
+        (void)json_get_string(response, "trust", trust, sizeof(trust));
+        (void)json_get_string(response, "server", o->server, sizeof(o->server));
+        o->paired = o->connected && !strcmp(trust, "paired");
+    }
+    return LE_OK;
+}
+
+static int sendspin_set(struct le_backend *b, int enabled)
+{
+    char args[32];
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_sendspin_enabled", args);
+}
+
+static int sendspin_pairing_token(struct le_backend *b, char *out, size_t size)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc;
+    (void)b;
+    rc = adapter_command(LE_SENDSPIN_SOCK, "pairing_token", NULL, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_string(response, "token", out, size) < 1 || strncmp(out, "SP:", 3)) {
+        memset(out, 0, size);
+        return LE_IO;
+    }
+    memset(response, 0, sizeof(response));
+    return LE_OK;
+}
+
+static int sendspin_reset_pairing(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "reset_sendspin_pairing", "{}");
+}
+
 static int playback(struct le_backend *b, struct le_playback_state *o)
 {
     struct le_airplay_state airplay_state;
@@ -3042,15 +3129,22 @@ static int noise_start_ex(struct le_backend *b, const struct le_noise_request *r
     return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "noise_start", args);
 }
 
-static int led_idle_mode(struct le_backend *b, const char *mode)
+static int led_idle_mode(struct le_backend *b, const char *mode, int auto_off)
 {
-    char args[64];
+    char args[96];
 
     (void)b;
     if (!mode || (strcmp(mode, "off") && strcmp(mode, "indicator") &&
                   strcmp(mode, "always")))
         return LE_INVALID;
-    snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
+    if (auto_off != -1 && auto_off != 0 && auto_off != 5 && auto_off != 10 &&
+        auto_off != 30 && auto_off != 60)
+        return LE_INVALID;
+    if (auto_off >= 0)
+        snprintf(args, sizeof(args),
+                 "{\"mode\":\"%s\",\"auto_off_minutes\":%d}", mode, auto_off);
+    else
+        snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
     return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_idle_mode", args);
 }
 
@@ -3146,7 +3240,8 @@ static const struct le_backend_ops ops = {
     recovery_configure, recovery_prepare, recovery_stop,
     network_portal,
     linux_reboot_bootloader,
-    volume_leveling
+    volume_leveling,
+    sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)
