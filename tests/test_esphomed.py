@@ -216,7 +216,7 @@ class Fixture(Daemon):
   for _ in range(16):
    try:t,b=receive(self.s)
    except EOFError:break
-   self.assertIn(t,(26,64)) # A state broadcast already queued before rejection may drain.
+   self.assertIn(t,(26,50,64)) # A state broadcast (incl. the reply-volume number) already queued before rejection may drain.
   else:self.fail('malformed volume did not close the client')
  def test_announcement_error_reports_failure_and_resets_playback(self):
   wav=io.BytesIO()

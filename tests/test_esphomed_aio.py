@@ -28,7 +28,7 @@ class PinnedFixture(Fixture):
    client.media_player_command(1,command=command);await self.wait_for(lambda:any(r['cmd']==verb for r in self.adapters['radio'].calls),verb)
   client.media_player_command(1,volume=.42);await self.wait_for(lambda:any(r['cmd']=='set_volume' and r['args']=={'volume':42} for r in self.adapters['audio'].calls),'volume command')
   client.media_player_command(1,command=MediaPlayerCommand.MUTE);await self.wait_for(lambda:any(r['cmd']=='set_volume' and r['args']=={'volume':0} for r in self.adapters['audio'].calls),'output mute');await self.wait_for(lambda:any(isinstance(s,MediaPlayerEntityState) and s.muted for s in states),'output muted state')
-  client.media_player_command(1,command=MediaPlayerCommand.UNMUTE);await self.wait_for(lambda:isinstance(states[-2],MediaPlayerEntityState) and not states[-2].muted if len(states)>1 else False,'output unmuted state')
+  client.media_player_command(1,command=MediaPlayerCommand.UNMUTE);await self.wait_for(lambda:(lambda media:bool(media) and not media[-1].muted)([x for x in states if isinstance(x,MediaPlayerEntityState)]),'output unmuted state')
   client.switch_command(2,True);await self.wait_for(lambda:self.adapters['audio'].muted,'microphone mute');self.privacy.write_text('1\n');await asyncio.sleep(.3);before=sum(r['cmd']=='set_mute' for r in self.adapters['audio'].calls);client.switch_command(2,False);await asyncio.sleep(.1);self.assertEqual(sum(r['cmd']=='set_mute' for r in self.adapters['audio'].calls),before)
   self.privacy.write_text('0\n');await asyncio.sleep(.3);client.switch_command(2,False);await self.wait_for(lambda:not self.adapters['audio'].muted,'microphone unmute');await asyncio.sleep(.1)
   starts=[];stops=[];audio=[];finished=[]
