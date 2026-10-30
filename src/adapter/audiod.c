@@ -953,7 +953,8 @@ static int volume_leveling_apply(int enabled);
 #define LE_REPLY_VOLUME_PATH "/data/libreecho/config/reply-volume"
 #endif
 #ifndef LE_REPLY_VOLUME_RUNTIME_PATH
-#define LE_REPLY_VOLUME_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/reply.volume"
+/* Literal, beside master.volume (LE_MASTER_VOLUME_DIR may be a variable in tests). */
+#define LE_REPLY_VOLUME_RUNTIME_PATH "/run/libreecho-audio/reply.volume"
 #endif
 static int reply_volume_load(int *volume);
 static int reply_volume_publish(int custom, int volume);

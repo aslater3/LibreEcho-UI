@@ -9,6 +9,7 @@
 #define LE_SOUND_DIR "/tmp/libreecho-audiod-review-sounds"
 #define LE_VOLUME_LEVELING_PATH "/tmp/libreecho-audiod-review-volume-leveling"
 #define LE_REPLY_VOLUME_PATH "/tmp/libreecho-audiod-review-reply-volume"
+#define LE_REPLY_VOLUME_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/reply.volume"
 #define LE_AVL_DISABLED_DIR "/tmp/libreecho-audiod-review-run"
 #define LE_AVL_DISABLED_PATH LE_AVL_DISABLED_DIR "/avl.disabled"
 #include <sys/syscall.h>
