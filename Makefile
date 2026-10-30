@@ -968,6 +968,10 @@ $(BUILD)/test-spoken-time: tests/test_spoken_time.c src/adapter/spoken_time.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -o $@
 
+$(BUILD)/test-timezone: tests/test_timezone.c src/timezone.h
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_timezone.c -o $@
+
 $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
 		src/adapter/adapter_client.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -1301,7 +1305,7 @@ clean:
 		$(BUILD)/test-radiod-mp3-frames \
 		$(BUILD)/test-http-worker-registry $(BUILD)/test-http-client-state \
 		$(BUILD)/test-wake-decode \
-		$(BUILD)/test-wake-led $(BUILD)/test-spoken-time \
+		$(BUILD)/test-wake-led $(BUILD)/test-spoken-time $(BUILD)/test-timezone \
 		$(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
