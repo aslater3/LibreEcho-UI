@@ -26,7 +26,8 @@ static char directory[] = "/tmp/libreecho-button-events-XXXXXX";
 
 static void cleanup(void)
 {
-    const char *files[] = {"audio.sock", "led.sock", "audio.log", "led.log", "config.json"};
+    const char *files[] = {"audio.sock", "led.sock", "audio.log", "led.log", "config.json",
+                           "esphome-status.json", "esphome-control.sock"};
     size_t i;
     char path[256];
     if (getpid() != fixture_owner) return;
@@ -119,6 +120,22 @@ static void mock_daemon(int listen_fd, const char *log_path, int audio)
         close(fd);
 
     }
+}
+
+static void write_voice_status(const char *path, int busy)
+{
+    FILE *file = fopen(path, "w");
+    assert(file != NULL);
+    fprintf(file, "{\"ready\":true,\"connected\":true,\"in_progress\":%s}\n",
+            busy ? "true" : "false");
+    assert(fclose(file) == 0);
+}
+
+/* What the esphomed control socket received, or "" if nothing arrived. */
+static void control_received(int fd, char *out, size_t size)
+{
+    ssize_t n = recv(fd, out, size - 1, MSG_DONTWAIT);
+    out[n > 0 ? n : 0] = '\0';
 }
 
 static int log_contains(const char *path, const char *needle)
@@ -248,7 +265,62 @@ int main(void)
     assert(log_contains(audio_log, "action-2"));
     assert(buttond_fixture_opens > 0);
 
+    /* #404: while a voice request is in progress the action press cancels it
+       instead of doing its usual job; otherwise the usual job is untouched. */
+    {
+        char status_path[256], control_path[256], got[32];
+        struct sockaddr_un address;
+        int control = socket(AF_UNIX, SOCK_DGRAM, 0);
+        unsigned int index;
 
-    puts("button event dispatch: volume, KEY_POWER mute sync, KEY_HELP rotation and sleep-sound toggle: ok");
+        snprintf(status_path, sizeof(status_path), "%s/esphome-status.json", directory);
+        snprintf(control_path, sizeof(control_path), "%s/esphome-control.sock", directory);
+        assert(control >= 0);
+        memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        assert(strlen(control_path) < sizeof(address.sun_path));
+        memcpy(address.sun_path, control_path, strlen(control_path) + 1);
+        assert(bind(control, (struct sockaddr *)&address, sizeof(address)) == 0);
+        ctx.esphome_status = status_path;
+        ctx.esphome_control = control_path;
+        strcpy(ctx.action, "sound");
+        strcpy(ctx.action_sounds, "action-1,action-2");
+        ctx.action_index = 0;
+
+        write_voice_status(status_path, 1);
+        handle_key(&ctx, KEY_HELP, 1);
+        control_received(control, got, sizeof(got));
+        assert(!strcmp(got, "cancel"));
+        assert(ctx.action_index == 0);        /* no action sound over the cancel */
+        handle_key(&ctx, KEY_HELP, 2);        /* autorepeat sends nothing more */
+        control_received(control, got, sizeof(got));
+        assert(!got[0]);
+
+        write_voice_status(status_path, 0);   /* idle: the usual action */
+        handle_key(&ctx, KEY_HELP, 1);
+        control_received(control, got, sizeof(got));
+        assert(!got[0]);
+        assert(ctx.action_index == 1);
+
+        strcpy(ctx.action, "disabled");       /* a disabled button stays inert */
+        write_voice_status(status_path, 1);
+        handle_key(&ctx, KEY_HELP, 1);
+        control_received(control, got, sizeof(got));
+        assert(!got[0]);
+
+        /* A stale "in progress" from a stopped satellite must not eat the press. */
+        strcpy(ctx.action, "sound");
+        close(control);
+        unlink(control_path);
+        index = ctx.action_index;
+        handle_key(&ctx, KEY_HELP, 1);
+        assert(ctx.action_index != index);
+        unlink(status_path);
+        handle_key(&ctx, KEY_HELP, 1);        /* no status file at all */
+        assert(ctx.action_index == index);
+    }
+
+
+    puts("button event dispatch: volume, KEY_POWER mute sync, KEY_HELP rotation, sleep-sound toggle and voice cancel: ok");
     return 0;
 }

@@ -2115,6 +2115,9 @@ accepted settings with the corresponding behavior reported by the daemon.
 `noise` makes the action button a sleep-sound switch: a press while no sleep
 sound is playing starts white noise with no timer (level 40), and a press while
 any sleep sound is playing stops it.
+Whatever the action, a press while a Home Assistant voice request is in
+progress (listening, thinking or replying) cancels that request instead; a
+`disabled` button stays inert. See `docs/HOME_ASSISTANT_VOICE.md`.
 `action_sounds` is a comma-separated list of installed sound names in rotation
 order. Each name follows the same 1–48-character lowercase-name rule as the
 preview endpoint; an empty string is valid and means no sound is played.
