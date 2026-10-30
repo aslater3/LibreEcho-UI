@@ -78,7 +78,7 @@
      "Assistant"
     ],
     "summary": "Read voice-assistant state and latency telemetry",
-    "description": "Reports subscription authentication, wake/STT stream health, measured speech-end-to-first-PCM latency, and the configured spoken time format.",
+    "description": "Reports subscription authentication, wake/STT stream health, measured speech-end-to-first-PCM latency, the configured spoken time format, and stop-without-the-wake-word state (stop_without_wake, stop_listening, stop_windows, stops_heard).",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -138,6 +138,11 @@
           ],
           "default": "12",
           "description": "Spoken time format: \"12\" reads times as 1:57 PM, \"24\" as 13:57. Applies to ChatGPT and OpenAI-compatible providers."
+         },
+         "stop_without_wake": {
+          "type": "boolean",
+          "default": false,
+          "description": "While a timer or alarm rings or a reply is playing, a bare \"stop\" (no wake word) ends it. Recognised on the device only; never used with a Wyoming speech server. Off by default."
          },
          "prompt": {
           "type": "string",

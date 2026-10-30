@@ -49,6 +49,11 @@
 #define DEFAULT_TTS_FIRST_PCM_FILE "/run/libreecho/tts-first-pcm"
 #define FOLLOW_UP_PLAYBACK_WAIT_MS 60000U
 #define FOLLOW_UP_MAX_DEPTH 2U
+/* How often the stop watcher re-reads whether something is ringing or a
+   reply is playing, and so whether a wake-free stop window should be open. */
+#define STOP_WATCH_INTERVAL_MS 300U
+/* How long a check that sttd is the on-device recogniser stays trusted. */
+#define STOP_ENGINE_RECHECK_MS 30000U
 
 enum auth_state {
     AUTH_SIGNED_OUT,
@@ -77,6 +82,13 @@ struct agent_config {
      * spoken-output settings because agentd is what says the time out loud.
      */
     char clock_format[4];
+    /*
+     * Stop without the wake word: while a timer or alarm rings or a reply is
+     * playing, a bare "stop" ends it. Off until the owner turns it on, because
+     * it transcribes room audio (on the device, discarded unless it is a stop)
+     * without the wake word having been said.
+     */
+    int stop_without_wake;
 };
 
 struct agent_state {
@@ -148,6 +160,17 @@ struct agent_state {
     char previous_voice_reply[1536];
     unsigned int follow_up_depth;
     int follow_up_armed;
+    /* Stop without the wake word. The capture thread posts a heard stop here
+       and the watcher thread acts on it, so no adapter call blocks capture. */
+    pthread_t stop_thread;
+    pthread_mutex_t stop_mutex;
+    pthread_cond_t stop_ready;
+    int stop_thread_started;
+    int stop_thread_exit;
+    int stop_pending;
+    char stop_text[128];
+    int stop_engine_on_device;
+    uint64_t stop_engine_checked_ms;
 };
 
 static volatile sig_atomic_t running = 1;
@@ -334,11 +357,13 @@ static int save_config(const struct agent_state *state)
         "\"home_location\":\"%s\","
         "\"latitude\":\"%s\",\"longitude\":\"%s\","
         "\"weather_provider\":\"%s\","
-        "\"clock_format\":\"%s\"}\n",
+        "\"clock_format\":\"%s\","
+        "\"stop_without_wake\":%s}\n",
         state->config.enabled ? "true" : "false", state->config.provider,
         model, prompt, location, state->config.latitude,
         state->config.longitude, state->config.weather_provider,
-        state->config.clock_format);
+        state->config.clock_format,
+        state->config.stop_without_wake ? "true" : "false");
     return length > 0 && length < (int)sizeof(json)
         ? config_write_atomic(state->config_path, json, (size_t)length)
         : -1;
@@ -356,6 +381,8 @@ static void load_config(struct agent_state *state)
                           sizeof(state->config.provider));
     if (json_get_bool(json, "enabled", &enabled) > 0)
         state->config.enabled = enabled;
+    if (json_get_bool(json, "stop_without_wake", &enabled) > 0)
+        state->config.stop_without_wake = enabled;
     (void)json_get_string(json, "model", state->config.model,
                           sizeof(state->config.model));
     (void)json_get_string(json, "prompt", state->config.prompt,
@@ -969,6 +996,8 @@ static int command_status(struct agent_state *state, int fd,
             "\"latitude\":\"%s\",\"longitude\":\"%s\","
             "\"weather_provider\":\"%s\","
             "\"clock_format\":\"%s\","
+            "\"stop_without_wake\":%s,\"stop_listening\":%s,"
+            "\"stop_windows\":%lu,\"stops_heard\":%lu,"
             "\"base_url\":\"%s\",\"api_key_configured\":%s,"
             "\"voice_pipeline\":true,\"text_streaming\":true,"
             "\"wake_connected\":%s,\"audio_connected\":%s,"
@@ -993,7 +1022,11 @@ static int command_status(struct agent_state *state, int fd,
             auth_state_name(state->auth_state), code, url, error,
             model, prompt, location, state->config.latitude,
             state->config.longitude, state->config.weather_provider,
-            state->config.clock_format, base_url,
+            state->config.clock_format,
+            state->config.stop_without_wake ? "true" : "false",
+            voice_metrics.stop_listening ? "true" : "false",
+            voice_metrics.stop_windows, voice_metrics.stops_heard,
+            base_url,
             state->credentials.api_key[0] ? "true" : "false",
             voice_metrics.wake_connected ? "true" : "false",
             voice_metrics.audio_connected ? "true" : "false",
@@ -1980,14 +2013,20 @@ static void voice_transcript(
                 turn->endpoint && turn->transcript_received_ms >= 500
                     ? turn->transcript_received_ms - 500 : 0,
                 reply, sizeof(reply),
-                error, sizeof(error)) < 0)
-            le_log_warn("agentd: voice response failed: %s", error);
-        else
+                error, sizeof(error)) < 0) {
+            /* A reply stopped while the model was still streaming fails to
+               queue its next sentence; that is the owner's stop, not a fault. */
+            if (le_voice_playback_cancelled(&state->playback))
+                generated = -1;
+            else
+                le_log_warn("agentd: voice response failed: %s", error);
+        } else {
             generated = 1;
+        }
         /* Metrics are final here: STT is done and the response has been
            generated and dispatched. Keep successful turns so the UI can show
            a history that survives a reboot. */
-        if (generated) {
+        if (generated > 0) {
         pthread_mutex_lock(&state->metrics_mutex);
         {
             struct turn_record record;
@@ -2019,7 +2058,10 @@ static void voice_transcript(
          * a response that could not be generated as assistant_failed.
          */
         pthread_mutex_lock(&state->metrics_mutex);
-        if (generated) {
+        if (generated < 0) {
+            record_voice_turn(state, LE_VOICE_TURN_CANCELLED, generation,
+                              text, "", stt_ms, 0, 0);
+        } else if (generated) {
             int status = state->turn_tts_failed
                 ? LE_VOICE_TURN_TTS_FAILED
                 : (le_voice_playback_cancelled(&state->playback)
@@ -2036,18 +2078,20 @@ static void voice_transcript(
                               text, "", stt_ms, 0, 0);
         }
         pthread_mutex_unlock(&state->metrics_mutex);
-        if (generated) {
+        if (generated > 0) {
             snprintf(state->previous_voice_user,
                      sizeof(state->previous_voice_user), "%.*s",
                      (int)sizeof(state->previous_voice_user) - 1, text);
             snprintf(state->previous_voice_reply,
                      sizeof(state->previous_voice_reply), "%.*s",
                      (int)sizeof(state->previous_voice_reply) - 1, reply);
+            /* A reply the owner stopped is not waiting for an answer. */
             if (response_asks_question(reply) &&
                 state->follow_up_depth < FOLLOW_UP_MAX_DEPTH &&
                 le_voice_playback_wait_idle(
                     &state->playback,
-                    FOLLOW_UP_PLAYBACK_WAIT_MS) == 0) {
+                    FOLLOW_UP_PLAYBACK_WAIT_MS) == 0 &&
+                !le_voice_playback_cancelled(&state->playback)) {
                 ++state->follow_up_depth;
                 state->follow_up_armed = 1;
                 if (le_voice_pipeline_request_follow_up(
@@ -2060,6 +2104,143 @@ static void voice_transcript(
         }
     }
     pthread_mutex_unlock(&state->control_mutex);
+}
+
+/* ---------------------- Stop without the wake word ---------------------- */
+
+/*
+ * Capture-thread callback for a stop window's final transcript. Only the
+ * conservative local stop phrases count; anything else was room audio and is
+ * dropped here without being logged, kept or sent anywhere.
+ */
+static int stop_window_heard(void *context, const char *text)
+{
+    struct agent_state *state = context;
+
+    if (!le_stop_intent_matches(text))
+        return 0;
+    pthread_mutex_lock(&state->stop_mutex);
+    snprintf(state->stop_text, sizeof(state->stop_text), "%s", text);
+    state->stop_pending = 1;
+    pthread_cond_signal(&state->stop_ready);
+    pthread_mutex_unlock(&state->stop_mutex);
+    return 1;
+}
+
+static int timer_ringing(struct agent_state *state, int *known)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int ringing = 0, remote = 0;
+
+    *known = 0;
+    if (adapter_call(state->timer_socket, 250, "status", "{}", response,
+                     sizeof(response)) != LE_ADAPTER_OK)
+        return 0;
+    *known = 1;
+    (void)json_get_int(response, "ringing", &ringing);
+    (void)json_get_int(response, "remote_ringing", &remote);
+    return ringing + remote > 0;
+}
+
+/*
+ * Stop windows only ever use the on-device recogniser. With a Wyoming
+ * endpoint configured sttd would forward every window to another machine,
+ * which is room audio leaving the device without the wake word: never.
+ */
+static int stop_engine_on_device(struct agent_state *state)
+{
+    char response[LE_ADAPTER_MSG_MAX], engine[48];
+    uint64_t now = monotonic_milliseconds();
+
+    if (state->stop_engine_checked_ms &&
+        now - state->stop_engine_checked_ms < STOP_ENGINE_RECHECK_MS)
+        return state->stop_engine_on_device;
+    state->stop_engine_checked_ms = now;
+    state->stop_engine_on_device =
+        adapter_call(state->stt_socket, 250, "status", NULL, response,
+                     sizeof(response)) == LE_ADAPTER_OK &&
+        json_get_string(response, "engine", engine, sizeof(engine)) == 1 &&
+        (!strcmp(engine, "sherpa-onnx-zipformer") || !strcmp(engine, "mock"));
+    return state->stop_engine_on_device;
+}
+
+/* "Stop" means: make the noise stop. Silence a ringing timer or alarm and
+   end a reply that is playing; leave music and pending timers alone, as the
+   wake-word stop does while something is ringing. */
+static void act_on_heard_stop(struct agent_state *state, const char *text)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    struct le_voice_turn_record record;
+    int known, rang, replying, dismissed = 0, silenced = 0;
+
+    rang = timer_ringing(state, &known);
+    if (rang && adapter_call(state->timer_socket, 1000, "dismiss", "{}",
+                             response, sizeof(response)) == LE_ADAPTER_OK)
+        dismissed = 1;
+    replying = le_voice_playback_pending(&state->playback);
+    if (replying) {
+        le_voice_playback_cancel(&state->playback);
+        silenced = adapter_call(state->audio_socket, 1000, "stop_speech",
+                                NULL, response, sizeof(response)) ==
+                   LE_ADAPTER_OK;
+    }
+    le_log_info("agentd: stop without wake word: timer=%s reply=%s",
+                rang ? (dismissed ? "dismissed" : "failed") : "none",
+                replying ? (silenced ? "stopped" : "failed") : "none");
+    if (!dismissed && !silenced)
+        return;
+    /* A stop that acted is a turn the owner should be able to see. It is
+       added without touching the in-flight turn's own history slot. */
+    memset(&record, 0, sizeof(record));
+    record.status = LE_VOICE_TURN_COMPLETED;
+    snprintf(record.transcript, sizeof(record.transcript), "%s", text);
+    pthread_mutex_lock(&state->metrics_mutex);
+    (void)le_voice_history_add(
+        &state->voice_history,
+        le_voice_history_generation(&state->voice_history), &record);
+    pthread_mutex_unlock(&state->metrics_mutex);
+}
+
+static void *stop_watch_worker(void *argument)
+{
+    struct agent_state *state = argument;
+    int listening = 0;
+
+    for (;;) {
+        struct timespec deadline;
+        char text[sizeof(state->stop_text)];
+        int pending, exiting, known, wanted = 0;
+
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_nsec += (long)STOP_WATCH_INTERVAL_MS * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            ++deadline.tv_sec;
+            deadline.tv_nsec -= 1000000000L;
+        }
+        pthread_mutex_lock(&state->stop_mutex);
+        if (!state->stop_pending && !state->stop_thread_exit)
+            (void)pthread_cond_timedwait(&state->stop_ready,
+                                         &state->stop_mutex, &deadline);
+        pending = state->stop_pending;
+        state->stop_pending = 0;
+        exiting = state->stop_thread_exit;
+        snprintf(text, sizeof(text), "%s", state->stop_text);
+        pthread_mutex_unlock(&state->stop_mutex);
+        if (exiting)
+            break;
+        if (pending)
+            act_on_heard_stop(state, text);
+        if (state->config.stop_without_wake &&
+            (le_voice_playback_pending(&state->playback) ||
+             timer_ringing(state, &known)))
+            wanted = stop_engine_on_device(state);
+        if (wanted != listening) {
+            le_voice_pipeline_set_stop_listen(state->voice_pipeline, wanted);
+            listening = wanted;
+        }
+    }
+    le_voice_pipeline_set_stop_listen(state->voice_pipeline, 0);
+    return NULL;
 }
 
 static int command_auth_start(struct agent_state *state, int fd,
@@ -2222,6 +2403,11 @@ static int command_configure(struct agent_state *state, const char *args,
         return respond(fd, id, 0, "clock_format must be 12 or 24");
     if (parsed > 0)
         strcpy(updated.clock_format, value);
+    parsed = json_get_bool(args, "stop_without_wake", &boolean);
+    if (parsed < 0)
+        return respond(fd, id, 0, "stop_without_wake must be a boolean");
+    if (parsed > 0)
+        updated.stop_without_wake = boolean;
     parsed = json_get_string(args, "base_url", value, sizeof(value));
     if (parsed < 0 || (parsed > 0 &&
         (!endpoint_valid(value) || strlen(value) >= sizeof(state->credentials.base_url))))
@@ -2522,6 +2708,24 @@ int main(int argc, char **argv)
         state.voice_pipeline, voice_outcome, &state);
     le_voice_pipeline_set_turn_begin_callback(
         state.voice_pipeline, voice_turn_begin, &state);
+    if (pthread_mutex_init(&state.stop_mutex, NULL) == 0) {
+        if (pthread_cond_init(&state.stop_ready, NULL) == 0) {
+            if (pthread_create(&state.stop_thread, NULL,
+                               stop_watch_worker, &state) == 0)
+                state.stop_thread_started = 1;
+            else
+                pthread_cond_destroy(&state.stop_ready);
+        }
+        if (!state.stop_thread_started)
+            pthread_mutex_destroy(&state.stop_mutex);
+    }
+    /* Without the watcher no stop window ever opens; the wake-word stop is
+       unaffected, so this degrades rather than failing the assistant. */
+    if (state.stop_thread_started)
+        le_voice_pipeline_set_stop_callback(
+            state.voice_pipeline, stop_window_heard, &state);
+    else
+        le_log_warn("agentd: stop without wake word unavailable");
     le_log_info("agentd: ready socket=%s provider=%s",
                 state.socket_path, state.provider->id);
     while (running) {
@@ -2602,6 +2806,15 @@ int main(int argc, char **argv)
             pthread_join(client_threads[i], NULL);
     sem_destroy(&client_slots);
     pthread_mutex_destroy(&client_mutex);
+    if (state.stop_thread_started) {
+        pthread_mutex_lock(&state.stop_mutex);
+        state.stop_thread_exit = 1;
+        pthread_cond_signal(&state.stop_ready);
+        pthread_mutex_unlock(&state.stop_mutex);
+        pthread_join(state.stop_thread, NULL);
+        pthread_cond_destroy(&state.stop_ready);
+        pthread_mutex_destroy(&state.stop_mutex);
+    }
     le_voice_pipeline_stop(state.voice_pipeline);
     le_voice_playback_stop(&state.playback);
     le_llm_credentials_clear(&state.credentials);
