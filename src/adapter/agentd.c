@@ -52,8 +52,13 @@
 /* How often the stop watcher re-reads whether something is ringing or a
    reply is playing, and so whether a wake-free stop window should be open. */
 #define STOP_WATCH_INTERVAL_MS 300U
-/* How long a check that sttd is the on-device recogniser stays trusted. */
+/* How long a check that sttd is the on-device recogniser stays trusted, and
+   how soon a failed check (sttd busy with a turn, or absent) is retried. */
 #define STOP_ENGINE_RECHECK_MS 30000U
+#define STOP_ENGINE_RETRY_MS 3000U
+/* timerd answers status between ring cues, and a cue waits up to a second
+   for audiod, so a shorter timeout misses a ringing timer entirely. */
+#define STOP_TIMER_STATUS_TIMEOUT_MS 1500
 
 enum auth_state {
     AUTH_SIGNED_OUT,
@@ -2133,7 +2138,8 @@ static int timer_ringing(struct agent_state *state, int *known)
     int ringing = 0, remote = 0;
 
     *known = 0;
-    if (adapter_call(state->timer_socket, 250, "status", "{}", response,
+    if (adapter_call(state->timer_socket, STOP_TIMER_STATUS_TIMEOUT_MS,
+                     "status", "{}", response,
                      sizeof(response)) != LE_ADAPTER_OK)
         return 0;
     *known = 1;
@@ -2147,17 +2153,25 @@ static int timer_ringing(struct agent_state *state, int *known)
  * endpoint configured sttd would forward every window to another machine,
  * which is room audio leaving the device without the wake word: never.
  */
-static int stop_engine_on_device(struct agent_state *state)
+static int stop_engine_on_device(struct agent_state *state, int listening)
 {
     char response[LE_ADAPTER_MSG_MAX], engine[48];
     uint64_t now = monotonic_milliseconds();
 
+    /* sttd serves one client at a time: while a stop window is open it is
+       busy with that window and cannot answer, so keep the verdict that
+       opened it. A positive check is trusted for a while; a failed one (sttd
+       busy with a wake turn, or not running) is retried soon. */
+    if (listening)
+        return state->stop_engine_on_device;
     if (state->stop_engine_checked_ms &&
-        now - state->stop_engine_checked_ms < STOP_ENGINE_RECHECK_MS)
+        now - state->stop_engine_checked_ms <
+            (state->stop_engine_on_device ? STOP_ENGINE_RECHECK_MS
+                                          : STOP_ENGINE_RETRY_MS))
         return state->stop_engine_on_device;
     state->stop_engine_checked_ms = now;
     state->stop_engine_on_device =
-        adapter_call(state->stt_socket, 250, "status", NULL, response,
+        adapter_call(state->stt_socket, 1000, "status", NULL, response,
                      sizeof(response)) == LE_ADAPTER_OK &&
         json_get_string(response, "engine", engine, sizeof(engine)) == 1 &&
         (!strcmp(engine, "sherpa-onnx-zipformer") || !strcmp(engine, "mock"));
@@ -2233,7 +2247,7 @@ static void *stop_watch_worker(void *argument)
         if (state->config.stop_without_wake &&
             (le_voice_playback_pending(&state->playback) ||
              timer_ringing(state, &known)))
-            wanted = stop_engine_on_device(state);
+            wanted = stop_engine_on_device(state, listening);
         if (wanted != listening) {
             le_voice_pipeline_set_stop_listen(state->voice_pipeline, wanted);
             listening = wanted;
