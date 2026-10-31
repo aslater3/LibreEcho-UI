@@ -337,7 +337,7 @@ int main(void)
     CHECK(seen.turn_begins == 0);
 
     /* With no grace at all, a word cut off by the limit is still heard: the
-       next window starts with the second of audio before it. */
+       next window starts with the audio just before it. */
     setenv("LE_VOICE_STOP_WINDOW_MS", "150", 1);
     setenv("LE_VOICE_STOP_GRACE_MS", "0", 1);
     CHECK(scenario("overlap", "stop", 1, 1, -1, &seen, &metrics) == 0);

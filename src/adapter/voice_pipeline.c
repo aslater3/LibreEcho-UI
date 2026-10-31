@@ -20,7 +20,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PCM_RING_SAMPLES (16000U * 2U)
+/* Three seconds: room for a stop window's replay (below) as well as the
+   wake word's own lead-in. */
+#define PCM_RING_SAMPLES (16000U * 3U)
 #define TRANSCRIPT_MAX 4096U
 /*
  * Bounded recognition deadline. sttd itself endpoints at 20 seconds of audio;
@@ -48,9 +50,12 @@
  * lost either: a window closed by its time limit is followed by one that
  * replays this much of the audio before it, so the whole word is in the next
  * window. Only windows that heard nothing usable are followed this way, so
- * nothing is ever acted on twice.
+ * nothing is ever acted on twice. 2.5 s, because the recogniser's first
+ * partial comes up to a second after the word starts, and the streaming
+ * Zipformer needs about 0.7 s of audio before a word to decode it (a stream
+ * that starts closer than that turns "Alexa, stop" into "P").
  */
-#define STOP_WINDOW_OVERLAP_SAMPLES 16000U
+#define STOP_WINDOW_OVERLAP_SAMPLES (16000U * 5U / 2U)
 #define STOP_COOLDOWN_MS 1500U
 #define STOP_RETRY_MS 1000U
 
