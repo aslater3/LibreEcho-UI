@@ -767,11 +767,13 @@ static int timezone_source_valid(const char *source)
  * web-config.json, so the file is the authority: pick it up before the
  * value is shown or written back, never overwrite it with a stale copy.
  */
+/* Set while a PUT that names a zone is being saved: that zone, not the file's, is the one to write. */
+static int timezone_put_pinned;
 static void timezone_sync_from_file(struct api_context *c)
 {
     char saved[16384], tz[64], name[64];
 
-    if (strcmp(c->timezone_source, "home_assistant") || !c->config_path[0] ||
+    if (timezone_put_pinned || strcmp(c->timezone_source, "home_assistant") || !c->config_path[0] ||
         config_read(c->config_path, saved, sizeof(saved)) <= 0)
         return;
     if (json_get_string(saved, "timezone", tz, sizeof(tz)) == 1 && timezone_valid(tz))
@@ -809,6 +811,7 @@ static int timezone_put(struct api_context *c, const char *body, struct api_resp
     if (tz_field > 0) {
         strcpy(c->timezone, tz);
         strcpy(c->timezone_name, name);
+        timezone_put_pinned = 1; /* cleared by the caller once saved */
     } else if (name_field > 0) {
         strcpy(c->timezone_name, name);
     }
@@ -2508,7 +2511,7 @@ if(!strcmp(p,"/api/v1/audio/test")&&!strcmp(q->method,"POST")){rc=le_play_test_t
   rc=le_set_led_sleep(c->backend,&sr);
   if(rc){err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,"Sleep light could not be applied");return;}
   api_log(c,"info","Sleep light updated");led_json(c,r);return;}
- if(!strcmp(p,"/api/v1/system/timezone")){if(!strcmp(q->method,"PUT")){if(timezone_put(c,q->body,r))return;rc=persist_configuration(c);if(rc){err(r,503,rc,"Timezone could not be saved");return;}api_log(c,"info","Timezone updated");out(r,200,"{\"ok\":true,\"data\":{\"timezone\":\"%s\",\"name\":\"%s\",\"source\":\"%s\",\"applies\":\"now\"},\"error\":null}",c->timezone,c->timezone_name,c->timezone_source);return;}if(!strcmp(q->method,"GET")){timezone_sync_from_file(c);out(r,200,"{\"ok\":true,\"data\":{\"timezone\":\"%s\",\"name\":\"%s\",\"source\":\"%s\"},\"error\":null}",c->timezone,c->timezone_name,c->timezone_source);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/system/timezone")){if(!strcmp(q->method,"PUT")){if(timezone_put(c,q->body,r))return;rc=persist_configuration(c);timezone_put_pinned=0;if(rc){err(r,503,rc,"Timezone could not be saved");return;}api_log(c,"info","Timezone updated");out(r,200,"{\"ok\":true,\"data\":{\"timezone\":\"%s\",\"name\":\"%s\",\"source\":\"%s\",\"applies\":\"now\"},\"error\":null}",c->timezone,c->timezone_name,c->timezone_source);return;}if(!strcmp(q->method,"GET")){timezone_sync_from_file(c);out(r,200,"{\"ok\":true,\"data\":{\"timezone\":\"%s\",\"name\":\"%s\",\"source\":\"%s\"},\"error\":null}",c->timezone,c->timezone_name,c->timezone_source);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/led/night")){if(!strcmp(q->method,"PUT")){int en,st,e2;if(json_get_bool(q->body,"enabled",&en)<1||json_get_int(q->body,"start_minute",&st)<1||json_get_int(q->body,"end_minute",&e2)<1||st<0||st>1439||e2<0||e2>1439){err(r,400,LE_INVALID,"Night mode needs enabled, start_minute and end_minute (0-1439)");return;}rc=le_set_led_night(c->backend,en,st,e2);if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,"Night mode could not be applied");return;}api_log(c,"info","Night mode updated");led_json(c,r);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/led/profile")&&!strcmp(q->method,"PUT")){char name[24];struct le_led_profile profile;memset(&profile,0,sizeof(profile));if(json_get_string(q->body,"name",name,sizeof(name))<1||json_get_int(q->body,"r",&v)<1||v<0||v>255){err(r,400,LE_INVALID,"A valid LED profile and colour are required");return;}profile.r=(uint8_t)v;if(json_get_int(q->body,"g",&v)<1||v<0||v>255){err(r,400,LE_INVALID,"LED colour is invalid");return;}profile.g=(uint8_t)v;if(json_get_int(q->body,"b",&v)<1||v<0||v>255){err(r,400,LE_INVALID,"LED colour is invalid");return;}profile.b=(uint8_t)v;profile.brightness=100;if(json_get_int(q->body,"brightness",&v)>0){if(v<0||v>100){err(r,400,LE_INVALID,"LED brightness is invalid");return;}profile.brightness=v;}rc=le_set_led_profile(c->backend,name,&profile);if(rc){err(r,rc==LE_INVALID?400:501,rc,"LED profile could not be saved");return;}event_bus_publish(&c->events,"led","{\"changed\":true}");led_json(c,r);return;}
  if(!strcmp(p,"/api/v1/network")){if(!strcmp(q->method,"GET")){net_json(c,r);return;}if(!strcmp(q->method,"PUT")){char host[64];int changed=0;{char m[64],canon[24];int k;for(k=0;k<2;k++){const char*key=k?"bt_mac":"wifi_mac";int result=json_get_string(q->body,key,m,sizeof(m));if(result<0){err(r,400,LE_INVALID,"MAC override must be a string no longer than 63 bytes");return;}if(result>0&&m[0]&&!mac_override_valid(m,canon,sizeof(canon))){err(r,400,LE_INVALID,"MAC address must be six hex octets and must not be multicast");return;}}}if(json_get_string(q->body,"hostname",host,sizeof(host))>0){rc=le_set_hostname(c->backend,host);changed=1;if(rc){err(r,rc==LE_INVALID?400:501,rc,"Hostname could not be applied");return;}}if(json_get_bool(q->body,"ssh",&v)>0){c->net_ssh=v;changed=1;}if(json_get_bool(q->body,"api_lan",&v)>0){c->net_api_lan=v;changed=1;}{char m[64],canon[24];int k;for(k=0;k<2;k++){const char*key=k?"bt_mac":"wifi_mac";char*dst=k?c->mac_bt:c->mac_wifi;size_t cap=k?sizeof(c->mac_bt):sizeof(c->mac_wifi);int result=json_get_string(q->body,key,m,sizeof(m));if(result<0){err(r,400,LE_INVALID,"MAC override must be a string no longer than 63 bytes");return;}if(result==0)continue;if(!m[0]){dst[0]=0;changed=1;continue;}if(!mac_override_valid(m,canon,sizeof(canon))){err(r,400,LE_INVALID,"MAC address must be six hex octets and must not be multicast");return;}snprintf(dst,cap,"%s",canon);changed=1;}}if(!changed){err(r,400,LE_INVALID,"No supported network setting was supplied");return;}if(persist_configuration(c)){err(r,503,LE_IO,"Network settings could not be saved");return;}net_json(c,r);return;}}if(!strcmp(p,"/api/v1/network/wifi/scan")&&!strcmp(q->method,"GET")){struct le_wifi_scan s;rc=le_scan_wifi(c->backend,&s);if(rc){err(r,501,rc,"Wi-Fi scan failed");return;}if(wifi_scan_json(r,&s)<0){err(r,503,LE_IO,"Wi-Fi scan response is too large");return;}return;}

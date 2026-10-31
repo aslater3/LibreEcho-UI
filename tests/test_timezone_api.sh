@@ -51,6 +51,11 @@ code=$(curl -sS -o /tmp/le-tz.out -w '%{http_code}' -X PUT "$URL/api/v1/system/f
 [ "$code" = 200 ]
 jq -e '.timezone == "MST7MDT,M3.2.0,M11.1.0" and .timezone_source == "home_assistant"' "$CFG" >/dev/null
 
+# An interim zone sent while following Home Assistant is the one saved, not the file's older copy.
+[ "$(put '{"timezone":"CET-1CEST,M3.5.0,M10.5.0/3","name":"Europe/Paris","source":"home_assistant"}')" = 200 ]
+jq -e '.data.timezone == "CET-1CEST,M3.5.0,M10.5.0/3" and .data.name == "Europe/Paris" and .data.source == "home_assistant"' /tmp/le-tz.out >/dev/null
+jq -e '.timezone == "CET-1CEST,M3.5.0,M10.5.0/3" and .timezone_name == "Europe/Paris" and .timezone_source == "home_assistant"' "$CFG" >/dev/null
+
 # Back to manual: the file no longer wins, the chosen zone does.
 [ "$(put '{"timezone":"UTC","source":"manual"}')" = 200 ]
 jq '.timezone = "JST-9"' "$CFG" >"$tmp" && mv "$tmp" "$CFG"
