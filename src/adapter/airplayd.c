@@ -39,6 +39,10 @@
 #define INPUT_MAX LE_ADAPTER_MSG_MAX
 #define AIRPLAY_METADATA_FIFO "/run/libreecho-audio/airplay.metadata"
 #define LE_MDNS_BUS_SOCKET "/usr/local/lib/libreecho-mdns/root/run/dbus/system_bus_socket"
+#ifndef LE_MDNS_AVAHI_PIDFILE
+#define LE_MDNS_AVAHI_PIDFILE "/usr/local/lib/libreecho-mdns/root/run/avahi-daemon/pid"
+#endif
+#define AIRPLAY_SANDBOX_BUS_SOCKET "/run/dbus/system_bus_socket"
 #define AIRPLAY_METADATA_ITEM_MAX 8192
 #define AIRPLAY_METADATA_FIELD_MAX 192
 #define AIRPLAY_METADATA_AP2_PLIST_MAX 16384
@@ -49,6 +53,15 @@
 struct airplay_metadata_parser {
     char item[AIRPLAY_METADATA_ITEM_MAX + 1];
     size_t used;
+};
+
+/* Which shared D-Bus/Avahi instance is live: the bus socket inode and the
+ * Avahi daemon's pid. libreecho-mdnsd respawns either one when it dies, and a
+ * watchdog restart replaces both. */
+struct airplay_mdns_generation {
+    dev_t bus_dev;
+    ino_t bus_ino;
+    long avahi_pid;
 };
 
 struct airplay_ctx {
@@ -91,6 +104,10 @@ struct airplay_ctx {
     char artist[AIRPLAY_METADATA_FIELD_MAX + 1];
     char album[AIRPLAY_METADATA_FIELD_MAX + 1];
     struct airplay_metadata_parser metadata_parser;
+    /* The shared responder Shairport Sync registered with (see
+     * airplay_mdns_poll). */
+    struct airplay_mdns_generation shairport_mdns;
+    int shairport_mdns_deferred;
 };
 
 static volatile sig_atomic_t running = 1;
@@ -112,15 +129,15 @@ static volatile sig_atomic_t running = 1;
 #define SENDSPIN_STATE_FILE "/data/libreecho/config/sendspin-state"
 #endif
 
-/* The AirPlay sandbox reaches ledd through a bind mount of the single socket
- * file (see libreecho-airplayd.init). A bind mount pins the inode, so when
+/* The AirPlay sandbox reaches ledd, and the shared D-Bus, through a bind
+ * mount of the single socket file (see libreecho-airplayd.init). A bind mount pins the inode, so when
  * ledd restarts and creates a new socket the sandbox keeps the deleted one
  * and visualiser frames are silently dropped. Re-point the bind whenever the
  * bridged inode is no longer the live socket.
  *
  * Returns 1 when the bind was (re)created, 0 when nothing needed doing
  * (current, ledd not up, or sandbox /run not prepared yet), -1 on failure. */
-static int airplay_led_bridge_refresh(const char *source, const char *target)
+static int airplay_socket_bridge_refresh(const char *source, const char *target)
 {
     struct stat live, bridged, parent;
     char directory[256];
@@ -173,7 +190,7 @@ static void airplay_led_bridge_poll(const struct airplay_ctx *ctx)
     if (snprintf(target, sizeof(target), "%s%s", ctx->runtime_root,
                  LE_ADAPTER_LED_SOCK) >= (int)sizeof(target))
         return;
-    result = airplay_led_bridge_refresh(LE_ADAPTER_LED_SOCK, target);
+    result = airplay_socket_bridge_refresh(LE_ADAPTER_LED_SOCK, target);
     if (result > 0) {
         le_log_info("airplayd: LED socket bridge re-attached to the live ledd socket");
         last_failed = 0;
@@ -183,6 +200,46 @@ static void airplay_led_bridge_poll(const struct airplay_ctx *ctx)
     } else if (result == 0) {
         last_failed = 0;
     }
+}
+
+static void airplay_mdns_generation_read(const char *bus_socket,
+                                         const char *avahi_pidfile,
+                                         struct airplay_mdns_generation *out)
+{
+    struct stat bus;
+    FILE *pidfile;
+    long pid = 0;
+
+    memset(out, 0, sizeof(*out));
+    if (stat(bus_socket, &bus) == 0 && S_ISSOCK(bus.st_mode)) {
+        out->bus_dev = bus.st_dev;
+        out->bus_ino = bus.st_ino;
+    }
+    pidfile = fopen(avahi_pidfile, "r");
+    if (pidfile) {
+        if (fscanf(pidfile, "%ld", &pid) == 1 && pid > 0)
+            out->avahi_pid = pid;
+        fclose(pidfile);
+    }
+}
+
+/* Shairport Sync holds one Avahi client on the bus it started with. When
+ * libreecho-mdnsd replaces the bus or Avahi it tries once to make a new
+ * client, usually before the new daemon is up, and then never advertises
+ * again: AirPlay plays for a connected sender but no picker lists the
+ * speaker. Restart only Shairport Sync, once the responder is running again
+ * and no stream is playing. Returns 1 when a restart is due now. */
+static int airplay_mdns_restart_due(const struct airplay_mdns_generation *registered,
+                                    const struct airplay_mdns_generation *live,
+                                    int responder_running, int playing)
+{
+    if (!responder_running || !live->bus_ino || !live->avahi_pid)
+        return 0;
+    if (registered->bus_dev == live->bus_dev &&
+        registered->bus_ino == live->bus_ino &&
+        registered->avahi_pid == live->avahi_pid)
+        return 0;
+    return !playing;
 }
 
 static void on_signal(int signo)
@@ -1560,6 +1617,9 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
     metadata_reset(ctx);
     if (metadata_fifo_open(ctx) < 0)
         goto fail;
+    airplay_mdns_generation_read(LE_MDNS_BUS_SOCKET, LE_MDNS_AVAHI_PIDFILE,
+                                 &ctx->shairport_mdns);
+    ctx->shairport_mdns_deferred = 0;
     ctx->shairport_pid = spawn_shairport(ctx);
     if (ctx->shairport_pid < 0)
         goto fail;
@@ -1582,10 +1642,52 @@ fail:
     return -1;
 }
 
+static void airplay_mdns_poll(struct airplay_ctx *ctx)
+{
+    static uint64_t last_check_ms;
+    char target[256];
+    struct airplay_mdns_generation live;
+    uint64_t now = airplay_monotonic_ms();
+    int result, responder;
+
+    if (last_check_ms && now - last_check_ms < AIRPLAY_LED_BRIDGE_CHECK_MS)
+        return;
+    last_check_ms = now;
+    if (!ctx->enabled || ctx->shairport_pid <= 0)
+        return;
+    if (snprintf(target, sizeof(target), "%s%s", ctx->runtime_root,
+                 AIRPLAY_SANDBOX_BUS_SOCKET) >= (int)sizeof(target))
+        return;
+    result = airplay_socket_bridge_refresh(LE_MDNS_BUS_SOCKET, target);
+    if (result > 0)
+        le_log_info("airplayd: D-Bus socket bridge re-attached to the live shared bus");
+    else if (result < 0)
+        le_log_warn("airplayd: D-Bus socket bridge re-attach failed: %s", strerror(errno));
+    airplay_mdns_generation_read(LE_MDNS_BUS_SOCKET, LE_MDNS_AVAHI_PIDFILE, &live);
+    responder = le_mdns_status(ctx->mdns_socket) == 1;
+    if (!airplay_mdns_restart_due(&ctx->shairport_mdns, &live, responder,
+                                  ctx->playing)) {
+        if (responder && ctx->playing && !ctx->shairport_mdns_deferred &&
+            memcmp(&ctx->shairport_mdns, &live, sizeof(live)) != 0) {
+            le_log_info("airplayd: shared mDNS responder restarted; re-registering after playback");
+            ctx->shairport_mdns_deferred = 1;
+        }
+        return;
+    }
+    stop_child(&ctx->shairport_pid);
+    ctx->shairport_pid = spawn_shairport(ctx);
+    ctx->shairport_mdns = live;
+    ctx->shairport_mdns_deferred = 0;
+    if (ctx->shairport_pid < 0)
+        le_log_warn("airplayd: Shairport Sync restart after an mDNS restart failed");
+    else
+        le_log_info("airplayd: Shairport Sync restarted to re-register with the restarted mDNS responder");
+}
+
 /* A host name change is republished by the shared supervisor, which renders
  * its records from the current host name. This controller no longer owns that
  * stack, so a refresh only reports whether the external dependency is
- * available; libreecho-web asks the supervisor's init script to restart it. */
+ * available. */
 static int refresh_hostname(struct airplay_ctx *ctx)
 {
     if (!ctx->enabled)
@@ -1826,6 +1928,7 @@ int main(int argc, char **argv)
             (void)metadata_fifo_open(&ctx);
         airplay_master_poll(&ctx);
         airplay_led_bridge_poll(&ctx);
+        airplay_mdns_poll(&ctx);
         sendspin_poll(&ctx);
         pfd[0].fd = ctx.listener;
         pfd[0].events = POLLIN;
