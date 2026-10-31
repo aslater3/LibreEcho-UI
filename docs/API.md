@@ -1334,6 +1334,15 @@ the same on every device paired with that key and does not reveal the key.
 A paired device answers 409 to `create` and `join` until it is unpaired.
 Unknown fields and bad codes answer 400.
 
+The pairing endpoints follow the API's normal authentication. On a device
+with no web login and LAN API access on, anyone on the network can call
+`show` and read the house key, and with it pose as any paired device. Set up
+a login on every paired device.
+
+The trust label belongs to the device's address and port (the one the list
+opens), not to the advertised name: the device list still shows the name,
+room and version from discovery.
+
 **DELETE /api/v1/network/pairing** unpairs this device and removes the key.
 
 **GET /api/v1/peer/proof?nonce=&lt;32 lowercase hex&gt;** is the one
