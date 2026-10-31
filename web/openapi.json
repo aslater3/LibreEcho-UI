@@ -4026,6 +4026,10 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1024
+         },
+         "noise_suppression": {
+          "type": "boolean",
+          "description": "Run the on-device noise suppressor on the speech sent to the assistant (Home Assistant or the local pipeline). Off by default; restarts the voice pipeline like the other listening fields."
          }
         }
        }
@@ -4691,7 +4695,8 @@
     "required": [
      "max_utterance_ms",
      "end_silence_ms",
-     "vad_floor_rms"
+     "vad_floor_rms",
+     "noise_suppression"
     ],
     "properties": {
      "max_utterance_ms": {
@@ -4708,6 +4713,10 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 1024
+     },
+     "noise_suppression": {
+      "type": "boolean",
+      "description": "Steady-noise suppression on the speech sent to the assistant; false unless turned on."
      }
     }
    },

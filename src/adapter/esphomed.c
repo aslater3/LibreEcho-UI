@@ -8,6 +8,7 @@
 #include "esphome_noise.h"
 #include "esphome_playback.h"
 #include "mdns_client.h"
+#include "voice_ns.h"
 #include "../config_store.h"
 #include "../json.h"
 #include "../esphome_health.h"
@@ -47,6 +48,8 @@ struct state {
  char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake;
  uint64_t now,turn_deadline,turn_limit,last_audio_status,last_status_poll,wake_retry,mdns_retry,ring_first,ring_end,capture_next,timer_retry;
  int16_t ring[RING_SAMPLES];unsigned char mic_rx[24+2560];size_t mic_n;int mic_ack;
+ /* Optional noise suppression on the speech sent to Home Assistant (#401), off unless web-config says voice_noise_suppression. It runs on every frame so the noise estimate is settled when a turn starts. */
+ int noise_suppression;struct le_voice_ns ns;
  char conversation[128],tts_url[1024],next_url[1024],result[24];int continue_turn,run_end,early_tts,playing,announcement,pipeline,tts_done,timer_pending;
  time_t result_time;struct esp_playback playback;int mdns_fd;
  char process_start[32],boot_id[64],listener_inode[32];unsigned listener_port;
@@ -226,10 +229,10 @@ static void client_tick(unsigned idx,short events){struct client *c=&S.clients[i
 }
 static uint32_t le32(const unsigned char *p){return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);}
 static void ring_frame(const unsigned char *p){uint64_t first=le32(p+8)|((uint64_t)le32(p+12)<<32);unsigned count=le32(p+16);if(first>UINT64_MAX-count){cancel_turn("stream_error");return;}
- if(S.ring_end&&first!=S.ring_end){S.ring_first=S.ring_end=first;if(S.turn==2)cancel_turn("stream_gap");}
- if(!S.ring_end)S.ring_first=first;for(unsigned i=0;i<count;i++){unsigned char const *a=p+24+2*i;S.ring[(first+i)%RING_SAMPLES]=(int16_t)((unsigned)a[0]|((unsigned)a[1]<<8));}S.ring_end=first+count;if(S.ring_end-S.ring_first>RING_SAMPLES)S.ring_first=S.ring_end-RING_SAMPLES;
+ if(S.ring_end&&first!=S.ring_end){S.ring_first=S.ring_end=first;le_voice_ns_reset(&S.ns);if(S.turn==2)cancel_turn("stream_gap");}
+ if(!S.ring_end)S.ring_first=first;{int16_t pcm[1280];for(unsigned i=0;i<count;i++){unsigned char const *a=p+24+2*i;pcm[i]=(int16_t)((unsigned)a[0]|((unsigned)a[1]<<8));}if(S.noise_suppression)le_voice_ns_process(&S.ns,pcm,count);for(unsigned i=0;i<count;i++)S.ring[(first+i)%RING_SAMPLES]=pcm[i];}S.ring_end=first+count;if(S.ring_end-S.ring_first>RING_SAMPLES)S.ring_first=S.ring_end-RING_SAMPLES;
 }
-static void stream_loss(struct io *j){io_close(j);if(j==&S.mic){S.mic_ack=0;S.mic_n=0;S.ring_first=S.ring_end=0;}if(S.turn==1||S.turn==2)cancel_turn("stream_error");S.wake_retry=S.now+1000;}
+static void stream_loss(struct io *j){io_close(j);if(j==&S.mic){S.mic_ack=0;S.mic_n=0;S.ring_first=S.ring_end=0;le_voice_ns_reset(&S.ns);}if(S.turn==1||S.turn==2)cancel_turn("stream_error");S.wake_retry=S.now+1000;}
 static void stream_tick(struct io *j,int audio){if(j->fd<0)return;
  if(j->stage<3){int rc=io_tick(j);if(rc<0){stream_loss(j);return;}if(!rc)return;char *end=memchr(j->rx,'\n',j->rx_n);*end=0;int ok=0;if(json_get_bool(j->rx,"ok",&ok)<=0||!ok){stream_loss(j);return;}
  if(audio){char format[32];int rate,channels,header,indexed;if(json_get_string(j->rx,"format",format,sizeof format)<=0||strcmp(format,"pcm_s16_le")||json_get_int(j->rx,"sample_rate",&rate)<=0||rate!=16000||json_get_int(j->rx,"channels",&channels)<=0||channels!=1||json_get_int(j->rx,"frame_header_bytes",&header)<=0||header!=24||json_get_bool(j->rx,"sample_indexed",&indexed)<=0||!indexed){stream_loss(j);return;}}
@@ -274,6 +277,7 @@ static int load_configuration(void){char b[16384],key[45],mac[64],name[64],wake[
  S.provisioned=!!key[0];memset(S.psk,0,32);if(S.provisioned&&(mbedtls_base64_decode(S.psk,32,&z,(unsigned char*)key,44)||z!=32)){mbedtls_platform_zeroize(key,sizeof key);return -1;}mbedtls_platform_zeroize(key,sizeof key);mbedtls_platform_zeroize(&cfg,sizeof cfg);
  if(!S.name[0]){if(json_get_string(b,"hostname",name,sizeof name)<=0)snprintf(name,sizeof name,"libreecho");if(strlen(name)>31||!name[0])return -1;for(size_t i=0;name[i];i++)if(!(isalnum((unsigned char)name[i])||name[i]=='-'))return -1;snprintf(S.name,sizeof S.name,"%.31s",name);}
  if(!S.friendly[0])snprintf(S.friendly,sizeof S.friendly,"%s",S.name);
+ {int on=0,was=S.noise_suppression;S.noise_suppression=json_get_top_level_bool(b,(size_t)n,"voice_noise_suppression",&on)==1&&on;if(S.noise_suppression&&!was)le_voice_ns_reset(&S.ns);if(S.noise_suppression!=was)fprintf(stderr,"esphomed: noise suppression %s\n",S.noise_suppression?"on":"off");}
  {char room[64];S.room[0]=0;if(json_get_string(b,"room",room,sizeof room)==1&&strlen(room)<=48){size_t i;for(i=0;room[i]&&(unsigned char)room[i]>=0x20&&room[i]!=0x7f&&room[i]!='"'&&room[i]!='\\';i++){}if(!room[i]&&i<sizeof S.room)memcpy(S.room,room,i+1);}}
  if(!S.mac[0]){if(json_get_string(b,"wifi_mac",mac,sizeof mac)>0&&mac[0]){if(normalize_mac(mac,S.mac))return -1;}else{static const char *fields[]={"mac_addr","macaddr","wifi_mac","wifi_mac_addr","mac"};int found=0;for(unsigned i=0;i<5;i++){char path[512];if(snprintf(path,sizeof path,"%s/%s/value",S.idme_path,fields[i])>=(int)sizeof path)return -1;if(config_read(path,mac,sizeof mac)>0&&!normalize_mac(mac,S.mac)){found=1;break;}}if(!found)return -1;}}
  return 0;
@@ -293,6 +297,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  else if(!strcmp(argv[i],"--audio-socket"))S.audio_path=v;else if(!strcmp(argv[i],"--wake-socket"))S.wake_path=v;else if(!strcmp(argv[i],"--radio-socket"))S.radio_path=v;else if(!strcmp(argv[i],"--timer-socket"))S.timer_path=v;else if(!strcmp(argv[i],"--led-socket"))S.led_path=v;else if(!strcmp(argv[i],"--mdns-socket"))S.mdns_path=v;else if(!strcmp(argv[i],"--audio-bus"))S.bus_path=v;else if(!strcmp(argv[i],"--privacy-state"))S.privacy_path=v;else if(!strcmp(argv[i],"--tls-ca"))S.ca_path=v;else if(!strcmp(argv[i],"--idme-root"))S.idme_path=v;
  else if(!strcmp(argv[i],"--name")){if(strlen(v)>=sizeof S.name)return 2;snprintf(S.name,sizeof S.name,"%s",v);}else if(!strcmp(argv[i],"--mac")){if(normalize_mac(v,S.mac))return 2;}
  else if(!strcmp(argv[i],"--turn-timeout-ms")){char *end;unsigned long p=strtoul(v,&end,10);if(*end||p<100||p>120000)return 2;S.turn_limit=p;}else return 2;i++;}
+ if(le_voice_ns_init(&S.ns,LE_VOICE_NS_DEFAULT_ATTENUATION_DB))return 1;
  if(load_configuration()){fprintf(stderr,"esphomed: invalid config or missing stable MAC\n");return 1;}
  /* Explicit diagnostics never overrides a provisioned key. */
  memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_port=htons((uint16_t)port);if(inet_pton(AF_INET,bind_addr,&a.sin_addr)!=1)return 2;

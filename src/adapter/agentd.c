@@ -1615,6 +1615,26 @@ static void read_room(const struct agent_state *state, char *room, size_t size)
         }
 }
 
+/*
+ * Noise suppression on the speech sent to recognition (#401), set from the
+ * web API as voice_noise_suppression. Read once at start: the API restarts
+ * agentd whenever it changes a voice pipeline setting. Off unless true.
+ */
+static int read_noise_suppression(const struct agent_state *state)
+{
+    char json[16384];
+    int length, enabled = 0;
+
+    if (!state->web_config_path[0])
+        return 0;
+    length = config_read(state->web_config_path, json, sizeof(json));
+    if (length <= 0 ||
+        json_get_top_level_bool(json, (size_t)length,
+                                "voice_noise_suppression", &enabled) != 1)
+        return 0;
+    return enabled ? 1 : 0;
+}
+
 static void build_turn_prompt(struct agent_state *state, char *out,
                               size_t size)
 {
@@ -2522,6 +2542,10 @@ int main(int argc, char **argv)
         state.voice_pipeline, voice_outcome, &state);
     le_voice_pipeline_set_turn_begin_callback(
         state.voice_pipeline, voice_turn_begin, &state);
+    if (read_noise_suppression(&state)) {
+        le_voice_pipeline_set_noise_suppression(state.voice_pipeline, 1);
+        le_log_info("agentd: noise suppression on");
+    }
     le_log_info("agentd: ready socket=%s provider=%s",
                 state.socket_path, state.provider->id);
     while (running) {
