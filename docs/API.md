@@ -2109,17 +2109,38 @@ the action-button ring flash.
 Update any supported button setting. The request is persisted after every
 successful update. `tones` controls the short rising/falling press cues;
 `action` controls the separate action-button behavior, and `action_brightness`
-and `mute_brightness` are LED-ring brightness values from 0 to 100. The
-wired actions are `sound` and `noise`; `listen`, `playpause`, and `disabled` are
-accepted settings with the corresponding behavior reported by the daemon.
-`noise` makes the action button a sleep-sound switch: a press while no sleep
-sound is playing starts white noise with no timer (level 40), and a press while
-any sleep sound is playing stops it.
+and `mute_brightness` are LED-ring brightness values from 0 to 100. `action`
+is one of `sound`, `noise`, `listen`, `playpause` or `disabled`:
+
+- `sound` plays the next sound in `action_sounds`.
+- `noise` makes the action button a sleep-sound switch: a press while no sleep
+  sound is playing starts white noise with no timer (level 40), and a press
+  while any sleep sound is playing stops it.
+- `listen` starts a voice request as if the wake word had been heard
+  (push-to-talk), in whichever voice mode is active: on-device, Home Assistant
+  or a live session. `libreecho-waked` publishes the same `wake_detected` event
+  a detection does, with `model` set to `button`, and lights the listening
+  ring. While the microphone is muted the press is refused with a low tone and
+  a ring flash, since the request could not hear anything.
+- `playpause` pauses internet radio and resumes it on the next press. A sleep
+  sound has no pause, so it is stopped and the next press starts it again with
+  the same source, bed and level (without its timer). AirPlay and Bluetooth are
+  controlled from the phone; with only those playing, or nothing at all, the
+  press is refused with a low tone and a ring flash.
+- `disabled` does nothing.
+
+`action_long` is what holding the action button does: `same` (the default) or
+any `action` value. With `same` there is no separate long press and the button
+acts the moment it is pressed, as before. With any other value a press held
+for 800 ms runs `action_long` while the button is still down, and a shorter
+press runs `action` when the button is released.
 `action_sounds` is a comma-separated list of installed sound names in rotation
 order. Each name follows the same 1–48-character lowercase-name rule as the
 preview endpoint; an empty string is valid and means no sound is played.
 At least one recognized button field is required. The legacy `short_press` and
-`long_press` strings are limited to 31 bytes each. Missing settings, malformed
+`long_press` strings are limited to 31 bytes each; they are stored and returned
+for compatibility, but no daemon acts on them and the web UI no longer offers
+them: `action` and `action_long` are the action button's short and long press. Missing settings, malformed
 fields, unsupported actions, and brightness values outside 0–100 return the
 standard 400 error envelope. If persistence fails, the API returns 503 and the
 previous in-memory preferences remain active.
@@ -2131,6 +2152,7 @@ previous in-memory preferences remain active.
   "long_press": "Open pairing mode",
   "tones": true,
   "action": "sound",
+  "action_long": "same",
   "action_sounds": "action-1,action-2,action-3",
   "action_brightness": 70,
   "mute_brightness": 60
@@ -2153,6 +2175,7 @@ previous in-memory preferences remain active.
     "stale": true,
     "tones": true,
     "action": "sound",
+    "action_long": "same",
     "action_sounds": "action-1,action-2,action-3",
     "available_sounds": ["action-1", "action-2", "action-3"],
     "action_brightness": 70,
@@ -2162,9 +2185,10 @@ previous in-memory preferences remain active.
 }
 ```
 
-Configuration export/import includes `button_action_sounds` alongside the other
-button settings. Imports from older exports may omit it; omitted values retain
-the current setting, while any present value is validated and restored.
+Configuration export/import includes `button_action_sounds` and
+`button_action_long` alongside the other button settings. Imports from older
+exports may omit them; omitted values retain the current setting, while any
+present value is validated and restored.
 
 ### Bluetooth
 

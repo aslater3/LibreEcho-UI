@@ -115,7 +115,7 @@ grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 make build/libreecho-ledd build/libreecho-buttond
 python3 tests/test_buttond_led_restart.py
-make build/test-action-sample build/test-cue-rate-limit build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing build/test-watchdog-policy
+make build/test-action-sample build/test-cue-rate-limit build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-actions build/test-buttond-timing build/test-watchdog-policy
 ./build/test-action-sample
 ./build/test-cue-rate-limit
 ./build/test-audiod-review
@@ -123,6 +123,7 @@ make build/test-action-sample build/test-cue-rate-limit build/test-audiod-review
 ./build/test-button-settings
 ./build/test-buttond-privacy
 ./build/test-buttond-events
+./build/test-buttond-actions
 ./build/test-buttond-timing
 make build/test-wake-led-profile
 ./build/test-wake-led-profile
@@ -134,6 +135,7 @@ sh tests/test_watchdogd_recovery.sh
 sh tests/test_watchdog_voice_mode.sh
 make build/libreecho-waked
 WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
+WAKED_REQUIRED=1 python3 tests/test_waked_listen.py
 sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
 make build/libreecho-timerd build/libreecho-watchdogd

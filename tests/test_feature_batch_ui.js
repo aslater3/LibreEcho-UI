@@ -277,6 +277,35 @@ async function caseActionButtonNoise() {
     has(content.innerHTML, '<option selected>Sleep sound on/off</option>', 'a saved "noise" action shows as Sleep sound on/off');
 }
 
+/* #372: Start listening and Play / pause are real, and a long press can do
+   something of its own. The old free-text short/long-press selects are gone. */
+async function caseActionButtonLongPress() {
+    resetDom(); resetCalls();
+    state.page = 'LED & Buttons'; state.renderGeneration++;
+    await ledPage(); clearTimers();
+    const html = content.innerHTML;
+    check(!html.includes('placeholders'), 'Start listening and Play / pause are no longer described as placeholders');
+    check(!html.includes('id="short-action"') && !html.includes('id="long-action"'), 'the unwired short/long-press selects are gone');
+    has(html, 'Action button long press', 'a long-press select is offered');
+    has(html, '<option selected>Same as a short press</option>', 'with no saved long press it defaults to Same as a short press');
+    $app('#action-behaviour').value = 'Start listening';
+    $app('#action-long').value = 'Play / pause';
+    await $app('#save-buttons').onclick();
+    clearTimers();
+    const body = lastBody('/buttons', 'PUT');
+    checkEqual(body && body.action, 'listen', 'saving Start listening PUTs action "listen"');
+    checkEqual(body && body.action_long, 'playpause', 'saving a Play / pause long press PUTs action_long "playpause"');
+    check(body && !('short_press' in body) && !('long_press' in body), 'the legacy strings are no longer sent');
+
+    routes['/buttons'] = Object.assign({}, BUTTONS, { action: 'playpause', action_long: 'listen' });
+    resetDom();
+    state.page = 'LED & Buttons'; state.renderGeneration++;
+    await ledPage(); clearTimers();
+    delete routes['/buttons'];
+    has(content.innerHTML, '<option selected>Play / pause</option>', 'a saved "playpause" action shows as Play / pause');
+    has(content.innerHTML, '<option selected>Start listening</option>', 'a saved "listen" long press shows as Start listening');
+}
+
 async function caseLedDiagnosticsEscaped() {
     resetDom(); resetCalls();
     routes['/led'] = Object.assign({}, LED, { music: { active: true, grammar: '<img src=x onerror=1>', effect: 'ok', session: 3 } });
@@ -1027,6 +1056,7 @@ async function main() {
     const cases = [
         ['LED idle/sleep controls and diagnostics', caseLedControls],
         ['action button sleep-sound toggle', caseActionButtonNoise],
+        ['action button start listening, play/pause and long press', caseActionButtonLongPress],
         ['LED diagnostics escape untrusted text', caseLedDiagnosticsEscaped],
         ['SSH status note (#24)', caseSshStatusNote],
         ['recovery / reflash mode (#27)', caseRecoveryMode],
