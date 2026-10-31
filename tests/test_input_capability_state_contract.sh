@@ -24,7 +24,7 @@ button_fixtures = [Path(path).read_text() for path in
 fixture_header = Path('tests/buttond_fixture.h')
 fixture_source = fixture_header.read_text() if fixture_header.exists() else ''
 button_update = api.split('if(!strcmp(p,"/api/v1/buttons")){if(!strcmp(q->method,"PUT"))', 1)[1].split('buttons_json(c,r);return;}', 1)[0]
-recognized_guard = 'if(!(short_field>0||long_field>0||tones_field>0||action_field>0||sounds_field>0||action_brightness_field>0||mute_brightness_field>0))'
+recognized_guard = 'if(!(short_field>0||long_field>0||tones_field>0||action_field>0||action_long_field>0||sounds_field>0||action_brightness_field>0||mute_brightness_field>0))'
 
 checks = {
     **schema_checks,
