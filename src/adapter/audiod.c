@@ -1733,12 +1733,22 @@ static void sample_stop_signal(int signum)
     g_sample_stop = 1;
 }
 
+/*
+ * How long a sample writer waits for the bus to take more audio. The playback
+ * engine holds the bus while it wakes the output from idle (measured 1.44 s on
+ * radar), so anything longer than the 64 KiB pipe would otherwise be cut off
+ * there. Waits are sliced so a stop request is seen within one slice.
+ */
+#define LE_SAMPLE_STALL_BUDGET_MS 3000
+#define LE_SAMPLE_POLL_MS 50
+
 static int write_sample_fd(int fd, int sample_fd)
 {
     unsigned char out[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS * sizeof(int16_t)];
     int16_t in[LE_TONE_CHUNK_FRAMES];
     FILE *file = fdopen(sample_fd, "rb");
     size_t frames;
+    unsigned int stalled_ms = 0;
     int last = 0;
 
     if (!file) {
@@ -1774,9 +1784,17 @@ static int write_sample_fd(int fd, int sample_fd)
                 struct pollfd pfd = { fd, POLLOUT, 0 };
                 int rc;
 
-                do {
-                    rc = poll(&pfd, 1, 1000);
-                } while (rc < 0 && errno == EINTR);
+                /* Stopped while the bus is full: nothing more can be
+                   faded in, so end here rather than wait for room. */
+                if (g_sample_stop) {
+                    fclose(file);
+                    return 0;
+                }
+                rc = poll(&pfd, 1, LE_SAMPLE_POLL_MS);
+                if (rc < 0 && errno == EINTR)
+                    continue;
+                if (rc == 0 && (stalled_ms += LE_SAMPLE_POLL_MS) < LE_SAMPLE_STALL_BUDGET_MS)
+                    continue;
                 if (rc <= 0) {
                     fclose(file);
                     return -1;
@@ -1787,6 +1805,7 @@ static int write_sample_fd(int fd, int sample_fd)
                 fclose(file);
                 return -1;
             }
+            stalled_ms = 0;
             sent += (size_t)n;
         }
     }

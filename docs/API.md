@@ -725,8 +725,11 @@ built-in sound.
 
 The `wake` and `end` chimes belong to the local assistant pipeline. The Home
 Assistant (ESPHome) path stays visual-only, as before. A timer sound longer
-than the two-second ring period plays back to back, and dismissing the timer
-fades it out within one audio chunk.
+than the two-second ring period plays back to back. Dismissing the timer stops
+it: the writer ends on a faded chunk, and what is already queued for the
+speaker (at most about a third of a second) plays out. The speaker can take
+about 1.5 seconds to wake from idle; a longer sound waits for it and then plays
+in full.
 
 Sounds are stored as 48 kHz mono files (`sound-<event>.raw`, mode 0600)
 directly in `/data/libreecho/config`. They survive reboots and OTA updates,

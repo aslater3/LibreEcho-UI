@@ -129,6 +129,40 @@ int main(void)
     CHECK(reap(child) == 0);
     child = 0;
 
+    /* The playback engine holds the bus while it wakes the output from idle
+       (1.44 s measured on radar). A sound longer than the pipe must wait that
+       out and still play in full, not give up after a one-second stall. */
+    CHECK(write_raw(path, 48000, 777) == 0);
+    call(&audio, "event_sound", "{\"event\":\"timer\"}");
+    CHECK(strstr(response, "\"playing\":true"));
+    child = audio.sample_pid;
+    usleep(1500000);
+    CHECK(drain(fifo_fd, first, 4) == 48000L * 4 && first[0] == 777);
+    CHECK(reap(child) == 0);
+    child = 0;
+
+    /* A dismissal during that wake-up stall ends the writer promptly. */
+    CHECK(write_raw(path, 48000, 555) == 0);
+    call(&audio, "event_sound", "{\"event\":\"timer\"}");
+    CHECK(strstr(response, "\"playing\":true"));
+    child = audio.sample_pid;
+    usleep(200000);
+    call(&audio, "event_sound_stop", "{\"event\":\"timer\"}");
+    CHECK(strstr(response, "\"stopped\":true"));
+    {
+        int waited = 0, reaped_status;
+        pid_t done;
+
+        while ((done = waitpid(child, &reaped_status, WNOHANG)) == 0 && waited < 50) {
+            usleep(10000);
+            ++waited;
+        }
+        CHECK(done == child && WIFEXITED(reaped_status) && WEXITSTATUS(reaped_status) == 0);
+        CHECK(waited < 30);                 /* well under 300 ms, not the full stall */
+    }
+    child = 0;
+    CHECK(drain(fifo_fd, NULL, 0) < 48000L * 4);
+
     /* A file larger than the event allows is never streamed. */
     CHECK(write_raw(path, LE_EVENT_SOUND_MAX_SAMPLES + 1, 1) == 0);
     call(&audio, "event_sound", "{\"event\":\"timer\"}");
