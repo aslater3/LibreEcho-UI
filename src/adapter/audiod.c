@@ -1811,7 +1811,7 @@ static int sample_busy(struct audio_hw *audio)
 }
 
 /* Takes ownership of sample_fd whatever the outcome. */
-static int start_sample_fd(struct audio_hw *audio, int sample_fd, int event)
+static int spawn_sample_writer(struct audio_hw *audio, int sample_fd, int event)
 {
     int fd;
     pid_t pid;
@@ -1858,7 +1858,7 @@ static int start_sample(struct audio_hw *audio, const char *name)
     sample_fd = sample_open_fd(name);
     if (sample_fd < 0)
         return -1;
-    return start_sample_fd(audio, sample_fd, -1);
+    return spawn_sample_writer(audio, sample_fd, -1);
 }
 
 /*
@@ -1914,7 +1914,7 @@ static int play_event_sound(struct audio_hw *audio, int index, int preview)
         close(fd);
         return LE_EVENT_SOUND_BUSY;
     }
-    if (start_sample_fd(audio, fd, index) < 0)
+    if (spawn_sample_writer(audio, fd, index) < 0)
         return LE_EVENT_SOUND_FAILED;
     return LE_EVENT_SOUND_PLAYING;
 }
