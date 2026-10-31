@@ -43,6 +43,14 @@
  * across the boundary was otherwise never heard by either window.
  */
 #define STOP_WINDOW_GRACE_MS 4000U
+/*
+ * A word that starts too close to the limit to be decoded in time is not
+ * lost either: a window closed by its time limit is followed by one that
+ * replays this much of the audio before it, so the whole word is in the next
+ * window. Only windows that heard nothing usable are followed this way, so
+ * nothing is ever acted on twice.
+ */
+#define STOP_WINDOW_OVERLAP_SAMPLES 16000U
 #define STOP_COOLDOWN_MS 1500U
 #define STOP_RETRY_MS 1000U
 
@@ -69,6 +77,7 @@ struct le_voice_pipeline {
     int stop_window_speech;
     uint64_t recognition_timeout_ms;
     uint64_t stop_window_ms;
+    uint64_t stop_window_grace_ms;
     int16_t pcm_ring[PCM_RING_SAMPLES];
     uint64_t ring_first_sample;
     size_t ring_count;
@@ -522,6 +531,19 @@ static void close_connection(struct le_voice_pipeline *pipeline,
     set_connection_metric(pipeline, wake, 0);
 }
 
+static uint64_t env_milliseconds(const char *name, uint64_t fallback,
+                                 unsigned long minimum)
+{
+    const char *override = getenv(name);
+    char *end;
+    unsigned long value;
+
+    if (!override || !override[0])
+        return fallback;
+    value = strtoul(override, &end, 10);
+    return !*end && value >= minimum && value <= 600000UL ? value : fallback;
+}
+
 static void *capture_worker(void *opaque)
 {
     struct le_voice_pipeline *pipeline = opaque;
@@ -537,6 +559,7 @@ static void *capture_worker(void *opaque)
     int recognition_active = 0;
     uint64_t stop_window_started_ms = 0;
     uint64_t stop_window_not_before_ms = 0;
+    int stop_window_overlap = 0;
 
     while (pipeline_running(pipeline)) {
         struct pollfd descriptors[3];
@@ -661,6 +684,7 @@ static void *capture_worker(void *opaque)
             /* The wake word always wins over a stop window. */
             if (stt_fd >= 0 && pipeline->stop_window)
                 close_recognition(pipeline, &stt_fd);
+            stop_window_overlap = 0;
             detection_sample = sample;
             recognition_follow_up = 0;
             recognition_started_ms = monotonic_milliseconds();
@@ -754,11 +778,15 @@ static void *capture_worker(void *opaque)
             pthread_mutex_lock(&pipeline->mutex);
             keep = pipeline->stop_listen && !pipeline->follow_up_pending;
             pthread_mutex_unlock(&pipeline->mutex);
-            if (!keep || (open_ms >= pipeline->stop_window_ms &&
-                          (!pipeline->stop_window_speech ||
-                           open_ms >= pipeline->stop_window_ms +
-                                          STOP_WINDOW_GRACE_MS)))
+            if (!keep) {
                 close_recognition(pipeline, &stt_fd);
+            } else if (open_ms >= pipeline->stop_window_ms &&
+                       (!pipeline->stop_window_speech ||
+                        open_ms >= pipeline->stop_window_ms +
+                                       pipeline->stop_window_grace_ms)) {
+                close_recognition(pipeline, &stt_fd);
+                stop_window_overlap = 1;
+            }
         }
         if (stt_fd < 0) {
             int start_follow_up = 0;
@@ -804,14 +832,22 @@ static void *capture_worker(void *opaque)
                 !pipeline->follow_up_pending &&
                 !pipeline->transcript_pending && pipeline->ring_count &&
                 now >= stop_window_not_before_ms) {
-                /* From now on: a stop window never replays older audio. */
+                /* From now on, never older audio: only a window following
+                   one that ran out of time starts a little earlier. */
+                uint64_t back = stop_window_overlap
+                    ? (pipeline->ring_count < STOP_WINDOW_OVERLAP_SAMPLES
+                           ? pipeline->ring_count
+                           : STOP_WINDOW_OVERLAP_SAMPLES)
+                    : 0;
+
                 detection_sample =
-                    pipeline->ring_first_sample + pipeline->ring_count;
+                    pipeline->ring_first_sample + pipeline->ring_count - back;
                 ++pipeline->metrics.stop_windows;
                 start_stop = 1;
             }
             pthread_mutex_unlock(&pipeline->mutex);
             if (start_stop) {
+                stop_window_overlap = 0;
                 recognition_active = 0;
                 stt_fd = start_recognition(pipeline, detection_sample, 1);
                 stop_window_started_ms = now;
@@ -874,19 +910,12 @@ struct le_voice_pipeline *le_voice_pipeline_start(
     pipeline->transcript_callback = transcript;
     pipeline->callback_context = context;
     pipeline->recognition_timeout_ms = RECOGNITION_TIMEOUT_MS;
-    pipeline->stop_window_ms = STOP_WINDOW_MS;
-    {
-        /* Tests shorten the stop window to exercise its boundary. */
-        const char *override = getenv("LE_VOICE_STOP_WINDOW_MS");
-
-        if (override && override[0]) {
-            char *end;
-            unsigned long value = strtoul(override, &end, 10);
-
-            if (!*end && value > 0 && value <= 600000UL)
-                pipeline->stop_window_ms = value;
-        }
-    }
+    /* Tests shorten the stop window and its grace to exercise the
+       boundary. */
+    pipeline->stop_window_ms =
+        env_milliseconds("LE_VOICE_STOP_WINDOW_MS", STOP_WINDOW_MS, 1);
+    pipeline->stop_window_grace_ms =
+        env_milliseconds("LE_VOICE_STOP_GRACE_MS", STOP_WINDOW_GRACE_MS, 0);
     {
         const char *override = getenv("LE_VOICE_STT_TIMEOUT_MS");
 

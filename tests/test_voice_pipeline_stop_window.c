@@ -336,6 +336,21 @@ int main(void)
     CHECK(seen.transcripts == 0);
     CHECK(seen.turn_begins == 0);
 
+    /* With no grace at all, a word cut off by the limit is still heard: the
+       next window starts with the second of audio before it. */
+    setenv("LE_VOICE_STOP_WINDOW_MS", "150", 1);
+    setenv("LE_VOICE_STOP_GRACE_MS", "0", 1);
+    CHECK(scenario("overlap", "stop", 1, 1, -1, &seen, &metrics) == 0);
+    unsetenv("LE_VOICE_STOP_WINDOW_MS");
+    unsetenv("LE_VOICE_STOP_GRACE_MS");
+    CHECK(seen.stop_calls >= 1);
+    CHECK(!strcmp(seen.stop_text, "stop"));
+    CHECK(metrics.stops_heard == (unsigned long)seen.stop_calls);
+    CHECK(seen.transcripts == 0);
+    CHECK(seen.turn_begins == 0);
+    /* The cooldown still holds: the replayed second never acts twice. */
+    CHECK(seen.stop_calls < (int)CYCLES);
+
     puts("voice pipeline: stop without the wake word: ok");
 cleanup:
     return result;
