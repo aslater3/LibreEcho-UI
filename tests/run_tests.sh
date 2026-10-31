@@ -134,6 +134,7 @@ sh tests/test_watchdogd_recovery.sh
 sh tests/test_watchdog_voice_mode.sh
 make build/libreecho-waked
 WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
+WAKED_REQUIRED=1 python3 tests/test_waked_nearest_answers.py
 sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
 make build/libreecho-timerd build/libreecho-watchdogd
@@ -177,6 +178,7 @@ node tests/test_timers_ui.js
 node tests/test_frontend_state_ui.js
 node tests/test_update_identity_ui.js
 node tests/test_baby_monitor_ui.js
+node tests/test_peer_pairing_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
 node tests/test_privacy_disclosure_ui.js
 node tests/test_assistant_clock_format_ui.js
@@ -351,6 +353,8 @@ make build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
 make test-mdns
+make test-peer-auth
+make test-wake-arbiter
 # Guard the nested-make provenance contract before the ESPHome section: its
 # strict radio-controls build is the first -Werror consumer of the augmented
 # CPPFLAGS, so a snapshot mismatch surfaces there. This reproduces the
@@ -374,6 +378,9 @@ sh tests/test_timed.sh
 make test-lived
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
+# Device list (#413): browse and advertisement through the real daemon, own ports.
+python3 tests/test_network_peers.py
+python3 tests/test_peer_pairing.py
 sh tests/test_setup_first_run.sh
 # First-boot provisioning drives the real daemon over loopback with the mock
 # backend and owns its own ports, so it runs outside the shared server above.

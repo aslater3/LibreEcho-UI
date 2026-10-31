@@ -194,7 +194,7 @@ if(api.integrations&8u){int bluetooth_rc=le_set_bluetooth_enabled(b,1);if(blueto
 if(api.integrations&16u){int airplay_rc=LE_IO,airplay_try;for(airplay_try=0;airplay_try<12&&airplay_rc;airplay_try++){airplay_rc=le_set_airplay_enabled(b,1);if(airplay_rc)usleep(500000);}if(airplay_rc){api_log(&api,"error","AirPlay 2 could not be started from saved configuration");fprintf(stderr,"Unable to start configured AirPlay 2 integration: %d\n",airplay_rc);}}
 /* The saved feature flag turns HTTPS on at boot; --tls-port still overrides
    it, and picks the port when the flag is what enabled it. */
-if(!o.tls_port&&api.feature_https)o.tls_port=8443;
+if(!o.tls_port&&api.feature_https)o.tls_port=8443;api_set_http_listener(&api,o.port,strcmp(o.listen_host,"127.0.0.1")&&strcmp(o.listen_host,"::1"));
 if(o.tls_port>0){
 if(o.tls_port<1||o.tls_port>65535||o.tls_port==o.port){fprintf(stderr,"Invalid --tls-port\n");le_backend_destroy(b);return 2;}
 snprintf(o.tls_cert,sizeof(o.tls_cert),"%s/https-cert.pem",tls_dir);
