@@ -2843,11 +2843,63 @@
     }
    }
   },
+  "/network/pairing": {
+   "get": {
+    "tags": ["Network"],
+    "summary": "Device pairing state",
+    "description": "Whether this device holds a house key for signed device-to-device traffic (#450), and its fingerprint. Never returns the key.",
+    "responses": {
+     "200": {"description": "Pairing state", "content": {"application/json": {"schema": {"type": "object", "required": ["ok", "data", "error"], "properties": {"ok": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/PeerPairing"}, "error": {"$ref": "#/components/schemas/NullableApiError"}}}}}},
+     "401": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "post": {
+    "tags": ["Network"],
+    "summary": "Create, join or show the house key",
+    "description": "action create makes a new random house key and returns its pairing code once; join takes the code from another device (64 hex digits, any case, '-' or spaces allowed); show returns the code again so another device can join. A paired device answers 409 to create and join until it is unpaired. Unknown fields are refused. The key is stored in peer.key beside the configuration, mode 0600, and is not part of the configuration export.",
+    "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["action"], "additionalProperties": false, "properties": {"action": {"type": "string", "enum": ["create", "join", "show"]}, "code": {"type": "string", "maxLength": 128}}}}}},
+    "responses": {
+     "200": {"description": "Pairing state; code is present for create and show", "content": {"application/json": {"schema": {"type": "object", "required": ["ok", "data", "error"], "properties": {"ok": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/PeerPairing"}, "error": {"$ref": "#/components/schemas/NullableApiError"}}}}}},
+     "400": {"$ref": "#/components/responses/Error"},
+     "401": {"$ref": "#/components/responses/Error"},
+     "403": {"$ref": "#/components/responses/Error"},
+     "409": {"$ref": "#/components/responses/Error"},
+     "501": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "delete": {
+    "tags": ["Network"],
+    "summary": "Unpair this device",
+    "description": "Removes the house key. This device then signs nothing and trusts no device.",
+    "responses": {
+     "200": {"description": "Pairing state", "content": {"application/json": {"schema": {"type": "object", "required": ["ok", "data", "error"], "properties": {"ok": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/PeerPairing"}, "error": {"$ref": "#/components/schemas/NullableApiError"}}}}}},
+     "401": {"$ref": "#/components/responses/Error"},
+     "403": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/peer/proof": {
+   "get": {
+    "tags": ["Network"],
+    "summary": "Signed proof for another paired device",
+    "description": "Device-to-device (#450). Needs no session: another LibreEcho device asks with a fresh nonce and checks the answer with the shared house key. Answered only when Host is one of this device's IPv4 addresses and its plain HTTP port, so the signed host tells the asker which address answered. GET only; every other method goes through normal authentication.",
+    "security": [],
+    "parameters": [{"name": "nonce", "in": "query", "required": true, "schema": {"type": "string", "pattern": "^[0-9a-f]{32}$"}}],
+    "responses": {
+     "200": {"description": "Signed proof", "content": {"application/json": {"schema": {"type": "object", "required": ["ok", "data", "error"], "properties": {"ok": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/PeerProof"}, "error": {"$ref": "#/components/schemas/NullableApiError"}}}}}},
+     "400": {"$ref": "#/components/responses/Error"},
+     "405": {"$ref": "#/components/responses/Error"},
+     "409": {"description": "not_paired: this device has no house key", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+    }
+   }
+  },
   "/network/peers": {
    "get": {
     "tags": ["Network"],
     "summary": "List other LibreEcho devices on the local network",
-    "description": "One bounded DNS-SD browse for _libreecho._tcp.local (mDNS legacy-unicast query; answers are collected for one second and repeated requests within three seconds reuse the last answer). At most 16 devices; truncated is true when more answered. Only devices with an SRV record are listed. self marks this device's own record (one of its IPv4 addresses and its HTTP port); advertising is true while this device holds its own lease. GET only.",
+    "description": "One bounded DNS-SD browse for _libreecho._tcp.local (mDNS legacy-unicast query; answers are collected for one second and repeated requests within three seconds reuse the last answer). At most 16 devices; truncated is true when more answered. Only devices with an SRV record are listed. self marks this device's own record (one of its IPv4 addresses and its HTTP port); advertising is true while this device holds its own lease. When this device is paired (#450) every other listed device is asked for a signed proof in parallel (at most 0.8 s in total) and trust says what came back; without a house key trust is off and nothing is sent. GET only.",
     "responses": {
      "200": {
       "description": "Devices found on the local network",
@@ -2860,10 +2912,12 @@
           "ok": {"type": "boolean"},
           "data": {
            "type": "object",
-           "required": ["discoverable", "advertising", "devices", "truncated"],
+           "required": ["discoverable", "advertising", "paired", "key_id", "devices", "truncated"],
            "properties": {
             "discoverable": {"type": "boolean"},
             "advertising": {"type": "boolean"},
+            "paired": {"type": "boolean", "description": "This device holds a house key"},
+            "key_id": {"type": "string", "pattern": "^([0-9a-f]{8})?$", "description": "Fingerprint of the house key; empty when not paired"},
             "devices": {"type": "array", "maxItems": 16, "items": {"$ref": "#/components/schemas/NetworkPeer"}},
             "truncated": {"type": "boolean"}
            }
@@ -4682,7 +4736,7 @@
    },
    "NetworkPeer": {
     "type": "object",
-    "required": ["name", "room", "version", "address", "port", "url", "self"],
+    "required": ["name", "room", "version", "address", "port", "url", "self", "trust"],
     "properties": {
      "name": {"type": "string", "maxLength": 63, "description": "DNS-SD instance name (the device hostname)"},
      "room": {"type": "string", "maxLength": 63, "description": "Room from TXT; empty when unset or unsafe"},
@@ -4690,7 +4744,33 @@
      "address": {"type": "string", "description": "IPv4 address of the device"},
      "port": {"type": "integer", "minimum": 1, "maximum": 65535},
      "url": {"type": "string", "description": "Link to that device's control centre"},
-     "self": {"type": "boolean", "description": "True for this device's own record"}
+     "self": {"type": "boolean", "description": "True for this device's own record"},
+     "trust": {"type": "string", "enum": ["off", "self", "paired", "unpaired", "failed"], "description": "off: this device is not paired, nothing checked. self: this device. paired: answered with a valid signed proof for this house key. unpaired: answered without a house key or with another one. failed: no answer, or a proof that did not verify (forged, replayed or relayed)."}
+    }
+   },
+   "PeerPairing": {
+    "type": "object",
+    "required": ["supported", "paired", "key_id"],
+    "properties": {
+     "supported": {"type": "boolean", "description": "False when the daemon runs without a saved configuration"},
+     "paired": {"type": "boolean"},
+     "key_id": {"type": "string", "pattern": "^([0-9a-f]{8})?$", "description": "Fingerprint of the house key; the same on every paired device"},
+     "code": {"type": "string", "pattern": "^[0-9a-f]{4}(-[0-9a-f]{4}){15}$", "description": "Pairing code (the house key). Only in the answers to create and show."}
+    }
+   },
+   "PeerProof": {
+    "type": "object",
+    "required": ["key_id", "type", "ts", "nonce", "name", "room", "version", "host", "mac"],
+    "properties": {
+     "key_id": {"type": "string", "pattern": "^[0-9a-f]{8}$"},
+     "type": {"type": "string", "enum": ["peer-proof"]},
+     "ts": {"type": "integer", "minimum": 0},
+     "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+     "name": {"type": "string"},
+     "room": {"type": "string"},
+     "version": {"type": "string"},
+     "host": {"type": "string", "description": "The Host this device was asked under: one of its IPv4 addresses and its HTTP port"},
+     "mac": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "HMAC-SHA256 over LESIG1, type, ts, nonce and name/room/version/host joined by newlines; see docs/API.md"}
     }
    },
    "ErrorEnvelope": {

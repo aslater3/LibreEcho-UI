@@ -3,6 +3,7 @@
 #include "backend.h"
 #include "auth.h"
 #include "event_bus.h"
+#include "peer_auth.h"
 #include <stddef.h>
 struct api_request{char method[8],path[256],host[256],origin[256],authorization[256],csrf[96],confirm[96];const char*body;size_t body_len;int https;};
 /*
@@ -65,7 +66,11 @@ int recovery_portal_active;char recovery_portal_address[32];long recovery_portal
    HTTP listener (lan is 0 for a loopback-only bind, which is never
    advertised). discovery_fd holds the mDNS supervisor lease while the record
    should exist; discovery_sent is the registration it carries. */
-int discoverable,http_port,http_lan,discovery_fd;long discovery_retry,discovery_checked;char discovery_sent[384];};
+int discoverable,http_port,http_lan,discovery_fd;long discovery_retry,discovery_checked;char discovery_sent[384];
+/* Device pairing (#450). peer_key is the house key shared by paired devices,
+   loaded on first use from peer_key_path (peer.key beside the config file).
+   Without a key this device signs nothing and trusts no device. */
+struct le_peer_key peer_key;char peer_key_path[512];int peer_key_loaded;};
 int api_request_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_bootstrap_required(const struct api_context*);
 void api_set_https_active(struct api_context*,int);

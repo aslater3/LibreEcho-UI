@@ -177,6 +177,7 @@ node tests/test_timers_ui.js
 node tests/test_frontend_state_ui.js
 node tests/test_update_identity_ui.js
 node tests/test_baby_monitor_ui.js
+node tests/test_peer_pairing_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
 node tests/test_privacy_disclosure_ui.js
 node tests/test_assistant_clock_format_ui.js
@@ -351,6 +352,7 @@ make build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
 make test-mdns
+make test-peer-auth
 # Guard the nested-make provenance contract before the ESPHome section: its
 # strict radio-controls build is the first -Werror consumer of the augmented
 # CPPFLAGS, so a snapshot mismatch surfaces there. This reproduces the
@@ -376,6 +378,7 @@ sh tests/test_timed_timeout.sh
 make build/libreecho-web
 # Device list (#413): browse and advertisement through the real daemon, own ports.
 python3 tests/test_network_peers.py
+python3 tests/test_peer_pairing.py
 sh tests/test_setup_first_run.sh
 # First-boot provisioning drives the real daemon over loopback with the mock
 # backend and owns its own ports, so it runs outside the shared server above.
