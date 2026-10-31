@@ -324,6 +324,18 @@ int main(void)
     CHECK(metrics.dropped_turns == 0);
     CHECK(metrics.stop_windows >= 2);
 
+    /* A window whose time runs out mid-word lets the word finish instead of
+       discarding it. Each 300 ms utterance needs 500 ms to endpoint; with a
+       150 ms window every one of them straddled a boundary and was lost. */
+    setenv("LE_VOICE_STOP_WINDOW_MS", "150", 1);
+    CHECK(scenario("boundary", "stop", 1, 1, -1, &seen, &metrics) == 0);
+    unsetenv("LE_VOICE_STOP_WINDOW_MS");
+    CHECK(seen.stop_calls >= 1);
+    CHECK(!strcmp(seen.stop_text, "stop"));
+    CHECK(metrics.stops_heard == (unsigned long)seen.stop_calls);
+    CHECK(seen.transcripts == 0);
+    CHECK(seen.turn_begins == 0);
+
     puts("voice pipeline: stop without the wake word: ok");
 cleanup:
     return result;

@@ -36,6 +36,13 @@
  * of the same word cannot act twice.
  */
 #define STOP_WINDOW_MS 8000U
+/*
+ * A window that reaches its time limit while the recogniser is part way
+ * through a word is given this long to endpoint it instead of being cut off:
+ * closing the socket throws away the final transcript, so a "stop" spoken
+ * across the boundary was otherwise never heard by either window.
+ */
+#define STOP_WINDOW_GRACE_MS 4000U
 #define STOP_COOLDOWN_MS 1500U
 #define STOP_RETRY_MS 1000U
 
@@ -58,7 +65,10 @@ struct le_voice_pipeline {
     int stop_listen;
     /* Capture thread only: the open recognition is a wake-free stop window. */
     int stop_window;
+    /* Capture thread only: the open stop window has decoded some speech. */
+    int stop_window_speech;
     uint64_t recognition_timeout_ms;
+    uint64_t stop_window_ms;
     int16_t pcm_ring[PCM_RING_SAMPLES];
     uint64_t ring_first_sample;
     size_t ring_count;
@@ -380,6 +390,7 @@ static int start_recognition(struct le_voice_pipeline *pipeline,
         return -1;
     }
     pipeline->stop_window = stop_window;
+    pipeline->stop_window_speech = 0;
     pthread_mutex_lock(&pipeline->mutex);
     if (stop_window)
         pipeline->metrics.stop_listening = 1;
@@ -403,6 +414,7 @@ static void close_recognition(struct le_voice_pipeline *pipeline,
     *fd = -1;
     pipeline->stt_line_used = 0;
     pipeline->stop_window = 0;
+    pipeline->stop_window_speech = 0;
     pthread_mutex_lock(&pipeline->mutex);
     if (stop_window)
         pipeline->metrics.stop_listening = 0;
@@ -427,6 +439,12 @@ static int handle_stop_line(struct le_voice_pipeline *pipeline,
     void *context;
     int acted = 0;
 
+    if (strstr(line, "\"event\":\"transcript_partial\"")) {
+        /* Something is being said: the window may run into its grace. */
+        if (json_get_string(line, "text", text, sizeof(text)) > 0 && text[0])
+            pipeline->stop_window_speech = 1;
+        return 0;
+    }
     if (!strstr(line, "\"event\":\"transcript\""))
         return 0;
     if (json_get_string(line, "text", text, sizeof(text)) < 1 || !text[0])
@@ -730,12 +748,16 @@ static void *capture_worker(void *opaque)
         }
         if (stt_fd >= 0 && pipeline->stop_window) {
             int keep;
+            uint64_t open_ms =
+                monotonic_milliseconds() - stop_window_started_ms;
 
             pthread_mutex_lock(&pipeline->mutex);
             keep = pipeline->stop_listen && !pipeline->follow_up_pending;
             pthread_mutex_unlock(&pipeline->mutex);
-            if (!keep || monotonic_milliseconds() - stop_window_started_ms >=
-                             STOP_WINDOW_MS)
+            if (!keep || (open_ms >= pipeline->stop_window_ms &&
+                          (!pipeline->stop_window_speech ||
+                           open_ms >= pipeline->stop_window_ms +
+                                          STOP_WINDOW_GRACE_MS)))
                 close_recognition(pipeline, &stt_fd);
         }
         if (stt_fd < 0) {
@@ -852,6 +874,19 @@ struct le_voice_pipeline *le_voice_pipeline_start(
     pipeline->transcript_callback = transcript;
     pipeline->callback_context = context;
     pipeline->recognition_timeout_ms = RECOGNITION_TIMEOUT_MS;
+    pipeline->stop_window_ms = STOP_WINDOW_MS;
+    {
+        /* Tests shorten the stop window to exercise its boundary. */
+        const char *override = getenv("LE_VOICE_STOP_WINDOW_MS");
+
+        if (override && override[0]) {
+            char *end;
+            unsigned long value = strtoul(override, &end, 10);
+
+            if (!*end && value > 0 && value <= 600000UL)
+                pipeline->stop_window_ms = value;
+        }
+    }
     {
         const char *override = getenv("LE_VOICE_STT_TIMEOUT_MS");
 
