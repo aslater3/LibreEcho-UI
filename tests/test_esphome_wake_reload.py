@@ -19,6 +19,7 @@ SOURCES = [
     "src/adapter/wake_led.c", "src/adapter/voice_stream.c",
     "src/adapter/voice_aec.c", "src/adapter/voice_reference.c",
     "src/adapter/voice_dsp.c", "src/log.c", "src/json.c",
+    "src/adapter/wake_arbiter.c", "src/peer_auth.c",
 ]
 CASES = ["validation", "reload", "failure", "recovery", "queued", "capture",
          "timeout", "retirement"]

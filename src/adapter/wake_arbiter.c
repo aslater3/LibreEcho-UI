@@ -224,6 +224,12 @@ int le_wake_arbiter_packet(struct le_wake_arbiter *a, uint64_t now_ms, long long
         a->last_reject = rc;
         return rc;
     }
+    if (strcmp(c.id, a->self.id)) {
+        /* One line per wake per device: shows on hardware how late claims
+         * arrive relative to ours. */
+        if (a->pending) fprintf(stderr, "waked: claim from device %s level %d, %lld ms after ours\n", c.id, c.level, (long long)now_ms - (long long)a->claim_ms);
+        else fprintf(stderr, "waked: claim from device %s level %d\n", c.id, c.level);
+    }
     le_wake_arbiter_heard(a, now_ms, &c);
     return LE_PEER_OK;
 }
