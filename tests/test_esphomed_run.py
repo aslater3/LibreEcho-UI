@@ -59,6 +59,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
  run([sys.executable,'tests/test_esphome_ffmpeg_wav.py','--http-fixture',d/'http'],env)
  run([sys.executable,'tests/test_esphomed.py'],env)
  run([sys.executable,'tests/test_esphomed_native_lifecycle.py'],env)
+ run([sys.executable,'tests/test_esphomed_light.py'],env)
  timerd=d/'libreecho-timerd';run(flags+['-Isrc','src/adapter/timerd.c','src/adapter/timer_schedule.c','src/adapter/adapter_client.c','src/adapter/adapter_server.c','src/json.c','src/log.c']+libs+['-o',timerd])
  run([sys.executable,'tests/test_esphomed_final_spec.py'],dict(env,TIMERD_BIN=str(timerd),ESPHOMED_PRIVATE_NAMESPACE='1'))
  run([a.crypto_python,'tests/test_esphomed_noise.py','NoiseFixture.test_noise_provision_persist_reconnect_wrong_key_and_plain_refusal','NoiseFixture.test_noise_replay_is_rejected','KeyedDaemon'],env)
@@ -68,6 +69,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
  if not a.host_only:
   run([a.aio_python,'tests/test_esphomed_aio.py','PinnedFixture.test_pinned_plain_real_login_entities_ping_disconnect','PinnedFixture.test_pinned_noise_provision_reconnect_wrong_key'],env)
   run([a.aio_python,'tests/test_esphomed_media_state.py'],env)
+  run([a.aio_python,'tests/test_esphomed_light_aio.py'],env)
   # Compare approved pinned serialization without overwriting checked-in evidence.
   run([a.aio_python,'tests/test_esphomed_generate_goldens.py','--check'],env)
  else:print('NOT RUN: pinned aioesphomeapi interoperability and pinned golden regeneration (--host-only)',flush=True)

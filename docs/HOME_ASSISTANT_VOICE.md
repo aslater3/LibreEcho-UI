@@ -33,6 +33,18 @@ first added, and Assist can then target "the lights" in that area. Home
 Assistant only applies a suggested area when the device is added; for a device
 that is already set up, change its area in Home Assistant.
 
+Besides the Assist satellite, the device offers Home Assistant a media player,
+a **Microphone mute** switch and, on boards with the TSL2540 ambient light
+sensor, an **Illuminance** sensor (unit `lx`, device class `illuminance`, state
+class `measurement`). `libreecho-esphomed` reads the sensor's `als_lux` node at
+most once a second and publishes a new value only when it changes by 5% (or
+1 lx in the dark), or after a minute for smaller drift, so HA sees no more than
+one update a second. A board without the sensor lists no illuminance entity;
+if the sensor stops reading, HA shows the entity as unknown. Tests and other
+boards can point the daemon at a different file with `--light-sensor PATH`.
+The sensor is found when HA lists entities, so a sensor that appears late in
+boot shows up at HA's next reconnect.
+
 Disabling HA restores the previously selected **Local** or **Custom** mode and
 its settings. Custom Whisper/Piper addresses, model/voice choices and assistant
 configuration are not erased. There is no protocol selector, legacy satellite
