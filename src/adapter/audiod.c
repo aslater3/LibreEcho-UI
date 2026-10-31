@@ -15,6 +15,7 @@
 #endif
 
 #include "adapter.h"
+#include "event_sound.h"
 #include "log.h"
 #include "sleep_generator.h"
 
@@ -208,6 +209,8 @@ struct snd_ctl_elem_value {
 
 static volatile sig_atomic_t g_stop;
 static volatile sig_atomic_t g_sleep_stop;
+/* Raised by SIGTERM in a sample child: finish on a faded chunk and exit. */
+static volatile sig_atomic_t g_sample_stop;
 
 struct audio_control {
     int found;
@@ -262,6 +265,9 @@ struct audio_hw {
     pid_t noise_pid;
     /* One sample child at a time; this also lets the reaper clear ownership. */
     pid_t sample_pid;
+    /* Which owner event sound the live sample child is playing, or -1 for a
+       bundled sample, so a timer dismissal stops only its own ring. */
+    int sample_event;
     /*
      * Cue playback: at most one writer at a time, and at most one cue per
      * LE_CUE_MIN_INTERVAL_MS.  The PID is the writer slot and the timestamp
@@ -1721,26 +1727,43 @@ static int sample_open_fd(const char *name)
     return fd;
 }
 
+static void sample_stop_signal(int signum)
+{
+    (void)signum;
+    g_sample_stop = 1;
+}
+
 static int write_sample_fd(int fd, int sample_fd)
 {
     unsigned char out[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS * sizeof(int16_t)];
     int16_t in[LE_TONE_CHUNK_FRAMES];
     FILE *file = fdopen(sample_fd, "rb");
     size_t frames;
+    int last = 0;
 
     if (!file) {
         close(sample_fd);
         return -1;
     }
-    while ((frames = fread(in, sizeof(int16_t), LE_TONE_CHUNK_FRAMES, file)) > 0) {
+    while (!last &&
+           (frames = fread(in, sizeof(int16_t), LE_TONE_CHUNK_FRAMES, file)) > 0) {
         int16_t *samples = (int16_t *)out;
         size_t bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t);
         size_t sent = 0;
         size_t i;
 
+        /* A stop request fades the current chunk (about 21 ms) to silence
+           and ends there, so an owner's long ring stops on a whole frame and
+           without a click when the timer is dismissed. */
+        last = g_sample_stop != 0;
         for (i = 0; i < frames; i++) {
-            samples[i * 2] = in[i];
-            samples[i * 2 + 1] = in[i];
+            int16_t value = in[i];
+
+            if (last)
+                value = (int16_t)((long)value * (long)(frames - i) /
+                                  (long)frames);
+            samples[i * 2] = value;
+            samples[i * 2 + 1] = value;
         }
         while (sent < bytes) {
             ssize_t n = write(fd, out + sent, bytes - sent);
@@ -1775,22 +1798,29 @@ static int write_sample_fd(int fd, int sample_fd)
     return 0;
 }
 
-static int start_sample(struct audio_hw *audio, const char *name)
+/* Nonzero while an earlier sample child is still writing. */
+static int sample_busy(struct audio_hw *audio)
 {
-    int fd, sample_fd;
-    pid_t pid;
-
-    if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0)
-        return -1;
     if (audio->sample_pid > 0) {
         pid_t done = waitpid(audio->sample_pid, NULL, WNOHANG);
         if (done == 0 || (done < 0 && errno != ECHILD))
-            return -1;
+            return 1;
         audio->sample_pid = 0;
     }
-    sample_fd = sample_open_fd(name);
-    if (sample_fd < 0)
+    return 0;
+}
+
+/* Takes ownership of sample_fd whatever the outcome. */
+static int start_sample_fd(struct audio_hw *audio, int sample_fd, int event)
+{
+    int fd;
+    pid_t pid;
+
+    if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0 ||
+        sample_busy(audio)) {
+        close(sample_fd);
         return -1;
+    }
     fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         close(sample_fd);
@@ -1803,13 +1833,100 @@ static int start_sample(struct audio_hw *audio, const char *name)
         return -1;
     }
     if (pid == 0) {
-        int result = write_sample_fd(fd, sample_fd);
+        int result;
+
+        g_sample_stop = 0;
+        signal(SIGTERM, sample_stop_signal);
+        result = write_sample_fd(fd, sample_fd);
         close(fd);
         _exit(result < 0 ? 1 : 0);
     }
     audio->sample_pid = pid;
+    audio->sample_event = event;
     close(sample_fd);
     close(fd);
+    return 0;
+}
+
+static int start_sample(struct audio_hw *audio, const char *name)
+{
+    int sample_fd;
+
+    if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0 ||
+        sample_busy(audio))
+        return -1;
+    sample_fd = sample_open_fd(name);
+    if (sample_fd < 0)
+        return -1;
+    return start_sample_fd(audio, sample_fd, -1);
+}
+
+/*
+ * The owner's sound for an event (#410). Only the selected file is played,
+ * unless `preview` asks for the kept one too so the owner can hear a sound
+ * before switching to it. The size is re-checked here rather than trusted
+ * from the uploader: this is the process that streams it to the speaker.
+ */
+static int event_sound_open_fd(int index, int preview)
+{
+    static const char *suffixes[] = { ".raw", ".raw.saved" };
+    char path[320];
+    struct stat status;
+    unsigned long limit = le_event_sound_max_bytes(index);
+    int i;
+
+    if (limit == 0)
+        return -1;
+    for (i = 0; i < (preview ? 2 : 1); ++i) {
+        int length = snprintf(path, sizeof(path), "%s/" LE_EVENT_SOUND_PREFIX "%s%s",
+                              le_event_sound_dir(),
+                              le_event_sound_slots[index].id, suffixes[i]);
+        int fd;
+
+        if (length < 0 || (size_t)length >= sizeof(path))
+            return -1;
+        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0)
+            continue;
+        if (fstat(fd, &status) == 0 && S_ISREG(status.st_mode) &&
+            status.st_size > 0 &&
+            (status.st_size % (off_t)sizeof(int16_t)) == 0 &&
+            (unsigned long)status.st_size <= limit)
+            return fd;
+        close(fd);
+    }
+    return -1;
+}
+
+/* Event sound outcomes for callers that keep their own built-in fallback. */
+#define LE_EVENT_SOUND_NONE 0
+#define LE_EVENT_SOUND_PLAYING 1
+#define LE_EVENT_SOUND_BUSY 2
+#define LE_EVENT_SOUND_FAILED 3
+
+static int play_event_sound(struct audio_hw *audio, int index, int preview)
+{
+    int fd = event_sound_open_fd(index, preview);
+
+    if (fd < 0)
+        return LE_EVENT_SOUND_NONE;
+    if (sample_busy(audio)) {
+        close(fd);
+        return LE_EVENT_SOUND_BUSY;
+    }
+    if (start_sample_fd(audio, fd, index) < 0)
+        return LE_EVENT_SOUND_FAILED;
+    return LE_EVENT_SOUND_PLAYING;
+}
+
+static int stop_event_sound(struct audio_hw *audio, int index)
+{
+    if (sample_busy(audio) && audio->sample_event == index &&
+        audio->sample_pid > 0) {
+        if (kill(audio->sample_pid, SIGTERM) < 0 && errno != ESRCH)
+            return -1;
+        return 1;
+    }
     return 0;
 }
 
@@ -2503,9 +2620,52 @@ static int handle_request(struct audio_hw *audio, char *message,
         return response_ok(response, response_size, id, "{}");
     }
 
+    if (!strcmp(command, "event_sound") ||
+        !strcmp(command, "event_sound_stop")) {
+        char event[16] = "";
+        int index, preview = 0, outcome;
+
+        (void)json_string(message, "event", event, sizeof(event));
+        index = le_event_sound_index(event);
+        if (index < 0)
+            return response_error(response, response_size, id,
+                                  "event must be wake, end or timer");
+        if (!strcmp(command, "event_sound_stop")) {
+            outcome = stop_event_sound(audio, index);
+            if (outcome < 0)
+                return response_error(response, response_size, id,
+                                      "event sound could not be stopped");
+            return response_ok(response, response_size, id,
+                               outcome ? "{\"stopped\":true}"
+                                       : "{\"stopped\":false}");
+        }
+        if (json_bool(message, "preview", &boolean) == 0)
+            preview = boolean;
+        outcome = play_event_sound(audio, index, preview);
+        if (outcome == LE_EVENT_SOUND_FAILED)
+            return response_error(response, response_size, id,
+                                  "event sound could not be played");
+        /* "custom":false tells the caller to play its own built-in sound. */
+        return response_ok(response, response_size, id,
+                           outcome == LE_EVENT_SOUND_NONE
+                               ? "{\"custom\":false,\"playing\":false}"
+                           : outcome == LE_EVENT_SOUND_BUSY
+                               ? "{\"custom\":true,\"playing\":false,\"busy\":true}"
+                               : "{\"custom\":true,\"playing\":true}");
+    }
+
     if (!strcmp(command, "wake_chirp")) {
-        int cue = start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ,
-                            LE_CHIRP_MS);
+        int cue, owner = play_event_sound(audio, le_event_sound_index("wake"), 0);
+
+        /* The owner's chime replaces the chirp; if it cannot play, the chirp
+           still marks the turn rather than leaving it silent. */
+        if (owner == LE_EVENT_SOUND_PLAYING)
+            return response_ok(response, response_size, id, "{\"custom\":true}");
+        if (owner == LE_EVENT_SOUND_BUSY)
+            return response_ok(response, response_size, id,
+                               "{\"custom\":true,\"playing\":false}");
+        cue = start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ,
+                        LE_CHIRP_MS);
 
         if (cue < 0)
             return response_error(response, response_size, id,

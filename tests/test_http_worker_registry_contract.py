@@ -8,6 +8,7 @@ for name, kind in (
     ("start_pcm_stream", "CHILD_WORKER_PCM_STREAM"),
     ("start_update_upload", "CHILD_WORKER_UPDATE"),
     ("start_update_fetch", "CHILD_WORKER_UPDATE"),
+    ("start_sound_upload", "CHILD_WORKER_SOUND"),
 ):
     match = re.search(
         rf"static int {name}\([^{{]+\)\{{(.*?)\nstatic ",

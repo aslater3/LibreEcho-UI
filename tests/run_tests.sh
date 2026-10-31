@@ -117,6 +117,10 @@ make build/libreecho-ledd build/libreecho-buttond
 python3 tests/test_buttond_led_restart.py
 make build/test-action-sample build/test-cue-rate-limit build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing build/test-watchdog-policy
 ./build/test-action-sample
+# Owner event sounds (#410): WAV conversion/store and audiod playback.
+make build/test-sound-store build/test-event-sound
+./build/test-sound-store
+./build/test-event-sound
 ./build/test-cue-rate-limit
 ./build/test-audiod-review
 ./build/test-led-night-review
@@ -174,6 +178,7 @@ node tests/test_sendspin_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
+node tests/test_own_sounds_ui.js
 node tests/test_frontend_state_ui.js
 node tests/test_update_identity_ui.js
 node tests/test_baby_monitor_ui.js
@@ -374,6 +379,8 @@ sh tests/test_timed.sh
 make test-lived
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
+# Owns its own port and private sound directory.
+sh tests/test_event_sounds_api.sh
 sh tests/test_setup_first_run.sh
 # First-boot provisioning drives the real daemon over loopback with the mock
 # backend and owns its own ports, so it runs outside the shared server above.
@@ -400,6 +407,7 @@ make build/test-backend-mock-timers
 make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
 ./build/test-timer-persistence
 sh tests/test_timerd.sh
+sh tests/test_timerd_event_sound.sh
 make build/libreecho-agentd
 sh tests/test_agentd_startup_readiness_contract.sh
 sh tests/test_agentd_timers.sh

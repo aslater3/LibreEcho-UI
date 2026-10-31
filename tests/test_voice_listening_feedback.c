@@ -24,6 +24,8 @@ static struct le_adapter led_adapter = {0};
 static int audio_available = 1;
 static int audio_calls;
 static int led_calls;
+static char audio_command[32];
+static char audio_args[128];
 static char led_args[2][256];
 
 struct le_adapter *le_adapter_connect(const char *path, int timeout_ms)
@@ -48,7 +50,9 @@ int le_adapter_call(struct le_adapter *adapter, const char *command,
     (void)output_size;
     if (adapter->audio) {
         ++audio_calls;
-        if (strcmp(command, "wake_chirp"))
+        snprintf(audio_command, sizeof(audio_command), "%s", command);
+        snprintf(audio_args, sizeof(audio_args), "%s", args ? args : "");
+        if (strcmp(command, "wake_chirp") && strcmp(command, "event_sound"))
             return -1;
         return 0;
     }
@@ -62,6 +66,8 @@ static void reset_calls(void)
 {
     audio_calls = 0;
     led_calls = 0;
+    audio_command[0] = '\0';
+    audio_args[0] = '\0';
     memset(led_args, 0, sizeof(led_args));
 }
 
@@ -101,6 +107,20 @@ int main(void)
     CHECK(led_calls == 1);
     CHECK(unsetenv("LE_VOICE_WAKE_CHIRP") == 0);
 
-    puts("voice listening feedback: ring-only and chirped paths: ok");
+    /* The finished-listening chime asks audiod for the owner's sound only;
+       it never touches the ring and is silent when audiod is gone. */
+    reset_calls();
+    le_voice_listening_end_sound();
+    CHECK(audio_calls == 1);
+    CHECK(led_calls == 0);
+    CHECK(!strcmp(audio_command, "event_sound"));
+    CHECK(strstr(audio_args, "\"event\":\"end\"") != NULL);
+    audio_available = 0;
+    reset_calls();
+    le_voice_listening_end_sound();
+    CHECK(audio_calls == 0);
+    audio_available = 1;
+
+    puts("voice listening feedback: ring-only, chirped and end-chime paths: ok");
     return 0;
 }

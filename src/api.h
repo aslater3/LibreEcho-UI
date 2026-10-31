@@ -84,6 +84,8 @@ int api_provision_start(struct api_context*);
    once networkd reports an association with an address. */
 void api_provision_poll(struct api_context*);
 int api_update_upload_authorize(struct api_context*,const struct api_request*,struct api_response*);
+/* PUT /api/v1/sounds/<event>: route, method and security checks for the streamed upload (#410). */
+int api_sound_upload_authorize(struct api_context*,const struct api_request*,struct api_response*,int*index);
 int api_update_fetch_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_update_channel_authorize(struct api_context*,const struct api_request*,struct api_response*,char*,size_t);
 /* 1 iff networkd reports the recovery AP actively serving (mode
