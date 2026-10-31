@@ -65,8 +65,9 @@ int le_peer_proof_verify(const struct le_peer_key *key, int status, const char *
     int n;
     if (!key || !key->set) return LE_PEER_TRUST_OFF;
     if (!body || !nonce || !host) return LE_PEER_TRUST_FAILED;
-    /* A device without the endpoint (older firmware) or without a key. */
-    if (status == 404) return LE_PEER_TRUST_UNPAIRED;
+    /* Older firmware without the endpoint: 404, or 401 when it has accounts
+       (the endpoint is not exempt from its login). */
+    if (status == 404 || status == 401) return LE_PEER_TRUST_UNPAIRED;
     if (status == 409 && json_get_string(body, "code", code, sizeof(code)) > 0 && !strcmp(code, "not_paired")) return LE_PEER_TRUST_UNPAIRED;
     if (status != 200 || !json_valid_object(body, strlen(body))) return LE_PEER_TRUST_FAILED;
     memset(&got, 0, sizeof(got));

@@ -205,6 +205,7 @@ static void test_proof(void)
     CHECK(le_peer_proof_verify(&key, 200, body, nonce, "192.0.2.10:8080", NULL) == LE_PEER_TRUST_UNPAIRED);
     CHECK(le_peer_proof_verify(&key, 409, "{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_paired\",\"message\":\"x\"}}", nonce, "h", NULL) == LE_PEER_TRUST_UNPAIRED);
     CHECK(le_peer_proof_verify(&key, 404, "{}", nonce, "h", NULL) == LE_PEER_TRUST_UNPAIRED);
+    CHECK(le_peer_proof_verify(&key, 401, "{}", nonce, "h", NULL) == LE_PEER_TRUST_UNPAIRED);
     CHECK(le_peer_proof_verify(&key, 500, "{}", nonce, "h", NULL) == LE_PEER_TRUST_FAILED);
     CHECK(le_peer_proof_verify(&key, 200, "not json", nonce, "h", NULL) == LE_PEER_TRUST_FAILED);
     CHECK(le_peer_proof_verify(&none, 200, body, nonce, "h", NULL) == LE_PEER_TRUST_OFF);
