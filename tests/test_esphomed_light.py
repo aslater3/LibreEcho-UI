@@ -29,7 +29,9 @@ class LightSensor(Daemon):
   # Atomic, like a sysfs read: never let the daemon see a half-written file.
   tmp=self.lux.with_suffix('.tmp');tmp.write_text('%d\n'%v);os.replace(tmp,self.lux)
  def subscribe(self):
-  self.hello();self.s.sendall(frame(20))
+  # As Home Assistant does: list entities, then subscribe to states.
+  self.hello();self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(4)],[63,17,16,19])
+  self.s.sendall(frame(20))
   return self.light_states(1.5,stop_after=1)
  def light_states(self,seconds,stop_after=None):
   got=[];end=time.monotonic()+seconds
@@ -58,6 +60,10 @@ class LightSensor(Daemon):
  def test_small_drift_is_not_published(self):
   self.subscribe();self.set_lux(122)
   self.assertEqual(self.light_states(2.2),[],'a 2% change is noise, not a new reading')
+ def test_no_state_for_a_client_that_never_listed_the_sensor(self):
+  # A state for a key the client was never told about is not sent.
+  self.hello();self.s.sendall(frame(20));self.assertEqual(self.light_states(1.5),[])
+  self.set_lux(900);self.assertEqual(self.light_states(1.5),[])
  def test_unreadable_sensor_reports_missing_state(self):
   self.subscribe();self.lux.unlink();self.assertEqual(self.light_states(2.5,stop_after=1),[None])
   self.set_lux(80);self.assertEqual(self.light_states(2.5,stop_after=1),[80.0])

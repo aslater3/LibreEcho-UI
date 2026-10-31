@@ -43,7 +43,7 @@
 #define LIGHT_KEY 3U
 #define LIGHT_POLL_MS 1000U
 #define LIGHT_REFRESH_MS 60000U
-struct client { int fd,mode,phase,hello,states,closing; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
+struct client { int fd,mode,phase,hello,states,closing,light; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
 struct state {
  struct client clients[CLIENTS];struct io jobs[JOBS],wake,mic,timer_cleanup;
@@ -144,7 +144,7 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  for(unsigned i=0;i<3;i++){struct ep_writer n={nested,sizeof nested,0,0};ep_string(&n,1,i==1?"wav":"mp3");ep_uint(&n,2,48000);ep_uint(&n,3,i==1?1:2);ep_uint(&n,4,i?1:0);if(i==1)ep_uint(&n,5,2);ep_bytes(&w,9,n.data,n.length);}(void)send_writer(c,63,&w);
  w.length=0;ep_string(&w,1,"microphone_mute");ep_fixed32(&w,2,MUTE_KEY);ep_string(&w,3,"Microphone mute");ep_string(&w,5,"mdi:microphone-off");(void)send_writer(c,17,&w);
  /* ListEntitiesSensorResponse: lx, illuminance, STATE_CLASS_MEASUREMENT; only when the board has a sensor. */
- if(S.light_path[0]){w.length=0;ep_string(&w,1,"illuminance");ep_fixed32(&w,2,LIGHT_KEY);ep_string(&w,3,"Illuminance");ep_string(&w,6,"lx");ep_uint(&w,7,0);ep_string(&w,9,"illuminance");ep_uint(&w,10,1);(void)send_writer(c,16,&w);}
+ if(S.light_path[0]){c->light=1;w.length=0;ep_string(&w,1,"illuminance");ep_fixed32(&w,2,LIGHT_KEY);ep_string(&w,3,"Illuminance");ep_string(&w,6,"lx");ep_uint(&w,7,0);ep_string(&w,9,"illuminance");ep_uint(&w,10,1);(void)send_writer(c,16,&w);}
  (void)send_msg(c,19,NULL,0);
 }
 static void configuration(struct client *c){unsigned char b[256],x[128];struct ep_writer w={b,sizeof b,0,0},n={x,sizeof x,0,0};ep_string(&n,1,"alexa_v0.1");ep_string(&n,2,"Alexa");ep_string(&n,3,"en");ep_bytes(&w,1,x,n.length);if(S.active_wake)ep_string(&w,2,"alexa_v0.1");ep_uint(&w,3,1);(void)send_writer(c,122,&w);}
@@ -181,8 +181,9 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  if(type==3)return 0;/* Legacy Auth is obsolete; pinned client does not await it. */
  if(!c->hello)return -1;
  switch(type){case 7:return send_msg(c,8,NULL,0);case 8:return 0;case 5:if(send_msg(c,6,NULL,0))return -1;c->closing=1;return 0;case 9:device_info(c);return 0;case 11:entities(c);return 0;
- /* The lux state goes once on subscribe, then only from light_poll: all_states() runs on every adapter status change. */
- case 20:c->states=1;states_send(c);if(S.light_path[0])light_state(c);return 0;
+ /* The lux state goes once on subscribe, then only from light_poll: all_states() runs on every adapter status change.
+  * Only clients whose entity list carried the sensor get it (a late-found sensor waits for the next list). */
+ case 20:c->states=1;states_send(c);if(c->light)light_state(c);return 0;
  case 89:if(!ep_get_uint(p,n,1,0)){if(S.owner==(int)idx){cancel_turn("unsubscribed");S.owner=-1;timer_owner_end();}return 0;}if(S.owner>=0&&S.owner!=(int)idx)return -1;
  /* Pinned client API_AUDIO subscription flag is 1<<2 (4), not 1. */
  if(!(ep_get_uint(p,n,2,0)&4))return -1;S.owner=(int)idx;return 0;
@@ -275,7 +276,7 @@ static void light_poll(void){static const char *const probe[]={"/sys/bus/i2c/dev
  lux=light_read(S.light_path);S.lux=lux;if(lux==S.lux_sent)return;
  big=lux<0||S.lux_sent<0||abs(lux-S.lux_sent)*20>=(S.lux_sent>20?S.lux_sent:20);
  if(!big&&S.now<S.light_sent_at+LIGHT_REFRESH_MS)return;
- S.lux_sent=lux;S.light_sent_at=S.now;for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].states)light_state(&S.clients[i]);}
+ S.lux_sent=lux;S.light_sent_at=S.now;for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].states&&S.clients[i].light)light_state(&S.clients[i]);}
 static void privacy_poll(void){char b[32];int n=config_read(S.privacy_path,b,sizeof b),old=S.privacy;if(n<0)S.privacy=-1;else if(b[0]=='0')S.privacy=0;else if(b[0]=='1')S.privacy=1;else S.privacy=-1;if(old!=S.privacy){if(mic_muted()&&(S.turn==1||S.turn==2))capture_end();all_states();}}
 static int normalize_mac(const char *input,char *out){unsigned char b[6];unsigned n=0,high=0;int hi=-1;for(size_t i=0;input[i];i++){int x=input[i];if(x==':'||isspace((unsigned char)x))continue;if(x>='0'&&x<='9')x-='0';else if(x>='a'&&x<='f')x=x-'a'+10;else if(x>='A'&&x<='F')x=x-'A'+10;else return -1;if(hi<0)hi=x;else{if(n>=6)return -1;b[n++]=(unsigned char)(hi*16+x);high|=b[n-1];hi=-1;}}if(n!=6||hi>=0||!high||(b[0]&1))return -1;snprintf(out,18,"%02x:%02x:%02x:%02x:%02x:%02x",b[0],b[1],b[2],b[3],b[4],b[5]);return 0;}
 static int load_configuration(void){char b[16384],key[45],mac[64],name[64],wake[64];int n=config_read(S.config_path,b,sizeof b);struct le_esphome_config cfg;size_t z;if(n<0||config_esphome_read(S.config_path,&cfg))return -1;
