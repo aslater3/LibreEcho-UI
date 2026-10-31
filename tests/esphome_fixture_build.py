@@ -19,7 +19,7 @@ def daemon_binary(directory):
     tls = Path(prefix)
     binary = Path(directory) / "libreecho-esphomed"
     sources = ["esphomed", "esphome_proto", "esphome_frame", "esphome_noise", "esphome_playback",
-               "radio_resample", "mdns_client", "mdns_lease"]
+               "radio_resample", "mdns_client", "mdns_lease", "voice_ns"]
     command = [os.environ.get("CC", "cc"), "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-O1",
                "-Wall", "-Wextra", "-Werror", "-Wno-misleading-indentation", "-I" + str(tls / "include")]
     command += ["src/adapter/" + source + ".c" for source in sources] + ["src/config_store.c", "src/json.c"]
