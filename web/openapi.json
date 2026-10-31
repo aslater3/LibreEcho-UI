@@ -474,7 +474,7 @@
      "Audio"
     ],
     "summary": "Read audio state",
-    "description": "Returns available audio state, including volume_leveling (experimental music automatic volume leveling, false by default). On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error.",
+    "description": "Returns available audio state, including volume_leveling (experimental music automatic volume leveling, false by default) and the separate reply volume: reply_volume (0-100, the level spoken replies, announcements and chimes play at; equal to volume while following) and reply_volume_custom (false while replies follow the master volume, the default). On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -488,8 +488,8 @@
     "tags": [
      "Audio"
     ],
-    "summary": "Update volume, microphone state, announcement voice, or music volume leveling",
-  "description": "Accepts any of volume (0-100), microphone_gain (0-100), microphone_muted (boolean), tts_voice, and volume_leveling (boolean: experimental stock-style music automatic volume leveling, off by default; persisted). A non-boolean volume_leveling is rejected with 400.",
+    "summary": "Update volume, reply volume, microphone state, announcement voice, or music volume leveling",
+  "description": "Accepts any of volume (0-100), microphone_gain (0-100), microphone_muted (boolean), tts_voice, and volume_leveling (boolean: experimental stock-style music automatic volume leveling, off by default; persisted). A non-boolean volume_leveling is rejected with 400. reply_volume (integer 0-100) gives assistant replies, announcements and chimes their own level, persisted; reply_volume_custom false returns them to the master volume. Alarms, music and other media always use volume. An out-of-range or non-integer reply_volume, a non-boolean reply_volume_custom, or reply_volume_custom true without reply_volume is rejected with 400 before any change.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"

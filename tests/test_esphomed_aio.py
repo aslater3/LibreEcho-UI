@@ -28,7 +28,7 @@ class PinnedFixture(Fixture):
    client.media_player_command(1,command=command);await self.wait_for(lambda:any(r['cmd']==verb for r in self.adapters['radio'].calls),verb)
   client.media_player_command(1,volume=.42);await self.wait_for(lambda:any(r['cmd']=='set_volume' and r['args']=={'volume':42} for r in self.adapters['audio'].calls),'volume command')
   client.media_player_command(1,command=MediaPlayerCommand.MUTE);await self.wait_for(lambda:any(r['cmd']=='set_volume' and r['args']=={'volume':0} for r in self.adapters['audio'].calls),'output mute');await self.wait_for(lambda:any(isinstance(s,MediaPlayerEntityState) and s.muted for s in states),'output muted state')
-  client.media_player_command(1,command=MediaPlayerCommand.UNMUTE);await self.wait_for(lambda:isinstance(states[-2],MediaPlayerEntityState) and not states[-2].muted if len(states)>1 else False,'output unmuted state')
+  client.media_player_command(1,command=MediaPlayerCommand.UNMUTE);await self.wait_for(lambda:(lambda media:bool(media) and not media[-1].muted)([x for x in states if isinstance(x,MediaPlayerEntityState)]),'output unmuted state')
   client.switch_command(2,True);await self.wait_for(lambda:self.adapters['audio'].muted,'microphone mute');self.privacy.write_text('1\n');await asyncio.sleep(.3);before=sum(r['cmd']=='set_mute' for r in self.adapters['audio'].calls);client.switch_command(2,False);await asyncio.sleep(.1);self.assertEqual(sum(r['cmd']=='set_mute' for r in self.adapters['audio'].calls),before)
   self.privacy.write_text('0\n');await asyncio.sleep(.3);client.switch_command(2,False);await self.wait_for(lambda:not self.adapters['audio'].muted,'microphone unmute');await asyncio.sleep(.1)
   starts=[];stops=[];audio=[];finished=[]
@@ -72,7 +72,7 @@ class PinnedFixture(Fixture):
    client=APIClient('127.0.0.1',self.port,client_info='LibreEcho isolated acceptance',provide_time=False)
    try:
     await client.connect(login=True);info=await client.device_info();self.assertEqual(info.name,'fixture-satellite');self.assertEqual(info.mac_address,'02:00:00:00:00:01');self.assertEqual(info.voice_assistant_feature_flags,61)
-    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2});self.assertFalse(services)
+    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,3});self.assertFalse(services)
     from aioesphomeapi.model import MediaPlayerEntityFeature,MediaPlayerInfo
     media=next(e for e in entities if isinstance(e,MediaPlayerInfo));self.assertTrue(media.supports_pause);self.assertEqual(media.feature_flags,int(MediaPlayerEntityFeature.PAUSE|MediaPlayerEntityFeature.PLAY|MediaPlayerEntityFeature.STOP|MediaPlayerEntityFeature.VOLUME_SET|MediaPlayerEntityFeature.VOLUME_MUTE|MediaPlayerEntityFeature.PLAY_MEDIA|MediaPlayerEntityFeature.MEDIA_ANNOUNCE))
     await self.exercise_controls_and_voice(client)
@@ -101,9 +101,29 @@ class PinnedFixture(Fixture):
    await asyncio.sleep(.05)
    good=APIClient('127.0.0.1',self.port,noise_psk=encoded,provide_time=False)
    try:
-    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2})
+    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,3})
     await self.exercise_controls_and_voice(good)
     await good._get_connection().send_message_await_response(PingRequest(),PingResponse);await good.disconnect()
    finally:await good.disconnect(force=True)
   asyncio.run(asyncio.wait_for(run(),20))
+ def test_pinned_reply_volume_number(self):
+  # Separate reply volume (#409): a config number that follows the master until set.
+  self.s.close();time.sleep(.05)
+  async def run():
+   from aioesphomeapi.model import EntityCategory,NumberInfo,NumberMode,NumberState
+   client=APIClient('127.0.0.1',self.port,provide_time=False)
+   try:
+    await client.connect(login=True);entities,_=await client.list_entities_services()
+    number=next(e for e in entities if isinstance(e,NumberInfo))
+    self.assertEqual((number.key,number.object_id,number.name),(3,'reply_volume','Reply volume'))
+    self.assertEqual((number.min_value,number.max_value,number.step,number.unit_of_measurement),(0,100,1,'%'))
+    self.assertEqual(number.entity_category,EntityCategory.CONFIG);self.assertEqual(number.mode,NumberMode.SLIDER)
+    states=[];client.subscribe_states(lambda s:states.append(s) if isinstance(s,NumberState) else None)
+    await self.wait_for(lambda:any(s.state==66 for s in states),'reply volume following the master (66)')
+    client.number_command(3,25)
+    await self.wait_for(lambda:any(r['cmd']=='set_reply_volume' for r in self.adapters['audio'].calls),'set_reply_volume')
+    self.assertEqual(self.wait_call('audio','set_reply_volume')['args'],{'volume':25})
+    await self.wait_for(lambda:states and states[-1].state==25,'reply volume state 25')
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),10))
 if __name__=='__main__':unittest.main(defaultTest='PinnedFixture')

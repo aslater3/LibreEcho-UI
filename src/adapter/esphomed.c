@@ -37,6 +37,9 @@
 #define RING_SAMPLES 48000U
 #define MEDIA_KEY 1U
 #define MUTE_KEY 2U
+/* Separate reply volume (#409): a 0-100 % config number in Home Assistant. */
+#define REPLY_KEY 3U
+#define JOB_REPLY 9
 struct client { int fd,mode,phase,hello,states,closing; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
 struct state {
@@ -44,7 +47,7 @@ struct state {
  const char *config_path,*status_path,*audio_path,*wake_path,*radio_path,*timer_path,*led_path,*mdns_path,*bus_path,*privacy_path,*ca_path,*idme_path;
  /* Optional room from web-config (#64), offered to Home Assistant as the suggested area when it adds this device. */
  char room[49];
- char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake;
+ char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake,reply_volume;
  uint64_t now,turn_deadline,turn_limit,last_audio_status,last_status_poll,wake_retry,mdns_retry,ring_first,ring_end,capture_next,timer_retry;
  int16_t ring[RING_SAMPLES];unsigned char mic_rx[24+2560];size_t mic_n;int mic_ack;
  char conversation[128],tts_url[1024],next_url[1024],result[24];int continue_turn,run_end,early_tts,playing,announcement,pipeline,tts_done,timer_pending;
@@ -106,6 +109,7 @@ static void profile(const char *name){char a[192];if(!strcmp(name,"idle")){(void
 static void states_send(struct client *c){unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};float f=(float)S.volume/100.0f;uint32_t bits;memcpy(&bits,&f,4);
  ep_fixed32(&w,1,MEDIA_KEY);ep_uint(&w,2,S.playing?2:S.radio_state);ep_fixed32(&w,3,bits);ep_uint(&w,4,S.output_muted);if(S.last_audio_status)(void)send_writer(c,64,&w);
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
+ if(S.last_audio_status){f=(float)S.reply_volume;memcpy(&bits,&f,4);w.length=0;ep_fixed32(&w,1,REPLY_KEY);ep_fixed32(&w,2,bits);(void)send_writer(c,50,&w);}
 }
 static void all_states(void){for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].states)states_send(&S.clients[i]);}
 static int announce_done(int success){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,(unsigned)success);return S.owner>=0?send_writer(&S.clients[S.owner],120,&w):-1;}
@@ -133,7 +137,11 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  /* aioesphomeapi 46.2.0: PAUSE, VOLUME_SET/MUTE, PLAY_MEDIA, STOP, PLAY, MEDIA_ANNOUNCE. */
  ep_uint(&w,11,(1U<<0)|(1U<<2)|(1U<<3)|(1U<<9)|(1U<<12)|(1U<<14)|(1U<<20));
  for(unsigned i=0;i<3;i++){struct ep_writer n={nested,sizeof nested,0,0};ep_string(&n,1,i==1?"wav":"mp3");ep_uint(&n,2,48000);ep_uint(&n,3,i==1?1:2);ep_uint(&n,4,i?1:0);if(i==1)ep_uint(&n,5,2);ep_bytes(&w,9,n.data,n.length);}(void)send_writer(c,63,&w);
- w.length=0;ep_string(&w,1,"microphone_mute");ep_fixed32(&w,2,MUTE_KEY);ep_string(&w,3,"Microphone mute");ep_string(&w,5,"mdi:microphone-off");(void)send_writer(c,17,&w);(void)send_msg(c,19,NULL,0);
+ w.length=0;ep_string(&w,1,"microphone_mute");ep_fixed32(&w,2,MUTE_KEY);ep_string(&w,3,"Microphone mute");ep_string(&w,5,"mdi:microphone-off");(void)send_writer(c,17,&w);
+ /* Number: min 0, max 100, step 1, config category, %, slider. Follows the master volume until set; the web UI can return it to following. */
+ {float lo=0,hi=100,step=1;uint32_t bits;w.length=0;ep_string(&w,1,"reply_volume");ep_fixed32(&w,2,REPLY_KEY);ep_string(&w,3,"Reply volume");ep_string(&w,5,"mdi:account-voice");
+ memcpy(&bits,&lo,4);ep_fixed32(&w,6,bits);memcpy(&bits,&hi,4);ep_fixed32(&w,7,bits);memcpy(&bits,&step,4);ep_fixed32(&w,8,bits);ep_uint(&w,10,1);ep_string(&w,11,"%");ep_uint(&w,12,2);(void)send_writer(c,49,&w);}
+ (void)send_msg(c,19,NULL,0);
 }
 static void configuration(struct client *c){unsigned char b[256],x[128];struct ep_writer w={b,sizeof b,0,0},n={x,sizeof x,0,0};ep_string(&n,1,"alexa_v0.1");ep_string(&n,2,"Alexa");ep_string(&n,3,"en");ep_bytes(&w,1,x,n.length);if(S.active_wake)ep_string(&w,2,"alexa_v0.1");ep_uint(&w,3,1);(void)send_writer(c,122,&w);}
 /* Preserve all unrelated fields; only replace a validated top-level string or
@@ -185,6 +193,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  if(job(S.wake_path,"set_word","{\"word\":\"Alexa\"}",5,1)<0)return -1;S.active_wake=1;configuration(c);return 0;}
  case 124:return provision(c,p,n);
  case 33:if(ep_get_uint(p,n,1,0)!=MUTE_KEY)return -1;{int mute=!!ep_get_uint(p,n,2,0);if(!mute&&S.privacy!=0){all_states();return 0;}if(mute){S.local_mute_gate=1;S.muted=1;if(S.turn==1)cancel_turn("muted");else if(S.turn==2)capture_end();all_states();}snprintf(args,sizeof args,"{\"muted\":%s}",mute?"true":"false");return job(S.audio_path,"set_mute",args,3,mute);}
+ case 51:if(ep_get_uint(p,n,1,0)!=REPLY_KEY)return -1;{uint32_t bits=(uint32_t)ep_get_uint(p,n,2,0);float level;memcpy(&level,&bits,4);if(!isfinite(level)||level<0||level>100)return -1;int target=(int)lroundf(level);snprintf(args,sizeof args,"{\"volume\":%d}",target);return job(S.audio_path,"set_reply_volume",args,JOB_REPLY,target)?-1:0;}
  case 65:if(ep_get_uint(p,n,1,0)!=MEDIA_KEY)return -1;
  if(ep_get_uint(p,n,4,0)){uint32_t bits=(uint32_t)ep_get_uint(p,n,5,0);float volume;memcpy(&volume,&bits,4);if(!isfinite(volume)||volume<0||volume>1)return -1;snprintf(args,sizeof args,"{\"volume\":%d}",(int)lroundf(volume*100));if(job(S.audio_path,"set_volume",args,4,(int)lroundf(volume*100)))return -1;}
  if(ep_get_uint(p,n,6,0)){if(ep_get_text(p,n,7,url,sizeof url)||strlen(url)>900)return -1;json_escape(escaped,sizeof escaped,url);snprintf(args,sizeof args,"{\"url\":\"%.1900s\"}",escaped);
@@ -250,9 +259,9 @@ static void capture_tick(void){if(S.turn!=2||S.owner<0)return;if(mic_muted()){ca
  if(send_writer(&S.clients[S.owner],106,&w)){cancel_turn("backpressure");return;}S.capture_next+=320;}
 }
 static void jobs_tick(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i];if(j->stage==3&&j->kind==JOB_TIMER){if(S.timer_pending)continue;if(io_connect(j,S.timer_path)<0){io_close(j);continue;}j->stage=1;j->deadline=S.now+500;}if(j->fd<0)continue;int rc=io_tick(j);if(!rc)continue;int ok=0;if(rc>0){char *end=memchr(j->rx,'\n',j->rx_n);*end=0;(void)json_get_bool(j->rx,"ok",&ok);}if(ok){
- if(j->kind==1){int muted,volume;if(json_get_bool(j->rx,"muted",&muted)>0&&json_get_int(j->rx,"volume",&volume)>0&&volume>=0&&volume<=100){S.muted=muted;S.volume=volume;S.last_audio_status=S.now;}}
+ if(j->kind==1){int muted,volume;if(json_get_bool(j->rx,"muted",&muted)>0&&json_get_int(j->rx,"volume",&volume)>0&&volume>=0&&volume<=100){S.muted=muted;S.volume=volume;S.last_audio_status=S.now;int reply;S.reply_volume=json_get_int(j->rx,"reply_volume",&reply)>0&&reply>=0&&reply<=100?reply:volume;}}
  if(j->kind==2){int playing=0,paused=0;(void)json_get_bool(j->rx,"playing",&playing);(void)json_get_bool(j->rx,"paused",&paused);S.radio_state=paused?3:playing?2:1;}
- if(j->kind==3){S.muted=j->target;S.local_mute_gate=j->target;}if(j->kind==4)S.volume=j->target;if(j->kind==6){S.output_muted=j->target;S.volume=j->target?0:S.restore_volume;}
+ if(j->kind==3){S.muted=j->target;S.local_mute_gate=j->target;}if(j->kind==4)S.volume=j->target;if(j->kind==JOB_REPLY)S.reply_volume=j->target;if(j->kind==6){S.output_muted=j->target;S.volume=j->target?0:S.restore_volume;}
  }else if(j->kind>=3&&j->kind<=6&&S.turn)cancel_turn("adapter_error");io_close(j);all_states();}timer_cleanup_tick();}
 static void privacy_poll(void){char b[32];int n=config_read(S.privacy_path,b,sizeof b),old=S.privacy;if(n<0)S.privacy=-1;else if(b[0]=='0')S.privacy=0;else if(b[0]=='1')S.privacy=1;else S.privacy=-1;if(old!=S.privacy){if(mic_muted()&&(S.turn==1||S.turn==2))capture_end();all_states();}}
 static int normalize_mac(const char *input,char *out){unsigned char b[6];unsigned n=0,high=0;int hi=-1;for(size_t i=0;input[i];i++){int x=input[i];if(x==':'||isspace((unsigned char)x))continue;if(x>='0'&&x<='9')x-='0';else if(x>='a'&&x<='f')x=x-'a'+10;else if(x>='A'&&x<='F')x=x-'A'+10;else return -1;if(hi<0)hi=x;else{if(n>=6)return -1;b[n++]=(unsigned char)(hi*16+x);high|=b[n-1];hi=-1;}}if(n!=6||hi>=0||!high||(b[0]&1))return -1;snprintf(out,18,"%02x:%02x:%02x:%02x:%02x:%02x",b[0],b[1],b[2],b[3],b[4],b[5]);return 0;}

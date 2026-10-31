@@ -475,6 +475,20 @@ curl -fsS "$URL/api/v1/audio" | grep -q '"volume_leveling":true'
 code=$(curl -sS -o /tmp/le-leveling-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume_leveling":"on"}')
 [ "$code" = 400 ] || { echo "volume_leveling accepted a non-boolean ($code)" >&2; exit 1; }
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume_leveling":false}' | grep -q '"volume_leveling":false'
+# Separate reply volume (#409): follows the master until set, own level, back to following, validated.
+curl -fsS "$URL/api/v1/audio" | grep -q '"reply_volume_custom":false'
+master=$(curl -fsS "$URL/api/v1/audio" | sed -n 's/.*"data":{"volume":\([0-9]*\).*/\1/p')
+curl -fsS "$URL/api/v1/audio" | grep -q "\"reply_volume\":$master,"
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"reply_volume":35}' | grep -q '"reply_volume":35,"reply_volume_custom":true'
+curl -fsS "$URL/api/v1/audio" | grep -q "\"data\":{\"volume\":$master,"
+# A bad reply level is rejected before any other field in the same request is applied.
+for bad in '{"reply_volume":101}' '{"reply_volume":-1}' '{"reply_volume":"loud"}' '{"reply_volume":35.5}' '{"reply_volume":4294967346}' '{"reply_volume_custom":true}' '{"reply_volume_custom":"no"}' '{"volume":7,"reply_volume":101}' '{"volume":7,"reply_volume_custom":"no"}'; do
+  code=$(curl -sS -o /tmp/le-reply-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data "$bad")
+  [ "$code" = 400 ] || { echo "reply volume accepted $bad ($code)" >&2; exit 1; }
+done
+curl -fsS "$URL/api/v1/audio" | grep -q '"reply_volume":35,"reply_volume_custom":true'
+curl -fsS "$URL/api/v1/audio" | grep -q "\"data\":{\"volume\":$master,"
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"reply_volume_custom":false}' | grep -q "\"reply_volume\":$master,\"reply_volume_custom\":false"
 code=$(curl -sS -o /tmp/le-voice-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"not-a-voice"}')
 [ "$code" = 400 ]
 echo 'api: ok'
