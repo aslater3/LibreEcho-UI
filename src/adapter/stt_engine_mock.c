@@ -54,8 +54,10 @@ void stt_engine_stream_destroy(struct stt_stream *stream)
 static void copy_result(const struct stt_stream *stream,
                         char *text, size_t text_size)
 {
-    const char *result =
-        stream->speech_samples ? "mock transcription" : "";
+    /* Tests choose what the mock "heard" (a stop command, room chatter). */
+    const char *heard = getenv("LIBREECHO_MOCK_STT_TEXT");
+    const char *result = !stream->speech_samples ? ""
+        : heard && heard[0] ? heard : "mock transcription";
 
     if (text && text_size)
         snprintf(text, text_size, "%s", result);

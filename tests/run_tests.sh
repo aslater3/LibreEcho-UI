@@ -180,6 +180,7 @@ node tests/test_baby_monitor_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
 node tests/test_privacy_disclosure_ui.js
 node tests/test_assistant_clock_format_ui.js
+node tests/test_stop_without_wake_ui.js
 node tests/test_chatgpt_auth_gate_ui.js
 node tests/test_home_location_lookup_ui.js
 node tests/test_mute_lamp_ui.js
@@ -350,6 +351,11 @@ make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
+# Stop without the wake word (#405): the wake-free stop window in the pipeline,
+# then the real agent acting on it (timer, reply, chatter, remote STT guard).
+make build/test-voice-pipeline-stop-window build/mock-llm-curl
+./build/test-voice-pipeline-stop-window
+python3 tests/test_stop_without_wake.py
 make test-mdns
 # Guard the nested-make provenance contract before the ESPHome section: its
 # strict radio-controls build is the first -Werror consumer of the augmented
