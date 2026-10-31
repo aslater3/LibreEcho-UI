@@ -205,6 +205,34 @@ class Fixture(Daemon):
    with wave.open(wav,'wb') as w:w.setnchannels(1);w.setsampwidth(2);w.setframerate(48000);w.writeframes(struct.pack('<h',sample)*count)
    urls.append(self.http_audio(wav.getvalue()))
   self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,urls[1])+text(3,urls[0])));self.wait_completion();self.assertEqual(self.busbytes,struct.pack('<h',900)*2000+struct.pack('<h',1800)*2400)
+ def time_zone_exchange(self,source,*zones):
+  """Subscribe states, answer the device's GetTimeRequest (36) like HA does (GetTimeResponse 37), return the stored config."""
+  cfg=json.loads(self.config.read_text())
+  if source is not None:cfg['timezone_source']=source
+  cfg['timezone']='UTC';self.config.write_text(json.dumps(cfg))
+  self.hello();self.s.sendall(frame(20));end=time.monotonic()+3
+  while time.monotonic()<end:
+   t,_=receive(self.s)
+   if t==36:break
+  else:self.fail('no GetTimeRequest after subscribing states')
+  for zone in zones:
+   self.s.sendall(frame(37,b'\x0d'+struct.pack('<I',int(time.time()))+text(2,zone)));time.sleep(.15)
+   self.s.sendall(frame(7));end=time.monotonic()+3
+   while time.monotonic()<end:
+    if receive(self.s)[0]==8:break
+   else:self.fail('client did not stay connected after GetTimeResponse')
+  return json.loads(self.config.read_text())
+ def test_time_zone_from_home_assistant_when_followed(self):
+  cfg=self.time_zone_exchange('home_assistant','CST6CDT,M3.2.0,M11.1.0')
+  self.assertEqual(cfg['timezone'],'CST6CDT,M3.2.0,M11.1.0');self.assertEqual(cfg['timezone_name'],'');self.assertEqual(cfg['hostname'],'fixture-satellite')
+ def test_time_zone_from_home_assistant_rewrites_angle_bracket_names(self):
+  self.assertEqual(self.time_zone_exchange('home_assistant','<+04>-4')['timezone'],'LST-4')
+ def test_time_zone_from_home_assistant_ignored_without_source(self):
+  self.assertEqual(self.time_zone_exchange(None,'CST6CDT,M3.2.0,M11.1.0')['timezone'],'UTC')
+ def test_time_zone_from_home_assistant_ignored_when_manual(self):
+  self.assertEqual(self.time_zone_exchange('manual','CST6CDT,M3.2.0,M11.1.0')['timezone'],'UTC')
+ def test_time_zone_from_home_assistant_rejects_unusable_zone(self):
+  self.assertEqual(self.time_zone_exchange('home_assistant','UTC;reboot','A'*90,'','<+04')['timezone'],'UTC')
  def test_adapter_failure_does_not_claim_unmute_or_volume(self):
   self.hello();self.adapters['audio'].fail=True;self.adapters['audio'].muted=True
   self.s.sendall(frame(33,b'\x0d'+struct.pack('<I',2)+num(2,1)));self.wait_call('audio','set_mute')
@@ -215,7 +243,7 @@ class Fixture(Daemon):
   for _ in range(16):
    try:t,b=receive(self.s)
    except EOFError:break
-   self.assertIn(t,(26,64)) # A state broadcast already queued before rejection may drain.
+   self.assertIn(t,(26,36,64)) # A state broadcast (or the GetTimeRequest sent on subscribe) already queued before rejection may drain.
   else:self.fail('malformed volume did not close the client')
  def test_announcement_error_reports_failure_and_resets_playback(self):
   wav=io.BytesIO()

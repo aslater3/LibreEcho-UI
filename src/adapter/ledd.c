@@ -18,6 +18,7 @@
 #include "led_music_render.h"
 #include "log.h"
 #include "music_visualizer_protocol.h"
+#include "../timezone.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -647,6 +648,8 @@ static int night_mode_active(const struct led_state *state)
 
     if (!state->night_enabled)
         return 0;
+    /* Follow a time zone changed in Device settings or by Home Assistant (#371). */
+    (void)le_timezone_follow(NULL);
     now = time(NULL);
     if (!localtime_r(&now, &tm))
         return 0;

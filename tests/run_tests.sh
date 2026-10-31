@@ -31,6 +31,7 @@ python3 tests/test_acoustic_events_review_contract.py
 python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
 sh tests/test_active_device_ping.sh
+sh tests/test_timezone_setup.sh
 python3 tests/test_pr244_review_contract.py
 python3 tests/test_pr245_review_contract.py
 make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-networkd-ap-scan build/test-nl80211-scan-transport build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
@@ -176,6 +177,7 @@ sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
 node tests/test_frontend_state_ui.js
 node tests/test_update_identity_ui.js
+node tests/test_timezone_ui.js
 node tests/test_baby_monitor_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
 node tests/test_privacy_disclosure_ui.js
@@ -320,10 +322,11 @@ cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic
     -Isrc -Isrc/adapter tests/test_bt_media_resample.c src/adapter/radio_resample.c \
     -lm -o build/test-bt-media-resample
 ./build/test-bt-media-resample
-make build/test-voice-aec build/test-voice-reference build/test-spoken-time
+make build/test-voice-aec build/test-voice-reference build/test-spoken-time build/test-timezone
 ./build/test-voice-aec
 ./build/test-voice-reference
 ./build/test-spoken-time
+./build/test-timezone
 make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
 make build/test-voice-reply build/test-voice-playback
@@ -410,6 +413,7 @@ while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -l
 # Timer HTTP cases require this ready, isolated mock server.
 LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
+LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_timezone_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh

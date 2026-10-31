@@ -11,6 +11,7 @@
 #include "../config_store.h"
 #include "../json.h"
 #include "../esphome_health.h"
+#include "../timezone.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -37,7 +38,7 @@
 #define RING_SAMPLES 48000U
 #define MEDIA_KEY 1U
 #define MUTE_KEY 2U
-struct client { int fd,mode,phase,hello,states,closing; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
+struct client { int fd,mode,phase,hello,states,closing; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at,time_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
 struct state {
  struct client clients[CLIENTS];struct io jobs[JOBS],wake,mic,timer_cleanup;
@@ -164,12 +165,32 @@ static void voice_event(const void *p,size_t n){unsigned event=(unsigned)ep_get_
  if((event==100&&S.early_tts)||event==8){capture_end();if(!S.playing&&!S.tts_done&&S.tts_url[0]&&playback_start(S.tts_url)<0){(void)announce_done(0);cancel_turn("playback_error");return;}}
  if(event==2){S.run_end=1;if(!S.playing&&(S.tts_done||!S.tts_url[0])){capture_end();completed();}}
 }
+/*
+ * Time zone from Home Assistant (#371). Like an ESPHome `time: platform:
+ * homeassistant`, ask the client for the time (GetTimeRequest 36); HA answers
+ * with GetTimeResponse 37 whose field 2 is its configured zone as a POSIX
+ * string. Only when the owner chose "Follow Home Assistant" in Device
+ * settings (timezone_source in web-config.json, read fresh so no reload is
+ * needed) is it stored as "timezone"; the daemons that render local time
+ * pick that up live and the initramfs exports it at the next boot. An empty,
+ * oversized or unusable zone is ignored, never a reason to drop the client.
+ */
+#define TIME_REQUEST_INTERVAL_MS 3600000U
+static void time_request(struct client *c){c->time_at=S.now+TIME_REQUEST_INTERVAL_MS;(void)send_msg(c,36,NULL,0);}
+static void time_response(const void *p,size_t n){char raw[96],tz[64],current[64],source[24],b[16384];int len;
+ if(ep_get_text(p,n,2,raw,sizeof raw)||!raw[0])return;len=config_read(S.config_path,b,sizeof b);if(len<0||!json_valid_object(b,(size_t)len))return;
+ if(json_get_string_top_level(b,"timezone_source",source,sizeof source)!=1||strcmp(source,"home_assistant"))return;
+ if(le_timezone_normalize(raw,tz,sizeof tz)){fprintf(stderr,"esphomed: ignoring unusable Home Assistant time zone\n");return;}
+ if(json_get_string_top_level(b,"timezone",current,sizeof current)==1&&!strcmp(current,tz))return;
+ if(config_set_string("timezone",tz)||config_set_string("timezone_name",""))fprintf(stderr,"esphomed: Home Assistant time zone could not be saved\n");
+ else fprintf(stderr,"esphomed: time zone set from Home Assistant: %s\n",tz);}
 static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){struct client *c=&S.clients[idx];unsigned char b[128];struct ep_writer w={b,sizeof b,0,0};char args[2048],url[1024],escaped[2048];if(valid_proto(p,n))return -1;
  if(type==1){if(c->hello)return -1;ep_uint(&w,1,1);ep_uint(&w,2,14);ep_string(&w,3,"LibreEcho 0.14.0");ep_string(&w,4,S.name);c->hello=1;c->deadline=S.now+120000;status_write();return send_writer(c,2,&w);}
  if(type==3)return 0;/* Legacy Auth is obsolete; pinned client does not await it. */
  if(!c->hello)return -1;
  switch(type){case 7:return send_msg(c,8,NULL,0);case 8:return 0;case 5:if(send_msg(c,6,NULL,0))return -1;c->closing=1;return 0;case 9:device_info(c);return 0;case 11:entities(c);return 0;
- case 20:c->states=1;states_send(c);return 0;
+ case 20:c->states=1;states_send(c);time_request(c);return 0;
+ case 37:time_response(p,n);return 0;
  case 89:if(!ep_get_uint(p,n,1,0)){if(S.owner==(int)idx){cancel_turn("unsubscribed");S.owner=-1;timer_owner_end();}return 0;}if(S.owner>=0&&S.owner!=(int)idx)return -1;
  /* Pinned client API_AUDIO subscription flag is 1<<2 (4), not 1. */
  if(!(ep_get_uint(p,n,2,0)&4))return -1;S.owner=(int)idx;return 0;
@@ -218,6 +239,7 @@ static void client_tick(unsigned idx,short events){struct client *c=&S.clients[i
  /* aioesphomeapi only pings after hearing nothing, and our state stream keeps
   * it quiet, so probe a silent peer ourselves well inside the idle deadline. */
  if(c->hello&&!c->closing&&S.now>=c->last_seen+60000&&S.now>=c->ping_at+30000){c->ping_at=S.now;(void)send_msg(c,7,NULL,0);}
+ if(c->hello&&!c->closing&&c->time_at&&S.now>=c->time_at)time_request(c);
  if((events&POLLIN)&&!c->closing){ssize_t n=recv(c->fd,c->rx+c->rx_n,sizeof c->rx-c->rx_n,MSG_DONTWAIT);if(n<0&&(errno==EAGAIN||errno==EWOULDBLOCK))n=-2;if(n==-2){}else if(n<=0){client_close(idx);return;}else{c->rx_n+=(size_t)n;c->last_seen=S.now;if(c->hello)c->deadline=S.now+120000;if(process_rx(idx)<0||c->rx_n==sizeof c->rx){client_close(idx);return;}}}
  if(c->tx_sent<c->tx_n){ssize_t n=send(c->fd,c->tx+c->tx_sent,c->tx_n-c->tx_sent,MSG_DONTWAIT|MSG_NOSIGNAL);if(n<0&&errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR){client_close(idx);return;}if(n>0)c->tx_sent+=(size_t)n;if(c->tx_sent==c->tx_n)c->tx_sent=c->tx_n=0;}
  if((c->closing&&!c->tx_n)||(events&(POLLERR|POLLNVAL))){client_close(idx);return;}

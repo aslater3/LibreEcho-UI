@@ -134,6 +134,11 @@ Validates and applies the first-boot hostname, initial volume, Wi-Fi profile,
 wake-word preferences, and privacy choices. Hostname, audio, Wi-Fi, and durable
 configuration failures abort the transaction with stage-specific errors.
 
+`timezone` (POSIX TZ string) and `timezone_name` (IANA name) are optional;
+the wizard sends the browser's zone. They follow the rules of
+`PUT /api/v1/system/timezone`; `timezone_name` without `timezone`, or an
+invalid value, is rejected with 400. Without them the device keeps UTC.
+
 Wake-word support is optional: if its companion service returns
 `LE_NOT_SUPPORTED`, setup continues, the submitted `wake_word` and
 `wake_sensitivity` are still written to the canonical configuration, and the
@@ -1366,6 +1371,8 @@ state. The hardware clock is maintained in UTC.
       "rollback_available": false
     },
     "timezone": "UTC",
+    "timezone_name": "",
+    "timezone_source": "manual",
     "boot_estimate_seconds": null,
     "ntp": true,
     "ntp_state": "synchronized",
@@ -1607,21 +1614,44 @@ trust decision before uploading.
 
 #### GET /api/v1/system/timezone
 
-Returns the configured timezone.
+Returns the configured timezone, the IANA name it was picked as, and who sets it:
+
+```json
+{ "timezone": "GMT0BST,M3.5.0/1,M10.5.0", "name": "Europe/London", "source": "manual" }
+```
+
+`name` is `""` when unknown (an older client, or a zone Home Assistant sent).
+`source` is `manual` or `home_assistant`.
 
 #### PUT /api/v1/system/timezone
 
 Sets the timezone as a POSIX TZ string, for example `CST6CDT,M3.2.0,M11.1.0`.
 There is no zoneinfo database on the device, so Olson names such as
-`America/Chicago` are **not** accepted; busybox honours `TZ` from the
-environment and that is what this sets.
+`America/Chicago` are **not** accepted as `timezone`; the web UI maps them
+with its own table (`web/js/timezones.js`, generated from tzdata by
+`tools/generate-timezones.py`). `name` optionally records the IANA name so the
+picker can show it again; it is cleared when omitted.
 
 ```json
-{ "timezone": "CST6CDT,M3.2.0,M11.1.0" }
+{ "timezone": "CST6CDT,M3.2.0,M11.1.0", "name": "America/Chicago", "source": "manual" }
 ```
 
-Daemons read `TZ` when they start, so the response reports
-`"applies": "after restart"`. Anything that is not a plausible TZ string is
+Angle-bracket names, as tzdata and Home Assistant write zones without a letter
+abbreviation (`<+04>-4`), are stored with letters instead (`LST-4`, and `LDT`
+for a second name): the offsets and rules are unchanged, only the abbreviation
+`%Z` prints differs, and the initramfs only exports plain characters as `TZ`.
+
+`"source": "home_assistant"` makes esphomed take the zone Home Assistant
+reports over the ESPHome connection (GetTimeResponse, sent for HA's configured
+zone) and store it as `timezone`, with `name` cleared. `timezone` is optional
+then: the current zone stays in use until HA reports one. While HA is the
+source, the zone in `web-config.json` is authoritative and is never
+overwritten by the web daemon's copy.
+
+The daemons that render local time (LED night mode, the assistant's clock, the
+live-session time tool) follow the stored zone within seconds, so the
+response reports `"applies": "now"`; every other daemon gets it as `TZ` at the
+next boot. Anything that is not a plausible TZ string, name or source is
 rejected with 400 rather than written.
 
 #### GET /api/v1/system/features

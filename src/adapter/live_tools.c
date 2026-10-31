@@ -4,6 +4,7 @@
 #include "adapter.h"
 #include "timer_intent.h"
 #include "../json.h"
+#include "../timezone.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -338,6 +339,7 @@ static int tool_device_time(const struct le_live_tool_environment *environment,
     int synchronized = 0;
 
     (void)arguments;
+    (void)le_timezone_follow(NULL);
     if (!localtime_r(&now, &broken_down) ||
         strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S%z",
                  &broken_down) == 0)

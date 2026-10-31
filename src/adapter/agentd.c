@@ -14,6 +14,7 @@
 #include "../config_store.h"
 #include "../json.h"
 #include "../log.h"
+#include "../timezone.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1615,6 +1616,19 @@ static void read_room(const struct agent_state *state, char *room, size_t size)
         }
 }
 
+/*
+ * Turns run on client worker threads, so the follow check (its own state and
+ * the in-place TZ rewrite) is serialised here. main() makes the first call
+ * before any worker exists, which is when the TZ buffer is installed.
+ */
+static pthread_mutex_t agent_timezone_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void agent_timezone_follow(const char *web_config_path)
+{
+    pthread_mutex_lock(&agent_timezone_mutex);
+    (void)le_timezone_follow(web_config_path);
+    pthread_mutex_unlock(&agent_timezone_mutex);
+}
+
 static void build_turn_prompt(struct agent_state *state, char *out,
                               size_t size)
 {
@@ -1623,6 +1637,7 @@ static void build_turn_prompt(struct agent_state *state, char *out,
     struct tm tm;
 
     (void)snprintf(out, size, "%s", state->config.prompt);
+    agent_timezone_follow(state->web_config_path);
     if (localtime_r(&now, &tm))
         le_spoken_time(when, sizeof(when), &tm,
                        le_clock_format_twelve_hour(state->config.clock_format));
@@ -2483,6 +2498,8 @@ int main(int argc, char **argv)
     signal(SIGINT, stop_handler);
     signal(SIGTERM, stop_handler);
     signal(SIGPIPE, SIG_IGN);
+    /* Before any worker thread: installs the TZ buffer the turns update. */
+    agent_timezone_follow(state.web_config_path);
     if (pthread_mutex_init(&state.control_mutex, NULL) != 0)
         return 1;
     if (pthread_mutex_init(&state.metrics_mutex, NULL) != 0) {

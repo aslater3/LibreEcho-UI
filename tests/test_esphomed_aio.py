@@ -80,6 +80,18 @@ class PinnedFixture(Fixture):
     await client.disconnect()
    finally:await client.disconnect(force=True)
   asyncio.run(asyncio.wait_for(run(),12))
+ def test_pinned_client_time_zone_reaches_config_when_followed(self):
+  """#371: the pinned client answers GetTimeRequest with the zone HA passes as timezone=hass.config.time_zone."""
+  self.s.close();time.sleep(.05);cfg=json.loads(self.config.read_text());cfg['timezone']='UTC';cfg['timezone_source']='home_assistant';self.config.write_text(json.dumps(cfg))
+  async def run():
+   client=APIClient('127.0.0.1',self.port,client_info='LibreEcho isolated acceptance',timezone='America/Chicago')
+   try:
+    await client.connect(login=True);client.subscribe_states(lambda state:None)
+    await self.wait_for(lambda:json.loads(self.config.read_text()).get('timezone')!='UTC','time zone from GetTimeResponse')
+    stored=json.loads(self.config.read_text());self.assertEqual(stored['timezone'],'CST6CDT,M3.2.0,M11.1.0');self.assertEqual(stored['timezone_name'],'')
+    await client._get_connection().send_message_await_response(PingRequest(),PingResponse)
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),12))
  def test_pinned_noise_provision_reconnect_wrong_key(self):
   self.s.close();time.sleep(.05);key=bytes(range(32));zero=base64.b64encode(b'\0'*32).decode();encoded=base64.b64encode(key).decode()
   async def run():

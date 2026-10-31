@@ -3224,7 +3224,7 @@
      "Setup"
     ],
     "summary": "Complete first-boot AP-mode setup",
-    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. Hostname, audio, Wi-Fi and persistence failures return stage-specific errors. After the settings and Wi-Fi commit, the daemon synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features` helper and waits for `/run/libreecho/startup-ready` before completing setup. Reconciliation or readiness failure returns 503 and leaves setup incomplete; if and only if the optional wake adapter reports not-supported, setup continues and persists wake_word and wake_sensitivity for later restore. This one-time operation is rejected after setup completes.",
+    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. Hostname, audio, Wi-Fi and persistence failures return stage-specific errors. After the settings and Wi-Fi commit, the daemon synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features` helper and waits for `/run/libreecho/startup-ready` before completing setup. Reconciliation or readiness failure returns 503 and leaves setup incomplete; if and only if the optional wake adapter reports not-supported, setup continues and persists wake_word and wake_sensitivity for later restore. Optional timezone (POSIX TZ string) and timezone_name (IANA name) set the device time zone; without them it stays UTC. This one-time operation is rejected after setup completes.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -3618,6 +3618,7 @@
      "System"
     ],
     "summary": "Read the configured timezone",
+    "description": "Returns timezone (POSIX TZ string), name (the IANA name it was picked as, or empty) and source (manual or home_assistant).",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -3629,7 +3630,7 @@
      "System"
     ],
     "summary": "Set the timezone",
-    "description": "A POSIX TZ string such as CST6CDT,M3.2.0,M11.1.0. There is no zoneinfo database on the device, so Olson names are not accepted. Daemons read TZ at start, so the change applies after a restart.",
+    "description": "A POSIX TZ string such as CST6CDT,M3.2.0,M11.1.0; there is no zoneinfo database on the device, so IANA names are not accepted as timezone. name optionally records the IANA name for the picker. Angle-bracket names (<+04>-4) are stored as letters (LST-4). source home_assistant makes esphomed store the zone Home Assistant reports over ESPHome; timezone is optional then. Daemons that render local time follow the change within seconds (applies: now); others at the next boot.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -3641,13 +3642,25 @@
       "application/json": {
        "schema": {
         "type": "object",
-        "required": [
-         "timezone"
-        ],
         "properties": {
          "timezone": {
           "type": "string",
-          "maxLength": 63
+          "maxLength": 63,
+          "description": "POSIX TZ string; required unless source is home_assistant"
+         },
+         "name": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^[A-Za-z0-9_+/-]*$",
+          "description": "IANA name, e.g. Europe/London"
+         },
+         "source": {
+          "type": "string",
+          "enum": [
+           "manual",
+           "home_assistant"
+          ],
+          "default": "manual"
          }
         }
        }
