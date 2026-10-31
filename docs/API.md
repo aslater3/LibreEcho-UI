@@ -1269,9 +1269,9 @@ the nearest device answer when several hear the wake word (#408). It works
 only while this device is paired (see Device pairing below); turn it on on
 every paired device that should take part. On each wake, `libreecho-waked`
 broadcasts a signed claim (LESIG1 type `wake.claim`, UDP port 6054 on the
-local network) with the wake word's level, waits 350 ms for the other
+local network) with the wake word's level, waits 450 ms for the other
 devices' claims, and passes the wake to the voice assistant only when no
-claim is louder. A device that hears a claim from more than 200 ms before its
+claim is louder. A device that hears a claim from more than 150 ms before its
 own wake treats that turn as taken and stays quiet. Claims that are not
 signed with this house key, are replayed, or are more than 30 s off this
 device's clock are ignored, so an unpaired device can never silence a paired

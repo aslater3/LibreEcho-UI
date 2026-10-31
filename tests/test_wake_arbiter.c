@@ -165,7 +165,7 @@ static void test_late_device_yields_silently(void)
     /* Long after, the old claim no longer silences anyone. */
     ra = rb = 0;
     CHECK(le_wake_arbiter_claim(&a, 5000, WALL, -400, 900) == LE_WAKE_ARB_PENDING);
-    run(&a, &ra, &b, &rb, 5000, 5400);
+    run(&a, &ra, &b, &rb, 5000, 5500);
     CHECK(ra == LE_WAKE_ARB_WON);
     le_wake_arbiter_close(&a); le_wake_arbiter_close(&b);
 }
@@ -204,7 +204,7 @@ static void test_refused_claims(void)
     CHECK(a.heard_count == 0 && a.rejected == 5);
     /* None of those counted: a still answers alone. */
     CHECK(le_wake_arbiter_claim(&a, 1000, WALL, -500, 500) == LE_WAKE_ARB_PENDING);
-    run(&a, &ra, &b, &rb, 1000, 1400);
+    run(&a, &ra, &b, &rb, 1000, 1500);
     CHECK(ra == LE_WAKE_ARB_WON);
     /* A genuine claim played again is refused the second time. */
     CHECK(!le_peer_nonce(nonce));
