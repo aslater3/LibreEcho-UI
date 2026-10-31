@@ -183,6 +183,7 @@ node tests/test_assistant_clock_format_ui.js
 node tests/test_chatgpt_auth_gate_ui.js
 node tests/test_home_location_lookup_ui.js
 node tests/test_mute_lamp_ui.js
+node tests/test_noise_suppression_ui.js
 node tests/test_doa_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
@@ -322,6 +323,10 @@ cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic
 ./build/test-bt-media-resample
 make build/test-voice-aec build/test-voice-reference build/test-spoken-time
 ./build/test-voice-aec
+# #401: noise suppressor, and the local pipeline's off/on contract.
+make build/test-voice-ns build/test-voice-pipeline-noise
+./build/test-voice-ns
+./build/test-voice-pipeline-noise
 ./build/test-voice-reference
 ./build/test-spoken-time
 make build/test-voice-stream build/test-sttd build/test-llm-provider \

@@ -63,7 +63,7 @@ STTD_SHERPA_CXX_SOURCES = src/adapter/stt_engine_sherpa.cpp
 AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/timer_intent.c src/adapter/llm_provider.c \
 	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
-	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+	src/adapter/voice_pipeline.c src/adapter/voice_stream.c src/adapter/voice_ns.c \
 	src/adapter/voice_history.c \
 	src/adapter/voice_listening_led.c \
 	src/adapter/spoken_time.c \
@@ -83,7 +83,7 @@ endif
 ESPHOMED_SOURCES = src/adapter/esphomed.c src/adapter/esphome_proto.c \
 	src/adapter/esphome_frame.c src/adapter/esphome_noise.c src/adapter/esphome_playback.c \
 	src/adapter/radio_resample.c src/adapter/mdns_client.c src/adapter/mdns_lease.c \
-	src/config_store.c src/json.c
+	src/adapter/voice_ns.c src/config_store.c src/json.c
 ESPHOMED_TEST_TLS_PREFIX ?= $(ESPHOMED_TLS_PREFIX)
 ESPHOMED_CRYPTO_PYTHON ?= python3
 ESPHOMED_AIO_PYTHON ?= python3
@@ -187,7 +187,7 @@ $(BUILD)/libreecho-sttd: $(STTD_OBJECTS)
 
 $(BUILD)/libreecho-agentd: $(AGENTD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AGENTD_OBJECTS) $(LDFLAGS) \
-		-lpthread -o $@
+		-lpthread -lm -o $@
 
 # The shared supervisor ships in the image like the other daemons, so it is
 # built with the same language level, warnings and feature macros rather than a
@@ -905,6 +905,20 @@ $(BUILD)/libreecho-sttd-sherpa-arm32: $(BUILD)/sttd.arm.o \
 		-Wl,--start-group $(ORT_ARCHIVES) $(ORT_ABSEIL) -Wl,--end-group \
 		-lpthread -ldl -lm -o $@
 
+$(BUILD)/test-voice-ns: tests/test_voice_ns.c src/adapter/voice_ns.c src/adapter/voice_ns.h
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc -Isrc/adapter $(filter %.c,$^) -lm -o $@
+
+$(BUILD)/test-voice-pipeline-noise: tests/test_voice_pipeline_noise.c \
+		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c src/adapter/voice_listening_led.c \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc -Isrc/adapter $^ -lpthread -lm -o $@
+
 $(BUILD)/test-voice-aec: tests/test_voice_aec.c src/adapter/voice_aec.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
@@ -1047,13 +1061,15 @@ $(BUILD)/mock-voice-source: tests/mock_voice_source.c \
 
 $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
 		src/json.c $(BUILD)/libreecho-sttd $(BUILD)/mock-voice-source
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
-		src/json.c src/log.c -lpthread -o $@
+		src/json.c src/log.c -lpthread -lm -o $@
 
 $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
 	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c
@@ -1286,6 +1302,7 @@ clean:
 	rm -f $(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32 \
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
+		$(BUILD)/test-voice-ns $(BUILD)/test-voice-pipeline-noise \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
 		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \
 		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-timing \

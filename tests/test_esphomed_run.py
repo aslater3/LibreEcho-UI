@@ -32,7 +32,7 @@ else:
 flags=[os.environ.get('CC','cc'),'-std=c99','-D_POSIX_C_SOURCE=200809L','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-I'+str(M/'include')]
 if a.sanitize:flags+=['-fsanitize=address,undefined','-fno-omit-frame-pointer']
 libs=[str(M/'lib'/('lib'+name+'.a')) for name in ['mbedtls','mbedx509','mbedcrypto']]+['-lm']
-common=['src/adapter/esphome_proto.c','src/adapter/esphome_frame.c','src/adapter/esphome_noise.c','src/adapter/esphome_playback.c','src/adapter/radio_resample.c','src/adapter/mdns_client.c','src/adapter/mdns_lease.c','src/config_store.c','src/json.c']
+common=['src/adapter/esphome_proto.c','src/adapter/esphome_frame.c','src/adapter/esphome_noise.c','src/adapter/esphome_playback.c','src/adapter/radio_resample.c','src/adapter/mdns_client.c','src/adapter/mdns_lease.c','src/adapter/voice_ns.c','src/config_store.c','src/json.c']
 def run(argv,env=None):
  print('+',' '.join(map(str,argv)),flush=True);subprocess.run(list(map(str,argv)),cwd=ROOT,env=env,check=True,timeout=90)
 with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as directory:

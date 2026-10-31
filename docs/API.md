@@ -728,6 +728,7 @@ includes the persisted `listening` object and the latest bounded restart state:
   "max_utterance_ms": 6000,
   "end_silence_ms": 1500,
   "vad_floor_rms": 45,
+  "noise_suppression": false,
   "restart": {
     "state": "ready",
     "error": ""
@@ -740,6 +741,15 @@ includes the persisted `listening` object and the latest bounded restart state:
 read from the same persisted `web-config.json` used by `libreecho-sttd`; they
 are not inferred from the web daemon's environment.
 
+`noise_suppression` (boolean, default `false`, stored as
+`voice_noise_suppression`) runs an on-device steady-noise suppressor on the
+speech sent to the assistant: the audio `libreecho-esphomed` streams to Home
+Assistant and the audio the local pipeline in `libreecho-agentd` sends to
+speech recognition. It is a short-time Wiener filter (256-point frames, 15 dB
+deepest cut, 16 ms added delay) that runs after echo cancellation; the wake
+word keeps hearing the unsuppressed audio. Changing it restarts the voice
+pipeline like the other listening fields.
+
 #### PUT /api/v1/voice-pipeline
 
 Updates the pipeline mode and optional Wyoming settings. The listening fields
@@ -750,7 +760,8 @@ are writable here and are validated before any setting is committed:
   "mode": "local",
   "max_utterance_ms": 6000,
   "end_silence_ms": 1500,
-  "vad_floor_rms": 45
+  "vad_floor_rms": 45,
+  "noise_suppression": true
 }
 ```
 

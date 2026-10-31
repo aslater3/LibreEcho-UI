@@ -1,5 +1,5 @@
 """Isolated real-daemon sockets/FIFO fixtures; no host device access."""
-import contextlib,json,os,pathlib,socket,struct,subprocess,tempfile,threading,time,unittest,wave,io
+import contextlib,json,math,os,pathlib,random,socket,struct,subprocess,tempfile,threading,time,unittest,wave,io
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 BIN=os.environ.get('ESPHOMED_BIN',str(pathlib.Path(__file__).parents[1]/'build/libreecho-esphomed'))
 def var(v):
@@ -61,6 +61,8 @@ class Adapter:
   assert len(self.streams)==2,self.calls
  def samples(self,first,count=320):
   self.streams['stream_audio'].sendall(struct.pack('<IHHQII',0x3153564c,1,0,first,count,0)+struct.pack('<'+'h'*count,*[(first+i)%30000 for i in range(count)]))
+ def pcm(self,first,values):
+  self.streams['stream_audio'].sendall(struct.pack('<IHHQII',0x3153564c,1,0,first,len(values),0)+struct.pack('<'+'h'*len(values),*values))
  def wake(self,sample):self.streams['subscribe'].sendall((json.dumps({'v':1,'event':'wake_detected','data':{'detection_sample':sample,'score':1,'model':'Alexa'}})+'\n').encode())
  def close(self):
   self.stop=True;self.thread.join(2);self.sock.close()
@@ -291,4 +293,35 @@ class RoomUnsafeNotSent(Daemon):
  config_fields=dict(ROOM_BASE,room='Hall\nsecond line')
  def test_unsafe_room_is_not_sent(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertNotIn(var((16<<3)|2),b);self.assertIn(b'fixture-satellite',b)
+# #401: steady room noise in, what Home Assistant receives out.
+def steady_noise(count,seed=401):
+ r=random.Random(seed);return [max(-32768,min(32767,int(r.gauss(0,800)))) for _ in range(count)]
+def rms(values):return math.sqrt(sum(v*v for v in values)/len(values))
+class NoiseSuppressionCase(Daemon):
+ def streamed_audio(self):
+  noise=steady_noise(48000);self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,40000,320):a.pcm(i,noise[i:i+320])
+  time.sleep(.2);a.wake(38000);t,b=receive(self.s);self.assertEqual(t,90);self.s.sendall(frame(91))
+  for i in range(40000,48000,320):a.pcm(i,noise[i:i+320])
+  heard=[]
+  while len(heard)<6400:
+   t,b=receive(self.s)
+   if t==106 and b[:1]==b'\x0a':
+    n,k,shift=0,1,0
+    while True:
+     n|=(b[k]&0x7f)<<shift;k+=1;shift+=7
+     if not b[k-1]&0x80:break
+    heard+=struct.unpack('<'+'h'*(n//2),b[k:k+n])
+  return noise,heard
+class NoiseSuppressionOff(NoiseSuppressionCase):
+ config_fields=dict(ROOM_BASE)
+ def test_default_sends_microphone_audio_unchanged(self):
+  noise,heard=self.streamed_audio();start=38000-3200
+  self.assertEqual(heard[:6400],noise[start:start+6400],'with the setting absent the audio must be untouched')
+class NoiseSuppressionOn(NoiseSuppressionCase):
+ config_fields=dict(ROOM_BASE,voice_noise_suppression=True)
+ def test_enabled_suppresses_steady_noise_sent_to_home_assistant(self):
+  noise,heard=self.streamed_audio();before,after=rms(noise[34800:41200]),rms(heard[:6400])
+  self.assertLess(after,before*0.5,'steady noise must be at least 6 dB quieter, got %.1f -> %.1f RMS'%(before,after))
+  self.assertGreater(after,before*0.1,'noise must not be cut past the 15 dB floor')
 if __name__=='__main__':unittest.main()

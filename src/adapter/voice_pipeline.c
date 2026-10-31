@@ -5,6 +5,7 @@
 #include "adapter.h"
 #include "voice_stream.h"
 #include "voice_listening_led.h"
+#include "voice_ns.h"
 #include "../json.h"
 
 #include <fcntl.h>
@@ -55,6 +56,13 @@ struct le_voice_pipeline {
     int dispatching;
     int follow_up_pending;
     struct le_voice_pipeline_metrics metrics;
+    /* Optional noise suppression on the speech sent to recognition (#401).
+     * The flag is shared under mutex; the filter state belongs to the
+     * capture thread, which runs it on every frame so the noise estimate is
+     * settled before a wake. */
+    int noise_suppression;
+    int noise_suppression_reset;
+    struct le_voice_ns ns;
 };
 
 static uint64_t monotonic_milliseconds(void)
@@ -522,6 +530,24 @@ static void *capture_worker(void *opaque)
                 close_connection(pipeline, &audio_fd, 0);
                 continue;
             }
+            {
+                int suppress, reset;
+
+                pthread_mutex_lock(&pipeline->mutex);
+                suppress = pipeline->noise_suppression;
+                reset = pipeline->noise_suppression_reset;
+                pipeline->noise_suppression_reset = 0;
+                pthread_mutex_unlock(&pipeline->mutex);
+                /* A gap in the sample index is a new stream: start over. */
+                if (reset || (pipeline->ring_count &&
+                              frame.first_sample !=
+                                  pipeline->ring_first_sample +
+                                      pipeline->ring_count))
+                    le_voice_ns_reset(&pipeline->ns);
+                if (suppress)
+                    le_voice_ns_process(&pipeline->ns, frame.samples,
+                                        frame.sample_count);
+            }
             ring_append(pipeline, &frame);
             if (stt_fd >= 0 &&
                 frame.first_sample + frame.sample_count >
@@ -741,6 +767,11 @@ struct le_voice_pipeline *le_voice_pipeline_start(
     pipeline->transcript_callback = transcript;
     pipeline->callback_context = context;
     pipeline->recognition_timeout_ms = RECOGNITION_TIMEOUT_MS;
+    if (le_voice_ns_init(&pipeline->ns,
+                         LE_VOICE_NS_DEFAULT_ATTENUATION_DB) < 0) {
+        free(pipeline);
+        return NULL;
+    }
     {
         const char *override = getenv("LE_VOICE_STT_TIMEOUT_MS");
 
@@ -810,6 +841,19 @@ void le_voice_pipeline_set_outcome_callback(
     pthread_mutex_lock(&pipeline->mutex);
     pipeline->outcome_callback = outcome;
     pipeline->outcome_context = context;
+    pthread_mutex_unlock(&pipeline->mutex);
+}
+
+void le_voice_pipeline_set_noise_suppression(
+    struct le_voice_pipeline *pipeline, int enabled)
+{
+    if (!pipeline)
+        return;
+    pthread_mutex_lock(&pipeline->mutex);
+    if (enabled && !pipeline->noise_suppression)
+        pipeline->noise_suppression_reset = 1;
+    pipeline->noise_suppression = enabled ? 1 : 0;
+    pipeline->metrics.noise_suppression = pipeline->noise_suppression;
     pthread_mutex_unlock(&pipeline->mutex);
 }
 
