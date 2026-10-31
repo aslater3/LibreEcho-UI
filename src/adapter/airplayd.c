@@ -43,6 +43,13 @@
 #define LE_MDNS_AVAHI_PIDFILE "/usr/local/lib/libreecho-mdns/root/run/avahi-daemon/pid"
 #endif
 #define AIRPLAY_SANDBOX_BUS_SOCKET "/run/dbus/system_bus_socket"
+/* A replaced responder must stay up this long before Shairport Sync is
+ * started against it: Avahi has a pid before it owns its bus name, and a
+ * Shairport Sync that starts in that gap exits at once. */
+#define AIRPLAY_MDNS_SETTLE_MS 4000u
+#define SHAIRPORT_BACKOFF_MIN_MS 2000u
+#define SHAIRPORT_BACKOFF_MAX_MS 30000u
+#define SHAIRPORT_HEALTHY_RUN_MS 60000u
 #define AIRPLAY_METADATA_ITEM_MAX 8192
 #define AIRPLAY_METADATA_FIELD_MAX 192
 #define AIRPLAY_METADATA_AP2_PLIST_MAX 16384
@@ -108,6 +115,14 @@ struct airplay_ctx {
      * airplay_mdns_poll). */
     struct airplay_mdns_generation shairport_mdns;
     int shairport_mdns_deferred;
+    /* The responder instance last seen, and since when it has not changed. */
+    struct airplay_mdns_generation mdns_seen;
+    uint64_t mdns_seen_since_ms;
+    /* Shairport Sync is restarted alone after it exits (it cannot run without
+     * Avahi); 0 when it is running or AirPlay is off. */
+    uint64_t shairport_retry_ms;
+    uint64_t shairport_backoff_ms;
+    uint64_t shairport_started_ms;
 };
 
 static volatile sig_atomic_t running = 1;
@@ -227,19 +242,47 @@ static void airplay_mdns_generation_read(const char *bus_socket,
  * libreecho-mdnsd replaces the bus or Avahi it tries once to make a new
  * client, usually before the new daemon is up, and then never advertises
  * again: AirPlay plays for a connected sender but no picker lists the
- * speaker. Restart only Shairport Sync, once the responder is running again
+ * speaker. Restart only Shairport Sync, once the new responder has settled
  * and no stream is playing. Returns 1 when a restart is due now. */
 static int airplay_mdns_restart_due(const struct airplay_mdns_generation *registered,
                                     const struct airplay_mdns_generation *live,
-                                    int responder_running, int playing)
+                                    int settled, int playing)
 {
-    if (!responder_running || !live->bus_ino || !live->avahi_pid)
+    if (!settled || !live->bus_ino || !live->avahi_pid)
         return 0;
     if (registered->bus_dev == live->bus_dev &&
         registered->bus_ino == live->bus_ino &&
         registered->avahi_pid == live->avahi_pid)
         return 0;
     return !playing;
+}
+
+/* Records the live responder instance and reports whether it is running and
+ * has stayed the same for AIRPLAY_MDNS_SETTLE_MS. */
+static int airplay_mdns_settled(struct airplay_ctx *ctx,
+                                const struct airplay_mdns_generation *live,
+                                int responder_running, uint64_t now)
+{
+    if (memcmp(&ctx->mdns_seen, live, sizeof(*live)) != 0 ||
+        !ctx->mdns_seen_since_ms) {
+        ctx->mdns_seen = *live;
+        ctx->mdns_seen_since_ms = now ? now : 1;
+    }
+    return responder_running && live->bus_ino && live->avahi_pid &&
+           now - ctx->mdns_seen_since_ms >= AIRPLAY_MDNS_SETTLE_MS;
+}
+
+/* Called when Shairport Sync has exited: schedule its restart. */
+static void airplay_shairport_exited(struct airplay_ctx *ctx, uint64_t now)
+{
+    if (!ctx->shairport_backoff_ms ||
+        now - ctx->shairport_started_ms >= SHAIRPORT_HEALTHY_RUN_MS)
+        ctx->shairport_backoff_ms = SHAIRPORT_BACKOFF_MIN_MS;
+    else if (ctx->shairport_backoff_ms < SHAIRPORT_BACKOFF_MAX_MS)
+        ctx->shairport_backoff_ms *= 2;
+    if (ctx->shairport_backoff_ms > SHAIRPORT_BACKOFF_MAX_MS)
+        ctx->shairport_backoff_ms = SHAIRPORT_BACKOFF_MAX_MS;
+    ctx->shairport_retry_ms = now + ctx->shairport_backoff_ms;
 }
 
 static void on_signal(int signo)
@@ -1356,8 +1399,15 @@ static int reap(struct airplay_ctx *ctx)
             lost = 1;
         }
         if (pid == ctx->shairport_pid) {
+            /* Not fatal: it exits whenever Avahi is unreachable. NQPTP and
+             * the audio bridge stay up, and airplay_mdns_poll starts it
+             * again once discovery has settled. */
             ctx->shairport_pid = -1;
-            lost = 1;
+            if (ctx->enabled) {
+                airplay_shairport_exited(ctx, airplay_monotonic_ms());
+                le_log_warn("airplayd: Shairport Sync exited; restarting it in %llu ms once mDNS is ready",
+                            (unsigned long long)ctx->shairport_backoff_ms);
+            }
         }
         if (pid == ctx->sendspin_pid) {
             /* Not an AirPlay child: never tears the receiver down. A crash
@@ -1573,11 +1623,13 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
                                     (child_alive(ctx->engine_pid) &&
                                      child_alive(ctx->nqptp_pid) &&
                                      child_alive(ctx->audio_pid) &&
-                                     child_alive(ctx->shairport_pid) &&
+                                     (child_alive(ctx->shairport_pid) ||
+                                      ctx->shairport_retry_ms) &&
                                      ctx->metadata_fd >= 0)))
         return 0;
     if (!enabled) {
         stop_child(&ctx->shairport_pid);
+        ctx->shairport_retry_ms = 0;
         stop_child(&ctx->audio_pid);
         (void)airplay_master_end(ctx);
         stop_child(&ctx->nqptp_pid);
@@ -1620,15 +1672,21 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
     airplay_mdns_generation_read(LE_MDNS_BUS_SOCKET, LE_MDNS_AVAHI_PIDFILE,
                                  &ctx->shairport_mdns);
     ctx->shairport_mdns_deferred = 0;
+    ctx->shairport_retry_ms = 0;
+    ctx->shairport_backoff_ms = 0;
+    ctx->shairport_started_ms = airplay_monotonic_ms();
     ctx->shairport_pid = spawn_shairport(ctx);
     if (ctx->shairport_pid < 0)
         goto fail;
     /* A successful fork is not a successful enable: a child may reject its
      * configuration or a required runtime mount may still be absent. */
     for (i = 0; i < 20; ++i) {
-        if (!child_running(&ctx->nqptp_pid) || !child_running(&ctx->audio_pid) ||
-            !child_running(&ctx->shairport_pid))
+        if (!child_running(&ctx->nqptp_pid) || !child_running(&ctx->audio_pid))
             goto fail;
+        /* Shairport Sync exits when Avahi is not up yet (boot, a responder
+         * restart): retried by airplay_mdns_poll, not a failed enable. */
+        if (ctx->shairport_pid > 0 && !child_running(&ctx->shairport_pid))
+            airplay_shairport_exited(ctx, airplay_monotonic_ms());
         usleep(100000);
     }
     ctx->enabled = 1;
@@ -1642,18 +1700,35 @@ fail:
     return -1;
 }
 
+static void airplay_shairport_start(struct airplay_ctx *ctx,
+                                    const struct airplay_mdns_generation *live,
+                                    uint64_t now)
+{
+    ctx->shairport_mdns = *live;
+    ctx->shairport_mdns_deferred = 0;
+    ctx->shairport_started_ms = now;
+    ctx->shairport_pid = spawn_shairport(ctx);
+    if (ctx->shairport_pid < 0) {
+        ctx->shairport_pid = -1;
+        airplay_shairport_exited(ctx, now);
+        le_log_warn("airplayd: Shairport Sync could not be started");
+        return;
+    }
+    ctx->shairport_retry_ms = 0;
+}
+
 static void airplay_mdns_poll(struct airplay_ctx *ctx)
 {
     static uint64_t last_check_ms;
     char target[256];
     struct airplay_mdns_generation live;
     uint64_t now = airplay_monotonic_ms();
-    int result, responder;
+    int result, settled;
 
     if (last_check_ms && now - last_check_ms < AIRPLAY_LED_BRIDGE_CHECK_MS)
         return;
     last_check_ms = now;
-    if (!ctx->enabled || ctx->shairport_pid <= 0)
+    if (!ctx->enabled)
         return;
     if (snprintf(target, sizeof(target), "%s%s", ctx->runtime_root,
                  AIRPLAY_SANDBOX_BUS_SOCKET) >= (int)sizeof(target))
@@ -1664,10 +1739,19 @@ static void airplay_mdns_poll(struct airplay_ctx *ctx)
     else if (result < 0)
         le_log_warn("airplayd: D-Bus socket bridge re-attach failed: %s", strerror(errno));
     airplay_mdns_generation_read(LE_MDNS_BUS_SOCKET, LE_MDNS_AVAHI_PIDFILE, &live);
-    responder = le_mdns_status(ctx->mdns_socket) == 1;
-    if (!airplay_mdns_restart_due(&ctx->shairport_mdns, &live, responder,
+    settled = airplay_mdns_settled(ctx, &live,
+                                   le_mdns_status(ctx->mdns_socket) == 1, now);
+    if (ctx->shairport_pid <= 0) {
+        if (ctx->shairport_retry_ms && settled && now >= ctx->shairport_retry_ms) {
+            airplay_shairport_start(ctx, &live, now);
+            if (ctx->shairport_pid > 0)
+                le_log_info("airplayd: Shairport Sync restarted against the shared mDNS responder");
+        }
+        return;
+    }
+    if (!airplay_mdns_restart_due(&ctx->shairport_mdns, &live, settled,
                                   ctx->playing)) {
-        if (responder && ctx->playing && !ctx->shairport_mdns_deferred &&
+        if (settled && ctx->playing && !ctx->shairport_mdns_deferred &&
             memcmp(&ctx->shairport_mdns, &live, sizeof(live)) != 0) {
             le_log_info("airplayd: shared mDNS responder restarted; re-registering after playback");
             ctx->shairport_mdns_deferred = 1;
@@ -1675,12 +1759,8 @@ static void airplay_mdns_poll(struct airplay_ctx *ctx)
         return;
     }
     stop_child(&ctx->shairport_pid);
-    ctx->shairport_pid = spawn_shairport(ctx);
-    ctx->shairport_mdns = live;
-    ctx->shairport_mdns_deferred = 0;
-    if (ctx->shairport_pid < 0)
-        le_log_warn("airplayd: Shairport Sync restart after an mDNS restart failed");
-    else
+    airplay_shairport_start(ctx, &live, now);
+    if (ctx->shairport_pid > 0)
         le_log_info("airplayd: Shairport Sync restarted to re-register with the restarted mDNS responder");
 }
 

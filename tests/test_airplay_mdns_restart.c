@@ -72,7 +72,7 @@ int main(void)
     write_pid(pidfile, 101);
     airplay_mdns_generation_read(bus, pidfile, &live);
     assert(airplay_mdns_restart_due(&registered, &live, 1, 0));
-    /* ...but not while the responder is still coming up, */
+    /* ...but not before the new responder has settled, */
     assert(!airplay_mdns_restart_due(&registered, &live, 0, 0));
     /* ...and not in the middle of a stream. */
     assert(!airplay_mdns_restart_due(&registered, &live, 1, 1));
@@ -93,7 +93,43 @@ int main(void)
     assert(!live.avahi_pid);
     assert(!airplay_mdns_restart_due(&registered, &live, 1, 0));
 
+    /* A replaced responder must settle before Shairport Sync is started
+     * against it: Avahi has a pid before it owns its bus name. */
+    {
+        struct airplay_ctx ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        write_pid(pidfile, 103);
+        airplay_mdns_generation_read(bus, pidfile, &live);
+        assert(!airplay_mdns_settled(&ctx, &live, 1, 10000));
+        assert(!airplay_mdns_settled(&ctx, &live, 1, 10000 + AIRPLAY_MDNS_SETTLE_MS - 1));
+        assert(airplay_mdns_settled(&ctx, &live, 1, 10000 + AIRPLAY_MDNS_SETTLE_MS));
+        /* not while the supervisor reports degraded */
+        assert(!airplay_mdns_settled(&ctx, &live, 0, 20000));
+        /* another respawn restarts the settle window */
+        write_pid(pidfile, 104);
+        airplay_mdns_generation_read(bus, pidfile, &live);
+        assert(!airplay_mdns_settled(&ctx, &live, 1, 20000));
+        assert(airplay_mdns_settled(&ctx, &live, 1, 20000 + AIRPLAY_MDNS_SETTLE_MS));
+
+        /* Shairport Sync exiting (no Avahi yet) is retried with backoff,
+         * reset after a healthy run, never a reason to drop AirPlay. */
+        ctx.shairport_started_ms = 1000;
+        airplay_shairport_exited(&ctx, 1500);
+        assert(ctx.shairport_backoff_ms == SHAIRPORT_BACKOFF_MIN_MS);
+        assert(ctx.shairport_retry_ms == 1500 + SHAIRPORT_BACKOFF_MIN_MS);
+        ctx.shairport_started_ms = 4000;
+        airplay_shairport_exited(&ctx, 4500);
+        assert(ctx.shairport_backoff_ms == 2 * SHAIRPORT_BACKOFF_MIN_MS);
+        for (int i = 0; i < 8; ++i)
+            airplay_shairport_exited(&ctx, 4600);
+        assert(ctx.shairport_backoff_ms == SHAIRPORT_BACKOFF_MAX_MS);
+        ctx.shairport_started_ms = 5000;
+        airplay_shairport_exited(&ctx, 5000 + SHAIRPORT_HEALTHY_RUN_MS);
+        assert(ctx.shairport_backoff_ms == SHAIRPORT_BACKOFF_MIN_MS);
+    }
+
     close(second);
+    unlink(pidfile);
     unlink(bus);
     rmdir(root);
     puts("airplay re-registers after a shared mDNS restart: ok");
