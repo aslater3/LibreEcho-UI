@@ -316,3 +316,125 @@ int le_mdns_lease_register_sendspin(struct le_mdns_lease *lease, int owner_fd,
 #undef XML
     return publish(lease, owner_fd, "sendspin", xml, used);
 }
+
+static int libreecho_text_valid(const char *text, size_t size, int required)
+{
+    size_t n;
+    if (!text) return 0;
+    n = strnlen(text, size);
+    if (n >= size || (required && !n)) return 0;
+    return utf8_valid((const unsigned char *)text, n);
+}
+static int libreecho_version_valid(const char *version, size_t size)
+{
+    size_t i, n;
+    if (!version) return 0;
+    n = strnlen(version, size);
+    if (!n || n >= size) return 0;
+    for (i = 0; i < n; ++i) {
+        char c = version[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              c == '.' || c == '-' || c == '_' || c == '+')) return 0;
+    }
+    return 1;
+}
+static int libreecho_metadata_valid(const struct le_mdns_libreecho_metadata *m)
+{
+    return m && libreecho_text_valid(m->name, sizeof(m->name), 1) &&
+           libreecho_version_valid(m->version, sizeof(m->version)) &&
+           libreecho_text_valid(m->room, sizeof(m->room), 0);
+}
+static int append_hex(char *out, size_t capacity, size_t *used, const char *text)
+{
+    static const char digits[] = "0123456789abcdef";
+    size_t n = strlen(text), j;
+    if (n * 2 >= capacity - *used) return -1;
+    for (j = 0; j < n; ++j) {
+        out[(*used)++] = digits[(unsigned char)text[j] >> 4];
+        out[(*used)++] = digits[(unsigned char)text[j] & 15];
+    }
+    out[*used] = 0;
+    return 0;
+}
+int le_mdns_libreecho_encode(char *message, size_t capacity, unsigned int port,
+                             const struct le_mdns_libreecho_metadata *metadata)
+{
+    size_t used;
+    int n;
+    if (!message || !capacity || !port || port > 65535 || !libreecho_metadata_valid(metadata))
+        return -1;
+    if (capacity > LE_MDNS_LIBREECHO_PACKET_MAX) capacity = LE_MDNS_LIBREECHO_PACKET_MAX;
+    n = snprintf(message, capacity, "LIBREECHO/1 %u name=", port);
+    if (n < 0 || (size_t)n >= capacity) return -1;
+    used = (size_t)n;
+    if (append_hex(message, capacity, &used, metadata->name) < 0 ||
+        append(message, capacity, &used, " version=") < 0 ||
+        append_hex(message, capacity, &used, metadata->version) < 0 ||
+        append(message, capacity, &used, " room=") < 0 ||
+        append_hex(message, capacity, &used, metadata->room) < 0 ||
+        append(message, capacity, &used, "\n") < 0) return -1;
+    return (int)used;
+}
+/* One " key=<hex>" field at *p into out (capacity includes the NUL). */
+static int decode_hex_field(const char *message, size_t length, size_t *p, const char *key,
+                            char *out, size_t capacity)
+{
+    size_t k = strlen(key), start, j = 0;
+    if (length - *p < k + 2 || message[*p] != ' ' || memcmp(message + *p + 1, key, k) ||
+        message[*p + 1 + k] != '=') return -1;
+    start = *p + k + 2;
+    *p = start;
+    while (*p < length && message[*p] != ' ' && message[*p] != '\n') ++*p;
+    if ((*p - start) % 2 || (*p - start) / 2 >= capacity) return -1;
+    for (j = 0; j < (*p - start) / 2; ++j) {
+        int high = hex((unsigned char)message[start + j * 2]);
+        int low = hex((unsigned char)message[start + j * 2 + 1]);
+        if (high < 0 || low < 0) return -1;
+        out[j] = (char)(high * 16 + low);
+    }
+    out[j] = 0;
+    return strlen(out) == j ? 0 : -1;
+}
+int le_mdns_libreecho_decode(const char *message, size_t length, unsigned int *port,
+                             struct le_mdns_libreecho_metadata *metadata)
+{
+    struct le_mdns_libreecho_metadata parsed;
+    size_t p = 12;
+    unsigned int number = 0;
+    if (!message || !port || !metadata || length < 14 || length >= LE_MDNS_LIBREECHO_PACKET_MAX ||
+        memcmp(message, "LIBREECHO/1 ", 12) || message[length - 1] != '\n' ||
+        memchr(message, 0, length) || message[p] < '1' || message[p] > '9') return -1;
+    while (p < length && message[p] >= '0' && message[p] <= '9') {
+        number = number * 10 + (unsigned int)(message[p++] - '0');
+        if (number > 65535) return -1;
+    }
+    memset(&parsed, 0, sizeof(parsed));
+    if (decode_hex_field(message, length, &p, "name", parsed.name, sizeof(parsed.name)) < 0 ||
+        decode_hex_field(message, length, &p, "version", parsed.version, sizeof(parsed.version)) < 0 ||
+        decode_hex_field(message, length, &p, "room", parsed.room, sizeof(parsed.room)) < 0 ||
+        p != length - 1 || !libreecho_metadata_valid(&parsed)) return -1;
+    *metadata = parsed; *port = number;
+    return 0;
+}
+int le_mdns_lease_register_libreecho(struct le_mdns_lease *lease, int owner_fd,
+                                    unsigned int port,
+                                    const struct le_mdns_libreecho_metadata *metadata)
+{
+    char xml[1536] = "", port_text[16];
+    size_t used = 0;
+    if (!lease || owner_fd < 0 || port < 1 || port > 65535 || !libreecho_metadata_valid(metadata) ||
+        (lease->owner_fd >= 0 && lease->owner_fd != owner_fd) || lease->generation == ULONG_MAX) return -1;
+    (void)snprintf(port_text, sizeof(port_text), "%u", port);
+#define ADD(text) do { if (append(xml, sizeof(xml), &used, text) < 0) return -1; } while (0)
+#define XML(text) do { if (append_xml(xml, sizeof(xml), &used, text) < 0) return -1; } while (0)
+    ADD("<?xml version=\"1.0\"?><!DOCTYPE service-group SYSTEM \"avahi-service.dtd\">\n"
+        "<service-group><name replace-wildcards=\"no\">");
+    XML(metadata->name);
+    ADD("</name><service><type>" LE_MDNS_LIBREECHO_TYPE "</type><port>"); ADD(port_text); ADD("</port>");
+    ADD("<txt-record>version="); XML(metadata->version); ADD("</txt-record>");
+    ADD("<txt-record>room="); XML(metadata->room); ADD("</txt-record>");
+    ADD("<txt-record>path=/</txt-record></service></service-group>\n");
+#undef ADD
+#undef XML
+    return publish(lease, owner_fd, "libreecho", xml, used);
+}

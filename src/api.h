@@ -3,6 +3,7 @@
 #include "backend.h"
 #include "auth.h"
 #include "event_bus.h"
+#include "peer_auth.h"
 #include <stddef.h>
 struct api_request{char method[8],path[256],host[256],origin[256],authorization[256],csrf[96],confirm[96];const char*body;size_t body_len;int https;};
 /*
@@ -59,10 +60,25 @@ char radio_last_word[32];char logs[LE_MAX_LOGS][256];size_t log_count,log_next;
    treated as fresh.  recovery_portal_active is 0 unless networkd reports the
    recovery AP actively serving; recovery_portal_ok records whether the last
    probe was answered at all. */
-int recovery_portal_active;char recovery_portal_address[32];long recovery_portal_checked;int recovery_portal_ok;};
+int recovery_portal_active;char recovery_portal_address[32];long recovery_portal_checked;int recovery_portal_ok;
+/* Device list (#413). discoverable is the owner's choice to advertise this
+   control centre as _libreecho._tcp; http_port/http_lan describe the plain
+   HTTP listener (lan is 0 for a loopback-only bind, which is never
+   advertised). discovery_fd holds the mDNS supervisor lease while the record
+   should exist; discovery_sent is the registration it carries. */
+int discoverable,http_port,http_lan,discovery_fd;long discovery_retry,discovery_checked;char discovery_sent[384];
+/* Device pairing (#450). peer_key is the house key shared by paired devices,
+   loaded on first use from peer_key_path (peer.key beside the config file).
+   Without a key this device signs nothing and trusts no device. */
+struct le_peer_key peer_key;char peer_key_path[512];int peer_key_loaded;};
 int api_request_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_bootstrap_required(const struct api_context*);
 void api_set_https_active(struct api_context*,int);
+/* Once-a-second upkeep of this device's _libreecho._tcp advertisement. Never
+   blocks: registration is one nonblocking seqpacket send. */
+void api_discovery_tick(struct api_context*);
+/* Records the plain HTTP listener so the advertisement names the right port. */
+void api_set_http_listener(struct api_context*,int port,int lan);
 int api_init(struct api_context*,struct le_backend*,int,int,const char*,const char*,const char*,const char*,const char*);int api_apply_persisted_configuration(struct api_context*,char*,size_t);int api_persist_configuration(struct api_context*);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
 int api_diagnostics_kernel_authorize(struct api_context*,const struct api_request*,struct api_response*);int api_baby_monitor_stream_authorize(struct api_context*,const struct api_request*,struct api_response*,int*,int*,int*,int*,int*);
 size_t le_update_max_upload_bytes(void);

@@ -1234,6 +1234,7 @@ false.
   "hostname": "myecho",
   "ssh": false,
   "api_lan": true,
+  "discoverable": true,
   "wifi_mac": "<six hexadecimal octets>",
   "bt_mac": "<six hexadecimal octets>"
 }
@@ -1251,6 +1252,127 @@ The response fields `wifi_mac` and `bt_mac` report live interface values;
 `*_factory` reports board identity values when available; and `*_configured`
 reports persisted overrides. Empty strings mean that a value is unavailable or
 unset.
+
+`discoverable` (default `true`, persisted, also reported by `GET
+/api/v1/network`) lets other LibreEcho devices list this one. While it is on
+and the HTTP listener is reachable from the LAN (any bind other than
+loopback), the web daemon holds a `_libreecho._tcp` lease on the
+shared `libreecho-mdnsd` responder. The record's instance name is the
+hostname; its TXT records are `version` (LibreEcho version), `room` (may be
+empty) and `path=/`. Turning it off withdraws the record within a few seconds.
+A hostname or room change is re-advertised within about five seconds.
+
+#### GET /api/v1/network/peers
+
+Lists LibreEcho devices on the local network, with a link to each control
+centre (#413). The daemon sends one DNS-SD browse for `_libreecho._tcp.local`
+as an mDNS legacy-unicast query and collects answers for one second; repeated
+requests within three seconds reuse the last answer. At most 16 devices are
+returned; `truncated` is true when more answered. A device that answers
+without an SRV record (port) is not listed. `self` marks this device's own
+record: one that points at one of this device's IPv4 addresses and its HTTP
+port (not a hostname match, since Avahi renames a clashing record). `advertising` is true while this device holds its own lease.
+
+`paired` and `key_id` describe this device's house key (see Device pairing
+below). Each device has a `trust` value. While this device is paired, every
+other listed device is asked for a signed proof, all in parallel and at most
+0.8 s in total:
+
+| `trust` | Meaning |
+|---|---|
+| `off` | This device is not paired. Nothing is checked or sent. |
+| `self` | This device. |
+| `paired` | Answered with a valid proof signed with this house key. |
+| `unpaired` | Answered, but has no house key, has another one, or runs a version without pairing. |
+| `failed` | No answer, or a proof that did not verify (forged, replayed or relayed). |
+
+GET only; other methods answer 405. 503 `io_error` means no socket could be
+opened to search.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "discoverable": true,
+    "advertising": true,
+    "devices": [
+      {
+        "name": "kitchen-echo", "room": "Kitchen", "version": "0.14.6",
+        "address": "192.0.2.20", "port": 8080,
+        "url": "http://192.0.2.20:8080/", "self": false, "trust": "paired"
+      }
+    ],
+    "truncated": false
+  },
+  "error": null
+}
+```
+
+#### Device pairing and signed device-to-device traffic (#450)
+
+Devices in one home share a 32-byte **house key**. The owner creates it on one
+device and enters its pairing code on the others. A device without the key
+signs nothing and trusts no device. This is off until the owner pairs a
+device.
+
+The key is stored in `peer.key` beside the configuration file (mode 0600,
+temp file + fsync + rename, no backup copy). It is not part of the
+configuration export or any GET answer. `key_id` is a fingerprint of the key
+(the first 4 bytes of HMAC-SHA256(key, "LibreEcho key id v1"), in hex). It is
+the same on every device paired with that key and does not reveal the key.
+
+**GET /api/v1/network/pairing** returns `{"supported", "paired", "key_id"}`.
+
+**POST /api/v1/network/pairing** (CSRF required):
+- `{"action":"create"}` makes a new random key and returns it once as `code`
+  (16 groups of 4 hex digits).
+- `{"action":"join","code":"..."}` takes the code from another device. Any
+  case is accepted, with `-` or spaces between digits.
+- `{"action":"show"}` returns `code` again so another device can join.
+
+A paired device answers 409 to `create` and `join` until it is unpaired.
+Unknown fields and bad codes answer 400.
+
+The pairing endpoints follow the API's normal authentication. On a device
+with no web login and LAN API access on, anyone on the network can call
+`show` and read the house key, and with it pose as any paired device. Set up
+a login on every paired device.
+
+The trust label belongs to the device's address and port (the one the list
+opens), not to the advertised name: the device list still shows the name,
+room and version from discovery.
+
+**DELETE /api/v1/network/pairing** unpairs this device and removes the key.
+
+**GET /api/v1/peer/proof?nonce=&lt;32 lowercase hex&gt;** is the one
+device-to-device endpoint that needs no session. Another device asks with a
+fresh nonce. The answer `data` holds `key_id`, `type` (`peer-proof`), `ts`,
+the same `nonce`, `name`, `room`, `version`, `host` and `mac`. It is answered
+only when `Host` is one of this device's IPv4 addresses and its plain HTTP
+port. The asker checks that the signed `host` is the address it connected to,
+so a machine that relays a real device's proof under its own address is
+caught. The nonce makes every proof single use, so the clocks do not have to
+agree. An unpaired device answers 409 `not_paired`. A bad nonce or a foreign
+Host answers 400. Other methods are not exempt from authentication.
+
+**Message authentication.** All device-to-device messages use one MAC (`src/peer_auth.h`):
+
+```
+mac_key = HMAC-SHA256(house_key, "LibreEcho peer mac v1")
+mac     = HMAC-SHA256(mac_key, "LESIG1\n" type "\n" ts "\n" nonce "\n" body)
+```
+
+`type` is `[a-z0-9.-]{1,32}`, `ts` is decimal Unix seconds and `nonce` is 32
+lowercase hex digits. A distinct `type` per message kind keeps a signature
+for one kind from being accepted as another. For the proof, the body is
+`name`, `room`, `version` and `host` joined by `\n`. These fields cannot hold
+control characters. Channels that carry raw packets (arbitration, intercom
+control and groups, when they arrive) use the sealed form
+`LESIG1 <key_id> <type> <ts> <nonce> <mac>\n<body>`. The receiver checks the
+key id, the MAC (constant time), the type and a time window, and keeps a
+64-entry replay cache. That cache fails closed: when it is full of in-window
+messages, anything as old as an evicted entry is refused.
 
 #### GET /api/v1/network/wifi/scan
 

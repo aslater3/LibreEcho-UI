@@ -7,6 +7,20 @@ config=$(curl -fsS "$URL/api/v1/config")
 printf '%s' "$config" | jq -e '.data.authentication == "users" and (.data.csrf_token | test("^[0-9a-f]{64}$"))' >/dev/null
 code=$(curl -sS -o /tmp/le-user-status.out -w '%{http_code}' "$URL/api/v1/status")
 [ "$code" = 401 ]
+# Device pairing (#450): managing the key needs a session; only GET of the
+# signed peer proof is open to other devices (409 here: no key yet), and
+# nothing else under that prefix or method skips authentication.
+code=$(curl -sS -o /tmp/le-user-pairing.out -w '%{http_code}' "$URL/api/v1/network/pairing")
+[ "$code" = 401 ]
+code=$(curl -sS -o /tmp/le-user-pairing.out -w '%{http_code}' -X POST "$URL/api/v1/network/pairing" -H "$CSRF" -H 'Content-Type: application/json' --data '{"action":"create"}')
+[ "$code" = 401 ]
+code=$(curl -sS -o /tmp/le-user-proof.out -w '%{http_code}' "$URL/api/v1/peer/proof?nonce=0123456789abcdef0123456789abcdef")
+[ "$code" = 409 ]
+jq -e '.error.code == "not_paired"' /tmp/le-user-proof.out >/dev/null
+code=$(curl -sS -o /tmp/le-user-proof.out -w '%{http_code}' -X POST "$URL/api/v1/peer/proof?nonce=0123456789abcdef0123456789abcdef" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 401 ]
+code=$(curl -sS -o /tmp/le-user-proof.out -w '%{http_code}' "$URL/api/v1/peer/proofs")
+[ "$code" = 401 ]
 code=$(curl -sS -o /tmp/le-user-bad-login.out -w '%{http_code}' -X POST "$URL/api/v1/auth/login" -H "$CSRF" -H 'Content-Type: application/json' --data '{"username":"test-user","password":"wrong-password"}')
 [ "$code" = 401 ]
 code=$(curl -sS -o /tmp/le-user-origin.out -w '%{http_code}' -X POST "$URL/api/v1/auth/login" -H "$CSRF" -H 'Origin: http://evil.test' -H 'Content-Type: application/json' --data '{"username":"test-user","password":"test-password-123"}')
