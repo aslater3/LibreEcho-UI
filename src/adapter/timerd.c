@@ -72,6 +72,9 @@ struct context {
     int listen_fd;
     int clients[MAX_CLIENTS];
     long long next_ring_ms;
+    /* The last ring was the owner's own sound (#410); stop it on dismissal,
+       because unlike the 250 ms cue it can still be playing. */
+    int custom_ring;
     int dirty;
     int state_loaded;
     /* The state path was atomically replaced, but its final durability step
@@ -617,7 +620,8 @@ static void audio_cue(struct context *ctx)
 {
     struct le_adapter *adapter;
     char args[128];
-    int result;
+    char reply[256];
+    int result, custom = 0;
 
 #ifdef LE_TIMERD_TESTING
     if (le_timerd_test_block_audio_ms > 0) {
@@ -631,13 +635,43 @@ static void audio_cue(struct context *ctx)
         le_log_warn("timerd: audio daemon unavailable; timer is silent");
         return;
     }
+    le_adapter_set_io_timeout(adapter, AUDIO_TIMEOUT_MS);
+    /* The owner's own ring, when one is selected. A sound longer than the
+       ring period answers busy and simply rings back to back; only "no
+       sound selected" or a failure falls back to the built-in cue. */
+    reply[0] = '\0';
+    result = le_adapter_call(adapter, "event_sound", "{\"event\":\"timer\"}",
+                             reply, sizeof(reply));
+    if (result == LE_ADAPTER_OK &&
+        json_get_top_level_bool(reply, strlen(reply), "custom", &custom) == 1 &&
+        custom) {
+        ctx->custom_ring = 1;
+        le_adapter_close(adapter);
+        return;
+    }
+    ctx->custom_ring = 0;
     snprintf(args, sizeof(args),
              "{\"first_hz\":%d,\"second_hz\":%d,\"ms\":%d}",
              RING_LOW_HZ, RING_HIGH_HZ, RING_CUE_MS);
-    le_adapter_set_io_timeout(adapter, AUDIO_TIMEOUT_MS);
     result = le_adapter_call(adapter, "cue", args, NULL, 0);
     if (result != LE_ADAPTER_OK)
         le_log_warn("timerd: audio cue failed (%d)", result);
+    le_adapter_close(adapter);
+}
+
+static void audio_ring_stop(struct context *ctx)
+{
+    struct le_adapter *adapter;
+
+    if (!ctx->custom_ring)
+        return;
+    ctx->custom_ring = 0;
+    adapter = le_adapter_connect(ctx->audio_sock, AUDIO_TIMEOUT_MS);
+    if (!adapter)
+        return;
+    le_adapter_set_io_timeout(adapter, AUDIO_TIMEOUT_MS);
+    (void)le_adapter_call(adapter, "event_sound_stop",
+                          "{\"event\":\"timer\"}", NULL, 0);
     le_adapter_close(adapter);
 }
 
@@ -646,6 +680,7 @@ static void ring_tick(struct context *ctx, long long now_ms)
     remote_ring_expire(ctx, now_ms);
     if (ringing_count(ctx) <= 0) {
         ctx->next_ring_ms = 0;
+        audio_ring_stop(ctx);
         return;
     }
     if (now_ms < ctx->next_ring_ms)

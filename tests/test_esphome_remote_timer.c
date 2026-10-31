@@ -41,6 +41,14 @@ void le_adapter_set_io_timeout(struct le_adapter *a, int ms)
 int le_adapter_call(struct le_adapter *a, const char *cmd, const char *args,
                     char *out, size_t size)
 {
+    /* No owner timer sound uploaded (#410): audiod tells timerd to use its
+       built-in cue, which is what this fixture counts. */
+    if (a != NULL && !strcmp(cmd, "event_sound")) {
+        assert(args && strstr(args, "\"event\":\"timer\""));
+        if (out && size)
+            snprintf(out, size, "{\"custom\":false,\"playing\":false}");
+        return LE_ADAPTER_OK;
+    }
     assert(a != NULL && !strcmp(cmd, "cue"));
     assert(strstr(args, "\"ms\":250")); (void)out; (void)size;
     ++cues; return audio_result;

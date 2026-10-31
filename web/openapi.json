@@ -1728,6 +1728,249 @@
     }
    }
   },
+  "/sounds": {
+   "get": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "List owner event sounds",
+    "description": "Each event reports whether the owner's own sound or the built-in one is selected, whether one is uploaded, its length and the event's length limit.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sounds/{event}": {
+   "put": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Upload the owner's sound for an event",
+    "description": "The body is a WAV file (16-bit PCM, mono or stereo, 8000-48000 Hz, at most 1 MiB). It is converted to 48 kHz mono and selected. Length limits: wake 1000 ms, end 2000 ms, timer 5000 ms. Invalid or over-long files are rejected and leave the stored sound unchanged. The web UI converts Opus, MP3 and other formats the browser can decode to WAV before uploading.",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "event",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "wake",
+        "end",
+        "timer"
+       ]
+      },
+      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+     },
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "audio/wav": {
+       "schema": {
+        "type": "string",
+        "format": "binary"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "413": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Remove the owner's sound and return to the built-in one",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "event",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "wake",
+        "end",
+        "timer"
+       ]
+      },
+      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+     },
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sounds/{event}/select": {
+   "post": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Choose the owner's sound or the built-in one",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "event",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "wake",
+        "end",
+        "timer"
+       ]
+      },
+      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+     },
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "selected"
+        ],
+        "properties": {
+         "selected": {
+          "type": "string",
+          "enum": [
+           "custom",
+           "default"
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sounds/{event}/preview": {
+   "post": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Play the uploaded sound for an event on the device",
+    "description": "Plays the uploaded sound whether or not it is selected. 409 when none is uploaded or another sound is playing.",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "event",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "wake",
+        "end",
+        "timer"
+       ]
+      },
+      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+     },
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/timers": {
    "get": {
     "tags": [

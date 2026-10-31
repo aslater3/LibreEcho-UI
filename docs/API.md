@@ -711,6 +711,80 @@ The timer page refreshes its status while open so countdowns and ringing state
 remain current. Timer state is persisted atomically with a restrictive
 permissions policy and is restored after the wall clock becomes valid.
 
+### Owner sounds
+
+The owner can replace three device sounds with their own (#410). Nothing
+changes until a sound is uploaded: with no upload every event keeps its
+built-in sound.
+
+| Event | Plays | Built-in sound | Longest sound |
+|---|---|---|---|
+| `wake` | when the local assistant starts listening | the short chirp | 1000 ms |
+| `end` | when the local assistant stops listening | none | 2000 ms |
+| `timer` | while a timer or alarm rings | the two-tone ring | 5000 ms |
+
+The `wake` and `end` chimes belong to the local assistant pipeline. The Home
+Assistant (ESPHome) path stays visual-only, as before. A timer sound longer
+than the two-second ring period plays back to back. Dismissing the timer stops
+it: the writer ends on a faded chunk, and what is already queued for the
+speaker (at most about a third of a second) plays out. The speaker can take
+about 1.5 seconds to wake from idle; a longer sound waits for it and then plays
+in full.
+
+Sounds are stored as 48 kHz mono files (`sound-<event>.raw`, mode 0600)
+directly in `/data/libreecho/config`. They survive reboots and OTA updates,
+are included in a device backup and are removed by a factory reset. They are
+not part of the JSON configuration export.
+
+#### GET /api/v1/sounds
+
+Returns `rate`, `format` (`"wav"`), `max_upload_bytes` and a `sounds` array.
+Each entry has `id`, `name`, `selected` (`custom` or `default`), `uploaded`,
+`duration_ms` of the uploaded sound, `max_ms` and `default` (the built-in
+sound).
+
+#### PUT /api/v1/sounds/{event}
+
+Uploads the owner's sound and selects it. The body is a WAV file sent as-is
+(`Content-Type: audio/wav`). It must be 16-bit integer PCM, mono or stereo,
+8000-48000 Hz, and no larger than 1 MiB. It is averaged to mono, resampled to
+48 kHz and stored atomically. This route streams past the 16 KiB API body
+limit like the OTA upload, one upload at a time. It requires
+`X-LibreEcho-CSRF`.
+
+```sh
+curl -X PUT -H "X-LibreEcho-CSRF: $CSRF" -H 'Content-Type: audio/wav' \
+     --data-binary @chime.wav http://echo.local:8080/api/v1/sounds/wake
+```
+
+Invalid files are rejected and the stored sound is left unchanged:
+
+- 400 `invalid_sound`: not WAV, or not 16-bit PCM mono or stereo at 8-48 kHz
+- 413 `sound_too_long`: longer than the event allows
+- 413 `sound_size`: larger than 1 MiB
+- 404: unknown event
+- 409 `busy`: another upload is running
+
+The web UI also accepts Opus, Ogg, MP3 and anything else the browser can
+decode. It converts the file to WAV in the browser before uploading.
+
+#### POST /api/v1/sounds/{event}/select
+
+`{ "selected": "custom" }` or `{ "selected": "default" }`. Switching to
+`default` keeps the uploaded sound so it can be selected again. Selecting
+`custom` with nothing uploaded returns 409. Requires `X-LibreEcho-CSRF`.
+
+#### POST /api/v1/sounds/{event}/preview
+
+Plays the uploaded sound on the device, whether or not it is selected.
+Returns 409 when nothing is uploaded or another sound is still playing.
+Requires `X-LibreEcho-CSRF`.
+
+#### DELETE /api/v1/sounds/{event}
+
+Removes the uploaded sound. The event goes back to its built-in sound.
+Requires `X-LibreEcho-CSRF`.
+
 ### Voice assistant
 
 The voice assistant uses local wake-word detection, post-AEC microphone audio,
