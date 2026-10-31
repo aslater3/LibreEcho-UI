@@ -9,8 +9,10 @@
  *
  * A short-time spectral Wiener filter: 256-point frames at 16 kHz with a
  * 128-sample hop, square-root Hann analysis and synthesis windows, a
- * minimum-tracking noise estimate per bin and a decision-directed a-priori
- * SNR. Every buffer is fixed-size inside the struct; nothing allocates.
+ * minimum-statistics noise estimate per bin (the minimum of the smoothed
+ * power over the last ~1.5 s, so a louder room is learnt within about two
+ * seconds) and a decision-directed a-priori SNR. Every buffer is fixed-size
+ * inside the struct; nothing allocates.
  *
  * le_voice_ns_process() rewrites samples in place with a constant delay of
  * LE_VOICE_NS_LATENCY_SAMPLES (16 ms). Callers that index audio by sample
@@ -25,6 +27,9 @@
 #define LE_VOICE_NS_DEFAULT_ATTENUATION_DB 15
 #define LE_VOICE_NS_MIN_ATTENUATION_DB 3
 #define LE_VOICE_NS_MAX_ATTENUATION_DB 30
+/* Minimum-statistics window: 8 sub-windows of 24 frames (8 ms) = 1.54 s. */
+#define LE_VOICE_NS_SUBWINDOWS 8U
+#define LE_VOICE_NS_SUBWINDOW_FRAMES 24U
 
 struct le_voice_ns {
     float window[LE_VOICE_NS_FFT];
@@ -34,11 +39,14 @@ struct le_voice_ns {
     float overlap[LE_VOICE_NS_FFT];
     float smoothed[LE_VOICE_NS_BINS];
     float minimum[LE_VOICE_NS_BINS];
+    float history[LE_VOICE_NS_SUBWINDOWS][LE_VOICE_NS_BINS];
     float previous[LE_VOICE_NS_BINS];
     int16_t input[LE_VOICE_NS_HOP];
     int16_t output[LE_VOICE_NS_HOP];
     unsigned short bit_reverse[LE_VOICE_NS_FFT];
     unsigned int position;
+    unsigned int subwindow_frame;
+    unsigned int subwindow_index;
     unsigned long long frames;
     float floor_gain;
 };

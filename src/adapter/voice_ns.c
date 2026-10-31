@@ -5,9 +5,6 @@
 
 /* Per-frame (8 ms) constants. */
 #define NS_SMOOTHING 0.7f        /* power smoothing before minimum tracking */
-/* The floor climbs at most 3 dB a second (x2 per 125 frames), so a louder
-   room is learnt in seconds while speech barely lifts it. */
-#define NS_MINIMUM_RISE 1.00556f
 #define NS_NOISE_BIAS 2.0f       /* minimum of smoothed power -> mean noise */
 #define NS_DD_ALPHA 0.98f        /* decision-directed a-priori SNR */
 #define NS_MIN_SNR 1e-3f
@@ -70,24 +67,26 @@ static void process_block(struct le_voice_ns *ns)
     fft(ns, re, im);
     for (i = 0; i < LE_VOICE_NS_BINS; ++i) {
         float power = re[i] * re[i] + im[i] * im[i];
-        float noise, posterior, prior, gain;
+        float noise, posterior, prior, gain, floor;
+        unsigned int v;
 
         if (!ns->frames) {
             ns->smoothed[i] = power;
             ns->minimum[i] = power;
+            for (v = 0; v < LE_VOICE_NS_SUBWINDOWS; ++v)
+                ns->history[v][i] = power;
             ns->previous[i] = 1.0f;
         } else {
             ns->smoothed[i] = NS_SMOOTHING * ns->smoothed[i] +
                               (1.0f - NS_SMOOTHING) * power;
             if (ns->smoothed[i] < ns->minimum[i])
                 ns->minimum[i] = ns->smoothed[i];
-            else if (ns->smoothed[i] > ns->minimum[i] * NS_MINIMUM_RISE)
-                ns->minimum[i] = ns->minimum[i] * NS_MINIMUM_RISE +
-                                 NS_POWER_EPSILON;
-            else
-                ns->minimum[i] = ns->smoothed[i];
         }
-        noise = NS_NOISE_BIAS * ns->minimum[i] + NS_POWER_EPSILON;
+        floor = ns->minimum[i];
+        for (v = 0; v < LE_VOICE_NS_SUBWINDOWS; ++v)
+            if (ns->history[v][i] < floor)
+                floor = ns->history[v][i];
+        noise = NS_NOISE_BIAS * floor + NS_POWER_EPSILON;
         posterior = power / noise;
         prior = NS_DD_ALPHA * ns->previous[i] +
                 (1.0f - NS_DD_ALPHA) *
@@ -106,6 +105,16 @@ static void process_block(struct le_voice_ns *ns)
         }
     }
     ++ns->frames;
+    /* Close a sub-window: its minimum replaces the oldest one, so the floor
+       is the minimum over the last LE_VOICE_NS_SUBWINDOWS sub-windows. */
+    if (++ns->subwindow_frame == LE_VOICE_NS_SUBWINDOW_FRAMES) {
+        memcpy(ns->history[ns->subwindow_index], ns->minimum,
+               sizeof(ns->minimum));
+        memcpy(ns->minimum, ns->smoothed, sizeof(ns->minimum));
+        ns->subwindow_index =
+            (ns->subwindow_index + 1U) % LE_VOICE_NS_SUBWINDOWS;
+        ns->subwindow_frame = 0;
+    }
     /* Inverse transform as the conjugate of a forward transform. */
     for (i = 0; i < LE_VOICE_NS_FFT; ++i)
         im[i] = -im[i];
@@ -137,6 +146,9 @@ void le_voice_ns_reset(struct le_voice_ns *ns)
     memset(ns->overlap, 0, sizeof(ns->overlap));
     memset(ns->smoothed, 0, sizeof(ns->smoothed));
     memset(ns->minimum, 0, sizeof(ns->minimum));
+    memset(ns->history, 0, sizeof(ns->history));
+    ns->subwindow_frame = 0;
+    ns->subwindow_index = 0;
     memset(ns->previous, 0, sizeof(ns->previous));
     memset(ns->input, 0, sizeof(ns->input));
     memset(ns->output, 0, sizeof(ns->output));

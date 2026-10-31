@@ -171,6 +171,20 @@ int main(void)
               rms(output, RATE * 2 + LE_VOICE_NS_LATENCY_SAMPLES, RATE),
           "30 dB setting not deeper than 15 dB");
 
+    /* A room that gets louder (a fan switched on at 4 s, 12 dB up) is
+       learnt within about two seconds, not left through untouched. */
+    for (i = 0; i < SAMPLES; ++i)
+        scratch[i] = clamp((i < RATE * 4 ? 200.0 : 800.0) * gaussian());
+    memcpy(output, scratch, sizeof(output));
+    run(output, 160, LE_VOICE_NS_DEFAULT_ATTENUATION_DB);
+    noise_in = rms(scratch, RATE * 6, RATE);
+    noise_out = rms(output, RATE * 6 + LE_VOICE_NS_LATENCY_SAMPLES, RATE);
+    printf("voice-ns: louder room after 2 s %.1f -> %.1f RMS (%.1f dB)\n",
+           noise_in, noise_out, 20.0 * log10(noise_out / noise_in));
+    CHECK(noise_out < noise_in * 0.3162,
+          "louder room not learnt within 2 s: %.1f -> %.1f", noise_in,
+          noise_out);
+
     /* Digital silence stays silent (no NaN, no DC from the filter). */
     CHECK(le_voice_ns_init(&ns, LE_VOICE_NS_DEFAULT_ATTENUATION_DB) == 0,
           "init");
