@@ -43,6 +43,14 @@ class Adapter:
                     cmd = message['cmd']; self.calls.append(cmd)
                     if cmd == 'dismiss': self.state['ringing'] = 0
                     data = dict(self.state)
+                    if 'ringing' in data:
+                        # timerd's real shape: each timer's "state":"ringing"
+                        # comes before the outer count (#405 hardware bug).
+                        data = {'timers': [{'id': 1, 'kind': 'countdown',
+                                            'state': 'ringing' if data['ringing'] else 'pending',
+                                            'seconds_remaining': 0}],
+                                **data, 'missed': 0, 'remote_timers': [],
+                                'remote_ringing': 0}
                     if self.engine and cmd == 'status': data['engine'] = self.engine
                     ok = not (self.engine and cmd == 'recognize_stream')
                     reply = {'v': 1, 'id': message['id'], 'ok': ok}

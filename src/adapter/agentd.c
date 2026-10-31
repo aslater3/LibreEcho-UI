@@ -17,6 +17,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -441,6 +442,21 @@ static int adapter_call(const char *socket_path, int timeout_ms,
                              response, response_size);
     le_adapter_close(adapter);
     return result;
+}
+
+/*
+ * A count from timerd's status. Only the outer object counts: each timer in
+ * the "timers" array carries "state":"ringing", and a plain key search finds
+ * that string first and reads no count at all, so a ringing timer looked
+ * silent.
+ */
+static int timer_status_count(const char *response, const char *key)
+{
+    long long count = 0;
+
+    if (json_get_int64_top_level(response, key, &count) != 1 || count < 0)
+        return 0;
+    return count > INT_MAX ? INT_MAX : (int)count;
 }
 
 /*
@@ -1193,7 +1209,7 @@ static int handle_timer_intent(struct agent_state *state,
            as it did before this existed. */
         return 0;
     }
-    (void)json_get_int(response, "ringing", &ringing);
+    ringing = timer_status_count(response, "ringing");
 
     switch (intent.kind) {
     case LE_TIMER_INTENT_DISMISS:
@@ -2143,8 +2159,8 @@ static int timer_ringing(struct agent_state *state, int *known)
                      sizeof(response)) != LE_ADAPTER_OK)
         return 0;
     *known = 1;
-    (void)json_get_int(response, "ringing", &ringing);
-    (void)json_get_int(response, "remote_ringing", &remote);
+    ringing = timer_status_count(response, "ringing");
+    remote = timer_status_count(response, "remote_ringing");
     return ringing + remote > 0;
 }
 
