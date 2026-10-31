@@ -245,10 +245,15 @@ int le_peer_seal(const struct le_peer_key *key, const char *type, long long ts, 
 /* Splits the next space- or newline-terminated field of at most cap-1 bytes. */
 static int field(const char **p, const char *end, char stop, char *out, size_t cap)
 {
-    size_t n = 0;
-    while (*p < end && **p != stop) { if (n + 1 >= cap || **p == ' ' || **p == '\n' || **p == 0) return -1; out[n++] = **p; (*p)++; }
-    if (*p >= end || !n) return -1;
-    out[n] = 0; (*p)++;
+    /* Measure first, then copy: a byte-at-a-time copy into out trips GCC 15's
+     * -Wstringop-overflow at -O3 on ARM (the waked build). */
+    const char *q = *p;
+    size_t n;
+    while (q < end && *q != stop) { if (*q == ' ' || *q == '\n' || *q == 0) return -1; q++; }
+    n = (size_t)(q - *p);
+    if (q >= end || !n || n >= cap) return -1;
+    memcpy(out, *p, n);
+    out[n] = 0; *p = q + 1;
     return 0;
 }
 
