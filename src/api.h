@@ -70,7 +70,10 @@ int discoverable,http_port,http_lan,discovery_fd;long discovery_retry,discovery_
 /* Device pairing (#450). peer_key is the house key shared by paired devices,
    loaded on first use from peer_key_path (peer.key beside the config file).
    Without a key this device signs nothing and trusts no device. */
-struct le_peer_key peer_key;char peer_key_path[512];int peer_key_loaded;};
+struct le_peer_key peer_key;char peer_key_path[512];int peer_key_loaded;
+/* Nearest-device answering (#408), off by default. Persisted here; waked
+   reads it from the saved config and needs the pairing key as well. */
+int nearest_answers;};
 int api_request_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_bootstrap_required(const struct api_context*);
 void api_set_https_active(struct api_context*,int);

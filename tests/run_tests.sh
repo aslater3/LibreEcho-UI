@@ -134,6 +134,7 @@ sh tests/test_watchdogd_recovery.sh
 sh tests/test_watchdog_voice_mode.sh
 make build/libreecho-waked
 WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
+WAKED_REQUIRED=1 python3 tests/test_waked_nearest_answers.py
 sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
 make build/libreecho-timerd build/libreecho-watchdogd
@@ -353,6 +354,7 @@ python3 tests/test_stop_intent_integration.py
 ./build/test-voice-pipeline
 make test-mdns
 make test-peer-auth
+make test-wake-arbiter
 # Guard the nested-make provenance contract before the ESPHome section: its
 # strict radio-controls build is the first -Werror consumer of the augmented
 # CPPFLAGS, so a snapshot mismatch surfaces there. This reproduces the

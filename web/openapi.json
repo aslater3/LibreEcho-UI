@@ -4315,6 +4315,10 @@
          "type": "boolean",
          "description": "Advertise this control centre as _libreecho._tcp so other LibreEcho devices can list it (default true)."
         },
+        "nearest_answers": {
+         "type": "boolean",
+         "description": "Only the nearest paired device answers the wake word (default false). Needs pairing; settled by signed claims between devices (#408)."
+        },
         "wifi_mac": {
          "type": "string",
          "pattern": "^$|^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"
@@ -4731,6 +4735,10 @@
      "discoverable": {
       "type": "boolean",
       "description": "Persisted choice to advertise this control centre to other LibreEcho devices (_libreecho._tcp)."
+     },
+     "nearest_answers": {
+      "type": "boolean",
+      "description": "Persisted choice to let only the nearest paired device answer the wake word (#408). Off by default."
      }
     }
    },

@@ -269,7 +269,9 @@ static void replay_record(struct le_peer_replay *r, const char *nonce, long long
         if (!r->seen[s].nonce[0] || r->seen[s].ts < now - window_s || r->seen[s].ts > now + window_s) { slot = s; break; }
     }
     if (i == LE_PEER_REPLAY_SLOTS && r->seen[slot].ts > r->floor) r->floor = r->seen[slot].ts;
-    snprintf(r->seen[slot].nonce, sizeof(r->seen[slot].nonce), "%s", nonce);
+    /* nonce was checked to be exactly LE_PEER_NONCE_HEX hex digits. */
+    memcpy(r->seen[slot].nonce, nonce, LE_PEER_NONCE_HEX);
+    r->seen[slot].nonce[LE_PEER_NONCE_HEX] = 0;
     r->seen[slot].ts = ts;
     r->next = (slot + 1) % LE_PEER_REPLAY_SLOTS;
 }

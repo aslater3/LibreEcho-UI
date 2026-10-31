@@ -1235,6 +1235,7 @@ false.
   "ssh": false,
   "api_lan": true,
   "discoverable": true,
+  "nearest_answers": false,
   "wifi_mac": "<six hexadecimal octets>",
   "bt_mac": "<six hexadecimal octets>"
 }
@@ -1261,6 +1262,23 @@ shared `libreecho-mdnsd` responder. The record's instance name is the
 hostname; its TXT records are `version` (LibreEcho version), `room` (may be
 empty) and `path=/`. Turning it off withdraws the record within a few seconds.
 A hostname or room change is re-advertised within about five seconds.
+
+`nearest_answers` (default `false`, persisted, also reported by `GET
+/api/v1/network`, exported and imported with the configuration) makes only
+the nearest device answer when several hear the wake word (#408). It works
+only while this device is paired (see Device pairing below); turn it on on
+every paired device that should take part. On each wake, `libreecho-waked`
+broadcasts a signed claim (LESIG1 type `wake.claim`, UDP port 6054 on the
+local network) with the wake word's level, waits 350 ms for the other
+devices' claims, and passes the wake to the voice assistant only when no
+claim is louder. A device that hears a claim from more than 200 ms before its
+own wake treats that turn as taken and stays quiet. Claims that are not
+signed with this house key, are replayed, or are more than 30 s off this
+device's clock are ignored, so an unpaired device can never silence a paired
+one. waked re-reads the switch and the key every two seconds. Its `status`
+command reports `nearest_answers` with `enabled`, `paired`, `active`, `won`,
+`yielded`, `heard` and `rejected`. A device whose own voice assistant is not
+set up should be left off: it would still win a turn it cannot answer.
 
 #### GET /api/v1/network/peers
 
