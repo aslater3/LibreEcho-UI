@@ -101,8 +101,10 @@ int main(void)
     assert(kind_of("Alexa, stop!") == LE_TIMER_INTENT_DISMISS);
     assert(kind_of("dismiss") == LE_TIMER_INTENT_DISMISS);
     assert(kind_of("turn off the timer") == LE_TIMER_INTENT_DISMISS);
-    assert(kind_of("snooze") == LE_TIMER_INTENT_NONE);
-    assert(kind_of("snooze the timer") == LE_TIMER_INTENT_NONE);
+    /* Snooze is its own request now; the daemon decides whether an alarm
+       is ringing to snooze. */
+    assert(kind_of("snooze") == LE_TIMER_INTENT_SNOOZE);
+    assert(kind_of("snooze the timer") == LE_TIMER_INTENT_SNOOZE);
 
     /* Cancelling something that has not gone off is a different request. */
     assert(kind_of("cancel my timer") == LE_TIMER_INTENT_CANCEL);
@@ -414,6 +416,47 @@ int main(void)
         memset(big, 'a', sizeof(big) - 1);
         big[sizeof(big) - 1] = '\0';
         (void)le_timer_intent_parse(big, &intent);
+    }
+
+    /* Snooze is recognised as its own request, with or without a duration
+       elsewhere in the sentence. The daemon decides whether anything rings. */
+    {
+        struct le_timer_intent intent;
+
+        assert(le_timer_intent_parse("snooze", &intent) == LE_TIMER_INTENT_SNOOZE);
+        assert(le_timer_intent_parse("snooze the alarm", &intent) ==
+               LE_TIMER_INTENT_SNOOZE);
+        assert(le_timer_intent_parse("please snooze it", &intent) ==
+               LE_TIMER_INTENT_SNOOZE);
+    }
+
+    /* Weekly alarms: the day mask is taken from the request. Bit 0 is Sunday. */
+    {
+        struct le_timer_intent intent;
+
+        assert(le_timer_intent_parse("set an alarm for 7am every day", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 7 && intent.alarm_minute == 0 &&
+               intent.alarm_days == 0x7fU);
+
+        assert(le_timer_intent_parse("set an alarm for 6:30am on weekdays", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 6 && intent.alarm_minute == 30 &&
+               intent.alarm_days == 0x3eU);
+
+        assert(le_timer_intent_parse("wake me at 8am on weekends", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_days == 0x41U);
+
+        assert(le_timer_intent_parse(
+                   "set an alarm for 7am every monday and wednesday", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_days == ((1U << 1) | (1U << 3)));
+
+        /* No day named is still a one-off alarm. */
+        assert(le_timer_intent_parse("set an alarm for 7am", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_days == 0U);
     }
 
     printf("timer intent: ok\n");

@@ -322,6 +322,159 @@ int main(void)
                LE_TIMER_ERR_RANGE);
     }
 
+    /* Repeating alarms. SYNCED_EPOCH is Thursday 2026-01-01 00:00 UTC. */
+    {
+        const long long thursday_0700 = SYNCED_EPOCH + 25200LL;
+        const long long next_monday_0700 = SYNCED_EPOCH + 4 * 86400LL + 25200LL;
+        const long long friday_0700 = SYNCED_EPOCH + 86400LL + 25200LL;
+        long long due = 0;
+        unsigned int id = 0;
+        struct le_timer_set set;
+        struct le_timer *timer;
+
+        setenv("TZ", "UTC0", 1);
+        tzset();
+
+        /* The next occurrence is the next allowed weekday at the set time. */
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 7, 0, 0x02U, &due) ==
+               LE_TIMER_OK);
+        assert(due == next_monday_0700);
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 7, 0, 0x3eU, &due) ==
+               LE_TIMER_OK);
+        assert(due == thursday_0700);
+        /* Thursday 08:00 with a weekday mask rolls to Friday 07:00. */
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH + 8 * 3600LL, 7, 0, 0x3eU,
+                                          &due) == LE_TIMER_OK);
+        assert(due == friday_0700);
+        /* Invalid input is refused rather than guessed at. */
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 7, 0, 0U, &due) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 7, 0, 0x80U, &due) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 24, 0, 0x7fU, &due) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_next_repeat_epoch(BOOT_EPOCH, 7, 0, 0x7fU, &due) ==
+               LE_TIMER_ERR_CLOCK);
+
+        le_timer_set_init(&set);
+        assert(le_timer_add_repeat_alarm(&set, 7, 0, 0U, "x", SYNCED_EPOCH,
+                                         &id) == LE_TIMER_ERR_RANGE);
+        assert(le_timer_add_repeat_alarm(&set, 7, 0, 0x3eU, "work", SYNCED_EPOCH,
+                                         &id) == LE_TIMER_OK);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->repeat_days == 0x3eU && timer->hour == 7 &&
+               timer->minute == 0 && timer->due_epoch == thursday_0700);
+
+        /* A repeat rings at its due instant, is dismissed, and comes back on
+           its next allowed day instead of being removed. */
+        assert(step(&set, 1000, thursday_0700) == 1);
+        assert(le_timer_ringing_count(&set) == 1);
+        assert(le_timer_dismiss_at(&set, id, thursday_0700 + 10) == 1);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        assert(timer->due_epoch == friday_0700);
+
+        /* Snooze: a ringing alarm rings again after the snooze period, and
+           keeps its repeat. */
+        assert(step(&set, 2000, friday_0700) == 1);
+        assert(le_timer_snooze_ringing(&set, friday_0700 + 5) == 1);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        assert(timer->due_epoch == friday_0700 + 5 + LE_TIMER_SNOOZE_SECONDS);
+        assert(timer->repeat_days == 0x3eU && timer->hour == 7);
+        assert(step(&set, 3000, friday_0700 + 5 + LE_TIMER_SNOOZE_SECONDS - 1) == 0);
+        assert(step(&set, 3000 + 300000,
+                    friday_0700 + 5 + LE_TIMER_SNOOZE_SECONDS) == 1);
+        /* Letting the ring run out also advances a repeat to the next day. */
+        assert(step(&set, 3000 + 300000 + 301000,
+                    friday_0700 + 5 + LE_TIMER_SNOOZE_SECONDS + 301) == 0);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        /* Friday is a weekday, so the rollover after it is Monday. */
+        assert(timer->due_epoch == next_monday_0700);
+
+        /* A countdown is never snoozed, and a one-off is cleared on dismiss. */
+        le_timer_set_init(&set);
+        assert(le_timer_add_countdown(&set, 60, "eggs", 0, &id) == LE_TIMER_OK);
+        assert(step(&set, 60000, SYNCED_EPOCH) == 1);
+        assert(le_timer_snooze_ringing(&set, SYNCED_EPOCH) == 0);
+        assert(le_timer_ringing_count(&set) == 1);
+        assert(le_timer_dismiss_at(&set, id, SYNCED_EPOCH) == 1);
+        assert(le_timer_find(&set, id) == NULL);
+        assert(le_timer_add_alarm(&set, SYNCED_EPOCH + 60, "once", SYNCED_EPOCH,
+                                  &id) == LE_TIMER_OK);
+        assert(step(&set, 1000, SYNCED_EPOCH + 60) == 1);
+        assert(le_timer_dismiss_all_at(&set, SYNCED_EPOCH + 61) == 1);
+        assert(le_timer_active_count(&set) == 0);
+
+        /* An alarm whose repeat expired while the device was down is advanced
+           to its next occurrence, not reported as missed. */
+        le_timer_set_init(&set);
+        assert(le_timer_restore_repeat_alarm(&set, 7, SYNCED_EPOCH - 2 * 86400LL,
+                                             7, 0, 0x7fU, "daily",
+                                             SYNCED_EPOCH + 12 * 3600LL, 1000,
+                                             &id) == LE_TIMER_OK);
+        assert(id == 7 && set.missed == 0);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->due_epoch == friday_0700);
+    }
+
+    /* Daylight saving: an alarm set for 07:00 keeps 07:00 across the change,
+       rather than drifting by an hour. Europe/London moves forward on
+       2026-03-29 and back on 2026-10-25. */
+    {
+        struct tm when;
+        long long now, due;
+        time_t check;
+        struct tm local;
+
+        setenv("TZ", "Europe/London", 1);
+        tzset();
+
+        memset(&when, 0, sizeof(when));
+        when.tm_year = 2026 - 1900;
+        when.tm_mon = 2;
+        when.tm_mday = 28;
+        when.tm_hour = 12;
+        when.tm_isdst = -1;
+        now = (long long)mktime(&when);
+        assert(le_timer_next_repeat_epoch(now, 7, 0, 0x7fU, &due) == LE_TIMER_OK);
+        check = (time_t)due;
+        assert(localtime_r(&check, &local));
+        assert(local.tm_mday == 29 && local.tm_hour == 7 && local.tm_min == 0);
+        /* Noon GMT to 07:00 BST the next day is eighteen hours, not nineteen. */
+        assert(due - now == 18LL * 3600LL);
+
+        memset(&when, 0, sizeof(when));
+        when.tm_year = 2026 - 1900;
+        when.tm_mon = 9;
+        when.tm_mday = 24;
+        when.tm_hour = 12;
+        when.tm_isdst = -1;
+        now = (long long)mktime(&when);
+        assert(le_timer_next_repeat_epoch(now, 7, 0, 0x7fU, &due) == LE_TIMER_OK);
+        check = (time_t)due;
+        assert(localtime_r(&check, &local));
+        assert(local.tm_mday == 25 && local.tm_hour == 7 && local.tm_min == 0);
+        /* Noon BST is 11:00 UTC; 07:00 GMT the next day is 07:00 UTC: twenty hours. */
+        assert(due - now == 20LL * 3600LL);
+
+        /* A time that does not exist on the spring-forward day (01:30) still
+           resolves to one instant within the day rather than failing. */
+        memset(&when, 0, sizeof(when));
+        when.tm_year = 2026 - 1900;
+        when.tm_mon = 2;
+        when.tm_mday = 28;
+        when.tm_hour = 12;
+        when.tm_isdst = -1;
+        now = (long long)mktime(&when);
+        assert(le_timer_next_repeat_epoch(now, 1, 30, 0x7fU, &due) == LE_TIMER_OK);
+        assert(due > now && due < now + 2LL * 86400LL);
+
+        setenv("TZ", "UTC0", 1);
+        tzset();
+    }
+
     printf("timer schedule: ok\n");
     return 0;
 }

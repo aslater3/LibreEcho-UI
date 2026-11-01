@@ -33,6 +33,14 @@
    or it rings again on the next tick. */
 #define LE_TIMER_RING_SECONDS 300
 
+/* Snooze delays a ringing alarm by a fixed five minutes. The same length for
+   the button and the voice, so "snooze" means one thing on this device. */
+#define LE_TIMER_SNOOZE_SECONDS 300
+
+/* Repeat days are a bit mask over tm_wday: bit 0 is Sunday through bit 6
+   Saturday. Zero means the alarm is one-off. */
+#define LE_TIMER_DAYS_ALL 0x7fU
+
 /* A timer that came due while the device was down still fires, but only if it
    is barely late. Waking the room at 03:00 for a countdown that expired at
    22:00 is worse than missing it, so anything older is dropped and reported
@@ -70,6 +78,12 @@ struct le_timer {
     long long due_monotonic_ms;
     long long due_epoch;
     long long ring_started_ms;
+    /* Alarms only. A repeating alarm keeps its local hour and minute so it
+       still rings at the same wall-clock time after a snooze moved its due
+       instant, and after daylight-saving changes. */
+    unsigned int repeat_days;
+    int hour;
+    int minute;
     char label[LE_TIMER_LABEL_MAX];
 };
 
@@ -109,6 +123,31 @@ int le_timer_add_alarm(struct le_timer_set *set, long long due_epoch,
 int le_timer_next_alarm_epoch(long long now_epoch, int hour, int minute,
                               long long *due_epoch);
 
+/*
+ * The next local-time occurrence of hour:minute strictly after now_epoch on
+ * one of the days in `days` (a LE_TIMER_DAYS_ALL style mask). Searches up to
+ * eight local days ahead, recomputing each candidate from the calendar date so
+ * the wall-clock time is kept across daylight-saving changes.
+ */
+int le_timer_next_repeat_epoch(long long now_epoch, int hour, int minute,
+                               unsigned int days, long long *due_epoch);
+
+/* Add an alarm that repeats on `days` at hour:minute. Refused while the clock
+   is not credible, or when `days` is empty or out of range. */
+int le_timer_add_repeat_alarm(struct le_timer_set *set, int hour, int minute,
+                              unsigned int days, const char *label,
+                              long long now_epoch, unsigned int *id);
+
+/* Restore a persisted repeating alarm. A record that came due while the device
+   was down is advanced to its next occurrence instead of being reported as
+   missed, so a weekday alarm does not vanish after a long power cut. */
+int le_timer_restore_repeat_alarm(struct le_timer_set *set,
+                                  unsigned int restore_id, long long due_epoch,
+                                  int hour, int minute, unsigned int days,
+                                  const char *label, long long now_epoch,
+                                  long long now_monotonic_ms,
+                                  unsigned int *id);
+
 /* Restore a persisted wall-clock due time after the clock becomes valid. A
  * due time may be slightly overdue so le_timer_step() can apply the common
  * miss grace, but stale records are rejected. */
@@ -134,9 +173,24 @@ int le_timer_cancel(struct le_timer_set *set, unsigned int id);
 int le_timer_cancel_at(struct le_timer_set *set, unsigned int id,
                        long long now_monotonic_ms, long long now_epoch);
 
-/* Stop a ringing timer and clear it. Returns how many were stopped. */
+/*
+ * Stop a ringing timer. A one-off is cleared; a repeating alarm moves to its
+ * next occurrence instead of disappearing. The _at forms take the wall clock
+ * for that; the plain forms clear everything and suit one-off entries only.
+ * Returns how many were stopped.
+ */
 int le_timer_dismiss(struct le_timer_set *set, unsigned int id);
 int le_timer_dismiss_all(struct le_timer_set *set);
+int le_timer_dismiss_at(struct le_timer_set *set, unsigned int id,
+                        long long now_epoch);
+int le_timer_dismiss_all_at(struct le_timer_set *set, long long now_epoch);
+
+/*
+ * Snooze every ringing alarm: it goes back to pending and rings again
+ * LE_TIMER_SNOOZE_SECONDS after now_epoch. Countdowns are not snoozed. Returns
+ * how many alarms were snoozed.
+ */
+int le_timer_snooze_ringing(struct le_timer_set *set, long long now_epoch);
 
 /*
  * Advance the schedule. Newly due timers move to ringing and their ids are

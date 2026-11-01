@@ -1881,7 +1881,7 @@
       "tags": [
         "Timers"
       ],
-      "summary": "Set a one-off alarm at the next occurrence of a local 24-hour time",
+      "summary": "Set an alarm at the next occurrence of a local 24-hour time, once or on repeating days",
       "security": [
         {
           "BearerAuth": []
@@ -1910,6 +1910,10 @@
                 "label": {
                   "type": "string",
                   "description": "Optional label; its UTF-8 encoding must be no longer than 47 bytes and must not contain control characters."
+                },
+                "days": {
+                  "type": "string",
+                  "description": "Optional repeat days: a comma list of lower-case names (sun,mon,tue,wed,thu,fri,sat), or daily, weekdays or weekends. Empty or omitted makes a one-off alarm. An unknown list returns 400."
                 }
               }
             }
@@ -1925,6 +1929,32 @@
         },
         "409": {
           "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/alarms/snooze": {
+    "post": {
+      "tags": [
+        "Timers"
+      ],
+      "summary": "Snooze every ringing alarm for five minutes; countdowns are not snoozed",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
         },
         "503": {
           "$ref": "#/components/responses/Error"

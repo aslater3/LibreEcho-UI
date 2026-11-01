@@ -317,6 +317,56 @@ int main(void)
     assert_post_commit_retry(path, backup, &le_timerd_test_fail_chmod);
     assert_post_commit_retry(path, backup, &le_timerd_test_fail_parent_fsync);
 
+    /* A repeating alarm persists as a v4 record with its days and its set
+       time, and reloads as the same alarm. */
+    {
+        struct context repeat;
+        struct context restored;
+        char rtext[512];
+        unsigned int alarm_id = 0;
+        struct le_timer *timer;
+        long long due;
+
+        unlink(path);
+        unlink(backup);
+        memset(&repeat, 0, sizeof(repeat));
+        repeat.state_path = path;
+        repeat.state_loaded = 1;
+        le_timer_set_init(&repeat.timers);
+        assert(le_timer_add_repeat_alarm(&repeat.timers, 7, 30, 0x3eU, "work",
+                                         SYNCED_EPOCH, &alarm_id) == LE_TIMER_OK);
+        assert(state_save_at(&repeat, 1000, SYNCED_EPOCH) == STATE_SAVE_OK);
+        read_text(path, rtext, sizeof(rtext));
+        assert(strstr(rtext, "v4 alarm ") != NULL);
+        assert(strstr(rtext, " 62 7 30 ") != NULL);
+
+        memset(&restored, 0, sizeof(restored));
+        restored.state_path = path;
+        le_timer_set_init(&restored.timers);
+        assert(state_load_at(&restored, 1000, SYNCED_EPOCH) == 1);
+        timer = le_timer_find(&restored.timers, alarm_id);
+        assert(timer && timer->repeat_days == 0x3eU && timer->hour == 7 &&
+               timer->minute == 30 && !strcmp(timer->label, "work"));
+        assert(timer->due_epoch == SYNCED_EPOCH + 7 * 3600LL + 1800LL);
+        assert(restored.timers.missed == 0);
+
+        /* A snoozed repeating alarm keeps its repeat and its set time, while
+           its due instant moves to the snooze. */
+        due = timer->due_epoch;
+        repeat.state_loaded = 1;
+        assert(le_timer_step(&repeat.timers, 2000, due, NULL, 0) == 1);
+        assert(le_timer_snooze_ringing(&repeat.timers, due + 5) == 1);
+        assert(state_save_at(&repeat, 3000, due + 5) == STATE_SAVE_OK);
+        memset(&restored, 0, sizeof(restored));
+        restored.state_path = path;
+        le_timer_set_init(&restored.timers);
+        assert(state_load_at(&restored, 1000, due + 10) == 1);
+        timer = le_timer_find(&restored.timers, alarm_id);
+        assert(timer && timer->repeat_days == 0x3eU && timer->hour == 7 &&
+               timer->minute == 30);
+        assert(timer->due_epoch == due + 5 + LE_TIMER_SNOOZE_SECONDS);
+    }
+
     puts("timer persistence: ok");
     return 0;
 }

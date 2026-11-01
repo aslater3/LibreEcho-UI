@@ -93,7 +93,8 @@ static int restore_timer(struct le_timer_set *set, enum le_timer_kind kind,
                          unsigned int restore_id, long long due_epoch,
                          const char *label,
                          long long now_epoch, long long now_monotonic_ms,
-                         unsigned int *id)
+                         unsigned int *id, unsigned int days, int hour,
+                         int minute)
 {
     struct le_timer *timer;
     long long delta;
@@ -102,8 +103,20 @@ static int restore_timer(struct le_timer_set *set, enum le_timer_kind kind,
         return LE_TIMER_ERR_NOT_FOUND;
     if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
         return LE_TIMER_ERR_CLOCK;
+    if (days) {
+        /* A repeat that expired while the device was down is not a miss: its
+           next occurrence is still wanted. */
+        if (kind != LE_TIMER_ALARM || (days & ~LE_TIMER_DAYS_ALL) ||
+            hour < 0 || hour > 23 || minute < 0 || minute > 59)
+            return LE_TIMER_ERR_RANGE;
+        if (due_epoch - now_epoch < -LE_TIMER_MISS_GRACE_SECONDS) {
+            if (le_timer_next_repeat_epoch(now_epoch, hour, minute, days,
+                                           &due_epoch) != LE_TIMER_OK)
+                return LE_TIMER_ERR_RANGE;
+        }
+    }
     delta = due_epoch - now_epoch;
-    if (delta < -LE_TIMER_MISS_GRACE_SECONDS)
+    if (!days && delta < -LE_TIMER_MISS_GRACE_SECONDS)
         return LE_TIMER_ERR_RANGE;
     if (kind == LE_TIMER_COUNTDOWN && delta > LE_TIMER_MAX_SECONDS)
         return LE_TIMER_ERR_RANGE;
@@ -127,6 +140,83 @@ static int restore_timer(struct le_timer_set *set, enum le_timer_kind kind,
     timer->state = LE_TIMER_STATE_PENDING;
     timer->due_epoch = due_epoch;
     timer->due_monotonic_ms = now_monotonic_ms + delta * 1000LL;
+    timer->repeat_days = days;
+    timer->hour = days ? hour : 0;
+    timer->minute = days ? minute : 0;
+    set_label(timer, label);
+    if (id)
+        *id = timer->id;
+    return LE_TIMER_OK;
+}
+
+int le_timer_next_repeat_epoch(long long now_epoch, int hour, int minute,
+                               unsigned int days, long long *due_epoch)
+{
+    time_t now = (time_t)now_epoch;
+    struct tm *zoned;
+    struct tm today;
+    int offset;
+
+    if (!due_epoch)
+        return LE_TIMER_ERR_RANGE;
+    if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
+        return LE_TIMER_ERR_CLOCK;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+        !(days & LE_TIMER_DAYS_ALL) || (days & ~LE_TIMER_DAYS_ALL))
+        return LE_TIMER_ERR_RANGE;
+    zoned = localtime(&now);
+    if (!zoned)
+        return LE_TIMER_ERR_CLOCK;
+    today = *zoned;
+    /* Eight local days cover every weekday once, plus today again for a
+       slot that has already passed. */
+    for (offset = 0; offset <= 7; ++offset) {
+        struct tm candidate = today;
+        time_t due;
+
+        candidate.tm_mday += offset;
+        candidate.tm_hour = hour;
+        candidate.tm_min = minute;
+        candidate.tm_sec = 0;
+        candidate.tm_isdst = -1;
+        due = mktime(&candidate);
+        if (due == (time_t)-1 || (long long)due <= now_epoch)
+            continue;
+        /* mktime normalises the candidate, so tm_wday is the real weekday of
+           the local date it resolved to. */
+        if (!((days >> candidate.tm_wday) & 1U))
+            continue;
+        *due_epoch = (long long)due;
+        return LE_TIMER_OK;
+    }
+    return LE_TIMER_ERR_RANGE;
+}
+
+int le_timer_add_repeat_alarm(struct le_timer_set *set, int hour, int minute,
+                              unsigned int days, const char *label,
+                              long long now_epoch, unsigned int *id)
+{
+    struct le_timer *timer;
+    long long due;
+    int result;
+
+    if (!set)
+        return LE_TIMER_ERR_NOT_FOUND;
+    result = le_timer_next_repeat_epoch(now_epoch, hour, minute, days, &due);
+    if (result != LE_TIMER_OK)
+        return result;
+    timer = free_slot(set);
+    if (!timer)
+        return LE_TIMER_ERR_FULL;
+
+    memset(timer, 0, sizeof(*timer));
+    timer->id = set->next_id++;
+    timer->kind = LE_TIMER_ALARM;
+    timer->state = LE_TIMER_STATE_PENDING;
+    timer->due_epoch = due;
+    timer->repeat_days = days;
+    timer->hour = hour;
+    timer->minute = minute;
     set_label(timer, label);
     if (id)
         *id = timer->id;
@@ -176,7 +266,7 @@ int le_timer_restore_countdown(struct le_timer_set *set, long long due_epoch,
                                long long now_monotonic_ms, unsigned int *id)
 {
     return restore_timer(set, LE_TIMER_COUNTDOWN, 0, due_epoch, label,
-                         now_epoch, now_monotonic_ms, id);
+                         now_epoch, now_monotonic_ms, id, 0, 0, 0);
 }
 
 int le_timer_restore_alarm(struct le_timer_set *set, long long due_epoch,
@@ -184,7 +274,18 @@ int le_timer_restore_alarm(struct le_timer_set *set, long long due_epoch,
                            long long now_monotonic_ms, unsigned int *id)
 {
     return restore_timer(set, LE_TIMER_ALARM, 0, due_epoch, label, now_epoch,
-                         now_monotonic_ms, id);
+                         now_monotonic_ms, id, 0, 0, 0);
+}
+
+int le_timer_restore_repeat_alarm(struct le_timer_set *set,
+                                  unsigned int restore_id, long long due_epoch,
+                                  int hour, int minute, unsigned int days,
+                                  const char *label, long long now_epoch,
+                                  long long now_monotonic_ms,
+                                  unsigned int *id)
+{
+    return restore_timer(set, LE_TIMER_ALARM, restore_id, due_epoch, label,
+                         now_epoch, now_monotonic_ms, id, days, hour, minute);
 }
 
 int le_timer_restore_countdown_with_id(struct le_timer_set *set,
@@ -195,7 +296,7 @@ int le_timer_restore_countdown_with_id(struct le_timer_set *set,
                                        unsigned int *id)
 {
     return restore_timer(set, LE_TIMER_COUNTDOWN, restore_id, due_epoch, label,
-                         now_epoch, now_monotonic_ms, id);
+                         now_epoch, now_monotonic_ms, id, 0, 0, 0);
 }
 
 int le_timer_restore_alarm_with_id(struct le_timer_set *set,
@@ -205,7 +306,7 @@ int le_timer_restore_alarm_with_id(struct le_timer_set *set,
                                    unsigned int *id)
 {
     return restore_timer(set, LE_TIMER_ALARM, restore_id, due_epoch, label,
-                         now_epoch, now_monotonic_ms, id);
+                         now_epoch, now_monotonic_ms, id, 0, 0, 0);
 }
 
 struct le_timer *le_timer_find(struct le_timer_set *set, unsigned int id)
@@ -238,17 +339,40 @@ int le_timer_cancel_at(struct le_timer_set *set, unsigned int id,
     return le_timer_cancel(set, id);
 }
 
-int le_timer_dismiss(struct le_timer_set *set, unsigned int id)
+/*
+ * End a ring. A repeating alarm is put back to pending at its next occurrence
+ * after now_epoch; anything else is cleared. Without a credible clock there is
+ * no next occurrence to compute, so the entry is cleared rather than left
+ * ringing forever.
+ */
+static void retire(struct le_timer *timer, long long now_epoch)
+{
+    long long next;
+
+    if (timer->kind == LE_TIMER_ALARM && timer->repeat_days &&
+        now_epoch >= LE_TIMER_CLOCK_VALID_EPOCH &&
+        le_timer_next_repeat_epoch(now_epoch, timer->hour, timer->minute,
+                                   timer->repeat_days, &next) == LE_TIMER_OK) {
+        timer->state = LE_TIMER_STATE_PENDING;
+        timer->due_epoch = next;
+        timer->ring_started_ms = 0;
+        return;
+    }
+    memset(timer, 0, sizeof(*timer));
+}
+
+int le_timer_dismiss_at(struct le_timer_set *set, unsigned int id,
+                        long long now_epoch)
 {
     struct le_timer *timer = le_timer_find(set, id);
 
     if (!timer || timer->state != LE_TIMER_STATE_RINGING)
         return 0;
-    memset(timer, 0, sizeof(*timer));
+    retire(timer, now_epoch);
     return 1;
 }
 
-int le_timer_dismiss_all(struct le_timer_set *set)
+int le_timer_dismiss_all_at(struct le_timer_set *set, long long now_epoch)
 {
     size_t i;
     int stopped = 0;
@@ -258,10 +382,41 @@ int le_timer_dismiss_all(struct le_timer_set *set)
     for (i = 0; i < LE_TIMER_MAX; ++i) {
         if (set->timers[i].state != LE_TIMER_STATE_RINGING)
             continue;
-        memset(&set->timers[i], 0, sizeof(set->timers[i]));
+        retire(&set->timers[i], now_epoch);
         ++stopped;
     }
     return stopped;
+}
+
+int le_timer_dismiss(struct le_timer_set *set, unsigned int id)
+{
+    return le_timer_dismiss_at(set, id, 0);
+}
+
+int le_timer_dismiss_all(struct le_timer_set *set)
+{
+    return le_timer_dismiss_all_at(set, 0);
+}
+
+int le_timer_snooze_ringing(struct le_timer_set *set, long long now_epoch)
+{
+    size_t i;
+    int snoozed = 0;
+
+    if (!set || now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
+        return 0;
+    for (i = 0; i < LE_TIMER_MAX; ++i) {
+        struct le_timer *timer = &set->timers[i];
+
+        if (timer->state != LE_TIMER_STATE_RINGING ||
+            timer->kind != LE_TIMER_ALARM)
+            continue;
+        timer->state = LE_TIMER_STATE_PENDING;
+        timer->due_epoch = now_epoch + LE_TIMER_SNOOZE_SECONDS;
+        timer->ring_started_ms = 0;
+        ++snoozed;
+    }
+    return snoozed;
 }
 
 static int countdown_due(const struct le_timer *timer, long long now_ms)
@@ -307,7 +462,7 @@ int le_timer_step(struct le_timer_set *set, long long now_monotonic_ms,
         if (timer->state == LE_TIMER_STATE_RINGING) {
             if (now_monotonic_ms - timer->ring_started_ms >=
                 LE_TIMER_RING_SECONDS * 1000LL)
-                memset(timer, 0, sizeof(*timer));
+                retire(timer, now_epoch);
             continue;
         }
         if (timer->state != LE_TIMER_STATE_PENDING)
@@ -327,7 +482,7 @@ int le_timer_step(struct le_timer_set *set, long long now_monotonic_ms,
         }
 
         if (too_late(timer, now_monotonic_ms, now_epoch)) {
-            memset(timer, 0, sizeof(*timer));
+            retire(timer, now_epoch);
             ++set->missed;
             continue;
         }

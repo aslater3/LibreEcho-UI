@@ -34,7 +34,10 @@ enum le_timer_intent_kind {
     LE_TIMER_INTENT_QUERY,
     /* A wall-clock alarm ("set an alarm for 7am"). Appended so the existing
        kinds keep their values. */
-    LE_TIMER_INTENT_ALARM
+    LE_TIMER_INTENT_ALARM,
+    /* Snooze the alarm that is ringing for the fixed snooze period. Appended
+       with the others so existing values keep their meaning. */
+    LE_TIMER_INTENT_SNOOZE
 };
 
 struct le_timer_intent {
@@ -49,6 +52,9 @@ struct le_timer_intent {
        (for example "7" with no am or pm). */
     int alarm_hour;
     int alarm_minute;
+    /* Alarm: the days it repeats on, as a bit mask with bit 0 Sunday. Zero
+       means a one-off alarm. */
+    unsigned int alarm_days;
     char label[LE_TIMER_INTENT_LABEL_MAX];
 };
 

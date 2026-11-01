@@ -712,22 +712,32 @@ Requires `X-LibreEcho-CSRF`.
 Returns the pending and ringing alarms, a subset of the shared timer schedule
 (`/timers` lists them too, with `kind: "alarm"`). Each entry has an `id`,
 `state` (`pending` or `ringing`), `time` (the local 24-hour `HH:MM` it rings
-at), `due_epoch` (the same instant as Unix seconds), `seconds_remaining`, and
-an optional `label`. `available` is `false` when `timerd` is absent.
+at), `days` (the repeat days as a comma list, or `""` for a one-off),
+`due_epoch` (the same instant as Unix seconds), `seconds_remaining`, and an
+optional `label`. A repeating alarm's `time` is the time it is set for, even
+while a snooze has moved its `due_epoch`. `available` is `false` when `timerd`
+is absent.
 
 #### POST /api/v1/alarms
 
-Sets a one-off alarm and requires `X-LibreEcho-CSRF`.
+Sets an alarm and requires `X-LibreEcho-CSRF`.
 
 ```json
-{ "time": "07:00", "label": "wake up" }
+{ "time": "07:00", "label": "wake up", "days": "weekdays" }
 ```
+
+`days` is optional. Leave it out (or send `""`) for a one-off alarm. Otherwise
+send a comma list of lower-case names (`sun,mon,tue,wed,thu,fri,sat`), or one
+of `daily`, `weekdays`, `weekends`. A repeating alarm rings at its time on each
+of those days, in the device time zone, and after it rings or is stopped it
+moves to its next day rather than disappearing. Cancelling it removes the
+whole repeat. An unknown day list returns 400.
 
 `time` is required and must be `HH:MM` on a 24-hour clock (no seconds and no
 am/pm). It rings at the next occurrence of that time in the device time zone:
 if the time has passed today it is tomorrow, so an alarm is never in the past.
 `label` is optional, with the same rules as timer labels. Success returns HTTP
-201 with `{ "id", "time", "due_epoch" }`. A malformed body or time returns 400.
+201 with `{ "id", "time", "days", "due_epoch" }`. A malformed body or time returns 400.
 An unset clock (no network time yet), a full schedule, or a time-of-day that
 cannot be placed returns 409 with error code `busy`; retry once the clock is
 set. Alarms survive a restart: they are persisted with the other timers and
@@ -739,9 +749,19 @@ Cancels one pending alarm. The id must name an alarm: a countdown id, a
 ringing alarm, or an unknown id returns HTTP 404 and removes nothing. Use
 `/timers/dismiss` to silence a ringing alarm. Requires `X-LibreEcho-CSRF`.
 
+#### POST /api/v1/alarms/snooze
+
+Snoozes every ringing alarm for five minutes; it rings again then, and a
+repeating alarm keeps its days. Countdowns are not snoozed. Returns 200 with
+`{ "snoozed": n }`, where `n` is zero when no alarm was ringing. Requires
+`X-LibreEcho-CSRF`. The same snooze is available from the action button while
+an alarm rings, and by saying "snooze".
+
 Alarms can also be set and cancelled by voice without a language model:
-"set an alarm for 7am", "wake me at seven thirty in the evening", "cancel my
-alarm". A clock time without am or pm is asked about, not guessed.
+"set an alarm for 7am", "wake me at seven thirty in the evening", "set an
+alarm for 6:30am on weekdays", "cancel my alarm", "snooze". A clock time
+without am or pm is asked about, not guessed. Snooze only does something while
+an alarm rings; otherwise the request goes to the language model as before.
 
 The timer page refreshes its status while open so countdowns and ringing state
 remain current. Timer state is persisted atomically with a restrictive
