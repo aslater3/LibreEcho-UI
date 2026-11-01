@@ -22,6 +22,11 @@ CREDENTIALS=${CREDENTIALS:-/data/libreecho/secrets/openai-codex.json}
 ASSISTANT_ROOT=${ASSISTANT_ROOT:-/run/libreecho/features/assistant/root}
 CA_BUNDLE=${CA_BUNDLE:-$ASSISTANT_ROOT/usr/local/share/libreecho/cacert.pem}
 ARGS=${ARGS:---foreground --transport $TRANSPORT --model $MODEL --voice $VOICE --credentials $CREDENTIALS --live-ca $CA_BUNDLE --socket $SOCKET --wake-socket $WAKE_SOCKET --audio-bus $BUS}
+# Home Assistant tools are off unless the owner sets HA_URL (e.g. in
+# /etc/default/libreecho-lived). The token file is read per call, not logged.
+HA_URL=${HA_URL:-}
+HA_TOKEN_FILE=${HA_TOKEN_FILE:-/data/libreecho/secrets/home-assistant-token}
+[ -n "$HA_URL" ] && ARGS="$ARGS --ha-url $HA_URL --ha-token-file $HA_TOKEN_FILE"
 
 # Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life:
 # it goes stale when the daemon is started from a shell that then exits (the

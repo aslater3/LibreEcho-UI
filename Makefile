@@ -94,7 +94,7 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 	src/adapter/live_transport_realtime.c src/adapter/live_audio_out.c \
 	src/adapter/live_tools.c src/adapter/timer_intent.c src/adapter/radio_resample.c \
 	src/adapter/live_b64.c src/adapter/ws_client.c src/adapter/live_dns.c \
-	src/adapter/llm_store.c \
+	src/adapter/llm_store.c src/adapter/live_ha.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
@@ -395,7 +395,14 @@ $(BUILD)/test-live-session: tests/test_live_session.c src/adapter/live_session.c
 
 $(BUILD)/test-live-tools: tests/test_live_tools.c src/adapter/live_tools.c \
 		src/adapter/timer_intent.c src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/adapter/live_ha.c src/adapter/live_dns.c \
 		src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
+
+$(BUILD)/test-live-ha: tests/test_live_ha.c src/adapter/live_tools.c src/adapter/live_ha.c \
+		src/adapter/live_dns.c src/adapter/timer_intent.c src/adapter/adapter_client.c \
+		src/adapter/adapter_server.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
 $(BUILD)/test-live-audio-out: tests/test_live_audio_out.c \
@@ -418,11 +425,12 @@ $(BUILD)/test-lived: tests/test_lived.c $(BUILD)/libreecho-lived
 	$(CC) $(LIVE_TEST_CFLAGS) tests/test_lived.c -o $@
 
 test-lived: $(BUILD)/test-live-ring $(BUILD)/test-live-session \
-		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
+		$(BUILD)/test-live-tools $(BUILD)/test-live-ha $(BUILD)/test-live-audio-out \
 		$(BUILD)/test-ws-client $(BUILD)/test-live-dns $(BUILD)/test-lived
 	./$(BUILD)/test-live-ring
 	./$(BUILD)/test-live-session
 	./$(BUILD)/test-live-tools
+	./$(BUILD)/test-live-ha
 	./$(BUILD)/test-live-audio-out
 	./$(BUILD)/test-ws-client
 	./$(BUILD)/test-live-dns
@@ -1313,7 +1321,7 @@ clean:
 		$(BUILD)/test-agentd \
 		$(BUILD)/test-agentd-voice-history-race \
 		$(BUILD)/test-live-ring $(BUILD)/test-live-session \
-		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
+		$(BUILD)/test-live-tools $(BUILD)/test-live-ha $(BUILD)/test-live-audio-out \
 		$(BUILD)/test-ws-client $(BUILD)/test-live-dns $(BUILD)/test-lived \
 		$(BUILD)/test-voice-reply \
 		$(BUILD)/test-voice-playback \
