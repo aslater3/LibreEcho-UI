@@ -1402,20 +1402,27 @@ static int sendspin_sink_ready(const struct airplay_ctx *ctx)
  * mounted payload outside the sandbox: it needs none of the payload's
  * libraries, and does need audiod's socket and its state file on /data. */
 /* The owner's "play without pairing" choice, one plain file beside the state
- * file. Only an explicit "1" enables it: a missing or unreadable file is off. */
-static int sendspin_unpaired_access(const struct airplay_ctx *ctx)
+ * file: -1 when the owner has never set it, 1 only for an explicit "1", else 0.
+ * An unset choice is not passed to the player, so a payload that predates the
+ * option still starts. */
+static int sendspin_unpaired_setting(const struct airplay_ctx *ctx)
 {
     char path[sizeof(ctx->sendspin_state) + 16], value[4] = "";
     int fd, n;
 
     if (snprintf(path, sizeof(path), "%s.unpaired", ctx->sendspin_state) >= (int)sizeof(path))
-        return 0;
+        return -1;
     fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
-        return 0;
+        return -1;
     n = (int)read(fd, value, sizeof(value) - 1);
     close(fd);
-    return n > 0 && value[0] == '1';
+    return (n > 0 && value[0] == '1') ? 1 : 0;
+}
+
+static int sendspin_unpaired_access(const struct airplay_ctx *ctx)
+{
+    return sendspin_unpaired_setting(ctx) == 1;
 }
 
 /* Stores the choice atomically, then restarts the player so it applies. */
@@ -1451,7 +1458,8 @@ static int sendspin_set_unpaired(struct airplay_ctx *ctx, int enabled)
 
 static pid_t spawn_sendspin(const struct airplay_ctx *ctx)
 {
-    char name[96], path[256], unpaired[8];
+    char name[96], path[256];
+    int setting;
     pid_t pid;
 
     /* Advertise the device's own host name, as AirPlay does. */
@@ -1464,11 +1472,14 @@ static pid_t spawn_sendspin(const struct airplay_ctx *ctx)
     pid = fork();
     if (pid != 0)
         return pid;
-    snprintf(unpaired, sizeof(unpaired), "%s",
-             sendspin_unpaired_access(ctx) ? "on" : "off");
-    execl(path, path, "--run", "--quiet", "--name", name,
-          "--state-file", ctx->sendspin_state,
-          "--unpaired-access", unpaired, (char *)NULL);
+    setting = sendspin_unpaired_setting(ctx);
+    if (setting < 0)
+        execl(path, path, "--run", "--quiet", "--name", name,
+              "--state-file", ctx->sendspin_state, (char *)NULL);
+    else
+        execl(path, path, "--run", "--quiet", "--name", name,
+              "--state-file", ctx->sendspin_state,
+              "--unpaired-access", setting ? "on" : "off", (char *)NULL);
     _exit(127);
 }
 

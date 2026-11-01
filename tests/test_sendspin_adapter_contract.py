@@ -505,11 +505,11 @@ class NativeBridgeCompanionTests(unittest.TestCase):
 
     def test_play_without_pairing_is_an_owner_switch_off_by_default(self) -> None:
         # The owner's switch is stored beside the player state and passed to the
-        # companion explicitly on every start. The stored default is off, and
-        # only an explicit "1" turns it on.
+        # companion only once the owner has set it, so an older payload still
+        # starts. Only an explicit "1" turns it on.
         daemon = (UI / "src/adapter/airplayd.c").read_text(encoding="utf-8")
-        self.assertIn('"--unpaired-access", unpaired', daemon)
-        self.assertIn('value[0] == \'1\'', daemon)
+        self.assertIn('"--unpaired-access", setting ? "on" : "off"', daemon)
+        self.assertIn("value[0] == '1'", daemon)
         self.assertIn('"set_sendspin_unpaired"', daemon)
         player = (UI / "src/adapter/sendspind.cpp").read_text(encoding="utf-8")
         self.assertIn('"--unpaired-access"', player)
