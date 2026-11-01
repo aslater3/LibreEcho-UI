@@ -2165,13 +2165,12 @@ try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==s
  if(state.page!=='Timers'||generation!==state.renderGeneration)return;
  const liveDraft=timerFormDraft()||draft;
  if(!t.available){content.innerHTML=panel('Timers',`<div class="empty-state"><p>The timer service is not running on this device.</p></div>`);state.timerViewReady=true;scheduleTimerRefresh(liveDraft);return}
- /* Alarms have their own list with the clock time; the countdown table keeps
-    countdowns only. A failed alarm read shows an empty list, not an error page. */
- const alarms=await api('/alarms').then(a=>a.alarms||[],()=>[]);
- if(state.page!=='Timers'||generation!==state.renderGeneration)return;
+ /* Alarms have their own list with the clock time (the server supplies it in
+    the device zone); the countdown table keeps countdowns only. */
+ const alarms=(t.timers||[]).filter(x=>x.kind==='alarm');
  const countdowns=(t.timers||[]).filter(x=>x.kind!=='alarm');
  const rows=countdowns.map(x=>`<tr><td>${esc(x.label||'Timer')}</td><td>${x.state==='ringing'?'<strong>ringing</strong>':esc(sayLeft(x.seconds_remaining))}</td><td class="right">${x.state==='pending'?`<button class="link-btn" data-cancel="${x.id}">Cancel</button>`:''}</td></tr>`).join('');
- const alarmRows=alarms.map(a=>`<tr><td>${esc(a.time)}</td><td>${esc(a.label||'Alarm')}</td><td>${a.state==='ringing'?'<strong>ringing</strong>':'in '+esc(sayLeft(a.seconds_remaining))}</td><td class="right">${a.state==='pending'?`<button class="link-btn" data-cancel-alarm="${a.id}">Cancel</button>`:''}</td></tr>`).join('');
+ const alarmRows=alarms.map(a=>`<tr><td>${esc(a.time||'')}</td><td>${esc(a.label||'Alarm')}</td><td>${a.state==='ringing'?'<strong>ringing</strong>':'in '+esc(sayLeft(a.seconds_remaining))}</td><td class="right">${a.state==='pending'?`<button class="link-btn" data-cancel-alarm="${a.id}">Cancel</button>`:''}</td></tr>`).join('');
  state.timerViewReady=true;
  content.innerHTML=`<div class="settings-grid">${panel('Timers',
    (countdowns.length

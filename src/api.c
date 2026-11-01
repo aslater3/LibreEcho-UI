@@ -2324,7 +2324,7 @@ static void alarm_cancel_json(struct api_context*c,const char*path,struct api_re
  ok(r,"{\"cancelled\":true}");}
 
 static void timers_json(struct api_context*c,struct api_response*r){
- struct le_timer_list list;char body[4096];char escaped[128];size_t used=0;int i,written,rc;
+ struct le_timer_list list;char body[4096];char escaped[128];char timefield[32];size_t used=0;int i,written,rc;
  rc=le_get_timers(c->backend,&list);
  if(rc!=LE_OK){if(rc!=LE_NOT_SUPPORTED){err(r,503,rc,"Timer service could not be read");return;}memset(&list,0,sizeof(list));}
  written=snprintf(body,sizeof(body),"{\"available\":%s,\"ringing\":%d,\"missed\":%d,\"timers\":[",list.available?"true":"false",list.ringing,list.missed);
@@ -2332,7 +2332,10 @@ static void timers_json(struct api_context*c,struct api_response*r){
  used=(size_t)written;
  for(i=0;i<list.count;i++){
   json_escape(escaped,sizeof(escaped),list.items[i].label);
-  written=snprintf(body+used,sizeof(body)-used,"%s{\"id\":%u,\"kind\":\"%s\",\"state\":\"%s\",\"seconds_remaining\":%ld,\"label\":\"%s\"}",i?",":"",list.items[i].id,list.items[i].kind,list.items[i].state,list.items[i].seconds_remaining,escaped);
+  /* An alarm also carries its local HH:MM, from the device zone, so the page never has to guess. */
+  timefield[0]='\0';
+  if(!strcmp(list.items[i].kind,"alarm")){time_t due=(time_t)((long long)time(NULL)+list.items[i].seconds_remaining);struct tm*lt=localtime(&due);if(lt)snprintf(timefield,sizeof(timefield),",\"time\":\"%02d:%02d\"",lt->tm_hour,lt->tm_min);}
+  written=snprintf(body+used,sizeof(body)-used,"%s{\"id\":%u,\"kind\":\"%s\",\"state\":\"%s\",\"seconds_remaining\":%ld,\"label\":\"%s\"%s}",i?",":"",list.items[i].id,list.items[i].kind,list.items[i].state,list.items[i].seconds_remaining,escaped,timefield);
   if(written<0||(size_t)written>=sizeof(body)-used){err(r,500,LE_IO,"Timer list could not be rendered");return;}
   used+=(size_t)written;}
  written=snprintf(body+used,sizeof(body)-used,"]}");
