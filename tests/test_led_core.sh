@@ -52,5 +52,6 @@ build_and_run test-led-daemon-core tests/test_led_daemon_core.c $LEDD_DEPS
 build_and_run test-led-night-review tests/test_led_night_review.c $LEDD_DEPS
 build_and_run test-wake-led-profile tests/test_wake_led_profile.c $LEDD_DEPS
 build_and_run test-led-output-pacing tests/test_led_output_pacing.c $LEDD_DEPS
+build_and_run test-sunrise-led tests/test_sunrise_led.c $LEDD_DEPS
 
 echo "LED focused suite: ok"

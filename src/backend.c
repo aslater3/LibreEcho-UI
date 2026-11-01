@@ -29,3 +29,4 @@ int le_set_led_sleep(struct le_backend*b,const struct le_led_sleep_request*r){re
 int le_recovery_configure(struct le_backend*b,int e,int a,int t){return b&&b->ops->recovery_configure?b->ops->recovery_configure(b,e,a,t):LE_NOT_SUPPORTED;}
 int le_recovery_prepare(struct le_backend*b,char*out,size_t n){return b&&b->ops->recovery_prepare?b->ops->recovery_prepare(b,out,n):LE_NOT_SUPPORTED;}
 int le_recovery_stop(struct le_backend*b){return b&&b->ops->recovery_stop?b->ops->recovery_stop(b):LE_NOT_SUPPORTED;}
+int le_get_alarm_sunrise(struct le_backend*b,int*m){return b&&b->ops->timer_sunrise_get?b->ops->timer_sunrise_get(b,m):LE_NOT_SUPPORTED;} int le_set_alarm_sunrise(struct le_backend*b,int m){return b&&b->ops->timer_sunrise_set?b->ops->timer_sunrise_set(b,m):LE_NOT_SUPPORTED;}

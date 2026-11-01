@@ -1962,6 +1962,77 @@
       }
     }
   },
+    "/alarms/sunrise": {
+      "get": {
+        "tags": [
+          "Timers"
+        ],
+        "summary": "Read the sunrise wake light lead time",
+        "description": "Minutes before an alarm that the LED ring starts a warm fade-up. 0 means off, the default.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Success"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Timers"
+        ],
+        "summary": "Set the sunrise wake light lead time",
+        "description": "lead_minutes is a single top-level integer: 0 turns the wake light off, 5 to 30 sets the lead. Applies to every alarm.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "lead_minutes"
+                ],
+                "properties": {
+                  "lead_minutes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 30,
+                    "description": "0 (off) or 5 to 30"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
   "/alarms/{id}": {
     "delete": {
       "tags": [
