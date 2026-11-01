@@ -5,6 +5,7 @@
 #include "adapter.h"
 #include "voice_stream.h"
 #include "voice_listening_led.h"
+#include "voice_whisper.h"
 #include "../json.h"
 
 #include <fcntl.h>
@@ -44,6 +45,8 @@ struct le_voice_pipeline {
     le_voice_pipeline_turn_begin_fn turn_begin_callback;
     void *turn_begin_context;
     uint64_t recognition_timeout_ms;
+    int whisper_detect;
+    int16_t whisper_window[PCM_RING_SAMPLES];
     int16_t pcm_ring[PCM_RING_SAMPLES];
     uint64_t ring_first_sample;
     size_t ring_count;
@@ -306,6 +309,36 @@ static int ring_write_from(struct le_voice_pipeline *pipeline, int fd,
     return 0;
 }
 
+/*
+ * Classify the request audio held in the ring from the detection sample to
+ * the newest captured sample. Runs on the capture worker, the only writer of
+ * the ring, so the ring needs no extra locking here.
+ */
+static int classify_turn_whisper(struct le_voice_pipeline *pipeline,
+                                 uint64_t detection_sample)
+{
+    uint64_t first = detection_sample;
+    uint64_t end = pipeline->ring_first_sample + pipeline->ring_count;
+    struct le_voice_whisper_result result;
+    size_t count = 0;
+
+    pthread_mutex_lock(&pipeline->mutex);
+    if (!pipeline->whisper_detect) {
+        pthread_mutex_unlock(&pipeline->mutex);
+        return 0;
+    }
+    pthread_mutex_unlock(&pipeline->mutex);
+    if (first < pipeline->ring_first_sample)
+        first = pipeline->ring_first_sample;
+    for (; first < end; ++first)
+        pipeline->whisper_window[count++] =
+            pipeline->pcm_ring[first % PCM_RING_SAMPLES];
+    if (le_voice_whisper_classify(pipeline->whisper_window, count,
+                                  &result) != 0)
+        return 0;
+    return result.whispered;
+}
+
 static int queue_transcript(
     struct le_voice_pipeline *pipeline, const char *text,
     const struct le_voice_pipeline_turn *turn)
@@ -414,6 +447,7 @@ static int handle_stt_line(struct le_voice_pipeline *pipeline,
             turn.stt_audio_ms + turn.stt_processing_ms;
     turn.endpoint = strstr(line, "\"endpoint\":true") != NULL;
     turn.follow_up = follow_up;
+    turn.whispered = classify_turn_whisper(pipeline, detection_sample);
     /* An empty final transcript is a recognition failure, not a turn. */
     if (!text[0])
         return -1;
@@ -810,6 +844,16 @@ void le_voice_pipeline_set_outcome_callback(
     pthread_mutex_lock(&pipeline->mutex);
     pipeline->outcome_callback = outcome;
     pipeline->outcome_context = context;
+    pthread_mutex_unlock(&pipeline->mutex);
+}
+
+void le_voice_pipeline_set_whisper_detection(
+    struct le_voice_pipeline *pipeline, int enabled)
+{
+    if (!pipeline)
+        return;
+    pthread_mutex_lock(&pipeline->mutex);
+    pipeline->whisper_detect = enabled ? 1 : 0;
     pthread_mutex_unlock(&pipeline->mutex);
 }
 
