@@ -1728,6 +1728,41 @@ switch is register writes only and returns immediately.
 
 The listener binds at startup, so the change is stored and applies after a restart; disabling it also removes the persisted sessions.
 
+### HTTPS certificate and private CA
+
+Both routes need the CSRF header on writes. Each returns the usual envelope; a
+failed write changes nothing on disk. On builds without TLS (`tls_available`
+false) every write answers 501.
+
+**`GET /api/v1/https/certificate`** returns `tls_available`, `custom` (an owner
+certificate is installed), `https_expires` and `https_fingerprint` for the
+certificate in use. The private key is never returned.
+
+**`PUT /api/v1/https/certificate`** takes `{"certificate_pem": "...", "private_key_pem": "..."}`.
+The certificate must parse, the key must be unencrypted and match it, and the
+certificate must not have expired; otherwise the answer is 400. A valid pair
+replaces the self-signed certificate in the configuration directory. New TLS
+connections use it immediately, and boot keeps it rather than regenerating a
+self-signed pair while the custom marker exists.
+
+**`DELETE /api/v1/https/certificate`** removes the owner certificate and generates a
+new self-signed pair.
+
+**`GET /api/v1/https/private-ca`** returns `configured`.
+
+**`PUT /api/v1/https/private-ca`** takes `{"ca_pem": "..."}` with one or more CA
+certificates (basic constraints CA:TRUE). The system roots and the CA are written
+to `trust-bundle.pem` in the configuration directory, so the CA is added to the
+roots and never replaces them. Verification stays on. News refresh reads the bundle
+right away; the LLM agent, live voice and Home Assistant services (`agentd`,
+`lived`, `esphomed`) read it when they next start.
+
+**`DELETE /api/v1/https/private-ca`** removes the CA and the bundle built from it.
+
+The web UI does not yet have a certificate page; these routes are the supported
+path for now. Radio streams and OTA downloads are outside this change (see the
+release notes).
+
 ### Configuration
 
 #### GET /api/v1/config

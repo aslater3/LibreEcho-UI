@@ -525,3 +525,109 @@ done:
     mbedtls_entropy_free(&entropy);
     return rc;
 }
+
+/*
+ * Owner-supplied PEM. The parsers below take the request body's bytes, so the
+ * copy adds the terminating NUL that mbedTLS requires for PEM input.
+ */
+#define LE_TLS_MAX_PEM (32 * 1024)
+
+static unsigned char *pem_copy(const char *pem, size_t len)
+{
+    unsigned char *buf;
+
+    if (!pem || !len || len > LE_TLS_MAX_PEM)
+        return NULL;
+    buf = malloc(len + 1);
+    if (!buf)
+        return NULL;
+    memcpy(buf, pem, len);
+    buf[len] = '\0';
+    return buf;
+}
+
+int le_tls_check_certificate_pair(const char *cert_pem, size_t cert_len,
+                                  const char *key_pem, size_t key_len)
+{
+    mbedtls_x509_crt crt;
+    mbedtls_pk_context key;
+    mbedtls_ctr_drbg_context drbg;
+    mbedtls_entropy_context entropy;
+    unsigned char *cbuf, *kbuf;
+    int rc = LE_INVALID;
+
+    cbuf = pem_copy(cert_pem, cert_len);
+    kbuf = pem_copy(key_pem, key_len);
+    mbedtls_x509_crt_init(&crt);
+    mbedtls_pk_init(&key);
+    mbedtls_ctr_drbg_init(&drbg);
+    mbedtls_entropy_init(&entropy);
+    if (!cbuf || !kbuf)
+        goto done;
+    if (mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
+                              (const unsigned char *)SEED, strlen(SEED)))
+        goto done;
+    if (mbedtls_x509_crt_parse(&crt, cbuf, cert_len + 1))
+        goto done;
+    /* An encrypted key fails here: there is no passphrase channel. */
+    if (mbedtls_pk_parse_key(&key, kbuf, key_len + 1, NULL, 0,
+                             mbedtls_ctr_drbg_random, &drbg))
+        goto done;
+    if (mbedtls_pk_check_pair(&crt.pk, &key, mbedtls_ctr_drbg_random, &drbg))
+        goto done;
+    if (mbedtls_x509_time_is_past(&crt.valid_to))
+        goto done;
+    rc = LE_OK;
+
+done:
+    free(cbuf);
+    free(kbuf);
+    mbedtls_x509_crt_free(&crt);
+    mbedtls_pk_free(&key);
+    mbedtls_ctr_drbg_free(&drbg);
+    mbedtls_entropy_free(&entropy);
+    return rc;
+}
+
+int le_tls_check_ca_bundle(const char *pem, size_t len)
+{
+    mbedtls_x509_crt crt;
+    const mbedtls_x509_crt *c;
+    unsigned char *buf;
+    int count = 0, rc = LE_INVALID;
+
+    buf = pem_copy(pem, len);
+    if (!buf)
+        return LE_INVALID;
+    mbedtls_x509_crt_init(&crt);
+    if (mbedtls_x509_crt_parse(&crt, buf, len + 1))
+        goto done;
+    for (c = &crt; c && c->raw.len; c = c->next) {
+        if (!c->ca_istrue)
+            goto done;          /* a leaf certificate is not a trust anchor */
+        count++;
+    }
+    rc = count > 0 ? count : LE_INVALID;
+
+done:
+    free(buf);
+    mbedtls_x509_crt_free(&crt);
+    return rc;
+}
+
+int le_tls_install_file(const char *path, const char *data, size_t len,
+                        int public_readable)
+{
+    if (!path || !data || !len)
+        return LE_INVALID;
+    if (write_private(path, (const unsigned char *)data, len) != LE_OK)
+        return LE_IO;
+    if (public_readable && chmod(path, 0644) < 0)
+        return LE_IO;
+    return LE_OK;
+}
+
+int le_tls_available(void)
+{
+    return 1;
+}

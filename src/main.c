@@ -130,6 +130,10 @@ static int tls_directory_for_user(const char *path, const struct passwd *user)
     return 0;
 }
 
+/* An owner-installed certificate (marker file beside it) is kept as it is, even
+   when expired: swapping it for a self-signed pair without saying so would hide
+   the change. Otherwise the self-signed pair is kept or generated as before. */
+static int tls_ensure_certificate(const char*dir,const char*cert,const char*key){char marker[384];snprintf(marker,sizeof(marker),"%s/%s",dir,LE_TLS_CUSTOM_MARKER);if(!access(marker,F_OK)&&!access(cert,R_OK)&&!access(key,R_OK))return LE_OK;unlink(marker);return le_tls_ensure_self_signed(cert,key,"libreecho");}
 int main(int argc,char**argv){const char*mode="mock",*cfg="./config/runtime.json",*mock="./config/mock-state.json",*token_path=0,*users_path=0,*allowed_origin=0;
 unsigned seed=0;
 int dev=0,insecure_lan=0,i;
@@ -181,7 +185,7 @@ if(strcmp(o.listen_host,"127.0.0.1")&&strcmp(o.listen_host,"::1")&&!token[0]&&!u
 if(users_path&&access(users_path,F_OK)==0&&!valid_users_path(users_path)){fprintf(stderr,"Users file must be a regular private file: %s\n",users_path);return 2;}
 if(le_backend_init(&b,mode,mock,cfg,seed)!=LE_OK){fprintf(stderr,"Unable to initialise %s backend\n",mode);
 return 1;
-}if(random_csrf(csrf,sizeof(csrf))){fprintf(stderr,"Unable to obtain secure CSRF token\n");le_backend_destroy(b);return 2;}if(api_init(&api,b,dev,insecure_lan,token,allowed_origin,csrf,cfg,users_path)){fprintf(stderr,"Unable to initialise authentication\n");le_backend_destroy(b);return 2;}if(!api.feature_https&&!o.tls_port)api_set_https_active(&api,0);if(setup_marker_valid(cfg))api.setup_completed=1;
+}if(random_csrf(csrf,sizeof(csrf))){fprintf(stderr,"Unable to obtain secure CSRF token\n");le_backend_destroy(b);return 2;}if(api_init(&api,b,dev,insecure_lan,token,allowed_origin,csrf,cfg,users_path)){fprintf(stderr,"Unable to initialise authentication\n");le_backend_destroy(b);return 2;}api_set_tls_dir(&api,tls_dir);if(!api.feature_https&&!o.tls_port)api_set_https_active(&api,0);if(setup_marker_valid(cfg))api.setup_completed=1;
 /* An installer's one-shot document is applied here, before the listener opens:
    the account and the settings are the device's own first-boot state, and the
    Wi-Fi hand-off only starts. Nothing blocks on the association -- the
@@ -201,7 +205,7 @@ snprintf(o.tls_cert,sizeof(o.tls_cert),"%s/https-cert.pem",tls_dir);
 snprintf(o.tls_key,sizeof(o.tls_key),"%s/https-key.pem",tls_dir);
 mkdir_p_mode(tls_dir,0755);   /* parents need traversal after the drop */
 (void)chmod(tls_dir,0700);
-if(le_tls_ensure_self_signed(o.tls_cert,o.tls_key,"libreecho")!=LE_OK){
+if(tls_ensure_certificate(tls_dir,o.tls_cert,o.tls_key)!=LE_OK){
 /* Never fatal: HTTP stays up so a certificate problem cannot lock out the UI */
 fprintf(stderr,"HTTPS disabled: could not create a certificate in %s\n",tls_dir);
 api_set_https_active(&api,0);

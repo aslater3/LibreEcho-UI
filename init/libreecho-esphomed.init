@@ -20,7 +20,12 @@ WAKE_SOCKET=${WAKE_SOCKET:-/run/libreecho/wakeword.sock}
 AUDIO_SOCKET=${AUDIO_SOCKET:-/run/libreecho/audio.sock}
 AUDIO_BUS=${AUDIO_BUS:-/run/libreecho-audio/system.pcm}
 MDNS_SOCKET=${MDNS_SOCKET:-/run/libreecho/mdns.sock}
-TLS_CA=${TLS_CA:-/etc/ssl/certs/ca-certificates.crt}
+TRUST_BUNDLE=${TRUST_BUNDLE:-/data/libreecho/config/trust-bundle.pem}
+# An owner-added private CA lives in trust-bundle.pem (system roots plus the CA).
+if [ -z "${TLS_CA:-}" ]; then
+    TLS_CA=/etc/ssl/certs/ca-certificates.crt
+    [ -r "$TRUST_BUNDLE" ] && TLS_CA=$TRUST_BUNDLE
+fi
 RADIO_SOCKET=${RADIO_SOCKET:-/run/libreecho/radio.sock}
 TIMER_SOCKET=${TIMER_SOCKET:-/run/libreecho/timer.sock}
 LED_SOCKET=${LED_SOCKET:-/run/libreecho/led.sock}
