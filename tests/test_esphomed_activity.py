@@ -17,7 +17,7 @@ class Activity(Daemon):
   super().tearDown()
  def subscribe(self):
   # As Home Assistant does: list entities, subscribe to states and to the voice pipeline.
-  self.hello();self.s.sendall(frame(11));listed=[receive(self.s) for _ in range(10)]
+  self.hello();self.s.sendall(frame(11));listed=[receive(self.s) for _ in range(11)]
   self.s.sendall(frame(20));self.s.sendall(frame(89,num(1,1)+num(2,4)));time.sleep(.1);return listed
  def events(self,count,seconds=5):
   # Event entity messages (type 108) in arrival order; other traffic is skipped but drained.
@@ -42,7 +42,7 @@ class Activity(Daemon):
 class ActivityEntities(Activity):
  def test_activity_entities_list_their_event_types(self):
   listed=self.subscribe()
-  self.assertEqual([t for t,_ in listed],[63,17,107,107,107,107,107,107,107,19])
+  self.assertEqual([t for t,_ in listed],[63,17,107,107,107,107,107,107,107,15,19])
   entities=[parse(b) for t,b in listed if t==107][4:]
   self.assertEqual([(p[1][0],key_of(p[2][0]),p[3][0]) for p in entities],[
    (b'voice_assistant',20,b'Voice assistant'),(b'playback',21,b'Playback'),(b'timer',22,b'Timer')])
