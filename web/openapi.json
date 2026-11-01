@@ -4692,6 +4692,194 @@
       ]
     }
   },
+  "/network/settings/copy": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Copy settings to a paired device",
+      "description": "Copies the chosen settings groups (voice, audio, ha, led) from this device to one other paired device (#449). Only the keys listed in src/peer_settings.h are sent: no hostname, MAC, Wi-Fi, SSH, API exposure, room, timezone, privacy, feature switches, buttons, appearance or secret ever moves. The values travel in a sealed settings-copy packet (house key, #450) to POST /api/v1/peer/settings on the target. This device must be paired. The target must be a different device, and the address must be IPv4. Answers result applied, unpaired (no key, another key, or older firmware), failed or unreachable. The send is bounded to about 3 seconds.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "address",
+                "port"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "description": "IPv4 address of the target device, as shown in the device list"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "voice": {
+                  "type": "boolean",
+                  "description": "Wake word, wake sensitivity and speech end and VAD tuning"
+                },
+                "audio": {
+                  "type": "boolean",
+                  "description": "Speaker volume and microphone gain"
+                },
+                "ha": {
+                  "type": "boolean",
+                  "description": "Home Assistant address (only when this device has one set)"
+                },
+                "led": {
+                  "type": "boolean",
+                  "description": "LED brightness, visualizer and action and mute ring brightness"
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Result for the target",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "result",
+                      "groups",
+                      "address",
+                      "port"
+                    ],
+                    "properties": {
+                      "result": {
+                        "type": "string",
+                        "enum": [
+                          "applied",
+                          "unpaired",
+                          "failed",
+                          "unreachable"
+                        ]
+                      },
+                      "groups": {
+                        "type": "string",
+                        "description": "Comma-separated group names that were sent"
+                      },
+                      "address": {
+                        "type": "string"
+                      },
+                      "port": {
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/peer/settings": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Apply a signed settings copy",
+      "description": "Device-to-device (#449). Needs no session or CSRF token: the body is a sealed packet of type settings-copy (LESIG1 header, then a flat JSON object of setting values) made with the house key. A packet that does not verify, is outside the 300 second window, or was already accepted answers 401 not_verified. A device without a key answers 409 not_paired. Keys this device does not copy are ignored; a listed key with a value out of range, or a wrong type, refuses the whole packet with 400 and changes nothing. Other methods are not exempt from authentication.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Applied",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "applied": {
+                        "type": "boolean"
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
   "/peer/command": {
     "post": {
       "tags": [
