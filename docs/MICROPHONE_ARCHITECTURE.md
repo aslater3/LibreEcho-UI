@@ -130,3 +130,27 @@ while the selected beam follows talkers. The two can therefore differ.
 - Raw capture is not retained by `micd`.
 - The UI/API authentication and privacy policy remain in front of browser
   streaming and the beam view.
+
+## Clap detection (experimental, off by default)
+
+`libreecho-waked` can screen its cleaned mono frames for claps. The detector
+(`src/adapter/clap_detector.c`) is off at start-up and is switched on only by
+the adapter control socket:
+
+```text
+{"v":1,"id":1,"cmd":"set_clap","args":{"enabled":true}}
+```
+
+`status` reports `clap_enabled` and `clap_count`. While enabled, a clap is a
+10 ms frame whose energy jumps well above a slowly tracked noise floor, whose
+peak is impulsive, whose spectrum is broadband (spectral flatness over eight
+Goertzel bands) and whose energy falls back by about 6 dB within 40 ms. Frames
+that fail the energy test never reach the spectral check, so silence and steady
+sound cost almost nothing.
+
+Results go to the wake subscriber stream as `clap_detected` with
+`{"detection_sample":N,"claps":1}` for a single clap or `"claps":2` for two
+claps 150-800 ms apart. A single is reported once the double window has passed
+without a second clap. Existing subscribers select on `wake_detected`, so a
+clap does not start a voice turn. The setting is not persisted, not exposed in
+the HTTP API and not forwarded to Home Assistant yet.

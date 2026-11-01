@@ -968,6 +968,9 @@ $(BUILD)/test-spoken-time: tests/test_spoken_time.c src/adapter/spoken_time.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -o $@
 
+$(BUILD)/test-clap-detector: tests/test_clap_detector.c src/adapter/clap_detector.c src/adapter/clap_detector.h
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< src/adapter/clap_detector.c -lm -o $@
+
 $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
 		src/adapter/adapter_client.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -1090,7 +1093,7 @@ test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback $(BUILD)/l
 
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
-		src/adapter/voice_stream.c \
+		src/adapter/voice_stream.c src/adapter/clap_detector.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/log.c src/json.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -1099,7 +1102,7 @@ $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 
 $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
-		src/adapter/voice_stream.c \
+		src/adapter/voice_stream.c src/adapter/clap_detector.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 \
 		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
@@ -1150,9 +1153,11 @@ $(BUILD)/%.wake.arm.o: src/adapter/%.c
 $(BUILD)/waked.wake.arm.o: src/adapter/adapter.h \
 	src/adapter/voice_aec.h src/adapter/voice_dsp.h \
 	src/adapter/voice_reference.h src/adapter/voice_stream.h \
+	src/adapter/clap_detector.h \
 	src/adapter/wake_led.h \
 	src/adapter/wake_worker.h src/json.h
 $(BUILD)/voice_aec.wake.arm.o: src/adapter/voice_aec.h
+$(BUILD)/clap_detector.wake.arm.o: src/adapter/clap_detector.h
 $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
 $(BUILD)/voice_dsp.wake.arm.o: src/adapter/voice_dsp.h
 $(BUILD)/wake_worker.wake.arm.o: src/adapter/wake_worker.h \
@@ -1176,6 +1181,7 @@ $(BUILD)/json.wake.arm.o: src/json.c src/json.h
 		-Isrc -Isrc/adapter -c $< -o $@
 
 WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
+	$(BUILD)/clap_detector.wake.arm.o \
 	$(BUILD)/voice_aec.wake.arm.o \
 	$(BUILD)/voice_reference.wake.arm.o \
 	$(BUILD)/voice_dsp.wake.arm.o \
@@ -1301,7 +1307,7 @@ clean:
 		$(BUILD)/test-radiod-mp3-frames \
 		$(BUILD)/test-http-worker-registry $(BUILD)/test-http-client-state \
 		$(BUILD)/test-wake-decode \
-		$(BUILD)/test-wake-led $(BUILD)/test-spoken-time \
+		$(BUILD)/test-wake-led $(BUILD)/test-clap-detector $(BUILD)/test-spoken-time \
 		$(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
