@@ -2292,7 +2292,7 @@ static void alarms_json(struct api_context*c,struct api_response*r){
   due=(time_t)(now+list.items[i].seconds_remaining);
   /* A repeating alarm shows the time it is set for; a snoozed one would
      otherwise show the snooze instant. */
-  if(list.items[i].hour>=0&&list.items[i].minute>=0)snprintf(hhmm,sizeof(hhmm),"%02d:%02d",list.items[i].hour,list.items[i].minute);
+  if(list.items[i].repeat_days&&list.items[i].hour>=0&&list.items[i].minute>=0)snprintf(hhmm,sizeof(hhmm),"%02d:%02d",list.items[i].hour,list.items[i].minute);
   else{if(!localtime_r(&due,&local))continue;snprintf(hhmm,sizeof(hhmm),"%02d:%02d",local.tm_hour,local.tm_min);}
   alarm_days_text(list.items[i].repeat_days,days_text,sizeof(days_text));
   json_escape(escaped,sizeof(escaped),list.items[i].label);
