@@ -630,9 +630,22 @@ async function sendspinDetail(){
   host.innerHTML=`<div class="status-line"><span class="status-dot ${s.connected?'ok':''}"></span><span>${sendspinStateText(s)}</span></div>
     <p class="muted">Music Assistant finds this speaker on your network. To add it, pair it there with this speaker's pairing token.</p>
     <div class="button-row"><button class="secondary-btn" id="sendspin-pair">Show pairing token</button><button class="secondary-btn" id="sendspin-unpair">Forget paired servers</button></div>
+    <label class="sound-row${s.unpaired_access?' on':''}"><input type="checkbox" id="sendspin-unpaired"${s.unpaired_access?' checked':''}> Play without pairing (off)</label>
+    <p class="muted">When on, any Music Assistant server on your network can play to this speaker, including ones that have not paired. Paired servers work either way.</p>
     <div id="sendspin-token" hidden></div>`;
   $('#sendspin-pair').onclick=showSendspinToken;
   $('#sendspin-unpair').onclick=forgetSendspinServers;
+  $('#sendspin-unpaired').onchange=setSendspinUnpaired;
+}
+/* Owner's play-without-pairing switch. Turning it on is confirmed first; the
+   box is put back if the change is refused. */
+async function setSendspinUnpaired(e){
+  const box=e.target,enabled=box.checked;
+  if(enabled&&!confirm('Let Music Assistant servers play without pairing?\n\nAny server on your network can then stream audio to this speaker until you turn this off. Paired servers are not affected.')){box.checked=false;return;}
+  try{await api('/sendspin/unpaired-access',{method:'PUT',body:JSON.stringify({enabled})});}
+  catch(err){box.checked=!enabled;toast(err.message,true);return;}
+  toast(enabled?'Play without pairing is on':'Play without pairing is off');
+  await sendspinDetail();
 }
 /* Clears every pairing and issues a new token; servers must pair again. */
 async function forgetSendspinServers(){

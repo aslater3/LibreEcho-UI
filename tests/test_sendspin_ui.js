@@ -52,6 +52,7 @@ globalThis.api=async(path,options={})=>{
   if(path==='/sendspin'){if(status instanceof Error)throw status;return status;}
   if(path==='/sendspin/pairing'&&method==='POST')return {pairing_token:TOKEN};
   if(path==='/sendspin/unpair'&&method==='POST')return {reset:true};
+  if(path==='/sendspin/unpaired-access'&&method==='PUT')return {unpaired_access:JSON.parse(options.body).enabled};
   if(path.startsWith('/integrations/')||path==='/home-location')return {};
   throw Error('Unexpected API path '+path);
 };
@@ -97,6 +98,24 @@ const posts=()=>requests.filter(r=>r.path==='/sendspin/pairing');
   await document.querySelector('#sendspin-unpair').onclick();
   assert.equal(unpairs().length,1);
   assert(toasts.some(t=>!t.bad&&/forgot|forgotten/i.test(t.m)),'unpair not reported');
+  globalThis.confirm=()=>false;
+
+  // Play without pairing: off by default, confirmed before it is turned on,
+  // sent as a PUT with the owner's choice, and reflected from status.
+  assert(html.includes('id="sendspin-unpaired"')&&!/id="sendspin-unpaired"[^>]*checked/.test(html),'switch not off by default');
+  const unpaired=()=>requests.filter(r=>r.path==='/sendspin/unpaired-access');
+  let asked2='';
+  globalThis.confirm=m=>{asked2=m;return false;};
+  const box={checked:true};
+  await setSendspinUnpaired({target:box});
+  assert(asked2.includes('without pairing')&&unpaired().length===0&&box.checked===false,'enable not confirmed');
+  globalThis.confirm=()=>true;
+  await setSendspinUnpaired({target:{checked:true}});
+  assert.equal(unpaired().length,1);
+  assert.equal(unpaired()[0].method,'PUT');
+  await setSendspinUnpaired({target:{checked:false}});
+  assert.equal(unpaired().length,2);
+  assert(toasts.some(t=>!t.bad&&/Play without pairing is off/.test(t.m)),'disable not reported');
   globalThis.confirm=()=>false;
 
   // Other states.

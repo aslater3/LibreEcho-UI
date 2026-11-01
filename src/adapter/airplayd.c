@@ -1401,9 +1401,57 @@ static int sendspin_sink_ready(const struct airplay_ctx *ctx)
 /* The player is a static executable shipped in the payload and runs from the
  * mounted payload outside the sandbox: it needs none of the payload's
  * libraries, and does need audiod's socket and its state file on /data. */
+/* The owner's "play without pairing" choice, one plain file beside the state
+ * file. Only an explicit "1" enables it: a missing or unreadable file is off. */
+static int sendspin_unpaired_access(const struct airplay_ctx *ctx)
+{
+    char path[sizeof(ctx->sendspin_state) + 16], value[4] = "";
+    int fd, n;
+
+    if (snprintf(path, sizeof(path), "%s.unpaired", ctx->sendspin_state) >= (int)sizeof(path))
+        return 0;
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return 0;
+    n = (int)read(fd, value, sizeof(value) - 1);
+    close(fd);
+    return n > 0 && value[0] == '1';
+}
+
+/* Stores the choice atomically, then restarts the player so it applies. */
+static int sendspin_set_unpaired(struct airplay_ctx *ctx, int enabled)
+{
+    char path[sizeof(ctx->sendspin_state) + 16], temp[sizeof(ctx->sendspin_state) + 20];
+    const char *text = enabled ? "1\n" : "0\n";
+    size_t length = strlen(text);
+    int fd;
+
+    if (snprintf(path, sizeof(path), "%s.unpaired", ctx->sendspin_state) >= (int)sizeof(path) ||
+        snprintf(temp, sizeof(temp), "%s.tmp", path) >= (int)sizeof(temp))
+        return -1;
+    fd = open(temp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    if (write(fd, text, length) != (ssize_t)length || fsync(fd) != 0) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    close(fd);
+    if (rename(temp, path) != 0) {
+        unlink(temp);
+        return -1;
+    }
+    if (ctx->sendspin_pid > 0) {
+        stop_child(&ctx->sendspin_pid);
+        le_log_info("airplayd: Sendspin player stopped to apply the pairing setting");
+    }
+    return 0;
+}
+
 static pid_t spawn_sendspin(const struct airplay_ctx *ctx)
 {
-    char name[96], path[256];
+    char name[96], path[256], unpaired[8];
     pid_t pid;
 
     /* Advertise the device's own host name, as AirPlay does. */
@@ -1416,8 +1464,11 @@ static pid_t spawn_sendspin(const struct airplay_ctx *ctx)
     pid = fork();
     if (pid != 0)
         return pid;
+    snprintf(unpaired, sizeof(unpaired), "%s",
+             sendspin_unpaired_access(ctx) ? "on" : "off");
     execl(path, path, "--run", "--quiet", "--name", name,
-          "--state-file", ctx->sendspin_state, (char *)NULL);
+          "--state-file", ctx->sendspin_state,
+          "--unpaired-access", unpaired, (char *)NULL);
     _exit(127);
 }
 
@@ -1625,7 +1676,7 @@ static int request(struct airplay_ctx *ctx, char *message,
 #undef RUNTIME_AVAILABLE
         length = snprintf(data, sizeof(data),
                           "{\"available\":%s,\"enabled\":%s,\"engine_running\":%s,\"mdns_running\":%s,\"nqptp_running\":%s,\"audio_running\":%s,\"shairport_running\":%s,"
-                          "\"sendspin_available\":%s,\"sendspin_enabled\":%s,\"sendspin_running\":%s",
+                          "\"sendspin_available\":%s,\"sendspin_enabled\":%s,\"sendspin_running\":%s,\"sendspin_unpaired_access\":%s",
                           available ? "true" : "false",
                           ctx->enabled ? "true" : "false",
                           child_alive(ctx->engine_pid) ? "true" : "false",
@@ -1635,7 +1686,8 @@ static int request(struct airplay_ctx *ctx, char *message,
                           child_alive(ctx->shairport_pid) ? "true" : "false",
                           sendspin_available(ctx) ? "true" : "false",
                           ctx->sendspin_wanted ? "true" : "false",
-                          child_alive(ctx->sendspin_pid) ? "true" : "false");
+                          child_alive(ctx->sendspin_pid) ? "true" : "false",
+                          sendspin_unpaired_access(ctx) ? "true" : "false");
         if (length < 0 || (size_t)length >= sizeof(data))
             return le_adapter_respond_err(response, response_size, id,
                                           "status response overflow");
@@ -1667,6 +1719,20 @@ static int request(struct airplay_ctx *ctx, char *message,
         ctx->sendspin_next_start_ms = 0;
         sendspin_poll(ctx);
         le_log_info("airplayd: Sendspin %s", enabled ? "enabled" : "disabled");
+        return le_adapter_respond_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "set_sendspin_unpaired")) {
+        if (json_bool(args, "enabled", &enabled) < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "enabled must be boolean");
+        if (sendspin_set_unpaired(ctx, enabled) < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "Sendspin setting could not be stored");
+        ctx->sendspin_backoff_ms = SENDSPIN_BACKOFF_MIN_MS;
+        ctx->sendspin_next_start_ms = 0;
+        sendspin_poll(ctx);
+        le_log_info("airplayd: Sendspin play without pairing %s",
+                    enabled ? "enabled" : "disabled");
         return le_adapter_respond_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "reset_sendspin_pairing")) {

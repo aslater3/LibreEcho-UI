@@ -1,8 +1,9 @@
 #!/bin/sh
 # HTTP contract for the Sendspin integration (mock backend, real web daemon):
 # the integrations toggle (bit 64, persisted), GET /api/v1/sendspin status
-# without any pairing material, and POST /api/v1/sendspin/pairing gated by
-# enablement, CSRF and authentication.
+# without any pairing material, POST /api/v1/sendspin/pairing gated by
+# enablement, CSRF and authentication, and the play-without-pairing switch
+# (PUT /api/v1/sendspin/unpaired-access, off by default).
 #
 # Usage: sh tests/test_sendspin_api.sh
 # Requires: build/libreecho-web (make build/libreecho-web), jq, curl.
@@ -94,6 +95,17 @@ jcheck "enabled after restart" '.data.enabled and .data.state=="connected"' "$UR
 echo "== pairing token =="
 check "pairing without CSRF" 403 -X POST "$URL/api/v1/sendspin/pairing"
 jcheck "pairing token" '.data.pairing_token | startswith("SP:")' -X POST "$URL/api/v1/sendspin/pairing" -H "$AUTH"
+
+echo "== play without pairing (off by default) =="
+jcheck "status off by default" '.data.unpaired_access == false' "$URL/api/v1/sendspin"
+check "unpaired-access without CSRF" 403 -X PUT "$URL/api/v1/sendspin/unpaired-access" --data '{"enabled":true}'
+check "unpaired-access GET" 405 "$URL/api/v1/sendspin/unpaired-access"
+check "unpaired-access non-boolean" 400 -X PUT "$URL/api/v1/sendspin/unpaired-access" -H "$AUTH" -H "$JSON" --data '{"enabled":"yes"}'
+check "unpaired-access missing field" 400 -X PUT "$URL/api/v1/sendspin/unpaired-access" -H "$AUTH" -H "$JSON" --data '{}'
+jcheck "unpaired-access on" '.data.unpaired_access == true' -X PUT "$URL/api/v1/sendspin/unpaired-access" -H "$AUTH" -H "$JSON" --data '{"enabled":true}'
+jcheck "status shows on" '.data.unpaired_access == true' "$URL/api/v1/sendspin"
+jcheck "unpaired-access off" '.data.unpaired_access == false' -X PUT "$URL/api/v1/sendspin/unpaired-access" -H "$AUTH" -H "$JSON" --data '{"enabled":false}'
+jcheck "status shows off" '.data.unpaired_access == false' "$URL/api/v1/sendspin"
 
 echo "== forget paired servers =="
 check "unpair without CSRF" 403 -X POST "$URL/api/v1/sendspin/unpair"
