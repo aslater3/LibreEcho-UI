@@ -512,6 +512,16 @@ static int adapter_command_timeout(const char *socket_path, const char *command,
     if (rc == LE_ADAPTER_ERR_REJECTED && command && response &&
         !strcmp(command, "add") && !strcmp(response, "no free timer slots"))
         return LE_BUSY;
+    /* Alarms: a full schedule and an unset clock are both "not now" (409),
+       and an instant already past is the caller's mistake (400). */
+    if (rc == LE_ADAPTER_ERR_REJECTED && command && response &&
+        !strcmp(command, "add_alarm")) {
+        if (!strcmp(response, "no free timer slots") ||
+            !strcmp(response, "clock not synchronised yet"))
+            return LE_BUSY;
+        if (!strcmp(response, "time out of range"))
+            return LE_INVALID;
+    }
     /*
      * The recovery secret commands carry a semantic refusal from networkd --
      * "recovery password is unavailable in this mode" while the captive AP
@@ -2508,6 +2518,35 @@ static int timer_add(struct le_backend *b, int seconds, const char *label,
     return LE_OK;
 }
 
+/* An alarm is a wall-clock instant; the daemon refuses it while the clock is
+   not credible, and that refusal arrives as an ordinary adapter error. */
+static int timer_add_alarm(struct le_backend *b, long long epoch,
+                           const char *label, unsigned *id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[256];
+    char escaped[128];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    if (epoch < 1 || epoch > INT_MAX)
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), label ? label : "");
+    snprintf(args, sizeof(args), "{\"epoch\":%lld,\"label\":\"%s\"}",
+             epoch, escaped);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "add_alarm", args, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "id", &value) != 1 || value <= 0 ||
+        value > UINT_MAX)
+        return LE_IO;
+    if (id)
+        *id = (unsigned)value;
+    return LE_OK;
+}
+
 static int timer_cancel(struct le_backend *b, unsigned id)
 {
     char response[LE_ADAPTER_MSG_MAX];
@@ -3235,7 +3274,7 @@ static const struct le_backend_ops ops = {
     spotify, spotify_set,
     light,
     sound_sample,
-    timers, timer_add, timer_cancel, timer_dismiss,
+    timers, timer_add, timer_cancel, timer_dismiss, timer_add_alarm,
     noise_start_ex, led_idle_mode, led_sleep,
     recovery_configure, recovery_prepare, recovery_stop,
     network_portal,

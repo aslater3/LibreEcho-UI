@@ -615,10 +615,187 @@ static int has_universal_timer_noun(const char *text)
     return 0;
 }
 
+/* Split a normalised transcript on its single spaces. */
+static int tokenise(const char *text, char tokens[][24], int max)
+{
+    int count = 0;
+    const char *cursor = text;
+
+    while (*cursor == ' ')
+        ++cursor;
+    while (*cursor && count < max) {
+        size_t length = 0;
+
+        while (cursor[length] && cursor[length] != ' ')
+            ++length;
+        if (length >= 24)
+            return count;
+        memcpy(tokens[count], cursor, length);
+        tokens[count][length] = '\0';
+        ++count;
+        cursor += length;
+        while (*cursor == ' ')
+            ++cursor;
+    }
+    return count;
+}
+
+/* "7" or "7am" / "7pm": digits with an optional attached period. */
+static int clock_digits(const char *token, int *value, int *period)
+{
+    size_t length = strlen(token);
+    size_t digits = length;
+    size_t i;
+
+    *period = 0;
+    if (length >= 3 && (!strcmp(token + length - 2, "am") ||
+                        !strcmp(token + length - 2, "pm"))) {
+        digits = length - 2;
+        *period = token[length - 2] == 'a' ? 1 : 2;
+    }
+    if (digits < 1 || digits > 2)
+        return 0;
+    *value = 0;
+    for (i = 0; i < digits; ++i) {
+        if (!isdigit((unsigned char)token[i]))
+            return 0;
+        *value = *value * 10 + (token[i] - '0');
+    }
+    return 1;
+}
+
+/* A spoken number, excluding "a"/"an", which are articles here. */
+static int clock_word(const char *token, int *value)
+{
+    size_t i;
+
+    if (!strcmp(token, "a") || !strcmp(token, "an"))
+        return 0;
+    for (i = 0; i < sizeof(WORD_NUMBERS) / sizeof(WORD_NUMBERS[0]); ++i)
+        if (!strcmp(token, WORD_NUMBERS[i].word)) {
+            *value = WORD_NUMBERS[i].value;
+            return 1;
+        }
+    return 0;
+}
+
+/* Returns 1 and sets the period when the token is an am/pm marker or a
+   time-of-day word, else 0. Period 1 is morning, 2 is afternoon/evening. */
+static int clock_period_word(const char *token, int *period)
+{
+    if (!strcmp(token, "am") || !strcmp(token, "morning")) {
+        *period = 1;
+        return 1;
+    }
+    if (!strcmp(token, "pm") || !strcmp(token, "afternoon") ||
+        !strcmp(token, "evening") || !strcmp(token, "night") ||
+        !strcmp(token, "tonight")) {
+        *period = 2;
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * Read a wall-clock time from a transcript: "7am", "7 30 pm", "seven thirty
+ * in the evening", "noon". Returns 1 with a 24-hour time, 2 when a clock hour
+ * is present but am or pm is not (so the caller should ask, never guess), or
+ * 0 when there is no time of day at all.
+ */
+static int parse_clock(const char *text, int *hour_out, int *minute_out)
+{
+    char tokens[24][24];
+    int count;
+    int i;
+
+    count = tokenise(text, tokens, 24);
+    for (i = 0; i < count; ++i) {
+        int hour = -1;
+        int minute = 0;
+        int period = 0;
+        int value = 0;
+        int piece = 0;
+        int j;
+        int k;
+
+        if (!strcmp(tokens[i], "noon") || !strcmp(tokens[i], "midnight")) {
+            *hour_out = tokens[i][0] == 'n' ? 12 : 0;
+            *minute_out = 0;
+            return 1;
+        }
+        if (clock_digits(tokens[i], &value, &period)) {
+            hour = value;
+        } else if (clock_word(tokens[i], &value) && value >= 1 && value <= 12) {
+            hour = value;
+        } else {
+            continue;
+        }
+        j = i + 1;
+
+        /* A minute: "30", "30am", "thirty", or "thirty five". */
+        if (j < count && clock_digits(tokens[j], &value, &piece) &&
+            value < 60 && strlen(tokens[j]) == 2 + (piece ? 2 : 0)) {
+            minute = value;
+            if (piece)
+                period = piece;
+            ++j;
+        } else if (j < count && clock_word(tokens[j], &value) && value >= 1 &&
+                   value <= 59) {
+            minute = value;
+            ++j;
+        } else if (j + 1 < count && clock_word(tokens[j], &value) &&
+                   value >= 20 && value <= 50 && value % 10 == 0 &&
+                   clock_word(tokens[j + 1], &piece) && piece >= 1 &&
+                   piece <= 9) {
+            minute = value + piece;
+            j += 2;
+        }
+
+        /* The period: a separate "am", "a m", "in the morning", and so on. */
+        for (k = j; k < count && !period; ++k) {
+            if ((!strcmp(tokens[k], "a") || !strcmp(tokens[k], "p")) &&
+                k + 1 < count && !strcmp(tokens[k + 1], "m")) {
+                period = tokens[k][0] == 'a' ? 1 : 2;
+                break;
+            }
+            (void)clock_period_word(tokens[k], &period);
+        }
+
+        if (hour > 23 || minute > 59)
+            continue;
+        if (period && hour > 12)
+            continue;
+        if (period == 0 && hour >= 1 && hour <= 12) {
+            *hour_out = -1;
+            *minute_out = minute;
+            return 2;
+        }
+        if (period == 1 && hour == 12)
+            hour = 0;
+        else if (period == 2 && hour < 12)
+            hour += 12;
+        *hour_out = hour;
+        *minute_out = minute;
+        return 1;
+    }
+    return 0;
+}
+
+static int mentions_alarm(const char *text)
+{
+    return has_word(text, "alarm") || has_word(text, "alarms");
+}
+
 static int mentions_timer(const char *text)
 {
     return has_word(text, "timer") || has_word(text, "timers") ||
-           has_word(text, "alarm") || has_word(text, "alarms");
+           mentions_alarm(text);
+}
+
+/* "wake me at seven" is an alarm without the word alarm. */
+static int asks_to_wake(const char *text)
+{
+    return has_word(text, "wake") && has_word(text, "me");
 }
 
 static int negates_setting(const char *text)
@@ -645,6 +822,8 @@ enum le_timer_intent_kind le_timer_intent_parse(
     const char *cancel_verb;
     size_t cancel_verb_length;
     int found = 0;
+    int hour = -1;
+    int minute = 0;
     long long seconds;
 
     if (!intent)
@@ -664,7 +843,7 @@ enum le_timer_intent_kind le_timer_intent_parse(
         return intent->kind;
     }
 
-    if (!mentions_timer(text))
+    if (!mentions_timer(text) && !asks_to_wake(text))
         return LE_TIMER_INTENT_NONE;
 
     cancel_verb = first_cancel_verb(text, &cancel_verb_length);
@@ -677,6 +856,9 @@ enum le_timer_intent_kind le_timer_intent_parse(
         intent->kind = LE_TIMER_INTENT_CANCEL;
         cancel_verb = cancel_verb + cancel_verb_length;
         intent->cancel_count = cancellation_count(text);
+        intent->alarm_only = mentions_alarm(text) &&
+                             !has_word(text, "timer") &&
+                             !has_word(text, "timers");
         intent->cancel_all = has_universal_timer_noun(
             cancel_verb);
         if (!intent->cancel_all)
@@ -699,6 +881,24 @@ enum le_timer_intent_kind le_timer_intent_parse(
     if (found && seconds > 0) {
         intent->kind = LE_TIMER_INTENT_SET;
         intent->seconds = seconds;
+        extract_label(text, intent->label, sizeof(intent->label));
+        return intent->kind;
+    }
+
+    /* "set an alarm for 7am", "wake me at seven in the evening". A clock
+       time with no am or pm is asked about, not guessed. */
+    if (mentions_alarm(text) || asks_to_wake(text)) {
+        int clock = parse_clock(text, &hour, &minute);
+
+        /* Without a time, "alarm" must be asked for: "I need the alarm clock
+           fixed" is not a request. */
+        if (clock == 0 && !(has_word(text, "set") || has_word(text, "start") ||
+                            has_word(text, "create") || has_word(text, "add") ||
+                            has_word(text, "wake")))
+            return LE_TIMER_INTENT_NONE;
+        intent->kind = LE_TIMER_INTENT_ALARM;
+        intent->alarm_hour = clock == 1 ? hour : -1;
+        intent->alarm_minute = clock == 1 ? minute : 0;
         extract_label(text, intent->label, sizeof(intent->label));
         return intent->kind;
     }
@@ -767,7 +967,23 @@ int le_timer_intent_speech(const struct le_timer_intent *intent, int count,
             return snprintf(out, size, "%s timer for %s, starting now.",
                             duration, intent->label);
         return snprintf(out, size, "%s, starting now.", duration);
+    case LE_TIMER_INTENT_ALARM:
+        if (intent->alarm_hour < 0)
+            return snprintf(out, size, "What time should the alarm be?");
+        return snprintf(out, size, "Alarm set for %d:%02d %s.",
+                        intent->alarm_hour % 12 ? intent->alarm_hour % 12 : 12,
+                        intent->alarm_minute,
+                        intent->alarm_hour < 12 ? "am" : "pm");
     case LE_TIMER_INTENT_CANCEL:
+        if (intent->alarm_only) {
+            if (count < 0)
+                return snprintf(out, size, "Which alarm should I cancel?");
+            if (count == 0)
+                return snprintf(out, size, "There are no alarms to cancel.");
+            if (count == 1)
+                return snprintf(out, size, "Alarm cancelled.");
+            return snprintf(out, size, "All %d alarms cancelled.", count);
+        }
         if (count < 0)
             return snprintf(out, size, "Which timer should I cancel?");
         if (count == 0)

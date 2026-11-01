@@ -31,7 +31,10 @@ enum le_timer_intent_kind {
        caller decides, because "stop" means something else the rest of the
        time. */
     LE_TIMER_INTENT_DISMISS,
-    LE_TIMER_INTENT_QUERY
+    LE_TIMER_INTENT_QUERY,
+    /* A wall-clock alarm ("set an alarm for 7am"). Appended so the existing
+       kinds keep their values. */
+    LE_TIMER_INTENT_ALARM
 };
 
 struct le_timer_intent {
@@ -39,6 +42,13 @@ struct le_timer_intent {
     long long seconds;
     int cancel_all;
     int cancel_count;
+    /* Cancel: the request named alarms and no timers, so only alarms are
+       eligible. */
+    int alarm_only;
+    /* Alarm: local 24-hour time, or -1 when the request gave no usable time
+       (for example "7" with no am or pm). */
+    int alarm_hour;
+    int alarm_minute;
     char label[LE_TIMER_INTENT_LABEL_MAX];
 };
 

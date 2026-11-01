@@ -707,6 +707,42 @@ must be a nonzero decimal integer; malformed, ringing, out-of-range, missing,
 or already-cancelled IDs return HTTP 404 without removing another timer.
 Requires `X-LibreEcho-CSRF`.
 
+#### GET /api/v1/alarms
+
+Returns the pending and ringing alarms, a subset of the shared timer schedule
+(`/timers` lists them too, with `kind: "alarm"`). Each entry has an `id`,
+`state` (`pending` or `ringing`), `time` (the local 24-hour `HH:MM` it rings
+at), `due_epoch` (the same instant as Unix seconds), `seconds_remaining`, and
+an optional `label`. `available` is `false` when `timerd` is absent.
+
+#### POST /api/v1/alarms
+
+Sets a one-off alarm and requires `X-LibreEcho-CSRF`.
+
+```json
+{ "time": "07:00", "label": "wake up" }
+```
+
+`time` is required and must be `HH:MM` on a 24-hour clock (no seconds and no
+am/pm). It rings at the next occurrence of that time in the device time zone:
+if the time has passed today it is tomorrow, so an alarm is never in the past.
+`label` is optional, with the same rules as timer labels. Success returns HTTP
+201 with `{ "id", "time", "due_epoch" }`. A malformed body or time returns 400.
+An unset clock (no network time yet), a full schedule, or a time-of-day that
+cannot be placed returns 409 with error code `busy`; retry once the clock is
+set. Alarms survive a restart: they are persisted with the other timers and
+restored once the clock is valid.
+
+#### DELETE /api/v1/alarms/{id}
+
+Cancels one pending alarm. The id must name an alarm: a countdown id, a
+ringing alarm, or an unknown id returns HTTP 404 and removes nothing. Use
+`/timers/dismiss` to silence a ringing alarm. Requires `X-LibreEcho-CSRF`.
+
+Alarms can also be set and cancelled by voice without a language model:
+"set an alarm for 7am", "wake me at seven thirty in the evening", "cancel my
+alarm". A clock time without am or pm is asked about, not guessed.
+
 The timer page refreshes its status while open so countdowns and ringing state
 remain current. Timer state is persisted atomically with a restrictive
 permissions policy and is restored after the wall clock becomes valid.

@@ -827,6 +827,19 @@ static int remote_event(struct context *ctx, const char *args,
     return le_adapter_respond_ok(out, size, id, "{}");
 }
 
+/* The optional "kind" filter on next and cancel_all: "" matches everything. */
+static int kind_valid(const char *kind)
+{
+    return !kind[0] || !strcmp(kind, "alarm") || !strcmp(kind, "countdown");
+}
+
+static int kind_matches(const struct le_timer *timer, const char *kind)
+{
+    if (!kind[0])
+        return 1;
+    return !strcmp(kind, timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown");
+}
+
 static int dispatch(struct context *ctx, const char *cmd, const char *args,
                     unsigned long id, char *out, size_t size)
 {
@@ -905,9 +918,15 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
     if (!strcmp(cmd, "cancel_all")) {
         size_t i;
         int cancelled = 0;
+        char kind[16] = "";
+        int kind_result = args ? json_get_string(args, "kind", kind, sizeof(kind)) : 0;
 
+        if (kind_result < 0 || !kind_valid(kind_result == 1 ? kind : ""))
+            return le_adapter_respond_err(out, size, id,
+                                          "kind must be alarm or countdown");
         for (i = 0; i < LE_TIMER_MAX; ++i) {
-            if (ctx->timers.timers[i].state != LE_TIMER_STATE_PENDING)
+            if (ctx->timers.timers[i].state != LE_TIMER_STATE_PENDING ||
+                !kind_matches(&ctx->timers.timers[i], kind_result == 1 ? kind : ""))
                 continue;
             memset(&ctx->timers.timers[i], 0,
                    sizeof(ctx->timers.timers[i]));
@@ -926,14 +945,20 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         long long soonest = -1;
         unsigned int soonest_id = 0;
         char label[LE_TIMER_LABEL_MAX * 2] = "";
+        char kind[16] = "";
+        int kind_result = args ? json_get_string(args, "kind", kind, sizeof(kind)) : 0;
         int count = 0;
         size_t i;
 
+        if (kind_result < 0 || !kind_valid(kind_result == 1 ? kind : ""))
+            return le_adapter_respond_err(out, size, id,
+                                          "kind must be alarm or countdown");
         for (i = 0; i < LE_TIMER_MAX; ++i) {
             const struct le_timer *timer = &ctx->timers.timers[i];
             long long remaining;
 
-            if (timer->state != LE_TIMER_STATE_PENDING)
+            if (timer->state != LE_TIMER_STATE_PENDING ||
+                !kind_matches(timer, kind_result == 1 ? kind : ""))
                 continue;
             ++count;
             if (timer->kind == LE_TIMER_ALARM)
