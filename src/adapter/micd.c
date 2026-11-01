@@ -62,6 +62,8 @@ struct beam_view {
     long long updated_ms;
     /* enum le_mic_mix, set by "set_mix" and read by the stream worker per hop */
     volatile unsigned int mix_mode;
+    /* Array lane used by the "single" mode; -1 is automatic (lowest selected lane). */
+    volatile int mix_lane;
 };
 
 static struct beam_view *beam_view;
@@ -69,6 +71,11 @@ static struct beam_view *beam_view;
 static unsigned int current_mix_mode(void)
 {
     return beam_view ? beam_view->mix_mode : LE_MIC_MIX_BEAMFORMER;
+}
+
+static int current_mix_lane(void)
+{
+    return beam_view ? beam_view->mix_lane : -1;
 }
 
 /*
@@ -104,24 +111,58 @@ static int mix_mode_from_json(const char *text, const char *key)
     return le_mic_mix_parse(name);
 }
 
-/* The owner's saved mix mode from LE_MIC_CONFIG, read once at start-up. */
+/* The owner's saved mix settings from LE_MIC_CONFIG are read once at start-up. */
 #define MIX_CONFIG_MAX_BYTES 16384
 
-static int saved_mix_mode(void)
+/*
+ * The integer named by "key" in a JSON object, which must be within
+ * [-1, MIC_LOGICAL_CHANNELS - 1]; -1 is the automatic lane.  Returns -1 when
+ * the key is absent or the value is out of range, otherwise 0 with *lane set.
+ */
+static int lane_from_json(const char *text, const char *key, int *lane)
+{
+    const char *p;
+    char *end;
+    long value;
+
+    if (!text || !key || !lane || !(p = strstr(text, key)))
+        return -1;
+    p += strlen(key);
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    if (*p++ != ':')
+        return -1;
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    errno = 0;
+    value = strtol(p, &end, 10);
+    if (errno || end == p || value < -1 || value >= MIC_LOGICAL_CHANNELS)
+        return -1;
+    *lane = (int)value;
+    return 0;
+}
+
+/* The owner's saved mix mode and lane from LE_MIC_CONFIG, read once at start-up. */
+static void saved_mix_settings(int *mode, int *lane)
 {
     const char *path = getenv("LE_MIC_CONFIG");
     static char text[MIX_CONFIG_MAX_BYTES];
-    size_t used;
+    size_t used = 0;
     FILE *file;
-    int mode;
+    int value;
 
-    if (!path || !path[0] || !(file = fopen(path, "r")))
-        return LE_MIC_MIX_BEAMFORMER;
-    used = fread(text, 1, sizeof(text) - 1, file);
-    (void)fclose(file);
+    *mode = LE_MIC_MIX_BEAMFORMER;
+    *lane = -1;
+    if (path && path[0] && (file = fopen(path, "r"))) {
+        used = fread(text, 1, sizeof(text) - 1, file);
+        (void)fclose(file);
+    }
     text[used] = '\0';
-    mode = mix_mode_from_json(text, "\"microphone_mix\"");
-    return mode < 0 ? LE_MIC_MIX_BEAMFORMER : mode;
+    value = mix_mode_from_json(text, "\"microphone_mix\"");
+    if (value >= 0)
+        *mode = (int)value;
+    if (lane_from_json(text, "\"microphone_lane\"", &value) == 0)
+        *lane = value;
 }
 
 static long long monotonic_ms(void)
@@ -760,7 +801,7 @@ static int format_status(char *buffer, size_t size,
         "\"geometry\":{\"reference\":\"0 deg front (volume down), clockwise viewed from above\",\"ring_lanes\":[0,1,2,3,4,5],\"ring_azimuth_deg\":[150,210,270,330,30,90],\"centre_lane\":6,\"ring_radius_mm\":36,\"lane_skew\":\"none measured\"},"
         "\"relative_delay_samples\":{}},"
         "\"pipeline\":{\"stage\":\"fixed-beam-select\","
-        "\"microphone_mix\":\"%s\","
+        "\"microphone_mix\":\"%s\",\"microphone_lane\":%d,"
         "\"beams\":%d,\"fft\":%d,\"hop\":%d,"
         "\"beam_design\":\"superdirective, white-noise gain >= -3 dB\","
         "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
@@ -773,7 +814,7 @@ static int format_status(char *buffer, size_t size,
         values[4], values[5], values[6],
         miccal_source(config->idme_dir, config->dt_idme_dir),
         count, count == MIC_LOGICAL_CHANNELS ? "true" : "false",
-        mics, le_mic_mix_name(current_mix_mode()),
+        mics, le_mic_mix_name(current_mix_mode()), current_mix_lane(),
         LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP);
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
@@ -901,7 +942,6 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
     ssize_t count = 0;
     unsigned int digital_gain = digital_gain_from_environment();
     unsigned int mix_mask = LE_BEAM_DEFAULT_MIC_MASK;
-    int single_lane = 0;
     int result = -1;
 
     if (pipe(pipe_fds) < 0)
@@ -932,7 +972,6 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
     }
     le_voice_highpass_init(&highpass);
     mix_mask = beam_mic_mask();
-    single_lane = le_mic_mix_single_lane(mix_mask);
 
     while ((count = read(pipe_fds[0], input + pending,
                          sizeof(input) - pending)) > 0) {
@@ -957,7 +996,8 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
                 if (mode == LE_MIC_MIX_AVERAGE)
                     mixed = le_mic_mix_average(logical, mix_mask);
                 else if (mode == LE_MIC_MIX_SINGLE)
-                    mixed = logical[single_lane];
+                    mixed = le_mic_mix_single(logical, mix_mask,
+                                              current_mix_lane());
                 output[frame] = le_voice_highpass_sample(&highpass, mixed);
                 if (beamformer.fill == 0)
                     beam_view_publish(&beamformer);
@@ -1098,8 +1138,12 @@ int main(int argc, char **argv)
     if (beam_view == MAP_FAILED)
         beam_view = NULL;
     else {
+        int mode, lane;
+
         memset(beam_view, 0, sizeof(*beam_view));
-        beam_view->mix_mode = (unsigned int)saved_mix_mode();
+        saved_mix_settings(&mode, &lane);
+        beam_view->mix_mode = (unsigned int)mode;
+        beam_view->mix_lane = lane;
     }
     listen_fd = le_adapter_listen(config.socket_path);
     if (listen_fd < 0) {
@@ -1177,6 +1221,22 @@ int main(int argc, char **argv)
                 (void)snprintf(status, sizeof(status),
                                "{\"microphone_mix\":\"%s\"}",
                                le_mic_mix_name(mode));
+                (void)respond(client_fd, id, 1, status);
+            }
+            close(client_fd);
+        } else if (!strcmp(command, "set_lane")) {
+            int lane;
+
+            if (lane_from_json(args, "\"lane\"", &lane) < 0) {
+                (void)respond(client_fd, id, 0, "invalid microphone lane");
+            } else if (!beam_view) {
+                (void)respond(client_fd, id, 0,
+                              "microphone lane is unavailable");
+            } else {
+                beam_view->mix_lane = lane;
+                le_log_info("microphone lane set to %d", lane);
+                (void)snprintf(status, sizeof(status),
+                               "{\"microphone_lane\":%d}", lane);
                 (void)respond(client_fd, id, 1, status);
             }
             close(client_fd);

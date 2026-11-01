@@ -115,7 +115,11 @@ The owner picks how the speech microphones become the mono stream with
 
 - `beamformer` (default): the fixed-beam output described above.
 - `average`: the mean of the lanes in the speech set, rounded to nearest.
-- `single`: the lowest-numbered lane in the speech set (lane 0 by default).
+- `single`: one array microphone. `microphone_lane` picks lane 0-6 (array
+  microphone 1-7); `-1`, the default, uses the lowest-numbered lane in the
+  speech set (lane 0 by default). The lane is set live with `set_lane` (`{"lane":N}`),
+  reported as `pipeline.microphone_lane`, and saved in the web configuration.
+  It is only used in `single` mode.
 
 The beamformer runs in every mode, so its selection and the beam view stay
 current, and switching modes does not restart the stream. The mode is held in
@@ -124,6 +128,19 @@ live, and `status` reports it as `pipeline.microphone_mix`. At start-up micd
 reads the saved value from the web configuration named by `LE_MIC_CONFIG`.
 Average and single output are not delayed by the 16 ms beamformer latency, so
 a switch causes a one-time step of about 16 ms in the stream.
+
+### External microphones
+
+Only the on-board array is selectable. A USB audio input is not possible on
+the radar image: the running MT8163 kernel is built without
+`CONFIG_SND_USB_AUDIO` (checked in `/proc/config.gz` on radar, 2026-11-01).
+Bluetooth audio input is not part of this contract. Adding an external source
+needs the USB audio driver in the kernel, and any new source must stay behind
+micd, the sole capture owner.
+
+The dot has no seven-microphone array: its capture is a single TLV320AIC3101
+codec, and the array stream returns no samples there, so `single` with a lane
+choice is radar-only.
 
 ## Beam view and direction of arrival
 
