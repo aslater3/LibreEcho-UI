@@ -97,6 +97,7 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic \
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic \
     -Isrc -Isrc/adapter tests/test_bluetooth_bond_persistence.c \
     src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c \
+    src/adapter/bt_adv_proxy.c \
     src/adapter/adapter_server.c src/log.c \
     -o build/test-bluetooth-bond-persistence
 ./build/test-bluetooth-bond-persistence
