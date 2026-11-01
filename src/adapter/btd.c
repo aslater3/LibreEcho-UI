@@ -14,6 +14,7 @@
 #include "adapter.h"
 #include "log.h"
 
+#include "bt_adv_proxy.h"
 #include "bt_mgmt_events.h"
 #include "bt_pairing_events.h"
 #include "bt_profile.h"
@@ -288,9 +289,20 @@ struct bt_context {
     struct bt_pairing pairing;
     struct le_profiles profiles;
     int profiles_opened;
+    /* Passive LE advertisement relay for esphomed (bt_adv_proxy.c). */
+    struct bt_adv_ring adv;
+    int proxy_started;
 };
 
 static volatile sig_atomic_t stopping;
+
+static uint64_t bt_monotonic_ms(void)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+}
 
 static uint16_t read_le16(const uint8_t *p)
 {
@@ -1175,6 +1187,13 @@ static void process_event(struct bt_context *context, uint16_t event,
             if (eir_size > size - 14)
                 eir_size = size - 14;
             eir_name(payload + 14, eir_size, name, sizeof(name));
+            if (bt_adv_leased(&context->adv, bt_monotonic_ms()))
+                (void)bt_adv_push(&context->adv, payload, payload[6], rssi,
+                                  payload + 14, eir_size);
+            /* A proxy-owned scan stays out of the device table: rotating LE
+             * addresses would fill it and block the next UI scan. */
+            if (context->proxy_started)
+                return;
             device = get_device(context, payload, payload[6]);
             if (!device)
                 return;
@@ -1866,6 +1885,33 @@ static int set_discovery(struct bt_context *context, int start)
     return result;
 }
 
+/* LE-only discovery for the advertisement relay.  No classic inquiry runs, so
+ * the BR/EDR link used by A2DP is not interrupted by the proxy. */
+static int start_proxy_discovery(struct bt_context *context)
+{
+    uint8_t type = MGMT_DISCOVERY_LE;
+
+    if (!context->enabled)
+        return -1;
+    if (controller_command(context, MGMT_OP_START_DISCOVERY, &type, 1) != 0)
+        return -1;
+    context->discovery_type = type;
+    context->scanning = 1;
+    return 0;
+}
+
+/* Ends a proxy-owned scan once its lease lapses.  A UI scan clears
+ * proxy_started, so it is never stopped from here. */
+static void proxy_scan_expire(struct bt_context *context)
+{
+    if (!context->proxy_started ||
+        bt_adv_leased(&context->adv, bt_monotonic_ms()))
+        return;
+    context->proxy_started = 0;
+    if (context->scanning)
+        (void)set_discovery(context, 0);
+}
+
 static int set_controller_setting(struct bt_context *context, uint16_t opcode,
                                   int enabled)
 {
@@ -1967,6 +2013,7 @@ static int set_pairing_mode(struct bt_context *context, int enabled)
             (context->current_settings & MGMT_SETTING_DISCOVERABLE) != 0;
         context->pairing_saved_bondable =
             (context->current_settings & MGMT_SETTING_BONDABLE) != 0;
+        context->proxy_started = 0;
         if (context->scanning)
             (void)set_discovery(context, 0);
         if (set_pairing_identity(context) != 0) {
@@ -2193,7 +2240,63 @@ static int handle_request(struct bt_context *context, char *message,
                                      enabled ? "{\"pairing_mode\":true}" :
                                      "{\"pairing_mode\":false}");
     }
+    if (!strcmp(command, "proxy_scan")) {
+        const char *p = json_value(args, "enabled");
+        int ttl_ms = 0;
+
+        if (!p || (strncmp(p, "true", 4) && strncmp(p, "false", 5)))
+            return le_adapter_respond_err(response, response_size, id,
+                                           "enabled must be boolean");
+        if (!strncmp(p, "false", 5)) {
+            bt_adv_lease(&context->adv, 0, 0);
+            proxy_scan_expire(context);
+            return le_adapter_respond_ok(response, response_size, id,
+                                         "{\"proxy_scan\":false}");
+        }
+        if (json_integer(args, "ttl_ms", &ttl_ms) != 0 || ttl_ms < 1 ||
+            ttl_ms > (int)BT_ADV_LEASE_MAX_MS)
+            return le_adapter_respond_err(response, response_size, id,
+                                           "ttl_ms must be 1 to 30000");
+        if (!context->enabled)
+            return le_adapter_respond_err(response, response_size, id,
+                                           "Bluetooth is not powered");
+        if (context->pairing_mode)
+            return le_adapter_respond_err(response, response_size, id,
+                                           "Bluetooth pairing mode is active");
+        bt_adv_lease(&context->adv, bt_monotonic_ms(), (unsigned)ttl_ms);
+        if (!context->scanning) {
+            if (start_proxy_discovery(context) != 0)
+                return le_adapter_respond_err(response, response_size, id,
+                                               "Bluetooth proxy scan could not start");
+            context->proxy_started = 1;
+        }
+        return le_adapter_respond_ok(response, response_size, id,
+                                     "{\"proxy_scan\":true}");
+    }
+    if (!strcmp(command, "adverts")) {
+        char batch[2048];
+        int after = 0;
+
+        /* Without a cursor the reply only sets one: no backlog is replayed
+         * to a client that has just subscribed. */
+        if (json_integer(args, "after", &after) != 0)
+            after = (int)context->adv.last_seq;
+        if (after < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                           "after must not be negative");
+        if (bt_adv_query(&context->adv, (uint32_t)after, batch,
+                         sizeof(batch)) < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                           "advertisement batch too large");
+        return le_adapter_respond_ok(response, response_size, id, batch);
+    }
     if (!strcmp(command, "scan") || !strcmp(command, "scan_stop")) {
+        if (!strcmp(command, "scan") && context->proxy_started) {
+            /* Hand the radio from the relay to the UI scan. */
+            context->proxy_started = 0;
+            if (context->scanning)
+                (void)set_discovery(context, 0);
+        }
         if (set_discovery(context, !strcmp(command, "scan")) != 0)
             return le_adapter_respond_err(response, response_size, id,
                                            "Bluetooth discovery command failed");
@@ -2492,6 +2595,7 @@ int main(int argc, char **argv)
                                             read_master_volume());
             }
         }
+        proxy_scan_expire(&context);
         if (pollfds[0].revents & POLLIN) {
             int client = le_adapter_accept(listener);
             if (client < 0) {

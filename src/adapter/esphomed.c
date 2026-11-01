@@ -11,6 +11,8 @@
 #include "../config_store.h"
 #include "../json.h"
 #include "../esphome_health.h"
+#include "adapter.h"
+#include "esphome_ble_proxy.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -51,7 +53,7 @@ struct state {
  time_t result_time;struct esp_playback playback;int mdns_fd;
  char process_start[32],boot_id[64],listener_inode[32];unsigned listener_port;
 };
-static struct state S;static volatile sig_atomic_t running=1,reload_config;
+static struct state S;static struct le_ble_proxy B;static volatile sig_atomic_t running=1,reload_config;
 static void sigstop(int sig){if(sig==SIGHUP)reload_config=1;else running=0;}
 static uint64_t now_ms(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000+(unsigned)t.tv_nsec/1000000;}
 static void io_close(struct io *j){if(j->fd>=0)close(j->fd);j->fd=-1;j->stage=0;j->rx_n=j->tx_n=j->tx_sent=0;}
@@ -114,7 +116,7 @@ static void turn_clear(const char *result,int notify){int active=S.turn||S.playi
  * reconnect is not a user-visible failure. */
  profile(active&&strcmp(result,"success")?"error":"idle");status_write();all_states();}
 static void cancel_turn(const char *reason){if(S.turn&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,0);(void)send_writer(&S.clients[S.owner],90,&w);}turn_clear(reason,S.announcement);}
-static void client_close(unsigned i){struct client *c=&S.clients[i];if(c->fd>=0)close(c->fd);c->fd=-1;if(S.owner==(int)i){cancel_turn("disconnected");S.owner=-1;timer_owner_end();}en_free(&c->noise);memset(c,0,sizeof *c);c->fd=-1;status_write();}
+static void client_close(unsigned i){struct client *c=&S.clients[i];if(c->fd>=0)close(c->fd);c->fd=-1;le_ble_proxy_close(&B,(int)i);if(S.owner==(int)i){cancel_turn("disconnected");S.owner=-1;timer_owner_end();}en_free(&c->noise);memset(c,0,sizeof *c);c->fd=-1;status_write();}
 static int voice_start(uint64_t sample,int continued){unsigned char b[256];struct ep_writer w={b,sizeof b,0,0};if(!S.ha_selected||S.owner<0||S.turn||mic_muted()||(!continued&&!S.active_wake))return -1;
  ep_uint(&w,1,1);ep_string(&w,2,S.conversation);/* flags: USE_VAD only. USE_WAKE_WORD asks Home Assistant to run its own
     wake-word engine on the stream (ESPHome use_wake_word: true); the word was
@@ -128,7 +130,7 @@ static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(es
  * alive until RUN_END so its delayed event cannot address a new capture. */
 static void completed(void){if(!S.tts_done)(void)announce_done(1);S.tts_done=1;if(S.pipeline&&!S.run_end)return;char conv[128];int cont=S.continue_turn;snprintf(conv,sizeof conv,"%s",S.conversation);turn_clear("success",0);if(cont&&!mic_muted()){snprintf(S.conversation,sizeof S.conversation,"%s",conv);(void)voice_start(S.ring_end,1);}}
 static int valid_proto(const void *p,size_t n){struct ep_reader r;struct ep_field f;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0){}return r.error?-1:0;}
-static void device_info(struct client *c){unsigned char b[512];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,2,S.name);ep_string(&w,3,S.mac);ep_string(&w,4,"2026.9.0");ep_string(&w,6,"radar-puffin");ep_string(&w,8,"libreecho.satellite");ep_string(&w,9,"0.14.0");ep_string(&w,12,"LibreEcho");ep_string(&w,13,S.friendly);if(S.room[0])ep_string(&w,16,S.room);ep_uint(&w,17,61);ep_uint(&w,19,1);ep_uint(&w,26,!S.provisioned);(void)send_writer(c,10,&w);}
+static void device_info(struct client *c){unsigned char b[512];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,2,S.name);ep_string(&w,3,S.mac);ep_string(&w,4,"2026.9.0");ep_string(&w,6,"radar-puffin");ep_string(&w,8,"libreecho.satellite");ep_string(&w,9,"0.14.0");ep_string(&w,12,"LibreEcho");ep_string(&w,13,S.friendly);if(S.room[0])ep_string(&w,16,S.room);ep_uint(&w,15,LE_BLE_PROXY_FEATURES);ep_uint(&w,17,61);ep_uint(&w,19,1);ep_uint(&w,26,!S.provisioned);(void)send_writer(c,10,&w);}
 static void entities(struct client *c){unsigned char b[768],nested[80];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,1,"media_player");ep_fixed32(&w,2,MEDIA_KEY);ep_string(&w,3,"Media player");ep_uint(&w,8,1);
  /* aioesphomeapi 46.2.0: PAUSE, VOLUME_SET/MUTE, PLAY_MEDIA, STOP, PLAY, MEDIA_ANNOUNCE. */
  ep_uint(&w,11,(1U<<0)|(1U<<2)|(1U<<3)|(1U<<9)|(1U<<12)|(1U<<14)|(1U<<20));
@@ -183,6 +185,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  if(config_set_string("esphome_active_wake_word",active?"alexa_v0.1":"")<0)return -1;
  if(!active){S.active_wake=0;cancel_turn("wake_disabled");configuration(c);return 0;}
  if(job(S.wake_path,"set_word","{\"word\":\"Alexa\"}",5,1)<0)return -1;S.active_wake=1;configuration(c);return 0;}
+ case LE_BLE_PROXY_MSG_SUBSCRIBE:return le_ble_proxy_subscribe(&B,(int)idx,p,n);
  case 124:return provision(c,p,n);
  case 33:if(ep_get_uint(p,n,1,0)!=MUTE_KEY)return -1;{int mute=!!ep_get_uint(p,n,2,0);if(!mute&&S.privacy!=0){all_states();return 0;}if(mute){S.local_mute_gate=1;S.muted=1;if(S.turn==1)cancel_turn("muted");else if(S.turn==2)capture_end();all_states();}snprintf(args,sizeof args,"{\"muted\":%s}",mute?"true":"false");return job(S.audio_path,"set_mute",args,3,mute);}
  case 65:if(ep_get_uint(p,n,1,0)!=MEDIA_KEY)return -1;
@@ -249,7 +252,9 @@ static void capture_tick(void){if(S.turn!=2||S.owner<0)return;if(mic_muted()){ca
  for(unsigned i=0;i<4&&S.ring_end-S.capture_next>=320;i++){unsigned char pcm[640],b[660];struct ep_writer w={b,sizeof b,0,0};for(unsigned k=0;k<320;k++){uint16_t v=(uint16_t)S.ring[(S.capture_next+k)%RING_SAMPLES];pcm[2*k]=(unsigned char)v;pcm[2*k+1]=(unsigned char)(v>>8);}ep_bytes(&w,1,pcm,sizeof pcm);
  if(send_writer(&S.clients[S.owner],106,&w)){cancel_turn("backpressure");return;}S.capture_next+=320;}
 }
-static void jobs_tick(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i];if(j->stage==3&&j->kind==JOB_TIMER){if(S.timer_pending)continue;if(io_connect(j,S.timer_path)<0){io_close(j);continue;}j->stage=1;j->deadline=S.now+500;}if(j->fd<0)continue;int rc=io_tick(j);if(!rc)continue;int ok=0;if(rc>0){char *end=memchr(j->rx,'\n',j->rx_n);*end=0;(void)json_get_bool(j->rx,"ok",&ok);}if(ok){
+static void ble_job_done(struct io *j,int rc){int ok=0;if(rc>0&&j->kind==LE_BLE_JOB_POLL){char *end=memchr(j->rx,'\n',j->rx_n);*end=0;(void)json_get_bool(j->rx,"ok",&ok);if(ok){unsigned char out[2048];size_t m=le_ble_proxy_poll_result(&B,j->rx,j->rx_n,out,sizeof out);if(m&&B.owner>=0)(void)send_msg(&S.clients[B.owner],LE_BLE_PROXY_MSG_RAW_ADVS,out,m);}}io_close(j);}
+static void ble_tick(void){char args[160];for(unsigned n=0;n<3;n++){int k=le_ble_proxy_due(&B,S.now,args,sizeof args);if(!k)break;(void)job(LE_ADAPTER_BLUETOOTH_SOCK,k==LE_BLE_JOB_LEASE?"proxy_scan":"adverts",args,k,0);}}
+static void jobs_tick(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i];if(j->stage==3&&j->kind==JOB_TIMER){if(S.timer_pending)continue;if(io_connect(j,S.timer_path)<0){io_close(j);continue;}j->stage=1;j->deadline=S.now+500;}if(j->fd<0)continue;int rc=io_tick(j);if(!rc)continue;if(j->kind==LE_BLE_JOB_POLL||j->kind==LE_BLE_JOB_LEASE){ble_job_done(j,rc);continue;}int ok=0;if(rc>0){char *end=memchr(j->rx,'\n',j->rx_n);*end=0;(void)json_get_bool(j->rx,"ok",&ok);}if(ok){
  if(j->kind==1){int muted,volume;if(json_get_bool(j->rx,"muted",&muted)>0&&json_get_int(j->rx,"volume",&volume)>0&&volume>=0&&volume<=100){S.muted=muted;S.volume=volume;S.last_audio_status=S.now;}}
  if(j->kind==2){int playing=0,paused=0;(void)json_get_bool(j->rx,"playing",&playing);(void)json_get_bool(j->rx,"paused",&paused);S.radio_state=paused?3:playing?2:1;}
  if(j->kind==3){S.muted=j->target;S.local_mute_gate=j->target;}if(j->kind==4)S.volume=j->target;if(j->kind==6){S.output_muted=j->target;S.volume=j->target?0:S.restore_volume;}
@@ -284,7 +289,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
   char *end;unsigned long p;if(!le_eh_decimal(argv[4]))return 2;p=strtoul(argv[4],&end,10);if(*end||p<1||p>65535)return 2;
   return le_esphome_health(argv[2],argv[3],argv[5],(unsigned)p,argv[6],!strcmp(argv[1],"--process-check"))?0:1;
  }
- memset(&S,0,sizeof S);S.owner=-1;S.mdns_fd=-1;S.muted=1;S.privacy=-1;S.radio_state=1;S.active_wake=1;S.restore_volume=66;S.turn_limit=120000;
+ memset(&S,0,sizeof S);le_ble_proxy_init(&B);S.owner=-1;S.mdns_fd=-1;S.muted=1;S.privacy=-1;S.radio_state=1;S.active_wake=1;S.restore_volume=66;S.turn_limit=120000;
  S.config_path=getenv("LE_CONFIG_PATH");if(!S.config_path||!S.config_path[0])S.config_path="/etc/libreecho/web-config.json";S.status_path="/run/libreecho/esphome-status.json";S.audio_path="/run/libreecho/audio.sock";S.wake_path="/run/libreecho/wakeword.sock";S.radio_path="/run/libreecho/radio.sock";S.timer_path="/run/libreecho/timer.sock";S.led_path="/run/libreecho/led.sock";S.mdns_path=LE_MDNS_SOCKET;S.bus_path="/run/libreecho-audio/system.pcm";S.privacy_path="/sys/devices/platform/amz_privacy/privacy_state";S.idme_path="/sys/firmware/devicetree/base/idme";
  for(unsigned i=0;i<CLIENTS;i++)S.clients[i].fd=-1;for(unsigned i=0;i<JOBS;i++)S.jobs[i].fd=-1;S.wake.fd=S.mic.fd=S.timer_cleanup.fd=-1;esp_playback_init(&S.playback);
  for(int i=1;i<argc;i++){const char *v=i+1<argc?argv[i+1]:NULL;if(!strcmp(argv[i],"--plaintext")){S.plaintext=1;continue;}if(!v)return 2;
@@ -307,7 +312,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  if(fds[0].revents&POLLIN){for(unsigned n=0;n<4;n++){int fd=accept(listener,NULL,NULL);if(fd<0)break;int flags=fcntl(fd,F_GETFL,0);if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){close(fd);continue;}unsigned idx;for(idx=0;idx<CLIENTS;idx++)if(S.clients[idx].fd<0)break;if(idx==CLIENTS){close(fd);continue;}struct client *c=&S.clients[idx];memset(c,0,sizeof *c);c->fd=fd;c->mode=-1;c->deadline=S.now+15000;c->last_seen=S.now;en_init(&c->noise);}}
  for(unsigned i=0;i<CLIENTS;i++)client_tick(i,fds[i+1].revents);
  if(S.now>=S.last_status_poll+250){S.last_status_poll=S.now;privacy_poll();(void)job(S.audio_path,"status","{}",1,0);(void)job(S.radio_path,"status","{}",2,0);}
- jobs_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
+ jobs_tick();ble_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);capture_tick();
  if(S.turn&&S.now>S.turn_deadline)cancel_turn("timeout");
  if(S.playing){int rc=esp_playback_tick(&S.playback,S.now);if(rc){S.playing=0;if(rc<0)turn_clear("playback_error",1);else if(S.next_url[0]){char next[1024];snprintf(next,sizeof next,"%s",S.next_url);S.next_url[0]=0;if(playback_start(next)<0)turn_clear("playback_error",1);}else completed();}}
