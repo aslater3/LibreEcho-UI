@@ -1137,6 +1137,35 @@ correct or the window fires at the wrong hour. See
 `PUT /api/v1/system/timezone`. Current state is reported by `GET /api/v1/led`
 under `night`, including whether the cap is currently `active`.
 
+#### GET /api/v1/dnd
+
+Reports the do-not-disturb switch.
+
+```json
+{ "ok": true, "data": { "enabled": false }, "error": null }
+```
+
+#### PUT /api/v1/dnd
+
+Turns do-not-disturb on or off. The choice is saved in the web configuration
+(`do_not_disturb`) so it survives a reboot, and applied at once:
+
+- **Sounds:** audiod drops chimes, press tones, wake chirps and action samples.
+  The reply is still `ok` with `"suppressed": true` on the audio command. Timer
+  alarms are sent as priority and still ring.
+- **Home Assistant announcements:** esphomed acknowledges an announcement as
+  finished without playing it while the switch is on.
+- **Ring:** the ring shows the saved do-not-disturb theme as a steady pattern
+  owned by `dnd`. Turning the switch off clears it.
+
+Body: `{ "enabled": true }`. A non-boolean `enabled` is `400`. A failed apply
+returns `503` and nothing is saved. The wake word and assistant replies are not
+silenced by this switch.
+
+```json
+{ "enabled": true }
+```
+
 ### Network
 
 #### GET /api/v1/network

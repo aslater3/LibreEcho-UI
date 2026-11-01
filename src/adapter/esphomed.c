@@ -108,6 +108,13 @@ static void states_send(struct client *c){unsigned char b[64];struct ep_writer w
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
 }
 static void all_states(void){for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].states)states_send(&S.clients[i]);}
+/* Owner's do-not-disturb switch, written by audiod (same file, "on"/"off").
+ * While it is on, a Home Assistant announcement is acknowledged as finished
+ * without playing, so the automation that sent it does not see an error. */
+#ifndef LE_DND_PATH
+#define LE_DND_PATH "/data/libreecho/config/do-not-disturb"
+#endif
+static int dnd_on(void){char t[8];ssize_t n;int fd=open(LE_DND_PATH,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);if(fd<0)return 0;n=read(fd,t,sizeof t-1);close(fd);if(n<=0)return 0;t[n]=0;return !strcmp(t,"on\n")||!strcmp(t,"on");}
 static int announce_done(int success){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,(unsigned)success);return S.owner>=0?send_writer(&S.clients[S.owner],120,&w):-1;}
 static void capture_end(void){if(S.turn==2&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,2,1);(void)send_writer(&S.clients[S.owner],106,&w);}if(S.turn==1||S.turn==2)S.turn=3;profile("thinking");}
 static void turn_clear(const char *result,int notify){int active=S.turn||S.playing;if(notify)(void)announce_done(0);esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=0;S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);/* Error flash only for a turn that was really interrupted: an idle HA
@@ -176,6 +183,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  case 91:if(S.owner!=(int)idx||S.turn!=1)return 0;if(ep_get_uint(p,n,2,0)||ep_get_uint(p,n,1,0)){cancel_turn("ha_rejected");return 0;}S.turn=2;return 0;
  case 92:if(S.owner==(int)idx)voice_event(p,n);return 0;
  case 119:if(S.owner!=(int)idx)return -1;if(S.turn){(void)announce_done(0);return 0;}
+ if(dnd_on()){(void)announce_done(1);return 0;}
  if(ep_get_text(p,n,1,url,sizeof url)||ep_get_text(p,n,3,S.next_url,sizeof S.next_url))return -1;S.turn=3;S.announcement=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=!!ep_get_uint(p,n,4,0);snprintf(S.tts_url,sizeof S.tts_url,"%s",url);
  if(S.next_url[0]){char pre[1024];snprintf(pre,sizeof pre,"%s",S.next_url);snprintf(S.next_url,sizeof S.next_url,"%s",url);if(playback_start(pre)<0)turn_clear("playback_error",1);}else if(playback_start(url)<0)turn_clear("playback_error",1);status_write();return 0;
  case 121:configuration(c);return 0;
