@@ -186,7 +186,10 @@ static unsigned int events(struct waked_ipc *ipc)
     unsigned int found = 0;
     while ((count = read(ipc->event_pipe[0], &event, sizeof(event))) > 0) {
         require(count == (ssize_t)sizeof(event), "partial wake event");
-        require(!strcmp(event.model_name, "alexa_v0.1"), "wrong model event");
+        /* The event names the model the worker loaded: the stock model is
+         * alexa_v0.1, and any other directory reports its own folder name. This
+         * harness loads from a folder called models. */
+        require(!strcmp(event.model_name, "models"), "wrong model event");
         ++found;
     }
     require(count < 0 && errno == EAGAIN, "event pipe read failed");

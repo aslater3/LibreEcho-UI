@@ -2036,7 +2036,8 @@ reports `Alexa` and accepts only `Alexa` or `alexa` through its existing
 `set_word` command; LibreEcho, Computer, Echo and Custom model are not installed
 choices. Unsupported selections fail rather than switching models. The web UI
 therefore displays the adapter-reported word read-only and saves sensitivity
-only. There is no model upload, training or phrase-selection flow here.
+only. Owner-staged models are managed by the endpoints below; training is not
+part of this API.
 
 Custom voice mode selects STT/TTS engines, not another wake model. Home
 Assistant can select or disable the installed Alexa model through the ESPHome
@@ -2044,6 +2045,66 @@ native API; its `esphome_active_wake_word` setting is separate from saved
 Local/Custom preferences. The web page reports the wake adapter, not that HA
 selection or proof that voice capture is active. Existing settings are not
 migrated or rewritten by viewing the page or saving sensitivity.
+
+#### Owner-staged wake models
+
+An owner-staged model is a folder under `/data/libreecho/wakeword-models/<name>/`
+holding `melspectrogram.onnx`, `embedding_model.onnx` and `alexa_v0.1.onnx` (the
+classifier, whatever the word is). The contract is in
+`docs/wake-word-training.md` in the product repository. The stock model is
+always installed and remains the default. Folder names may use letters, digits,
+`.`, `_` and `-`, may not start with `.`, may be 63 characters at most, and
+`alexa_v0.1` is reserved for the stock model.
+
+Uploads are chunked because a request body is capped at 16 KiB: each file is
+sent as base64 chunks that decode to at most 8192 bytes, each file is at most
+8 MiB, and a chunk's `offset` must equal the bytes already staged for that file.
+Nothing is installed until `commit` passes.
+
+`GET /api/v1/wake-word/models` lists committed folders with validation results:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "stock": {"name": "alexa_v0.1", "wake_word": "Alexa"},
+    "selected": "my-word",
+    "selection_error": false,
+    "models": [
+      {"name": "my-word", "valid": true, "reason": "", "bytes": 2650112, "selected": true}
+    ],
+    "truncated": false,
+    "limits": {"files": 3, "file_bytes_max": 8388608, "chunk_bytes_max": 8192}
+  },
+  "error": null
+}
+```
+
+`PUT /api/v1/wake-word/model` with `{"model": "my-word"}` selects a committed
+folder; `{"model": "alexa_v0.1"}` or `{"model": ""}` selects the stock model. The
+response carries `restart_required: true`: the wake service reads the selection
+when it starts, so the change applies after a reboot or
+`/etc/init.d/libreecho-waked.init restart`. A folder that fails the check cannot
+be selected (`400`), and a missing one returns `404`.
+
+`POST /api/v1/wake-word/models/{name}/files/{file}` with
+`{"offset": 0, "data": "<base64>"}` stages one chunk. `file` is one of the three
+names above.
+
+`POST /api/v1/wake-word/models/{name}/commit` checks the staged files and moves
+the folder into place. The check covers the names and sizes of the three files,
+the graph input and output names, the operators, opset 13 and Sigmoid output of
+the classifier, and the absence of external weight data. A folder that fails is
+discarded and the `422` response says why. Shapes are not checked here; the
+detector refuses a model it cannot load and falls back to the stock model.
+
+`DELETE /api/v1/wake-word/models/{name}` removes a folder. The selected folder
+cannot be removed (`409`); select the stock model first.
+
+The wake status reports the loaded model: `wake_word` is `Alexa` for the stock
+model and the folder name for an owner-staged one, and `model` is `alexa_v0.1` or
+the folder name. Detection events carry at most 23 characters of the name. The
+ESPHome/Home Assistant wake selection still reports and accepts only `Alexa`.
 
 #### POST /api/v1/wake-word/test
 
