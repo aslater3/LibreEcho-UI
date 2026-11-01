@@ -26,7 +26,7 @@ static char directory[] = "/tmp/libreecho-button-events-XXXXXX";
 
 static void cleanup(void)
 {
-    const char *files[] = {"audio.sock", "led.sock", "audio.log", "led.log", "config.json"};
+    const char *files[] = {"audio.sock", "led.sock", "audio.log", "led.log", "config.json", "buttons.sock"};
     size_t i;
     char path[256];
     if (getpid() != fixture_owner) return;
@@ -63,6 +63,42 @@ static int make_listener(const char *path)
                 (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1)) == 0);
     assert(listen(fd, 8) == 0);
     return fd;
+}
+
+static int make_datagram_listener(const char *path)
+{
+    struct sockaddr_un address;
+    int fd;
+    size_t n = strlen(path);
+
+    assert(n < sizeof(address.sun_path));
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    assert(fd >= 0);
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, path, n + 1);
+    unlink(path);
+    assert(bind(fd, (struct sockaddr *)&address,
+                (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1)) == 0);
+    return fd;
+}
+
+static void expect_datagram(int fd, const char *expected)
+{
+    char buffer[64];
+    ssize_t got = recv(fd, buffer, sizeof(buffer) - 1, 0);
+    assert(got >= 0);
+    buffer[got] = 0;
+    if (strcmp(buffer, expected) != 0) {
+        fprintf(stderr, "button event: got \"%s\", expected \"%s\"\n", buffer, expected);
+        exit(1);
+    }
+}
+
+static void expect_no_datagram(int fd)
+{
+    char buffer[64];
+    assert(recv(fd, buffer, sizeof(buffer), 0) < 0 && errno == EAGAIN);
 }
 
 static void mock_daemon(int listen_fd, const char *log_path, int audio)
@@ -249,6 +285,48 @@ int main(void)
     assert(buttond_fixture_opens > 0);
 
 
+    /* Gestures are reported to the event socket (#394) and local handling
+       above is unchanged. Flush what the presses above left pending, unreported,
+       then check one short press and one hold reach the socket as datagrams. */
+    {
+        char event_socket[256];
+        struct timespec gap = {0, 400000000L}, hold = {0, 900000000L};
+        int event_fd;
+
+        snprintf(event_socket, sizeof(event_socket), "%s/buttons.sock", directory);
+        event_fd = make_datagram_listener(event_socket);
+        handle_key(&ctx, KEY_VOLUMEUP, 0);
+        handle_key(&ctx, KEY_VOLUMEDOWN, 0);
+        handle_key(&ctx, KEY_HELP, 0);
+        handle_key(&ctx, KEY_POWER, 0);
+        handle_key(&ctx, KEY_MUTE, 0);
+        handle_key(&ctx, KEY_MICMUTE, 0);
+        nanosleep(&gap, NULL);
+        publish_pending_gestures(&ctx);
+        expect_no_datagram(event_fd);
+
+        ctx.event_sock = event_socket;
+        handle_key(&ctx, KEY_VOLUMEUP, 1);
+        handle_key(&ctx, KEY_VOLUMEUP, 0);
+        nanosleep(&gap, NULL);
+        publish_pending_gestures(&ctx);
+        expect_datagram(event_fd, "volume_up press");
+        assert(ctx.volume == 55);
+
+        handle_key(&ctx, KEY_HELP, 1);
+        nanosleep(&hold, NULL);
+        publish_pending_gestures(&ctx);
+        expect_datagram(event_fd, "action long_press");
+        handle_key(&ctx, KEY_HELP, 0);
+        nanosleep(&gap, NULL);
+        publish_pending_gestures(&ctx);
+        expect_no_datagram(event_fd);
+
+        close(event_fd);
+        ctx.event_sock = NULL;
+    }
+
     puts("button event dispatch: volume, KEY_POWER mute sync, KEY_HELP rotation and sleep-sound toggle: ok");
+    puts("button gestures reach the event socket, local volume unchanged: ok");
     return 0;
 }
