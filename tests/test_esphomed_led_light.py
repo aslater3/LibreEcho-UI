@@ -34,7 +34,7 @@ def command(state=None,rgb=None,level=None,effect=None):
 class LedLight(Daemon):
  def subscribe(self):
   # As Home Assistant does: list entities (LED ring light after the activity entities), then subscribe.
-  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(11)]
+  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(15)]
   self.s.sendall(frame(20));return self.listed
  def wait_for(self,predicate,seconds=3):
   end=time.monotonic()+seconds
@@ -56,8 +56,8 @@ class LedLight(Daemon):
 class LedLightEntity(LedLight):
  def test_list_entities_has_rgb_light_with_effects(self):
   listed=self.subscribe()
-  self.assertEqual([t for t,_ in listed],[63,17,107,107,107,107,107,107,107,15,19])
-  light=all_fields(listed[9][1])
+  self.assertEqual([t for t,_ in listed],[63,17,17,49,49,49,107,107,107,107,107,107,107,15,19])
+  light=all_fields(listed[13][1])
   self.assertEqual(light[0],(1,b'led_ring'))
   self.assertEqual(light[1],(2,struct.pack('<I',LIGHT_KEY)))
   self.assertEqual([v for f,v in light if f==3],[b'LED ring'])

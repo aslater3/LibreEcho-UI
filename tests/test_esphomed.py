@@ -49,8 +49,14 @@ class Adapter:
    if self.kind=='wake' and cmd in ('subscribe','stream_audio'):
     self.streams[cmd]=c;data={'subscribed':True} if cmd=='subscribe' else {'streaming':True,'format':'pcm_s16_le','sample_rate':16000,'channels':1,'frame_header_bytes':24,'sample_indexed':True}
     c.sendall((json.dumps({'v':1,'id':req['id'],'ok':True,'data':data})+'\n').encode());return
+   if getattr(self,'track',False):
+    # Opt-in (#396): daemon state follows the setters so read-back tests see the change.
+    if cmd=='set_volume':self.volume=req['args']['volume']
+    if cmd=='set_brightness' and getattr(self,'status',None) is not None:self.status['current']['brightness']=req['args']['brightness']
+    if cmd=='set_sensitivity' and getattr(self,'status',None) is not None:self.status['sensitivity']=req['args']['sensitivity']
    if cmd=='set_mute' and not self.fail:self.muted=req['args']['muted']
-   data={'muted':self.muted,'volume':66,'output_available':True} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}
+   data={'muted':self.muted,'volume':getattr(self,'volume',66),'output_available':True} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}
+   if cmd=='status' and getattr(self,'status',None) is not None:data=self.status
    c.sendall((json.dumps({'v':1,'id':req['id'],'ok':not self.fail,'data':data})+'\n').encode())
   except (OSError,ValueError):pass
   finally:
@@ -95,7 +101,7 @@ class Fixture(Daemon):
  def test_hello_auth_device_list_ping_disconnect(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(b'fixture-satellite',b);self.assertIn(num(17,61),b)
   self.assertNotIn(var((16<<3)|2),b,'no room configured: DeviceInfo has no suggested_area')
-  self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(11)],[63,17,107,107,107,107,107,107,107,15,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
+  self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(15)],[63,17,17,49,49,49,107,107,107,107,107,107,107,15,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
  def test_oversize_malformed_and_client_limit(self):
   self.hello();s2=self.connect();s3=self.connect();self.assertEqual(s3.recv(1),b'');s2.sendall(b'\0'+var(65537)+var(1));self.assertEqual(s2.recv(1),b'')
   time.sleep(.05);s4=self.connect();s4.sendall(frame(9,b'\x08'+b'\xff'*10));self.assertEqual(s4.recv(1),b'')
@@ -215,7 +221,7 @@ class Fixture(Daemon):
   for _ in range(16):
    try:t,b=receive(self.s)
    except EOFError:break
-   self.assertIn(t,(26,64)) # A state broadcast already queued before rejection may drain.
+   self.assertIn(t,(26,50,64)) # A state broadcast (switch, number or media) already queued before rejection may drain.
   else:self.fail('malformed volume did not close the client')
  def test_announcement_error_reports_failure_and_resets_playback(self):
   wav=io.BytesIO()

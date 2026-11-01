@@ -62,6 +62,14 @@
 /* LED ring as a light (#395): Home Assistant's state is ledd's owner-scoped overlay. */
 #define LED_RING_KEY 30U
 #define LED_OWNER "esphome-light"
+/* Settings as HA entities (#396): wake word on/off is a switch; volume, wake sensitivity and
+ * LED brightness are integer 0-100 numbers. Config category. Values are read back from the
+ * owning daemons every SETTINGS_POLL_MS so changes made in the web UI reach HA too. */
+#define WAKE_SWITCH_KEY 43U
+#define VOLUME_NUMBER_KEY 40U
+#define SENSITIVITY_NUMBER_KEY 41U
+#define LED_BRIGHTNESS_KEY 42U
+#define SETTINGS_POLL_MS 2000U
 #define NELEM(a) (sizeof(a)/sizeof((a)[0]))
 struct client { int fd,mode,phase,hello,states,closing,light,led_light; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
@@ -75,6 +83,8 @@ struct state {
  int button_fd;char button_path[160];
  /* HA light state for the LED ring (#395); the device's own indicators are never stored here. */
  int led_on,led_r,led_g,led_b,led_brightness,led_effect,led_dirty;
+ /* Settings entities (#396): ledd global brightness and waked sensitivity, read back by status poll. */
+ int led_master,led_master_known,sensitivity,sensitivity_known;uint64_t settings_poll;
  char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake,voice_open;
  uint64_t now,turn_deadline,turn_limit,last_audio_status,last_status_poll,wake_retry,mdns_retry,ring_first,ring_end,capture_next,timer_retry;
  int16_t ring[RING_SAMPLES];unsigned char mic_rx[24+2560];size_t mic_n;int mic_ack;
@@ -171,9 +181,21 @@ static int led_command(const void *p,size_t n){float r=0,g=0,b=0,level=0;char ef
  if(ep_get_uint(p,n,18,0)){if(ep_get_text(p,n,19,effect,sizeof effect))return -1;index=-1;for(unsigned i=0;i<NELEM(led_effects);i++)if(!strcmp(effect,led_effects[i]))index=(int)i;if(index<0)return -1;}
  S.led_on=on;S.led_effect=index;S.led_r=rr;S.led_g=gg;S.led_b=bb;S.led_brightness=brightness;
  led_changed();led_states_all();return 0;}
+static const struct {unsigned key;const char *id,*label,*unit,*icon;} setting_numbers[]={
+ {VOLUME_NUMBER_KEY,"volume","Volume","%","mdi:volume-high"},
+ {SENSITIVITY_NUMBER_KEY,"wake_word_sensitivity","Wake word sensitivity","","mdi:tune-variant"},
+ {LED_BRIGHTNESS_KEY,"led_brightness","LED brightness","%","mdi:brightness-6"}};
+/* Current value of a settings number; 0 when the owning daemon has not reported it yet. */
+static int setting_value(unsigned key,int *v){switch(key){
+ case VOLUME_NUMBER_KEY:*v=S.volume;return S.last_audio_status!=0;
+ case SENSITIVITY_NUMBER_KEY:*v=S.sensitivity;return S.sensitivity_known;
+ case LED_BRIGHTNESS_KEY:*v=S.led_master;return S.led_master_known;}
+ return 0;}
 static void states_send(struct client *c){unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};float f=(float)S.volume/100.0f;uint32_t bits;memcpy(&bits,&f,4);
  ep_fixed32(&w,1,MEDIA_KEY);ep_uint(&w,2,S.playing?2:S.radio_state);ep_fixed32(&w,3,bits);ep_uint(&w,4,S.output_muted);if(S.last_audio_status)(void)send_writer(c,64,&w);
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
+ w.length=0;ep_fixed32(&w,1,WAKE_SWITCH_KEY);ep_uint(&w,2,S.active_wake);(void)send_writer(c,26,&w);
+ for(unsigned i=0;i<NELEM(setting_numbers);i++){int v=0,known=setting_value(setting_numbers[i].key,&v);w.length=0;ep_fixed32(&w,1,setting_numbers[i].key);if(known)put_float(&w,2,(float)v);else ep_uint(&w,3,1);(void)send_writer(c,50,&w);}
 }
 static const char *const button_ids[BUTTON_COUNT]={"volume_up","volume_down","microphone_mute","action"};
 static const char *const button_labels[BUTTON_COUNT]={"Volume up button","Volume down button","Microphone mute button","Action button"};
@@ -232,6 +254,10 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  ep_uint(&w,11,(1U<<0)|(1U<<2)|(1U<<3)|(1U<<9)|(1U<<12)|(1U<<14)|(1U<<20));
  for(unsigned i=0;i<3;i++){struct ep_writer n={nested,sizeof nested,0,0};ep_string(&n,1,i==1?"wav":"mp3");ep_uint(&n,2,48000);ep_uint(&n,3,i==1?1:2);ep_uint(&n,4,i?1:0);if(i==1)ep_uint(&n,5,2);ep_bytes(&w,9,n.data,n.length);}(void)send_writer(c,63,&w);
  w.length=0;ep_string(&w,1,"microphone_mute");ep_fixed32(&w,2,MUTE_KEY);ep_string(&w,3,"Microphone mute");ep_string(&w,5,"mdi:microphone-off");(void)send_writer(c,17,&w);
+ /* Settings (#396), config category: wake word on/off (ListEntitiesSwitchResponse) ... */
+ w.length=0;ep_string(&w,1,"wake_word");ep_fixed32(&w,2,WAKE_SWITCH_KEY);ep_string(&w,3,"Wake word");ep_string(&w,5,"mdi:account-voice");ep_uint(&w,7,1);(void)send_writer(c,17,&w);
+ /* ... and the 0-100 numbers (ListEntitiesNumberResponse: min 8, max 9, step 10, unit 11). */
+ for(unsigned i=0;i<NELEM(setting_numbers);i++){w.length=0;ep_string(&w,1,setting_numbers[i].id);ep_fixed32(&w,2,setting_numbers[i].key);ep_string(&w,3,setting_numbers[i].label);ep_string(&w,5,setting_numbers[i].icon);ep_uint(&w,7,1);put_float(&w,8,0.0f);put_float(&w,9,100.0f);put_float(&w,10,1.0f);if(setting_numbers[i].unit[0])ep_string(&w,11,setting_numbers[i].unit);(void)send_writer(c,49,&w);}
  /* ListEntitiesEventResponse, one per button: the gesture is the event type. */
  for(unsigned i=0;i<BUTTON_COUNT;i++){w.length=0;ep_string(&w,1,button_ids[i]);ep_fixed32(&w,2,BUTTON_KEY_BASE+i);ep_string(&w,3,button_labels[i]);for(unsigned g=0;g<GESTURE_COUNT;g++)ep_string(&w,9,gesture_ids[g]);(void)send_writer(c,EVENT_LIST_TYPE,&w);}
  /* Activity entities (#393): one event entity each, event types listed as field 9. */
@@ -258,6 +284,16 @@ static int config_set_string(const char *field,const char *value){char old[16384
  }
  end=old+n;while(end>old&&isspace((unsigned char)end[-1]))end--;if(end==old||end[-1]!='}')return -1;prefix=(size_t)(end-old-1);char *q=old+1;while(isspace((unsigned char)*q))q++;int z=snprintf(out,sizeof out,"%.*s%s\"%s\":\"%s\"}\n",(int)prefix,old,*q=='}'?"":",",field,escaped);if(z<0||(size_t)z>=sizeof out)return -1;return config_write_atomic(S.config_path,out,(size_t)z);
 }
+/* Integer twin of config_set_string (#396): replaces an existing top-level number or inserts one.
+ * The document is validated first; only a digit run may be replaced, so a string is never overwritten. */
+static int config_set_int(const char *field,int value){char old[16384],out[16384],needle[128],num[16];int n=config_read(S.config_path,old,sizeof old);if(n<0||!json_valid_object(old,(size_t)n)||json_duplicate_key(old,(size_t)n,field))return -1;
+ snprintf(num,sizeof num,"%d",value);snprintf(needle,sizeof needle,"\"%s\"",field);char *start=top_field(old,needle),*end;size_t prefix;
+ if(start){char *colon=strchr(start+strlen(needle),':');if(!colon)return -1;char *v=colon+1;while(isspace((unsigned char)*v))v++;end=v;while(*end&&*end!=','&&*end!='}'&&!isspace((unsigned char)*end)){if(!isdigit((unsigned char)*end)&&*end!='-')return -1;end++;}if(end==v)return -1;prefix=(size_t)(v-old);
+ int z=snprintf(out,sizeof out,"%.*s%s%s",(int)prefix,old,num,end);if(z<0||(size_t)z>=sizeof out)return -1;return config_write_atomic(S.config_path,out,(size_t)z);
+ }
+ end=old+n;while(end>old&&isspace((unsigned char)end[-1]))end--;if(end==old||end[-1]!='}')return -1;prefix=(size_t)(end-old-1);char *q=old+1;while(isspace((unsigned char)*q))q++;
+ int z=snprintf(out,sizeof out,"%.*s%s\"%s\":%s}\n",(int)prefix,old,*q=='}'?"":",",field,num);if(z<0||(size_t)z>=sizeof out)return -1;return config_write_atomic(S.config_path,out,(size_t)z);
+}
 static int provision(struct client *c,const void *p,size_t n){struct ep_reader r;struct ep_field f;unsigned char key[32],b[8];char base64[45];size_t z;int found=0,ok=0;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0)if(f.number==1){if(found++||f.wire!=2||f.length!=32)return -1;memcpy(key,f.data,32);}if(!found)return -1;
  if(c->mode==1&&!mbedtls_base64_encode((unsigned char*)base64,sizeof base64,&z,key,32)&&z==44){base64[z]=0;if(config_set_string("esphome_noise_key",base64)==0){memcpy(S.psk,key,32);S.provisioned=1;ok=1;}}
  struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,ok);int rc=send_writer(c,125,&w);mbedtls_platform_zeroize(key,sizeof key);mbedtls_platform_zeroize(base64,sizeof base64);if(ok){/* current encrypted session can read its ack; all sessions reconnect */for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0)S.clients[i].closing=1;}return rc;
@@ -271,6 +307,23 @@ static void voice_event(const void *p,size_t n){unsigned event=(unsigned)ep_get_
  if((event==100&&S.early_tts)||event==8){capture_end();if(!S.playing&&!S.tts_done&&S.tts_url[0]){event_send(ACTIVITY_VOICE_KEY,"replying");if(playback_start(S.tts_url)<0){(void)announce_done(0);cancel_turn("playback_error");return;}}}
  if(event==2){S.run_end=1;if(!S.playing&&(S.tts_done||!S.tts_url[0])){capture_end();completed();}}
 }
+/* Wake word on/off: the same persisted selection and waked set_word that VoiceAssistantSetConfiguration uses. */
+static int wake_set_active(int active){
+ if(config_set_string("esphome_active_wake_word",active?"alexa_v0.1":"")<0)return -1;
+ if(!active){S.active_wake=0;cancel_turn("wake_disabled");return 0;}
+ if(job(S.wake_path,"set_word","{\"word\":\"Alexa\"}",5,1)<0)return -1;S.active_wake=1;return 0;}
+/* NumberCommandRequest (#396). Integer 0-100 only, as the web API validates; each value goes to the
+ * same daemon command the web API uses (set_volume, set_sensitivity, set_brightness). */
+static int number_command(const void *p,size_t n){unsigned key=(unsigned)ep_get_uint(p,n,1,0);uint32_t bits=(uint32_t)ep_get_uint(p,n,2,0);float v;char args[64];int target;
+ memcpy(&v,&bits,4);if(!isfinite(v)||v<0.0f||v>100.0f||v!=truncf(v))return -1;target=(int)v;
+ switch(key){
+ case VOLUME_NUMBER_KEY:snprintf(args,sizeof args,"{\"volume\":%d}",target);if(job(S.audio_path,"set_volume",args,4,target))return -1;
+  /* Same LED idle auto-off activity as the web volume change; best effort. */
+  (void)job(S.led_path,"activity","{\"source\":\"volume\"}",0,0);return 0;
+ case SENSITIVITY_NUMBER_KEY:snprintf(args,sizeof args,"{\"sensitivity\":%d}",target);return job(S.wake_path,"set_sensitivity",args,12,target)?-1:0;
+ case LED_BRIGHTNESS_KEY:snprintf(args,sizeof args,"{\"brightness\":%d}",target);return job(S.led_path,"set_brightness",args,9,target)?-1:0;
+ default:return -1;}
+}
 static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){struct client *c=&S.clients[idx];unsigned char b[128];struct ep_writer w={b,sizeof b,0,0};char args[2048],url[1024],escaped[2048];if(valid_proto(p,n))return -1;
  if(type==1){if(c->hello)return -1;ep_uint(&w,1,1);ep_uint(&w,2,14);ep_string(&w,3,"LibreEcho 0.14.0");ep_string(&w,4,S.name);c->hello=1;c->deadline=S.now+120000;status_write();return send_writer(c,2,&w);}
  if(type==3)return 0;/* Legacy Auth is obsolete; pinned client does not await it. */
@@ -281,6 +334,8 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  case 20:c->states=1;states_send(c);if(c->light)light_state(c);if(c->led_light)led_state(c);return 0;
  /* LightCommandRequest (#395): HA sets the LED ring light; device indicators keep priority. */
  case 32:return led_command(p,n);
+ /* NumberCommandRequest (#396): volume, wake sensitivity, LED brightness. */
+ case 51:return number_command(p,n);
  case 89:if(!ep_get_uint(p,n,1,0)){if(S.owner==(int)idx){cancel_turn("unsubscribed");S.owner=-1;timer_owner_end();}return 0;}if(S.owner>=0&&S.owner!=(int)idx)return -1;
  /* Pinned client API_AUDIO subscription flag is 1<<2 (4), not 1. */
  if(!(ep_get_uint(p,n,2,0)&4))return -1;S.owner=(int)idx;return 0;
@@ -291,11 +346,9 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  if(S.next_url[0]){char pre[1024];snprintf(pre,sizeof pre,"%s",S.next_url);snprintf(S.next_url,sizeof S.next_url,"%s",url);if(playback_start(pre)<0)turn_clear("playback_error",1);}else if(playback_start(url)<0)turn_clear("playback_error",1);status_write();return 0;
  case 121:configuration(c);return 0;
  case 123:{struct ep_reader r;struct ep_field f;unsigned count=0;int active=0;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0)if(f.number==1){if(++count>1||ep_text(&f,url,sizeof url)||strcmp(url,"alexa_v0.1"))return -1;active=1;}
- if(config_set_string("esphome_active_wake_word",active?"alexa_v0.1":"")<0)return -1;
- if(!active){S.active_wake=0;cancel_turn("wake_disabled");configuration(c);return 0;}
- if(job(S.wake_path,"set_word","{\"word\":\"Alexa\"}",5,1)<0)return -1;S.active_wake=1;configuration(c);return 0;}
+ if(wake_set_active(active))return -1;configuration(c);return 0;}
  case 124:return provision(c,p,n);
- case 33:if(ep_get_uint(p,n,1,0)!=MUTE_KEY)return -1;{int mute=!!ep_get_uint(p,n,2,0);if(!mute&&S.privacy!=0){all_states();return 0;}if(mute){S.local_mute_gate=1;S.muted=1;if(S.turn==1)cancel_turn("muted");else if(S.turn==2)capture_end();all_states();}snprintf(args,sizeof args,"{\"muted\":%s}",mute?"true":"false");return job(S.audio_path,"set_mute",args,3,mute);}
+ case 33:if(ep_get_uint(p,n,1,0)==WAKE_SWITCH_KEY){if(wake_set_active(!!ep_get_uint(p,n,2,0)))return -1;all_states();return 0;}if(ep_get_uint(p,n,1,0)!=MUTE_KEY)return -1;{int mute=!!ep_get_uint(p,n,2,0);if(!mute&&S.privacy!=0){all_states();return 0;}if(mute){S.local_mute_gate=1;S.muted=1;if(S.turn==1)cancel_turn("muted");else if(S.turn==2)capture_end();all_states();}snprintf(args,sizeof args,"{\"muted\":%s}",mute?"true":"false");return job(S.audio_path,"set_mute",args,3,mute);}
  case 65:if(ep_get_uint(p,n,1,0)!=MEDIA_KEY)return -1;
  if(ep_get_uint(p,n,4,0)){uint32_t bits=(uint32_t)ep_get_uint(p,n,5,0);float volume;memcpy(&volume,&bits,4);if(!isfinite(volume)||volume<0||volume>1)return -1;snprintf(args,sizeof args,"{\"volume\":%d}",(int)lroundf(volume*100));if(job(S.audio_path,"set_volume",args,4,(int)lroundf(volume*100)))return -1;}
  if(ep_get_uint(p,n,6,0)){if(ep_get_text(p,n,7,url,sizeof url)||strlen(url)>900)return -1;json_escape(escaped,sizeof escaped,url);snprintf(args,sizeof args,"{\"url\":\"%.1900s\"}",escaped);
@@ -363,6 +416,10 @@ static void capture_tick(void){if(S.turn!=2||S.owner<0)return;if(mic_muted()){ca
 static void jobs_tick(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i];if(j->stage==3&&j->kind==JOB_TIMER){if(S.timer_pending)continue;if(io_connect(j,S.timer_path)<0){io_close(j);continue;}j->stage=1;j->deadline=S.now+500;}if(j->fd<0)continue;int rc=io_tick(j);if(!rc)continue;int ok=0;if(rc>0){char *end=memchr(j->rx,'\n',j->rx_n);*end=0;(void)json_get_bool(j->rx,"ok",&ok);}if(ok){
  if(j->kind==1){int muted,volume;if(json_get_bool(j->rx,"muted",&muted)>0&&json_get_int(j->rx,"volume",&volume)>0&&volume>=0&&volume<=100){S.muted=muted;S.volume=volume;S.last_audio_status=S.now;}}
  if(j->kind==2){int playing=0,paused=0;(void)json_get_bool(j->rx,"playing",&playing);(void)json_get_bool(j->rx,"paused",&paused);S.radio_state=paused?3:playing?2:1;}
+ if(j->kind==9){S.led_master=j->target;S.led_master_known=1;}
+ if(j->kind==12){S.sensitivity=j->target;S.sensitivity_known=1;(void)config_set_int("wake_sensitivity",j->target);}
+ if(j->kind==10){const char *cur=strstr(j->rx,"\"current\"");int v;if(cur&&json_get_int(cur,"brightness",&v)>0&&v>=0&&v<=100){S.led_master=v;S.led_master_known=1;}}
+ if(j->kind==11){int v;if(json_get_int(j->rx,"sensitivity",&v)>0&&v>=0&&v<=100){S.sensitivity=v;S.sensitivity_known=1;}}
  if(j->kind==3){S.muted=j->target;S.local_mute_gate=j->target;}if(j->kind==4)S.volume=j->target;if(j->kind==6){S.output_muted=j->target;S.volume=j->target?0:S.restore_volume;}
  }else if(j->kind>=3&&j->kind<=6&&S.turn)cancel_turn("adapter_error");io_close(j);all_states();}timer_cleanup_tick();}
 static int light_read(const char *path){char b[32],*end;long v;if(config_read(path,b,sizeof b)<1)return -1;v=strtol(b,&end,10);if(end==b||v<0||v>1000000)return -1;return (int)v;}
@@ -433,6 +490,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  if(fds[0].revents&POLLIN){for(unsigned n=0;n<4;n++){int fd=accept(listener,NULL,NULL);if(fd<0)break;int flags=fcntl(fd,F_GETFL,0);if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){close(fd);continue;}unsigned idx;for(idx=0;idx<CLIENTS;idx++)if(S.clients[idx].fd<0)break;if(idx==CLIENTS){close(fd);continue;}struct client *c=&S.clients[idx];memset(c,0,sizeof *c);c->fd=fd;c->mode=-1;c->deadline=S.now+15000;c->last_seen=S.now;en_init(&c->noise);}}
  for(unsigned i=0;i<CLIENTS;i++)client_tick(i,fds[i+1].revents);
  if(S.button_fd>=0&&(fds[1+CLIENTS].revents&POLLIN))button_tick();
+ if(S.now>=S.settings_poll+SETTINGS_POLL_MS){S.settings_poll=S.now;(void)job(S.led_path,"status","{}",10,0);(void)job(S.wake_path,"status","{}",11,0);}
  if(S.now>=S.last_status_poll+250){S.last_status_poll=S.now;privacy_poll();light_poll();(void)job(S.audio_path,"status","{}",1,0);(void)job(S.radio_path,"status","{}",2,0);}
  jobs_tick();led_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);capture_tick();
