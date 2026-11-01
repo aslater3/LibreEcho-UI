@@ -53,6 +53,17 @@ they are off by default and nothing else is published about speech. The
 sensors clear to empty when the voice history is cleared. Values are kept in
 memory only, and a change reaches HA only while HA is subscribed.
 
+**Room level** is a dBFS sensor (one decimal, not calibrated to dB SPL) of the
+room's sound level, averaged over one-second windows. It is off by default and
+listed only when the owner sets `"esphome_room_level_sensor": true` in the web
+configuration. It reuses the audio stream the satellite already reads for its
+ring, so it opens no second capture. No audio leaves the device for it. It is
+published at most every 5 s, and only when the level moves by 2 dB or more, or
+once a minute. It reads missing while the microphone is muted or the stream is
+stale. The level is taken after the echo canceller, which does not remove the
+device's own playback: on bench tests a 2 s test tone at volume 30 raised the
+reading by about 25 dB, so playing sound on the device does show in the sensor.
+
 The four hardware buttons are offered as event entities, one each: **Volume up
 button**, **Volume down button**, **Microphone mute button** and **Action
 button**. Each event's type is the gesture: `press`, `long_press` (reported

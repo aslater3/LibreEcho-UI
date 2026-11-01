@@ -44,6 +44,15 @@
 #define LIGHT_KEY 3U
 #define LIGHT_POLL_MS 1000U
 #define LIGHT_REFRESH_MS 60000U
+/* Room level (#399): dBFS of the 16 kHz stream esphomed already reads for the ring. Each 1 s window is a
+ * LEQ; a value is published at most every LEVEL_MIN_MS, on a LEVEL_STEP_DB change or each LEVEL_REFRESH_MS. */
+#define LEVEL_KEY 73U
+#define LEVEL_WINDOW_SAMPLES 16000U
+#define LEVEL_STALE_MS 3000U
+#define LEVEL_MIN_MS 5000U
+#define LEVEL_REFRESH_MS 60000U
+#define LEVEL_STEP_DB 2.0
+#define LEVEL_FLOOR_DBFS -90.0
 /* Hardware buttons as Home Assistant event entities (#394). buttond sends one
  * datagram per gesture, "<button> <gesture>", to the button socket. */
 #define BUTTON_KEY_BASE 10U
@@ -81,7 +90,7 @@
 #define TEXT_VALUE_MAX 1024U
 #define HISTORY_GENERATION_KIND 13
 #define NELEM(a) (sizeof(a)/sizeof((a)[0]))
-struct client { int fd,mode,phase,hello,states,closing,light,led_light,text_speech; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
+struct client { int fd,mode,phase,hello,states,closing,light,led_light,text_speech,level;unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
 struct state {
  struct client clients[CLIENTS];struct io jobs[JOBS],wake,mic,timer_cleanup;
@@ -106,6 +115,8 @@ struct state {
  uint64_t action_ring_end;
  /* Last-turn text sensors (#398) and the voice-history generation they clear on. */
  char last_wake[TEXT_VALUE_MAX],last_transcript[TEXT_VALUE_MAX],last_reply[TEXT_VALUE_MAX];int speech_text,history_known;long long history_generation;
+ /* Room level sensor (#399), opt-in through esphome_room_level_sensor; the LEQ window and what was last published. */
+ int room_level_sensor,level_known,level_sent_ok;float level_db,level_sent_db;double level_sum;unsigned level_n;uint64_t level_at,level_sent_at;
  const char *agent_path;
 };
 static struct state S;static volatile sig_atomic_t running=1,reload_config;
@@ -161,6 +172,25 @@ static void profile(const char *name){char a[192];if(!strcmp(name,"idle")){(void
  int error=!strcmp(name,"error");unsigned r=72,g=185,b=255;if(!strcmp(name,"thinking")){r=168;g=115;b=239;}else if(error){r=239;g=80;b=80;}
  snprintf(a,sizeof a,"{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":100,\"repeats\":%d,\"profile\":\"%s\",\"owner\":\"esphome\"}",error?"flash":"pulse",r,g,b,error?3:0,name);(void)job(S.led_path,"pattern",a,0,0);}
 static void light_state(struct client *c){unsigned char b[16];struct ep_writer w={b,sizeof b,0,0};float f=(float)(S.lux<0?0:S.lux);uint32_t bits;memcpy(&bits,&f,4);ep_fixed32(&w,1,LIGHT_KEY);ep_fixed32(&w,2,bits);if(S.lux<0)ep_uint(&w,3,1);(void)send_writer(c,25,&w);}
+/* Room level (#399): a level window is computed from the stream frames ring_frame() already receives, so there
+ * is no second capture or subscriber. Muted, stale or disabled input reads as missing; only the number leaves. */
+static int level_available(void){return S.room_level_sensor&&S.level_known&&S.now-S.level_at<=LEVEL_STALE_MS&&!mic_muted();}
+static void level_state(struct client *c){unsigned char b[16];struct ep_writer w={b,sizeof b,0,0};int ok=level_available();float f=ok?S.level_db:0.0f;uint32_t bits;memcpy(&bits,&f,4);ep_fixed32(&w,1,LEVEL_KEY);ep_fixed32(&w,2,bits);if(!ok)ep_uint(&w,3,1);(void)send_writer(c,25,&w);}
+static void level_frame(const unsigned char *pcm,unsigned count){
+ if(mic_muted()){S.level_sum=0;S.level_n=0;return;}
+ for(unsigned i=0;i<count;i++){double v=(double)(int16_t)((unsigned)pcm[2*i]|((unsigned)pcm[2*i+1]<<8));S.level_sum+=v*v;}
+ S.level_n+=count;if(S.level_n<LEVEL_WINDOW_SAMPLES)return;
+ {double ms=S.level_sum/(double)S.level_n/(32768.0*32768.0);double db=ms>0.0?10.0*log10(ms):LEVEL_FLOOR_DBFS;if(db<LEVEL_FLOOR_DBFS)db=LEVEL_FLOOR_DBFS;S.level_db=(float)db;S.level_known=1;S.level_at=S.now;}
+ S.level_sum=0;S.level_n=0;
+}
+static void level_tick(void){
+ int ok=level_available();
+ if(!ok&&!S.level_sent_ok)return;
+ if(S.now<S.level_sent_at+LEVEL_MIN_MS)return;
+ if(ok&&S.level_sent_ok&&fabs((double)S.level_db-(double)S.level_sent_db)<LEVEL_STEP_DB&&S.now<S.level_sent_at+LEVEL_REFRESH_MS)return;
+ S.level_sent_ok=ok;S.level_sent_db=S.level_db;S.level_sent_at=S.now;
+ for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].states&&S.clients[i].level)level_state(&S.clients[i]);
+}
 /* LED ring as a Home Assistant light (#395). HA's state is one ledd overlay,
  * owner "esphome-light" (solid, pulse or flash, repeats 0). Device voice
  * indicators use owner "esphome"; ledd keeps the overlay as their previous layer
@@ -363,6 +393,8 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  w.length=0;ep_string(&w,1,"led_ring");ep_fixed32(&w,2,LED_RING_KEY);ep_string(&w,3,"LED ring");ep_uint(&w,12,35);for(unsigned e=0;e<NELEM(led_effects);e++)ep_string(&w,11,led_effects[e]);ep_string(&w,14,"mdi:led-strip-variant");(void)send_writer(c,15,&w);c->led_light=1;
  /* ListEntitiesSensorResponse: lx, illuminance, STATE_CLASS_MEASUREMENT; only when the board has a sensor. */
  if(S.light_path[0]){c->light=1;w.length=0;ep_string(&w,1,"illuminance");ep_fixed32(&w,2,LIGHT_KEY);ep_string(&w,3,"Illuminance");ep_string(&w,6,"lx");ep_uint(&w,7,0);ep_string(&w,9,"illuminance");ep_uint(&w,10,1);(void)send_writer(c,16,&w);}
+ /* ListEntitiesSensorResponse (#399): room level in dBFS, one decimal, measurement; only when the owner opts in. */
+ if(S.room_level_sensor){c->level=1;w.length=0;ep_string(&w,1,"room_level");ep_fixed32(&w,2,LEVEL_KEY);ep_string(&w,3,"Room level");ep_string(&w,5,"mdi:ear-hearing");ep_string(&w,6,"dBFS");ep_uint(&w,7,1);ep_uint(&w,10,1);(void)send_writer(c,16,&w);}
  /* ListEntitiesTextSensorResponse (#398): last wake word; transcript and reply only with speech text on. */
  c->text_speech=S.speech_text;w.length=0;ep_string(&w,1,"last_wake_word");ep_fixed32(&w,2,TEXT_WAKE_KEY);ep_string(&w,3,"Last wake word");ep_string(&w,5,"mdi:account-voice");(void)send_writer(c,TEXT_LIST_TYPE,&w);
  if(S.speech_text){w.length=0;ep_string(&w,1,"last_transcript");ep_fixed32(&w,2,TEXT_TRANSCRIPT_KEY);ep_string(&w,3,"Last transcript");ep_string(&w,5,"mdi:microphone-message");(void)send_writer(c,TEXT_LIST_TYPE,&w);
@@ -436,7 +468,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  switch(type){case 7:return send_msg(c,8,NULL,0);case 8:return 0;case 5:if(send_msg(c,6,NULL,0))return -1;c->closing=1;return 0;case 9:device_info(c);return 0;case 11:entities(c);return 0;
  /* The lux state goes once on subscribe, then only from light_poll: all_states() runs on every adapter status change.
   * Only clients whose entity list carried the sensor get it (a late-found sensor waits for the next list). */
- case 20:c->states=1;states_send(c);for(unsigned i=0;i<4;i++)setting_send(c,i);if(c->light)light_state(c);if(c->led_light)led_state(c);text_states(c);return 0;
+ case 20:c->states=1;states_send(c);for(unsigned i=0;i<4;i++)setting_send(c,i);if(c->light)light_state(c);if(c->level)level_state(c);if(c->led_light)led_state(c);text_states(c);return 0;
  /* LightCommandRequest (#395): HA sets the LED ring light; device indicators keep priority. */
  case 32:return led_command(p,n);
  /* ExecuteServiceRequest (#397): announce, play_sound, set_ring. */
@@ -499,6 +531,7 @@ static uint32_t le32(const unsigned char *p){return (uint32_t)p[0]|((uint32_t)p[
 static void ring_frame(const unsigned char *p){uint64_t first=le32(p+8)|((uint64_t)le32(p+12)<<32);unsigned count=le32(p+16);if(first>UINT64_MAX-count){cancel_turn("stream_error");return;}
  if(S.ring_end&&first!=S.ring_end){S.ring_first=S.ring_end=first;if(S.turn==2)cancel_turn("stream_gap");}
  if(!S.ring_end)S.ring_first=first;for(unsigned i=0;i<count;i++){unsigned char const *a=p+24+2*i;S.ring[(first+i)%RING_SAMPLES]=(int16_t)((unsigned)a[0]|((unsigned)a[1]<<8));}S.ring_end=first+count;if(S.ring_end-S.ring_first>RING_SAMPLES)S.ring_first=S.ring_end-RING_SAMPLES;
+ level_frame(p+24,count);
 }
 static void stream_loss(struct io *j){io_close(j);if(j==&S.mic){S.mic_ack=0;S.mic_n=0;S.ring_first=S.ring_end=0;}if(S.turn==1||S.turn==2)cancel_turn("stream_error");S.wake_retry=S.now+1000;}
 static void stream_tick(struct io *j,int audio){if(j->fd<0)return;
@@ -547,6 +580,8 @@ static int load_configuration(void){char b[16384],key[45],mac[64],name[64],wake[
  int selected=json_get_string_top_level(b,"esphome_active_wake_word",wake,sizeof wake);if(selected<0||json_duplicate_key(b,(size_t)n,"esphome_active_wake_word")||(selected>0&&wake[0]&&strcmp(wake,"alexa_v0.1")))return -1;S.active_wake=selected<=0||!!wake[0];
  /* Speech text sensors (#398) are off unless the owner sets esphome_speech_text_sensors; turning them off drops what was held. */
  {int speech=0;(void)json_get_bool(b,"esphome_speech_text_sensors",&speech);S.speech_text=speech!=0;if(!S.speech_text){text_set(TEXT_TRANSCRIPT_KEY,"");text_set(TEXT_REPLY_KEY,"");}}
+ /* Room level sensor (#399) is off unless the owner sets esphome_room_level_sensor; a reload restarts the window. */
+ {int room=0;(void)json_get_bool(b,"esphome_room_level_sensor",&room);S.room_level_sensor=room!=0;S.level_known=S.level_sent_ok=0;S.level_n=0;S.level_sum=0;}
  /* HA ownership is what the web API persists: integrations bit 1 or the
   * home-assistant pipeline mode (api.c applies the same rule on load).
   * voice_assistant_mode is a legacy field the API never writes. */
@@ -606,7 +641,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  if(S.button_fd>=0&&(fds[1+CLIENTS].revents&POLLIN))button_tick();
  if(S.now>=S.settings_poll+SETTINGS_POLL_MS){S.settings_poll=S.now;(void)job(S.led_path,"status","{}",10,0);(void)job(S.wake_path,"status","{}",11,0);(void)job(S.agent_path,"voice_history_generation","{}",HISTORY_GENERATION_KIND,0);}
  if(S.now>=S.last_status_poll+250){S.last_status_poll=S.now;privacy_poll();light_poll();(void)job(S.audio_path,"status","{}",1,0);(void)job(S.radio_path,"status","{}",2,0);}
- jobs_tick();led_tick();action_ring_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
+ jobs_tick();led_tick();action_ring_tick();level_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);capture_tick();
  if(S.turn&&S.now>S.turn_deadline)cancel_turn("timeout");
  if(S.playing){int rc=esp_playback_tick(&S.playback,S.now);if(rc){playback_stopped();if(rc<0)turn_clear("playback_error",1);else if(S.next_url[0]){char next[1024];snprintf(next,sizeof next,"%s",S.next_url);S.next_url[0]=0;if(playback_start(next)<0)turn_clear("playback_error",1);}else completed();}}
