@@ -50,6 +50,23 @@ int le_wake_worker_start(struct le_wake_worker *worker,
  * Submit continuous post-AEC mono PCM. This call only copies into a bounded
  * queue and never waits for ONNX inference.
  */
+/*
+ * As le_wake_worker_start, and also runs a second wake word: a classifier file
+ * that shares the first word's mel and embedding features. Each word decodes
+ * on its own, and a detection names the word that fired in its event. A NULL
+ * second_classifier is the single-word worker. second_name must be a valid
+ * model name (1..64 characters from [A-Za-z0-9._-]); only its first 23
+ * characters reach the event.
+ */
+int le_wake_worker_start_words(struct le_wake_worker *worker,
+                               const char *model_directory,
+                               unsigned int threads,
+                               float accept_threshold,
+                               const char *second_classifier,
+                               const char *second_name,
+                               le_wake_event_callback callback,
+                               void *callback_opaque);
+
 int le_wake_worker_submit(
     struct le_wake_worker *worker,
     const int16_t *samples,

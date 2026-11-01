@@ -36,6 +36,9 @@
 #define PREROLL_SAMPLES (LE_VOICE_AEC_RATE * 3U)
 #define REFERENCE_TIMEOUT_NS 250000000ULL
 #define WAKE_ACCEPT_THRESHOLD 0.55f
+/* The classifier of a model folder: the one file a second word needs. */
+#define WAKE_CLASSIFIER_FILE "alexa_v0.1.onnx"
+#define WAKE_SECOND_PATH_BYTES 1024U
 #define MAX_WAKE_SUBSCRIBERS 4U
 #define MAX_AUDIO_SUBSCRIBERS 2U
 
@@ -50,6 +53,9 @@ struct waked_config {
     unsigned int wake_threads;
     unsigned int vad_floor_rms;
     float wake_threshold;
+    /* Optional second wake word: a model folder whose classifier runs on the
+     * first model's features. Its folder name is the word's name. */
+    const char *second_model_directory;
 };
 
 struct waked_ipc {
@@ -642,6 +648,13 @@ static int process_frame(struct le_voice_aec *aec,
     return metrics->dump_samples >= dump_limit ? 1 : 0;
 }
 
+static const char *wake_second_name(const char *directory)
+{
+    const char *slash = strrchr(directory, '/');
+
+    return slash ? slash + 1 : directory;
+}
+
 static int run_waked(const struct waked_config *config)
 {
     struct le_voice_reference reference;
@@ -717,11 +730,30 @@ static int run_waked(const struct waked_config *config)
             &vad, config->vad_floor_rms) < 0)
         goto out;
 #ifdef LE_WAKE_ENGINE_ONNX
-    if (le_wake_worker_start(
-            &wake_worker, config->model_directory,
-            config->wake_threads, config->wake_threshold,
-            wake_event_received, &ipc) < 0)
-        goto out;
+    {
+        char second_classifier[WAKE_SECOND_PATH_BYTES];
+        const char *second_name = NULL;
+        const char *second_path = NULL;
+
+        if (config->second_model_directory) {
+            second_name = wake_second_name(config->second_model_directory);
+            if (snprintf(second_classifier, sizeof(second_classifier),
+                         "%s/%s", config->second_model_directory,
+                         WAKE_CLASSIFIER_FILE) >=
+                    (int)sizeof(second_classifier)) {
+                fprintf(stderr, "waked: second wake model path too long\n");
+                goto out;
+            }
+            second_path = second_classifier;
+            fprintf(stderr, "waked: second wake word %s\n", second_name);
+        }
+        if (le_wake_worker_start_words(
+                &wake_worker, config->model_directory,
+                config->wake_threads, config->wake_threshold,
+                second_path, second_name,
+                wake_event_received, &ipc) < 0)
+            goto out;
+    }
 #endif
     microphone_fd = connect_mic_stream(config->mic_socket);
     if (microphone_fd < 0) {
@@ -893,7 +925,8 @@ int main(int argc, char **argv)
         0,
         2,
         LE_VOICE_VAD_DEFAULT_FLOOR_RMS,
-        WAKE_ACCEPT_THRESHOLD
+        WAKE_ACCEPT_THRESHOLD,
+        NULL
     };
     int i;
 
@@ -934,6 +967,15 @@ int main(int argc, char **argv)
                 return 2;
             }
             config.wake_threshold = threshold;
+        } else if (!strcmp(argv[i], "--second-model-dir") &&
+                   i + 1 < argc) {
+            const char *name = wake_second_name(argv[++i]);
+
+            if (!le_wake_model_name_valid(name)) {
+                fprintf(stderr, "waked: invalid second wake model name\n");
+                return 2;
+            }
+            config.second_model_directory = argv[i];
         } else if (!strcmp(argv[i], "--vad-floor-rms") &&
                    i + 1 < argc) {
             char *end = NULL;
@@ -977,6 +1019,7 @@ int main(int argc, char **argv)
                     "[--model-dir PATH] [--wake-threads 1..4] "
                     "[--vad-floor-rms 1..16384] "
                     "[--wake-threshold 0..1] "
+                    "[--second-model-dir PATH] "
                     "[--dump-pcm PATH --dump-seconds N]\n", argv[0]);
             return 2;
         }
