@@ -83,4 +83,29 @@ int le_beamformer_selected_azimuth(const struct le_beamformer *beamformer);
 /* Parses "0,1,3,4" or "all" into a microphone mask; returns 0 when invalid. */
 unsigned int le_beamformer_parse_mics(const char *text);
 
+/*
+ * How micd turns the calibrated lanes into the mono stream.  The beamformer
+ * keeps running in every mode so its selection and beam view stay warm; the
+ * mode only chooses which signal is sent on.
+ */
+enum le_mic_mix {
+    LE_MIC_MIX_BEAMFORMER = 0,   /* fixed beams, follows the talker (default) */
+    LE_MIC_MIX_AVERAGE = 1,      /* mean of the selected microphones */
+    LE_MIC_MIX_SINGLE = 2,       /* one microphone: the lowest selected lane */
+    LE_MIC_MIX_COUNT = 3
+};
+
+/* Parses "beamformer", "average" or "single"; returns -1 for anything else. */
+int le_mic_mix_parse(const char *text);
+
+/* The canonical name of a mode, or NULL when out of range. */
+const char *le_mic_mix_name(int mode);
+
+/* Mean of the lanes in mic_mask, rounded to nearest; 0 when mic_mask is 0. */
+int16_t le_mic_mix_average(const int16_t logical[LE_VOICE_LOGICAL_CHANNELS],
+                           unsigned int mic_mask);
+
+/* The lowest-numbered lane in mic_mask, or -1 when mic_mask is 0. */
+int le_mic_mix_single_lane(unsigned int mic_mask);
+
 #endif

@@ -53,6 +53,8 @@ struct le_backend_ops {
  int (*sendspin_set)(struct le_backend*,int);
  int (*sendspin_pairing_token)(struct le_backend*,char*,size_t);
  int (*sendspin_reset_pairing)(struct le_backend*);
+ /* Mic array mixing mode ("beamformer", "average", "single"). Appended last for the positional-init reason; null reports unsupported. */
+ int (*microphone_mix)(struct le_backend*,const char*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);
