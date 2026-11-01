@@ -142,6 +142,8 @@ python3 tests/test_install_completeness.py
 python3 tests/test_watchdog_build_contract.py
 make build/test-wake-decode
 ./build/test-wake-decode
+make build/test-voice-clip-store
+./build/test-voice-clip-store
 make build/test-wake-health build/test-wake-health-api
 ./build/test-wake-health
 ./build/test-wake-health-api
@@ -405,6 +407,9 @@ sh tests/test_agentd_startup_readiness_contract.sh
 sh tests/test_agentd_init_lifecycle_lock.sh
 NO_SETSID=1 sh tests/test_agentd_init_lifecycle_lock.sh
 sh tests/test_agentd_timers.sh
+# Wake clips are kept under a suite-private directory, never /data.
+LIBREECHO_VOICE_CLIP_DIR="$SUITE_TMP/voice-clips"
+export LIBREECHO_VOICE_CLIP_DIR
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!
 i=0
@@ -412,6 +417,7 @@ while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -l
 # Timer HTTP cases require this ready, isolated mock server.
 LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
+python3 tests/test_voice_clips_contract.py
 LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
