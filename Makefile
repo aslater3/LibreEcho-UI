@@ -60,7 +60,7 @@ TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adap
 TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
 STTD_SOURCES = src/adapter/sttd.c src/adapter/stt_engine_mock.c src/adapter/adapter_server.c src/log.c
 STTD_SHERPA_CXX_SOURCES = src/adapter/stt_engine_sherpa.cpp
-AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/timer_intent.c src/adapter/llm_provider.c \
+AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/timer_intent.c src/adapter/timer_schedule.c src/adapter/llm_provider.c \
 	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
@@ -99,7 +99,7 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/adapter/timer_schedule.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -1056,14 +1056,14 @@ $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 		src/json.c src/log.c -lpthread -o $@
 
 $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
-	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c
+	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c -o $@
 
 $(BUILD)/test-voice-pipeline-env-isolation: tests/test_voice_pipeline_env_isolation.c \
-	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c
+	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
@@ -1071,7 +1071,7 @@ $(BUILD)/test-voice-pipeline-env-isolation: tests/test_voice_pipeline_env_isolat
 
 $(BUILD)/test-home-assistant-discovery: tests/test_home_assistant_discovery_lifecycle.c \
 	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c \
-	src/service_env.c
+	src/service_env.c src/adapter/timer_schedule.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \

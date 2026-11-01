@@ -100,6 +100,15 @@ int le_timer_add_alarm(struct le_timer_set *set, long long due_epoch,
                        const char *label, long long now_epoch,
                        unsigned int *id);
 
+/*
+ * The next local-time occurrence of hour:minute strictly after now_epoch. An
+ * instant already passed today means tomorrow, so "07:00" said at 07:30 means
+ * the following morning. Uses the libc local zone (TZ), as the rest of the
+ * device does. Refused while the clock is not credible.
+ */
+int le_timer_next_alarm_epoch(long long now_epoch, int hour, int minute,
+                              long long *due_epoch);
+
 /* Restore a persisted wall-clock due time after the clock becomes valid. A
  * due time may be slightly overdue so le_timer_step() can apply the common
  * miss grace, but stale records are rejected. */

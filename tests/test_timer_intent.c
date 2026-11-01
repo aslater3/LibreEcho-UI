@@ -325,6 +325,87 @@ int main(void)
         assert(strstr(speech, "2 minutes and 5 seconds") != NULL);
     }
 
+    /* Alarms: a clock time with am or pm is an alarm, and the 24-hour time
+       comes out exactly. */
+    {
+        struct le_timer_intent intent;
+        char speech[160];
+
+        assert(le_timer_intent_parse("set an alarm for 7am", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 7 && intent.alarm_minute == 0);
+        assert(!intent.alarm_only);
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(strcmp(speech, "Alarm set for 7:00 am.") == 0);
+
+        assert(le_timer_intent_parse("set an alarm for 7:30 pm", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 19 && intent.alarm_minute == 30);
+
+        assert(le_timer_intent_parse("wake me at seven thirty in the morning",
+                                     &intent) == LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 7 && intent.alarm_minute == 30);
+
+        assert(le_timer_intent_parse("set an alarm for 12 am", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 0);
+        assert(le_timer_intent_parse("set an alarm for 12 pm", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 12);
+
+        assert(le_timer_intent_parse("set an alarm for 6 a.m.", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 6);
+
+        assert(le_timer_intent_parse("set an alarm for 19:15", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 19 && intent.alarm_minute == 15);
+
+        /* No am or pm: the caller must ask, never guess. */
+        assert(le_timer_intent_parse("set an alarm for 7", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == -1);
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(strstr(speech, "What time") != NULL);
+
+        /* An alarm noun with no time is still an alarm request to ask about. */
+        assert(le_timer_intent_parse("set an alarm", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == -1);
+
+        /* A duration stays a countdown, whatever the noun. */
+        assert(le_timer_intent_parse("set an alarm for ten minutes", &intent) ==
+               LE_TIMER_INTENT_SET);
+        assert(intent.seconds == 600);
+
+        /* Not a request: negated, and a question about the schedule. */
+        assert(le_timer_intent_parse("don't set an alarm for 7am", &intent) ==
+               LE_TIMER_INTENT_NONE);
+        assert(le_timer_intent_parse("what is the time", &intent) ==
+               LE_TIMER_INTENT_NONE);
+        assert(le_timer_intent_parse("I need the alarm clock fixed",
+                                     &intent) == LE_TIMER_INTENT_NONE);
+
+        /* Cancellation of alarms is restricted to alarms, and a timer word
+           lifts the restriction. */
+        assert(le_timer_intent_parse("cancel my alarm", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.alarm_only);
+        le_timer_intent_speech(&intent, 1, 0, speech, sizeof(speech));
+        assert(strcmp(speech, "Alarm cancelled.") == 0);
+        le_timer_intent_speech(&intent, -1, 0, speech, sizeof(speech));
+        assert(strstr(speech, "Which alarm") != NULL);
+        assert(le_timer_intent_parse("cancel my timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.alarm_only);
+        assert(le_timer_intent_parse("cancel all alarms", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.alarm_only && intent.cancel_all);
+        assert(le_timer_intent_parse("cancel all timers and alarms", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.alarm_only && intent.cancel_all);
+    }
+
     /* A long transcript must not overflow anything. */
     {
         char big[1024];
