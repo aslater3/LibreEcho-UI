@@ -291,4 +291,60 @@ class RoomUnsafeNotSent(Daemon):
  config_fields=dict(ROOM_BASE,room='Hall\nsecond line')
  def test_unsafe_room_is_not_sent(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertNotIn(var((16<<3)|2),b);self.assertIn(b'fixture-satellite',b)
+# esphome_server_wake (off by default): Home Assistant runs wake detection on a
+# continuous mic stream. The daemon opens a run with USE_VAD|USE_WAKE_WORD (3)
+# and no phrase, streams without any device wake event, and stops on mute or
+# unsubscribe. With the option absent, on-device wake remains the only starter.
+SERVER_WAKE_CONFIG=dict(API_HA_CONFIG,esphome_server_wake=True)
+def server_wake_status(p):return json.loads((p/'status.json').read_text())
+class ServerWakeStreams(Daemon):
+ config_fields=SERVER_WAKE_CONFIG
+ def test_server_run_streams_without_device_wake_and_stops_on_unsubscribe(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(1,1),b);self.assertIn(num(3,3),b);self.assertNotIn(b'Alexa',b)
+  self.s.sendall(frame(91));t,b=receive(self.s);self.assertEqual(t,106)
+  self.assertTrue(server_wake_status(self.p)['server_wake_streaming'])
+  self.s.sendall(frame(89,num(1,0)))
+  while True:
+   t,b=receive(self.s)
+   if t==90:break
+  self.assertNotIn(num(1,1),b);self.assertFalse(server_wake_status(self.p)['server_wake_streaming'])
+class ServerWakeIgnoresDeviceWake(Daemon):
+ config_fields=SERVER_WAKE_CONFIG
+ def test_device_wake_does_not_start_a_second_run_while_server_wake_is_on(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  t,b=receive(self.s);self.assertEqual(t,90)
+  self.s.sendall(frame(91));self.s.sendall(frame(92,num(1,2)));time.sleep(.1);a.wake(4000)
+  # The run restarts after the server-wake retry delay, never from the device wake.
+  messages=[]
+  while True:
+   t,b=receive(self.s);messages.append((t,b))
+   if t==90:break
+  self.assertIn(num(3,3),messages[-1][1]);self.assertNotIn(b'Alexa',messages[-1][1])
+class ServerWakeMuteStops(Daemon):
+ config_fields=SERVER_WAKE_CONFIG
+ def test_mute_stops_the_stream_and_unmute_resumes_it(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  t,b=receive(self.s);self.assertEqual(t,90);self.s.sendall(frame(91));t,b=receive(self.s);self.assertEqual(t,106)
+  self.s.sendall(frame(33,num(1,2)+num(2,1)))
+  while True:
+   t,b=receive(self.s)
+   if t==90:break
+  self.assertNotIn(num(1,1),b)
+  self.s.sendall(frame(33,num(1,2)))
+  while True:
+   t,b=receive(self.s)
+   if t==90:break
+  self.assertIn(num(1,1),b);self.assertIn(num(3,3),b)
+class ServerWakeDefaultOff(Daemon):
+ config_fields=API_HA_CONFIG
+ def test_default_off_never_streams_without_device_wake(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  time.sleep(.3);self.s.settimeout(.3)
+  with self.assertRaises(TimeoutError):receive(self.s)
+  a.wake(4000);self.s.settimeout(3);t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(1,1),b);self.assertNotIn(num(3,3),b)
 if __name__=='__main__':unittest.main()

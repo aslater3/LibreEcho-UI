@@ -106,4 +106,35 @@ class PinnedFixture(Fixture):
     await good._get_connection().send_message_await_response(PingRequest(),PingResponse);await good.disconnect()
    finally:await good.disconnect(force=True)
   asyncio.run(asyncio.wait_for(run(),20))
+# Owner option esphome_server_wake: the pinned client must see a run opened with
+# USE_VAD|USE_WAKE_WORD (3) and no phrase, receive mic audio with no device wake
+# event, and see the run stop on unsubscribe with the status flag cleared.
+class PinnedServerWake(PinnedFixture):
+ config_fields={'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','voice_assistant_mode':1,'esphome_noise_key':'','esphome_server_wake':True}
+ def test_pinned_server_wake_streams_and_stops(self):
+  self.s.close();time.sleep(.05)
+  async def run():
+   client=APIClient('127.0.0.1',self.port,client_info='LibreEcho server wake acceptance',provide_time=False)
+   try:
+    await client.connect(login=True)
+    starts=[];stops=[];audio=[]
+    async def start(conversation,flags,settings,wake):starts.append((conversation,flags,wake));return 0
+    async def stop(abort):stops.append(abort)
+    async def capture(data,data2):audio.append((data,data2))
+    async def done(result):pass
+    unsubscribe=client.subscribe_voice_assistant(handle_start=start,handle_stop=stop,handle_audio=capture,handle_announcement_finished=done)
+    a=self.adapters['wake'];a.wait_streams()
+    for i in range(0,6400,320):a.samples(i)
+    await self.wait_for(lambda:len(starts)==1,'server-wake run start without any device wake event')
+    self.assertEqual(starts[0][1],3,'USE_VAD|USE_WAKE_WORD');self.assertFalse(starts[0][2],'no wake phrase is sent in server-wake mode')
+    await self.wait_for(lambda:len(audio)>0,'continuous mic audio while the server run is open')
+    self.assertTrue(json.loads((self.p/'status.json').read_text())['server_wake_streaming'])
+    # Mic mute must end the server run (the client delivers the stop while still subscribed), and unmute must reopen it.
+    client.switch_command(2,True);await self.wait_for(lambda:stops==[True],'server-wake stop on microphone mute')
+    await asyncio.sleep(.1);self.assertFalse(json.loads((self.p/'status.json').read_text())['server_wake_streaming'])
+    client.switch_command(2,False);await self.wait_for(lambda:len(starts)==2,'server-wake restart after unmute')
+    self.assertEqual(starts[1][1],3);self.assertFalse(starts[1][2])
+    unsubscribe();await client.disconnect()
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),12))
 if __name__=='__main__':unittest.main(defaultTest='PinnedFixture')
