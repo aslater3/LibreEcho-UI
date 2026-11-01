@@ -60,8 +60,9 @@ configuration. It reuses the audio stream the satellite already reads for its
 ring, so it opens no second capture. No audio leaves the device for it. It is
 published at most every 5 s, and only when the level moves by 2 dB or more, or
 once a minute. It reads missing while the microphone is muted or the stream is
-stale. Playback is echo-cancelled before the level is measured, so the sensor
-mostly reflects sound in the room rather than the device's own output.
+stale. The level is taken after the echo canceller, which does not remove the
+device's own playback: on bench tests a 2 s test tone at volume 30 raised the
+reading by about 25 dB, so playing sound on the device does show in the sensor.
 
 The four hardware buttons are offered as event entities, one each: **Volume up
 button**, **Volume down button**, **Microphone mute button** and **Action
