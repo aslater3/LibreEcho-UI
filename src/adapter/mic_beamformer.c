@@ -525,3 +525,11 @@ int le_mic_mix_single_lane(unsigned int mic_mask)
             return (int)i;
     return -1;
 }
+
+int16_t le_mic_mix_single(const int16_t logical[LE_VOICE_LOGICAL_CHANNELS],
+                          unsigned int mic_mask, int lane)
+{
+    if (lane < 0 || lane >= LE_VOICE_LOGICAL_CHANNELS)
+        lane = le_mic_mix_single_lane(mic_mask);
+    return lane < 0 ? 0 : logical[lane];
+}

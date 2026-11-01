@@ -216,6 +216,7 @@ int main(void)
     CHECK(strstr(response, "\"vad\":\"native-energy-baseline\"") != NULL);
     CHECK(strstr(response, "\"wake_word\":false") != NULL);
     CHECK(strstr(response, "\"microphone_mix\":\"beamformer\"") != NULL);
+    CHECK(strstr(response, "\"microphone_lane\":-1") != NULL);
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
     CHECK(adapter != NULL);
@@ -236,6 +237,32 @@ int main(void)
                           response, sizeof(response)) == LE_ADAPTER_OK);
     CHECK(strstr(response, "\"microphone_mix\":\"average\"") != NULL);
     puts("micd: microphone mix mode is set live and reported in status");
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_lane", "{\"lane\":5}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"microphone_lane\":5") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "status", "{}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"microphone_lane\":5") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_lane", "{\"lane\":7}",
+                          response, sizeof(response)) ==
+          LE_ADAPTER_ERR_REJECTED);
+    CHECK(strstr(response, "invalid microphone lane") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_lane", "{\"lane\":-1}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"microphone_lane\":-1") != NULL);
+    puts("micd: array lane is set live, reported in status and bounded to -1..6");
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
     CHECK(adapter != NULL);

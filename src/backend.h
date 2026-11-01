@@ -31,7 +31,9 @@ struct le_audio_state { int volume, microphone_gain, notification_volume, muted,
  /* Music volume leveling (audio engine AVL); 1 = on, the stock default. */
  int volume_leveling;
  /* Mic array mixing mode for the voice stream: beamformer (default), average or single. */
- char microphone_mix[16]; };
+ char microphone_mix[16];
+ /* Array lane (0-6) used by the single mode; -1 is automatic (lowest selected lane). */
+ int microphone_lane; };
 /*
  * Spotify Connect. installed is 0 when the librespot-based daemon is not in
  * the image, which is different from being switched off: the UI must be able
@@ -190,7 +192,7 @@ void le_backend_destroy(struct le_backend *b);
 const char *le_backend_mode(struct le_backend *b);
 const char *le_result_code(int rc);
 int le_get_system_status(struct le_backend*,struct le_system_status*); int le_get_device_info(struct le_backend*,struct le_device_info*);
-int le_get_audio_state(struct le_backend*,struct le_audio_state*); int le_set_volume(struct le_backend*,int); int le_set_microphone_gain(struct le_backend*,int); int le_set_microphone_muted(struct le_backend*,int); int le_play_test_tone(struct le_backend*); int le_set_tts_voice(struct le_backend*,const char*); int le_set_volume_leveling(struct le_backend*,int); int le_set_microphone_mix(struct le_backend*,const char*); int le_announce(struct le_backend*,const char*); int le_stop_speech(struct le_backend*); int le_start_noise(struct le_backend*,const char*,int,int); int le_stop_noise(struct le_backend*); int le_simulate_audio(struct le_backend*,const char*); int le_radio_play(struct le_backend*,const char*); int le_radio_stop(struct le_backend*); int le_radio_playing(struct le_backend*,struct le_radio_status*);
+int le_get_audio_state(struct le_backend*,struct le_audio_state*); int le_set_volume(struct le_backend*,int); int le_set_microphone_gain(struct le_backend*,int); int le_set_microphone_muted(struct le_backend*,int); int le_play_test_tone(struct le_backend*); int le_set_tts_voice(struct le_backend*,const char*); int le_set_volume_leveling(struct le_backend*,int); int le_set_microphone_mix(struct le_backend*,const char*); int le_set_microphone_lane(struct le_backend*,int); int le_announce(struct le_backend*,const char*); int le_stop_speech(struct le_backend*); int le_start_noise(struct le_backend*,const char*,int,int); int le_stop_noise(struct le_backend*); int le_simulate_audio(struct le_backend*,const char*); int le_radio_play(struct le_backend*,const char*); int le_radio_stop(struct le_backend*); int le_radio_playing(struct le_backend*,struct le_radio_status*);
 int le_start_noise_ex(struct le_backend*,const struct le_noise_request*);
 int le_get_led_state(struct le_backend*,struct le_led_state*); int le_set_led_colour(struct le_backend*,uint8_t,uint8_t,uint8_t); int le_set_led_brightness(struct le_backend*,int); int le_set_led_visualizer_enabled(struct le_backend*,int); int le_set_boot_led(struct le_backend*,const struct le_led_profile*); int le_set_led_profile(struct le_backend*,const char*,const struct le_led_profile*); int le_set_led_night(struct le_backend*,int,int,int); int le_run_led_test(struct le_backend*); int le_get_spotify_state(struct le_backend*,struct le_spotify_state*); int le_set_spotify_enabled(struct le_backend*,int); int le_get_light_state(struct le_backend*,struct le_light_state*);
 /* auto_off_minutes: 0, 5, 10, 30 or 60; -1 leaves the stored value unchanged. */

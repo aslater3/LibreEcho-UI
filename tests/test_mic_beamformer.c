@@ -297,6 +297,15 @@ static void test_mix_modes(void)
     CHECK(le_mic_mix_single_lane(LE_BEAM_DEFAULT_MIC_MASK) == 0);
     CHECK(le_mic_mix_single_lane(1U << 4) == 4);
     CHECK(le_mic_mix_single_lane(0) == -1);
+    {
+        int16_t lanes[LE_VOICE_LOGICAL_CHANNELS] = {10, 20, 30, 40, 50, 60, 70};
+
+        CHECK(le_mic_mix_single(lanes, LE_BEAM_DEFAULT_MIC_MASK, -1) == 10);
+        CHECK(le_mic_mix_single(lanes, LE_BEAM_DEFAULT_MIC_MASK, 4) == 50);
+        CHECK(le_mic_mix_single(lanes, LE_BEAM_DEFAULT_MIC_MASK, 6) == 70);
+        CHECK(le_mic_mix_single(lanes, LE_BEAM_DEFAULT_MIC_MASK, 9) == 10);
+        CHECK(le_mic_mix_single(lanes, 0, -1) == 0);
+    }
     puts("mic-beamformer: mix modes parse, average and pick a lane");
 }
 
