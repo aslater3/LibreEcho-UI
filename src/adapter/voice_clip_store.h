@@ -14,7 +14,7 @@
  * fixed-width name sorts chronologically, so the oldest clip is the smallest
  * name and eviction needs no timestamps.
  *
- * The directory defaults to /data/libreecho/voice-clips. The environment
+ * The directory defaults to the device path below. The environment
  * variable LIBREECHO_VOICE_CLIP_DIR overrides it; that is the test hook used
  * to exercise the store against /tmp on a device without a /data write.
  */
