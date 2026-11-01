@@ -24,11 +24,16 @@ TTS_SOCKET=${TTS_SOCKET:-/run/libreecho/tts.sock}
 AGENT_DEPENDENCY_TIMEOUT_SECONDS=${AGENT_DEPENDENCY_TIMEOUT_SECONDS:-90}
 AGENT_DEPENDENCY_POLL_SECONDS=${AGENT_DEPENDENCY_POLL_SECONDS:-1}
 FEATURE_POLICY_FILE=${FEATURE_POLICY_FILE:-/etc/libreecho/feature-policy}
+LOCKFILE=${LOCKFILE:-/run/libreecho-agentd.lock}
+AGENT_LOCK_TIMEOUT_SECONDS=${AGENT_LOCK_TIMEOUT_SECONDS:-180}
 case "$AGENT_DEPENDENCY_TIMEOUT_SECONDS" in
     ''|*[!0-9]*) AGENT_DEPENDENCY_TIMEOUT_SECONDS=90 ;;
 esac
 case "$AGENT_DEPENDENCY_POLL_SECONDS" in
     ''|*[!0-9]*|0) AGENT_DEPENDENCY_POLL_SECONDS=1 ;;
+esac
+case "$AGENT_LOCK_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*) AGENT_LOCK_TIMEOUT_SECONDS=180 ;;
 esac
 
 mount_runtime() {
@@ -145,6 +150,31 @@ wait_for_dependency_sockets() {
     done
 }
 
+# One start/stop/restart at a time. Two overlapping restarts (a settings save
+# while watchdogd restarts the assistant, or two saves in a row) both stopped,
+# both saw nothing running during the dependency wait and both launched a
+# daemon, so every utterance was answered twice. A later caller waits for the
+# one in progress and then sees its result: start finds the daemon running,
+# restart replaces it. The kernel drops an flock when its holder dies, so a
+# killed script cannot leave the lock behind. The daemon must not inherit fd 9,
+# or it would hold the lock for its whole life; the launch lines close it.
+# Without flock the script runs unlocked, as it did before.
+with_lifecycle_lock() {
+    command -v flock >/dev/null 2>&1 || { "$@"; return; }
+    mkdir -p "$(dirname "$LOCKFILE")"
+    exec 9>>"$LOCKFILE"
+    flock -w "$AGENT_LOCK_TIMEOUT_SECONDS" 9 || {
+        echo "libreecho-agentd: another start/stop did not finish within ${AGENT_LOCK_TIMEOUT_SECONDS}s" >&2
+        return 1
+    }
+    "$@"
+}
+
+restart_service() {
+    stop_service
+    start_service
+}
+
 start_service() {
     if is_running; then echo "libreecho-agentd already running"; return 0; fi
     mount_runtime || return 1
@@ -169,15 +199,15 @@ start_service() {
     ARGS=${ARGS:---socket $SOCKET --curl $CURL}
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS \
-            </dev/null >>"$LOGFILE" 2>&1
+            </dev/null >>"$LOGFILE" 2>&1 9>&-
     else
         # setsid detaches the child from this shell's process group. Without it
         # the daemon dies with the shell that started it -- which is why a
         # restart issued over adb or ssh appeared to work and then evaporated.
         if command -v setsid >/dev/null 2>&1; then
-            setsid "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+            setsid "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 9>&- &
         else
-            "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 &
+            "$DAEMON" $ARGS </dev/null >>"$LOGFILE" 2>&1 9>&- &
         fi
         launched=$!
         echo "$launched" >"$PIDFILE"
@@ -220,9 +250,9 @@ stop_service() {
 }
 
 case "${1:-}" in
-    start) start_service ;;
-    stop) stop_service ;;
-    restart) stop_service; start_service ;;
+    start) with_lifecycle_lock start_service ;;
+    stop) with_lifecycle_lock stop_service ;;
+    restart) with_lifecycle_lock restart_service ;;
     status) if is_running; then echo "running"; else echo "stopped"; exit 1; fi ;;
     *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
 esac
