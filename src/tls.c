@@ -603,7 +603,7 @@ int le_tls_check_ca_bundle(const char *pem, size_t len)
     if (mbedtls_x509_crt_parse(&crt, buf, len + 1))
         goto done;
     for (c = &crt; c && c->raw.len; c = c->next) {
-        if (!c->ca_istrue)
+        if (mbedtls_x509_crt_get_ca_istrue(c) != 1)
             goto done;          /* a leaf certificate is not a trust anchor */
         count++;
     }
