@@ -1374,6 +1374,55 @@ key id, the MAC (constant time), the type and a time window, and keeps a
 64-entry replay cache. That cache fails closed: when it is full of in-window
 messages, anything as old as an evicted entry is refused.
 
+#### Device groups and group control (#448)
+
+An owner groups LibreEcho devices and sends one command to the whole group.
+Groups are kept on the device that made them, in `peer-groups` beside the
+configuration file (mode 0600, written atomically). A member is a device as
+shown in the device list (#413): its IPv4 `address` and HTTP `port`, and a
+display `name`. A device holds at most 8 groups of 8 members each.
+
+**GET /api/v1/network/groups** returns `{"groups": [{"id", "name", "members": [{"address", "port", "name"}]}]}`.
+
+**POST /api/v1/network/groups** (CSRF required) with `{"name"}` creates an empty
+group (1 to 47 characters, no control characters) and returns the list.
+
+**DELETE /api/v1/network/groups/{id}** removes a group and returns the list.
+
+**POST /api/v1/network/groups/{id}/members** (CSRF required) with `{"address", "port", "name"}`
+adds a device. A bad IPv4 address, a port outside 1 to 65535, an empty name, a
+full group or a device already listed answers 400.
+
+**POST /api/v1/network/groups/{id}/command** (CSRF required) with
+`{"action": "mute" | "unmute" | "stop"}` sends the command to every member.
+`mute` and `unmute` set the microphone mute. `stop` stops speech and radio
+playback. A member on this device is applied directly. Every other member gets
+a signed packet, `POST /api/v1/peer/command`, of type `group-command`, sealed
+with the house key (#450). The answer holds one `result` per member:
+
+| `result` | Meaning |
+|---|---|
+| `applied` | The member verified the packet and applied the command. |
+| `unpaired` | The member has no house key, another key, or runs older firmware. |
+| `failed` | The member answered, but not with a successful result. |
+| `unreachable` | No answer inside the fan-out budget (about 2 seconds for the whole group). |
+
+The owner must be paired (409 `not_paired` otherwise). The answer holds
+`{"group", "action", "members": [...], "applied", "total"}`.
+
+**POST /api/v1/peer/command** is device-to-device and needs no session or CSRF
+token, like the proof endpoint; the signed packet is its credential. The body is the sealed packet
+`LESIG1 <key_id> group-command <ts> <nonce> <mac>` newline and then the action
+name. A packet that does not verify, falls outside a 300 second window or was
+already accepted answers 401 `not_verified`. A device without a key answers
+409 `not_paired`. Other methods are not exempt from authentication. The clocks
+must agree within the window; a device whose clock is far off reports
+`unreachable` or `unpaired`, never a silent success.
+
+Grouping is a first slice. Devices can be grouped and commanded from the
+device API. Ring, announce and volume commands, the Web UI for groups, and
+Home Assistant entities for each group are not in this release.
+
 #### GET /api/v1/network/wifi/scan
 
 Scan for WiFi networks. Results are ordered with 5 GHz networks first, then by

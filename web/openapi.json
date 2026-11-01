@@ -4249,6 +4249,525 @@
      }
     }
    }
+  },
+  "/network/groups": {
+    "get": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "List device groups",
+      "description": "Device groups (#448) with their members. Owner only; needs a session like the rest of the API.",
+      "responses": {
+        "200": {
+          "description": "Groups",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "groups"
+                    ],
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/DeviceGroup"
+                        }
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Create a device group",
+      "description": "Creates an empty group with the given name (1 to 47 characters, no control characters). Returns the groups.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 47
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Groups",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "groups"
+                    ],
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/DeviceGroup"
+                        }
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/network/groups/{id}": {
+    "delete": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Delete a device group",
+      "description": "Removes the group and its member list. Returns the remaining groups.",
+      "responses": {
+        "200": {
+          "description": "Groups",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "groups"
+                    ],
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/DeviceGroup"
+                        }
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ]
+    }
+  },
+  "/network/groups/{id}/members": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Add a device to a group",
+      "description": "Adds a device by its address and HTTP port, as shown in the device list (#413). Refused for a bad IPv4 address, a port outside 1 to 65535, an empty name, a full group (8 members) or a device already listed.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "address",
+                "port",
+                "name"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "maxLength": 15
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 63
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Groups",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "groups"
+                    ],
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/DeviceGroup"
+                        }
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ]
+    }
+  },
+  "/network/groups/{id}/command": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Send a group command",
+      "description": "Sends mute, unmute or stop to every member. The device applies it to itself directly, and sends a signed group-command packet (#450 house key) to each other member. Requires this device to be paired. Answers with each member result: applied, unpaired (no key, another key, or older firmware), failed, or unreachable. The whole fan-out is bounded to about 2 seconds.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "mute",
+                    "unmute",
+                    "stop"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Command result per member",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "$ref": "#/components/schemas/GroupCommandResult"
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ]
+    }
+  },
+  "/peer/command": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Apply a signed group command",
+      "description": "Device-to-device (#448). Needs no session: the body is a sealed packet of type group-command (LESIG1 header, then the action name) made with the house key. A packet that does not verify, is outside the 300 second window, or was already accepted answers 401 not_verified. A device without a key answers 409 not_paired. Other methods are not exempt from authentication.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Applied",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string"
+                      },
+                      "applied": {
+                        "type": "boolean"
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "security": []
+    }
   }
  },
  "components": {
@@ -5174,6 +5693,105 @@
       }
      }
     ]
+   },
+   "DeviceGroup": {
+     "type": "object",
+     "required": [
+       "id",
+       "name",
+       "members"
+     ],
+     "properties": {
+       "id": {
+         "type": "integer"
+       },
+       "name": {
+         "type": "string"
+       },
+       "members": {
+         "type": "array",
+         "items": {
+           "type": "object",
+           "required": [
+             "address",
+             "port",
+             "name"
+           ],
+           "properties": {
+             "address": {
+               "type": "string"
+             },
+             "port": {
+               "type": "integer"
+             },
+             "name": {
+               "type": "string"
+             }
+           }
+         }
+       }
+     }
+   },
+   "GroupCommandResult": {
+     "type": "object",
+     "required": [
+       "group",
+       "action",
+       "members",
+       "applied",
+       "total"
+     ],
+     "properties": {
+       "group": {
+         "type": "integer"
+       },
+       "action": {
+         "type": "string",
+         "enum": [
+           "mute",
+           "unmute",
+           "stop"
+         ]
+       },
+       "members": {
+         "type": "array",
+         "items": {
+           "type": "object",
+           "required": [
+             "name",
+             "address",
+             "port",
+             "result"
+           ],
+           "properties": {
+             "name": {
+               "type": "string"
+             },
+             "address": {
+               "type": "string"
+             },
+             "port": {
+               "type": "integer"
+             },
+             "result": {
+               "type": "string",
+               "enum": [
+                 "applied",
+                 "unpaired",
+                 "failed",
+                 "unreachable"
+               ]
+             }
+           }
+         }
+       },
+       "applied": {
+         "type": "integer"
+       },
+       "total": {
+         "type": "integer"
+       }
+     }
    }
   }
  }

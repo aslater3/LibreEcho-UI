@@ -4,6 +4,7 @@
 #include "auth.h"
 #include "event_bus.h"
 #include "peer_auth.h"
+#include "peer_group.h"
 #include <stddef.h>
 struct api_request{char method[8],path[256],host[256],origin[256],authorization[256],csrf[96],confirm[96];const char*body;size_t body_len;int https;};
 /*
@@ -70,7 +71,7 @@ int discoverable,http_port,http_lan,discovery_fd;long discovery_retry,discovery_
 /* Device pairing (#450). peer_key is the house key shared by paired devices,
    loaded on first use from peer_key_path (peer.key beside the config file).
    Without a key this device signs nothing and trusts no device. */
-struct le_peer_key peer_key;char peer_key_path[512];int peer_key_loaded;};
+struct le_peer_key peer_key;char peer_key_path[512];int peer_key_loaded;/* Replay cache for group commands (#448). */struct le_peer_replay peer_replay;/* Device groups (#448), kept in peer-groups beside the config file. */struct le_group_set groups;char groups_path[512];int groups_loaded;};
 int api_request_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_bootstrap_required(const struct api_context*);
 void api_set_https_active(struct api_context*,int);

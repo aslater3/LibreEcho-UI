@@ -53,4 +53,8 @@ int le_peer_proof_verify(const struct le_peer_key *key, int status, const char *
  * is LE_PEER_TRUST_OFF and nothing is sent. */
 void le_peer_verify_all(const struct le_peer_key *key, const struct le_peer *list, size_t count,
                         const int *skip, int timeout_ms, int *trust);
+/* One bounded POST to a device's peer endpoint (#448 group commands): returns
+ * 0 with *status and the reply body (headers stripped) filled in, or -1 when
+ * the device is unreachable or does not answer within timeout_ms. */
+int le_peer_post(const char *address, unsigned int port, const char *path, const char *body, size_t body_len, int timeout_ms, int *status, char *reply, size_t reply_capacity);
 #endif

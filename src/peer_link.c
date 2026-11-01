@@ -165,3 +165,70 @@ void le_peer_verify_all(const struct le_peer_key *key, const struct le_peer *lis
     }
     for (i = 0; i < count; i++) if (probes[i].fd >= 0) { close(probes[i].fd); probes[i].fd = -1; }
 }
+
+/* One bounded POST to another device's peer endpoint (#448). Returns 0 when
+   a status line came back, -1 when the device could not be reached or did
+   not answer inside timeout_ms. reply receives at most reply_capacity-1
+   bytes of the response. Blocking only as long as timeout_ms. */
+int le_peer_post(const char *address, unsigned int port, const char *path, const char *body, size_t body_len, int timeout_ms, int *status, char *reply, size_t reply_capacity)
+{
+    struct sockaddr_in a;
+    char head[512];
+    size_t sent = 0, used = 0, total;
+    long long deadline;
+    int fd, n, code = 0;
+    if (status) *status = 0;
+    if (reply && reply_capacity) reply[0] = 0;
+    if (!address || !path || !body || !status || !reply || reply_capacity < 2 || !port || port > 65535) return -1;
+    if (timeout_ms <= 0) timeout_ms = 800;
+    deadline = now_ms();
+    if (deadline < 0) return -1;
+    deadline += timeout_ms;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((unsigned short)port);
+    if (inet_pton(AF_INET, address, &a.sin_addr) != 1) return -1;
+    n = snprintf(head, sizeof(head), "POST %s HTTP/1.1\r\nHost: %s:%u\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %zu\r\nAccept: application/json\r\nConnection: close\r\n\r\n", path, address, port, body_len);
+    if (n < 0 || (size_t)n >= sizeof(head) || body_len > 4096) return -1;
+    total = (size_t)n + body_len;
+    fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    if (connect(fd, (const struct sockaddr *)&a, sizeof(a)) < 0 && errno != EINPROGRESS) { close(fd); return -1; }
+    /* Write the request, then read the reply until the peer closes. */
+    for (;;) {
+        struct pollfd pf;
+        long long left = deadline - now_ms();
+        int rc;
+        if (left <= 0) { close(fd); return -1; }
+        pf.fd = fd; pf.events = sent < total ? POLLOUT : POLLIN; pf.revents = 0;
+        rc = poll(&pf, 1, (int)left);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0) { close(fd); return -1; }
+        if (sent < total) {
+            int soerr = 0;
+            socklen_t len = sizeof(soerr);
+            ssize_t w;
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) || soerr) { close(fd); return -1; }
+            if (sent < (size_t)n) w = send(fd, head + sent, (size_t)n - sent, MSG_NOSIGNAL);
+            else w = send(fd, body + (sent - (size_t)n), total - sent, MSG_NOSIGNAL);
+            if (w < 0) { if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue; close(fd); return -1; }
+            sent += (size_t)w;
+        } else {
+            ssize_t r = recv(fd, reply + used, reply_capacity - 1 - used, 0);
+            if (r < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            if (r < 0) { close(fd); return -1; }
+            if (r == 0) break;
+            used += (size_t)r;
+            if (used >= reply_capacity - 1) break;
+        }
+    }
+    close(fd);
+    reply[used] = 0;
+    if (sscanf(reply, "HTTP/1.%*1[01] %3d", &code) != 1) return -1;
+    *status = code;
+    {
+        char *b = strstr(reply, "\r\n\r\n");
+        if (b) memmove(reply, b + 4, strlen(b + 4) + 1);
+    }
+    return 0;
+}
