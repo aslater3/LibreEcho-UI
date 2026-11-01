@@ -84,6 +84,10 @@ struct le_timer {
     unsigned int repeat_days;
     int hour;
     int minute;
+    /* A reminder is an alarm record that is spoken instead of rung: at its
+       due time timerd says the label and does not enter the ringing state.
+       Reminders always keep hour and minute, repeating or not. */
+    int reminder;
     char label[LE_TIMER_LABEL_MAX];
 };
 
@@ -137,6 +141,23 @@ int le_timer_next_repeat_epoch(long long now_epoch, int hour, int minute,
 int le_timer_add_repeat_alarm(struct le_timer_set *set, int hour, int minute,
                               unsigned int days, const char *label,
                               long long now_epoch, unsigned int *id);
+
+/*
+ * Add a spoken reminder at hour:minute. `days` is a repeat mask as for alarms;
+ * zero means it fires once, at the next occurrence of that time. Refused while
+ * the clock is not credible, or when the time or days are out of range.
+ */
+int le_timer_add_reminder(struct le_timer_set *set, int hour, int minute,
+                          unsigned int days, const char *label,
+                          long long now_epoch, unsigned int *id);
+
+/* Restore a persisted reminder. Like a repeating alarm, a reminder that came
+   due while the device was down is moved on (repeating) or missed (one-off). */
+int le_timer_restore_reminder(struct le_timer_set *set,
+                              unsigned int restore_id, long long due_epoch,
+                              int hour, int minute, unsigned int days,
+                              const char *label, long long now_epoch,
+                              long long now_monotonic_ms, unsigned int *id);
 
 /* Restore a persisted repeating alarm. A record that came due while the device
    was down is advanced to its next occurrence instead of being reported as
@@ -199,6 +220,10 @@ int le_timer_snooze_ringing(struct le_timer_set *set, long long now_epoch);
  */
 int le_timer_step(struct le_timer_set *set, long long now_monotonic_ms,
                   long long now_epoch, unsigned int *fired, size_t fired_max);
+
+/* Whether a fired timer id is a reminder. Reminders are spoken by the caller
+   and then dismissed at once, so they never sit in the ringing state. */
+int le_timer_is_reminder(const struct le_timer_set *set, unsigned int id);
 
 int le_timer_ringing_count(const struct le_timer_set *set);
 int le_timer_active_count(const struct le_timer_set *set);

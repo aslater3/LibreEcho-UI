@@ -1141,6 +1141,7 @@ static int handle_timer_intent(struct agent_state *state,
     char speech[LE_TIMER_INTENT_SPEECH_MAX];
     /* Alarm-only cancels must never reach a countdown: the daemon filters. */
     const char *alarm_filter = "{\"kind\":\"alarm\"}";
+    const char *reminder_filter = "{\"kind\":\"reminder\"}";
     const char *filter = "{}";
     int ringing = 0;
     int count = 0;
@@ -1162,6 +1163,8 @@ static int handle_timer_intent(struct agent_state *state,
     (void)json_get_int(response, "ringing", &ringing);
     if (intent.kind == LE_TIMER_INTENT_CANCEL && intent.alarm_only)
         filter = alarm_filter;
+    if (intent.kind == LE_TIMER_INTENT_CANCEL && intent.reminder_only)
+        filter = reminder_filter;
 
     switch (intent.kind) {
     case LE_TIMER_INTENT_DISMISS:
@@ -1235,6 +1238,27 @@ static int handle_timer_intent(struct agent_state *state,
         if (adapter_call(state->timer_socket, 1000, "add_alarm", args, response,
                          sizeof(response)) != LE_ADAPTER_OK) {
             snprintf(speech, sizeof(speech), "I could not set that alarm.");
+            snprintf(spoken, spoken_size, "%s", speech);
+            (void)play_sentence(state, speech);
+            return 1;
+        }
+        break;
+    }
+
+    case LE_TIMER_INTENT_REMINDER: {
+        char label[LE_TIMER_INTENT_LABEL_MAX * 2];
+
+        /* A reminder with no usable am or pm is asked about, not guessed. */
+        if (intent.alarm_hour < 0)
+            break;
+        json_escape(label, sizeof(label), intent.label);
+        snprintf(args, sizeof(args),
+                 "{\"hour\":%d,\"minute\":%d,\"days\":%u,\"label\":\"%s\"}",
+                 intent.alarm_hour, intent.alarm_minute, intent.alarm_days,
+                 label);
+        if (adapter_call(state->timer_socket, 1000, "add_reminder", args,
+                         response, sizeof(response)) != LE_ADAPTER_OK) {
+            snprintf(speech, sizeof(speech), "I could not set that reminder.");
             snprintf(spoken, spoken_size, "%s", speech);
             (void)play_sentence(state, speech);
             return 1;

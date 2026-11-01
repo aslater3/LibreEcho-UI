@@ -610,6 +610,47 @@ case "$out" in
     *'"ok":false'*) ;;
     *) echo "FAIL: unknown kind filter was accepted: $out"; exit 1 ;;
 esac
+# Reminders by voice: set at a clock time, listed as a reminder rather than an
+# alarm or a countdown, and cancelled by voice without touching a countdown.
+out=$(call "$agent_sock" respond '{"text":"remind me to take the pills at 6pm"}')
+case "$out" in
+    *'Reminder set for 6:00 pm: take the pills.'*) ;;
+    *) echo "FAIL: reminder not confirmed: $out"; cat "$dir/agentd.log"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.load(sys.stdin)["data"]["timers"]
+reminders = [t for t in timers if t["kind"] == "reminder"]
+assert len(reminders) == 1, timers
+assert reminders[0]["label"] == "take the pills" and reminders[0]["state"] == "pending", timers
+assert reminders[0]["hour"] == 18 and reminders[0]["minute"] == 0, timers
+assert not [t for t in timers if t["kind"] == "alarm"], timers
+' || { echo "FAIL: reminder not in the schedule as a reminder: $out"; exit 1; }
+out=$(call "$agent_sock" respond '{"text":"set a timer for ten minutes"}')
+case "$out" in
+    *'"ok":true'*) ;;
+    *) echo "FAIL: countdown beside the reminder rejected: $out"; exit 1 ;;
+esac
+out=$(call "$agent_sock" respond '{"text":"cancel my reminder"}')
+case "$out" in
+    *'Reminder cancelled.'*) ;;
+    *) echo "FAIL: reminder cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.load(sys.stdin)["data"]["timers"]
+assert not [t for t in timers if t["kind"] == "reminder"], timers
+assert [t for t in timers if t["kind"] == "countdown"], timers
+' || { echo "FAIL: reminder cancel touched a countdown or left the reminder: $out"; exit 1; }
+out=$(call "$timer_sock" next '{"kind":"alarm"}')
+case "$out" in
+    *'"count":0'*) ;;
+    *) echo "FAIL: alarm filter matched a reminder or countdown: $out"; exit 1 ;;
+esac
+echo "  reminder set and cancelled by voice, countdown untouched: ok"
+
 out=$(call "$agent_sock" respond '{"text":"cancel all timers and alarms"}')
 out=$(call "$timer_sock" status '{}')
 printf '%s' "$out" | python3 -c '
