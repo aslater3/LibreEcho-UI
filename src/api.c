@@ -14,6 +14,8 @@
 #include "boot_control.h"
 #include "json.h"
 #include "wake_diagnostic.h"
+#include "wake_model.h"
+#include "wake_model_store.h"
 #include "logd.h"
 #include "log.h"
 #include "service_env.h"
@@ -2929,7 +2931,70 @@ static int handle_home_assistant(struct api_context *c,const struct api_request 
     } \
 } while (0)
 int api_request_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){return security(c,q,r)&&(!changing(q->method)||!q->body_len||body_ok(q,r));}
-void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;(void)voice_pipeline_restart_reap();if(!api_request_authorize(c,q,r))return;if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":setup_failure_message(c));return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"os_version\":\"%s\",\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\",\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",LE_OS_VERSION_STRING,c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false",c->ui_theme,c->color_mode);return;}api_handle_inner(c,q,r);}
+/* Owner-staged wake models (docs/OPERATIONS.md). Listing is read-only; upload
+   is chunked because a model is megabytes and a request body is 16 KiB. */
+#define LE_WAKE_MODEL_PREFIX "/api/v1/wake-word/models"
+#define LE_WAKE_MODEL_B64_MAX 11000
+struct wake_model_listing{char*body;size_t used,cap;int first,truncated;};
+static int wake_model_paths_for(const struct api_context*c,struct le_wake_model_paths*p){return c->config_path[0]&&!le_wake_model_paths_from_config(c->config_path,p)?0:-1;}
+static void wake_model_listed(const struct le_wake_model_entry*e,void*opaque){struct wake_model_listing*s=opaque;char name[160],reason[320];int n;json_escape(name,sizeof(name),e->name);json_escape(reason,sizeof(reason),e->reason);n=snprintf(s->body+s->used,s->cap-s->used,"%s{\"name\":\"%s\",\"valid\":%s,\"reason\":\"%s\",\"bytes\":%lu,\"selected\":%s}",s->first?"":",",name,e->valid?"true":"false",reason,e->bytes,e->selected?"true":"false");if(n<0||(size_t)n>=s->cap-s->used){s->truncated=1;return;}s->used+=(size_t)n;s->first=0;}
+static void wake_models_get(struct api_context*c,struct api_response*r){struct le_wake_model_paths p;struct wake_model_listing s;char selected[LE_WAKE_MODEL_NAME_MAX]="",sel_json[LE_WAKE_MODEL_NAME_MAX+4]="null";int sel;s.cap=65536;s.body=malloc(s.cap);if(!s.body){err(r,503,LE_IO,"Wake-word models are not available");return;}s.used=0;s.first=1;s.truncated=0;if(wake_model_paths_for(c,&p)){free(s.body);err(r,503,LE_IO,"Wake-word models are not available");return;}sel=le_wake_model_selection_read(&p,selected,sizeof(selected));if(sel==1)snprintf(sel_json,sizeof(sel_json),"\"%s\"",selected);s.body[0]='\0';(void)le_wake_model_scan(&p,wake_model_listed,&s);s.body[s.used]='\0';out(r,200,"{\"ok\":true,\"data\":{\"stock\":{\"name\":\"%s\",\"wake_word\":\"%s\"},\"selected\":%s,\"selection_error\":%s,\"models\":[%s],\"truncated\":%s,\"limits\":{\"files\":3,\"file_bytes_max\":%lu,\"chunk_bytes_max\":%lu}},\"error\":null}",LE_WAKE_MODEL_STOCK_NAME,LE_WAKE_MODEL_STOCK_PHRASE,sel_json,sel<0?"true":"false",s.body,s.truncated?"true":"false",(unsigned long)LE_WAKE_MODEL_MAX_BYTES,(unsigned long)LE_WAKE_MODEL_STAGE_CHUNK_MAX);free(s.body);}
+static int wake_model_route(struct api_context*c,const struct api_request*q,struct api_response*r){
+    struct le_wake_model_paths p;char name[LE_WAKE_MODEL_NAME_MAX+1],file[32],text[LE_WAKE_MODEL_B64_MAX+1],reason[320],esc[400];const char*rest,*tail,*slash;unsigned char bytes[LE_WAKE_MODEL_STAGE_CHUNK_MAX];long long offset;unsigned long staged=0;int rc,decoded;size_t n;
+    if(!strcmp(q->path,"/api/v1/wake-word/model")){
+        if(strcmp(q->method,"PUT")){method_not_allowed(r);return 1;}
+        if(wake_model_paths_for(c,&p)){err(r,503,LE_IO,"Wake-word models are not available");return 1;}
+        strcpy(name,"\x01");
+        if(json_get_string(q->body,"model",name,sizeof(name))<0||!strcmp(name,"\x01")){err(r,400,LE_INVALID,"The model field is required; use alexa_v0.1 for the stock model");return 1;}
+        rc=le_wake_model_select(&p,name);
+        if(rc==LE_WAKE_MODEL_STORE_OK){char data[640];int stock=!name[0]||!strcmp(name,LE_WAKE_MODEL_STOCK_NAME);json_escape(esc,sizeof(esc),name);snprintf(data,sizeof(data),"{\"selected\":\"%s\",\"restart_required\":true}",esc);if(stock)snprintf(data,sizeof(data),"{\"selected\":null,\"restart_required\":true}");ok(r,data);return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_NOT_FOUND){err(r,404,LE_NOT_SUPPORTED,"No model with that name is installed");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_INVALID){err(r,400,LE_INVALID,"The model name is invalid or the folder does not pass the model check");return 1;}
+        err(r,503,LE_IO,"The wake-word selection could not be saved");return 1;
+    }
+    n=strlen(LE_WAKE_MODEL_PREFIX);
+    if(strncmp(q->path,LE_WAKE_MODEL_PREFIX,n)||(q->path[n]!='\0'&&q->path[n]!='/'))return 0;
+    if(q->path[n]=='\0'){if(strcmp(q->method,"GET")){method_not_allowed(r);return 1;}wake_models_get(c,r);return 1;}
+    if(wake_model_paths_for(c,&p)){err(r,503,LE_IO,"Wake-word models are not available");return 1;}
+    rest=q->path+n+1;slash=strchr(rest,'/');tail=slash?slash+1:"";
+    {size_t length=slash?(size_t)(slash-rest):strlen(rest);if(length>=sizeof(name)){err(r,404,LE_NOT_SUPPORTED,"No model with that name is installed");return 1;}memcpy(name,rest,length);name[length]='\0';}
+    if(!tail[0]){
+        if(strcmp(q->method,"DELETE")){method_not_allowed(r);return 1;}
+        rc=le_wake_model_delete(&p,name);
+        if(rc==LE_WAKE_MODEL_STORE_OK){char data[640];json_escape(esc,sizeof(esc),name);snprintf(data,sizeof(data),"{\"deleted\":\"%s\"}",esc);ok(r,data);return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_CONFLICT){err(r,409,LE_BUSY,"The selected model cannot be removed; select the stock model first");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_NOT_FOUND){err(r,404,LE_NOT_SUPPORTED,"No model with that name is installed");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_INVALID){err(r,400,LE_INVALID,"The model name is invalid");return 1;}
+        err(r,503,LE_IO,"The model could not be removed");return 1;
+    }
+    if(!strcmp(tail,"commit")){
+        if(strcmp(q->method,"POST")){method_not_allowed(r);return 1;}
+        rc=le_wake_model_commit(&p,name,reason,sizeof(reason));
+        if(rc==LE_WAKE_MODEL_STORE_OK){char data[640];json_escape(esc,sizeof(esc),name);snprintf(data,sizeof(data),"{\"installed\":\"%s\",\"restart_required\":true}",esc);ok(r,data);return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_CONFLICT){err(r,409,LE_BUSY,"A model with this name already exists");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_NOT_FOUND){err(r,404,LE_NOT_SUPPORTED,"Nothing has been uploaded under this name");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_INVALID){json_escape(esc,sizeof(esc),reason[0]?reason:"model rejected");char msg[700];snprintf(msg,sizeof(msg),"Model rejected: %s",esc);err(r,422,LE_INVALID,msg);return 1;}
+        err(r,503,LE_IO,"The model could not be installed");return 1;
+    }
+    if(!strncmp(tail,"files/",6)){
+        if(strcmp(q->method,"POST")){method_not_allowed(r);return 1;}
+        if(strlen(tail+6)>=sizeof(file)){err(r,400,LE_INVALID,"Unknown model file");return 1;}
+        strcpy(file,tail+6);
+        offset=-1;(void)json_get_int64(q->body,"offset",&offset);
+        if(offset<0){err(r,400,LE_INVALID,"offset is required");return 1;}
+        if(json_get_string(q->body,"data",text,sizeof(text))<=0){err(r,400,LE_INVALID,"data (base64) is required");return 1;}
+        decoded=le_wake_model_base64_decode(text,strlen(text),bytes,sizeof(bytes));
+        if(decoded<=0){err(r,400,LE_INVALID,"data is not valid base64 or is too large");return 1;}
+        rc=le_wake_model_stage_chunk(&p,name,file,(unsigned long)offset,bytes,(size_t)decoded,&staged);
+        if(rc==LE_WAKE_MODEL_STORE_OK){char data[640];json_escape(esc,sizeof(esc),file);snprintf(data,sizeof(data),"{\"file\":\"%s\",\"staged_bytes\":%lu}",esc,staged);ok(r,data);return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_CONFLICT){err(r,409,LE_BUSY,"A model with this name already exists");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_INVALID){err(r,400,LE_INVALID,"Chunk rejected: unknown file, wrong offset, or file too large");return 1;}
+        err(r,503,LE_IO,"The chunk could not be stored");return 1;
+    }
+    err(r,404,LE_NOT_SUPPORTED,"Not found");return 1;
+}
+
+void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;(void)voice_pipeline_restart_reap();if(!api_request_authorize(c,q,r))return;if(wake_model_route(c,q,r))return;if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":setup_failure_message(c));return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"os_version\":\"%s\",\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\",\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",LE_OS_VERSION_STRING,c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false",c->ui_theme,c->color_mode);return;}api_handle_inner(c,q,r);}
 
 int api_persist_configuration(struct api_context*c){(void)voice_pipeline_restart_reap();return persist_configuration(c);}
 int api_diagnostics_kernel_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){if(strcmp(q->method,"GET")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;return 1;}

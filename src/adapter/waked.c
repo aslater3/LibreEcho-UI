@@ -7,6 +7,7 @@
 #include "voice_stream.h"
 #include "wake_led.h"
 #include "wake_worker.h"
+#include "wake_model.h"
 #include "../json.h"
 
 #include "wake_health.h"
@@ -59,6 +60,9 @@ struct waked_ipc {
     unsigned int detected_count;
     int sensitivity;
     struct le_wake_event last_event;
+    /* The phrase and model name of the model this process runs. */
+    char wake_phrase[LE_WAKE_MODEL_NAME_MAX];
+    char wake_model[LE_WAKE_MODEL_NAME_MAX];
     struct le_wake_led led;
 };
 
@@ -439,7 +443,7 @@ static void handle_control_client(
 #endif
         snprintf(
             status, sizeof(status),
-            "{\"enabled\":true,\"wake_word\":\"Alexa\","
+            "{\"enabled\":true,\"wake_word\":\"%s\","
             "\"model_status\":\"%s\",\"sensitivity\":%d,"
             "\"cooldown_ms\":1750,\"detected_count\":%u,"
             "\"cpu_cost\":17,\"memory_cost_mb\":6,"
@@ -448,7 +452,8 @@ static void handle_control_client(
             "\"model_loaded\":%s,\"processed_frames\":%llu,"
             "\"capture_active\":%s,\"capture_age_ms\":%d,"
             "\"inference_active\":%s,\"inference_age_ms\":%d,"
-            "\"model\":\"alexa_v0.1\"}",
+            "\"model\":\"%s\"}",
+            ipc->wake_phrase,
             model_loaded ? "loaded" : "unavailable", ipc->sensitivity, ipc->detected_count,
             metrics->vad_active ? "true" : "false",
             metrics->vad_floor_rms,
@@ -456,7 +461,8 @@ static void handle_control_client(
             metrics->playback_active ? "true" : "false",
             model_loaded ? "true" : "false", (unsigned long long)metrics->processed_frames,
             metrics->processed_frames && le_wake_recent(capture_age_ms, LE_WAKE_CAPTURE_STALE_MS) ? "true" : "false", capture_age_ms,
-            model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms);
+            model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms,
+            ipc->wake_model);
         (void)respond(client_fd, id, 1, status);
     } else if (!strcmp(command, "subscribe")) {
         if (add_subscriber(ipc, client_fd) < 0) {
@@ -667,6 +673,14 @@ static int run_waked(const struct waked_config *config)
     ipc.listen_fd = -1;
     ipc.event_pipe[0] = -1;
     ipc.event_pipe[1] = -1;
+    if (le_wake_model_label(config->model_directory, ipc.wake_phrase,
+                            sizeof(ipc.wake_phrase), ipc.wake_model,
+                            sizeof(ipc.wake_model)) < 0) {
+        snprintf(ipc.wake_phrase, sizeof(ipc.wake_phrase), "%s",
+                 LE_WAKE_MODEL_STOCK_PHRASE);
+        snprintf(ipc.wake_model, sizeof(ipc.wake_model), "%s",
+                 LE_WAKE_MODEL_STOCK_NAME);
+    }
     le_wake_led_init(&ipc.led, config->led_socket);
     ipc.sensitivity =
         threshold_sensitivity(config->wake_threshold);
