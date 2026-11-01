@@ -2276,8 +2276,11 @@ static int alarm_time_parse(const char *text, int *hour, int *minute)
    instant the daemon will ring at. */
 static void alarms_json(struct api_context*c,struct api_response*r){
  struct le_timer_list list;char body[4096];char escaped[128];size_t used=0;int i,written,rc;
- long long now=(long long)time(NULL);
+ long long now;
  rc=le_get_timers(c->backend,&list);
+ /* Read the clock after the daemon, so the remaining seconds it reported cannot
+    push the rendered minute past the one it is due in. */
+ now=(long long)time(NULL);
  if(rc!=LE_OK){if(rc!=LE_NOT_SUPPORTED){err(r,503,rc,"Alarm list could not be read");return;}memset(&list,0,sizeof(list));}
  written=snprintf(body,sizeof(body),"{\"available\":%s,\"alarms\":[",list.available?"true":"false");
  if(written<0||(size_t)written>=sizeof(body)){err(r,500,LE_IO,"Alarm list could not be rendered");return;}

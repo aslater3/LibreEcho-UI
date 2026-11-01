@@ -140,6 +140,54 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/timers/$id
 [ "$code" = 404 ] || { echo "FAIL: cancelling twice returned $code, expected 404"; exit 1; }
 echo "  cancelling a gone timer is 404: ok"
 
+# Alarms run before the capacity test fills every mock slot.
+# --- alarms: a wall-clock time, set and cancelled through the same schedule ---
+# An empty alarm list is a list. The time must be HH:MM on a 24-hour clock.
+curl -fsS "$URL/api/v1/alarms" | jq -e '.ok and (.data.alarms | length) == 0' >/dev/null
+echo "  empty alarm list: ok"
+
+for bad in '{"time":"7am"}' '{"time":"7:00:00"}' '{"time":"25:00"}' '{"time":"07:60"}' '{"label":"no time"}'; do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/alarms" \
+        -H "$CSRF" -H "$JSON" --data "$bad")
+    [ "$code" = 400 ] || { echo "FAIL: alarm body $bad returned $code, expected 400"; exit 1; }
+done
+echo "  malformed alarm times refused: ok"
+
+code=$(curl -sS -o /tmp/le-alarm-add.out -w '%{http_code}' -X POST "$URL/api/v1/alarms" \
+    -H "$CSRF" -H "$JSON" --data '{"time":"06:45","label":"wake"}')
+[ "$code" = 201 ] || { echo "FAIL: alarm create returned $code"; cat /tmp/le-alarm-add.out; exit 1; }
+alarm_id=$(jq -r '.data.id' < /tmp/le-alarm-add.out)
+jq -e '.data.time == "06:45" and (.data.due_epoch > 0)' < /tmp/le-alarm-add.out >/dev/null \
+    || { echo "FAIL: alarm create did not return its time"; exit 1; }
+curl -fsS "$URL/api/v1/alarms" | jq -e --argjson id "$alarm_id" \
+    '.data.alarms as $a | ($a | length) == 1 and $a[0].id == $id and $a[0].time == "06:45" and $a[0].label == "wake"' >/dev/null \
+    || { echo "FAIL: alarm list did not show the new alarm"; exit 1; }
+# The shared schedule lists the alarm as an alarm, so one timer list stays truthful.
+curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$alarm_id" \
+    '.data.timers[] | select(.id == $id) | .kind == "alarm"' >/dev/null
+echo "  alarm created, listed by time and kind: ok"
+
+# Alarms cancel only through the alarm route; a countdown id is not an alarm.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/alarms/$id" -H "$CSRF")
+[ "$code" = 404 ] || { echo "FAIL: deleting a countdown through /alarms returned $code"; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/alarms/$alarm_id" -H "$CSRF")
+[ "$code" = 200 ] || { echo "FAIL: alarm cancel returned $code"; exit 1; }
+curl -fsS "$URL/api/v1/alarms" | jq -e '(.data.alarms | length) == 0' >/dev/null
+echo "  alarm cancelled and removed: ok"
+
+# Reads are GET-only for the alarm list; writes need the CSRF header.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$URL/api/v1/alarms" -H "$CSRF" -H "$JSON" --data '{}')
+[ "$code" = 405 ] || { echo "FAIL: PUT /alarms returned $code, expected 405"; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/alarms" -H "$JSON" --data '{"time":"06:45"}')
+[ "$code" = 403 ] || { echo "FAIL: alarm create without CSRF returned $code, expected 403"; exit 1; }
+echo "  alarm methods and CSRF enforced: ok"
+
+# The Timers page has an alarm form wired to the route.
+curl -fsS "$URL/js/app.js" -o /tmp/le-app-alarms.js
+grep -q "api/v1/alarms\|'/alarms'\|/alarms/" /tmp/le-app-alarms.js \
+    || { echo "FAIL: the timers page does not use the alarm route"; exit 1; }
+echo "  alarm form wired into the UI: ok"
+
 # The fixed mock schedule has sixteen slots. A valid request beyond that hard
 # limit is busy, not an invalid duration or an unavailable service.
 i=0
@@ -203,50 +251,5 @@ assert block.count('err(r,503,rc,"Timer service is unavailable")') == 3
 assert 'err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable")' not in block
 PY
 echo "  timer write error codes preserved: ok"
-
-# --- alarms: a wall-clock time, set and cancelled through the same schedule ---
-# An empty alarm list is a list. The time must be HH:MM on a 24-hour clock.
-curl -fsS "$URL/api/v1/alarms" | jq -e '.ok and (.data.alarms | length) == 0' >/dev/null
-echo "  empty alarm list: ok"
-
-for bad in '{"time":"7am"}' '{"time":"7:00:00"}' '{"time":"25:00"}' '{"time":"07:60"}' '{"label":"no time"}'; do
-    code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/alarms" \
-        -H "$CSRF" -H "$JSON" --data "$bad")
-    [ "$code" = 400 ] || { echo "FAIL: alarm body $bad returned $code, expected 400"; exit 1; }
-done
-echo "  malformed alarm times refused: ok"
-
-code=$(curl -sS -o /tmp/le-alarm-add.out -w '%{http_code}' -X POST "$URL/api/v1/alarms" \
-    -H "$CSRF" -H "$JSON" --data '{"time":"06:45","label":"wake"}')
-[ "$code" = 201 ] || { echo "FAIL: alarm create returned $code"; cat /tmp/le-alarm-add.out; exit 1; }
-alarm_id=$(jq -r '.data.id' < /tmp/le-alarm-add.out)
-jq -e '.data.time == "06:45" and (.data.due_epoch > 0)' < /tmp/le-alarm-add.out >/dev/null \
-    || { echo "FAIL: alarm create did not return its time"; exit 1; }
-curl -fsS "$URL/api/v1/alarms" | jq -e --argjson id "$alarm_id" \
-    '.data.alarms | length == 1 and .[0].id == $id and .[0].time == "06:45" and .[0].label == "wake"' >/dev/null
-# The shared schedule lists the alarm as an alarm, so one timer list stays truthful.
-curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$alarm_id" \
-    '.data.timers[] | select(.id == $id) | .kind == "alarm"' >/dev/null
-echo "  alarm created, listed by time and kind: ok"
-
-# Alarms cancel only through the alarm route; a countdown id is not an alarm.
-code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/alarms/$id" -H "$CSRF")
-[ "$code" = 404 ] || { echo "FAIL: deleting a countdown through /alarms returned $code"; exit 1; }
-code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/alarms/$alarm_id" -H "$CSRF")
-[ "$code" = 200 ] || { echo "FAIL: alarm cancel returned $code"; exit 1; }
-curl -fsS "$URL/api/v1/alarms" | jq -e '(.data.alarms | length) == 0' >/dev/null
-echo "  alarm cancelled and removed: ok"
-
-# Reads are GET-only for the alarm list; writes need the CSRF header.
-code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$URL/api/v1/alarms" -H "$CSRF" -H "$JSON" --data '{}')
-[ "$code" = 405 ] || { echo "FAIL: PUT /alarms returned $code, expected 405"; exit 1; }
-code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/alarms" -H "$JSON" --data '{"time":"06:45"}')
-[ "$code" = 403 ] || { echo "FAIL: alarm create without CSRF returned $code, expected 403"; exit 1; }
-echo "  alarm methods and CSRF enforced: ok"
-
-# The Timers page has an alarm form wired to the route.
-grep -q "api/v1/alarms\|/alarms'" /tmp/le-app.js \
-    || { echo "FAIL: the timers page does not use the alarm route"; exit 1; }
-echo "  alarm form wired into the UI: ok"
 
 echo "timers api: ok"
