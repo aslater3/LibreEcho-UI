@@ -489,12 +489,12 @@ $(BUILD)/test-cue-rate-limit: tests/test_cue_rate_limit.c \
 
 $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 	src/adapter/buttond_timing.c
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-buttond-gesture: tests/test_buttond_gesture.c \
 	src/adapter/buttond_gesture.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
-	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-watchdog-policy: tests/test_watchdog_policy.c \
 		src/adapter/watchdog_policy.c
