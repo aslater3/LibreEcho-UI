@@ -103,6 +103,8 @@ make build/test-sdp-wire-format
 ./build/test-sdp-wire-format
 make build/test-avdtp-wire-format
 ./build/test-avdtp-wire-format
+make build/test-bt-a2dp-source
+./build/test-bt-a2dp-source
 make build/test-avrcp-wire-format
 ./build/test-avrcp-wire-format
 sh tests/test_network_scan_contract.sh

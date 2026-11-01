@@ -933,6 +933,18 @@ $(BUILD)/test-sdp-wire-format: tests/test_sdp_wire_format.c \
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -lm -o $@
 
+$(BUILD)/test-bt-a2dp-source: tests/test_bt_a2dp_source.c \
+		src/adapter/bt_a2dp_source.c \
+		$(BUILD)/adapter/bt-sbc/sbc.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_neon.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_armv6.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_sse.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_mmx.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_iwmmxt.o
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -lm -o $@
+
 $(BUILD)/test-avdtp-wire-format: tests/test_avdtp_wire_format.c \
 		$(BUILD)/adapter/bt_profile.o $(BUILD)/adapter/radio_resample.o \
 		$(BUILD)/log.o \
