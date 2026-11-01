@@ -53,6 +53,11 @@ struct le_backend_ops {
  int (*sendspin_set)(struct le_backend*,int);
  int (*sendspin_pairing_token)(struct le_backend*,char*,size_t);
  int (*sendspin_reset_pairing)(struct le_backend*);
+ /* Repeating alarms and snooze. Appended last: the backends initialise this
+    struct positionally. A backend that leaves one null reports the feature
+    unsupported. */
+ int (*timer_add_repeat)(struct le_backend*,int,int,unsigned,const char*,unsigned*);
+ int (*timer_snooze)(struct le_backend*,int*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

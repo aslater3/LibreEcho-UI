@@ -41,6 +41,7 @@
 #define LE_BUTTOND_CONFIG "/data/libreecho/config/web-config.json"
 #endif
 #define CONNECT_TIMEOUT_MS 400
+#define TIMER_SOCK_PATH "/run/libreecho/timer.sock"
 #define PRIVACY_POLL_MS 100
 #define METER_OWNER "buttons"
 
@@ -391,6 +392,29 @@ static int audio_call(struct context *ctx, const char *cmd, const char *args,
     result = le_adapter_call(adapter, cmd, args, out, out_size);
     le_adapter_close(adapter);
     return result;
+}
+
+/*
+ * While an alarm rings, the action button is its snooze, whatever sound or
+ * noise the button is otherwise set to. Returns 1 when an alarm was snoozed.
+ * With nothing ringing the press falls through to the normal action, and an
+ * unreachable timer daemon does the same.
+ */
+static int alarm_snooze_press(void)
+{
+    struct le_adapter *adapter;
+    char data[128];
+    int snoozed = 0;
+    int result;
+
+    adapter = le_adapter_connect(TIMER_SOCK_PATH, CONNECT_TIMEOUT_MS);
+    if (!adapter)
+        return 0;
+    result = le_adapter_call(adapter, "snooze", "{}", data, sizeof(data));
+    le_adapter_close(adapter);
+    if (result != LE_ADAPTER_OK || json_get_int(data, "snoozed", &snoozed) < 1)
+        return 0;
+    return snoozed > 0;
 }
 
 static int refresh_audio(struct context *ctx)
@@ -1036,6 +1060,11 @@ static void handle_key(struct context *ctx, int code, int value)
      */
     case KEY_HELP:
         if (value == 1) {
+            if (alarm_snooze_press()) {
+                le_log_info("buttond: action button snoozed a ringing alarm");
+                action_flourish(ctx);
+                return;
+            }
             /*
              * Three of them, rotating, so repeated presses do not sound like
              * Bundled PCM rather than synthesised: the files ship in the

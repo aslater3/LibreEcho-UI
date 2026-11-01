@@ -1205,6 +1205,22 @@ static int handle_timer_intent(struct agent_state *state,
 
         if (intent.alarm_hour < 0)
             break;
+        if (intent.alarm_days) {
+            /* A weekly alarm: the daemon owns the next-occurrence rule. */
+            json_escape(label, sizeof(label), intent.label);
+            snprintf(args, sizeof(args),
+                     "{\"hour\":%d,\"minute\":%d,\"days\":%u,\"label\":\"%s\"}",
+                     intent.alarm_hour, intent.alarm_minute, intent.alarm_days,
+                     label);
+            if (adapter_call(state->timer_socket, 1000, "add_repeat", args,
+                             response, sizeof(response)) != LE_ADAPTER_OK) {
+                snprintf(speech, sizeof(speech), "I could not set that alarm.");
+                snprintf(spoken, spoken_size, "%s", speech);
+                (void)play_sentence(state, speech);
+                return 1;
+            }
+            break;
+        }
         if (le_timer_next_alarm_epoch((long long)now, intent.alarm_hour,
                                       intent.alarm_minute, &due) != LE_TIMER_OK) {
             /* No credible clock yet: say so rather than ring at a wrong time. */
@@ -1281,6 +1297,19 @@ static int handle_timer_intent(struct agent_state *state,
             return 0;
         (void)json_get_int(response, "count", &count);
         (void)json_get_int(response, "seconds_remaining", &remaining);
+        break;
+
+    case LE_TIMER_INTENT_SNOOZE:
+        /* Only an alarm that is ringing can be snoozed. Anything else is not
+           ours to answer, so the model gets the request as it always did. */
+        if (ringing <= 0)
+            return 0;
+        if (adapter_call(state->timer_socket, 1000, "snooze", "{}", response,
+                         sizeof(response)) != LE_ADAPTER_OK)
+            return 0;
+        (void)json_get_int(response, "snoozed", &count);
+        if (count <= 0)
+            return 0;
         break;
 
     default:
