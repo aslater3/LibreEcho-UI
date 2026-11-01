@@ -51,7 +51,7 @@ class ButtonEvents(Daemon):
  def subscribe(self):
   # As Home Assistant does: list entities, then subscribe to states.
   self.hello();self.s.sendall(frame(11))
-  listed=[receive(self.s) for _ in range(15)]
+  listed=[receive(self.s) for _ in range(18)]
   self.s.sendall(frame(20));self.drain()
   return listed
  def events_after(self,datagram):
@@ -61,7 +61,7 @@ class ButtonEvents(Daemon):
 class ButtonEntities(ButtonEvents):
  def test_one_event_entity_per_button_lists_all_gestures(self):
   listed=self.subscribe()
-  self.assertEqual([t for t,_ in listed],[63,17,17,49,49,49,107,107,107,107,107,107,107,15,19])
+  self.assertEqual([t for t,_ in listed],[63,17,17,49,49,49,107,107,107,107,107,107,107,15,41,41,41,19])
   buttons=[parse(b) for t,b in listed if t==107 and key_of(parse(b)[2][0])<20]
   self.assertEqual([(p[1][0],key_of(p[2][0]),p[3][0]) for p in buttons],[
    (b'volume_up',10,b'Volume up button'),(b'volume_down',11,b'Volume down button'),
@@ -91,7 +91,7 @@ class ButtonGestures(ButtonEvents):
 
  def test_no_event_until_subscribed(self):
   self.hello();self.s.sendall(frame(11))
-  for _ in range(15):receive(self.s)
+  for _ in range(18):receive(self.s)
   self.assertEqual(self.events_after('volume_up press'),[])
 
 if __name__=='__main__':unittest.main()

@@ -92,6 +92,8 @@ struct state {
  char conversation[128],tts_url[1024],next_url[1024],result[24];int continue_turn,run_end,early_tts,playing,announcement,pipeline,tts_done,timer_pending;
  time_t result_time;struct esp_playback playback;int mdns_fd;
  char process_start[32],boot_id[64],listener_inode[32];unsigned listener_port;
+ /* set_ring (#397): when its ledd overlay ends; 0 when none is running. */
+ uint64_t action_ring_end;
 };
 static struct state S;static volatile sig_atomic_t running=1,reload_config;
 static void sigstop(int sig){if(sig==SIGHUP)reload_config=1;else running=0;}
@@ -258,6 +260,68 @@ static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(es
 static void completed(void){if(!S.tts_done)(void)announce_done(1);S.tts_done=1;if(S.pipeline&&!S.run_end)return;char conv[128];int cont=S.continue_turn;snprintf(conv,sizeof conv,"%s",S.conversation);turn_clear("success",0);if(cont&&!mic_muted()){snprintf(S.conversation,sizeof S.conversation,"%s",conv);(void)voice_start(S.ring_end,1);}}
 static int valid_proto(const void *p,size_t n){struct ep_reader r;struct ep_field f;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0){}return r.error?-1:0;}
 static void device_info(struct client *c){unsigned char b[512];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,2,S.name);ep_string(&w,3,S.mac);ep_string(&w,4,"2026.9.0");ep_string(&w,6,"radar-puffin");ep_string(&w,8,"libreecho.satellite");ep_string(&w,9,"0.14.0");ep_string(&w,12,"LibreEcho");ep_string(&w,13,S.friendly);if(S.room[0])ep_string(&w,16,S.room);ep_uint(&w,17,61);ep_uint(&w,19,1);ep_uint(&w,26,!S.provisioned);(void)send_writer(c,10,&w);}
+/* User-defined ESPHome services (#397): Home Assistant automations call announce, play_sound and
+ * set_ring. Each call is validated here, then sent to the daemon command the web UI and voice path
+ * already use: audiod speak (which goes through ttsd), audiod sample (bundled sounds) and ledd pattern.
+ * A call that arrives during a voice turn, playback or another LED write is ignored, never queued,
+ * so device activity keeps priority. Malformed or out-of-range arguments close the client before any change. */
+#define SERVICE_ANNOUNCE_KEY 60U
+#define SERVICE_PLAY_SOUND_KEY 61U
+#define SERVICE_SET_RING_KEY 62U
+#define LIST_SERVICES_TYPE 41U
+#define EXECUTE_SERVICE_TYPE 42U
+#define SERVICE_TEXT_MAX 200U
+#define SERVICE_NAME_MAX 48U
+#define SERVICE_RING_MAX_SECONDS 300U
+#define SERVICE_RING_OWNER "esphome-action"
+#define SERVICE_ARG_INT 1U
+#define SERVICE_ARG_STRING 3U
+struct service_arg { const char *name; unsigned type; };
+struct user_service { const char *name; unsigned key; const struct service_arg *args; unsigned count; };
+static const struct service_arg announce_args[]={{"text",SERVICE_ARG_STRING}};
+static const struct service_arg play_sound_args[]={{"name",SERVICE_ARG_STRING}};
+static const struct service_arg set_ring_args[]={{"colour",SERVICE_ARG_STRING},{"effect",SERVICE_ARG_STRING},{"duration",SERVICE_ARG_INT}};
+static const struct user_service user_services[]={
+ {"announce",SERVICE_ANNOUNCE_KEY,announce_args,NELEM(announce_args)},
+ {"play_sound",SERVICE_PLAY_SOUND_KEY,play_sound_args,NELEM(play_sound_args)},
+ {"set_ring",SERVICE_SET_RING_KEY,set_ring_args,NELEM(set_ring_args)}};
+/* ListEntitiesServicesResponse: name, key, then one ListEntitiesServicesArgument (name, type) per argument. */
+static void services_list(struct client *c){for(unsigned i=0;i<NELEM(user_services);i++){unsigned char b[256];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,1,user_services[i].name);ep_fixed32(&w,2,user_services[i].key);
+ for(unsigned a=0;a<user_services[i].count;a++){unsigned char x[64];struct ep_writer n={x,sizeof x,0,0};ep_string(&n,1,user_services[i].args[a].name);ep_uint(&n,2,user_services[i].args[a].type);ep_bytes(&w,3,n.data,n.length);}
+ (void)send_writer(c,LIST_SERVICES_TYPE,&w);}}
+struct svc_value { const unsigned char *data; size_t length; };
+/* ExecuteServiceRequest: fixed32 key (1), then ExecuteServiceArgument (2) in list order. */
+static int service_call(const void *p,size_t n,struct svc_value *v,unsigned max,unsigned *count){struct ep_reader r;struct ep_field f;*count=0;ep_reader_init(&r,p,n);
+ while(ep_next(&r,&f)>0)if(f.number==2){if(f.wire!=2||*count>=max)return -1;v[(*count)++]=(struct svc_value){f.data,f.length};}
+ return r.error?-1:0;}
+/* Strings are ExecuteServiceArgument.string_ (4); integers are int_ (5), sint32 as the pinned client sends them. */
+static int svc_text(const struct svc_value *v,char *out,size_t cap){if(ep_get_text(v->data,v->length,4,out,cap)||!out[0])return -1;return 0;}
+static int svc_int(const struct svc_value *v,int *out){uint64_t raw=ep_get_uint(v->data,v->length,5,0);uint32_t z;if(raw>UINT32_MAX)return -1;z=(uint32_t)raw;*out=(int)(int32_t)((z>>1)^(0U-(z&1U)));return 0;}
+static int svc_plain_text(const char *s){for(const unsigned char *q=(const unsigned char*)s;*q;q++)if(*q<0x20||*q==0x7f)return 0;return 1;}
+static int svc_sound_name(const char *s){size_t n=strlen(s);if(!n||n>SERVICE_NAME_MAX)return 0;for(size_t i=0;i<n;i++){char c=s[i];if(!((c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_'))return 0;}return 1;}
+/* "#RRGGBB" exactly. */
+static int svc_colour(const char *s,unsigned *r,unsigned *g,unsigned *b){unsigned v[3];if(strlen(s)!=7||s[0]!='#')return -1;
+ for(unsigned i=0;i<3;i++){char h[3]={s[1+2*i],s[2+2*i],0};char *end;if(!isxdigit((unsigned char)h[0])||!isxdigit((unsigned char)h[1]))return -1;v[i]=(unsigned)strtoul(h,&end,16);if(*end)return -1;}
+ *r=v[0];*g=v[1];*b=v[2];return 0;}
+/* Index into led_effects (Solid, Pulse, Flash), exact match as listed to Home Assistant. */
+static int svc_effect(const char *s){for(unsigned i=0;i<NELEM(led_effects);i++)if(!strcmp(s,led_effects[i]))return (int)i;return -1;}
+static int service_execute(const void *p,size_t n){struct svc_value v[3];unsigned count=0;unsigned key=(unsigned)ep_get_uint(p,n,1,0);
+ char text[SERVICE_TEXT_MAX+1],escaped[2*SERVICE_TEXT_MAX+16],args[512];
+ if(service_call(p,n,v,NELEM(v),&count))return -1;
+ if(key==SERVICE_ANNOUNCE_KEY){if(count!=1||svc_text(&v[0],text,sizeof text)||!svc_plain_text(text))return -1;
+  if(S.turn||S.playing)return 0;json_escape(escaped,sizeof escaped,text);snprintf(args,sizeof args,"{\"text\":\"%s\"}",escaped);return job(S.audio_path,"speak",args,0,0)?-1:0;}
+ if(key==SERVICE_PLAY_SOUND_KEY){char name[SERVICE_NAME_MAX+2];if(count!=1||svc_text(&v[0],name,sizeof name)||!svc_sound_name(name))return -1;
+  if(S.turn||S.playing)return 0;snprintf(args,sizeof args,"{\"name\":\"%s\"}",name);return job(S.audio_path,"sample",args,0,0)?-1:0;}
+ if(key==SERVICE_SET_RING_KEY){char colour[8],effect[16];unsigned r,g,b;int index,seconds;
+  if(count!=3||svc_text(&v[0],colour,sizeof colour)||svc_colour(colour,&r,&g,&b))return -1;
+  if(svc_text(&v[1],effect,sizeof effect))return -1;index=svc_effect(effect);if(index<0)return -1;
+  if(svc_int(&v[2],&seconds)||seconds<1||seconds>(int)SERVICE_RING_MAX_SECONDS)return -1;
+  if(led_busy()||led_job_pending())return 0;
+  snprintf(args,sizeof args,"{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":100,\"repeats\":0,\"owner\":\"" SERVICE_RING_OWNER "\"}",led_ledd_names[index],r,g,b);
+  if(job(S.led_path,"pattern",args,0,0))return -1;S.action_ring_end=S.now+(uint64_t)seconds*1000U;return 0;}
+ return -1;}
+/* A set_ring overlay ends after its duration. Only its own owner is stopped, so ledd restores the layer beneath it. */
+static void action_ring_tick(void){if(!S.action_ring_end||S.now<S.action_ring_end||led_job_pending())return;S.action_ring_end=0;(void)job(S.led_path,"pattern","{\"name\":\"stop\",\"owner\":\"" SERVICE_RING_OWNER "\"}",0,0);}
 static void entities(struct client *c){unsigned char b[768],nested[80];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,1,"media_player");ep_fixed32(&w,2,MEDIA_KEY);ep_string(&w,3,"Media player");ep_uint(&w,8,1);
  /* aioesphomeapi 46.2.0: PAUSE, VOLUME_SET/MUTE, PLAY_MEDIA, STOP, PLAY, MEDIA_ANNOUNCE. */
  ep_uint(&w,11,(1U<<0)|(1U<<2)|(1U<<3)|(1U<<9)|(1U<<12)|(1U<<14)|(1U<<20));
@@ -275,6 +339,8 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  w.length=0;ep_string(&w,1,"led_ring");ep_fixed32(&w,2,LED_RING_KEY);ep_string(&w,3,"LED ring");ep_uint(&w,12,35);for(unsigned e=0;e<NELEM(led_effects);e++)ep_string(&w,11,led_effects[e]);ep_string(&w,14,"mdi:led-strip-variant");(void)send_writer(c,15,&w);c->led_light=1;
  /* ListEntitiesSensorResponse: lx, illuminance, STATE_CLASS_MEASUREMENT; only when the board has a sensor. */
  if(S.light_path[0]){c->light=1;w.length=0;ep_string(&w,1,"illuminance");ep_fixed32(&w,2,LIGHT_KEY);ep_string(&w,3,"Illuminance");ep_string(&w,6,"lx");ep_uint(&w,7,0);ep_string(&w,9,"illuminance");ep_uint(&w,10,1);(void)send_writer(c,16,&w);}
+ /* ListEntitiesServicesResponse (#397): the user-defined actions, before ListEntitiesDone. */
+ services_list(c);
  (void)send_msg(c,19,NULL,0);
 }
 static void configuration(struct client *c){unsigned char b[256],x[128];struct ep_writer w={b,sizeof b,0,0},n={x,sizeof x,0,0};ep_string(&n,1,"alexa_v0.1");ep_string(&n,2,"Alexa");ep_string(&n,3,"en");ep_bytes(&w,1,x,n.length);if(S.active_wake)ep_string(&w,2,"alexa_v0.1");ep_uint(&w,3,1);(void)send_writer(c,122,&w);}
@@ -343,6 +409,8 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  case 20:c->states=1;states_send(c);for(unsigned i=0;i<4;i++)setting_send(c,i);if(c->light)light_state(c);if(c->led_light)led_state(c);return 0;
  /* LightCommandRequest (#395): HA sets the LED ring light; device indicators keep priority. */
  case 32:return led_command(p,n);
+ /* ExecuteServiceRequest (#397): announce, play_sound, set_ring. */
+ case EXECUTE_SERVICE_TYPE:return service_execute(p,n);
  /* NumberCommandRequest (#396): volume, wake sensitivity, LED brightness. */
  case 51:return number_command(p,n);
  case 89:if(!ep_get_uint(p,n,1,0)){if(S.owner==(int)idx){cancel_turn("unsubscribed");S.owner=-1;timer_owner_end();}return 0;}if(S.owner>=0&&S.owner!=(int)idx)return -1;
@@ -495,6 +563,8 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  timer_owner_end();S.ready=1;status_write();
  /* A previous process may have left its light overlay on the ring; HA starts from off. */
  led_apply();
+ /* A set_ring overlay from before a restart must not run on: HA starts from off. */
+ (void)job(S.led_path,"pattern","{\"name\":\"stop\",\"owner\":\"" SERVICE_RING_OWNER "\"}",0,0);
  while(running){struct pollfd fds[2+CLIENTS];fds[0]=(struct pollfd){listener,POLLIN,0};for(unsigned i=0;i<CLIENTS;i++)fds[i+1]=(struct pollfd){S.clients[i].fd,(short)(POLLIN|(S.clients[i].tx_n?POLLOUT:0)),0};fds[1+CLIENTS]=(struct pollfd){S.button_fd,POLLIN,0};int ready=poll(fds,2+CLIENTS,10);S.now=now_ms();if(ready<0&&errno!=EINTR)break;
  if(reload_config){reload_config=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);if(load_configuration())break;}
  if(fds[0].revents&POLLIN){for(unsigned n=0;n<4;n++){int fd=accept(listener,NULL,NULL);if(fd<0)break;int flags=fcntl(fd,F_GETFL,0);if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){close(fd);continue;}unsigned idx;for(idx=0;idx<CLIENTS;idx++)if(S.clients[idx].fd<0)break;if(idx==CLIENTS){close(fd);continue;}struct client *c=&S.clients[idx];memset(c,0,sizeof *c);c->fd=fd;c->mode=-1;c->deadline=S.now+15000;c->last_seen=S.now;en_init(&c->noise);}}
@@ -502,7 +572,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  if(S.button_fd>=0&&(fds[1+CLIENTS].revents&POLLIN))button_tick();
  if(S.now>=S.settings_poll+SETTINGS_POLL_MS){S.settings_poll=S.now;(void)job(S.led_path,"status","{}",10,0);(void)job(S.wake_path,"status","{}",11,0);}
  if(S.now>=S.last_status_poll+250){S.last_status_poll=S.now;privacy_poll();light_poll();(void)job(S.audio_path,"status","{}",1,0);(void)job(S.radio_path,"status","{}",2,0);}
- jobs_tick();led_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
+ jobs_tick();led_tick();action_ring_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);capture_tick();
  if(S.turn&&S.now>S.turn_deadline)cancel_turn("timeout");
  if(S.playing){int rc=esp_playback_tick(&S.playback,S.now);if(rc){playback_stopped();if(rc<0)turn_clear("playback_error",1);else if(S.next_url[0]){char next[1024];snprintf(next,sizeof next,"%s",S.next_url);S.next_url[0]=0;if(playback_start(next)<0)turn_clear("playback_error",1);}else completed();}}
