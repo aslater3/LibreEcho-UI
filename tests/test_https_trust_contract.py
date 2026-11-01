@@ -36,7 +36,7 @@ assert 'LE_TLS_CUSTOM_MARKER "https-custom-certificate"' in tls_h
 # and a private CA bundle may hold CA certificates only.
 assert "mbedtls_pk_check_pair(&crt.pk, &key" in tls_c
 assert "mbedtls_x509_time_is_past(&crt.valid_to)" in tls_c
-assert "if (!c->ca_istrue)" in tls_c
+assert "mbedtls_x509_crt_get_ca_istrue(c) != 1" in tls_c
 # Stub builds report unavailable instead of pretending validation passed.
 assert "return LE_NOT_SUPPORTED;" in stub.split("le_tls_check_certificate_pair", 1)[1][:400]
 
