@@ -120,6 +120,7 @@
 #define MGMT_OP_READ_INFO 0x0004
 #define MGMT_OP_SET_POWERED 0x0005
 #define MGMT_OP_SET_SSP 0x000b
+#define MGMT_OP_SET_LE 0x000d
 #define MGMT_OP_LOAD_LINK_KEYS 0x0012
 #define MGMT_OP_LOAD_LONG_TERM_KEYS 0x0013
 #define MGMT_OP_DISCONNECT 0x0014
@@ -292,6 +293,7 @@ struct bt_context {
     /* Passive LE advertisement relay for esphomed (bt_adv_proxy.c). */
     struct bt_adv_ring adv;
     int proxy_started;
+    int proxy_le_enabled;
 };
 
 static volatile sig_atomic_t stopping;
@@ -1890,10 +1892,24 @@ static int set_discovery(struct bt_context *context, int start)
 static int start_proxy_discovery(struct bt_context *context)
 {
     uint8_t type = MGMT_DISCOVERY_LE;
+    uint8_t le = 1;
+    int result;
 
     if (!context->enabled)
         return -1;
-    if (controller_command(context, MGMT_OP_START_DISCOVERY, &type, 1) != 0)
+    result = controller_command(context, MGMT_OP_START_DISCOVERY, &type, 1);
+    if (result == -(int)MGMT_STATUS_REJECTED &&
+        (context->supported_settings & MGMT_SETTING_LE) &&
+        !(context->current_settings & MGMT_SETTING_LE)) {
+        /* The bring-up leaves LE host support off, and the kernel then
+         * rejects LE discovery.  Enable it for the relay only;
+         * proxy_scan_expire() turns it off again when the lease ends. */
+        if (controller_command(context, MGMT_OP_SET_LE, &le, 1) != 0)
+            return -1;
+        context->proxy_le_enabled = 1;
+        result = controller_command(context, MGMT_OP_START_DISCOVERY, &type, 1);
+    }
+    if (result != 0)
         return -1;
     context->discovery_type = type;
     context->scanning = 1;
@@ -1904,12 +1920,19 @@ static int start_proxy_discovery(struct bt_context *context)
  * proxy_started, so it is never stopped from here. */
 static void proxy_scan_expire(struct bt_context *context)
 {
-    if (!context->proxy_started ||
-        bt_adv_leased(&context->adv, bt_monotonic_ms()))
+    uint8_t le = 0;
+
+    if (bt_adv_leased(&context->adv, bt_monotonic_ms()))
         return;
-    context->proxy_started = 0;
-    if (context->scanning)
-        (void)set_discovery(context, 0);
+    if (context->proxy_started) {
+        context->proxy_started = 0;
+        if (context->scanning)
+            (void)set_discovery(context, 0);
+    }
+    if (context->proxy_le_enabled && !context->scanning) {
+        context->proxy_le_enabled = 0;
+        (void)controller_command(context, MGMT_OP_SET_LE, &le, 1);
+    }
 }
 
 static int set_controller_setting(struct bt_context *context, uint16_t opcode,
