@@ -13,6 +13,17 @@ code=$(curl -sS -o /tmp/le-light-head.out -w '%{http_code}' -I "$URL/api/v1/ligh
 [ "$code" = 405 ]
 code=$(curl -sS -o /tmp/le-light-get.out -w '%{http_code}' "$URL/api/v1/light")
 [ "$code" = 501 ]
+# Do not disturb: GET reports the switch, PUT persists it (mock backend).
+curl -fsS "$URL/api/v1/dnd" | jq -e '.ok and .data.enabled == false' >/dev/null
+code=$(curl -sS -o /tmp/le-dnd-post.out -w '%{http_code}' -X POST "$URL/api/v1/dnd" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-dnd-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/dnd" -H 'Content-Type: application/json' --data '{"enabled":true}')
+[ "$code" = 403 ]
+code=$(curl -sS -o /tmp/le-dnd-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/dnd" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":"true"}')
+[ "$code" = 400 ]
+curl -fsS -X PUT "$URL/api/v1/dnd" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' | jq -e '.ok and .data.enabled == true' >/dev/null
+curl -fsS "$URL/api/v1/dnd" | jq -e '.ok and .data.enabled == true' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/dnd" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":false}' | jq -e '.ok and .data.enabled == false' >/dev/null
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
 curl -fsS "$URL/api/v1/config" | jq -e --arg version "LibreEcho OS $OS_VERSION" '.ok and .data.os_version == $version' >/dev/null

@@ -2555,6 +2555,67 @@
     }
    }
   },
+  "/dnd": {
+   "get": {
+    "tags": [
+     "LED"
+    ],
+    "summary": "Read do-not-disturb",
+    "description": "Reports whether the do-not-disturb switch is on. While on, chimes, press tones, wake chirps and action samples are silenced, Home Assistant announcements are acknowledged without playing, and the ring shows the do-not-disturb theme. Timer alarms still ring.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "LED"
+    ],
+    "summary": "Turn do-not-disturb on or off",
+    "description": "Persists the switch, applies it to the audio and LED daemons, and reports the saved state. Timer alarms are never silenced.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "enabled"
+        ],
+        "properties": {
+         "enabled": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/led/idle": {
    "put": {
     "tags": [
