@@ -158,15 +158,21 @@ wait_for_dependency_sockets() {
 # restart replaces it. The kernel drops an flock when its holder dies, so a
 # killed script cannot leave the lock behind. The daemon must not inherit fd 9,
 # or it would hold the lock for its whole life; the launch lines close it.
+# BusyBox flock has no -w, so the bounded wait polls -n once a second.
 # Without flock the script runs unlocked, as it did before.
 with_lifecycle_lock() {
     command -v flock >/dev/null 2>&1 || { "$@"; return; }
     mkdir -p "$(dirname "$LOCKFILE")"
     exec 9>>"$LOCKFILE"
-    flock -w "$AGENT_LOCK_TIMEOUT_SECONDS" 9 || {
-        echo "libreecho-agentd: another start/stop did not finish within ${AGENT_LOCK_TIMEOUT_SECONDS}s" >&2
-        return 1
-    }
+    waited=0
+    until flock -n 9; do
+        if [ "$waited" -ge "$AGENT_LOCK_TIMEOUT_SECONDS" ]; then
+            echo "libreecho-agentd: another start/stop did not finish within ${AGENT_LOCK_TIMEOUT_SECONDS}s" >&2
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
     "$@"
 }
 

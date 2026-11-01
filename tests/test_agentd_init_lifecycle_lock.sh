@@ -15,7 +15,6 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 command -v flock >/dev/null 2>&1 || { echo 'agentd init lifecycle lock: skipped (no flock)'; exit 0; }
-command -v setsid >/dev/null 2>&1 || { echo 'agentd init lifecycle lock: skipped (no setsid)'; exit 0; }
 
 # Absolute path of a tool on PATH. BusyBox sh answers "command -v sh" with the
 # bare applet name, which is no use for a symlink or a #! line.
@@ -55,9 +54,14 @@ PY
 # Only the tools the script needs, so the setsid launch path is used on hosts
 # that also have a Debian start-stop-daemon. mount is slowed down to widen the
 # window between the "not running" check and the launch.
-for tool in sh tr sed sleep kill grep rm sort dirname cat flock setsid date; do
+for tool in sh tr sed sleep kill grep rm sort dirname cat date; do
     ln -s "$(tool "$tool")" "$WORK/bin/$tool"
 done
+# The script launches through setsid where it exists and with a bare & where it
+# does not (the Echo images ship no setsid). NO_SETSID=1 tests the second path.
+if [ -z "${NO_SETSID:-}" ] && command -v setsid >/dev/null 2>&1; then
+    ln -s "$(tool setsid)" "$WORK/bin/setsid"
+fi
 printf '#!%s\nsleep 1\n' "$SH" >"$WORK/bin/mount"
 printf '#!%s\nexit 0\n' "$SH" >"$WORK/bin/umount"
 printf '#!%s\nexit 0\n' "$SH" >"$WORK/bin/chmod"
@@ -67,7 +71,14 @@ cat >"$WORK/bin/mkdir" <<EOF
 for a in "\$@"; do shift; case "\$a" in /data/*) ;; *) set -- "\$@" "\$a" ;; esac; done
 exec $MKDIR "\$@"
 EOF
-chmod +x "$WORK/bin/mount" "$WORK/bin/umount" "$WORK/bin/chmod" "$WORK/bin/mkdir"
+# The device's BusyBox flock takes only -s, -x, -u and -n; reject anything
+# else (notably -w) so the script cannot rely on util-linux options.
+cat >"$WORK/bin/flock" <<EOF
+#!$SH
+for a in "\$@"; do case "\$a" in -[sxun]) ;; -*) echo "flock: unrecognized option: \$a" >&2; exit 1 ;; esac; done
+exec $(tool flock) "\$@"
+EOF
+chmod +x "$WORK/bin/mount" "$WORK/bin/umount" "$WORK/bin/chmod" "$WORK/bin/mkdir" "$WORK/bin/flock"
 
 daemon_pids() {
     for entry in /proc/[0-9]*; do
@@ -97,26 +108,41 @@ expect_count() {
     }
 }
 
+# Runs two actions at once; both must succeed.
+race() {
+    run_init "$1" >/dev/null 2>"$WORK/race1.err" &
+    first=$!
+    run_init "$2" >/dev/null 2>"$WORK/race2.err" &
+    second=$!
+    rc=0
+    wait "$first" || rc=1
+    wait "$second" || rc=1
+    [ "$rc" -eq 0 ] || {
+        echo "FAIL: $1 racing $2 failed" >&2
+        cat "$WORK/race1.err" "$WORK/race2.err" >&2
+        exit 1
+    }
+}
+
 # The reproduction from the issue: two restarts at once.
-run_init restart >/dev/null 2>&1 &
-first=$!
-run_init restart >/dev/null 2>&1 &
-second=$!
-wait "$first"
-wait "$second"
+race restart restart
 expect_count 1 'concurrent restart'
-[ "$(cat "$WORK/agentd.pid")" = "$(daemon_pids)" ] || {
+before=$(daemon_pids)
+[ "$(cat "$WORK/agentd.pid")" = "$before" ] || {
     echo 'FAIL: pidfile does not name the running agentd' >&2
     exit 1
 }
 
+# Again with a daemon running: it must be replaced, not kept.
+race restart restart
+expect_count 1 'concurrent restart of a running agentd'
+[ "$(daemon_pids)" != "$before" ] || {
+    echo 'FAIL: restart left the old agentd in place' >&2
+    exit 1
+}
+
 # Restart racing a plain start: start must see the daemon, not add one.
-run_init restart >/dev/null 2>&1 &
-first=$!
-run_init start >/dev/null 2>&1 &
-second=$!
-wait "$first"
-wait "$second"
+race restart start
 expect_count 1 'restart racing start'
 
 # The daemon must not inherit the lock, or the next caller would block on it.

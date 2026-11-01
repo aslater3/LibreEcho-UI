@@ -403,6 +403,7 @@ sh tests/test_timerd.sh
 make build/libreecho-agentd
 sh tests/test_agentd_startup_readiness_contract.sh
 sh tests/test_agentd_init_lifecycle_lock.sh
+NO_SETSID=1 sh tests/test_agentd_init_lifecycle_lock.sh
 sh tests/test_agentd_timers.sh
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!
