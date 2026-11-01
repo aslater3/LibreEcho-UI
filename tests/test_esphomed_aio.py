@@ -72,7 +72,7 @@ class PinnedFixture(Fixture):
    client=APIClient('127.0.0.1',self.port,client_info='LibreEcho isolated acceptance',provide_time=False)
    try:
     await client.connect(login=True);info=await client.device_info();self.assertEqual(info.name,'fixture-satellite');self.assertEqual(info.mac_address,'02:00:00:00:00:01');self.assertEqual(info.voice_assistant_feature_flags,61)
-    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,10,11,12,13});self.assertFalse(services)
+    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,10,11,12,13,20,21,22});self.assertFalse(services)
     from aioesphomeapi.model import MediaPlayerEntityFeature,MediaPlayerInfo
     media=next(e for e in entities if isinstance(e,MediaPlayerInfo));self.assertTrue(media.supports_pause);self.assertEqual(media.feature_flags,int(MediaPlayerEntityFeature.PAUSE|MediaPlayerEntityFeature.PLAY|MediaPlayerEntityFeature.STOP|MediaPlayerEntityFeature.VOLUME_SET|MediaPlayerEntityFeature.VOLUME_MUTE|MediaPlayerEntityFeature.PLAY_MEDIA|MediaPlayerEntityFeature.MEDIA_ANNOUNCE))
     await self.exercise_controls_and_voice(client)
@@ -101,7 +101,7 @@ class PinnedFixture(Fixture):
    await asyncio.sleep(.05)
    good=APIClient('127.0.0.1',self.port,noise_psk=encoded,provide_time=False)
    try:
-    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,10,11,12,13})
+    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,10,11,12,13,20,21,22})
     await self.exercise_controls_and_voice(good)
     await good._get_connection().send_message_await_response(PingRequest(),PingResponse);await good.disconnect()
    finally:await good.disconnect(force=True)

@@ -53,6 +53,13 @@
 #define BUTTON_BATCH 8U
 #define EVENT_LIST_TYPE 107U
 #define EVENT_STATE_TYPE 108U
+/* Device activity as event entities (#393): voice steps, playback and the
+ * timer events Home Assistant sends. Event types only -- never transcript,
+ * TTS/media URL or timer text. */
+#define ACTIVITY_VOICE_KEY 20U
+#define ACTIVITY_PLAYBACK_KEY 21U
+#define ACTIVITY_TIMER_KEY 22U
+#define NELEM(a) (sizeof(a)/sizeof((a)[0]))
 struct client { int fd,mode,phase,hello,states,closing,light; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
 struct state {
@@ -63,7 +70,7 @@ struct state {
  /* Light sensor file (--light-sensor, else the first readable TSL2540 als_lux); empty until found. */
  char light_path[160];int lux,lux_sent;uint64_t light_poll,light_sent_at;
  int button_fd;char button_path[160];
- char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake;
+ char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake,voice_open;
  uint64_t now,turn_deadline,turn_limit,last_audio_status,last_status_poll,wake_retry,mdns_retry,ring_first,ring_end,capture_next,timer_retry;
  int16_t ring[RING_SAMPLES];unsigned char mic_rx[24+2560];size_t mic_n;int mic_ack;
  char conversation[128],tts_url[1024],next_url[1024],result[24];int continue_turn,run_end,early_tts,playing,announcement,pipeline,tts_done,timer_pending;
@@ -130,9 +137,19 @@ static void states_send(struct client *c){unsigned char b[64];struct ep_writer w
 static const char *const button_ids[BUTTON_COUNT]={"volume_up","volume_down","microphone_mute","action"};
 static const char *const button_labels[BUTTON_COUNT]={"Volume up button","Volume down button","Microphone mute button","Action button"};
 static const char *const gesture_ids[GESTURE_COUNT]={"press","long_press","double_press"};
-/* EventResponse for one press. Only subscribed clients get it, as with other states. */
-static void button_event(unsigned button,unsigned gesture){unsigned char b[64];
- for(unsigned i=0;i<CLIENTS;i++){struct ep_writer w={b,sizeof b,0,0};if(S.clients[i].fd<0||!S.clients[i].states)continue;ep_fixed32(&w,1,BUTTON_KEY_BASE+button);ep_string(&w,2,gesture_ids[gesture]);(void)send_writer(&S.clients[i],EVENT_STATE_TYPE,&w);}}
+/* EventResponse for one event. Only subscribed clients get it, as with other states. */
+static void event_send(unsigned key,const char *type){unsigned char b[64];
+ for(unsigned i=0;i<CLIENTS;i++){struct ep_writer w={b,sizeof b,0,0};if(S.clients[i].fd<0||!S.clients[i].states)continue;ep_fixed32(&w,1,key);ep_string(&w,2,type);(void)send_writer(&S.clients[i],EVENT_STATE_TYPE,&w);}}
+static void button_event(unsigned button,unsigned gesture){event_send(BUTTON_KEY_BASE+button,gesture_ids[gesture]);}
+/* Event types are fixed in each entity's list; the order here is the list order. */
+static const char *const voice_events[]={"wake_word","listening","thinking","replying","finished","stopped"};
+static const char *const playback_events[]={"started","stopped"};
+/* LibreEcho timer event types 0-3 as Home Assistant sends them (STARTED, UPDATED, CANCELLED, FINISHED). */
+static const char *const timer_events[]={"started","updated","cancelled","finished"};
+static const struct {unsigned key;const char *id,*label;const char *const *types;unsigned count;} activity_entities[]={
+ {ACTIVITY_VOICE_KEY,"voice_assistant","Voice assistant",voice_events,NELEM(voice_events)},
+ {ACTIVITY_PLAYBACK_KEY,"playback","Playback",playback_events,NELEM(playback_events)},
+ {ACTIVITY_TIMER_KEY,"timer","Timer",timer_events,NELEM(timer_events)}};
 /* Datagrams are "<button> <gesture>" exactly; anything else is dropped unseen. */
 static void button_tick(void){char msg[BUTTON_MSG_MAX+1];
  for(unsigned n=0;n<BUTTON_BATCH;n++){ssize_t got=recv(S.button_fd,msg,sizeof msg-1,MSG_DONTWAIT);if(got<0)break;msg[got]=0;char *sp=strchr(msg,' ');if(!sp)continue;*sp++=0;
@@ -145,8 +162,12 @@ static int button_socket_open(const char *path){struct sockaddr_un a;int fd;
  if(bind(fd,(struct sockaddr*)&a,sizeof a)<0){close(fd);return -1;}return fd;}
 static void all_states(void){for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].states)states_send(&S.clients[i]);}
 static int announce_done(int success){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,(unsigned)success);return S.owner>=0?send_writer(&S.clients[S.owner],120,&w):-1;}
-static void capture_end(void){if(S.turn==2&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,2,1);(void)send_writer(&S.clients[S.owner],106,&w);}if(S.turn==1||S.turn==2)S.turn=3;profile("thinking");}
-static void turn_clear(const char *result,int notify){int active=S.turn||S.playing;if(notify)(void)announce_done(0);esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=0;S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);/* Error flash only for a turn that was really interrupted: an idle HA
+static void capture_end(void){if(S.turn==2&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,2,1);(void)send_writer(&S.clients[S.owner],106,&w);}if(S.turn==1||S.turn==2){S.turn=3;event_send(ACTIVITY_VOICE_KEY,"thinking");}profile("thinking");}
+/* Playback ends through turn_clear or the tick; report it once, when S.playing drops. */
+static void playback_stopped(void){if(!S.playing)return;S.playing=0;event_send(ACTIVITY_PLAYBACK_KEY,"stopped");}
+static void turn_clear(const char *result,int notify){int active=S.turn||S.playing;if(notify)(void)announce_done(0);playback_stopped();esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=0;S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);
+ /* One voice event per opened turn (wake, announcement or continued turn). */
+ if(S.voice_open){S.voice_open=0;event_send(ACTIVITY_VOICE_KEY,strcmp(result,"success")?"stopped":"finished");}/* Error flash only for a turn that was really interrupted: an idle HA
  * reconnect is not a user-visible failure. */
  profile(active&&strcmp(result,"success")?"error":"idle");status_write();all_states();}
 static void cancel_turn(const char *reason){if(S.turn&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,0);(void)send_writer(&S.clients[S.owner],90,&w);}turn_clear(reason,S.announcement);}
@@ -157,9 +178,9 @@ static int voice_start(uint64_t sample,int continued){unsigned char b[256];struc
     already detected here, so HA must start at STT -- with no HA wake engine the
     run otherwise fails instantly with wake-engine-missing. */
  ep_uint(&w,3,1);if(!continued)ep_string(&w,5,"Alexa");if(send_writer(&S.clients[S.owner],90,&w))return -1;
- S.capture_next=sample>3200?sample-3200:0;if(S.capture_next<S.ring_first)S.capture_next=S.ring_first;S.turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;profile("listening");status_write();return 0;
+ S.capture_next=sample>3200?sample-3200:0;if(S.capture_next<S.ring_first)S.capture_next=S.ring_first;S.turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_open=1;if(!continued)event_send(ACTIVITY_VOICE_KEY,"wake_word");event_send(ACTIVITY_VOICE_KEY,"listening");profile("listening");status_write();return 0;
 }
-static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(esp_playback_start(&S.playback,url,S.bus_path,S.ca_path,S.now)<0){esp_playback_close(&S.playback);return -1;}S.playing=1;S.turn=4;all_states();return 0;}
+static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(esp_playback_start(&S.playback,url,S.bus_path,S.ca_path,S.now)<0){esp_playback_close(&S.playback);return -1;}S.playing=1;S.turn=4;all_states();event_send(ACTIVITY_PLAYBACK_KEY,"started");return 0;}
 /* HA may await the drain ack before RUN_END. Ack once, but keep this pipeline
  * alive until RUN_END so its delayed event cannot address a new capture. */
 static void completed(void){if(!S.tts_done)(void)announce_done(1);S.tts_done=1;if(S.pipeline&&!S.run_end)return;char conv[128];int cont=S.continue_turn;snprintf(conv,sizeof conv,"%s",S.conversation);turn_clear("success",0);if(cont&&!mic_muted()){snprintf(S.conversation,sizeof S.conversation,"%s",conv);(void)voice_start(S.ring_end,1);}}
@@ -172,6 +193,8 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  w.length=0;ep_string(&w,1,"microphone_mute");ep_fixed32(&w,2,MUTE_KEY);ep_string(&w,3,"Microphone mute");ep_string(&w,5,"mdi:microphone-off");(void)send_writer(c,17,&w);
  /* ListEntitiesEventResponse, one per button: the gesture is the event type. */
  for(unsigned i=0;i<BUTTON_COUNT;i++){w.length=0;ep_string(&w,1,button_ids[i]);ep_fixed32(&w,2,BUTTON_KEY_BASE+i);ep_string(&w,3,button_labels[i]);for(unsigned g=0;g<GESTURE_COUNT;g++)ep_string(&w,9,gesture_ids[g]);(void)send_writer(c,EVENT_LIST_TYPE,&w);}
+ /* Activity entities (#393): one event entity each, event types listed as field 9. */
+ for(unsigned i=0;i<NELEM(activity_entities);i++){w.length=0;ep_string(&w,1,activity_entities[i].id);ep_fixed32(&w,2,activity_entities[i].key);ep_string(&w,3,activity_entities[i].label);for(unsigned t=0;t<activity_entities[i].count;t++)ep_string(&w,9,activity_entities[i].types[t]);(void)send_writer(c,EVENT_LIST_TYPE,&w);}
  /* ListEntitiesSensorResponse: lx, illuminance, STATE_CLASS_MEASUREMENT; only when the board has a sensor. */
  if(S.light_path[0]){c->light=1;w.length=0;ep_string(&w,1,"illuminance");ep_fixed32(&w,2,LIGHT_KEY);ep_string(&w,3,"Illuminance");ep_string(&w,6,"lx");ep_uint(&w,7,0);ep_string(&w,9,"illuminance");ep_uint(&w,10,1);(void)send_writer(c,16,&w);}
  (void)send_msg(c,19,NULL,0);
@@ -202,7 +225,7 @@ static void voice_event(const void *p,size_t n){unsigned event=(unsigned)ep_get_
  if(event==0){cancel_turn("ha_error");return;}if(event==12)capture_end();
  if(event==6){if(event_data(p,n,"conversation_id",S.conversation,sizeof S.conversation)<0){cancel_turn("bad_event");return;}if(event_data(p,n,"continue_conversation",v,sizeof v)<0){cancel_turn("bad_event");return;}S.continue_turn=!strcmp(v,"1");}
  if(event==100){if(event_data(p,n,"tts_start_streaming",v,sizeof v)<0){cancel_turn("bad_event");return;}S.early_tts=!strcmp(v,"1");}
- if((event==100&&S.early_tts)||event==8){capture_end();if(!S.playing&&!S.tts_done&&S.tts_url[0]&&playback_start(S.tts_url)<0){(void)announce_done(0);cancel_turn("playback_error");return;}}
+ if((event==100&&S.early_tts)||event==8){capture_end();if(!S.playing&&!S.tts_done&&S.tts_url[0]){event_send(ACTIVITY_VOICE_KEY,"replying");if(playback_start(S.tts_url)<0){(void)announce_done(0);cancel_turn("playback_error");return;}}}
  if(event==2){S.run_end=1;if(!S.playing&&(S.tts_done||!S.tts_url[0])){capture_end();completed();}}
 }
 static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){struct client *c=&S.clients[idx];unsigned char b[128];struct ep_writer w={b,sizeof b,0,0};char args[2048],url[1024],escaped[2048];if(valid_proto(p,n))return -1;
@@ -219,7 +242,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  case 91:if(S.owner!=(int)idx||S.turn!=1)return 0;if(ep_get_uint(p,n,2,0)||ep_get_uint(p,n,1,0)){cancel_turn("ha_rejected");return 0;}S.turn=2;return 0;
  case 92:if(S.owner==(int)idx)voice_event(p,n);return 0;
  case 119:if(S.owner!=(int)idx)return -1;if(S.turn){(void)announce_done(0);return 0;}
- if(ep_get_text(p,n,1,url,sizeof url)||ep_get_text(p,n,3,S.next_url,sizeof S.next_url))return -1;S.turn=3;S.announcement=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=!!ep_get_uint(p,n,4,0);snprintf(S.tts_url,sizeof S.tts_url,"%s",url);
+ if(ep_get_text(p,n,1,url,sizeof url)||ep_get_text(p,n,3,S.next_url,sizeof S.next_url))return -1;S.turn=3;S.announcement=1;S.voice_open=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=!!ep_get_uint(p,n,4,0);snprintf(S.tts_url,sizeof S.tts_url,"%s",url);
  if(S.next_url[0]){char pre[1024];snprintf(pre,sizeof pre,"%s",S.next_url);snprintf(S.next_url,sizeof S.next_url,"%s",url);if(playback_start(pre)<0)turn_clear("playback_error",1);}else if(playback_start(url)<0)turn_clear("playback_error",1);status_write();return 0;
  case 121:configuration(c);return 0;
  case 123:{struct ep_reader r;struct ep_field f;unsigned count=0;int active=0;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0)if(f.number==1){if(++count>1||ep_text(&f,url,sizeof url)||strcmp(url,"alexa_v0.1"))return -1;active=1;}
@@ -236,7 +259,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  if(ep_get_uint(p,n,8,0)&&ep_get_uint(p,n,9,0)){if(S.owner!=(int)idx||S.turn)return 0;S.turn=3;S.turn_deadline=S.now+S.turn_limit;if(playback_start(url)<0)turn_clear("playback_error",1);}else if(job(S.radio_path,"play",args,0,0))return -1;}
  if(ep_get_uint(p,n,2,0)){unsigned command=(unsigned)ep_get_uint(p,n,3,0);const char *cmd=NULL;if(command==0)cmd="resume";else if(command==1)cmd="pause";else if(command==2)cmd="stop";else if(command==5)cmd=S.radio_state==2?"pause":"resume";
  if(cmd){if(job(S.radio_path,cmd,"{}",0,0))return -1;}else if(command==3||command==4){int target=command==3?0:S.restore_volume;if(command==3&&!S.output_muted)S.restore_volume=S.volume;snprintf(args,sizeof args,"{\"volume\":%d}",target);if(job(S.audio_path,"set_volume",args,6,command==3))return -1;}else return -1;}return 0;
- case 115:if(S.owner!=(int)idx)return -1;{char id[128],name[128],ei[256],en[256];unsigned event=(unsigned)ep_get_uint(p,n,1,0);uint64_t total=ep_get_uint(p,n,4,0),left=ep_get_uint(p,n,5,0);if(event>3||total>604800||left>604800||ep_get_text(p,n,2,id,sizeof id)||!id[0]||ep_get_text(p,n,3,name,sizeof name))return -1;json_escape(ei,sizeof ei,id);json_escape(en,sizeof en,name);snprintf(args,sizeof args,"{\"event_type\":%u,\"timer_id\":\"%s\",\"name\":\"%s\",\"total_seconds\":%llu,\"seconds_left\":%llu,\"is_active\":%s}",event,ei,en,(unsigned long long)total,(unsigned long long)left,ep_get_uint(p,n,6,0)?"true":"false");return job(S.timer_path,"remote_event",args,JOB_TIMER,0);}
+ case 115:if(S.owner!=(int)idx)return -1;{char id[128],name[128],ei[256],en[256];unsigned event=(unsigned)ep_get_uint(p,n,1,0);uint64_t total=ep_get_uint(p,n,4,0),left=ep_get_uint(p,n,5,0);if(event>3||total>604800||left>604800||ep_get_text(p,n,2,id,sizeof id)||!id[0]||ep_get_text(p,n,3,name,sizeof name))return -1;json_escape(ei,sizeof ei,id);json_escape(en,sizeof en,name);snprintf(args,sizeof args,"{\"event_type\":%u,\"timer_id\":\"%s\",\"name\":\"%s\",\"total_seconds\":%llu,\"seconds_left\":%llu,\"is_active\":%s}",event,ei,en,(unsigned long long)total,(unsigned long long)left,ep_get_uint(p,n,6,0)?"true":"false");if(job(S.timer_path,"remote_event",args,JOB_TIMER,0))return -1;event_send(ACTIVITY_TIMER_KEY,timer_events[event]);return 0;}
  default:return 0;}
 }
 static int process_rx(unsigned idx){struct client *c=&S.clients[idx];unsigned packets=0;
@@ -367,7 +390,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  jobs_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);capture_tick();
  if(S.turn&&S.now>S.turn_deadline)cancel_turn("timeout");
- if(S.playing){int rc=esp_playback_tick(&S.playback,S.now);if(rc){S.playing=0;if(rc<0)turn_clear("playback_error",1);else if(S.next_url[0]){char next[1024];snprintf(next,sizeof next,"%s",S.next_url);S.next_url[0]=0;if(playback_start(next)<0)turn_clear("playback_error",1);}else completed();}}
+ if(S.playing){int rc=esp_playback_tick(&S.playback,S.now);if(rc){playback_stopped();if(rc<0)turn_clear("playback_error",1);else if(S.next_url[0]){char next[1024];snprintf(next,sizeof next,"%s",S.next_url);S.next_url[0]=0;if(playback_start(next)<0)turn_clear("playback_error",1);}else completed();}}
  mdns_tick(port);
  }
  S.ready=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);
