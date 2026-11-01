@@ -154,3 +154,34 @@ claps 150-800 ms apart. A single is reported once the double window has passed
 without a second clap. Existing subscribers select on `wake_detected`, so a
 clap does not start a voice turn. The setting is not persisted, not exposed in
 the HTTP API and not forwarded to Home Assistant yet.
+
+## Smoke alarm detection (experimental, off by default)
+
+`libreecho-waked` can also screen its cleaned mono frames for the T3 temporal
+pattern of a smoke alarm: three pulses of a steady tone near 3 kHz, each about
+0.5 s long, separated by gaps of about 0.5 s. The detector
+(`src/adapter/smoke_alarm_detector.c`) is off at start-up and is switched on
+only by the adapter control socket:
+
+```text
+{"v":1,"id":1,"cmd":"set_smoke_alarm","args":{"enabled":true}}
+```
+
+`status` reports `smoke_alarm_enabled` and `smoke_alarm_count`. While enabled,
+each 10 ms frame must pass an energy gate. Frames that pass it are checked for
+tonality: one of three Goertzel filters (2.9, 3.1, 3.3 kHz) must hold most of
+the frame energy. A run of tonal frames of 0.3-0.9 s, followed by a gap of
+0.3-0.9 s and then the next run, counts as a pulse. Three pulses in sequence
+report one event, and a further 10 s cooldown applies. Noise, speech, music at
+other frequencies and pulses with the wrong length or gap break the sequence.
+The detector costs three 160-sample Goertzel passes per frame that passes the
+energy gate.
+
+Results go to the wake subscriber stream as `smoke_alarm_detected` with
+`{"detection_sample":N,"pulses":3}`. Like claps, it never starts a voice turn.
+The timing windows, the tonal threshold and the energy gate are tuned
+constants, not a measured standard: they must be checked against the alarm
+standard and a real alarm before any conformance claim. Only the T3 pattern is
+covered; the CO (T4) pattern has short pulses that do not fit these windows.
+The setting is not persisted, not exposed in the HTTP API and not forwarded to
+Home Assistant yet.

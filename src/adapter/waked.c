@@ -2,6 +2,7 @@
 
 #include "adapter.h"
 #include "clap_detector.h"
+#include "smoke_alarm_detector.h"
 #include "voice_aec.h"
 #include "voice_dsp.h"
 #include "voice_reference.h"
@@ -59,10 +60,12 @@ struct waked_ipc {
     int audio_subscribers[MAX_AUDIO_SUBSCRIBERS];
     unsigned int detected_count;
     unsigned int clap_count;
+    unsigned int smoke_alarm_count;
     int sensitivity;
     struct le_wake_event last_event;
     struct le_wake_led led;
     struct le_clap_detector clap;
+    struct le_smoke_alarm_detector smoke_alarm;
 };
 
 struct waked_metrics {
@@ -290,6 +293,31 @@ static void publish_clap_event(struct waked_ipc *ipc,
     send_to_wake_subscribers(ipc, message, length);
 }
 
+/*
+ * Smoke alarm T3 events use the same subscriber stream as claps. They are
+ * reported as smoke_alarm_detected and never start a voice turn.
+ */
+static void publish_smoke_alarm_event(
+    struct waked_ipc *ipc, const struct le_smoke_alarm_event *event)
+{
+    char data[128];
+    char message[LE_ADAPTER_MSG_MAX];
+    int length;
+
+    ++ipc->smoke_alarm_count;
+    if (snprintf(
+            data, sizeof(data),
+            "{\"detection_sample\":%llu,\"pulses\":%u}",
+            (unsigned long long)event->detection_sample,
+            event->pulses) >= (int)sizeof(data))
+        return;
+    length = le_adapter_format_event(
+        message, sizeof(message), "smoke_alarm_detected", data);
+    if (length < 0)
+        return;
+    send_to_wake_subscribers(ipc, message, length);
+}
+
 static void publish_wake_event(struct waked_ipc *ipc,
                                const struct le_wake_event *event)
 {
@@ -485,6 +513,7 @@ static void handle_control_client(
             "\"capture_active\":%s,\"capture_age_ms\":%d,"
             "\"inference_active\":%s,\"inference_age_ms\":%d,"
             "\"clap_enabled\":%s,\"clap_count\":%u,"
+            "\"smoke_alarm_enabled\":%s,\"smoke_alarm_count\":%u,"
             "\"model\":\"alexa_v0.1\"}",
             model_loaded ? "loaded" : "unavailable", ipc->sensitivity, ipc->detected_count,
             metrics->vad_active ? "true" : "false",
@@ -494,7 +523,9 @@ static void handle_control_client(
             model_loaded ? "true" : "false", (unsigned long long)metrics->processed_frames,
             metrics->processed_frames && le_wake_recent(capture_age_ms, LE_WAKE_CAPTURE_STALE_MS) ? "true" : "false", capture_age_ms,
             model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms,
-            ipc->clap.enabled ? "true" : "false", ipc->clap_count);
+            ipc->clap.enabled ? "true" : "false", ipc->clap_count,
+            ipc->smoke_alarm.enabled ? "true" : "false",
+            ipc->smoke_alarm_count);
         (void)respond(client_fd, id, 1, status);
     } else if (!strcmp(command, "subscribe")) {
         if (add_subscriber(ipc, client_fd) < 0) {
@@ -588,6 +619,22 @@ static void handle_control_client(
                           enabled ? "{\"enabled\":true}"
                                   : "{\"enabled\":false}");
         }
+    } else if (!strcmp(command, "set_smoke_alarm")) {
+        size_t length = args ? strnlen(args, LE_ADAPTER_MSG_MAX) : 0;
+        int enabled = 0;
+
+        if (!args || length == LE_ADAPTER_MSG_MAX ||
+            !json_valid_object(args, length) ||
+            json_duplicate_key(args, length, "enabled") ||
+            json_get_top_level_bool(args, length, "enabled", &enabled) != 1)
+            (void)respond(client_fd, id, 0,
+                          "enabled must be a single top-level boolean");
+        else {
+            le_smoke_alarm_detector_set_enabled(&ipc->smoke_alarm, enabled);
+            (void)respond(client_fd, id, 1,
+                          enabled ? "{\"enabled\":true}"
+                                  : "{\"enabled\":false}");
+        }
     } else if (!strcmp(command, "test")) {
         const struct le_wake_event event = {
             metrics->processed_frames *
@@ -662,6 +709,13 @@ static int process_frame(struct le_voice_aec *aec,
         if (le_clap_detector_process(&ipc->clap, clean, &clap))
             publish_clap_event(ipc, &clap);
     }
+    if (ipc->smoke_alarm.enabled) {
+        struct le_smoke_alarm_event alarm;
+
+        if (le_smoke_alarm_detector_process(
+                &ipc->smoke_alarm, clean, &alarm))
+            publish_smoke_alarm_event(ipc, &alarm);
+    }
 
 #ifdef LE_WAKE_ENGINE_ONNX
     if (wake_worker && wake_worker->implementation) {
@@ -725,6 +779,7 @@ static int run_waked(const struct waked_config *config)
     metrics.vad_floor_rms = config->vad_floor_rms;
     memset(&ipc, 0, sizeof(ipc));
     le_clap_detector_init(&ipc.clap);
+    le_smoke_alarm_detector_init(&ipc.smoke_alarm);
     ipc.listen_fd = -1;
     ipc.event_pipe[0] = -1;
     ipc.event_pipe[1] = -1;
