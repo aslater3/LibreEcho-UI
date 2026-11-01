@@ -103,6 +103,21 @@ int main(void)
         assert(backend.ops->timer_add_alarm(&backend, (long long)time(0) - 5, "old", &id) == LE_INVALID);
         assert(backend.ops->timer_cancel(&backend, id) == LE_OK);
     }
+    /* Sunrise wake light (UI #447): off by default, 5 to 30 or 0 to set. */
+    {
+        int minutes = -1;
+
+        assert(backend.ops->timer_sunrise_get(&backend, &minutes) == LE_OK);
+        assert(minutes == 0);
+        assert(backend.ops->timer_sunrise_set(&backend, 31) == LE_INVALID);
+        assert(backend.ops->timer_sunrise_set(&backend, 4) == LE_INVALID);
+        assert(backend.ops->timer_sunrise_set(&backend, 5) == LE_OK);
+        assert(backend.ops->timer_sunrise_get(&backend, &minutes) == LE_OK);
+        assert(minutes == 5);
+        assert(backend.ops->timer_sunrise_set(&backend, 0) == LE_OK);
+        assert(backend.ops->timer_sunrise_get(&backend, &minutes) == LE_OK);
+        assert(minutes == 0);
+    }
     backend.ops->destroy(&backend);
 
     puts("mock timer backend: ok");

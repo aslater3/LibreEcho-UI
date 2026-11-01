@@ -170,6 +170,29 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/alarms/snooz
 [ "$code" = 403 ] || { echo "FAIL: snooze without CSRF returned $code, expected 403"; exit 1; }
 echo "  snooze route, method and CSRF enforced: ok"
 
+# --- sunrise wake light lead time --------------------------------------------
+# Off by default. The owner sets 0 or 5 to 30 minutes; anything else is refused
+# and changes nothing. Only PUT and GET are routed, and PUT needs CSRF.
+code=$(curl -sS -o /tmp/le-sunrise.out -w '%{http_code}' -X PUT "$URL/api/v1/alarms/sunrise" \
+    -H "$CSRF" -H "$JSON" --data '{"lead_minutes":31}')
+[ "$code" = 400 ] || { echo "FAIL: sunrise lead of 31 returned $code, expected 400"; cat /tmp/le-sunrise.out; exit 1; }
+code=$(curl -sS -o /tmp/le-sunrise.out -w '%{http_code}' -X PUT "$URL/api/v1/alarms/sunrise" \
+    -H "$CSRF" -H "$JSON" --data '{"lead_minutes":5}')
+[ "$code" = 200 ] || { echo "FAIL: sunrise lead of 5 returned $code"; cat /tmp/le-sunrise.out; exit 1; }
+jq -e '.ok and .data.lead_minutes == 5' < /tmp/le-sunrise.out >/dev/null \
+    || { echo "FAIL: sunrise PUT did not echo 5"; cat /tmp/le-sunrise.out; exit 1; }
+curl -fsS "$URL/api/v1/alarms/sunrise" | jq -e '.data.lead_minutes == 5' >/dev/null \
+    || { echo "FAIL: sunrise GET did not read back 5"; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$URL/api/v1/alarms/sunrise" \
+    -H "$JSON" --data '{"lead_minutes":0}')
+[ "$code" = 403 ] || { echo "FAIL: sunrise PUT without CSRF returned $code, expected 403"; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/alarms/sunrise" -H "$CSRF")
+[ "$code" = 405 ] || { echo "FAIL: POST /alarms/sunrise returned $code, expected 405"; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$URL/api/v1/alarms/sunrise" \
+    -H "$CSRF" -H "$JSON" --data '{"lead_minutes":0}')
+[ "$code" = 200 ] || { echo "FAIL: sunrise lead of 0 returned $code"; exit 1; }
+echo "  sunrise lead time range, CSRF and methods enforced: ok"
+
 code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/alarms/$repeat_id" -H "$CSRF")
 [ "$code" = 200 ] || { echo "FAIL: repeating alarm cancel returned $code"; exit 1; }
 curl -fsS "$URL/api/v1/alarms" | jq -e '(.data.alarms | length) == 0' >/dev/null

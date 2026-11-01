@@ -122,6 +122,15 @@ static int idle_auto_off_minutes_valid(unsigned int minutes)
 #define SLEEP_PERIOD_MAX_MS 15000U
 #define SLEEP_TIMER_MAX_MINUTES 720
 #define SLEEP_PULSE_FLOOR_PERCENT 15U
+/* Sunrise wake light (UI #447). A warm fade-up from dark red to warm white over
+   the owner's lead time, then a hold until timerd ends it. The hold is also
+   capped: if timerd restarts mid-alarm the fade still ends on its own. */
+#define SUNRISE_SECONDS_MIN 60U
+#define SUNRISE_SECONDS_MAX 1800U
+#define SUNRISE_HOLD_MAX_SECONDS 360.0
+#define SUNRISE_START_R 64U
+#define SUNRISE_BRIGHTNESS_START 2U
+#define SUNRISE_BRIGHTNESS_PEAK 60U
 /* A timed sleep light that expires while the state write fails must retry that
    write; it is owed to disk or a restart restores the sleep light from the
    stale file.  Retried on a bounded cadence, not once a frame. */
@@ -315,6 +324,12 @@ struct daemon_context {
     /* Sleep light runtime (#101). */
     int sleep_active;
     double sleep_started;
+    /* Sunrise wake light (UI #447): a base-layer owner that outranks the idle
+       and sleep bases but not voice, playback, meters or the visualiser. */
+    int sunrise_active;
+    double sunrise_started;   /* monotonic seconds */
+    double sunrise_seconds;   /* fade length */
+    int sunrise_settled;      /* ramp finished and held: nothing left to draw */
     double sleep_expires;      /* absolute monotonic seconds, 0 = no timer */
     int sleep_persist_pending; /* expiry applied in memory; disk write owed */
     int sleep_persist_logged;  /* one warning per failure streak */
@@ -2577,11 +2592,49 @@ static void sleep_tick(struct daemon_context *ctx, double now)
  * indicator is the default; the sleep light, when active, is the base owner;
  * night mode caps whichever base is selected rather than replacing it.
  */
+static unsigned int sunrise_mix(unsigned int from, unsigned int to, double p)
+{
+    double v = (double)from + ((double)to - (double)from) * p;
+
+    return v <= 0.0 ? 0U : v >= 255.0 ? 255U : (unsigned int)(v + 0.5);
+}
+
+static double sunrise_progress(const struct daemon_context *ctx, double now)
+{
+    double p = (now - ctx->sunrise_started) / ctx->sunrise_seconds;
+
+    return p <= 0.0 ? 0.0 : p >= 1.0 ? 1.0 : p;
+}
+
+/* Dark red to the named warm white, brightness rising to a restrained peak.
+   Drawn through hardware_apply(), so the night cap, calibration, transfer and
+   IS31 current scaling are the same ones the sleep light and dimming use. */
+static void apply_sunrise_light(struct daemon_context *ctx, double now)
+{
+    struct led_rgb warm = {255U, 200U, 150U};
+    struct colour c;
+    double p = sunrise_progress(ctx, now);
+
+    (void)led_output_accent(LE_ACCENT_WARM_WHITE, &warm);
+    c.r = sunrise_mix(SUNRISE_START_R, warm.r, p);
+    c.g = sunrise_mix(0U, warm.g, p);
+    c.b = sunrise_mix(0U, warm.b, p);
+    c.brightness = SUNRISE_BRIGHTNESS_START +
+                   (unsigned int)((SUNRISE_BRIGHTNESS_PEAK -
+                                   SUNRISE_BRIGHTNESS_START) * p + 0.5);
+    hardware_apply(ctx, &c);
+}
+
 static void apply_base_state(struct daemon_context *ctx, double now)
 {
     struct pixel pixels[RING_PIXELS];
     size_t i;
 
+    /* Sunrise is a wake signal, so it outranks the idle and sleep bases. */
+    if (ctx->sunrise_active) {
+        apply_sunrise_light(ctx, now);
+        return;
+    }
     if (ctx->sleep_active) {
         apply_sleep_light(ctx, now);
         return;
@@ -2678,6 +2731,41 @@ static void apply_base_layer(struct daemon_context *ctx, double now)
         apply_animated(ctx, now);
     else
         apply_base_state(ctx, now);
+}
+
+/* Sunrise timing: draw the ramp while the base is showing, hold once it has
+   settled, and end the fade after the safety cap whatever timerd says. */
+static void sunrise_tick(struct daemon_context *ctx, double now)
+{
+    if (!ctx->sunrise_active)
+        return;
+    if (now >= ctx->sunrise_started + ctx->sunrise_seconds +
+                   SUNRISE_HOLD_MAX_SECONDS) {
+        ctx->sunrise_active = 0;
+        ctx->sunrise_settled = 0;
+        apply_base_layer(ctx, now);
+        return;
+    }
+    if (ctx->sunrise_settled || !base_layer_visible(ctx))
+        return;
+    apply_base_state(ctx, now);
+    if (now >= ctx->sunrise_started + ctx->sunrise_seconds)
+        ctx->sunrise_settled = 1;
+}
+
+/* Milliseconds until sunrise needs a frame or expires, or -1 when inactive. */
+static int sunrise_timeout(const struct daemon_context *ctx, double now)
+{
+    double remaining;
+
+    if (!ctx->sunrise_active)
+        return -1;
+    if (!ctx->sunrise_settled && base_layer_visible(ctx))
+        return FRAME_MS;
+    remaining = (ctx->sunrise_started + ctx->sunrise_seconds +
+                 SUNRISE_HOLD_MAX_SECONDS - now) * 1000.0;
+    return remaining <= 1.0 ? 1 : remaining >= 2147483647.0 ? 2147483647 :
+           (int)remaining;
 }
 
 static void apply_current(struct daemon_context *ctx)
@@ -3165,6 +3253,7 @@ static int status_json(const struct daemon_context *ctx, char *out,
         "\"sleep_light\":{\"mode\":\"%s\",\"active\":%s,\"brightness\":%u,"
         "\"period_ms\":%u,\"timer_minutes\":%d,\"remaining_ms\":%u,"
         "\"restore_on_boot\":%s},"
+        "\"sunrise\":{\"active\":%s,\"progress_percent\":%u},"
         "\"output\":{\"effective_brightness\":%u,\"frame_load\":%u,"
         "\"max_load\":%u,\"limited\":%s,\"slew_limited\":%s},"
         "\"music\":{\"active\":%s,\"grammar\":\"%s\",\"effect\":\"%s\","
@@ -3198,6 +3287,10 @@ static int status_json(const struct daemon_context *ctx, char *out,
         ctx->state.sleep_period_ms, ctx->state.sleep_timer_minutes,
         (unsigned int)sleep_remaining_ms(ctx),
         ctx->state.sleep_restore_on_boot ? "true" : "false",
+        ctx->sunrise_active ? "true" : "false",
+        ctx->sunrise_active
+            ? (unsigned int)(100.0 * sunrise_progress(ctx, monotonic_seconds()))
+            : 0U,
         ctx->output_diag.effective_brightness, ctx->output_diag.frame_load,
         ctx->output_diag.max_load,
         ctx->output_diag.limited ? "true" : "false",
@@ -3729,6 +3822,39 @@ static int handle_request(struct daemon_context *ctx, int fd,
                              NULL);
     }
 
+    if (strcmp(request.command, "sunrise") == 0) {
+        char action[16];
+        unsigned int seconds = 0;
+
+        if (!request.have_args ||
+            json_get_string(request.args, "action", action, sizeof(action)) != 0)
+            return send_response(fd, request.id, 0, NULL,
+                                 "sunrise requires an action");
+        if (!strcmp(action, "start")) {
+            if (get_arg_unsigned(&request, "seconds", &seconds,
+                                 SUNRISE_SECONDS_MAX) != 0 ||
+                seconds < SUNRISE_SECONDS_MIN)
+                return send_response(fd, request.id, 0, NULL,
+                                     "sunrise seconds out of range");
+            ctx->sunrise_active = 1;
+            ctx->sunrise_started = now;
+            ctx->sunrise_seconds = (double)seconds;
+            ctx->sunrise_settled = 0;
+            apply_base_layer(ctx, now);
+            return send_response(fd, request.id, 1,
+                                 "{\"sunrise\":\"active\"}", NULL);
+        }
+        if (!strcmp(action, "stop")) {
+            ctx->sunrise_active = 0;
+            ctx->sunrise_settled = 0;
+            apply_base_layer(ctx, now);
+            return send_response(fd, request.id, 1,
+                                 "{\"sunrise\":\"off\"}", NULL);
+        }
+        return send_response(fd, request.id, 0, NULL,
+                             "sunrise action must be start or stop");
+    }
+
     return send_response(fd, request.id, 0, NULL, "unknown command");
 }
 
@@ -4111,6 +4237,12 @@ int main(int argc, char **argv)
             if (auto_off_timeout >= 0 &&
                 (timeout < 0 || auto_off_timeout < timeout))
                 timeout = auto_off_timeout;
+            {
+                int sunrise_wait = sunrise_timeout(&ctx, now);
+
+                if (sunrise_wait >= 0 && (timeout < 0 || sunrise_wait < timeout))
+                    timeout = sunrise_wait;
+            }
         }
 
         for (j = 0; j < MAX_CLIENTS; j++) {
@@ -4146,6 +4278,7 @@ int main(int argc, char **argv)
              ctx.state.sleep_mode == SLEEP_MODE_PULSE))
             update_animation(&ctx, now);
         sleep_tick(&ctx, now);
+        sunrise_tick(&ctx, now);
         night_schedule_tick(&ctx, now);
         (void)output_flush(&ctx, monotonic_seconds(), 0);
     }

@@ -475,6 +475,61 @@ int main(void)
         tzset();
     }
 
+    /*
+     * Sunrise wake light (UI #447). Off by default; a lead applies only to
+     * pending alarms inside [due - lead, due), never to countdowns or to an
+     * alarm that is already ringing.
+     */
+    {
+        struct le_timer_set set;
+        unsigned int id = 0, alarm_id = 0;
+        long long due = 0, fake_due = SYNCED_EPOCH + 3600LL;
+
+        assert(le_timer_sunrise_minutes_valid(0));
+        assert(le_timer_sunrise_minutes_valid(5));
+        assert(le_timer_sunrise_minutes_valid(30));
+        assert(!le_timer_sunrise_minutes_valid(4));
+        assert(!le_timer_sunrise_minutes_valid(31));
+        assert(!le_timer_sunrise_minutes_valid(-5));
+
+        le_timer_set_init(&set);
+        assert(le_timer_add_alarm(&set, fake_due, "wake", SYNCED_EPOCH, &alarm_id)
+               == LE_TIMER_OK);
+        /* Outside the 5-minute window: 10 minutes early. */
+        assert(!le_timer_sunrise_due(&set, fake_due - 600, 5, &id, &due));
+        /* Inside: 3 minutes early with a 5-minute lead. */
+        assert(le_timer_sunrise_due(&set, fake_due - 180, 5, &id, &due));
+        assert(id == alarm_id && due == fake_due);
+        /* Lead off never opens a window. */
+        assert(!le_timer_sunrise_due(&set, fake_due - 180, 0, &id, &due));
+        /* The window closes at the due instant itself. */
+        assert(!le_timer_sunrise_due(&set, fake_due, 5, &id, &due));
+        /* An unsynced clock never opens one. */
+        assert(!le_timer_sunrise_due(&set, 10, 5, &id, &due));
+
+        /* Sleep until the window opens rather than polling past it. */
+        assert(le_timer_sunrise_timeout_ms(&set, fake_due - 600, 5, 600000) ==
+               300000LL);
+        assert(le_timer_sunrise_timeout_ms(&set, fake_due - 600, 5, 60000) ==
+               60000LL);
+        assert(le_timer_sunrise_timeout_ms(&set, fake_due - 600, 0, 60000) ==
+               60000LL);
+        assert(le_timer_sunrise_timeout_ms(&set, fake_due - 180, 5, 60000) ==
+               60000LL);
+
+        /* A ringing alarm is not "before" anything. */
+        {
+            unsigned int fired[LE_TIMER_MAX];
+            assert(le_timer_step(&set, 1000, fake_due, fired, LE_TIMER_MAX) == 1);
+            assert(!le_timer_sunrise_due(&set, fake_due - 60, 5, &id, &due));
+        }
+
+        /* A countdown never has a sunrise. */
+        le_timer_set_init(&set);
+        assert(le_timer_add_countdown(&set, 600, "tea", 1000, &id) == LE_TIMER_OK);
+        assert(!le_timer_sunrise_due(&set, SYNCED_EPOCH, 5, &id, &due));
+    }
+
     printf("timer schedule: ok\n");
     return 0;
 }
