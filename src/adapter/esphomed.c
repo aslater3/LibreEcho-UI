@@ -85,6 +85,7 @@ struct state {
  int led_on,led_r,led_g,led_b,led_brightness,led_effect,led_dirty;
  /* Settings entities (#396): ledd global brightness and waked sensitivity, read back by status poll. */
  int led_master,led_master_known,sensitivity,sensitivity_known;uint64_t settings_poll;
+ int set_sent_known[4],set_sent_value[4];
  char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake,voice_open;
  uint64_t now,turn_deadline,turn_limit,last_audio_status,last_status_poll,wake_retry,mdns_retry,ring_first,ring_end,capture_next,timer_retry;
  int16_t ring[RING_SAMPLES];unsigned char mic_rx[24+2560];size_t mic_n;int mic_ack;
@@ -185,17 +186,25 @@ static const struct {unsigned key;const char *id,*label,*unit,*icon;} setting_nu
  {VOLUME_NUMBER_KEY,"volume","Volume","%","mdi:volume-high"},
  {SENSITIVITY_NUMBER_KEY,"wake_word_sensitivity","Wake word sensitivity","","mdi:tune-variant"},
  {LED_BRIGHTNESS_KEY,"led_brightness","LED brightness","%","mdi:brightness-6"}};
-/* Current value of a settings number; 0 when the owning daemon has not reported it yet. */
-static int setting_value(unsigned key,int *v){switch(key){
- case VOLUME_NUMBER_KEY:*v=S.volume;return S.last_audio_status!=0;
- case SENSITIVITY_NUMBER_KEY:*v=S.sensitivity;return S.sensitivity_known;
- case LED_BRIGHTNESS_KEY:*v=S.led_master;return S.led_master_known;}
+/* Settings entities by index: 0 volume, 1 wake sensitivity, 2 LED brightness, 3 wake word switch.
+ * Returns whether the value is known; a daemon that has not reported yet is sent as missing. */
+static int setting_now(unsigned i,int *v){switch(i){
+ case 0:*v=S.volume;return S.last_audio_status!=0;
+ case 1:*v=S.sensitivity;return S.sensitivity_known;
+ case 2:*v=S.led_master;return S.led_master_known;
+ case 3:*v=S.active_wake;return 1;}
  return 0;}
+static void setting_send(struct client *c,unsigned i){int v=0,known=setting_now(i,&v);unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};
+ if(i==3){ep_fixed32(&w,1,WAKE_SWITCH_KEY);ep_uint(&w,2,(unsigned)v);(void)send_writer(c,26,&w);return;}
+ ep_fixed32(&w,1,i==0?VOLUME_NUMBER_KEY:i==1?SENSITIVITY_NUMBER_KEY:LED_BRIGHTNESS_KEY);if(known)put_float(&w,2,(float)v);else ep_uint(&w,3,1);(void)send_writer(c,50,&w);}
+/* Sends a settings entity only when it changed (or was never sent), so the 250 ms status polls stay quiet. */
+static void settings_sync(void){for(unsigned i=0;i<4;i++){int v=0,known=setting_now(i,&v);
+ if(known==S.set_sent_known[i]&&(!known||v==S.set_sent_value[i]))continue;
+ S.set_sent_known[i]=known;S.set_sent_value[i]=v;
+ for(unsigned k=0;k<CLIENTS;k++)if(S.clients[k].fd>=0&&S.clients[k].states)setting_send(&S.clients[k],i);}}
 static void states_send(struct client *c){unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};float f=(float)S.volume/100.0f;uint32_t bits;memcpy(&bits,&f,4);
  ep_fixed32(&w,1,MEDIA_KEY);ep_uint(&w,2,S.playing?2:S.radio_state);ep_fixed32(&w,3,bits);ep_uint(&w,4,S.output_muted);if(S.last_audio_status)(void)send_writer(c,64,&w);
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
- w.length=0;ep_fixed32(&w,1,WAKE_SWITCH_KEY);ep_uint(&w,2,S.active_wake);(void)send_writer(c,26,&w);
- for(unsigned i=0;i<NELEM(setting_numbers);i++){int v=0,known=setting_value(setting_numbers[i].key,&v);w.length=0;ep_fixed32(&w,1,setting_numbers[i].key);if(known)put_float(&w,2,(float)v);else ep_uint(&w,3,1);(void)send_writer(c,50,&w);}
 }
 static const char *const button_ids[BUTTON_COUNT]={"volume_up","volume_down","microphone_mute","action"};
 static const char *const button_labels[BUTTON_COUNT]={"Volume up button","Volume down button","Microphone mute button","Action button"};
@@ -331,7 +340,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  switch(type){case 7:return send_msg(c,8,NULL,0);case 8:return 0;case 5:if(send_msg(c,6,NULL,0))return -1;c->closing=1;return 0;case 9:device_info(c);return 0;case 11:entities(c);return 0;
  /* The lux state goes once on subscribe, then only from light_poll: all_states() runs on every adapter status change.
   * Only clients whose entity list carried the sensor get it (a late-found sensor waits for the next list). */
- case 20:c->states=1;states_send(c);if(c->light)light_state(c);if(c->led_light)led_state(c);return 0;
+ case 20:c->states=1;states_send(c);for(unsigned i=0;i<4;i++)setting_send(c,i);if(c->light)light_state(c);if(c->led_light)led_state(c);return 0;
  /* LightCommandRequest (#395): HA sets the LED ring light; device indicators keep priority. */
  case 32:return led_command(p,n);
  /* NumberCommandRequest (#396): volume, wake sensitivity, LED brightness. */
@@ -348,7 +357,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  case 123:{struct ep_reader r;struct ep_field f;unsigned count=0;int active=0;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0)if(f.number==1){if(++count>1||ep_text(&f,url,sizeof url)||strcmp(url,"alexa_v0.1"))return -1;active=1;}
  if(wake_set_active(active))return -1;configuration(c);return 0;}
  case 124:return provision(c,p,n);
- case 33:if(ep_get_uint(p,n,1,0)==WAKE_SWITCH_KEY){if(wake_set_active(!!ep_get_uint(p,n,2,0)))return -1;all_states();return 0;}if(ep_get_uint(p,n,1,0)!=MUTE_KEY)return -1;{int mute=!!ep_get_uint(p,n,2,0);if(!mute&&S.privacy!=0){all_states();return 0;}if(mute){S.local_mute_gate=1;S.muted=1;if(S.turn==1)cancel_turn("muted");else if(S.turn==2)capture_end();all_states();}snprintf(args,sizeof args,"{\"muted\":%s}",mute?"true":"false");return job(S.audio_path,"set_mute",args,3,mute);}
+ case 33:if(ep_get_uint(p,n,1,0)==WAKE_SWITCH_KEY){if(wake_set_active(!!ep_get_uint(p,n,2,0)))return -1;all_states();settings_sync();return 0;}if(ep_get_uint(p,n,1,0)!=MUTE_KEY)return -1;{int mute=!!ep_get_uint(p,n,2,0);if(!mute&&S.privacy!=0){all_states();return 0;}if(mute){S.local_mute_gate=1;S.muted=1;if(S.turn==1)cancel_turn("muted");else if(S.turn==2)capture_end();all_states();}snprintf(args,sizeof args,"{\"muted\":%s}",mute?"true":"false");return job(S.audio_path,"set_mute",args,3,mute);}
  case 65:if(ep_get_uint(p,n,1,0)!=MEDIA_KEY)return -1;
  if(ep_get_uint(p,n,4,0)){uint32_t bits=(uint32_t)ep_get_uint(p,n,5,0);float volume;memcpy(&volume,&bits,4);if(!isfinite(volume)||volume<0||volume>1)return -1;snprintf(args,sizeof args,"{\"volume\":%d}",(int)lroundf(volume*100));if(job(S.audio_path,"set_volume",args,4,(int)lroundf(volume*100)))return -1;}
  if(ep_get_uint(p,n,6,0)){if(ep_get_text(p,n,7,url,sizeof url)||strlen(url)>900)return -1;json_escape(escaped,sizeof escaped,url);snprintf(args,sizeof args,"{\"url\":\"%.1900s\"}",escaped);
@@ -421,7 +430,7 @@ static void jobs_tick(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i]
  if(j->kind==10){const char *cur=strstr(j->rx,"\"current\"");int v;if(cur&&json_get_int(cur,"brightness",&v)>0&&v>=0&&v<=100){S.led_master=v;S.led_master_known=1;}}
  if(j->kind==11){int v;if(json_get_int(j->rx,"sensitivity",&v)>0&&v>=0&&v<=100){S.sensitivity=v;S.sensitivity_known=1;}}
  if(j->kind==3){S.muted=j->target;S.local_mute_gate=j->target;}if(j->kind==4)S.volume=j->target;if(j->kind==6){S.output_muted=j->target;S.volume=j->target?0:S.restore_volume;}
- }else if(j->kind>=3&&j->kind<=6&&S.turn)cancel_turn("adapter_error");io_close(j);all_states();}timer_cleanup_tick();}
+ }else if(j->kind>=3&&j->kind<=6&&S.turn)cancel_turn("adapter_error");io_close(j);all_states();settings_sync();}timer_cleanup_tick();}
 static int light_read(const char *path){char b[32],*end;long v;if(config_read(path,b,sizeof b)<1)return -1;v=strtol(b,&end,10);if(end==b||v<0||v>1000000)return -1;return (int)v;}
 static void light_poll(void){static const char *const probe[]={"/sys/bus/i2c/devices/0-0039/als_lux","/sys/bus/i2c/devices/1-0039/als_lux"};int lux,big;
  if(S.now<S.light_poll)return;S.light_poll=S.now+LIGHT_POLL_MS;

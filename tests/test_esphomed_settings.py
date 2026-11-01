@@ -62,6 +62,11 @@ class SettingsEntities(Settings):
   latest=self.number_states(5,want={VOLUME:30.0,SENSITIVITY:55.0,LED_BRIGHTNESS:40.0})
   self.assertEqual(latest,{VOLUME:30.0,SENSITIVITY:55.0,LED_BRIGHTNESS:40.0})
 
+ def test_unchanged_settings_are_not_repeated_on_status_polls(self):
+  self.subscribe();self.number_states(1)
+  # Status polls run every 2 s with the same values: no settings entity may be re-sent.
+  got=self.read_until(lambda t,f:False,seconds=4.5)
+  self.assertEqual([t for t,_ in got if t==50],[],'unchanged number states were repeated')
  def test_web_change_reaches_home_assistant_on_the_next_poll(self):
   self.subscribe();self.number_states(5,want={LED_BRIGHTNESS:40.0})
   self.adapters['led'].status['current']['brightness']=20
