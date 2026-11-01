@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
  run([sys.executable,'tests/test_esphomed_light.py'],env)
  run([sys.executable,'tests/test_esphomed_buttons.py'],env)
  run([sys.executable,'tests/test_esphomed_activity.py'],env)
-run([sys.executable,'tests/test_esphomed_led_light.py'],env)
+ run([sys.executable,'tests/test_esphomed_led_light.py'],env)
  timerd=d/'libreecho-timerd';run(flags+['-Isrc','src/adapter/timerd.c','src/adapter/timer_schedule.c','src/adapter/adapter_client.c','src/adapter/adapter_server.c','src/json.c','src/log.c']+libs+['-o',timerd])
  run([sys.executable,'tests/test_esphomed_final_spec.py'],dict(env,TIMERD_BIN=str(timerd),ESPHOMED_PRIVATE_NAMESPACE='1'))
  run([a.crypto_python,'tests/test_esphomed_noise.py','NoiseFixture.test_noise_provision_persist_reconnect_wrong_key_and_plain_refusal','NoiseFixture.test_noise_replay_is_rejected','KeyedDaemon'],env)
