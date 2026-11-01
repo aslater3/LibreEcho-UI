@@ -215,6 +215,27 @@ int main(void)
     CHECK(strstr(response, "\"centre_lane\":6,\"ring_radius_mm\":36") != NULL);
     CHECK(strstr(response, "\"vad\":\"native-energy-baseline\"") != NULL);
     CHECK(strstr(response, "\"wake_word\":false") != NULL);
+    CHECK(strstr(response, "\"microphone_mix\":\"beamformer\"") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_mix", "{\"mode\":\"average\"}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"microphone_mix\":\"average\"") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_mix", "{\"mode\":\"echo\"}",
+                          response, sizeof(response)) ==
+          LE_ADAPTER_ERR_REJECTED);
+    CHECK(strstr(response, "invalid microphone mix mode") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "status", "{}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"microphone_mix\":\"average\"") != NULL);
+    puts("micd: microphone mix mode is set live and reported in status");
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
     CHECK(adapter != NULL);

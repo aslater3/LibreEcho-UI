@@ -1260,6 +1260,8 @@ static int network(struct le_backend *b, struct le_network_state *o)
     return LE_OK;
 }
 
+static void read_microphone_mix(struct le_audio_state *o);
+
 static int audio(struct le_backend *b, struct le_audio_state *o)
 {
     char response[LE_ADAPTER_MSG_MAX];
@@ -1278,6 +1280,7 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
     o->volume_leveling = 0;
     if (json_get_bool(response, "volume_leveling", &v) > 0) o->volume_leveling = v;
     else if (json_get_bool(response, "microphone_muted", &v) > 0) { o->muted = v; found = 1; }
+    read_microphone_mix(o);
     if (json_get_bool(response, "startup_sound", &v) > 0) { o->startup_sound = v; found = 1; }
     if (json_get_bool(response, "amplifier_on", &v) > 0) { o->amplifier_on = v; found = 1; }
     if (json_get_bool(response, "output_available", &v) > 0) { o->output_available = v; found = 1; }
@@ -1357,6 +1360,31 @@ static int volume_leveling(struct le_backend *b, int enabled)
     (void)b;
     snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
     return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_volume_leveling", args);
+}
+
+/* The live mixing mode is micd's; an unreachable micd reports the default. */
+static void read_microphone_mix(struct le_audio_state *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char mode[sizeof(o->microphone_mix)];
+
+    strcpy(o->microphone_mix, "beamformer");
+    if (adapter_command(LE_ADAPTER_MIC_SOCK, "status", NULL,
+                        response, sizeof(response)) != LE_OK)
+        return;
+    if (json_get_string(response, "microphone_mix", mode, sizeof(mode)) > 0)
+        strcpy(o->microphone_mix, mode);
+}
+
+static int microphone_mix(struct le_backend *b, const char *mode)
+{
+    char args[48];
+    (void)b;
+    if (!mode || (strcmp(mode, "beamformer") && strcmp(mode, "average") &&
+                  strcmp(mode, "single")))
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
+    return adapter_json_command(LE_ADAPTER_MIC_SOCK, "set_mix", args);
 }
 
 static int tone(struct le_backend *b)
@@ -3241,7 +3269,8 @@ static const struct le_backend_ops ops = {
     network_portal,
     linux_reboot_bootloader,
     volume_leveling,
-    sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing
+    sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing,
+    microphone_mix
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

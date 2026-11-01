@@ -108,6 +108,23 @@ The earlier fixed 4-sample delay-and-sum on lanes 0 and 3 was removed in
 0.14.4: the lanes arrive in step, so a fixed delay suited one source direction
 only and comb-filtered speech from every other direction.
 
+## Mix mode
+
+The owner picks how the speech microphones become the mono stream with
+`microphone_mix` on `PUT /api/v1/audio` (see `docs/API.md`):
+
+- `beamformer` (default): the fixed-beam output described above.
+- `average`: the mean of the lanes in the speech set, rounded to nearest.
+- `single`: the lowest-numbered lane in the speech set (lane 0 by default).
+
+The beamformer runs in every mode, so its selection and the beam view stay
+current, and switching modes does not restart the stream. The mode is held in
+the shared slot that the stream worker reads each frame. `set_mix` changes it
+live, and `status` reports it as `pipeline.microphone_mix`. At start-up micd
+reads the saved value from the web configuration named by `LE_MIC_CONFIG`.
+Average and single output are not delayed by the 16 ms beamformer latency, so
+a switch causes a one-time step of about 16 ms in the stream.
+
 ## Beam view and direction of arrival
 
 `GET /api/v1/microphones/beams` (see `docs/API.md`) exposes the `beams`
