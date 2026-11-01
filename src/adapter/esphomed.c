@@ -70,8 +70,18 @@
 #define SENSITIVITY_NUMBER_KEY 41U
 #define LED_BRIGHTNESS_KEY 42U
 #define SETTINGS_POLL_MS 2000U
+/* Last-turn text sensors (#398): the last wake word (waked's model name) is always listed; the last
+ * transcript and reply carry speech, so they are listed and published only when the owner sets
+ * esphome_speech_text_sensors. All three clear when the voice history is cleared (agentd's generation). */
+#define TEXT_WAKE_KEY 70U
+#define TEXT_TRANSCRIPT_KEY 71U
+#define TEXT_REPLY_KEY 72U
+#define TEXT_LIST_TYPE 18U
+#define TEXT_STATE_TYPE 27U
+#define TEXT_VALUE_MAX 1024U
+#define HISTORY_GENERATION_KIND 13
 #define NELEM(a) (sizeof(a)/sizeof((a)[0]))
-struct client { int fd,mode,phase,hello,states,closing,light,led_light; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
+struct client { int fd,mode,phase,hello,states,closing,light,led_light,text_speech; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
 struct state {
  struct client clients[CLIENTS];struct io jobs[JOBS],wake,mic,timer_cleanup;
@@ -94,6 +104,9 @@ struct state {
  char process_start[32],boot_id[64],listener_inode[32];unsigned listener_port;
  /* set_ring (#397): when its ledd overlay ends; 0 when none is running. */
  uint64_t action_ring_end;
+ /* Last-turn text sensors (#398) and the voice-history generation they clear on. */
+ char last_wake[TEXT_VALUE_MAX],last_transcript[TEXT_VALUE_MAX],last_reply[TEXT_VALUE_MAX];int speech_text,history_known;long long history_generation;
+ const char *agent_path;
 };
 static struct state S;static volatile sig_atomic_t running=1,reload_config;
 static void sigstop(int sig){if(sig==SIGHUP)reload_config=1;else running=0;}
@@ -215,6 +228,17 @@ static const char *const gesture_ids[GESTURE_COUNT]={"press","long_press","doubl
 static void event_send(unsigned key,const char *type){unsigned char b[64];
  for(unsigned i=0;i<CLIENTS;i++){struct ep_writer w={b,sizeof b,0,0};if(S.clients[i].fd<0||!S.clients[i].states)continue;ep_fixed32(&w,1,key);ep_string(&w,2,type);(void)send_writer(&S.clients[i],EVENT_STATE_TYPE,&w);}}
 static void button_event(unsigned button,unsigned gesture){event_send(BUTTON_KEY_BASE+button,gesture_ids[gesture]);}
+/* Last-turn text sensors (#398). Values change only on a real turn event or a history clear. Clients get
+ * the wake word once subscribed; transcript and reply only when they listed them (speech text on). */
+static char *text_slot(unsigned key){return key==TEXT_WAKE_KEY?S.last_wake:key==TEXT_TRANSCRIPT_KEY?S.last_transcript:S.last_reply;}
+static void text_state(struct client *c,unsigned key){unsigned char b[TEXT_VALUE_MAX+64];struct ep_writer w={b,sizeof b,0,0};const char *v=text_slot(key);
+ ep_fixed32(&w,1,key);ep_string(&w,2,v);if(!v[0])ep_uint(&w,3,1);(void)send_writer(c,TEXT_STATE_TYPE,&w);}
+static void text_states(struct client *c){text_state(c,TEXT_WAKE_KEY);if(c->text_speech){text_state(c,TEXT_TRANSCRIPT_KEY);text_state(c,TEXT_REPLY_KEY);}}
+static void text_set(unsigned key,const char *value){char *slot=text_slot(key);if(!strcmp(slot,value))return;snprintf(slot,TEXT_VALUE_MAX,"%s",value);
+ for(unsigned i=0;i<CLIENTS;i++){struct client *c=&S.clients[i];if(c->fd>=0&&c->states&&(key==TEXT_WAKE_KEY||c->text_speech))text_state(c,key);}}
+static void text_clear_all(void){text_set(TEXT_WAKE_KEY,"");text_set(TEXT_TRANSCRIPT_KEY,"");text_set(TEXT_REPLY_KEY,"");}
+/* agentd's voice_history_generation: every clear of the voice history bumps it (web clear or history_clear). */
+static void history_generation_seen(long long generation){if(S.history_known&&generation!=S.history_generation)text_clear_all();S.history_known=1;S.history_generation=generation;}
 /* Event types are fixed in each entity's list; the order here is the list order. */
 static const char *const voice_events[]={"wake_word","listening","thinking","replying","finished","stopped"};
 static const char *const playback_events[]={"started","stopped"};
@@ -339,6 +363,10 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  w.length=0;ep_string(&w,1,"led_ring");ep_fixed32(&w,2,LED_RING_KEY);ep_string(&w,3,"LED ring");ep_uint(&w,12,35);for(unsigned e=0;e<NELEM(led_effects);e++)ep_string(&w,11,led_effects[e]);ep_string(&w,14,"mdi:led-strip-variant");(void)send_writer(c,15,&w);c->led_light=1;
  /* ListEntitiesSensorResponse: lx, illuminance, STATE_CLASS_MEASUREMENT; only when the board has a sensor. */
  if(S.light_path[0]){c->light=1;w.length=0;ep_string(&w,1,"illuminance");ep_fixed32(&w,2,LIGHT_KEY);ep_string(&w,3,"Illuminance");ep_string(&w,6,"lx");ep_uint(&w,7,0);ep_string(&w,9,"illuminance");ep_uint(&w,10,1);(void)send_writer(c,16,&w);}
+ /* ListEntitiesTextSensorResponse (#398): last wake word; transcript and reply only with speech text on. */
+ c->text_speech=S.speech_text;w.length=0;ep_string(&w,1,"last_wake_word");ep_fixed32(&w,2,TEXT_WAKE_KEY);ep_string(&w,3,"Last wake word");ep_string(&w,5,"mdi:account-voice");(void)send_writer(c,TEXT_LIST_TYPE,&w);
+ if(S.speech_text){w.length=0;ep_string(&w,1,"last_transcript");ep_fixed32(&w,2,TEXT_TRANSCRIPT_KEY);ep_string(&w,3,"Last transcript");ep_string(&w,5,"mdi:microphone-message");(void)send_writer(c,TEXT_LIST_TYPE,&w);
+  w.length=0;ep_string(&w,1,"last_reply");ep_fixed32(&w,2,TEXT_REPLY_KEY);ep_string(&w,3,"Last reply");ep_string(&w,5,"mdi:message-reply-text");(void)send_writer(c,TEXT_LIST_TYPE,&w);}
  /* ListEntitiesServicesResponse (#397): the user-defined actions, before ListEntitiesDone. */
  services_list(c);
  (void)send_msg(c,19,NULL,0);
@@ -376,6 +404,8 @@ static int provision(struct client *c,const void *p,size_t n){struct ep_reader r
 static int event_data(const void *p,size_t n,const char *name,char *out,size_t cap){struct ep_reader r;struct ep_field f;unsigned count=0;ep_reader_init(&r,p,n);out[0]=0;while(ep_next(&r,&f)>0)if(f.number==2&&f.wire==2){char k[64],v[1024];if(++count>32||valid_proto(f.data,f.length)||ep_get_text(f.data,f.length,1,k,sizeof k)||ep_get_text(f.data,f.length,2,v,sizeof v))return -1;if(!strcmp(k,name)){if(strlen(v)>=cap)return -1;memcpy(out,v,strlen(v)+1);return 1;}}return r.error?-1:0;}
 static void voice_event(const void *p,size_t n){unsigned event=(unsigned)ep_get_uint(p,n,1,0);char v[1024];if(!S.turn)return;
  if(event_data(p,n,"url",v,sizeof v)<0){cancel_turn("bad_event");return;}if(v[0])snprintf(S.tts_url,sizeof S.tts_url,"%s",v);
+ /* Speech text (#398): STT_END carries the transcript, TTS_START the reply text. Published only with the owner setting. */
+ if(S.speech_text&&(event==4||event==7)){char t[TEXT_VALUE_MAX];if(event_data(p,n,"text",t,sizeof t)>0)text_set(event==4?TEXT_TRANSCRIPT_KEY:TEXT_REPLY_KEY,t);}
  if(event==0){cancel_turn("ha_error");return;}if(event==12)capture_end();
  if(event==6){if(event_data(p,n,"conversation_id",S.conversation,sizeof S.conversation)<0){cancel_turn("bad_event");return;}if(event_data(p,n,"continue_conversation",v,sizeof v)<0){cancel_turn("bad_event");return;}S.continue_turn=!strcmp(v,"1");}
  if(event==100){if(event_data(p,n,"tts_start_streaming",v,sizeof v)<0){cancel_turn("bad_event");return;}S.early_tts=!strcmp(v,"1");}
@@ -406,7 +436,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  switch(type){case 7:return send_msg(c,8,NULL,0);case 8:return 0;case 5:if(send_msg(c,6,NULL,0))return -1;c->closing=1;return 0;case 9:device_info(c);return 0;case 11:entities(c);return 0;
  /* The lux state goes once on subscribe, then only from light_poll: all_states() runs on every adapter status change.
   * Only clients whose entity list carried the sensor get it (a late-found sensor waits for the next list). */
- case 20:c->states=1;states_send(c);for(unsigned i=0;i<4;i++)setting_send(c,i);if(c->light)light_state(c);if(c->led_light)led_state(c);return 0;
+ case 20:c->states=1;states_send(c);for(unsigned i=0;i<4;i++)setting_send(c,i);if(c->light)light_state(c);if(c->led_light)led_state(c);text_states(c);return 0;
  /* LightCommandRequest (#395): HA sets the LED ring light; device indicators keep priority. */
  case 32:return led_command(p,n);
  /* ExecuteServiceRequest (#397): announce, play_sound, set_ring. */
@@ -476,7 +506,8 @@ static void stream_tick(struct io *j,int audio){if(j->fd<0)return;
  if(audio){char format[32];int rate,channels,header,indexed;if(json_get_string(j->rx,"format",format,sizeof format)<=0||strcmp(format,"pcm_s16_le")||json_get_int(j->rx,"sample_rate",&rate)<=0||rate!=16000||json_get_int(j->rx,"channels",&channels)<=0||channels!=1||json_get_int(j->rx,"frame_header_bytes",&header)<=0||header!=24||json_get_bool(j->rx,"sample_indexed",&indexed)<=0||!indexed){stream_loss(j);return;}}
  size_t used=(size_t)(end-j->rx)+1;memmove(j->rx,j->rx+used,j->rx_n-used);j->rx_n-=used;j->stage=3;j->deadline=UINT64_MAX;}
  if(!audio){/* Bounded event lines, including fragmented/coalesced reads. */
- for(unsigned loop=0;loop<8;loop++){char *end=memchr(j->rx,'\n',j->rx_n);if(!end)break;*end=0;long long sample;char event[64];if(json_get_string(j->rx,"event",event,sizeof event)>0&&!strcmp(event,"wake_detected")&&json_get_int64(j->rx,"detection_sample",&sample)>0&&sample>=0)(void)voice_start((uint64_t)sample,0);size_t z=(size_t)(end-j->rx)+1;memmove(j->rx,j->rx+z,j->rx_n-z);j->rx_n-=z;}
+ for(unsigned loop=0;loop<8;loop++){char *end=memchr(j->rx,'\n',j->rx_n);if(!end)break;*end=0;long long sample;char event[64];if(json_get_string(j->rx,"event",event,sizeof event)>0&&!strcmp(event,"wake_detected")){char model[TEXT_VALUE_MAX];if(json_get_string(j->rx,"model",model,sizeof model)>0)text_set(TEXT_WAKE_KEY,model);}
+ if(json_get_string(j->rx,"event",event,sizeof event)>0&&!strcmp(event,"wake_detected")&&json_get_int64(j->rx,"detection_sample",&sample)>0&&sample>=0)(void)voice_start((uint64_t)sample,0);size_t z=(size_t)(end-j->rx)+1;memmove(j->rx,j->rx+z,j->rx_n-z);j->rx_n-=z;}
  if(j->rx_n==sizeof j->rx-1){stream_loss(j);return;}ssize_t n=recv(j->fd,j->rx+j->rx_n,sizeof j->rx-1-j->rx_n,MSG_DONTWAIT);if(n>0){j->rx_n+=(size_t)n;j->rx[j->rx_n]=0;}else if(!n||(errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR))stream_loss(j);return;
  }
  /* First consume bytes coalesced with the JSON stream handshake. */
@@ -494,6 +525,7 @@ static void jobs_tick(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i]
  if(j->kind==1){int muted,volume;if(json_get_bool(j->rx,"muted",&muted)>0&&json_get_int(j->rx,"volume",&volume)>0&&volume>=0&&volume<=100){S.muted=muted;S.volume=volume;S.last_audio_status=S.now;}}
  if(j->kind==2){int playing=0,paused=0;(void)json_get_bool(j->rx,"playing",&playing);(void)json_get_bool(j->rx,"paused",&paused);S.radio_state=paused?3:playing?2:1;}
  if(j->kind==9){S.led_master=j->target;S.led_master_known=1;}
+ if(j->kind==HISTORY_GENERATION_KIND){long long generation=-1;if(json_get_int64(j->rx,"history_generation",&generation)>0&&generation>=0)history_generation_seen(generation);}
  if(j->kind==12){S.sensitivity=j->target;S.sensitivity_known=1;(void)config_set_int("wake_sensitivity",j->target);}
  /* ledd status is flat: the first "brightness" is the global ring brightness (set_brightness). */
  if(j->kind==10){int v;if(json_get_int(j->rx,"brightness",&v)>0&&v>=0&&v<=100){S.led_master=v;S.led_master_known=1;}}
@@ -513,6 +545,8 @@ static void privacy_poll(void){char b[32];int n=config_read(S.privacy_path,b,siz
 static int normalize_mac(const char *input,char *out){unsigned char b[6];unsigned n=0,high=0;int hi=-1;for(size_t i=0;input[i];i++){int x=input[i];if(x==':'||isspace((unsigned char)x))continue;if(x>='0'&&x<='9')x-='0';else if(x>='a'&&x<='f')x=x-'a'+10;else if(x>='A'&&x<='F')x=x-'A'+10;else return -1;if(hi<0)hi=x;else{if(n>=6)return -1;b[n++]=(unsigned char)(hi*16+x);high|=b[n-1];hi=-1;}}if(n!=6||hi>=0||!high||(b[0]&1))return -1;snprintf(out,18,"%02x:%02x:%02x:%02x:%02x:%02x",b[0],b[1],b[2],b[3],b[4],b[5]);return 0;}
 static int load_configuration(void){char b[16384],key[45],mac[64],name[64],wake[64];int n=config_read(S.config_path,b,sizeof b);struct le_esphome_config cfg;size_t z;if(n<0||config_esphome_read(S.config_path,&cfg))return -1;
  int selected=json_get_string_top_level(b,"esphome_active_wake_word",wake,sizeof wake);if(selected<0||json_duplicate_key(b,(size_t)n,"esphome_active_wake_word")||(selected>0&&wake[0]&&strcmp(wake,"alexa_v0.1")))return -1;S.active_wake=selected<=0||!!wake[0];
+ /* Speech text sensors (#398) are off unless the owner sets esphome_speech_text_sensors; turning them off drops what was held. */
+ {int speech=0;(void)json_get_bool(b,"esphome_speech_text_sensors",&speech);S.speech_text=speech!=0;if(!S.speech_text){text_set(TEXT_TRANSCRIPT_KEY,"");text_set(TEXT_REPLY_KEY,"");}}
  /* HA ownership is what the web API persists: integrations bit 1 or the
   * home-assistant pipeline mode (api.c applies the same rule on load).
   * voice_assistant_mode is a legacy field the API never writes. */
@@ -540,13 +574,13 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
   return le_esphome_health(argv[2],argv[3],argv[5],(unsigned)p,argv[6],!strcmp(argv[1],"--process-check"))?0:1;
  }
  memset(&S,0,sizeof S);S.owner=-1;S.mdns_fd=-1;S.muted=1;S.privacy=-1;S.radio_state=1;S.active_wake=1;S.restore_volume=66;S.turn_limit=120000;S.lux=S.lux_sent=-1;S.led_r=S.led_g=S.led_b=255;S.led_brightness=100;
- S.config_path=getenv("LE_CONFIG_PATH");if(!S.config_path||!S.config_path[0])S.config_path="/etc/libreecho/web-config.json";S.status_path="/run/libreecho/esphome-status.json";S.audio_path="/run/libreecho/audio.sock";S.wake_path="/run/libreecho/wakeword.sock";S.radio_path="/run/libreecho/radio.sock";S.timer_path="/run/libreecho/timer.sock";S.led_path="/run/libreecho/led.sock";S.mdns_path=LE_MDNS_SOCKET;S.bus_path="/run/libreecho-audio/system.pcm";S.privacy_path="/sys/devices/platform/amz_privacy/privacy_state";S.idme_path="/sys/firmware/devicetree/base/idme";
+ S.config_path=getenv("LE_CONFIG_PATH");if(!S.config_path||!S.config_path[0])S.config_path="/etc/libreecho/web-config.json";S.status_path="/run/libreecho/esphome-status.json";S.agent_path=LE_ADAPTER_AGENT_SOCK;S.audio_path="/run/libreecho/audio.sock";S.wake_path="/run/libreecho/wakeword.sock";S.radio_path="/run/libreecho/radio.sock";S.timer_path="/run/libreecho/timer.sock";S.led_path="/run/libreecho/led.sock";S.mdns_path=LE_MDNS_SOCKET;S.bus_path="/run/libreecho-audio/system.pcm";S.privacy_path="/sys/devices/platform/amz_privacy/privacy_state";S.idme_path="/sys/firmware/devicetree/base/idme";
  for(unsigned i=0;i<CLIENTS;i++)S.clients[i].fd=-1;for(unsigned i=0;i<JOBS;i++)S.jobs[i].fd=-1;S.wake.fd=S.mic.fd=S.timer_cleanup.fd=-1;S.button_fd=-1;esp_playback_init(&S.playback);
  snprintf(S.button_path,sizeof S.button_path,"%s",LE_ADAPTER_BUTTON_EVENT_SOCK);
  for(int i=1;i<argc;i++){const char *v=i+1<argc?argv[i+1]:NULL;if(!strcmp(argv[i],"--plaintext")){S.plaintext=1;continue;}if(!v)return 2;
  if(!strcmp(argv[i],"--port")){char *end;unsigned long p=strtoul(v,&end,10);if(*end||p<1||p>65535)return 2;port=(unsigned)p;}
  else if(!strcmp(argv[i],"--bind")||!strcmp(argv[i],"--listen"))bind_addr=v;else if(!strcmp(argv[i],"--config"))S.config_path=v;else if(!strcmp(argv[i],"--status-file"))S.status_path=v;
- else if(!strcmp(argv[i],"--audio-socket"))S.audio_path=v;else if(!strcmp(argv[i],"--wake-socket"))S.wake_path=v;else if(!strcmp(argv[i],"--radio-socket"))S.radio_path=v;else if(!strcmp(argv[i],"--timer-socket"))S.timer_path=v;else if(!strcmp(argv[i],"--led-socket"))S.led_path=v;else if(!strcmp(argv[i],"--mdns-socket"))S.mdns_path=v;else if(!strcmp(argv[i],"--button-socket")){if(strlen(v)>=sizeof S.button_path)return 2;snprintf(S.button_path,sizeof S.button_path,"%s",v);}else if(!strcmp(argv[i],"--audio-bus"))S.bus_path=v;else if(!strcmp(argv[i],"--privacy-state"))S.privacy_path=v;else if(!strcmp(argv[i],"--tls-ca"))S.ca_path=v;else if(!strcmp(argv[i],"--idme-root"))S.idme_path=v;
+ else if(!strcmp(argv[i],"--audio-socket"))S.audio_path=v;else if(!strcmp(argv[i],"--agent-socket"))S.agent_path=v;else if(!strcmp(argv[i],"--wake-socket"))S.wake_path=v;else if(!strcmp(argv[i],"--radio-socket"))S.radio_path=v;else if(!strcmp(argv[i],"--timer-socket"))S.timer_path=v;else if(!strcmp(argv[i],"--led-socket"))S.led_path=v;else if(!strcmp(argv[i],"--mdns-socket"))S.mdns_path=v;else if(!strcmp(argv[i],"--button-socket")){if(strlen(v)>=sizeof S.button_path)return 2;snprintf(S.button_path,sizeof S.button_path,"%s",v);}else if(!strcmp(argv[i],"--audio-bus"))S.bus_path=v;else if(!strcmp(argv[i],"--privacy-state"))S.privacy_path=v;else if(!strcmp(argv[i],"--tls-ca"))S.ca_path=v;else if(!strcmp(argv[i],"--idme-root"))S.idme_path=v;
  else if(!strcmp(argv[i],"--light-sensor")){if(!v[0]||strlen(v)>=sizeof S.light_path)return 2;snprintf(S.light_path,sizeof S.light_path,"%s",v);}
  else if(!strcmp(argv[i],"--name")){if(strlen(v)>=sizeof S.name)return 2;snprintf(S.name,sizeof S.name,"%s",v);}else if(!strcmp(argv[i],"--mac")){if(normalize_mac(v,S.mac))return 2;}
  else if(!strcmp(argv[i],"--turn-timeout-ms")){char *end;unsigned long p=strtoul(v,&end,10);if(*end||p<100||p>120000)return 2;S.turn_limit=p;}else return 2;i++;}
@@ -570,7 +604,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  if(fds[0].revents&POLLIN){for(unsigned n=0;n<4;n++){int fd=accept(listener,NULL,NULL);if(fd<0)break;int flags=fcntl(fd,F_GETFL,0);if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){close(fd);continue;}unsigned idx;for(idx=0;idx<CLIENTS;idx++)if(S.clients[idx].fd<0)break;if(idx==CLIENTS){close(fd);continue;}struct client *c=&S.clients[idx];memset(c,0,sizeof *c);c->fd=fd;c->mode=-1;c->deadline=S.now+15000;c->last_seen=S.now;en_init(&c->noise);}}
  for(unsigned i=0;i<CLIENTS;i++)client_tick(i,fds[i+1].revents);
  if(S.button_fd>=0&&(fds[1+CLIENTS].revents&POLLIN))button_tick();
- if(S.now>=S.settings_poll+SETTINGS_POLL_MS){S.settings_poll=S.now;(void)job(S.led_path,"status","{}",10,0);(void)job(S.wake_path,"status","{}",11,0);}
+ if(S.now>=S.settings_poll+SETTINGS_POLL_MS){S.settings_poll=S.now;(void)job(S.led_path,"status","{}",10,0);(void)job(S.wake_path,"status","{}",11,0);(void)job(S.agent_path,"voice_history_generation","{}",HISTORY_GENERATION_KIND,0);}
  if(S.now>=S.last_status_poll+250){S.last_status_poll=S.now;privacy_poll();light_poll();(void)job(S.audio_path,"status","{}",1,0);(void)job(S.radio_path,"status","{}",2,0);}
  jobs_tick();led_tick();action_ring_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);capture_tick();

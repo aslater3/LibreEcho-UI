@@ -57,6 +57,8 @@ class Adapter:
    if cmd=='set_mute' and not self.fail:self.muted=req['args']['muted']
    data={'muted':self.muted,'volume':getattr(self,'volume',66),'output_available':True} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}
    if cmd=='status' and getattr(self,'status',None) is not None:data=self.status
+   # Voice-history generation (#398): tests set .generation to model a history clear.
+   if cmd=='voice_history_generation' and getattr(self,'generation',None) is not None:data={'history_generation':self.generation}
    c.sendall((json.dumps({'v':1,'id':req['id'],'ok':not self.fail,'data':data})+'\n').encode())
   except (OSError,ValueError):pass
   finally:
@@ -78,7 +80,7 @@ class Daemon(unittest.TestCase):
   self.tmp=tempfile.TemporaryDirectory(prefix='esphomed-',dir=os.environ.get('TMPDIR'));self.p=pathlib.Path(self.tmp.name)
   self.config=self.p/'config.json';self.config.write_text(json.dumps(getattr(self,'config_fields',{'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','voice_assistant_mode':1,'esphome_noise_key':''})))
   self.privacy=self.p/'privacy';self.privacy.write_text('0\n');self.bus=self.p/'system.pcm';os.mkfifo(self.bus);self.busfd=os.open(self.bus,os.O_RDONLY|os.O_NONBLOCK);self.busbytes=bytearray()
-  self.adapters={k:Adapter(self.p/(k+'.sock'),k) for k in ('audio','wake','radio','timer','led')}
+  self.adapters={k:Adapter(self.p/(k+'.sock'),k) for k in ('audio','wake','radio','timer','led','agent')}
   s=socket.socket();s.bind(('127.0.0.1',0));self.port=s.getsockname()[1];s.close();self.clients=[]
   cmd=[BIN,'--port',str(self.port),'--bind','127.0.0.1']+(['--plaintext'] if getattr(self,'plaintext',True) else [])+['--config',str(self.config),'--status-file',str(self.p/'status.json'),'--privacy-state',str(self.privacy),'--audio-bus',str(self.bus),'--mdns-socket',str(self.p/'missing-mdns')]
   for k in self.adapters:cmd+=['--'+k+'-socket',str(self.p/(k+'.sock'))]
@@ -101,7 +103,7 @@ class Fixture(Daemon):
  def test_hello_auth_device_list_ping_disconnect(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(b'fixture-satellite',b);self.assertIn(num(17,61),b)
   self.assertNotIn(var((16<<3)|2),b,'no room configured: DeviceInfo has no suggested_area')
-  self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(18)],[63,17,17,49,49,49,107,107,107,107,107,107,107,15,41,41,41,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
+  self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(19)],[63,17,17,49,49,49,107,107,107,107,107,107,107,15,18,41,41,41,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
  def test_oversize_malformed_and_client_limit(self):
   self.hello();s2=self.connect();s3=self.connect();self.assertEqual(s3.recv(1),b'');s2.sendall(b'\0'+var(65537)+var(1));self.assertEqual(s2.recv(1),b'')
   time.sleep(.05);s4=self.connect();s4.sendall(frame(9,b'\x08'+b'\xff'*10));self.assertEqual(s4.recv(1),b'')
@@ -221,7 +223,7 @@ class Fixture(Daemon):
   for _ in range(16):
    try:t,b=receive(self.s)
    except EOFError:break
-   self.assertIn(t,(26,50,64)) # A state broadcast (switch, number or media) already queued before rejection may drain.
+   self.assertIn(t,(26,27,50,64)) # A state broadcast (switch, number, media or the #398 last-wake text state sent on subscribe) already queued before rejection may drain.
   else:self.fail('malformed volume did not close the client')
  def test_announcement_error_reports_failure_and_resets_playback(self):
   wav=io.BytesIO()
