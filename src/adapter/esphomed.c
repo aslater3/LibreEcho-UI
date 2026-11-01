@@ -427,7 +427,8 @@ static void jobs_tick(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i]
  if(j->kind==2){int playing=0,paused=0;(void)json_get_bool(j->rx,"playing",&playing);(void)json_get_bool(j->rx,"paused",&paused);S.radio_state=paused?3:playing?2:1;}
  if(j->kind==9){S.led_master=j->target;S.led_master_known=1;}
  if(j->kind==12){S.sensitivity=j->target;S.sensitivity_known=1;(void)config_set_int("wake_sensitivity",j->target);}
- if(j->kind==10){const char *cur=strstr(j->rx,"\"current\"");int v;if(cur&&json_get_int(cur,"brightness",&v)>0&&v>=0&&v<=100){S.led_master=v;S.led_master_known=1;}}
+ /* ledd status is flat: the first "brightness" is the global ring brightness (set_brightness). */
+ if(j->kind==10){int v;if(json_get_int(j->rx,"brightness",&v)>0&&v>=0&&v<=100){S.led_master=v;S.led_master_known=1;}}
  if(j->kind==11){int v;if(json_get_int(j->rx,"sensitivity",&v)>0&&v>=0&&v<=100){S.sensitivity=v;S.sensitivity_known=1;}}
  if(j->kind==3){S.muted=j->target;S.local_mute_gate=j->target;}if(j->kind==4)S.volume=j->target;if(j->kind==6){S.output_muted=j->target;S.volume=j->target?0:S.restore_volume;}
  }else if(j->kind>=3&&j->kind<=6&&S.turn)cancel_turn("adapter_error");io_close(j);all_states();settings_sync();}timer_cleanup_tick();}

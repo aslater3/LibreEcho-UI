@@ -52,7 +52,7 @@ class Adapter:
    if getattr(self,'track',False):
     # Opt-in (#396): daemon state follows the setters so read-back tests see the change.
     if cmd=='set_volume':self.volume=req['args']['volume']
-    if cmd=='set_brightness' and getattr(self,'status',None) is not None:self.status['current']['brightness']=req['args']['brightness']
+    if cmd=='set_brightness' and getattr(self,'status',None) is not None:self.status['brightness']=req['args']['brightness']
     if cmd=='set_sensitivity' and getattr(self,'status',None) is not None:self.status['sensitivity']=req['args']['sensitivity']
    if cmd=='set_mute' and not self.fail:self.muted=req['args']['muted']
    data={'muted':self.muted,'volume':getattr(self,'volume',66),'output_available':True} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}

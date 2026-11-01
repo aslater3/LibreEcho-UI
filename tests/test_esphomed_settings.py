@@ -16,7 +16,7 @@ class Settings(Daemon):
  def setUp(self):
   super().setUp()
   self.adapters['led'].track=self.adapters['wake'].track=self.adapters['audio'].track=True
-  self.adapters['led'].status={'current':{'brightness':40}};self.adapters['wake'].status={'sensitivity':55}
+  self.adapters['led'].status={'brightness':40};self.adapters['wake'].status={'sensitivity':55}
  def subscribe(self):
   self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(15)];self.s.sendall(frame(20))
  def calls(self,kind,cmd):return [r for r in self.adapters[kind].calls if r['cmd']==cmd]
@@ -69,7 +69,7 @@ class SettingsEntities(Settings):
   self.assertEqual([t for t,_ in got if t==50],[],'unchanged number states were repeated')
  def test_web_change_reaches_home_assistant_on_the_next_poll(self):
   self.subscribe();self.number_states(5,want={LED_BRIGHTNESS:40.0})
-  self.adapters['led'].status['current']['brightness']=20
+  self.adapters['led'].status['brightness']=20
   self.assertEqual(self.number_states(5,want={LED_BRIGHTNESS:20.0}).get(LED_BRIGHTNESS),20.0,'web change not reported')
 
 class SettingsCommands(Settings):
