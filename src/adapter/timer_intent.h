@@ -37,7 +37,10 @@ enum le_timer_intent_kind {
     LE_TIMER_INTENT_ALARM,
     /* Snooze the alarm that is ringing for the fixed snooze period. Appended
        with the others so existing values keep their meaning. */
-    LE_TIMER_INTENT_SNOOZE
+    LE_TIMER_INTENT_SNOOZE,
+    /* A spoken reminder ("remind me to X at 6pm", "remind me every weekday
+       at 8 to X"). Appended last so existing values keep their meaning. */
+    LE_TIMER_INTENT_REMINDER
 };
 
 struct le_timer_intent {
@@ -48,12 +51,14 @@ struct le_timer_intent {
     /* Cancel: the request named alarms and no timers, so only alarms are
        eligible. */
     int alarm_only;
+    /* Cancel: the request named reminders and no timers or alarms. */
+    int reminder_only;
     /* Alarm: local 24-hour time, or -1 when the request gave no usable time
        (for example "7" with no am or pm). */
     int alarm_hour;
     int alarm_minute;
-    /* Alarm: the days it repeats on, as a bit mask with bit 0 Sunday. Zero
-       means a one-off alarm. */
+    /* Alarm and reminder: the days it repeats on, as a bit mask with bit 0
+       Sunday. Zero means a one-off alarm or reminder. */
     unsigned int alarm_days;
     char label[LE_TIMER_INTENT_LABEL_MAX];
 };

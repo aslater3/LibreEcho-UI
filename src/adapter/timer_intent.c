@@ -821,10 +821,15 @@ static int mentions_alarm(const char *text)
     return has_word(text, "alarm") || has_word(text, "alarms");
 }
 
+static int mentions_reminder(const char *text)
+{
+    return has_word(text, "reminder") || has_word(text, "reminders");
+}
+
 static int mentions_timer(const char *text)
 {
     return has_word(text, "timer") || has_word(text, "timers") ||
-           mentions_alarm(text);
+           mentions_alarm(text) || mentions_reminder(text);
 }
 
 /* "wake me at seven" is an alarm without the word alarm. */
@@ -850,6 +855,102 @@ static int negates_cancellation(const char *text, const char *verb)
            (don && t && don < verb && t < verb);
 }
 
+/* Days named inside a span of normalised text, padded so word matching works
+   at the span edges. */
+static unsigned int days_in_span(const char *start, size_t length)
+{
+    char span[NORMAL_MAX];
+
+    if (length + 3 > sizeof(span))
+        return 0;
+    span[0] = ' ';
+    memcpy(span + 1, start, length);
+    span[length + 1] = ' ';
+    span[length + 2] = '\0';
+    return parse_alarm_days(span);
+}
+
+/*
+ * "remind me to take pills at 6pm" and "remind me every weekday at 8 to take
+ * pills". The label is the words between "to" and the last "at"; the time is
+ * whatever follows that "at", or, without one, the words before "to". Returns
+ * 1 when a reminder with a time was recognised, 0 when this is not one.
+ */
+static int parse_reminder(const char *text, struct le_timer_intent *intent)
+{
+    const char *remind = strstr(text, " remind me ");
+    const char *body;
+    const char *to;
+    const char *at = NULL;
+    const char *label_start;
+    const char *label_end;
+    const char *time_start;
+    const char *time_end;
+    char time_text[NORMAL_MAX];
+    size_t length;
+    int hour = -1;
+    int minute = 0;
+    int clock;
+    unsigned int days;
+
+    if (!remind)
+        return 0;
+    body = remind + strlen(" remind me");
+    to = strstr(body, " to ");
+    if (!to)
+        return 0;
+    label_start = to + 4;
+    /* The last " at " in the rest of the text, so "call dad at the office at
+       6pm" keeps its own "at" in the name. */
+    {
+        const char *scan = label_start;
+
+        while ((scan = strstr(scan, " at ")) != NULL) {
+            at = scan;
+            scan += 4;
+        }
+    }
+    if (at) {
+        label_end = at;
+        time_start = at + 4;
+        time_end = text + strlen(text);
+    } else {
+        label_end = text + strlen(text);
+        time_start = body;
+        time_end = to;
+    }
+
+    length = (size_t)(time_end - time_start);
+    if (length == 0 || length >= sizeof(time_text))
+        return 0;
+    memcpy(time_text, time_start, length);
+    time_text[length] = '\0';
+    clock = parse_clock(time_text, &hour, &minute);
+    if (clock == 0)
+        return 0;
+
+    /* Copy the label, trimming the padding space on each side. */
+    while (label_start < label_end && *label_start == ' ')
+        ++label_start;
+    while (label_end > label_start && label_end[-1] == ' ')
+        --label_end;
+    length = (size_t)(label_end - label_start);
+    if (length == 0)
+        return 0;
+    if (length >= sizeof(intent->label))
+        length = sizeof(intent->label) - 1;
+    memcpy(intent->label, label_start, length);
+    intent->label[length] = '\0';
+
+    days = days_in_span(body, (size_t)(to - body)) |
+           days_in_span(time_start, (size_t)(time_end - time_start));
+    intent->kind = LE_TIMER_INTENT_REMINDER;
+    intent->alarm_hour = clock == 1 ? hour : -1;
+    intent->alarm_minute = clock == 1 ? minute : 0;
+    intent->alarm_days = days;
+    return 1;
+}
+
 enum le_timer_intent_kind le_timer_intent_parse(
     const char *transcript, struct le_timer_intent *intent)
 {
@@ -868,7 +969,12 @@ enum le_timer_intent_kind le_timer_intent_parse(
         return LE_TIMER_INTENT_NONE;
     normalise(transcript, text, sizeof(text));
 
-        /* Snooze is only ever asked of a ringing alarm, and the caller checks
+    /* Before the silence and cancel words: "remind me to stop smoking at 6"
+       is a reminder, not a request to stop something. */
+    if (!negates_setting(text) && parse_reminder(text, intent))
+        return intent->kind;
+
+    /* Snooze is only ever asked of a ringing alarm, and the caller checks
        that; here it is just a word that cannot mean anything else. */
     if (has_word(text, "snooze")) {
         intent->kind = LE_TIMER_INTENT_SNOOZE;
@@ -901,8 +1007,12 @@ enum le_timer_intent_kind le_timer_intent_parse(
         intent->alarm_only = mentions_alarm(text) &&
                              !has_word(text, "timer") &&
                              !has_word(text, "timers");
+        intent->reminder_only = mentions_reminder(text) &&
+                                !mentions_alarm(text) &&
+                                !has_word(text, "timer") &&
+                                !has_word(text, "timers");
         intent->cancel_all = has_universal_timer_noun(
-            cancel_verb);
+            cancel_verb) || (intent->reminder_only && has_word(text, "all"));
         if (!intent->cancel_all)
             extract_cancel_label(text, intent->label, sizeof(intent->label));
         return intent->kind;
@@ -1030,7 +1140,33 @@ int le_timer_intent_speech(const struct le_timer_intent *intent, int count,
         if (count <= 0)
             return snprintf(out, size, "There is no alarm ringing.");
         return snprintf(out, size, "Snoozed for five minutes.");
+    case LE_TIMER_INTENT_REMINDER: {
+        int hour12 = intent->alarm_hour % 12 ? intent->alarm_hour % 12 : 12;
+        const char *period = intent->alarm_hour < 12 ? "am" : "pm";
+        const char *when = intent->alarm_days == 0x7fU ? ", every day"
+                           : intent->alarm_days == 0x3eU ? ", on weekdays"
+                           : intent->alarm_days == 0x41U ? ", on weekends"
+                           : intent->alarm_days ? ", repeating" : "";
+
+        if (intent->alarm_hour < 0)
+            return snprintf(out, size, "What time should the reminder be?");
+        if (intent->label[0])
+            return snprintf(out, size, "Reminder set for %d:%02d %s%s: %s.",
+                            hour12, intent->alarm_minute, period, when,
+                            intent->label);
+        return snprintf(out, size, "Reminder set for %d:%02d %s%s.", hour12,
+                        intent->alarm_minute, period, when);
+    }
     case LE_TIMER_INTENT_CANCEL:
+        if (intent->reminder_only) {
+            if (count < 0)
+                return snprintf(out, size, "Which reminder should I cancel?");
+            if (count == 0)
+                return snprintf(out, size, "There are no reminders to cancel.");
+            if (count == 1)
+                return snprintf(out, size, "Reminder cancelled.");
+            return snprintf(out, size, "All %d reminders cancelled.", count);
+        }
         if (intent->alarm_only) {
             if (count < 0)
                 return snprintf(out, size, "Which alarm should I cancel?");

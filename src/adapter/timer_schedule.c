@@ -94,7 +94,7 @@ static int restore_timer(struct le_timer_set *set, enum le_timer_kind kind,
                          const char *label,
                          long long now_epoch, long long now_monotonic_ms,
                          unsigned int *id, unsigned int days, int hour,
-                         int minute)
+                         int minute, int reminder)
 {
     struct le_timer *timer;
     long long delta;
@@ -103,6 +103,9 @@ static int restore_timer(struct le_timer_set *set, enum le_timer_kind kind,
         return LE_TIMER_ERR_NOT_FOUND;
     if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
         return LE_TIMER_ERR_CLOCK;
+    if (reminder && (kind != LE_TIMER_ALARM || (days & ~LE_TIMER_DAYS_ALL) ||
+                     hour < 0 || hour > 23 || minute < 0 || minute > 59))
+        return LE_TIMER_ERR_RANGE;
     if (days) {
         /* A repeat that expired while the device was down is not a miss: its
            next occurrence is still wanted. */
@@ -141,8 +144,9 @@ static int restore_timer(struct le_timer_set *set, enum le_timer_kind kind,
     timer->due_epoch = due_epoch;
     timer->due_monotonic_ms = now_monotonic_ms + delta * 1000LL;
     timer->repeat_days = days;
-    timer->hour = days ? hour : 0;
-    timer->minute = days ? minute : 0;
+    timer->reminder = reminder;
+    timer->hour = days || reminder ? hour : 0;
+    timer->minute = days || reminder ? minute : 0;
     set_label(timer, label);
     if (id)
         *id = timer->id;
@@ -223,6 +227,58 @@ int le_timer_add_repeat_alarm(struct le_timer_set *set, int hour, int minute,
     return LE_TIMER_OK;
 }
 
+int le_timer_add_reminder(struct le_timer_set *set, int hour, int minute,
+                          unsigned int days, const char *label,
+                          long long now_epoch, unsigned int *id)
+{
+    struct le_timer *timer;
+    long long due;
+    int result;
+
+    if (!set)
+        return LE_TIMER_ERR_NOT_FOUND;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+        (days & ~LE_TIMER_DAYS_ALL))
+        return LE_TIMER_ERR_RANGE;
+    if (days)
+        result = le_timer_next_repeat_epoch(now_epoch, hour, minute, days,
+                                            &due);
+    else
+        result = le_timer_next_alarm_epoch(now_epoch, hour, minute, &due);
+    if (result != LE_TIMER_OK)
+        return result;
+    timer = free_slot(set);
+    if (!timer)
+        return LE_TIMER_ERR_FULL;
+
+    memset(timer, 0, sizeof(*timer));
+    timer->id = set->next_id++;
+    timer->kind = LE_TIMER_ALARM;
+    timer->state = LE_TIMER_STATE_PENDING;
+    timer->due_epoch = due;
+    timer->repeat_days = days;
+    timer->reminder = 1;
+    timer->hour = hour;
+    timer->minute = minute;
+    set_label(timer, label);
+    if (id)
+        *id = timer->id;
+    return LE_TIMER_OK;
+}
+
+int le_timer_is_reminder(const struct le_timer_set *set, unsigned int id)
+{
+    size_t i;
+
+    if (!set || !id)
+        return 0;
+    for (i = 0; i < LE_TIMER_MAX; ++i)
+        if (set->timers[i].state != LE_TIMER_STATE_FREE &&
+            set->timers[i].id == id)
+            return set->timers[i].reminder;
+    return 0;
+}
+
 int le_timer_next_alarm_epoch(long long now_epoch, int hour, int minute,
                               long long *due_epoch)
 {
@@ -266,7 +322,7 @@ int le_timer_restore_countdown(struct le_timer_set *set, long long due_epoch,
                                long long now_monotonic_ms, unsigned int *id)
 {
     return restore_timer(set, LE_TIMER_COUNTDOWN, 0, due_epoch, label,
-                         now_epoch, now_monotonic_ms, id, 0, 0, 0);
+                         now_epoch, now_monotonic_ms, id, 0, 0, 0, 0);
 }
 
 int le_timer_restore_alarm(struct le_timer_set *set, long long due_epoch,
@@ -274,7 +330,7 @@ int le_timer_restore_alarm(struct le_timer_set *set, long long due_epoch,
                            long long now_monotonic_ms, unsigned int *id)
 {
     return restore_timer(set, LE_TIMER_ALARM, 0, due_epoch, label, now_epoch,
-                         now_monotonic_ms, id, 0, 0, 0);
+                         now_monotonic_ms, id, 0, 0, 0, 0);
 }
 
 int le_timer_restore_repeat_alarm(struct le_timer_set *set,
@@ -285,7 +341,20 @@ int le_timer_restore_repeat_alarm(struct le_timer_set *set,
                                   unsigned int *id)
 {
     return restore_timer(set, LE_TIMER_ALARM, restore_id, due_epoch, label,
-                         now_epoch, now_monotonic_ms, id, days, hour, minute);
+                         now_epoch, now_monotonic_ms, id, days, hour, minute,
+                         0);
+}
+
+int le_timer_restore_reminder(struct le_timer_set *set,
+                              unsigned int restore_id, long long due_epoch,
+                              int hour, int minute, unsigned int days,
+                              const char *label, long long now_epoch,
+                              long long now_monotonic_ms,
+                              unsigned int *id)
+{
+    return restore_timer(set, LE_TIMER_ALARM, restore_id, due_epoch, label,
+                         now_epoch, now_monotonic_ms, id, days, hour, minute,
+                         1);
 }
 
 int le_timer_restore_countdown_with_id(struct le_timer_set *set,
@@ -296,7 +365,7 @@ int le_timer_restore_countdown_with_id(struct le_timer_set *set,
                                        unsigned int *id)
 {
     return restore_timer(set, LE_TIMER_COUNTDOWN, restore_id, due_epoch, label,
-                         now_epoch, now_monotonic_ms, id, 0, 0, 0);
+                         now_epoch, now_monotonic_ms, id, 0, 0, 0, 0);
 }
 
 int le_timer_restore_alarm_with_id(struct le_timer_set *set,
@@ -306,7 +375,7 @@ int le_timer_restore_alarm_with_id(struct le_timer_set *set,
                                    unsigned int *id)
 {
     return restore_timer(set, LE_TIMER_ALARM, restore_id, due_epoch, label,
-                         now_epoch, now_monotonic_ms, id, 0, 0, 0);
+                         now_epoch, now_monotonic_ms, id, 0, 0, 0, 0);
 }
 
 struct le_timer *le_timer_find(struct le_timer_set *set, unsigned int id)

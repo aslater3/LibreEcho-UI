@@ -223,6 +223,31 @@ grep -q "api/v1/alarms\|'/alarms'\|/alarms/" /tmp/le-app-alarms.js \
     || { echo "FAIL: the timers page does not use the alarm route"; exit 1; }
 echo "  alarm form wired into the UI: ok"
 
+# --- spoken reminders ------------------------------------------------------
+# A reminder is listed on the timer schedule with its kind, time and days, is
+# refused on a malformed time, and cancels like any other pending timer.
+code=$(curl -sS -o /tmp/le-reminder-add.out -w '%{http_code}' -X POST "$URL/api/v1/reminders" \
+    -H "$CSRF" -H "$JSON" --data '{"time":"06:45","label":"take the pills","days":"weekdays"}')
+[ "$code" = 201 ] || { echo "FAIL: reminder create returned $code"; cat /tmp/le-reminder-add.out; exit 1; }
+rid=$(jq -r '.data.id' < /tmp/le-reminder-add.out)
+[ -n "$rid" ] && [ "$rid" != "null" ] || { echo "FAIL: no reminder id returned"; exit 1; }
+jq -e '.data.time == "06:45" and .data.days == "mon,tue,wed,thu,fri"' < /tmp/le-reminder-add.out >/dev/null
+curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$rid" '.data.timers[] | select(.id == $id) |
+    .kind == "reminder" and .label == "take the pills" and .time == "06:45" and .days == "mon,tue,wed,thu,fri"' >/dev/null
+echo "  reminder created and listed as a reminder: ok"
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/reminders" \
+    -H "$CSRF" -H "$JSON" --data '{"time":"6:45"}')
+[ "$code" = 400 ] || { echo "FAIL: malformed reminder time returned $code, expected 400"; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X GET "$URL/api/v1/reminders" -H "$CSRF")
+[ "$code" = 405 ] || { echo "FAIL: GET /reminders returned $code, expected 405"; exit 1; }
+echo "  malformed reminder refused and the route is POST only: ok"
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/timers/$rid" -H "$CSRF")
+[ "$code" = 200 ] || { echo "FAIL: reminder cancel returned $code"; exit 1; }
+curl -fsS "$URL/api/v1/timers" | jq -e --argjson id "$rid" '[.data.timers[] | select(.id == $id)] | length == 0' >/dev/null
+echo "  reminder cancelled by id: ok"
+
 # The fixed mock schedule has sixteen slots. A valid request beyond that hard
 # limit is busy, not an invalid duration or an unavailable service.
 i=0
