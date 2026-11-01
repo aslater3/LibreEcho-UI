@@ -1461,9 +1461,43 @@ with a wrong type or a value out of range refuses the whole packet with 400, and
 nothing is changed. A packet that does not verify answers 401 `not_verified`, and
 a device without a key answers 409 `not_paired`.
 
+**POST /api/v1/network/broadcast** (CSRF required) speaks a short text on every
+paired device (#412, first slice). The body is `{"text"}`, 1 to 240 UTF-8 bytes
+with no control characters. With `{"text", "address", "port"}` the text goes to
+that one device only. Without an address the device searches the LAN, checks
+which devices are paired (the device list's check, not cached), and sends to each
+paired device other than itself; this device speaks the text too. The answer holds
+`{"this_device", "devices", "sent", "applied", "skipped", "truncated"}`.
+`this_device` is `applied`, `not_supported`, `failed`, or `not_included` for a
+single-device send. Each entry of `devices` is `{"name", "address", "port", "result"}`
+(a single-device send lists its one target without a name) with `result` one of:
+
+| `result` | Meaning |
+|---|---|
+| `applied` | The target verified the packet and spoke the text. |
+| `not_supported` | The target verified the packet but has no speaker. |
+| `unpaired` | The target has no house key, another key, or runs older firmware. |
+| `failed` | The target answered, but not with a successful result. |
+| `unreachable` | No answer inside the fan-out budget (about 3 seconds). |
+
+Devices of another house and devices that are off are counted in `skipped` or
+reported as `unreachable`. The packet is signed with the house key but not
+encrypted: the text is spoken aloud on each receiving device, so do not put
+secrets in it. Do-not-disturb, two-way calls, Drop In and voice-started calls
+are not part of this slice.
+
+**POST /api/v1/peer/announce** is device-to-device and needs no session or CSRF
+token; the signed packet is its credential. The body is the sealed packet
+`LESIG1 <key_id> announcement <ts> <nonce> <mac>`, newline, then the text. The
+target checks the packet (house key, 300 second window, replay cache) and the
+text (1 to 240 bytes, no control characters). A packet that does not verify
+answers 401 `not_verified`; a device without a key answers 409 `not_paired`; a
+bad text answers 400; a verified announcement answers 200 `{"spoken": true}`
+or, on a device with no speaker, 501 `not_supported`.
+
 Grouping is a first slice. Devices can be grouped and commanded from the
-device API. Ring, announce and volume commands, the Web UI for groups, and
-Home Assistant entities for each group are not in this release.
+device API. Ring and volume commands, the Web UI for groups, and Home Assistant
+entities for each group are not in this release.
 
 #### GET /api/v1/network/wifi/scan
 

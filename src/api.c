@@ -22,6 +22,7 @@
 #include "peer_link.h"
 #include "peer_group.h"
 #include "peer_settings.h"
+#include "peer_announce.h"
 #include "adapter/mdns_client.h"
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -73,7 +74,7 @@ static int loopback_origin(const char*o){const char*host;if(!strncmp(o,"http://"
    answer is only a signature over its own nonce, and is given only to GET. */
 static int peer_proof_path(const struct api_request*q){return !strcmp(q->method,"GET")&&!strncmp(q->path,"/api/v1/peer/proof",18)&&(q->path[18]==0||q->path[18]=='?');}
 /* Device-to-device POSTs carry a sealed packet as the whole body (#448 group commands, #449 settings copies); the packet is their credential. */
-static int peer_command_path(const struct api_request*q){return !strcmp(q->method,"POST")&&(!strcmp(q->path,"/api/v1/peer/command")||!strcmp(q->path,"/api/v1/peer/settings"));}
+static int peer_command_path(const struct api_request*q){return !strcmp(q->method,"POST")&&(!strcmp(q->path,"/api/v1/peer/command")||!strcmp(q->path,"/api/v1/peer/settings")||!strcmp(q->path,"/api/v1/peer/announce"));}
 static int allowed_origin(const struct api_context*c,const struct api_request*q){const char*origin=q->origin;if(!origin[0]||c->allow_insecure_lan)return 1;if(c->allowed_origin[0])return constant_equal(origin,c->allowed_origin);if(origin_matches_host(origin,q->host))return 1;return loopback_origin(origin);}static int security(const struct api_context*c,const struct api_request*q,struct api_response*r){int authorized=0,bootstrap_path=!strcmp(q->path,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST"),login_path=!strcmp(q->path,"/api/v1/auth/login")&&!strcmp(q->method,"POST");if(!strcmp(q->path,"/api/v1/config")||bootstrap_path||login_path||peer_proof_path(q)||peer_command_path(q))authorized=1;if(!authorized&&c->auth_token[0]){char expected[256];snprintf(expected,sizeof(expected),"Bearer %s",c->auth_token);authorized=constant_equal(q->authorization,expected);}if(!authorized&&c->auth.enabled&&!strncmp(q->authorization,"Bearer ",7))authorized=le_auth_session((struct le_auth_db*)&c->auth,q->authorization+7,0,0);if(api_bootstrap_required_internal(c)&&!authorized){err(r,401,LE_AUTH,"Initial account setup is required");return 0;}if((c->auth_token[0]||c->auth.enabled)&&!authorized){err(r,401,LE_AUTH,"Authentication is required");return 0;}/* The signed group packet (#448) is the credential here, as the proof GET is; it carries no CSRF token. */
 if(!changing(q->method)||peer_command_path(q))return 1;if(!constant_equal(q->csrf,c->csrf_token)){err(r,403,LE_AUTH,"Missing or invalid CSRF token");return 0;}if(!allowed_origin(c,q)){err(r,403,LE_AUTH,"Origin is not allowed");return 0;}return 1;}
 static int body_ok(const struct api_request*q,struct api_response*r){if(!json_valid_object(q->body,q->body_len)){err(r,400,LE_INVALID,"Request body must be a valid JSON object");return 0;}return 1;}
@@ -2116,6 +2117,135 @@ static void settings_copy_json(struct api_context *c, const struct api_request *
     }
     ok(r, data);
 }
+/* Broadcast (#412, first slice). The owner speaks a short text on every paired device, or on one chosen device, as a signed "announcement" packet (peer_announce.h). A member speaks it once the packet verifies; the text is the only thing it takes from the packet. */
+#define LE_BROADCAST_FANOUT_MS 3000
+#define LE_BROADCAST_TEXT_BYTES 512
+#define LE_BROADCAST_DATA_BYTES 8192
+/* This device's own announcement path, with the same result words as a remote device. */
+static const char *announce_here(struct api_context *c, const char *text)
+{
+    int rc = le_announce(c->backend, text);
+    return rc == LE_OK ? "applied" : rc == LE_NOT_SUPPORTED ? "not_supported" : "failed";
+}
+/* One signed announcement to one remote device. Returns applied, not_supported, unpaired, failed or unreachable. */
+static const char *announce_to(struct api_context *c, const char *address, unsigned port, const char *text, long long deadline)
+{
+    char packet[LE_PEER_HEADER_MAX + LE_ANNOUNCE_TEXT_MAX + 16], reply[512], nonce[LE_PEER_NONCE_HEX + 1];
+    int status = 0, wire = 0, spoken = 0;
+    long long left;
+    if (own_ipv4(address) && port == (unsigned)c->http_port) return announce_here(c, text);
+    left = deadline - group_now_ms();
+    if (left <= 0 || le_peer_nonce(nonce) || (wire = le_peer_seal(&c->peer_key, LE_ANNOUNCE_TYPE, (long long)time(NULL), nonce, text, strlen(text), packet, sizeof packet)) <= 0) return "unreachable";
+    if (le_peer_post(address, port, "/api/v1/peer/announce", packet, (size_t)wire, (int)left, &status, reply, sizeof reply)) return "unreachable";
+    if (status == 200 && json_get_bool(reply, "spoken", &spoken) > 0 && spoken) return "applied";
+    if (status == 501) return "not_supported";
+    if (status == 401 || status == 404 || status == 409) return "unpaired";
+    return "failed";
+}
+/* Member side: a sealed "announcement" packet, verified and spoken once. */
+static void peer_announce(struct api_context *c, const struct api_request *q, struct api_response *r)
+{
+    const char *body = NULL;
+    size_t blen = 0;
+    char text[LE_ANNOUNCE_TEXT_MAX + 1];
+    int rc;
+    peer_key_ready(c);
+    if (!c->peer_key.set) {
+        out(r, 409, "{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_paired\",\"message\":\"This device is not paired with other devices\"}}");
+        return;
+    }
+    if (le_peer_open(&c->peer_key, &c->peer_replay, (long long)time(NULL), LE_GROUP_COMMAND_WINDOW_S, LE_ANNOUNCE_TYPE, q->body, q->body_len, &body, &blen) != LE_PEER_OK) {
+        api_log(c, "warning", "Refused an announcement that did not verify");
+        out(r, 401, "{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_verified\",\"message\":\"The announcement did not verify with this device's key\"}}");
+        return;
+    }
+    if (!le_announce_body_valid(body, blen)) {
+        err(r, 400, LE_INVALID, "The announcement text is not valid");
+        return;
+    }
+    memcpy(text, body, blen);
+    text[blen] = 0;
+    rc = le_announce(c->backend, text);
+    if (rc) {
+        err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc, "This device could not speak the announcement");
+        return;
+    }
+    api_log(c, "info", "Announcement from a paired device spoken");
+    ok(r, "{\"spoken\":true}");
+}
+/* Owner side: POST /api/v1/network/broadcast {"text", "address"?, "port"?}. With an address the text goes to that one device. Without one it goes to every paired device found on the LAN and is spoken here too. Devices of another house, and devices that are off, are skipped or reported. */
+static void broadcast_json(struct api_context *c, const struct api_request *q, struct api_response *r)
+{
+    char text[LE_BROADCAST_TEXT_BYTES], address[32], data[LE_BROADCAST_DATA_BYTES], name[160];
+    struct sockaddr_in dest;
+    struct le_peer list[LE_PEERS_MAX];
+    int self[LE_PEERS_MAX], trust[LE_PEERS_MAX], truncated = 0, have_dest, have_address, port = 0, cnt, n, sent = 0, applied = 0, skipped = 0;
+    size_t i, used = 0;
+    long long deadline;
+    const char *result;
+    struct in_addr a;
+    peer_key_ready(c);
+    if (!c->peer_key.set) {
+        err(r, 409, LE_BUSY, "Pair this device with the others before sending announcements");
+        return;
+    }
+    if (json_get_string(q->body, "text", text, sizeof text) < 1 || !le_announce_body_valid(text, strlen(text))) {
+        err(r, 400, LE_INVALID, "Announcement text must be 1 to 240 characters with no control characters");
+        return;
+    }
+    have_address = json_get_string(q->body, "address", address, sizeof address);
+    if (have_address < 0) {
+        err(r, 400, LE_INVALID, "The address is not valid");
+        return;
+    }
+    deadline = group_now_ms();
+    if (deadline < 0) {
+        err(r, 503, LE_IO, "The announcement could not be sent");
+        return;
+    }
+    deadline += LE_BROADCAST_FANOUT_MS;
+    if (have_address > 0) {
+        if (inet_pton(AF_INET, address, &a) != 1 || json_get_int(q->body, "port", &port) < 1 || port < 1 || port > 65535) {
+            err(r, 400, LE_INVALID, "A device needs an IPv4 address and a port");
+            return;
+        }
+        result = announce_to(c, address, (unsigned)port, text, deadline);
+        sent = 1;
+        applied = !strcmp(result, "applied");
+        n = snprintf(data, sizeof data, "{\"text_length\":%zu,\"this_device\":\"not_included\",\"devices\":[{\"address\":\"%s\",\"port\":%d,\"result\":\"%s\"}],\"sent\":%d,\"applied\":%d,\"skipped\":0,\"truncated\":false}", strlen(text), address, port, result, sent, applied);
+    } else {
+        have_dest = peers_destination(&dest);
+        cnt = le_peers_browse(have_dest ? &dest : NULL, LE_PEERS_BROWSE_MS, list, LE_PEERS_MAX, &truncated);
+        if (cnt < 0) {
+            err(r, 503, LE_IO, "The local network could not be searched");
+            return;
+        }
+        for (i = 0; i < (size_t)cnt; i++) self[i] = peer_is_self(c, &list[i]);
+        le_peer_verify_all(&c->peer_key, list, (size_t)cnt, self, LE_PEER_VERIFY_MS, trust);
+        result = announce_here(c, text);
+        n = snprintf(data, sizeof data, "{\"text_length\":%zu,\"this_device\":\"%s\",\"devices\":[", strlen(text), result);
+        if (n < 0 || (size_t)n >= sizeof data) goto overflow;
+        used = (size_t)n;
+        for (i = 0; i < (size_t)cnt; i++) {
+            if (self[i]) continue;
+            if (trust[i] != LE_PEER_TRUST_PAIRED) { skipped++; continue; }
+            result = announce_to(c, list[i].address, list[i].port, text, deadline);
+            sent++;
+            if (!strcmp(result, "applied")) applied++;
+            json_escape(name, sizeof name, list[i].name);
+            n = snprintf(data + used, sizeof data - used, "%s{\"name\":\"%s\",\"address\":\"%s\",\"port\":%u,\"result\":\"%s\"}", sent > 1 ? "," : "", name, list[i].address, list[i].port, result);
+            if (n < 0 || (size_t)n >= sizeof data - used) goto overflow;
+            used += (size_t)n;
+        }
+        n = snprintf(data + used, sizeof data - used, "],\"sent\":%d,\"applied\":%d,\"skipped\":%d,\"truncated\":%s}", sent, applied, skipped, truncated ? "true" : "false");
+    }
+    if (n < 0 || (size_t)n >= sizeof data) goto overflow;
+    api_log(c, "info", "Announcement sent to paired devices");
+    ok(r, data);
+    return;
+overflow:
+    err(r, 503, LE_IO, "The announcement could not be reported");
+}
 static int read_central_logs(char lines[LE_MAX_LOGS][LE_LOGD_MSG_MAX],size_t*count){FILE*f;char line[LE_LOGD_MSG_MAX],ordered[LE_MAX_LOGS][LE_LOGD_MSG_MAX];size_t next=0,total=0;if(!count)return 0;*count=0;f=fopen(LE_LOGD_FILE,"r");if(!f)return 0;while(fgets(line,sizeof(line),f)){size_t n=strlen(line);if(n&&line[n-1]=='\n')line[n-1]=0;memcpy(lines[next%LE_MAX_LOGS],line,sizeof(lines[0]));next++;if(total<LE_MAX_LOGS)total++;}fclose(f);if(total){size_t i,first=next-total;for(i=0;i<total;i++){memcpy(ordered[i],lines[(first+i)%LE_MAX_LOGS],sizeof(ordered[i]));}for(i=0;i<total;i++)memcpy(lines[i],ordered[i],sizeof(lines[i]));*count=total;}return *count>0;}
 static void logs_json(struct api_context*c,struct api_response*r){char central[LE_MAX_LOGS][LE_LOGD_MSG_MAX],message[256],escaped[512],level[16],service[32];size_t central_count=0,first,i,n=0;int timestamp,boot_seconds;int from_central=read_central_logs(central,&central_count);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"entries\":[");if(from_central){for(i=0;i<central_count&&n<sizeof(r->body)-500;i++){timestamp=0;boot_seconds=0;level[0]=0;service[0]=0;message[0]=0;json_get_int(central[i],"ts",&timestamp);json_get_int(central[i],"boot_seconds",&boot_seconds);json_get_string(central[i],"level",level,sizeof(level));json_get_string(central[i],"service",service,sizeof(service));json_get_string(central[i],"msg",message,sizeof(message));if(service[0]&&strncmp(message,service,strlen(service))){char prefixed[256];snprintf(prefixed,sizeof(prefixed),"%s: %s",service,message);strncpy(message,prefixed,sizeof(message)-1);message[sizeof(message)-1]=0;}json_escape(escaped,sizeof(escaped),message);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s{\"timestamp\":%d,\"boot_seconds\":%d,\"level\":\"%s\",\"message\":\"%s\"}",i?",":"",timestamp,boot_seconds,level[0]?level:"INFO",escaped);}}else{first=c->log_next-c->log_count;for(i=0;i<c->log_count&&n<sizeof(r->body)-500;i++)n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s%s",i?",":"",c->logs[(first+i)%LE_MAX_LOGS]);}n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"],\"source\":\"%s\",\"bounded\":true,\"capacity\":%d},\"error\":null}",from_central?"central-file":"web-memory",LE_MAX_LOGS);r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
 static void logs_stream_json(struct api_context*c,struct api_response*r){const char*prefix="event: logs\ndata: ",*suffix="\n\n";size_t prefix_len=strlen(prefix),suffix_len=strlen(suffix),n;logs_json(c,r);if(r->status!=200)return;if(r->length>sizeof(r->body)-prefix_len-suffix_len-1){err(r,503,LE_IO,"Log stream is too large");return;}n=r->length;memmove(r->body+prefix_len,r->body,n);memcpy(r->body,prefix,prefix_len);memcpy(r->body+prefix_len+n,suffix,suffix_len);r->length=prefix_len+n+suffix_len;r->body[r->length]=0;strcpy(r->type,"text/event-stream; charset=utf-8");}
@@ -2807,6 +2937,8 @@ if(!strcmp(p,"/api/v1/audio/test")&&!strcmp(q->method,"POST")){rc=le_play_test_t
  if(!strncmp(p,"/api/v1/peer/proof",18)&&(p[18]==0||p[18]=='?')){peer_proof(c,q,r);return;}
  if(!strcmp(p,"/api/v1/peer/command")){if(!strcmp(q->method,"POST")){peer_command(c,q,r);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/peer/settings")){if(!strcmp(q->method,"POST")){peer_settings(c,q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/peer/announce")){if(!strcmp(q->method,"POST")){peer_announce(c,q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/network/broadcast")){if(!strcmp(q->method,"POST")){broadcast_json(c,q,r);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/network/settings/copy")){if(!strcmp(q->method,"POST")){settings_copy_json(c,q,r);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/network/groups")||!strncmp(p,"/api/v1/network/groups/",23)){groups_handle(c,q,r);return;}
  if(!strcmp(p,"/api/v1/network/peers")){if(!strcmp(q->method,"GET")||!strcmp(q->method,"HEAD")){peers_json(c,r);return;}method_not_allowed(r);return;}
