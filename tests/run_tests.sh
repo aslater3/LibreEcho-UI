@@ -327,7 +327,7 @@ make build/test-voice-aec build/test-voice-reference build/test-spoken-time
 make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
 make build/test-voice-reply build/test-voice-playback
-make build/test-voice-pipeline
+make build/test-voice-pipeline build/test-voice-whisper
 make build/test-voice-listening-feedback
 ./build/test-voice-stream
 ./build/test-sttd
@@ -349,6 +349,7 @@ python3 tests/test_voice_listening_callers.py
 make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
+./build/test-voice-whisper
 ./build/test-voice-pipeline
 make test-mdns
 # Guard the nested-make provenance contract before the ESPHome section: its

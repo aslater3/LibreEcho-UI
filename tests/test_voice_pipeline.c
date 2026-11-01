@@ -94,6 +94,10 @@ int main(void)
     pipeline = le_voice_pipeline_start(
         wake_socket, stt_socket, transcript, &state);
     CHECK(pipeline != NULL);
+    /* Whisper detection is opt-in. Enabled here, the capture worker must
+       still deliver the turns; the mock request is voiced, so no turn may be
+       flagged whispered. */
+    le_voice_pipeline_set_whisper_detection(pipeline, 1);
     pthread_mutex_lock(&state.mutex);
     state.pipeline = pipeline;
     pthread_mutex_unlock(&state.mutex);
@@ -110,6 +114,8 @@ int main(void)
     {
         int called;
         int endpoint;
+        int whispered;
+        int first_whispered;
         uint64_t first_detection_sample;
         uint64_t follow_up_detection_sample;
         int follow_up_result;
@@ -120,6 +126,8 @@ int main(void)
         pthread_mutex_lock(&state.mutex);
         called = state.called;
         endpoint = state.turn.endpoint;
+        whispered = state.turn.whispered;
+        first_whispered = state.first_turn.whispered;
         first_detection_sample = state.first_turn.detection_sample;
         follow_up_detection_sample = state.turn.detection_sample;
         follow_up_result = state.follow_up_result;
@@ -135,6 +143,8 @@ int main(void)
         CHECK(!first_follow_up);
         CHECK(second_follow_up);
         CHECK(endpoint);
+        CHECK(!whispered);
+        CHECK(!first_whispered);
     }
     le_voice_pipeline_get_metrics(pipeline, &metrics);
     CHECK(metrics.wake_events == 1);

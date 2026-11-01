@@ -64,6 +64,7 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/time
 	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+	src/adapter/voice_whisper.c \
 	src/adapter/voice_history.c \
 	src/adapter/voice_listening_led.c \
 	src/adapter/spoken_time.c \
@@ -1047,13 +1048,22 @@ $(BUILD)/mock-voice-source: tests/mock_voice_source.c \
 
 $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_whisper.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
 		src/json.c $(BUILD)/libreecho-sttd $(BUILD)/mock-voice-source
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_whisper.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
 		src/json.c src/log.c -lpthread -o $@
+
+$(BUILD)/test-voice-whisper: tests/test_voice_whisper.c \
+		src/adapter/voice_whisper.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_voice_whisper.c \
+		src/adapter/voice_whisper.c -o $@
 
 $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
 	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c
@@ -1319,6 +1329,7 @@ clean:
 		$(BUILD)/test-voice-playback \
 		$(BUILD)/test-voice-listening-feedback \
 		$(BUILD)/test-voice-pipeline-restart \
+		$(BUILD)/test-voice-whisper \
 		$(BUILD)/test-service-env-isolation \
 		$(BUILD)/test-service-cancel-linux \
 		$(BUILD)/test-voice-pipeline-env-isolation \
