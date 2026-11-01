@@ -920,6 +920,26 @@ static int command_voice_history_clear(struct agent_state *state, int client_fd,
     return respond(client_fd, id, 1, "{}");
 }
 
+/*
+ * Voice-history clear generation only (#398). The ESPHome last-turn sensors
+ * poll this and clear when it changes; every clear of the canonical ring
+ * (web DELETE or history_clear) bumps it. Read-only, metrics_mutex only.
+ */
+static int command_voice_history_generation(struct agent_state *state,
+                                            int client_fd, unsigned long id)
+{
+    char body[64];
+    unsigned long long generation;
+
+    pthread_mutex_lock(&state->metrics_mutex);
+    generation = le_voice_history_generation(&state->voice_history);
+    pthread_mutex_unlock(&state->metrics_mutex);
+    if (snprintf(body, sizeof(body), "{\"history_generation\":%llu}",
+                 generation) >= (int)sizeof(body))
+        return respond(client_fd, id, 0, "history generation too large");
+    return respond(client_fd, id, 1, body);
+}
+
 static int command_status(struct agent_state *state, int fd,
                           unsigned long id)
 {
@@ -2291,8 +2311,11 @@ static void handle_client(struct agent_state *state, int client_fd)
     }
     if (!strcmp(command, "voice_history") ||
         !strcmp(command, "voice_history_entry") ||
-        !strcmp(command, "voice_history_clear")) {
-        if (!strcmp(command, "voice_history_clear"))
+        !strcmp(command, "voice_history_clear") ||
+        !strcmp(command, "voice_history_generation")) {
+        if (!strcmp(command, "voice_history_generation"))
+            (void)command_voice_history_generation(state, client_fd, id);
+        else if (!strcmp(command, "voice_history_clear"))
             (void)command_voice_history_clear(state, client_fd, id);
         else if (!strcmp(command, "voice_history_entry"))
             (void)command_voice_history_entry(state, args, client_fd, id);
