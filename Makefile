@@ -1017,7 +1017,7 @@ $(BUILD)/test-voice-ns: tests/test_voice_ns.c src/adapter/voice_ns.c src/adapter
 
 $(BUILD)/test-voice-pipeline-noise: tests/test_voice_pipeline_noise.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
-		src/adapter/voice_ns.c src/adapter/voice_listening_led.c \
+		src/adapter/voice_ns.c src/adapter/voice_whisper.c src/adapter/voice_listening_led.c \
 		src/adapter/adapter_client.c src/adapter/adapter_server.c \
 		src/json.c src/log.c
 	@mkdir -p $(BUILD)
@@ -1202,11 +1202,13 @@ $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 
 $(BUILD)/test-voice-pipeline-stop-window: tests/test_voice_pipeline_stop_window.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c src/adapter/voice_whisper.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/json.c $(BUILD)/libreecho-sttd
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_voice_pipeline_stop_window.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c src/adapter/voice_whisper.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/json.c src/log.c -lpthread -o $@
 
