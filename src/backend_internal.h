@@ -28,7 +28,7 @@ struct le_backend_ops {
     shift every op after it. A backend that leaves it null reports the
     feature unsupported, which is the right answer for the mock. */
  int (*sound_sample)(struct le_backend*,const char*);
- int (*timers)(struct le_backend*,struct le_timer_list*); int (*timer_add)(struct le_backend*,int,const char*,unsigned*); int (*timer_cancel)(struct le_backend*,unsigned); int (*timer_dismiss)(struct le_backend*,int*);
+ int (*timers)(struct le_backend*,struct le_timer_list*); int (*timer_add)(struct le_backend*,int,const char*,unsigned*); int (*timer_cancel)(struct le_backend*,unsigned); int (*timer_dismiss)(struct le_backend*,int*); int (*timer_add_alarm)(struct le_backend*,long long,const char*,unsigned*);
  /* Extended noise, sleep lighting and recovery. Appended last for the same
     positional-init reason as everything above; a backend that leaves one null
     reports the feature unsupported. */

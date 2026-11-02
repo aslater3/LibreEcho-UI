@@ -8,11 +8,16 @@
  * forward mid-session" is its normal boot, not an edge case.
  */
 
+/* setenv and tzset are POSIX; the schedule itself stays C99. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "adapter/timer_schedule.h"
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define BOOT_EPOCH 10LL              /* what the clock reads before NTP */
 #define SYNCED_EPOCH 1767225600LL    /* 2026-01-01, after NTP lands */
@@ -273,6 +278,48 @@ int main(void)
                0);
         /* Never longer than the caller's cap. */
         assert(le_timer_poll_timeout_ms(&set, 0, SYNCED_EPOCH, 5000) == 5000);
+    }
+
+    /* The next local occurrence of a wall-clock time, in the device zone. */
+    {
+        long long due = 0;
+
+        /* A fixed zone with no DST keeps the expectations exact. */
+        setenv("TZ", "UTC0", 1);
+        tzset();
+        /* 2026-01-01 06:00 UTC: 07:00 is an hour away today. */
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 6 * 3600, 7, 0, &due) ==
+               LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 7 * 3600);
+        /* At 07:30 the same 07:00 is tomorrow, never in the past. */
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 7 * 3600 + 1800, 7, 0,
+                                         &due) == LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 31 * 3600);
+        /* Exactly the due instant counts as passed, so it moves to tomorrow. */
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 7 * 3600, 7, 0, &due) ==
+               LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 31 * 3600);
+
+        /* The zone is the device's: the same instant in another zone is a
+           different wall-clock time. 2026-01-01 06:00 UTC is 07:00 at UTC+1. */
+        setenv("TZ", "CET-1", 1);
+        tzset();
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 6 * 3600, 7, 0, &due) ==
+               LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 6 * 3600 + 24 * 3600);
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 6 * 3600, 8, 0, &due) ==
+               LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 6 * 3600 + 3600);
+        setenv("TZ", "UTC0", 1);
+        tzset();
+
+        /* An unset clock and out-of-range times are refused. */
+        assert(le_timer_next_alarm_epoch(BOOT_EPOCH, 7, 0, &due) ==
+               LE_TIMER_ERR_CLOCK);
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH, 24, 0, &due) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH, 7, 60, &due) ==
+               LE_TIMER_ERR_RANGE);
     }
 
     printf("timer schedule: ok\n");

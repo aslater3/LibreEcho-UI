@@ -2,6 +2,7 @@
 
 #include <limits.h>
 #include <string.h>
+#include <time.h>
 
 static struct le_timer *free_slot(struct le_timer_set *set)
 {
@@ -129,6 +130,44 @@ static int restore_timer(struct le_timer_set *set, enum le_timer_kind kind,
     set_label(timer, label);
     if (id)
         *id = timer->id;
+    return LE_TIMER_OK;
+}
+
+int le_timer_next_alarm_epoch(long long now_epoch, int hour, int minute,
+                              long long *due_epoch)
+{
+    struct tm *zoned;
+    struct tm local;
+    time_t now = (time_t)now_epoch;
+    time_t due;
+
+    if (!due_epoch)
+        return LE_TIMER_ERR_RANGE;
+    if (now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
+        return LE_TIMER_ERR_CLOCK;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59)
+        return LE_TIMER_ERR_RANGE;
+    zoned = localtime(&now);
+    if (!zoned)
+        return LE_TIMER_ERR_CLOCK;
+    local = *zoned;
+    local.tm_hour = hour;
+    local.tm_min = minute;
+    local.tm_sec = 0;
+    local.tm_isdst = -1;
+    due = mktime(&local);
+    if (due == (time_t)-1)
+        return LE_TIMER_ERR_RANGE;
+    if ((long long)due <= now_epoch) {
+        /* Tomorrow at the same wall-clock time, so a DST change does not
+           shift the alarm by an hour or more. */
+        local.tm_mday += 1;
+        local.tm_isdst = -1;
+        due = mktime(&local);
+        if (due == (time_t)-1)
+            return LE_TIMER_ERR_RANGE;
+    }
+    *due_epoch = (long long)due;
     return LE_TIMER_OK;
 }
 

@@ -9,6 +9,7 @@
 #include "voice_history.h"
 #include "voice_playback.h"
 #include "timer_intent.h"
+#include "timer_schedule.h"
 #include "stop_intent.h"
 #include "voice_reply.h"
 #include "../config_store.h"
@@ -1213,6 +1214,9 @@ static int handle_timer_intent(struct agent_state *state,
     char response[LE_ADAPTER_MSG_MAX];
     char args[256];
     char speech[LE_TIMER_INTENT_SPEECH_MAX];
+    /* Alarm-only cancels must never reach a countdown: the daemon filters. */
+    const char *alarm_filter = "{\"kind\":\"alarm\"}";
+    const char *filter = "{}";
     int ringing = 0;
     int count = 0;
     int remaining = 0;
@@ -1231,6 +1235,8 @@ static int handle_timer_intent(struct agent_state *state,
         return 0;
     }
     ringing = timer_status_count(response, "ringing");
+    if (intent.kind == LE_TIMER_INTENT_CANCEL && intent.alarm_only)
+        filter = alarm_filter;
 
     switch (intent.kind) {
     case LE_TIMER_INTENT_DISMISS:
@@ -1267,9 +1273,37 @@ static int handle_timer_intent(struct agent_state *state,
         }
         break;
 
+    case LE_TIMER_INTENT_ALARM: {
+        char label[LE_TIMER_INTENT_LABEL_MAX * 2];
+        long long due = 0;
+        time_t now = time(NULL);
+
+        if (intent.alarm_hour < 0)
+            break;
+        if (le_timer_next_alarm_epoch((long long)now, intent.alarm_hour,
+                                      intent.alarm_minute, &due) != LE_TIMER_OK) {
+            /* No credible clock yet: say so rather than ring at a wrong time. */
+            snprintf(speech, sizeof(speech), "I cannot set an alarm until the clock is set.");
+            snprintf(spoken, spoken_size, "%s", speech);
+            (void)play_sentence(state, speech);
+            return 1;
+        }
+        json_escape(label, sizeof(label), intent.label);
+        snprintf(args, sizeof(args), "{\"epoch\":%lld,\"label\":\"%s\"}",
+                 due, label);
+        if (adapter_call(state->timer_socket, 1000, "add_alarm", args, response,
+                         sizeof(response)) != LE_ADAPTER_OK) {
+            snprintf(speech, sizeof(speech), "I could not set that alarm.");
+            snprintf(spoken, spoken_size, "%s", speech);
+            (void)play_sentence(state, speech);
+            return 1;
+        }
+        break;
+    }
+
     case LE_TIMER_INTENT_CANCEL:
         if (intent.cancel_all) {
-            if (adapter_call(state->timer_socket, 1000, "cancel_all", "{}",
+            if (adapter_call(state->timer_socket, 1000, "cancel_all", filter,
                              response, sizeof(response)) != LE_ADAPTER_OK)
                 return 0;
             (void)json_get_int(response, "cancelled", &count);
@@ -1294,7 +1328,7 @@ static int handle_timer_intent(struct agent_state *state,
             count = 1;
             break;
         }
-        if (adapter_call(state->timer_socket, 1000, "next", "{}", response,
+        if (adapter_call(state->timer_socket, 1000, "next", filter, response,
                          sizeof(response)) != LE_ADAPTER_OK)
             return 0;
         (void)json_get_int(response, "count", &count);
