@@ -219,6 +219,14 @@ test-peer-auth:
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_peer_auth.c src/peer_auth.c src/peer_link.c src/json.c -o $(BUILD)/test-peer-auth
 	./$(BUILD)/test-peer-auth
 
+# Only the nearest device answers (#408): claim format, ranking, timing,
+# switch and pairing, forged/replayed claims refused, over loopback UDP.
+.PHONY: test-wake-arbiter
+test-wake-arbiter:
+	mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_wake_arbiter.c src/adapter/wake_arbiter.c src/peer_auth.c src/json.c -lm -o $(BUILD)/test-wake-arbiter
+	./$(BUILD)/test-wake-arbiter
+
 # Sendspin adapter contract: dependency-free, safe for the default suite. It pins
 # the offline/player-only CMake shape and that the heavy SDK lane stays opt-in.
 .PHONY: test-sendspin-contract
@@ -1168,19 +1176,19 @@ test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback $(BUILD)/l
 
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
-		src/adapter/voice_stream.c src/adapter/clap_detector.c \
+		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c \
-		src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c
+		src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
 		$(filter %.c,$^) $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
 $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
-		src/adapter/voice_stream.c src/adapter/clap_detector.c \
+		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
-		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c
+		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 \
 		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
 		-ffunction-sections -fdata-sections -Wall -Wextra \
@@ -1230,10 +1238,11 @@ $(BUILD)/%.wake.arm.o: src/adapter/%.c
 $(BUILD)/waked.wake.arm.o: src/adapter/adapter.h \
 	src/adapter/voice_aec.h src/adapter/voice_dsp.h \
 	src/adapter/voice_reference.h src/adapter/voice_stream.h \
-	src/adapter/clap_detector.h \
+	src/adapter/clap_detector.h src/adapter/wake_arbiter.h \
 	src/adapter/smoke_alarm_detector.h \
 	src/adapter/wake_led.h \
 	src/adapter/wake_worker.h src/json.h
+$(BUILD)/wake_arbiter.wake.arm.o: src/adapter/wake_arbiter.h src/peer_auth.h
 $(BUILD)/voice_aec.wake.arm.o: src/adapter/voice_aec.h
 $(BUILD)/clap_detector.wake.arm.o: src/adapter/clap_detector.h
 $(BUILD)/smoke_alarm_detector.wake.arm.o: src/adapter/smoke_alarm_detector.h
@@ -1258,6 +1267,14 @@ $(BUILD)/wake_model.wake.arm.o: src/wake_model.c src/wake_model.h
 		-fdata-sections -Wall -Wextra -Wpedantic -Werror \
 		-Isrc -Isrc/adapter -c $< -o $@
 
+$(BUILD)/peer_auth.wake.arm.o: src/peer_auth.c src/peer_auth.h src/le_sha256.h
+	@mkdir -p $(BUILD)
+	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L \
+		-DLE_WAKE_ENGINE_ONNX -std=c99 -O3 -march=armv7-a \
+		-mfpu=neon-vfpv4 -mfloat-abi=hard -ffunction-sections \
+		-fdata-sections -Wall -Wextra -Wpedantic -Werror \
+		-Isrc -Isrc/adapter -c $< -o $@
+
 $(BUILD)/json.wake.arm.o: src/json.c src/json.h
 	@mkdir -p $(BUILD)
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L \
@@ -1275,6 +1292,8 @@ WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/voice_stream.wake.arm.o \
 	$(BUILD)/wake_worker.wake.arm.o \
 	$(BUILD)/wake_led.wake.arm.o \
+	$(BUILD)/wake_arbiter.wake.arm.o \
+	$(BUILD)/peer_auth.wake.arm.o \
 	$(BUILD)/adapter_client.wake.arm.o \
 	$(BUILD)/adapter_server.wake.arm.o \
 	$(BUILD)/log.wake.arm.o \
@@ -1294,7 +1313,7 @@ adapters: $(ADAPTER_TARGETS)
 
 $(BUILD)/adapter/watchdogd.o $(BUILD)/adapter/esphomed.o $(BUILD)/api.o: src/esphome_health.h src/json.h
 $(BUILD)/test-voice-pipeline-restart $(BUILD)/test-voice-pipeline-env-isolation $(BUILD)/test-home-assistant-discovery: tests/esphome_process_fixture.h src/esphome_health.h | $(BUILD)/libreecho-esphomed
-$(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32: src/json.h src/adapter/wake_worker.h
+$(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32: src/json.h src/adapter/wake_worker.h src/adapter/wake_arbiter.h src/peer_auth.h
 
 # -MMD -MP records which headers each object was built from, so editing a
 # header rebuilds what included it.  Without this the tree compiled

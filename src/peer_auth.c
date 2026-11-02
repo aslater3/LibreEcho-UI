@@ -245,10 +245,15 @@ int le_peer_seal(const struct le_peer_key *key, const char *type, long long ts, 
 /* Splits the next space- or newline-terminated field of at most cap-1 bytes. */
 static int field(const char **p, const char *end, char stop, char *out, size_t cap)
 {
-    size_t n = 0;
-    while (*p < end && **p != stop) { if (n + 1 >= cap || **p == ' ' || **p == '\n' || **p == 0) return -1; out[n++] = **p; (*p)++; }
-    if (*p >= end || !n) return -1;
-    out[n] = 0; (*p)++;
+    /* Measure first, then copy: a byte-at-a-time copy into out trips GCC 15's
+     * -Wstringop-overflow at -O3 on ARM (the waked build). */
+    const char *q = *p;
+    size_t n;
+    while (q < end && *q != stop) { if (*q == ' ' || *q == '\n' || *q == 0) return -1; q++; }
+    n = (size_t)(q - *p);
+    if (q >= end || !n || n >= cap) return -1;
+    memcpy(out, *p, n);
+    out[n] = 0; *p = q + 1;
     return 0;
 }
 
@@ -269,7 +274,9 @@ static void replay_record(struct le_peer_replay *r, const char *nonce, long long
         if (!r->seen[s].nonce[0] || r->seen[s].ts < now - window_s || r->seen[s].ts > now + window_s) { slot = s; break; }
     }
     if (i == LE_PEER_REPLAY_SLOTS && r->seen[slot].ts > r->floor) r->floor = r->seen[slot].ts;
-    snprintf(r->seen[slot].nonce, sizeof(r->seen[slot].nonce), "%s", nonce);
+    /* nonce was checked to be exactly LE_PEER_NONCE_HEX hex digits. */
+    memcpy(r->seen[slot].nonce, nonce, LE_PEER_NONCE_HEX);
+    r->seen[slot].nonce[LE_PEER_NONCE_HEX] = 0;
     r->seen[slot].ts = ts;
     r->next = (slot + 1) % LE_PEER_REPLAY_SLOTS;
 }

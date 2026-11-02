@@ -245,6 +245,25 @@ class NetworkPeers(unittest.TestCase):
         self.assertTrue(self.supervisor.messages[-1].decode().endswith(f' room={b"Hall".hex()}\n'))
         self.assertTrue(json.loads(self.config.read_text())['discoverable'])
 
+    def test_nearest_answers_switch_is_off_by_default_and_persists(self):
+        # #408: waked reads this key from the saved config, so it must be
+        # written there, survive a restart, and round-trip through export.
+        self.start()
+        self.assertIs(self.get('/api/v1/network')['data']['nearest_answers'], False)
+        status, body = self.request('PUT', '/api/v1/network', {'nearest_answers': True})
+        self.assertEqual(status, 200, body)
+        self.assertIs(self.get('/api/v1/network')['data']['nearest_answers'], True)
+        self.assertIs(json.loads(self.config.read_text())['nearest_answers'], True)
+        exported = self.get('/api/v1/config/export')['data']
+        self.assertIs(exported['nearest_answers'], True)
+        status, body = self.request('PUT', '/api/v1/network', {'nearest_answers': False})
+        self.assertEqual(status, 200, body)
+        self.assertIs(json.loads(self.config.read_text())['nearest_answers'], False)
+        status, body = self.request('POST', '/api/v1/config/import', exported)
+        self.assertEqual(status, 200, body)
+        self.assertIs(self.get('/api/v1/network')['data']['nearest_answers'], True)
+        self.assertIs(json.loads(self.config.read_text())['nearest_answers'], True)
+
     def test_loopback_listener_is_never_advertised(self):
         self.start(listen='127.0.0.1')
         time.sleep(2.5)
