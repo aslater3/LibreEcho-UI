@@ -41,6 +41,10 @@
 #define POLL_CAP_MS 60000
 #define RESTORE_RETRY_MS 1000
 #define AUDIO_TIMEOUT_MS 1000
+#define LED_TIMEOUT_MS 1000
+/* Owner's sunrise lead time (UI #447): a single decimal minute count. Kept in
+   its own file so the alarm record format does not change. */
+#define SUNRISE_STATE_PATH "/data/libreecho/config/timers-sunrise"
 
 /* The ring: a two-tone cue every RING_PERIOD_MS. Long enough to be a pattern
    rather than a siren, short enough that a room notices. */
@@ -87,6 +91,15 @@ struct context {
     /* The state path was atomically replaced, but its final durability step
        failed. A retry must not treat the new file as the old backup source. */
     int state_commit_pending;
+    /* Sunrise wake light (UI #447): minutes before an alarm, 0 when off. */
+    int sunrise_minutes;
+    const char *sunrise_path;
+    const char *led_sock;
+    /* The alarm whose fade is running, and the due instant the fade was
+       started for. A snooze, reschedule or cancel ends the fade. */
+    int sunrise_active;
+    unsigned int sunrise_id;
+    long long sunrise_due;
 };
 
 static volatile sig_atomic_t stop_requested;
@@ -725,6 +738,98 @@ static void audio_ring_stop(struct context *ctx)
     le_adapter_close(adapter);
 }
 
+/* ----------------------------- sunrise light ---------------------------- */
+
+static int sunrise_load(struct context *ctx)
+{
+    FILE *file = fopen(ctx->sunrise_path, "r");
+    int value = 0;
+
+    if (!file)
+        return 0; /* Never set: off, the default. */
+    if (fscanf(file, "%d", &value) != 1 ||
+        !le_timer_sunrise_minutes_valid(value)) {
+        le_log_warn("timerd: ignoring invalid sunrise setting");
+        value = 0;
+    }
+    fclose(file);
+    ctx->sunrise_minutes = value;
+    return 0;
+}
+
+static int sunrise_save(const struct context *ctx, int minutes)
+{
+    char temp[256];
+    FILE *file;
+
+    if (snprintf(temp, sizeof(temp), "%s.tmp", ctx->sunrise_path) >=
+        (int)sizeof(temp))
+        return -1;
+    file = fopen(temp, "w");
+    if (!file)
+        return -1;
+    if (fprintf(file, "%d\n", minutes) < 0 || fflush(file) != 0 ||
+        fsync(fileno(file)) != 0) {
+        fclose(file);
+        unlink(temp);
+        return -1;
+    }
+    if (fclose(file) != 0 || rename(temp, ctx->sunrise_path) != 0) {
+        unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+/* Best effort: a missing or busy ledd means no fade, never a missed alarm. */
+static void sunrise_send(const struct context *ctx, const char *args)
+{
+    struct le_adapter *adapter;
+    int result;
+
+    adapter = le_adapter_connect(ctx->led_sock, LED_TIMEOUT_MS);
+    if (!adapter) {
+        le_log_warn("timerd: LED daemon unavailable; no sunrise fade");
+        return;
+    }
+    le_adapter_set_io_timeout(adapter, LED_TIMEOUT_MS);
+    result = le_adapter_call(adapter, "sunrise", args, NULL, 0);
+    if (result != LE_ADAPTER_OK)
+        le_log_warn("timerd: sunrise command failed (%d)", result);
+    le_adapter_close(adapter);
+}
+
+/*
+ * Start the fade when a pending alarm enters its lead window, and end it when
+ * that alarm is dismissed, snoozed, cancelled or its ring runs out. A snooze
+ * or a repeat moves the due instant, a one-off is cleared: either ends the
+ * fade. The fade runs over the whole lead, then holds warm white until then.
+ */
+static void sunrise_tick(struct context *ctx, long long now_epoch)
+{
+    if (ctx->sunrise_active) {
+        const struct le_timer *timer =
+            le_timer_find(&ctx->timers, ctx->sunrise_id);
+
+        if (ctx->sunrise_minutes <= 0 || !timer ||
+            timer->due_epoch != ctx->sunrise_due) {
+            sunrise_send(ctx, "{\"action\":\"stop\"}");
+            ctx->sunrise_active = 0;
+        }
+        return;
+    }
+    if (le_timer_sunrise_due(&ctx->timers, now_epoch, ctx->sunrise_minutes,
+                             &ctx->sunrise_id, &ctx->sunrise_due)) {
+        char args[96];
+
+        snprintf(args, sizeof(args),
+                 "{\"action\":\"start\",\"seconds\":%d}",
+                 ctx->sunrise_minutes * 60);
+        sunrise_send(ctx, args);
+        ctx->sunrise_active = 1;
+    }
+}
+
 static void ring_tick(struct context *ctx, long long now_ms)
 {
     remote_ring_expire(ctx, now_ms);
@@ -1017,6 +1122,27 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
     if (!strcmp(cmd, "remote_clear")) {
         memset(ctx->remote_timers, 0, sizeof(ctx->remote_timers));
         return le_adapter_respond_ok(out, size, id, "{}");
+    }
+    if (!strcmp(cmd, "sunrise_get")) {
+        snprintf(data, sizeof(data), "{\"lead_minutes\":%d}",
+                 ctx->sunrise_minutes);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+    if (!strcmp(cmd, "sunrise_set")) {
+        long long minutes = 0;
+
+        if (!args || json_get_int64_top_level(args, "lead_minutes", &minutes) != 1 ||
+            !le_timer_sunrise_minutes_valid(minutes))
+            return le_adapter_respond_err(out, size, id,
+                "lead_minutes must be 0 or 5 to 30");
+        if (sunrise_save(ctx, (int)minutes) != 0)
+            return le_adapter_respond_err(out, size, id,
+                "sunrise setting could not be saved");
+        /* A change to 0 ends a running fade on the next tick. */
+        ctx->sunrise_minutes = (int)minutes;
+        snprintf(data, sizeof(data), "{\"lead_minutes\":%d}",
+                 ctx->sunrise_minutes);
+        return le_adapter_respond_ok(out, size, id, data);
     }
 
     label[0] = '\0';
@@ -1330,6 +1456,8 @@ int main(int argc, char **argv)
     ctx.state_path = STATE_PATH;
     ctx.audio_sock = LE_ADAPTER_AUDIO_SOCK;
     ctx.tts_socket = TTS_SOCK;
+    ctx.sunrise_path = SUNRISE_STATE_PATH;
+    ctx.led_sock = LE_ADAPTER_LED_SOCK;
     ctx.listen_fd = -1;
     for (i = 0; i < MAX_CLIENTS; ++i)
         ctx.clients[i] = -1;
@@ -1344,6 +1472,10 @@ int main(int argc, char **argv)
             ctx.audio_sock = argv[++i];
         else if (!strcmp(argv[i], "--tts-socket") && i + 1 < argc)
             ctx.tts_socket = argv[++i];
+        else if (!strcmp(argv[i], "--sunrise-state") && i + 1 < argc)
+            ctx.sunrise_path = argv[++i];
+        else if (!strcmp(argv[i], "--led-socket") && i + 1 < argc)
+            ctx.led_sock = argv[++i];
         else if (!strcmp(argv[i], "--foreground"))
             continue;
         else if (argv[i][0] == '-' && strncmp(argv[i], "--verbose", 9) &&
@@ -1358,6 +1490,7 @@ int main(int argc, char **argv)
     }
 
     le_timer_set_init(&ctx.timers);
+    (void)sunrise_load(&ctx);
 
     ctx.listen_fd = le_adapter_listen(ctx.socket_path);
     if (ctx.listen_fd < 0) {
@@ -1406,6 +1539,7 @@ int main(int argc, char **argv)
             ctx.dirty = 1;
         }
         ring_tick(&ctx, now_ms);
+        sunrise_tick(&ctx, now_epoch);
         /* ring_tick may wait for audiod. Refresh both snapshots before a save
            and before deriving the poll deadline from the schedule. */
         now_ms = monotonic_ms();
@@ -1427,6 +1561,14 @@ int main(int argc, char **argv)
         }
 
         timeout = timer_poll_timeout(&ctx, now_ms, now_epoch);
+        if (!ctx.sunrise_active) {
+            /* Wake for the start of a fade, not after it. */
+            long long until_sunrise = le_timer_sunrise_timeout_ms(
+                &ctx.timers, now_epoch, ctx.sunrise_minutes, timeout);
+
+            if (until_sunrise < timeout)
+                timeout = until_sunrise;
+        }
         if (ringing_count(&ctx) > 0) {
             long long until_ring = ctx.next_ring_ms - now_ms;
 

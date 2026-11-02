@@ -819,6 +819,22 @@ repeating alarm keeps its days. Countdowns are not snoozed. Returns 200 with
 `X-LibreEcho-CSRF`. The same snooze is available from the action button while
 an alarm rings, and by saying "snooze".
 
+#### GET /api/v1/alarms/sunrise
+
+Returns the sunrise wake light lead time as `{ "lead_minutes": n }`. Zero is
+off, the default. While an alarm is pending and inside its lead, the LED ring
+fades up from dark red to warm white over that many minutes, then holds warm
+white until the alarm is dismissed or snoozed. Voice, playback and other ring
+states keep priority over the fade.
+
+#### PUT /api/v1/alarms/sunrise
+
+Sets the lead time for every alarm. The body is a single top-level integer,
+`{ "lead_minutes": n }`, where `n` is 0 (off) or from 5 to 30. Anything else
+returns HTTP 400 and changes nothing. Returns 200 with the saved value. The
+setting is stored separately from the alarm schedule and survives restarts.
+Requires `X-LibreEcho-CSRF`.
+
 Alarms can also be set and cancelled by voice without a language model:
 "set an alarm for 7am", "wake me at seven thirty in the evening", "set an
 alarm for 6:30am on weekdays", "cancel my alarm", "snooze". Reminders work the

@@ -2712,6 +2712,41 @@ static int timer_snooze(struct le_backend *b, int *snoozed)
     return LE_OK;
 }
 
+/* Sunrise lead time (UI #447). timerd owns the setting and validates it. */
+static int timer_sunrise_get(struct le_backend *b, int *minutes)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "sunrise_get", "{}", response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "lead_minutes", &value) != 1 ||
+        value < 0 || value > INT_MAX)
+        return LE_IO;
+    if (minutes)
+        *minutes = (int)value;
+    return LE_OK;
+}
+
+static int timer_sunrise_set(struct le_backend *b, int minutes)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[48];
+    int rc;
+    (void)b;
+
+    if (minutes != 0 && (minutes < 5 || minutes > 30))
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"lead_minutes\":%d}", minutes);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "sunrise_set", args, response,
+                         sizeof(response));
+    return rc;
+}
+
 static int timer_cancel(struct le_backend *b, unsigned id)
 {
     char response[LE_ADAPTER_MSG_MAX];
@@ -3448,7 +3483,8 @@ static const struct le_backend_ops ops = {
     sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing,
     reply_volume,
     microphone_mix, microphone_lane,
-    timer_add_repeat, timer_snooze, timer_add_reminder
+    timer_add_repeat, timer_snooze, timer_add_reminder,
+    timer_sunrise_get, timer_sunrise_set
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

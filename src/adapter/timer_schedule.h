@@ -238,4 +238,34 @@ long long le_timer_poll_timeout_ms(const struct le_timer_set *set,
                                    long long now_monotonic_ms,
                                    long long now_epoch, long long cap_ms);
 
+/*
+ * Sunrise wake light (UI #447). The owner may ask for the LED ring to start a
+ * warm fade-up this many minutes before an alarm. 0 is off, the default; any
+ * other value must be within the range below.
+ */
+#define LE_TIMER_SUNRISE_MIN_MINUTES 5
+#define LE_TIMER_SUNRISE_MAX_MINUTES 30
+
+/* True for 0 (off) or a lead time within the sunrise range. */
+int le_timer_sunrise_minutes_valid(long long minutes);
+
+/*
+ * The pending alarm whose sunrise window contains now_epoch: due minus
+ * lead_minutes <= now < due. Writes its id and due instant and returns 1, or
+ * returns 0 when no alarm is in its window, the lead is off, or the wall clock
+ * is not yet credible. Pending alarms only: a ringing alarm is not "before".
+ */
+int le_timer_sunrise_due(const struct le_timer_set *set, long long now_epoch,
+                         int lead_minutes, unsigned int *id,
+                         long long *due_epoch);
+
+/*
+ * Milliseconds until the next sunrise window opens, capped at cap_ms. Returns
+ * cap_ms when no window is pending. Lets the caller wake for the start of a
+ * fade instead of sleeping through it.
+ */
+long long le_timer_sunrise_timeout_ms(const struct le_timer_set *set,
+                                      long long now_epoch, int lead_minutes,
+                                      long long cap_ms);
+
 #endif
