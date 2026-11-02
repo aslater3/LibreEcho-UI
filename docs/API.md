@@ -2994,6 +2994,38 @@ mutations persist atomically using the existing `0600` configuration store.
 
 ### Integrations
 
+#### GET /api/v1/voice/clips
+
+Lists wake near-miss clips. A near miss is a wake score that reaches the
+near-miss floor (0.35) with speech present but stays under the detection
+threshold. Clip capture is off by default. The response reports
+`near_miss_enabled`, `count`, `bytes`, the store `limits` (`max_count` 32,
+`max_bytes` 4 MiB, `max_samples` 32768, `sample_rate` 16000) and the clips
+newest first as `{id, kind, created, bytes}`. Clips are kept under
+`/data/libreecho/voice-clips` as 16 kHz mono WAV files at mode 0600, and the
+oldest are removed first when a bound is reached.
+
+#### PUT /api/v1/voice/clips
+
+Enables or disables near-miss clip capture. Requires `X-LibreEcho-CSRF`.
+Body: `{"near_miss_enabled": true}`. Disabling stops new clips; saved clips
+stay until deleted. A non-boolean value returns 400.
+
+#### GET /api/v1/voice/clips/{id}
+
+Downloads one clip as `audio/wav`. This is the only response that is not a JSON
+envelope. An unknown or malformed id returns 404 with the JSON error envelope.
+
+#### DELETE /api/v1/voice/clips/{id}
+
+Deletes one clip. Requires `X-LibreEcho-CSRF`. Returns 404 when the clip does
+not exist.
+
+#### POST /api/v1/voice/clips/clear
+
+Deletes every saved clip. Requires `X-LibreEcho-CSRF`. Returns
+`{"removed": N}`.
+
 #### GET /api/v1/spotify
 
 Returns the current Spotify Connect status. This endpoint is read-only; `HEAD`

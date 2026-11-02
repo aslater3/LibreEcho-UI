@@ -11,6 +11,7 @@
 #include "wake_led.h"
 #include "wake_worker.h"
 #include "wake_model.h"
+#include "voice_clip_store.h"
 #include "../json.h"
 
 #include "wake_health.h"
@@ -343,6 +344,36 @@ static void publish_smoke_alarm_event(
         return;
     send_to_wake_subscribers(ipc, message, length);
 }
+
+#ifdef LE_WAKE_ENGINE_ONNX
+/* Wake near-miss floor. Peaks at or above this, with speech, that stay under
+ * the accept threshold are kept as clips when the owner has enabled them. */
+#define WAKE_NEAR_MISS_FLOOR 0.35f
+
+/*
+ * Runs on the wake inference thread. Each near miss is one bounded clip write,
+ * taken only when the owner has enabled clip capture; the settings file is
+ * read here, so a change applies on the next near miss without a restart.
+ */
+static void wake_near_miss_received(
+    const struct le_wake_near_miss *miss,
+    const int16_t *samples, size_t count, void *opaque)
+{
+    struct le_voice_clip_settings settings;
+    const char *directory = le_voice_clip_directory();
+
+    (void)opaque;
+    (void)miss;
+    if (le_voice_clip_settings_load(directory, &settings) != 0 ||
+        !settings.near_miss_enabled)
+        return;
+    if (count > LE_VOICE_CLIP_MAX_SAMPLES)
+        count = LE_VOICE_CLIP_MAX_SAMPLES;
+    if (le_voice_clip_write(directory, "near", samples, count,
+                            (long long)time(NULL)) < 0)
+        fprintf(stderr, "waked: near-miss clip not stored\n");
+}
+#endif
 
 static void publish_wake_event(struct waked_ipc *ipc,
                                const struct le_wake_event *event)
@@ -987,6 +1018,10 @@ static int run_waked(const struct waked_config *config)
                 wake_event_received, &ipc) < 0)
             goto out;
     }
+    if (le_wake_worker_set_near_miss(
+            &wake_worker, WAKE_NEAR_MISS_FLOOR,
+            wake_near_miss_received, NULL) < 0)
+        goto out;
 #endif
     microphone_fd = connect_mic_stream(config->mic_socket);
     if (microphone_fd < 0) {

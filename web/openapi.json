@@ -3783,6 +3783,67 @@
     }
    }
   },
+  "/voice/clips": {
+   "get": {
+    "tags": ["Privacy"],
+    "summary": "List wake near-miss clips",
+    "description": "Reports whether near-miss clip capture is enabled (off by default), the store limits, and the saved clips newest first. Clips are 16 kHz mono WAV files kept under /data with mode 0600.",
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "405": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "put": {
+    "tags": ["Privacy"],
+    "summary": "Enable or disable wake near-miss clips",
+    "description": "State-changing requests require CSRF. Body: {\"near_miss_enabled\": true|false}. Disabling stops new clips; saved clips stay until deleted.",
+    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "requestBody": {"$ref": "#/components/requestBodies/JsonObject"},
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "400": {"$ref": "#/components/responses/Error"},
+     "405": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/voice/clips/clear": {
+   "post": {
+    "tags": ["Privacy"],
+    "summary": "Delete every saved wake near-miss clip",
+    "description": "State-changing requests require CSRF. Returns the number of clips removed.",
+    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "405": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/voice/clips/{id}": {
+   "get": {
+    "tags": ["Privacy"],
+    "summary": "Download one wake near-miss clip",
+    "description": "Returns the clip as audio/wav (16 kHz, mono, 16-bit). This is the only API response that is not a JSON envelope. Unknown or invalid ids return the JSON error envelope with 404.",
+    "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[a-z]{1,8}-[0-9]{10}-[0-9]{4}$"}}],
+    "responses": {
+     "200": {"description": "WAV clip", "content": {"audio/wav": {"schema": {"type": "string", "format": "binary"}}}},
+     "404": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "delete": {
+    "tags": ["Privacy"],
+    "summary": "Delete one wake near-miss clip",
+    "description": "State-changing requests require CSRF.",
+    "parameters": [
+     {"$ref": "#/components/parameters/Csrf"},
+     {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[a-z]{1,8}-[0-9]{10}-[0-9]{4}$"}}
+    ],
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "400": {"$ref": "#/components/responses/Error"},
+     "404": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
   "/provenance": {
    "get": {
     "tags": [

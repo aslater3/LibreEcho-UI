@@ -99,7 +99,7 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/sound_store.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/wake_model.c src/wake_model_store.c src/peers.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/peer_auth.c src/peer_link.c src/peer_group.c src/peer_settings.c src/peer_announce.c src/adapter/timer_schedule.c
+SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/sound_store.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/wake_model.c src/wake_model_store.c src/peers.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/peer_auth.c src/peer_link.c src/peer_group.c src/peer_settings.c src/peer_announce.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -575,6 +575,12 @@ $(BUILD)/test-service-cancel-linux: tests/test_service_cancel_linux.c \
 # Drives the real worker, queue, thread and decoder against scripted score
 # sequences; the test supplies its own le_wake_engine, so no ONNX runtime or
 # model is needed to exercise the decoding rules.
+$(BUILD)/test-voice-clip-store: tests/test_voice_clip_store.c \
+	src/adapter/voice_clip_store.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
+		$^ -o $@
+
 $(BUILD)/test-wake-decode: tests/test_wake_decode.c \
 	src/adapter/wake_worker.c src/wake_model.c
 	@mkdir -p $(BUILD)
@@ -593,11 +599,11 @@ $(BUILD)/test-wake-health: tests/test_wake_health.c src/json.c src/log.c src/ser
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $^ -o $@
 
-$(BUILD)/test-noise-playback: tests/test_noise_playback.c src/api.c src/wake_model.c src/wake_model_store.c src/json.c src/adapter/timer_schedule.c
+$(BUILD)/test-noise-playback: tests/test_noise_playback.c src/api.c src/wake_model.c src/wake_model_store.c src/json.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CSTD) $(WARN) \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter tests/test_noise_playback.c src/json.c src/adapter/timer_schedule.c -lm -o $@
+		-Isrc -Isrc/adapter tests/test_noise_playback.c src/json.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c -lm -o $@
 
 $(BUILD)/test-wake-health-api: tests/test_wake_health_api.c \
 	$(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
@@ -1175,18 +1181,18 @@ $(BUILD)/test-voice-pipeline-stop-window: tests/test_voice_pipeline_stop_window.
 		src/adapter/adapter_server.c src/json.c src/log.c -lpthread -o $@
 
 $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
-	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c
+	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c -o $@
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/voice_clip_store.c -o $@
 
 $(BUILD)/test-voice-pipeline-env-isolation: tests/test_voice_pipeline_env_isolation.c \
-	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c
+	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c -o $@
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/voice_clip_store.c -o $@
 
 $(BUILD)/test-home-assistant-discovery: tests/test_home_assistant_discovery_lifecycle.c \
 	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c \
@@ -1195,7 +1201,7 @@ $(BUILD)/test-home-assistant-discovery: tests/test_home_assistant_discovery_life
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c \
-		src/service_env.c src/adapter/wyoming_client.c -o $@
+		src/service_env.c src/adapter/wyoming_client.c src/adapter/voice_clip_store.c -o $@
 
 $(BUILD)/test-voice-listening-feedback: \
 		tests/test_voice_listening_feedback.c \
@@ -1212,7 +1218,7 @@ $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c \
-		src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c
+		src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
 		$(filter %.c,$^) $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
@@ -1221,7 +1227,7 @@ $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
-		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c
+		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 \
 		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
 		-ffunction-sections -fdata-sections -Wall -Wextra \
@@ -1327,6 +1333,7 @@ WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/wake_led.wake.arm.o \
 	$(BUILD)/wake_arbiter.wake.arm.o \
 	$(BUILD)/peer_auth.wake.arm.o \
+	$(BUILD)/voice_clip_store.wake.arm.o \
 	$(BUILD)/adapter_client.wake.arm.o \
 	$(BUILD)/adapter_server.wake.arm.o \
 	$(BUILD)/log.wake.arm.o \

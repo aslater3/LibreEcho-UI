@@ -40,6 +40,7 @@
  */
 #define WAKE_SUPPORT_THRESHOLD 0.20f
 #define WAKE_LOCKOUT_SAMPLES 28000ULL
+#define WAKE_HISTORY_BLOCKS 16U
 
 struct wake_block {
     int16_t samples[WAKE_BLOCK_SAMPLES];
@@ -47,6 +48,11 @@ struct wake_block {
 };
 
 struct wake_decoder {
+    /* Recent PCM for near-miss clips, owned by the inference thread. */
+    int16_t history[WAKE_HISTORY_BLOCKS][WAKE_BLOCK_SAMPLES];
+    unsigned int history_next;
+    unsigned int history_fill;
+    uint64_t near_miss_lockout_until_sample;
     float scores[3];
     /*
      * The observation each score was computed from, carried alongside it so a
@@ -97,7 +103,43 @@ struct wake_worker_impl {
     float accept_threshold;
     le_wake_event_callback callback;
     void *callback_opaque;
+    float near_miss_floor;
+    le_wake_near_miss_callback near_miss_callback;
+    void *near_miss_opaque;
+    int16_t snapshot[LE_WAKE_HISTORY_SAMPLES];
 };
+
+/* The history ring and the snapshot must agree on capacity. */
+typedef char wake_history_capacity_check
+    [(WAKE_HISTORY_BLOCKS * WAKE_BLOCK_SAMPLES == LE_WAKE_HISTORY_SAMPLES) ? 1 : -1];
+
+static void push_history(struct wake_decoder *decoder,
+                         const struct wake_block *block)
+{
+    memcpy(decoder->history[decoder->history_next], block->samples,
+           sizeof(block->samples));
+    decoder->history_next = (decoder->history_next + 1U) % WAKE_HISTORY_BLOCKS;
+    if (decoder->history_fill < WAKE_HISTORY_BLOCKS)
+        ++decoder->history_fill;
+}
+
+/* Copy the retained history oldest-first into the worker's snapshot buffer. */
+static size_t history_snapshot(struct wake_worker_impl *worker)
+{
+    /* The PCM history is shared by every word; it lives in the first one. */
+    struct wake_decoder *decoder = &worker->words[0].decoder;
+    unsigned int blocks = decoder->history_fill;
+    unsigned int start = (decoder->history_next + WAKE_HISTORY_BLOCKS - blocks) %
+                         WAKE_HISTORY_BLOCKS;
+    unsigned int i;
+
+    for (i = 0; i < blocks; ++i) {
+        memcpy(worker->snapshot + (size_t)i * WAKE_BLOCK_SAMPLES,
+               decoder->history[(start + i) % WAKE_HISTORY_BLOCKS],
+               sizeof(int16_t) * WAKE_BLOCK_SAMPLES);
+    }
+    return (size_t)blocks * WAKE_BLOCK_SAMPLES;
+}
 
 static uint64_t wake_now_ns(void)
 {
@@ -140,6 +182,9 @@ static void decode_word(struct wake_worker_impl *worker,
                         float accept_threshold)
 {
     struct wake_decoder *decoder = &word->decoder;
+    float near_floor;
+    le_wake_near_miss_callback near_callback;
+    void *near_opaque;
     unsigned int support = 0;
     unsigned int peak;
     unsigned int i;
@@ -158,6 +203,11 @@ static void decode_word(struct wake_worker_impl *worker,
         if (decoder->scores[i] >= WAKE_SUPPORT_THRESHOLD)
             ++support;
     }
+    pthread_mutex_lock(&worker->mutex);
+    near_floor = worker->near_miss_floor;
+    near_callback = worker->near_miss_callback;
+    near_opaque = worker->near_miss_opaque;
+    pthread_mutex_unlock(&worker->mutex);
 
     /*
      * Judge the window by its peak rather than by its newest frame.
@@ -188,6 +238,32 @@ static void decode_word(struct wake_worker_impl *worker,
         if (decoder->scores[i] > decoder->scores[peak])
             peak = i;
     }
+    /*
+     * Near miss: speech was present and the peak reached the floor but not
+     * the accept threshold. It is reported beside the decision below, never
+     * instead of it, and has its own lockout so one utterance yields one clip.
+     */
+    if (near_callback && near_floor > 0.0f && near_floor < accept_threshold &&
+        decoder->scores[peak] >= near_floor &&
+        decoder->scores[peak] < accept_threshold &&
+        decoder->observations[peak].vad_active &&
+        decoder->observations[peak].detection_sample >=
+            decoder->near_miss_lockout_until_sample) {
+        struct le_wake_near_miss miss;
+        size_t count;
+
+        decoder->near_miss_lockout_until_sample =
+            decoder->observations[peak].detection_sample + WAKE_LOCKOUT_SAMPLES;
+        ++worker->metrics.near_misses;
+        miss.detection_sample = decoder->observations[peak].detection_sample;
+        miss.score = decoder->scores[peak];
+        miss.accept_threshold = accept_threshold;
+        miss.vad_score = decoder->observations[peak].vad_score;
+        miss.playback_active = decoder->observations[peak].playback_active;
+        count = history_snapshot(worker);
+        near_callback(&miss, worker->snapshot, count, near_opaque);
+    }
+
     if (decoder->observations[peak].detection_sample <
             decoder->lockout_until_sample ||
         !decoder->observations[peak].vad_active ||
@@ -308,6 +384,7 @@ static void *wake_thread(void *opaque)
             le_wake_engine_last_inference_us(worker->engine);
         if (inference_us > worker->metrics.max_inference_us)
             worker->metrics.max_inference_us = inference_us;
+        push_history(&worker->words[0].decoder, &block);
         decode_score(worker, &block, scores);
     }
     return NULL;
@@ -458,6 +535,25 @@ int le_wake_worker_submit(
         }
     }
     return dropped;
+}
+
+int le_wake_worker_set_near_miss(
+    struct le_wake_worker *worker, float floor,
+    le_wake_near_miss_callback callback, void *callback_opaque)
+{
+    struct wake_worker_impl *impl;
+
+    if (!worker || !worker->implementation ||
+        !(floor >= 0.0f && floor < 1.0f) ||
+        (floor > 0.0f && !callback))
+        return -1;
+    impl = worker->implementation;
+    pthread_mutex_lock(&impl->mutex);
+    impl->near_miss_floor = floor;
+    impl->near_miss_callback = floor > 0.0f ? callback : NULL;
+    impl->near_miss_opaque = callback_opaque;
+    pthread_mutex_unlock(&impl->mutex);
+    return 0;
 }
 
 int le_wake_worker_set_threshold(

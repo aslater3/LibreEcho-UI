@@ -558,4 +558,44 @@ curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_lane":3'
 code=$(curl -sS -o /tmp/le-lane-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_lane":7}')
 [ "$code" = 400 ] || { echo "microphone_lane accepted an out-of-range lane ($code)" >&2; exit 1; }
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"beamformer","microphone_lane":-1}' | grep -q '"microphone_lane":-1'
+# Wake near-miss clips (issue #407): off by default, bounded, deletable, and
+# stored owner-only. The suite points the daemon at a private directory.
+voice_dir="${LIBREECHO_VOICE_CLIP_DIR:?voice clip directory is not set}"
+rm -rf "$voice_dir"
+curl -fsS "$URL/api/v1/voice/clips" | jq -e '.ok and .data.near_miss_enabled == false and .data.count == 0 and (.data.clips | length == 0) and .data.limits.max_count == 32' >/dev/null
+code=$(curl -sS -o /tmp/le-clip-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/voice/clips" -H "$CSRF" -H 'Content-Type: application/json' --data '{"near_miss_enabled":"yes"}')
+[ "$code" = 400 ] || { echo "voice clips accepted a non-boolean ($code)" >&2; exit 1; }
+code=$(curl -sS -o /tmp/le-clip-nocsrf.out -w '%{http_code}' -X PUT "$URL/api/v1/voice/clips" -H 'Content-Type: application/json' --data '{"near_miss_enabled":true}')
+[ "$code" = 403 ] || { echo "voice clips accepted a write without CSRF ($code)" >&2; exit 1; }
+curl -fsS -X PUT "$URL/api/v1/voice/clips" -H "$CSRF" -H 'Content-Type: application/json' --data '{"near_miss_enabled":true}' | jq -e '.data.near_miss_enabled == true' >/dev/null
+curl -fsS "$URL/api/v1/voice/clips" | jq -e '.data.near_miss_enabled == true' >/dev/null
+# Stand in for the device writer: one valid 1280-sample WAV at mode 0600.
+python3 - "$voice_dir" <<'PY'
+import os, struct, sys
+d = sys.argv[1]
+os.makedirs(d, mode=0o700, exist_ok=True)
+pcm = b'\x01\x00' * 1280
+header = b'RIFF' + struct.pack('<I', 36 + len(pcm)) + b'WAVEfmt ' + struct.pack('<IHHIIHH', 16, 1, 1, 16000, 32000, 2, 16) + b'data' + struct.pack('<I', len(pcm))
+for name in ('near-1700000000-0001', 'near-1700000001-0002'):
+    fd = os.open(os.path.join(d, name + '.wav'), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(fd, header + pcm)
+    os.close(fd)
+PY
+curl -fsS "$URL/api/v1/voice/clips" | jq -e '.data.count == 2 and .data.clips[0].id == "near-1700000001-0002" and .data.clips[1].kind == "near" and .data.clips[0].bytes == 2604' >/dev/null
+curl -fsS -D /tmp/le-clip-headers.out -o /tmp/le-clip.wav "$URL/api/v1/voice/clips/near-1700000000-0001"
+grep -qi '^content-type: audio/wav' /tmp/le-clip-headers.out
+[ "$(wc -c </tmp/le-clip.wav | tr -d ' ')" = 2604 ] || { echo "voice clip download size mismatch" >&2; exit 1; }
+[ "$(head -c 4 /tmp/le-clip.wav)" = RIFF ] || { echo "voice clip download is not a WAV" >&2; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/api/v1/voice/clips/near-1700000009-0009")
+[ "$code" = 404 ] || { echo "missing voice clip did not return 404 ($code)" >&2; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/api/v1/voice/clips/..%2Fsettings")
+[ "$code" = 404 ] || { echo "traversal-shaped voice clip id did not return 404 ($code)" >&2; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/voice/clips/near-1700000000-0001" -H "$CSRF")
+[ "$code" = 200 ] || { echo "voice clip delete failed ($code)" >&2; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/voice/clips/near-1700000000-0001" -H "$CSRF")
+[ "$code" = 404 ] || { echo "second voice clip delete did not return 404 ($code)" >&2; exit 1; }
+curl -fsS -X POST "$URL/api/v1/voice/clips/clear" -H "$CSRF" | jq -e '.data.removed == 1' >/dev/null
+curl -fsS "$URL/api/v1/voice/clips" | jq -e '.data.count == 0' >/dev/null
+[ "$(stat -c %a "$voice_dir/settings")" = 600 ] || { echo "voice clip settings are not mode 0600" >&2; exit 1; }
+curl -fsS -X PUT "$URL/api/v1/voice/clips" -H "$CSRF" -H 'Content-Type: application/json' --data '{"near_miss_enabled":false}' | jq -e '.data.near_miss_enabled == false' >/dev/null
 echo 'api: ok'
