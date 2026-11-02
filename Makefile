@@ -1210,7 +1210,7 @@ $(BUILD)/test-voice-pipeline-stop-window: tests/test_voice_pipeline_stop_window.
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 		src/adapter/voice_ns.c src/adapter/voice_whisper.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
-		src/adapter/adapter_server.c src/json.c src/log.c -lpthread -o $@
+		src/adapter/adapter_server.c src/json.c src/log.c -lpthread -lm -o $@
 
 $(BUILD)/test-voice-whisper: tests/test_voice_whisper.c \
 		src/adapter/voice_whisper.c
