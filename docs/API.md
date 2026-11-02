@@ -503,6 +503,7 @@ render the existing unsupported state without logging an HTTP error.
     "volume_leveling": false,
     "reply_volume": 50,
     "reply_volume_custom": false,
+    "microphone_mix": "beamformer",
     "tts_voice": "southern-female",
     "tts_voices": [
       { "id": "southern-female", "name": "Southern English — female" },
@@ -523,13 +524,21 @@ Update audio settings.
   "volume": 75,
   "microphone_gain": 80,
   "microphone_muted": false,
+  "microphone_mix": "beamformer",
   "tts_voice": "southern-female",
   "volume_leveling": true,
   "reply_volume": 35
 }
 ```
 
-All fields are optional. `volume_leveling` switches the audio engine's
+All fields are optional. `microphone_mix` chooses how the four speech
+microphones become the mono voice stream: `beamformer` (the default; fixed
+beams, following the strongest talker), `average` (the mean of the four
+speech microphones) or `single` (the lowest-numbered speech microphone). It
+is persisted, applied to the running voice stream without a restart, and an
+unknown value is rejected with `400`. The beamformer keeps running in every
+mode, so the direction-of-arrival preview stays live; only the output
+changes. `volume_leveling` switches the audio engine's
 stock-style music automatic volume leveling (AVL) on or off. It is
 **experimental and off by default** (the current leveler can make loudness
 surge on some music; a stock-accurate rework is planned), persisted across

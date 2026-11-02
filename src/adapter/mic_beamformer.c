@@ -467,3 +467,61 @@ unsigned int le_beamformer_parse_mics(const char *text)
     }
     return mask;
 }
+
+int le_mic_mix_parse(const char *text)
+{
+    static const char *const names[LE_MIC_MIX_COUNT] = {
+        "beamformer", "average", "single"
+    };
+    int mode;
+
+    if (!text)
+        return -1;
+    for (mode = 0; mode < LE_MIC_MIX_COUNT; ++mode)
+        if (!strcmp(text, names[mode]))
+            return mode;
+    return -1;
+}
+
+const char *le_mic_mix_name(int mode)
+{
+    switch (mode) {
+    case LE_MIC_MIX_BEAMFORMER:
+        return "beamformer";
+    case LE_MIC_MIX_AVERAGE:
+        return "average";
+    case LE_MIC_MIX_SINGLE:
+        return "single";
+    default:
+        return NULL;
+    }
+}
+
+int16_t le_mic_mix_average(const int16_t logical[LE_VOICE_LOGICAL_CHANNELS],
+                           unsigned int mic_mask)
+{
+    long sum = 0;
+    unsigned int i, count = 0;
+
+    for (i = 0; i < LE_VOICE_LOGICAL_CHANNELS; ++i) {
+        if (!(mic_mask & (1U << i)))
+            continue;
+        sum += logical[i];
+        ++count;
+    }
+    if (count == 0)
+        return 0;
+    /* Round half away from zero so the mean is symmetric about silence. */
+    return (int16_t)(sum >= 0 ? (sum + count / 2) / count
+                              : -((-sum + count / 2) / count));
+}
+
+int le_mic_mix_single_lane(unsigned int mic_mask)
+{
+    unsigned int i;
+
+    for (i = 0; i < LE_VOICE_LOGICAL_CHANNELS; ++i)
+        if (mic_mask & (1U << i))
+            return (int)i;
+    return -1;
+}

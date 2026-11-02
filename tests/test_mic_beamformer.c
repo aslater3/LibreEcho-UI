@@ -272,9 +272,38 @@ static void test_sensor_noise(void)
     }
 }
 
+static void test_mix_modes(void)
+{
+    int16_t frame[LE_VOICE_LOGICAL_CHANNELS] = {100, -100, 7, 0, 300, 301, 9999};
+
+    CHECK(le_mic_mix_parse("beamformer") == LE_MIC_MIX_BEAMFORMER);
+    CHECK(le_mic_mix_parse("average") == LE_MIC_MIX_AVERAGE);
+    CHECK(le_mic_mix_parse("single") == LE_MIC_MIX_SINGLE);
+    CHECK(le_mic_mix_parse("Average") == -1);
+    CHECK(le_mic_mix_parse("") == -1);
+    CHECK(le_mic_mix_parse(NULL) == -1);
+    CHECK(strcmp(le_mic_mix_name(LE_MIC_MIX_AVERAGE), "average") == 0);
+    CHECK(le_mic_mix_name(LE_MIC_MIX_COUNT) == NULL);
+    int16_t pair[LE_VOICE_LOGICAL_CHANNELS] = {1, 2, 0, 0, 0, 0, 0};
+
+    CHECK(le_mic_mix_average(frame, LE_BEAM_DEFAULT_MIC_MASK) == 75);
+    CHECK(le_mic_mix_average(pair, 3U) == 2);
+    pair[0] = -1;
+    pair[1] = -2;
+    CHECK(le_mic_mix_average(pair, 3U) == -2);
+    CHECK(le_mic_mix_average(frame, (1U << 0) | (1U << 1)) == 0);
+    CHECK(le_mic_mix_average(frame, 1U << 6) == 9999);
+    CHECK(le_mic_mix_average(frame, 0) == 0);
+    CHECK(le_mic_mix_single_lane(LE_BEAM_DEFAULT_MIC_MASK) == 0);
+    CHECK(le_mic_mix_single_lane(1U << 4) == 4);
+    CHECK(le_mic_mix_single_lane(0) == -1);
+    puts("mic-beamformer: mix modes parse, average and pick a lane");
+}
+
 int main(void)
 {
     test_parse();
+    test_mix_modes();
     test_on_axis_unity_and_selection();
     test_steady_source_ignored();
     test_between_beams();

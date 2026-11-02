@@ -518,4 +518,11 @@ curl -fsS "$URL/api/v1/audio" | grep -q "\"data\":{\"volume\":$master,"
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"reply_volume_custom":false}' | grep -q "\"reply_volume\":$master,\"reply_volume_custom\":false"
 code=$(curl -sS -o /tmp/le-voice-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"not-a-voice"}')
 [ "$code" = 400 ]
+# Microphone mixing: beamformer by default, persisted choice, unknown mode rejected.
+curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_mix":"beamformer"'
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"average"}' | grep -q '"microphone_mix":"average"'
+curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_mix":"average"'
+code=$(curl -sS -o /tmp/le-mix-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"echo"}')
+[ "$code" = 400 ] || { echo "microphone_mix accepted an unknown mode ($code)" >&2; exit 1; }
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"beamformer"}' | grep -q '"microphone_mix":"beamformer"'
 echo 'api: ok'

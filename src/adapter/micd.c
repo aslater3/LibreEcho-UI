@@ -60,9 +60,69 @@ struct beam_view {
     unsigned long hops;
     unsigned long switches;
     long long updated_ms;
+    /* enum le_mic_mix, set by "set_mix" and read by the stream worker per hop */
+    volatile unsigned int mix_mode;
 };
 
 static struct beam_view *beam_view;
+
+static unsigned int current_mix_mode(void)
+{
+    return beam_view ? beam_view->mix_mode : LE_MIC_MIX_BEAMFORMER;
+}
+
+/*
+ * The mode named by "key" in a JSON object: "beamformer", "average" or
+ * "single".  Returns -1 when the key is absent or the value is unknown.
+ */
+static int mix_mode_from_json(const char *text, const char *key)
+{
+    char name[24];
+    const char *p;
+    size_t length = 0;
+
+    if (!text || !key)
+        return -1;
+    if (!(p = strstr(text, key)))
+        return -1;
+    p += strlen(key);
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    if (*p++ != ':')
+        return -1;
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    if (*p++ != '"')
+        return -1;
+    while (p[length] && p[length] != '"' && length < sizeof(name) - 1) {
+        name[length] = p[length];
+        ++length;
+    }
+    if (p[length] != '"')
+        return -1;
+    name[length] = '\0';
+    return le_mic_mix_parse(name);
+}
+
+/* The owner's saved mix mode from LE_MIC_CONFIG, read once at start-up. */
+#define MIX_CONFIG_MAX_BYTES 16384
+
+static int saved_mix_mode(void)
+{
+    const char *path = getenv("LE_MIC_CONFIG");
+    static char text[MIX_CONFIG_MAX_BYTES];
+    size_t used;
+    FILE *file;
+    int mode;
+
+    if (!path || !path[0] || !(file = fopen(path, "r")))
+        return LE_MIC_MIX_BEAMFORMER;
+    used = fread(text, 1, sizeof(text) - 1, file);
+    (void)fclose(file);
+    text[used] = '\0';
+    mode = mix_mode_from_json(text, "\"microphone_mix\"");
+    return mode < 0 ? LE_MIC_MIX_BEAMFORMER : mode;
+}
 
 static long long monotonic_ms(void)
 {
@@ -700,6 +760,7 @@ static int format_status(char *buffer, size_t size,
         "\"geometry\":{\"reference\":\"0 deg front (volume down), clockwise viewed from above\",\"ring_lanes\":[0,1,2,3,4,5],\"ring_azimuth_deg\":[150,210,270,330,30,90],\"centre_lane\":6,\"ring_radius_mm\":36,\"lane_skew\":\"none measured\"},"
         "\"relative_delay_samples\":{}},"
         "\"pipeline\":{\"stage\":\"fixed-beam-select\","
+        "\"microphone_mix\":\"%s\","
         "\"beams\":%d,\"fft\":%d,\"hop\":%d,"
         "\"beam_design\":\"superdirective, white-noise gain >= -3 dB\","
         "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
@@ -712,7 +773,8 @@ static int format_status(char *buffer, size_t size,
         values[4], values[5], values[6],
         miccal_source(config->idme_dir, config->dt_idme_dir),
         count, count == MIC_LOGICAL_CHANNELS ? "true" : "false",
-        mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP);
+        mics, le_mic_mix_name(current_mix_mode()),
+        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP);
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
 
@@ -838,6 +900,8 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
     pid_t capture;
     ssize_t count = 0;
     unsigned int digital_gain = digital_gain_from_environment();
+    unsigned int mix_mask = LE_BEAM_DEFAULT_MIC_MASK;
+    int single_lane = 0;
     int result = -1;
 
     if (pipe(pipe_fds) < 0)
@@ -867,6 +931,8 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
         return -1;
     }
     le_voice_highpass_init(&highpass);
+    mix_mask = beam_mic_mask();
+    single_lane = le_mic_mix_single_lane(mix_mask);
 
     while ((count = read(pipe_fds[0], input + pending,
                          sizeof(input) - pending)) > 0) {
@@ -883,8 +949,16 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
                 le_voice_decode_calibrated(
                     input + frame * LE_VOICE_RAW_FRAME_BYTES,
                     &calibration, logical);
-                output[frame] = le_voice_highpass_sample(
-                    &highpass, le_beamformer_sample(&beamformer, logical));
+                /* The beamformer runs in every mode, so its selection and
+                   beam view stay warm; the mode only picks the output. */
+                unsigned int mode = current_mix_mode();
+                int16_t mixed = le_beamformer_sample(&beamformer, logical);
+
+                if (mode == LE_MIC_MIX_AVERAGE)
+                    mixed = le_mic_mix_average(logical, mix_mask);
+                else if (mode == LE_MIC_MIX_SINGLE)
+                    mixed = logical[single_lane];
+                output[frame] = le_voice_highpass_sample(&highpass, mixed);
                 if (beamformer.fill == 0)
                     beam_view_publish(&beamformer);
             }
@@ -1023,8 +1097,10 @@ int main(int argc, char **argv)
                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (beam_view == MAP_FAILED)
         beam_view = NULL;
-    else
+    else {
         memset(beam_view, 0, sizeof(*beam_view));
+        beam_view->mix_mode = (unsigned int)saved_mix_mode();
+    }
     listen_fd = le_adapter_listen(config.socket_path);
     if (listen_fd < 0) {
         le_log_perr("unable to listen on %s", config.socket_path);
@@ -1085,6 +1161,24 @@ int main(int argc, char **argv)
                 (void)respond(client_fd, id, 0, "beam state unavailable");
             else
                 (void)respond(client_fd, id, 1, status);
+            close(client_fd);
+        } else if (!strcmp(command, "set_mix")) {
+            int mode = mix_mode_from_json(args, "\"mode\"");
+
+            if (mode < 0) {
+                (void)respond(client_fd, id, 0,
+                              "invalid microphone mix mode");
+            } else if (!beam_view) {
+                (void)respond(client_fd, id, 0,
+                              "microphone mix is unavailable");
+            } else {
+                beam_view->mix_mode = (unsigned int)mode;
+                le_log_info("microphone mix set to %s", le_mic_mix_name(mode));
+                (void)snprintf(status, sizeof(status),
+                               "{\"microphone_mix\":\"%s\"}",
+                               le_mic_mix_name(mode));
+                (void)respond(client_fd, id, 1, status);
+            }
             close(client_fd);
         } else if (!strcmp(command, "stream_raw")) {
             int channel;
