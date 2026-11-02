@@ -22,6 +22,8 @@ rm -f ./build/radio-stations.json ./build/radio-stations.json.bak ./build/radio-
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_news.c src/news.c src/json.c -o build/test-news
 ./build/test-news
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_wifi_motion.c src/wifi_motion.c -o build/test-wifi-motion
+./build/test-wifi-motion
 ./build/test-unit
 make build/test-update-identity
 ./build/test-update-identity
