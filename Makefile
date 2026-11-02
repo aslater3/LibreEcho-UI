@@ -521,11 +521,11 @@ $(BUILD)/test-buttond-events: tests/test_buttond_events.c \
 		src/adapter/adapter_client.c src/json.c src/log.c -o $@
 
 $(BUILD)/test-buttond-actions: tests/test_buttond_actions.c \
-	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
-		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 		src/adapter/adapter_client.c src/json.c src/log.c -o $@
 
 $(BUILD)/test-action-sample: tests/test_action_sample.c \
