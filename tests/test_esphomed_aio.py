@@ -74,7 +74,7 @@ class PinnedFixture(Fixture):
    client=APIClient('127.0.0.1',self.port,client_info='LibreEcho isolated acceptance',provide_time=False)
    try:
     await client.connect(login=True);info=await client.device_info();self.assertEqual(info.name,'fixture-satellite');self.assertEqual(info.mac_address,'02:00:00:00:00:01');self.assertEqual(info.voice_assistant_feature_flags,61)
-    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,3,404,10,11,12,13,20,21,22,30,40,41,42,43,70});self.assertEqual(sorted(x.name for x in services),['announce','play_sound','set_ring'])
+    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,50,404,10,11,12,13,20,21,22,30,40,41,42,43,70});self.assertEqual(sorted(x.name for x in services),['announce','play_sound','set_ring'])
     from aioesphomeapi.model import ButtonInfo
     cancel=next(e for e in entities if isinstance(e,ButtonInfo));self.assertEqual((cancel.key,cancel.object_id,cancel.name),(404,'cancel_request','Cancel request'))
     from aioesphomeapi.model import MediaPlayerEntityFeature,MediaPlayerInfo
@@ -117,7 +117,7 @@ class PinnedFixture(Fixture):
    await asyncio.sleep(.05)
    good=APIClient('127.0.0.1',self.port,noise_psk=encoded,provide_time=False)
    try:
-    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,3,404,10,11,12,13,20,21,22,30,40,41,42,43,70})
+    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,50,404,10,11,12,13,20,21,22,30,40,41,42,43,70})
     await self.exercise_controls_and_voice(good)
     await good._get_connection().send_message_await_response(PingRequest(),PingResponse);await good.disconnect()
    finally:await good.disconnect(force=True)
@@ -131,12 +131,12 @@ class PinnedFixture(Fixture):
    try:
     await client.connect(login=True);entities,_=await client.list_entities_services()
     number=next(e for e in entities if isinstance(e,NumberInfo))
-    self.assertEqual((number.key,number.object_id,number.name),(3,'reply_volume','Reply volume'))
+    self.assertEqual((number.key,number.object_id,number.name),(50,'reply_volume','Reply volume'))
     self.assertEqual((number.min_value,number.max_value,number.step,number.unit_of_measurement),(0,100,1,'%'))
     self.assertEqual(number.entity_category,EntityCategory.CONFIG);self.assertEqual(number.mode,NumberMode.SLIDER)
     states=[];client.subscribe_states(lambda s:states.append(s) if isinstance(s,NumberState) else None)
     await self.wait_for(lambda:any(s.state==66 for s in states),'reply volume following the master (66)')
-    client.number_command(3,25)
+    client.number_command(50,25)
     await self.wait_for(lambda:any(r['cmd']=='set_reply_volume' for r in self.adapters['audio'].calls),'set_reply_volume')
     self.assertEqual(self.wait_call('audio','set_reply_volume')['args'],{'volume':25})
     await self.wait_for(lambda:states and states[-1].state==25,'reply volume state 25')
