@@ -179,6 +179,7 @@ node tests/test_update_identity_ui.js
 node tests/test_baby_monitor_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
 node tests/test_privacy_disclosure_ui.js
+node tests/test_privacy_future_reporting_ui.js
 node tests/test_assistant_clock_format_ui.js
 node tests/test_chatgpt_auth_gate_ui.js
 node tests/test_home_location_lookup_ui.js
