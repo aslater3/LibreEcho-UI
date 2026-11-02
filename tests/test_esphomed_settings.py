@@ -18,7 +18,7 @@ class Settings(Daemon):
   self.adapters['led'].track=self.adapters['wake'].track=self.adapters['audio'].track=True
   self.adapters['led'].status={'brightness':40};self.adapters['wake'].status={'sensitivity':55}
  def subscribe(self):
-  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(19)];self.s.sendall(frame(20))
+  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(21)];self.s.sendall(frame(20))
  def calls(self,kind,cmd):return [r for r in self.adapters[kind].calls if r['cmd']==cmd]
  def wait_call(self,kind,cmd,seconds=3):
   end=time.monotonic()+seconds
@@ -48,10 +48,10 @@ class Settings(Daemon):
 class SettingsEntities(Settings):
  def test_entities_are_listed_in_config_category(self):
   self.subscribe()
-  self.assertEqual([t for t,_ in self.listed][1:6],[17,17,49,49,49])
-  sw=all_fields(self.listed[2][1])
+  self.assertEqual([t for t,_ in self.listed][4:8],[17,49,49,49])
+  sw=all_fields(self.listed[4][1])
   self.assertIn((1,b'wake_word'),sw);self.assertIn((2,struct.pack('<I',WAKE_SWITCH)),sw);self.assertIn((7,1),sw)
-  for idx,(object_id,key) in zip((3,4,5),((b'volume',VOLUME),(b'wake_word_sensitivity',SENSITIVITY),(b'led_brightness',LED_BRIGHTNESS))):
+  for idx,(object_id,key) in zip((5,6,7),((b'volume',VOLUME),(b'wake_word_sensitivity',SENSITIVITY),(b'led_brightness',LED_BRIGHTNESS))):
    f=all_fields(self.listed[idx][1])
    self.assertIn((1,object_id),f);self.assertIn((2,struct.pack('<I',key)),f);self.assertIn((7,1),f)
    self.assertEqual(float_of([v for k,v in f if k==8][0]),0.0);self.assertEqual(float_of([v for k,v in f if k==9][0]),100.0)

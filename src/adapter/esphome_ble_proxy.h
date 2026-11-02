@@ -23,8 +23,8 @@
 #define LE_BLE_PROXY_MSG_RAW_ADVS  93
 
 /* Job kinds that esphomed.c uses for btd requests (distinct from its own). */
-#define LE_BLE_JOB_LEASE 9
-#define LE_BLE_JOB_POLL  10
+#define LE_BLE_JOB_LEASE 15
+#define LE_BLE_JOB_POLL  16
 
 #define LE_BLE_LEASE_TTL_MS 5000U
 #define LE_BLE_LEASE_EVERY_MS 1000U

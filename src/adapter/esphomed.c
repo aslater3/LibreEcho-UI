@@ -46,7 +46,7 @@
 #define CANCEL_KEY 404U
 /* Separate reply volume (#409): a 0-100 % config number in Home Assistant. */
 #define REPLY_KEY 50U
-#define JOB_REPLY 9
+#define JOB_REPLY 14
 /* Ambient light (#392): the board's TSL2540 lux as an HA illuminance sensor.
  * Read at most once a second, published on a real change (5% or 1 lx) or,
  * for smaller drift, at most once a minute -- never more than ~1/s per client. */

@@ -20,7 +20,7 @@ def int_arg(value):return num(5,zigzag(value))
 class Services(Daemon):
  def subscribe(self):
   # As Home Assistant does: list entities (3 services before ListEntitiesDone), then subscribe.
-  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(19)];self.s.sendall(frame(20))
+  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(21)];self.s.sendall(frame(20))
  def calls(self,kind,cmd):return [r for r in self.adapters[kind].calls if r['cmd']==cmd]
  def ring_calls(self,name=None):
   # Overlay writes owned by the service (the startup stop is one of them).
