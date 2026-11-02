@@ -1383,13 +1383,18 @@ static void read_microphone_mix(struct le_audio_state *o)
 {
     char response[LE_ADAPTER_MSG_MAX];
     char mode[sizeof(o->microphone_mix)];
+    int lane;
 
     strcpy(o->microphone_mix, "beamformer");
+    o->microphone_lane = -1;
     if (adapter_command(LE_ADAPTER_MIC_SOCK, "status", NULL,
                         response, sizeof(response)) != LE_OK)
         return;
     if (json_get_string(response, "microphone_mix", mode, sizeof(mode)) > 0)
         strcpy(o->microphone_mix, mode);
+    if (json_get_int(response, "microphone_lane", &lane) > 0 &&
+        lane >= -1 && lane <= 6)
+        o->microphone_lane = lane;
 }
 
 static int microphone_mix(struct le_backend *b, const char *mode)
@@ -1401,6 +1406,17 @@ static int microphone_mix(struct le_backend *b, const char *mode)
         return LE_INVALID;
     snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
     return adapter_json_command(LE_ADAPTER_MIC_SOCK, "set_mix", args);
+}
+
+/* -1 is automatic; 0-6 pick one array microphone for the single mode. */
+static int microphone_lane(struct le_backend *b, int lane)
+{
+    char args[32];
+    (void)b;
+    if (lane < -1 || lane > 6)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"lane\":%d}", lane);
+    return adapter_json_command(LE_ADAPTER_MIC_SOCK, "set_lane", args);
 }
 
 static int tone(struct le_backend *b)
@@ -3287,7 +3303,7 @@ static const struct le_backend_ops ops = {
     volume_leveling,
     sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing,
     reply_volume,
-    microphone_mix
+    microphone_mix, microphone_lane
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

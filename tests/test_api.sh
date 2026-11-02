@@ -525,4 +525,10 @@ curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_mix":"average"'
 code=$(curl -sS -o /tmp/le-mix-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"echo"}')
 [ "$code" = 400 ] || { echo "microphone_mix accepted an unknown mode ($code)" >&2; exit 1; }
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"beamformer"}' | grep -q '"microphone_mix":"beamformer"'
+curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_lane":-1'
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"single","microphone_lane":3}' | grep -q '"microphone_lane":3'
+curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_lane":3'
+code=$(curl -sS -o /tmp/le-lane-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_lane":7}')
+[ "$code" = 400 ] || { echo "microphone_lane accepted an out-of-range lane ($code)" >&2; exit 1; }
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"beamformer","microphone_lane":-1}' | grep -q '"microphone_lane":-1'
 echo 'api: ok'

@@ -479,7 +479,7 @@
      "Audio"
     ],
     "summary": "Read audio state",
-    "description": "Returns available audio state, including volume_leveling (experimental music automatic volume leveling, false by default) and the separate reply volume: reply_volume (0-100, the level spoken replies, announcements and chimes play at; equal to volume while following) and reply_volume_custom (false while replies follow the master volume, the default) and microphone_mix (how the microphone array is mixed for voice: beamformer, the default, average or single). On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error.",
+    "description": "Returns available audio state, including volume_leveling (experimental music automatic volume leveling, false by default) and the separate reply volume: reply_volume (0-100, the level spoken replies, announcements and chimes play at; equal to volume while following) and reply_volume_custom (false while replies follow the master volume, the default) and microphone_mix (how the microphone array is mixed for voice: beamformer, the default, average or single) and microphone_lane (the array microphone used by single: 0-6, or -1 for automatic). On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -494,7 +494,7 @@
      "Audio"
     ],
     "summary": "Update volume, reply volume, microphone state, announcement voice, or music volume leveling",
-  "description": "Accepts any of volume (0-100), microphone_gain (0-100), microphone_muted (boolean), microphone_mix (beamformer, average or single; persisted, and applied to the running voice stream at once), tts_voice, and volume_leveling (boolean: experimental stock-style music automatic volume leveling, off by default; persisted). A non-boolean volume_leveling is rejected with 400. reply_volume (integer 0-100) gives assistant replies, announcements and chimes their own level, persisted; reply_volume_custom false returns them to the master volume. Alarms, music and other media always use volume. An out-of-range or non-integer reply_volume, a non-boolean reply_volume_custom, or reply_volume_custom true without reply_volume is rejected with 400 before any change. An unknown microphone_mix is rejected with 400.",
+  "description": "Accepts any of volume (0-100), microphone_gain (0-100), microphone_muted (boolean), microphone_mix (beamformer, average or single; persisted, and applied to the running voice stream at once), microphone_lane (-1 automatic or 0-6 for one array microphone, used by single; persisted; out of range is rejected with 400), tts_voice, and volume_leveling (boolean: experimental stock-style music automatic volume leveling, off by default; persisted). A non-boolean volume_leveling is rejected with 400. reply_volume (integer 0-100) gives assistant replies, announcements and chimes their own level, persisted; reply_volume_custom false returns them to the master volume. Alarms, music and other media always use volume. An out-of-range or non-integer reply_volume, a non-boolean reply_volume_custom, or reply_volume_custom true without reply_volume is rejected with 400 before any change. An unknown microphone_mix is rejected with 400.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"

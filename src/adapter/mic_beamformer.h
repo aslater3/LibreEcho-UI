@@ -108,4 +108,12 @@ int16_t le_mic_mix_average(const int16_t logical[LE_VOICE_LOGICAL_CHANNELS],
 /* The lowest-numbered lane in mic_mask, or -1 when mic_mask is 0. */
 int le_mic_mix_single_lane(unsigned int mic_mask);
 
+/*
+ * The sample for the "single" mode: the chosen lane 0-6, or when lane is -1
+ * (automatic) the lowest lane in mic_mask.  An out-of-range lane falls back to
+ * the automatic choice rather than reading past the frame.
+ */
+int16_t le_mic_mix_single(const int16_t logical[LE_VOICE_LOGICAL_CHANNELS],
+                          unsigned int mic_mask, int lane);
+
 #endif

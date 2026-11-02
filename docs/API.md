@@ -504,6 +504,7 @@ render the existing unsupported state without logging an HTTP error.
     "reply_volume": 50,
     "reply_volume_custom": false,
     "microphone_mix": "beamformer",
+    "microphone_lane": -1,
     "tts_voice": "southern-female",
     "tts_voices": [
       { "id": "southern-female", "name": "Southern English — female" },
@@ -525,6 +526,7 @@ Update audio settings.
   "microphone_gain": 80,
   "microphone_muted": false,
   "microphone_mix": "beamformer",
+  "microphone_lane": -1,
   "tts_voice": "southern-female",
   "volume_leveling": true,
   "reply_volume": 35
@@ -536,7 +538,13 @@ microphones become the mono voice stream: `beamformer` (the default; fixed
 beams, following the strongest talker), `average` (the mean of the four
 speech microphones) or `single` (the lowest-numbered speech microphone). It
 is persisted, applied to the running voice stream without a restart, and an
-unknown value is rejected with `400`. The beamformer keeps running in every
+unknown value is rejected with `400`. `microphone_lane` picks the array
+microphone used by `single`: `0` to `6` is array microphone 1 to 7, and `-1`
+(the default) is automatic, the lowest-numbered speech microphone. It is
+persisted, applied at once, and kept while the mode is not `single`; a value
+outside `-1` to `6` is rejected with `400`. Only one array microphone can be
+chosen this way: USB and Bluetooth microphones are not available on this
+hardware (see `docs/MICROPHONE_ARCHITECTURE.md`). The beamformer keeps running in every
 mode, so the direction-of-arrival preview stays live; only the output
 changes. `volume_leveling` switches the audio engine's
 stock-style music automatic volume leveling (AVL) on or off. It is
