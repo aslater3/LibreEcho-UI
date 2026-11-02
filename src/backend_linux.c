@@ -3470,6 +3470,41 @@ static int recovery_stop(struct le_backend *b)
     return adapter_json_command(LE_ADAPTER_NETWORK_SOCK, "recovery_stop", NULL);
 }
 
+/*
+ * Do not disturb. audiod owns the silence (chimes, press tones, samples and
+ * wake chirps; alarms pass) and persists the switch; esphomed reads the same
+ * flag for Home Assistant announcements. The ring shows the saved
+ * do-not-disturb theme as a steady pattern owned by "dnd", so the saved ring
+ * colour is never overwritten and the pattern clears when the switch is off.
+ */
+static int do_not_disturb(struct le_backend *b, int enabled)
+{
+    char args[256];
+    struct le_led_state led_state;
+    int rc;
+
+    snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
+    rc = adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_do_not_disturb", args);
+    if (rc != LE_OK)
+        return rc;
+    if (!enabled) {
+        (void)adapter_json_command(LE_ADAPTER_LED_SOCK, "pattern",
+                                   "{\"name\":\"stop\",\"owner\":\"dnd\"}");
+        return LE_OK;
+    }
+    /* The sound is already silenced; a missing ring is reported by the log
+     * of ledd, not as a failed switch. */
+    if (led(b, &led_state) != LE_OK)
+        return LE_OK;
+    snprintf(args, sizeof(args),
+             "{\"name\":\"solid\",\"r\":%u,\"g\":%u,\"b\":%u,"
+             "\"brightness\":%d,\"repeats\":0,\"owner\":\"dnd\"}",
+             led_state.dnd.r, led_state.dnd.g, led_state.dnd.b,
+             led_state.dnd.brightness);
+    (void)adapter_json_command(LE_ADAPTER_LED_SOCK, "pattern", args);
+    return LE_OK;
+}
+
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
@@ -3497,7 +3532,8 @@ static const struct le_backend_ops ops = {
     microphone_mix, microphone_lane,
     timer_add_repeat, timer_snooze, timer_add_reminder,
     timer_sunrise_get, timer_sunrise_set,
-    sendspin_set_unpaired
+    sendspin_set_unpaired,
+    do_not_disturb
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

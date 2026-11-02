@@ -713,8 +713,9 @@ static void audio_cue(struct context *ctx)
         return;
     }
     ctx->custom_ring = 0;
+    /* priority: an alarm still rings while do-not-disturb silences chimes. */
     snprintf(args, sizeof(args),
-             "{\"first_hz\":%d,\"second_hz\":%d,\"ms\":%d}",
+             "{\"first_hz\":%d,\"second_hz\":%d,\"ms\":%d,\"priority\":true}",
              RING_LOW_HZ, RING_HIGH_HZ, RING_CUE_MS);
     result = le_adapter_call(adapter, "cue", args, NULL, 0);
     if (result != LE_ADAPTER_OK)

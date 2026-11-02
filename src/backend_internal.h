@@ -70,6 +70,8 @@ struct le_backend_ops {
  int (*timer_sunrise_get)(struct le_backend*,int*);
  int (*timer_sunrise_set)(struct le_backend*,int);
  int (*sendspin_set_unpaired)(struct le_backend*,int);
+ /* Do-not-disturb switch. Appended last for the positional-init reason above; null reports unsupported. */
+ int (*do_not_disturb)(struct le_backend*,int);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

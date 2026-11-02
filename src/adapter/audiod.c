@@ -290,6 +290,7 @@ struct audio_hw {
     int amplifier_on;
     char system_audio_bus[PATH_MAX];
     int volume_leveling;     /* music AVL in the audio engine, persisted */
+    int do_not_disturb;      /* owner's DND switch, persisted in LE_DND_PATH */
     long long last_leveling_check_ms;
     /* Separate assistant-reply level (#409), persisted.  0: replies follow
      * the master (the default); 1: reply_volume is their own level. */
@@ -947,6 +948,15 @@ static const char *control_name_or_default(const struct audio_control *control,
 /* The engine watches this beside master.volume (LE_MASTER_VOLUME_DIR). */
 #define LE_AVL_DISABLED_PATH "/run/libreecho-audio/avl.disabled"
 #endif
+/* Do not disturb: the owner's switch.  Stored beside volume leveling with the
+ * same atomic "on"/"off" file.  While it is on, chimes, press tones, wake
+ * chirps and action samples are dropped unless the caller marks them
+ * priority (timer alarms are).  esphomed reads the same file and drops Home
+ * Assistant announcements.  A missing file means off. */
+#ifndef LE_DND_PATH
+#define LE_DND_PATH "/data/libreecho/config/do-not-disturb"
+#endif
+static int flag_file_load(const char *path);
 static int volume_leveling_load(void);
 static int volume_leveling_apply(int enabled);
 /* Separate reply volume (#409).  The owner's level for assistant replies,
@@ -1262,6 +1272,7 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->reply_volume_custom = reply_volume_load(&audio->reply_volume) == 0;
     if (reply_volume_publish(audio->reply_volume_custom, audio->reply_volume) < 0)
         le_log_warn("audiod: reply volume could not be published");
+    audio->do_not_disturb = flag_file_load(LE_DND_PATH);
     (void)snprintf(audio->system_audio_bus, sizeof(audio->system_audio_bus),
                    "%s", LE_SYSTEM_AUDIO_BUS);
     (void)snprintf(audio->ctl_path, sizeof(audio->ctl_path),
@@ -1289,10 +1300,11 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->output_available = 0;
 }
 
-static int volume_leveling_load(void)
+/* Reads an "on"/"off" flag file.  Anything unreadable or unknown is off. */
+static int flag_file_load(const char *path)
 {
     char text[8];
-    int fd = open(LE_VOLUME_LEVELING_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     ssize_t n;
 
     if (fd < 0)
@@ -1303,6 +1315,11 @@ static int volume_leveling_load(void)
         return 0;
     text[n] = '\0';
     return strcmp(text, "on\n") == 0 || strcmp(text, "on") == 0;
+}
+
+static int volume_leveling_load(void)
+{
+    return flag_file_load(LE_VOLUME_LEVELING_PATH);
 }
 
 /* Drive the engine's RAM flag.  Returns 0 when the flag matches. */
@@ -1325,15 +1342,15 @@ static int volume_leveling_apply(int enabled)
     return 0;
 }
 
-/* Atomic, fsynced 0600 write of the owner's choice. */
-static int volume_leveling_save(int enabled)
+/* Atomic, fsynced 0600 write of an owner's on/off choice. */
+static int flag_file_save(const char *path, int enabled)
 {
-    char temp[sizeof(LE_VOLUME_LEVELING_PATH) + 16];
+    char temp[160];
     const char *text = enabled ? "on\n" : "off\n";
     size_t length = strlen(text);
     int fd;
 
-    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_VOLUME_LEVELING_PATH) >=
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", path) >=
         (int)sizeof(temp))
         return -1;
     fd = mkstemp(temp);
@@ -1345,7 +1362,7 @@ static int volume_leveling_save(int enabled)
         unlink(temp);
         return -1;
     }
-    if (close(fd) < 0 || rename(temp, LE_VOLUME_LEVELING_PATH) < 0) {
+    if (close(fd) < 0 || rename(temp, path) < 0) {
         unlink(temp);
         return -1;
     }
@@ -1439,6 +1456,11 @@ static int reply_volume_publish(int custom, int volume)
         return -1;
     }
     return 0;
+}
+
+static int volume_leveling_save(int enabled)
+{
+    return flag_file_save(LE_VOLUME_LEVELING_PATH, enabled);
 }
 
 static void stop_noise(struct audio_hw *audio);
@@ -1927,6 +1949,13 @@ static int write_sample_fd(int fd, int sample_fd)
     }
     fclose(file);
     return 0;
+}
+
+/* Do-not-disturb gate for chimes and samples.  Priority sounds (alarms) pass. */
+#define DND_SUPPRESSED_JSON "{\"playing\":false,\"suppressed\":true}"
+static int dnd_suppresses(const struct audio_hw *audio, int priority)
+{
+    return audio->do_not_disturb && !priority;
 }
 
 /* Nonzero while an earlier sample child is still writing. */
@@ -2454,7 +2483,8 @@ static int handle_request(struct audio_hw *audio, char *message,
                        "\"noise_active\":%s,\"noise_colour\":\"%s\","
                        "\"noise_source\":\"%s\",\"noise_bed\":\"%s\","
                        "\"noise_tempo\":%d,\"noise_fade_seconds\":%ld,"
-                       "\"noise_level\":%d,\"noise_remaining_seconds\":%ld}",
+                       "\"noise_level\":%d,\"noise_remaining_seconds\":%ld,"
+                       "\"do_not_disturb\":%s}",
                        audio->volume, audio->gain,
                        audio->reply_volume_custom ? audio->reply_volume
                                                   : audio->notification_volume,
@@ -2471,7 +2501,8 @@ static int handle_request(struct audio_hw *audio, char *message,
                        noise_source_name(audio->noise_source),
                        noise_bed_name(audio->noise_bed),
                        audio->noise_tempo, audio->noise_fade_seconds,
-                       audio->noise_level, noise_remaining(audio));
+                       audio->noise_level, noise_remaining(audio),
+                       audio->do_not_disturb ? "true" : "false");
         return response_ok(response, response_size, id, data);
     }
     if (!strcmp(command, "airplay_volume") || !strcmp(command, "airplay_end")) {
@@ -2619,6 +2650,15 @@ static int handle_request(struct audio_hw *audio, char *message,
             return response_error(response, response_size, id, "microphone gain unavailable");
         return response_ok(response, response_size, id, "{}");
     }
+    if (!strcmp(command, "set_do_not_disturb")) {
+        if (json_bool(message, "enabled", &boolean) < 0)
+            return response_error(response, response_size, id, "enabled must be boolean");
+        if (flag_file_save(LE_DND_PATH, boolean) < 0)
+            return response_error(response, response_size, id, "do not disturb could not be saved");
+        audio->do_not_disturb = boolean;
+        le_log_info("audiod: do not disturb %s", boolean ? "on" : "off");
+        return response_ok(response, response_size, id, "{}");
+    }
     if (!strcmp(command, "set_volume_leveling")) {
         if (json_bool(message, "enabled", &boolean) < 0)
             return response_error(response, response_size, id, "enabled must be boolean");
@@ -2744,6 +2784,8 @@ static int handle_request(struct audio_hw *audio, char *message,
         if (!sample_name_ok(name))
             return response_error(response, response_size, id,
                                   "sample name must be lowercase letters, digits, - or _");
+        if (dnd_suppresses(audio, 0))
+            return response_ok(response, response_size, id, DND_SUPPRESSED_JSON);
         if (start_sample(audio, name) < 0)
             return response_error(response, response_size, id,
                                   "sample could not be played");
@@ -2752,7 +2794,7 @@ static int handle_request(struct audio_hw *audio, char *message,
 
     if (!strcmp(command, "cue")) {
         long first = 0, second = 0, ms = LE_CHIRP_MS;
-        int cue;
+        int cue, priority = 0;
 
         if (json_long(message, "first_hz", &first) < 0 ||
             json_long(message, "second_hz", &second) < 0)
@@ -2767,6 +2809,11 @@ static int handle_request(struct audio_hw *audio, char *message,
         (void)json_long(message, "ms", &ms);
         if (ms < 40 || ms > 800)
             ms = LE_CHIRP_MS;
+        /* Alarms set priority and still ring while do-not-disturb is on. */
+        if (json_bool(message, "priority", &priority) < 0)
+            priority = 0;
+        if (dnd_suppresses(audio, priority))
+            return response_ok(response, response_size, id, DND_SUPPRESSED_JSON);
         cue = start_cue(audio, (double)first, (double)second,
                         (unsigned int)ms);
         if (cue < 0)
@@ -2801,6 +2848,11 @@ static int handle_request(struct audio_hw *audio, char *message,
         }
         if (json_bool(message, "preview", &boolean) == 0)
             preview = boolean;
+        /* Do-not-disturb silences the owner's chimes; the timer ring is
+           priority, like an alarm cue, and a preview is an explicit request. */
+        if (!preview &&
+            dnd_suppresses(audio, index == le_event_sound_index("timer")))
+            return response_ok(response, response_size, id, DND_SUPPRESSED_JSON);
         outcome = play_event_sound(audio, index, preview);
         if (outcome == LE_EVENT_SOUND_FAILED)
             return response_error(response, response_size, id,
@@ -2815,7 +2867,11 @@ static int handle_request(struct audio_hw *audio, char *message,
     }
 
     if (!strcmp(command, "wake_chirp")) {
-        int cue, owner = play_event_sound(audio, le_event_sound_index("wake"), 0);
+        int cue, owner;
+
+        if (dnd_suppresses(audio, 0))
+            return response_ok(response, response_size, id, DND_SUPPRESSED_JSON);
+        owner = play_event_sound(audio, le_event_sound_index("wake"), 0);
 
         /* The owner's chime replaces the chirp; if it cannot play, the chirp
            still marks the turn rather than leaving it silent. */

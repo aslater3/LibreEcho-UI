@@ -539,6 +539,14 @@ $(BUILD)/test-event-sound: tests/test_event_sound.c \
 		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
 		-lm -o $@
 
+$(BUILD)/test-dnd-audio: tests/test_dnd_audio.c \
+	src/adapter/audiod.c src/adapter/adapter_client.c \
+	src/adapter/adapter_server.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
+
 $(BUILD)/test-cue-rate-limit: tests/test_cue_rate_limit.c \
 	src/adapter/audiod.c src/adapter/adapter_client.c \
 	src/adapter/adapter_server.c src/log.c
@@ -1445,6 +1453,7 @@ clean:
 		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-actions \
 		$(BUILD)/test-buttond-timing \
 		$(BUILD)/test-action-sample \
+		$(BUILD)/test-dnd-audio \
 		$(BUILD)/test-networkd-health $(BUILD)/test-networkd-ap-scan \
 		$(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test_network_recovery $(BUILD)/test-networkd-recovery \

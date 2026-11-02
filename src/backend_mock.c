@@ -290,6 +290,7 @@ static int timer_sunrise_get_mock(struct le_backend*b,int*minutes){(void)b;if(mi
 static int timer_sunrise_set_mock(struct le_backend*b,int minutes){(void)b;if(minutes!=0&&(minutes<5||minutes>30))return LE_INVALID;mock_sunrise_minutes=minutes;return LE_OK;}
 static int timer_cancel_mock(struct le_backend*b,unsigned id){struct mock_state*m=M(b);int i;mock_timers_tick(m);for(i=0;i<m->timer_count;i++){if(m->timers[i].id!=id)continue;if(strcmp(m->timers[i].state,"pending"))return LE_INVALID;memmove(&m->timers[i],&m->timers[i+1],(size_t)(m->timer_count-i-1)*sizeof(m->timers[0]));memmove(&m->timer_due[i],&m->timer_due[i+1],(size_t)(m->timer_count-i-1)*sizeof(m->timer_due[0]));--m->timer_count;return LE_OK;}return LE_INVALID;}
 static int timer_dismiss_mock(struct le_backend*b,int*stopped){struct mock_state*m=M(b);int i=0,n=0;while(i<m->timer_count){if(!strcmp(m->timers[i].state,"ringing")){memmove(&m->timers[i],&m->timers[i+1],(size_t)(m->timer_count-i-1)*sizeof(m->timers[0]));memmove(&m->timer_due[i],&m->timer_due[i+1],(size_t)(m->timer_count-i-1)*sizeof(m->timer_due[0]));--m->timer_count;++n;continue;}++i;}if(stopped)*stopped=n;return LE_OK;}
+static int do_not_disturb_mock(struct le_backend*b,int enabled){(void)b;(void)enabled;return LE_OK;}
 static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,mute,tone,tts_voice,0,0,noise_start_mock,noise_stop_mock,simulate_audio_mock,radio_play_mock,radio_stop_mock,radio_playing_mock,led,colour,brightness,visualizer_enabled,boot_led,led_profile,night_mock,led_test,network,scan,connect_wifi,disconnect_wifi,hostname,wake,wake_set,sensitivity,wake_test,bluetooth,bluetooth_set,bluetooth_scan_mock,bluetooth_pair_mock,bluetooth_unpair_mock,bluetooth_disconnect_mock,bluetooth_pairing_response_mock,bluetooth_discoverable_mock,bluetooth_connectable_mock,bluetooth_pairing_mode_mock,airplay,airplay_set,playback,reboot,shutdown,reset,tick,control,
  spotify_mock, spotify_set_mock,
  /* light: the mock has no sensor; the dispatcher reports unsupported. */
@@ -310,5 +311,6 @@ static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,
  timer_add_repeat_mock, timer_snooze_mock, timer_add_reminder_mock,
  timer_sunrise_get_mock,
  timer_sunrise_set_mock,
- sendspin_set_unpaired_mock};
+ sendspin_set_unpaired_mock,
+ do_not_disturb_mock};
 int le_mock_create(struct le_backend*b,const char*mock,const char*cfg,unsigned seed){struct mock_state*m=calloc(1,sizeof(*m));if(!m)return LE_IO;defaults(m,seed);load_profile(m,mock,seed);if(cfg){strncpy(m->config_path,cfg,sizeof(m->config_path)-1);load(m,cfg);}b->data=m;b->ops=&ops;return LE_OK;}
