@@ -45,6 +45,15 @@ boards can point the daemon at a different file with `--light-sensor PATH`.
 The sensor is found when HA lists entities, so a sensor that appears late in
 boot shows up at HA's next reconnect.
 
+The four hardware buttons are offered as event entities, one each: **Volume up
+button**, **Volume down button**, **Microphone mute button** and **Action
+button**. Each event's type is the gesture: `press`, `long_press` (reported
+once the button has been held for 0.8 s) or `double_press` (two presses starting
+within 0.35 s of each other). A short press is reported after that 0.35 s
+window, so it can arrive a fraction of a second after the press. The buttons
+keep working locally as before; the events only report what the buttons did.
+An entity only sees presses from a button the board has.
+
 Disabling HA restores the previously selected **Local** or **Custom** mode and
 its settings. Custom Whisper/Piper addresses, model/voice choices and assistant
 configuration are not erased. There is no protocol selector, legacy satellite

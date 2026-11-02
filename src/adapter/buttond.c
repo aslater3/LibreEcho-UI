@@ -17,6 +17,7 @@
 
 #include "adapter.h"
 #include "buttond_timing.h"
+#include "buttond_gesture.h"
 
 #include "../json.h"
 #include "../log.h"
@@ -27,6 +28,7 @@
 #include <linux/input.h>
 #include <poll.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -128,6 +130,9 @@ struct context {
     const char *esphome_control;
     const char *wake_sock;       /* waked: "listen" starts a voice turn (#372) */
     const char *radio_sock;      /* radiod: pause/resume for play/pause */
+    /* Where press/long/double gestures are reported; NULL reports nothing. */
+    const char *event_sock;
+    struct button_gestures gestures;
     struct device devices[MAX_DEVICES];
     size_t device_count;
     int volume;          /* cached; -1 when unknown */
@@ -1322,8 +1327,82 @@ static void toggle_mute(struct context *ctx)
         show_meter(ctx, (unsigned int)ctx->volume, 120, 200, 255);
 }
 
+/*
+ * Report one gesture to libreecho-esphomed, which forwards it to Home
+ * Assistant as an event (#394). Best effort and fire-and-forget: a daemon
+ * that is not listening must never delay or change the local response to a
+ * button, so every failure here is silent.
+ */
+static void publish_button_event(const struct context *ctx,
+                                 const struct button_gesture_event *event)
+{
+    char message[48];
+    struct sockaddr_un address;
+    size_t path_len;
+    int n;
+    int fd;
+
+    if (!ctx->event_sock || !ctx->event_sock[0])
+        return;
+    n = snprintf(message, sizeof(message), "%s %s",
+                 button_gesture_button_name(event->button),
+                 button_gesture_kind_name(event->kind));
+    path_len = strlen(ctx->event_sock);
+    if (n < 0 || (size_t)n >= sizeof(message) ||
+        path_len >= sizeof(address.sun_path))
+        return;
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, ctx->event_sock, path_len + 1);
+    (void)sendto(fd, message, (size_t)n, MSG_DONTWAIT,
+                 (struct sockaddr *)&address,
+                 (socklen_t)(offsetof(struct sockaddr_un, sun_path) + path_len + 1));
+    close(fd);
+}
+
+static void publish_pending_gestures(struct context *ctx)
+{
+    struct button_gesture_event event;
+
+    while (button_gesture_expire(&ctx->gestures, monotonic_ms(), &event))
+        publish_button_event(ctx, &event);
+}
+
+/* Which gesture button a key belongs to; -1 for keys that are not buttons. */
+static int gesture_button_for_key(int code)
+{
+    switch (code) {
+    case KEY_VOLUMEUP:
+        return BUTTON_GESTURE_VOLUME_UP;
+    case KEY_VOLUMEDOWN:
+        return BUTTON_GESTURE_VOLUME_DOWN;
+    case KEY_MUTE:
+    case KEY_POWER:
+    case KEY_MICMUTE:
+        return BUTTON_GESTURE_MICROPHONE_MUTE;
+    case KEY_HELP:
+        return BUTTON_GESTURE_ACTION;
+    default:
+        return -1;
+    }
+}
+
 static void handle_key(struct context *ctx, int code, int value)
 {
+    /* value: 0 release, 1 press, 2 kernel autorepeat. */
+    {
+        int button = gesture_button_for_key(code);
+        struct button_gesture_event event;
+
+        /* Reporting only: the local handling below runs exactly as before. */
+        if (button >= 0 &&
+            button_gesture_key(&ctx->gestures, button, value, monotonic_ms(),
+                               &event))
+            publish_button_event(ctx, &event);
+    }
     /* value: 0 release, 1 press, 2 kernel autorepeat. The action button
        acts on its release too, when a long press is configured. */
     if (code == KEY_HELP) {
@@ -1419,6 +1498,10 @@ int main(int argc, char **argv)
     ctx.radio_sock = getenv("LE_RADIO_SOCK");
     if (!ctx.radio_sock || !ctx.radio_sock[0])
         ctx.radio_sock = LE_ADAPTER_RADIO_SOCK;
+    ctx.event_sock = getenv("LE_BUTTON_EVENT_SOCK");
+    if (!ctx.event_sock || !ctx.event_sock[0])
+        ctx.event_sock = LE_ADAPTER_BUTTON_EVENT_SOCK;
+    button_gestures_init(&ctx.gestures);
     ctx.volume = -1;
     ctx.muted = -1;
     ctx.privacy_state = -1;
@@ -1487,6 +1570,7 @@ int main(int argc, char **argv)
         }
         (void)sync_privacy_state(&ctx);
         action_long_poll(&ctx, monotonic_ms());
+        publish_pending_gestures(&ctx);
         if (monotonic_ms() >= next_status_ms) {
             write_capability_status(&ctx);
             /* The ring must follow the mute state however it changed -- the

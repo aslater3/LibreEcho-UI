@@ -9,6 +9,7 @@
 #include "esphome_playback.h"
 #include "mdns_client.h"
 #include "voice_ns.h"
+#include "adapter.h"
 #include "../config_store.h"
 #include "../json.h"
 #include "../esphome_health.h"
@@ -50,6 +51,15 @@
 #define LIGHT_KEY 3U
 #define LIGHT_POLL_MS 1000U
 #define LIGHT_REFRESH_MS 60000U
+/* Hardware buttons as Home Assistant event entities (#394). buttond sends one
+ * datagram per gesture, "<button> <gesture>", to the button socket. */
+#define BUTTON_KEY_BASE 10U
+#define BUTTON_COUNT 4U
+#define GESTURE_COUNT 3U
+#define BUTTON_MSG_MAX 40U
+#define BUTTON_BATCH 8U
+#define EVENT_LIST_TYPE 107U
+#define EVENT_STATE_TYPE 108U
 struct client { int fd,mode,phase,hello,states,closing,light; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at,time_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
 struct state {
@@ -59,6 +69,7 @@ struct state {
  char room[49];
  /* Light sensor file (--light-sensor, else the first readable TSL2540 als_lux); empty until found. */
  char light_path[160];int lux,lux_sent;uint64_t light_poll,light_sent_at;
+ int button_fd;char button_path[160];
  char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake,reply_volume;
  uint64_t cancel_guard,control_retry;int control_fd;
  uint64_t now,turn_deadline,turn_limit,last_audio_status,last_status_poll,wake_retry,mdns_retry,ring_first,ring_end,capture_next,timer_retry;
@@ -127,6 +138,22 @@ static void states_send(struct client *c){unsigned char b[64];struct ep_writer w
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
  if(S.last_audio_status){f=(float)S.reply_volume;memcpy(&bits,&f,4);w.length=0;ep_fixed32(&w,1,REPLY_KEY);ep_fixed32(&w,2,bits);(void)send_writer(c,50,&w);}
 }
+static const char *const button_ids[BUTTON_COUNT]={"volume_up","volume_down","microphone_mute","action"};
+static const char *const button_labels[BUTTON_COUNT]={"Volume up button","Volume down button","Microphone mute button","Action button"};
+static const char *const gesture_ids[GESTURE_COUNT]={"press","long_press","double_press"};
+/* EventResponse for one press. Only subscribed clients get it, as with other states. */
+static void button_event(unsigned button,unsigned gesture){unsigned char b[64];
+ for(unsigned i=0;i<CLIENTS;i++){struct ep_writer w={b,sizeof b,0,0};if(S.clients[i].fd<0||!S.clients[i].states)continue;ep_fixed32(&w,1,BUTTON_KEY_BASE+button);ep_string(&w,2,gesture_ids[gesture]);(void)send_writer(&S.clients[i],EVENT_STATE_TYPE,&w);}}
+/* Datagrams are "<button> <gesture>" exactly; anything else is dropped unseen. */
+static void button_tick(void){char msg[BUTTON_MSG_MAX+1];
+ for(unsigned n=0;n<BUTTON_BATCH;n++){ssize_t got=recv(S.button_fd,msg,sizeof msg-1,MSG_DONTWAIT);if(got<0)break;msg[got]=0;char *sp=strchr(msg,' ');if(!sp)continue;*sp++=0;
+  int button=-1,gesture=-1;for(unsigned i=0;i<BUTTON_COUNT;i++)if(!strcmp(msg,button_ids[i]))button=(int)i;for(unsigned g=0;g<GESTURE_COUNT;g++)if(!strcmp(sp,gesture_ids[g]))gesture=(int)g;
+  if(button>=0&&gesture>=0)button_event((unsigned)button,(unsigned)gesture);}
+}
+static int button_socket_open(const char *path){struct sockaddr_un a;int fd;
+ if(strlen(path)>=sizeof a.sun_path)return -1;memset(&a,0,sizeof a);a.sun_family=AF_UNIX;memcpy(a.sun_path,path,strlen(path)+1);
+ fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);if(fd<0)return -1;unlink(path);
+ if(bind(fd,(struct sockaddr*)&a,sizeof a)<0){close(fd);return -1;}return fd;}
 static void all_states(void){for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].states)states_send(&S.clients[i]);}
 static int announce_done(int success){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,(unsigned)success);return S.owner>=0?send_writer(&S.clients[S.owner],120,&w):-1;}
 static void capture_end(void){if(S.turn==2&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,2,1);(void)send_writer(&S.clients[S.owner],106,&w);}if(S.turn==1||S.turn==2)S.turn=3;profile("thinking");}
@@ -168,6 +195,8 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  /* Number: min 0, max 100, step 1, config category, %, slider. Follows the master volume until set; the web UI can return it to following. */
  {float lo=0,hi=100,step=1;uint32_t bits;w.length=0;ep_string(&w,1,"reply_volume");ep_fixed32(&w,2,REPLY_KEY);ep_string(&w,3,"Reply volume");ep_string(&w,5,"mdi:account-voice");
  memcpy(&bits,&lo,4);ep_fixed32(&w,6,bits);memcpy(&bits,&hi,4);ep_fixed32(&w,7,bits);memcpy(&bits,&step,4);ep_fixed32(&w,8,bits);ep_uint(&w,10,1);ep_string(&w,11,"%");ep_uint(&w,12,2);(void)send_writer(c,49,&w);}
+ /* ListEntitiesEventResponse, one per button: the gesture is the event type. */
+ for(unsigned i=0;i<BUTTON_COUNT;i++){w.length=0;ep_string(&w,1,button_ids[i]);ep_fixed32(&w,2,BUTTON_KEY_BASE+i);ep_string(&w,3,button_labels[i]);for(unsigned g=0;g<GESTURE_COUNT;g++)ep_string(&w,9,gesture_ids[g]);(void)send_writer(c,EVENT_LIST_TYPE,&w);}
  /* ListEntitiesSensorResponse: lx, illuminance, STATE_CLASS_MEASUREMENT; only when the board has a sensor. */
  if(S.light_path[0]){c->light=1;w.length=0;ep_string(&w,1,"illuminance");ep_fixed32(&w,2,LIGHT_KEY);ep_string(&w,3,"Illuminance");ep_string(&w,6,"lx");ep_uint(&w,7,0);ep_string(&w,9,"illuminance");ep_uint(&w,10,1);(void)send_writer(c,16,&w);}
  (void)send_msg(c,19,NULL,0);
@@ -364,11 +393,12 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  }
  memset(&S,0,sizeof S);S.owner=-1;S.mdns_fd=-1;S.muted=1;S.privacy=-1;S.radio_state=1;S.active_wake=1;S.restore_volume=66;S.turn_limit=120000;S.lux=S.lux_sent=-1;
  S.config_path=getenv("LE_CONFIG_PATH");if(!S.config_path||!S.config_path[0])S.config_path="/etc/libreecho/web-config.json";S.status_path="/run/libreecho/esphome-status.json";S.control_path="/run/libreecho/esphome-control.sock";S.control_fd=-1;S.audio_path="/run/libreecho/audio.sock";S.wake_path="/run/libreecho/wakeword.sock";S.radio_path="/run/libreecho/radio.sock";S.timer_path="/run/libreecho/timer.sock";S.led_path="/run/libreecho/led.sock";S.mdns_path=LE_MDNS_SOCKET;S.bus_path="/run/libreecho-audio/system.pcm";S.privacy_path="/sys/devices/platform/amz_privacy/privacy_state";S.idme_path="/sys/firmware/devicetree/base/idme";
- for(unsigned i=0;i<CLIENTS;i++)S.clients[i].fd=-1;for(unsigned i=0;i<JOBS;i++)S.jobs[i].fd=-1;S.wake.fd=S.mic.fd=S.timer_cleanup.fd=-1;esp_playback_init(&S.playback);
+ for(unsigned i=0;i<CLIENTS;i++)S.clients[i].fd=-1;for(unsigned i=0;i<JOBS;i++)S.jobs[i].fd=-1;S.wake.fd=S.mic.fd=S.timer_cleanup.fd=-1;S.button_fd=-1;esp_playback_init(&S.playback);
+ snprintf(S.button_path,sizeof S.button_path,"%s",LE_ADAPTER_BUTTON_EVENT_SOCK);
  for(int i=1;i<argc;i++){const char *v=i+1<argc?argv[i+1]:NULL;if(!strcmp(argv[i],"--plaintext")){S.plaintext=1;continue;}if(!v)return 2;
  if(!strcmp(argv[i],"--port")){char *end;unsigned long p=strtoul(v,&end,10);if(*end||p<1||p>65535)return 2;port=(unsigned)p;}
  else if(!strcmp(argv[i],"--bind")||!strcmp(argv[i],"--listen"))bind_addr=v;else if(!strcmp(argv[i],"--config"))S.config_path=v;else if(!strcmp(argv[i],"--status-file"))S.status_path=v;else if(!strcmp(argv[i],"--control-socket"))S.control_path=v;
- else if(!strcmp(argv[i],"--audio-socket"))S.audio_path=v;else if(!strcmp(argv[i],"--wake-socket"))S.wake_path=v;else if(!strcmp(argv[i],"--radio-socket"))S.radio_path=v;else if(!strcmp(argv[i],"--timer-socket"))S.timer_path=v;else if(!strcmp(argv[i],"--led-socket"))S.led_path=v;else if(!strcmp(argv[i],"--mdns-socket"))S.mdns_path=v;else if(!strcmp(argv[i],"--audio-bus"))S.bus_path=v;else if(!strcmp(argv[i],"--privacy-state"))S.privacy_path=v;else if(!strcmp(argv[i],"--tls-ca"))S.ca_path=v;else if(!strcmp(argv[i],"--idme-root"))S.idme_path=v;
+ else if(!strcmp(argv[i],"--audio-socket"))S.audio_path=v;else if(!strcmp(argv[i],"--wake-socket"))S.wake_path=v;else if(!strcmp(argv[i],"--radio-socket"))S.radio_path=v;else if(!strcmp(argv[i],"--timer-socket"))S.timer_path=v;else if(!strcmp(argv[i],"--led-socket"))S.led_path=v;else if(!strcmp(argv[i],"--mdns-socket"))S.mdns_path=v;else if(!strcmp(argv[i],"--button-socket")){if(strlen(v)>=sizeof S.button_path)return 2;snprintf(S.button_path,sizeof S.button_path,"%s",v);}else if(!strcmp(argv[i],"--audio-bus"))S.bus_path=v;else if(!strcmp(argv[i],"--privacy-state"))S.privacy_path=v;else if(!strcmp(argv[i],"--tls-ca"))S.ca_path=v;else if(!strcmp(argv[i],"--idme-root"))S.idme_path=v;
  else if(!strcmp(argv[i],"--light-sensor")){if(!v[0]||strlen(v)>=sizeof S.light_path)return 2;snprintf(S.light_path,sizeof S.light_path,"%s",v);}
  else if(!strcmp(argv[i],"--name")){if(strlen(v)>=sizeof S.name)return 2;snprintf(S.name,sizeof S.name,"%s",v);}else if(!strcmp(argv[i],"--mac")){if(normalize_mac(v,S.mac))return 2;}
  else if(!strcmp(argv[i],"--turn-timeout-ms")){char *end;unsigned long p=strtoul(v,&end,10);if(*end||p<100||p>120000)return 2;S.turn_limit=p;}else return 2;i++;}
@@ -379,13 +409,16 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  listener=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);int yes=1;if(listener<0)return 1;(void)setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes);if(bind(listener,(struct sockaddr*)&a,sizeof a)||listen(listener,CLIENTS)){close(listener);return 1;}
  {struct stat st;if(fstat(listener,&st)||!le_eh_start((int)getpid(),S.process_start)||!le_eh_boot(S.boot_id)){close(listener);return 1;}snprintf(S.listener_inode,sizeof S.listener_inode,"%llu",(unsigned long long)st.st_ino);S.listener_port=port;}
  signal(SIGINT,sigstop);signal(SIGTERM,sigstop);signal(SIGHUP,sigstop);signal(SIGPIPE,SIG_IGN);S.now=now_ms();
+ /* Without the button socket the satellite still runs; only button events are lost. */
+ S.button_fd=button_socket_open(S.button_path);if(S.button_fd<0)fprintf(stderr,"esphomed: button event socket unavailable; hardware button events disabled\n");
  /* timerd outlives this process. Fence replacement events until a retried
   * reserved clear is ACKed, including recovery after SIGKILL/power loss. */
  timer_owner_end();S.ready=1;status_write();
- while(running){struct pollfd fds[1+CLIENTS];fds[0]=(struct pollfd){listener,POLLIN,0};for(unsigned i=0;i<CLIENTS;i++)fds[i+1]=(struct pollfd){S.clients[i].fd,(short)(POLLIN|(S.clients[i].tx_n?POLLOUT:0)),0};int ready=poll(fds,1+CLIENTS,10);S.now=now_ms();if(ready<0&&errno!=EINTR)break;
+ while(running){struct pollfd fds[2+CLIENTS];fds[0]=(struct pollfd){listener,POLLIN,0};for(unsigned i=0;i<CLIENTS;i++)fds[i+1]=(struct pollfd){S.clients[i].fd,(short)(POLLIN|(S.clients[i].tx_n?POLLOUT:0)),0};fds[1+CLIENTS]=(struct pollfd){S.button_fd,POLLIN,0};int ready=poll(fds,2+CLIENTS,10);S.now=now_ms();if(ready<0&&errno!=EINTR)break;
  if(reload_config){reload_config=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);if(load_configuration())break;}
  if(fds[0].revents&POLLIN){for(unsigned n=0;n<4;n++){int fd=accept(listener,NULL,NULL);if(fd<0)break;int flags=fcntl(fd,F_GETFL,0);if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){close(fd);continue;}unsigned idx;for(idx=0;idx<CLIENTS;idx++)if(S.clients[idx].fd<0)break;if(idx==CLIENTS){close(fd);continue;}struct client *c=&S.clients[idx];memset(c,0,sizeof *c);c->fd=fd;c->mode=-1;c->deadline=S.now+15000;c->last_seen=S.now;en_init(&c->noise);}}
  for(unsigned i=0;i<CLIENTS;i++)client_tick(i,fds[i+1].revents);
+ if(S.button_fd>=0&&(fds[1+CLIENTS].revents&POLLIN))button_tick();
  if(S.now>=S.last_status_poll+250){S.last_status_poll=S.now;privacy_poll();light_poll();(void)job(S.audio_path,"status","{}",1,0);(void)job(S.radio_path,"status","{}",2,0);}
  jobs_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);control_tick();capture_tick();
@@ -394,7 +427,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  mdns_tick(port);
  }
  S.ready=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);
- close(listener);io_close(&S.wake);io_close(&S.mic);esp_playback_close(&S.playback);if(S.mdns_fd>=0)close(S.mdns_fd);if(S.control_fd>=0){close(S.control_fd);(void)unlink(S.control_path);}
+ close(listener);if(S.button_fd>=0){close(S.button_fd);unlink(S.button_path);S.button_fd=-1;}io_close(&S.wake);io_close(&S.mic);esp_playback_close(&S.playback);if(S.mdns_fd>=0)close(S.mdns_fd);if(S.control_fd>=0){close(S.control_fd);(void)unlink(S.control_path);}
  /* No new owners/events during shutdown. Retire unsent jobs, settle sent
   * ones, then clear via the reserved slot. Adapter outage must not hang exit;
   * the next startup keeps its cleanup fence until it receives an ACK. */

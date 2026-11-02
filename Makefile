@@ -39,7 +39,7 @@ MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/mic_beamfo
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
 	src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
 	src/adapter/led_music_director.c src/adapter/led_music_render.c
-BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
+BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/buttond_gesture.c src/adapter/adapter_client.c src/json.c src/log.c
 WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/service_env.c src/adapter/adapter_client.c src/json.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c src/adapter/mic_array_render.c
 RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/radio_opus.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
@@ -456,19 +456,19 @@ $(BUILD)/test-boot-control: tests/test_boot_control.c \
 
 
 $(BUILD)/test-buttond-privacy: tests/test_buttond_privacy.c \
-	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
-		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 		src/adapter/adapter_client.c src/json.c src/log.c -o $@
 
 $(BUILD)/test-buttond-events: tests/test_buttond_events.c \
-	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
-		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 		src/adapter/adapter_client.c src/json.c src/log.c -o $@
 
 $(BUILD)/test-buttond-actions: tests/test_buttond_actions.c \
@@ -510,6 +510,11 @@ $(BUILD)/test-cue-rate-limit: tests/test_cue_rate_limit.c \
 $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 	src/adapter/buttond_timing.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-buttond-gesture: tests/test_buttond_gesture.c \
+	src/adapter/buttond_gesture.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-watchdog-policy: tests/test_watchdog_policy.c \
 		src/adapter/watchdog_policy.c

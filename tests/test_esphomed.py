@@ -98,7 +98,7 @@ class Fixture(Daemon):
  def test_hello_auth_device_list_ping_disconnect(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(b'fixture-satellite',b);self.assertIn(num(17,61),b)
   self.assertNotIn(var((16<<3)|2),b,'no room configured: DeviceInfo has no suggested_area')
-  self.s.sendall(frame(11));listed=[receive(self.s) for _ in range(4)];self.assertEqual([t for t,_ in listed],[63,17,61,49,19])
+  self.s.sendall(frame(11));listed=[receive(self.s) for _ in range(9)];self.assertEqual([t for t,_ in listed],[63,17,61,49,107,107,107,107,19])
   button=listed[2][1];self.assertIn(b'\x15'+struct.pack('<I',404),button);self.assertIn(text(3,'Cancel request'),button)
   self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
  def test_oversize_malformed_and_client_limit(self):
