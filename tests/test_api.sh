@@ -298,6 +298,33 @@ code=$(curl -sS -o /tmp/le-invalid-listening-atomic.out -w '%{http_code}' \
 [ "$code" = 400 ]
 curl -fsS "$URL/api/v1/voice-pipeline" |
     jq -e '.data.listening.max_utterance_ms == 6000' >/dev/null
+# #401: noise suppression on the assistant audio is off by default, a
+# boolean only, persisted as voice_noise_suppression, and leaves the other
+# listening settings alone.
+curl -fsS "$URL/api/v1/voice-pipeline" |
+    jq -e '.data.listening.noise_suppression == false' >/dev/null
+jq -e '.voice_noise_suppression == false' "$CFG" >/dev/null
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"mode":"local","noise_suppression":true}' |
+    jq -e '.ok and .data.listening.noise_suppression == true and
+           .data.listening.max_utterance_ms == 6000' >/dev/null
+jq -e '.voice_noise_suppression == true' "$CFG" >/dev/null
+for body in '{"mode":"local","noise_suppression":"true"}' \
+            '{"mode":"local","noise_suppression":1}' \
+            '{"mode":"local","noise_suppression":false,"noise_suppression":true}'; do
+    code=$(curl -sS -o /tmp/le-invalid-noise-suppression.out -w '%{http_code}' \
+        -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+        -H 'Content-Type: application/json' --data "$body")
+    [ "$code" = 400 ] || { echo "noise_suppression accepted: $body" >&2; exit 1; }
+done
+curl -fsS "$URL/api/v1/voice-pipeline" |
+    jq -e '.data.listening.noise_suppression == true' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"mode":"local","noise_suppression":false}' |
+    jq -e '.data.listening.noise_suppression == false' >/dev/null
+jq -e '.voice_noise_suppression == false' "$CFG" >/dev/null
 curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
     -H 'Content-Type: application/json' \
     --data '{"mode":"custom","stt_wyoming_uri":"tcp://127.0.0.1:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://127.0.0.1:10200","tts_voice":"en_GB-alan-medium"}' |

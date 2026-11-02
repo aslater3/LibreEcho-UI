@@ -41,6 +41,7 @@ struct le_voice_pipeline_metrics {
     /* Wake-free stop windows opened, and how many heard a stop. */
     unsigned long stop_windows;
     unsigned long stops_heard;
+    int noise_suppression;
 };
 
 /*
@@ -110,6 +111,11 @@ void le_voice_pipeline_set_stop_callback(
 
 void le_voice_pipeline_set_stop_listen(
     struct le_voice_pipeline *pipeline, int active);
+
+/* Run the noise suppressor (voice_ns.h) on the audio sent to speech
+ * recognition. Off by default; safe to call at any time. */
+void le_voice_pipeline_set_noise_suppression(
+    struct le_voice_pipeline *pipeline, int enabled);
 
 int le_voice_pipeline_request_follow_up(
     struct le_voice_pipeline *pipeline);
