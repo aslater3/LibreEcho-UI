@@ -119,7 +119,10 @@ static long long wall_epoch(void)
 /* ------------------------------ persistence ----------------------------- */
 
 /*
- * One record per line: "v3 kind id due_epoch @hex:label_bytes". Older v2 and
+ * One record per line: "v3 kind id due_epoch @hex:label_bytes". A repeating
+ * alarm is "v4 alarm id due_epoch days hour minute @hex:label_bytes": the
+ * repeat mask and wall-clock time are stored because a snoozed alarm's due
+ * instant no longer says what time the alarm is set for. Older v2 and
  * whitespace-delimited records without the v2 marker are still accepted when
  * loading. Encoding new labels removes the whitespace ambiguity in the
  * original format and preserves every byte of the label across a restart.
@@ -384,9 +387,13 @@ static enum state_save_result state_save_at(struct context *ctx,
         }
         if (state_encode_label(encoded_label, sizeof(encoded_label),
                                timer->label) < 0 ||
-            fprintf(file, "v3 %s %u %lld %s\n",
-                    timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown",
-                    timer->id, due, encoded_label) < 0) {
+            (timer->kind == LE_TIMER_ALARM && timer->repeat_days
+                 ? fprintf(file, "v4 alarm %u %lld %u %d %d %s\n", timer->id,
+                           due, timer->repeat_days, timer->hour, timer->minute,
+                           encoded_label)
+                 : fprintf(file, "v3 %s %u %lld %s\n",
+                           timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown",
+                           timer->id, due, encoded_label)) < 0) {
             fclose(file);
             unlink(temporary);
             return STATE_SAVE_FAILED;
@@ -487,6 +494,30 @@ static int state_load_at(struct context *ctx, long long now_ms,
         int format = 0;
 
         label[0] = '\0';
+        if (!strncmp(line, "v4 alarm ", 9)) {
+            unsigned int days = 0;
+            unsigned int record_id = 0;
+            int hour = -1, minute = -1, consumed = 0;
+            size_t length;
+
+            if (sscanf(line, "v4 alarm %u %lld %u %d %d%n", &record_id, &due,
+                       &days, &hour, &minute, &consumed) != 5 || consumed <= 0 ||
+                !record_id)
+                continue;
+            if (line[consumed] != ' ')
+                continue;
+            length = strlen(line + consumed + 1);
+            while (length && (line[consumed + length] == '\n' ||
+                              line[consumed + length] == '\r'))
+                line[consumed + --length + 1] = '\0';
+            if (state_decode_label(line + consumed + 1, label, sizeof(label)) < 0)
+                continue;
+            if (le_timer_restore_repeat_alarm(&ctx->timers, record_id, due, hour,
+                                              minute, days, label, now_epoch,
+                                              now_ms, &id) != LE_TIMER_OK)
+                ++ctx->timers.missed;
+            continue;
+        }
         if (state_parse_header(line, kind, sizeof(kind), &restore_id, &due,
                                &label_offset, &format) < 0)
             continue;
@@ -712,6 +743,8 @@ static int timers_json(struct context *ctx, char *out, size_t size)
         const struct le_timer *timer = &ctx->timers.timers[i];
         char label[LE_TIMER_LABEL_MAX * 2];
         long long remaining;
+        int hour;
+        int minute;
 
         if (timer->state == LE_TIMER_STATE_FREE)
             continue;
@@ -723,15 +756,40 @@ static int timers_json(struct context *ctx, char *out, size_t size)
             remaining = 0;
         json_escape(label, sizeof(label), timer->label);
 
+        if (timer->kind == LE_TIMER_ALARM) {
+            /* A repeating alarm reports the time it is set for, not the due
+               instant of a snooze. A one-off reports the local time it rings. */
+            if (timer->repeat_days) {
+                hour = timer->hour;
+                minute = timer->minute;
+            } else {
+                time_t at = (time_t)timer->due_epoch;
+                struct tm local;
+
+                if (localtime_r(&at, &local)) {
+                    hour = local.tm_hour;
+                    minute = local.tm_min;
+                } else {
+                    hour = -1;
+                    minute = -1;
+                }
+            }
+        } else {
+            hour = -1;
+            minute = -1;
+        }
         written = snprintf(out + used, size - used,
                            "%s{\"id\":%u,\"kind\":\"%s\",\"state\":\"%s\","
-                           "\"seconds_remaining\":%lld,\"label\":\"%s\"}",
+                           "\"seconds_remaining\":%lld,\"label\":\"%s\","
+                           "\"repeat_days\":%u,\"hour\":%d,\"minute\":%d}",
                            first ? "" : ",", timer->id,
                            timer->kind == LE_TIMER_ALARM ? "alarm"
                                                          : "countdown",
                            timer->state == LE_TIMER_STATE_RINGING
                                ? "ringing" : "pending",
-                           remaining, label);
+                           remaining, label,
+                           timer->kind == LE_TIMER_ALARM ? timer->repeat_days : 0U,
+                           hour, minute);
         if (written < 0 || (size_t)written >= size - used)
             return -1;
         used += (size_t)written;
@@ -926,6 +984,41 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         return le_adapter_respond_ok(out, size, id, data);
     }
 
+    /* A weekly alarm: hour, minute and a day mask, bit 0 Sunday. The daemon
+       owns the next-occurrence rule so every caller agrees on it. */
+    if (!strcmp(cmd, "add_repeat")) {
+        unsigned int created = 0;
+        int hour = -1, minute = -1, days = 0;
+        int result;
+
+        if (!args || json_get_int(args, "hour", &hour) != 1 ||
+            json_get_int(args, "minute", &minute) != 1 ||
+            json_get_int(args, "days", &days) != 1)
+            return le_adapter_respond_err(out, size, id,
+                                          "add_repeat requires hour, minute and days");
+        result = le_timer_add_repeat_alarm(&ctx->timers, hour, minute,
+                                           (unsigned int)days, label,
+                                           wall_epoch(), &created);
+        if (result != LE_TIMER_OK)
+            return le_adapter_respond_err(out, size, id, add_error(result));
+        ctx->dirty = 1;
+        snprintf(data, sizeof(data), "{\"id\":%u}", created);
+        le_log_info("timerd: repeating alarm %u at %02d:%02d days 0x%02x",
+                    created, hour, minute, days);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+
+    /* Snooze every ringing alarm for the fixed snooze period. Countdowns are
+       not snoozed; a countdown that rings is stopped with dismiss. */
+    if (!strcmp(cmd, "snooze")) {
+        int snoozed = le_timer_snooze_ringing(&ctx->timers, wall_epoch());
+
+        if (snoozed)
+            ctx->dirty = 1;
+        snprintf(data, sizeof(data), "{\"snoozed\":%d}", snoozed);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+
     if (!strcmp(cmd, "add_alarm")) {
         unsigned int created = 0;
         int result;
@@ -1069,9 +1162,10 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
             return le_adapter_respond_err(out, size, id,
                                           "dismiss id must be a positive integer");
         if (id_result > 0)
-            stopped = le_timer_dismiss(&ctx->timers, dismiss_id);
+            stopped = le_timer_dismiss_at(&ctx->timers, dismiss_id, wall_epoch());
         else
-            stopped = le_timer_dismiss_all(&ctx->timers) + remote_dismiss_all(ctx);
+            stopped = le_timer_dismiss_all_at(&ctx->timers, wall_epoch()) +
+                      remote_dismiss_all(ctx);
         if (stopped)
             ctx->dirty = 1;
         snprintf(data, sizeof(data), "{\"dismissed\":%d}", stopped);

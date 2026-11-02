@@ -781,6 +781,41 @@ static int parse_clock(const char *text, int *hour_out, int *minute_out)
     return 0;
 }
 
+/*
+ * Which days a weekly alarm repeats on, as a mask with bit 0 Sunday. "every
+ * day", "weekdays" and "weekends" are shorthand; otherwise each day named is
+ * included. Returns zero when no day is named, which makes a one-off alarm.
+ */
+static unsigned int parse_alarm_days(const char *text)
+{
+    static const struct {
+        const char *word;
+        unsigned int bit;
+    } names[] = {
+        {"sunday", 1U << 0}, {"sun", 1U << 0},
+        {"monday", 1U << 1}, {"mon", 1U << 1},
+        {"tuesday", 1U << 2}, {"tue", 1U << 2}, {"tues", 1U << 2},
+        {"wednesday", 1U << 3}, {"wed", 1U << 3},
+        {"thursday", 1U << 4}, {"thu", 1U << 4}, {"thur", 1U << 4},
+        {"thurs", 1U << 4},
+        {"friday", 1U << 5}, {"fri", 1U << 5},
+        {"saturday", 1U << 6}, {"sat", 1U << 6}
+    };
+    unsigned int days = 0;
+    size_t i;
+
+    if (has_word(text, "weekends") || has_word(text, "weekend"))
+        days |= (1U << 0) | (1U << 6);
+    if (has_word(text, "weekdays") || has_word(text, "weekday"))
+        days |= 0x3eU;
+    if (has_word(text, "daily") || (has_word(text, "every") && has_word(text, "day")))
+        days |= 0x7fU;
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        if (has_word(text, names[i].word))
+            days |= names[i].bit;
+    return days;
+}
+
 static int mentions_alarm(const char *text)
 {
     return has_word(text, "alarm") || has_word(text, "alarms");
@@ -832,6 +867,13 @@ enum le_timer_intent_kind le_timer_intent_parse(
     if (!transcript || !transcript[0])
         return LE_TIMER_INTENT_NONE;
     normalise(transcript, text, sizeof(text));
+
+        /* Snooze is only ever asked of a ringing alarm, and the caller checks
+       that; here it is just a word that cannot mean anything else. */
+    if (has_word(text, "snooze")) {
+        intent->kind = LE_TIMER_INTENT_SNOOZE;
+        return intent->kind;
+    }
 
     /* Silence first: while something is ringing this is the only thing
        anyone is trying to say, and it is the shortest phrasing. */
@@ -899,6 +941,7 @@ enum le_timer_intent_kind le_timer_intent_parse(
         intent->kind = LE_TIMER_INTENT_ALARM;
         intent->alarm_hour = clock == 1 ? hour : -1;
         intent->alarm_minute = clock == 1 ? minute : 0;
+        intent->alarm_days = parse_alarm_days(text);
         extract_label(text, intent->label, sizeof(intent->label));
         return intent->kind;
     }
@@ -970,10 +1013,23 @@ int le_timer_intent_speech(const struct le_timer_intent *intent, int count,
     case LE_TIMER_INTENT_ALARM:
         if (intent->alarm_hour < 0)
             return snprintf(out, size, "What time should the alarm be?");
+        if (intent->alarm_days)
+            return snprintf(out, size, "Alarm set for %d:%02d %s, %s.",
+                            intent->alarm_hour % 12 ? intent->alarm_hour % 12 : 12,
+                            intent->alarm_minute,
+                            intent->alarm_hour < 12 ? "am" : "pm",
+                            intent->alarm_days == 0x7fU ? "every day"
+                            : intent->alarm_days == 0x3eU ? "on weekdays"
+                            : intent->alarm_days == 0x41U ? "on weekends"
+                            : "repeating");
         return snprintf(out, size, "Alarm set for %d:%02d %s.",
                         intent->alarm_hour % 12 ? intent->alarm_hour % 12 : 12,
                         intent->alarm_minute,
                         intent->alarm_hour < 12 ? "am" : "pm");
+    case LE_TIMER_INTENT_SNOOZE:
+        if (count <= 0)
+            return snprintf(out, size, "There is no alarm ringing.");
+        return snprintf(out, size, "Snoozed for five minutes.");
     case LE_TIMER_INTENT_CANCEL:
         if (intent->alarm_only) {
             if (count < 0)

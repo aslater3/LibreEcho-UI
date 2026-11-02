@@ -182,6 +182,11 @@ struct le_timer_entry {
     char state[16];
     long seconds_remaining;
     char label[48];
+    /* Alarms: the repeat mask (bit 0 Sunday, zero for one-off) and the local
+       time the alarm is set for. Hour and minute are -1 for countdowns. */
+    unsigned repeat_days;
+    int hour;
+    int minute;
 };
 struct le_timer_list {
     struct le_timer_entry items[16];
@@ -218,7 +223,7 @@ int le_sendspin_pairing_token(struct le_backend*,char*,size_t);
 /* Forget every paired server; the player restarts with a new pairing token. */
 int le_sendspin_reset_pairing(struct le_backend*);
 int le_get_playback_state(struct le_backend*,struct le_playback_state*);
-int le_get_timers(struct le_backend*,struct le_timer_list*); int le_add_timer(struct le_backend*,int,const char*,unsigned*); int le_cancel_timer(struct le_backend*,unsigned); int le_dismiss_timers(struct le_backend*,int*); int le_add_alarm(struct le_backend*,long long,const char*,unsigned*);
+int le_get_timers(struct le_backend*,struct le_timer_list*); int le_add_timer(struct le_backend*,int,const char*,unsigned*); int le_cancel_timer(struct le_backend*,unsigned); int le_dismiss_timers(struct le_backend*,int*); int le_add_alarm(struct le_backend*,long long,const char*,unsigned*); int le_add_repeat_alarm(struct le_backend*,int,int,unsigned,const char*,unsigned*); int le_snooze_timers(struct le_backend*,int*);
 int le_reboot(struct le_backend*); int le_reboot_bootloader(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);
 int le_backend_tick(struct le_backend*); int le_backend_mock_control(struct le_backend*,const char*,const char*);
 

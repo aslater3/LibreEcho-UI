@@ -22,7 +22,7 @@ CFLAGS="-std=c99 $WARN -O2 -D_FORTIFY_SOURCE=2 -D_POSIX_C_SOURCE=200809L -Isrc -
 # shellcheck disable=SC2086
 $CC $CFLAGS -o "$OUT/test-noise-heartbeat" \
     tests/test_feature_batch_noise_heartbeat.c \
-    src/backend_mock.c src/config_store.c src/json.c src/log.c
+    src/backend_mock.c src/adapter/timer_schedule.c src/config_store.c src/json.c src/log.c
 
 "$OUT/test-noise-heartbeat"
 echo "mock noise heartbeat regression: ok"

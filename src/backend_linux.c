@@ -2453,6 +2453,28 @@ static int timer_entry_parse(const char *entry, struct le_timer_entry *item)
     if (json_get_string_top_level(entry, "label", item->label,
                                   sizeof(item->label)) != 1)
         return 0;
+    /* The repeat fields arrived with weekly alarms. Absent means a countdown
+       or a one-off alarm; present values must be in range. */
+    {
+        long long days = 0, hour = -1, minute = -1;
+        int has_days, has_hour, has_minute;
+
+        has_days = json_get_int64_top_level(entry, "repeat_days", &days);
+        has_hour = json_get_int64_top_level(entry, "hour", &hour);
+        has_minute = json_get_int64_top_level(entry, "minute", &minute);
+        if ((has_days != 1 && has_days != 0) || (has_hour != 1 && has_hour != 0) ||
+            (has_minute != 1 && has_minute != 0))
+            return 0;
+        if (has_days == 1 && (days < 0 || days > 0x7fLL))
+            return 0;
+        if (has_hour == 1 && (hour < -1 || hour > 23))
+            return 0;
+        if (has_minute == 1 && (minute < -1 || minute > 59))
+            return 0;
+        item->repeat_days = has_days == 1 ? (unsigned)days : 0U;
+        item->hour = has_hour == 1 ? (int)hour : -1;
+        item->minute = has_minute == 1 ? (int)minute : -1;
+    }
     if (!timer_valid_utf8(item->label, strlen(item->label)))
         return 0;
     if ((strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm")) ||
@@ -2604,6 +2626,58 @@ static int timer_add_alarm(struct le_backend *b, long long epoch,
         return LE_IO;
     if (id)
         *id = (unsigned)value;
+    return LE_OK;
+}
+
+/* A weekly alarm. The daemon computes the next occurrence on the device's
+   local clock, so DST and the timezone are handled in one place. */
+static int timer_add_repeat(struct le_backend *b, int hour, int minute,
+                            unsigned days, const char *label, unsigned *id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[256];
+    char escaped[128];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+        !(days & 0x7fU) || (days & ~0x7fU))
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), label ? label : "");
+    snprintf(args, sizeof(args),
+             "{\"hour\":%d,\"minute\":%d,\"days\":%u,\"label\":\"%s\"}",
+             hour, minute, days, escaped);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "add_repeat", args, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "id", &value) != 1 || value <= 0 ||
+        value > UINT_MAX)
+        return LE_IO;
+    if (id)
+        *id = (unsigned)value;
+    return LE_OK;
+}
+
+/* Snooze every ringing alarm. The count tells the caller whether anything
+   was ringing, so a press with nothing to snooze can do something else. */
+static int timer_snooze(struct le_backend *b, int *snoozed)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "snooze", "{}", response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "snoozed", &value) != 1 ||
+        value < 0 || value > INT_MAX)
+        return LE_IO;
+    if (snoozed)
+        *snoozed = (int)value;
     return LE_OK;
 }
 
@@ -3342,7 +3416,8 @@ static const struct le_backend_ops ops = {
     volume_leveling,
     sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing,
     reply_volume,
-    microphone_mix, microphone_lane
+    microphone_mix, microphone_lane,
+    timer_add_repeat, timer_snooze
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

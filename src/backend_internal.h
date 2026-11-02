@@ -59,6 +59,11 @@ struct le_backend_ops {
  int (*microphone_mix)(struct le_backend*,const char*);
  /* Single-mode array lane, -1 for automatic. Appended after microphone_mix; null reports unsupported. */
  int (*microphone_lane)(struct le_backend*,int);
+ /* Repeating alarms and snooze. Appended last: the backends initialise this
+    struct positionally. A backend that leaves one null reports the feature
+    unsupported. */
+ int (*timer_add_repeat)(struct le_backend*,int,int,unsigned,const char*,unsigned*);
+ int (*timer_snooze)(struct le_backend*,int*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

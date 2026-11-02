@@ -140,6 +140,41 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/timers/$id
 [ "$code" = 404 ] || { echo "FAIL: cancelling twice returned $code, expected 404"; exit 1; }
 echo "  cancelling a gone timer is 404: ok"
 
+# --- weekly alarms and snooze -----------------------------------------------
+# A repeating alarm takes a day list and reports the days it repeats on.
+code=$(curl -sS -o /tmp/le-alarm-repeat.out -w '%{http_code}' -X POST "$URL/api/v1/alarms" \
+    -H "$CSRF" -H "$JSON" --data '{"time":"06:45","label":"school","days":"weekdays"}')
+[ "$code" = 201 ] || { echo "FAIL: repeating alarm create returned $code"; cat /tmp/le-alarm-repeat.out; exit 1; }
+repeat_id=$(jq -r '.data.id' < /tmp/le-alarm-repeat.out)
+jq -e '.data.days == "mon,tue,wed,thu,fri"' < /tmp/le-alarm-repeat.out >/dev/null \
+    || { echo "FAIL: repeating alarm did not report its days"; cat /tmp/le-alarm-repeat.out; exit 1; }
+curl -fsS "$URL/api/v1/alarms" | jq -e --argjson id "$repeat_id" \
+    '.data.alarms[] | select(.id == $id) | .time == "06:45" and .days == "mon,tue,wed,thu,fri"' >/dev/null \
+    || { echo "FAIL: alarm list did not show the repeat days"; exit 1; }
+echo "  repeating alarm created with its days: ok"
+
+# Days must be a known list; a typo is refused rather than becoming a one-off.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/alarms" -H "$CSRF" -H "$JSON" \
+    --data '{"time":"06:45","days":"funday"}')
+[ "$code" = 400 ] || { echo "FAIL: unknown day list returned $code, expected 400"; exit 1; }
+echo "  unknown day list refused: ok"
+
+# Snooze is a POST to its own route. With nothing ringing it snoozes nothing.
+code=$(curl -sS -o /tmp/le-alarm-snooze.out -w '%{http_code}' -X POST "$URL/api/v1/alarms/snooze" -H "$CSRF")
+[ "$code" = 200 ] || { echo "FAIL: snooze returned $code"; cat /tmp/le-alarm-snooze.out; exit 1; }
+jq -e '.ok and .data.snoozed == 0' < /tmp/le-alarm-snooze.out >/dev/null \
+    || { echo "FAIL: snooze with nothing ringing did not report zero"; cat /tmp/le-alarm-snooze.out; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X GET "$URL/api/v1/alarms/snooze" -H "$CSRF")
+[ "$code" = 405 ] || { echo "FAIL: GET /alarms/snooze returned $code, expected 405"; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL/api/v1/alarms/snooze")
+[ "$code" = 403 ] || { echo "FAIL: snooze without CSRF returned $code, expected 403"; exit 1; }
+echo "  snooze route, method and CSRF enforced: ok"
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/alarms/$repeat_id" -H "$CSRF")
+[ "$code" = 200 ] || { echo "FAIL: repeating alarm cancel returned $code"; exit 1; }
+curl -fsS "$URL/api/v1/alarms" | jq -e '(.data.alarms | length) == 0' >/dev/null
+echo "  repeating alarm cancelled: ok"
+
 # Alarms run before the capacity test fills every mock slot.
 # --- alarms: a wall-clock time, set and cancelled through the same schedule ---
 # An empty alarm list is a list. The time must be HH:MM on a 24-hour clock.
@@ -247,7 +282,9 @@ source = Path("src/api.c").read_text()
 start = source.index('if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"POST"))')
 end = source.index('if(!strcmp(p,"/api/v1/device")', start)
 block = source[start:end]
-assert block.count('err(r,503,rc,"Timer service is unavailable")') == 3
+# Four: timer create, dismiss, cancel, and the alarm snooze route, which sits in
+# this span and uses the same 503 for an unavailable daemon.
+assert block.count('err(r,503,rc,"Timer service is unavailable")') == 4
 assert 'err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable")' not in block
 PY
 echo "  timer write error codes preserved: ok"
