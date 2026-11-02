@@ -79,6 +79,7 @@ def isolated_main() -> None:
         tls = Path(os.environ.get("ESPHOME_TLS_PREFIX", "/usr"))
         binary = str(Path(os.environ["ESPHOME_HA_ROOT"]) / "libreecho-esphomed")
         sources = ["src/adapter/esphomed.c", "src/adapter/esphome_proto.c",
+                   "src/adapter/esphome_ble_proxy.c",
                    "src/adapter/esphome_frame.c", "src/adapter/esphome_noise.c",
                    "src/adapter/esphome_playback.c", "src/adapter/radio_resample.c",
                    "src/adapter/mdns_client.c", "src/adapter/mdns_lease.c",
