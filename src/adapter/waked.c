@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "adapter.h"
+#include "clap_detector.h"
 #include "voice_aec.h"
 #include "voice_dsp.h"
 #include "voice_reference.h"
@@ -64,12 +65,14 @@ struct waked_ipc {
     int subscribers[MAX_WAKE_SUBSCRIBERS];
     int audio_subscribers[MAX_AUDIO_SUBSCRIBERS];
     unsigned int detected_count;
+    unsigned int clap_count;
     int sensitivity;
     struct le_wake_event last_event;
     /* The phrase and model name of the model this process runs. */
     char wake_phrase[LE_WAKE_MODEL_NAME_MAX];
     char wake_model[LE_WAKE_MODEL_NAME_MAX];
     struct le_wake_led led;
+    struct le_clap_detector clap;
 };
 
 struct waked_metrics {
@@ -253,13 +256,56 @@ static int threshold_sensitivity(float threshold)
     return sensitivity;
 }
 
+static void send_to_wake_subscribers(struct waked_ipc *ipc,
+                                     const char *message, int length)
+{
+    size_t i;
+
+    for (i = 0; i < MAX_WAKE_SUBSCRIBERS; ++i) {
+        int fd = ipc->subscribers[i];
+
+        if (fd < 0)
+            continue;
+        if (send(fd, message, (size_t)length,
+                 MSG_DONTWAIT | MSG_NOSIGNAL) != length) {
+            close(fd);
+            ipc->subscribers[i] = -1;
+        }
+    }
+}
+
+/*
+ * Clap events travel on the wake subscriber stream as their own event type.
+ * Existing consumers select on wake_detected and ignore anything else, so a
+ * clap never starts a voice turn.
+ */
+static void publish_clap_event(struct waked_ipc *ipc,
+                               const struct le_clap_event *event)
+{
+    char data[128];
+    char message[LE_ADAPTER_MSG_MAX];
+    int length;
+
+    ++ipc->clap_count;
+    if (snprintf(
+            data, sizeof(data),
+            "{\"detection_sample\":%llu,\"claps\":%u}",
+            (unsigned long long)event->detection_sample,
+            event->claps) >= (int)sizeof(data))
+        return;
+    length = le_adapter_format_event(
+        message, sizeof(message), "clap_detected", data);
+    if (length < 0)
+        return;
+    send_to_wake_subscribers(ipc, message, length);
+}
+
 static void publish_wake_event(struct waked_ipc *ipc,
                                const struct le_wake_event *event)
 {
     char data[512];
     char message[LE_ADAPTER_MSG_MAX];
     int length;
-    size_t i;
 
     ++ipc->detected_count;
     ipc->last_event = *event;
@@ -288,17 +334,7 @@ static void publish_wake_event(struct waked_ipc *ipc,
         message, sizeof(message), "wake_detected", data);
     if (length < 0)
         return;
-    for (i = 0; i < MAX_WAKE_SUBSCRIBERS; ++i) {
-        int fd = ipc->subscribers[i];
-
-        if (fd < 0)
-            continue;
-        if (send(fd, message, (size_t)length,
-                 MSG_DONTWAIT | MSG_NOSIGNAL) != length) {
-            close(fd);
-            ipc->subscribers[i] = -1;
-        }
-    }
+    send_to_wake_subscribers(ipc, message, length);
 }
 
 #ifdef LE_WAKE_ENGINE_ONNX
@@ -458,6 +494,7 @@ static void handle_control_client(
             "\"model_loaded\":%s,\"processed_frames\":%llu,"
             "\"capture_active\":%s,\"capture_age_ms\":%d,"
             "\"inference_active\":%s,\"inference_age_ms\":%d,"
+            "\"clap_enabled\":%s,\"clap_count\":%u,"
             "\"model\":\"%s\"}",
             ipc->wake_phrase,
             model_loaded ? "loaded" : "unavailable", ipc->sensitivity, ipc->detected_count,
@@ -468,6 +505,7 @@ static void handle_control_client(
             model_loaded ? "true" : "false", (unsigned long long)metrics->processed_frames,
             metrics->processed_frames && le_wake_recent(capture_age_ms, LE_WAKE_CAPTURE_STALE_MS) ? "true" : "false", capture_age_ms,
             model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms,
+            ipc->clap.enabled ? "true" : "false", ipc->clap_count,
             ipc->wake_model);
         (void)respond(client_fd, id, 1, status);
     } else if (!strcmp(command, "subscribe")) {
@@ -546,6 +584,22 @@ static void handle_control_client(
         else
             (void)respond(client_fd, id, 0, "wake model runtime unavailable");
 #endif
+    } else if (!strcmp(command, "set_clap")) {
+        size_t length = args ? strnlen(args, LE_ADAPTER_MSG_MAX) : 0;
+        int enabled = 0;
+
+        if (!args || length == LE_ADAPTER_MSG_MAX ||
+            !json_valid_object(args, length) ||
+            json_duplicate_key(args, length, "enabled") ||
+            json_get_top_level_bool(args, length, "enabled", &enabled) != 1)
+            (void)respond(client_fd, id, 0,
+                          "enabled must be a single top-level boolean");
+        else {
+            le_clap_detector_set_enabled(&ipc->clap, enabled);
+            (void)respond(client_fd, id, 1,
+                          enabled ? "{\"enabled\":true}"
+                                  : "{\"enabled\":false}");
+        }
     } else if (!strcmp(command, "test")) {
         const struct le_wake_event event = {
             metrics->processed_frames *
@@ -631,6 +685,12 @@ static int process_frame(struct le_voice_aec *aec,
         (metrics->processed_frames - 1U) *
             LE_VOICE_AEC_FRAME_SAMPLES,
         clean, LE_VOICE_AEC_FRAME_SAMPLES);
+    if (ipc->clap.enabled) {
+        struct le_clap_event clap;
+
+        if (le_clap_detector_process(&ipc->clap, clean, &clap))
+            publish_clap_event(ipc, &clap);
+    }
 
 #ifdef LE_WAKE_ENGINE_ONNX
     if (wake_worker && wake_worker->implementation) {
@@ -700,6 +760,7 @@ static int run_waked(const struct waked_config *config)
     memset(&metrics, 0, sizeof(metrics));
     metrics.vad_floor_rms = config->vad_floor_rms;
     memset(&ipc, 0, sizeof(ipc));
+    le_clap_detector_init(&ipc.clap);
     ipc.listen_fd = -1;
     ipc.event_pipe[0] = -1;
     ipc.event_pipe[1] = -1;

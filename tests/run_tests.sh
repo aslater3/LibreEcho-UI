@@ -141,6 +141,7 @@ sh tests/test_watchdog_voice_mode.sh
 make build/libreecho-waked
 WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
 WAKED_REQUIRED=1 python3 tests/test_waked_listen.py
+WAKED_REQUIRED=1 python3 tests/test_waked_clap.py
 sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
 make build/libreecho-timerd build/libreecho-watchdogd
@@ -160,6 +161,8 @@ sh tests/test_bluetooth_startup_readiness_contract.sh
 sh tests/test_bluetooth_startup_optionality_contract.sh
 sh tests/test_bluetooth_decoder_state_contract.sh
 make build/test-wake-led
+make build/test-clap-detector
+./build/test-clap-detector
 sh tests/test_microphone_fanout_contract.sh
 sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
