@@ -196,12 +196,14 @@ class NetworkPeers(unittest.TestCase):
         data = self.get('/api/v1/network/peers')['data']
         self.assertTrue(data['discoverable'])
         self.assertFalse(data['truncated'])
+        # Not paired (#450): nothing is checked and no key id is reported.
+        self.assertEqual((data['paired'], data['key_id']), (False, ''))
         by_name = {d['name']: d for d in data['devices']}
         self.assertEqual(sorted(by_name), ['hall-echo', 'libreecho-dev', 'libreecho-dev #2'])
         hall = by_name['hall-echo']
         self.assertEqual(hall, {'name': 'hall-echo', 'room': 'Hall "B" & co', 'version': '0.14.6',
                                 'address': '127.0.0.1', 'port': 8080, 'url': 'http://127.0.0.1:8080/',
-                                'self': False})
+                                'self': False, 'trust': 'off'})
         # Self is this device's address and HTTP port, not its hostname: the
         # renamed own record is self, the other device on the same hostname is not.
         self.assertTrue(by_name['libreecho-dev #2']['self'])
