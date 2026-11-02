@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
  run([sys.executable,'tests/test_esphomed_watchdog.py'],env);run([sys.executable,'tests/test_esphomed_init.py'],env)
  run([sys.executable,'tests/test_esphome_health.py'],env)
  if not a.host_only:
-  run([a.aio_python,'tests/test_esphomed_aio.py','PinnedFixture.test_pinned_plain_real_login_entities_ping_disconnect','PinnedFixture.test_pinned_noise_provision_reconnect_wrong_key','PinnedFixture.test_pinned_client_time_zone_reaches_config_when_followed'],env)
+  run([a.aio_python,'tests/test_esphomed_aio.py','PinnedFixture.test_pinned_plain_real_login_entities_ping_disconnect','PinnedFixture.test_pinned_noise_provision_reconnect_wrong_key','PinnedFixture.test_pinned_client_time_zone_reaches_config_when_followed','PinnedServerWake.test_pinned_server_wake_streams_and_stops'],env)
   run([a.aio_python,'tests/test_esphomed_media_state.py'],env)
   run([a.aio_python,'tests/test_esphomed_light_aio.py'],env)
   run([a.aio_python,'tests/test_esphomed_text_sensors_aio.py'],env)

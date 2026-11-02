@@ -1864,6 +1864,9 @@ static int persist_configuration(struct api_context*c)
     esphome_wake[0]=0;
     if(esphome.esphome_active_wake_word_present)
         snprintf(esphome_wake,sizeof esphome_wake,",\n  \"esphome_active_wake_word\": \"%s\"",esphome.esphome_active_wake_word);
+    /* Owner option esphome_server_wake survives HA/web saves; the daemon reads it on start and reload. */
+    if(esphome.esphome_server_wake_present)
+        snprintf(esphome_wake+strlen(esphome_wake),sizeof esphome_wake-strlen(esphome_wake),",\n  \"esphome_server_wake\": %s",esphome.esphome_server_wake?"true":"false");
     --length;
     if (snprintf(
             config + length, sizeof(config) - length,

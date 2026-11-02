@@ -149,6 +149,28 @@ from the stopped run can never attach to a new one. `buttond` reaches
 `/run/libreecho/esphome-control.sock` (`--control-socket`); the only command is
 `cancel`, and it does nothing when no request is in progress.
 
+## Server-side wake word (optional, off by default)
+
+By default the wake word is detected on the device by `waked`, and that stays
+the only path that starts a turn. The owner can instead let Home Assistant run
+wake detection, as in ESPHome's "wake word on Home Assistant" mode, by setting
+`"esphome_server_wake": true` in `web-config.json` (no web control yet). The
+option is read when the daemon starts or on SIGHUP.
+
+While it is on, Home Assistant owns voice, and the satellite is subscribed,
+`esphomed` opens a run with `USE_VAD|USE_WAKE_WORD` and no wake phrase, then
+streams the post-AEC mono 16 kHz microphone continuously. Home Assistant's
+wake engine decides when a turn begins. On-device wake events are ignored while
+the option is on. The ring pulses the listening colour while the stream is open.
+`/run/libreecho/esphome-status.json` reports `server_wake` (configured) and
+`server_wake_streaming` (audio is being sent now).
+
+Mute, the privacy switch, or the unsubscribe of Home Assistant ends the stream
+at once with a stop request. After a run ends or times out, streaming restarts
+after one second, unless it is muted or privacy is on. Nothing streams while
+the option is off or Home Assistant does not own voice. Saves from the web UI
+keep the `esphome_server_wake` key.
+
 ## Protocol contract
 
 The reviewed interoperability baseline is Home Assistant **2026.9.4**, which
