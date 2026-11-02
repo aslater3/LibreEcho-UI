@@ -99,7 +99,7 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/sound_store.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/wake_model.c src/wake_model_store.c src/peers.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/peer_auth.c src/peer_link.c
+SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/sound_store.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/wake_model.c src/wake_model_store.c src/peers.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/peer_auth.c src/peer_link.c src/peer_group.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -226,6 +226,13 @@ test-wake-arbiter:
 	mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_wake_arbiter.c src/adapter/wake_arbiter.c src/peer_auth.c src/json.c -lm -o $(BUILD)/test-wake-arbiter
 	./$(BUILD)/test-wake-arbiter
+
+# Device groups (#448): store, malformed files, the action names.
+.PHONY: test-peer-group
+test-peer-group:
+	mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_peer_group.c src/peer_group.c -o $(BUILD)/test-peer-group
+	./$(BUILD)/test-peer-group
 
 # Sendspin adapter contract: dependency-free, safe for the default suite. It pins
 # the offline/player-only CMake shape and that the heavy SDK lane stays opt-in.
