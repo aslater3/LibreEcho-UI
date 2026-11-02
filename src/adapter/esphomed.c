@@ -113,7 +113,7 @@ struct state {
  int led_on,led_r,led_g,led_b,led_brightness,led_effect,led_dirty;
  /* Settings entities (#396): ledd global brightness and waked sensitivity, read back by status poll. */
  int led_master,led_master_known,sensitivity,sensitivity_known;uint64_t settings_poll;
- int set_sent_known[4],set_sent_value[4];
+ int set_sent_known[4],set_sent_value[4],reply_sent_known,reply_sent;
  char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake,reply_volume,voice_open,server_wake,server_turn;
  uint64_t cancel_guard,control_retry;int control_fd;
  uint64_t now,server_retry,turn_deadline,turn_limit,last_audio_status,last_status_poll,wake_retry,mdns_retry,ring_first,ring_end,capture_next,timer_retry;
@@ -254,15 +254,17 @@ static int setting_now(unsigned i,int *v){switch(i){
 static void setting_send(struct client *c,unsigned i){int v=0,known=setting_now(i,&v);unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};
  if(i==3){ep_fixed32(&w,1,WAKE_SWITCH_KEY);ep_uint(&w,2,(unsigned)v);(void)send_writer(c,26,&w);return;}
  ep_fixed32(&w,1,i==0?VOLUME_NUMBER_KEY:i==1?SENSITIVITY_NUMBER_KEY:LED_BRIGHTNESS_KEY);if(known)put_float(&w,2,(float)v);else ep_uint(&w,3,1);(void)send_writer(c,50,&w);}
+/* Reply volume number (#409): state for one client, and broadcast only on change so the 250 ms status polls stay quiet (#396 rule). */
+static void reply_state(struct client *c){unsigned char b[16];struct ep_writer w={b,sizeof b,0,0};float f=(float)S.reply_volume;uint32_t bits;memcpy(&bits,&f,4);if(!S.last_audio_status)return;ep_fixed32(&w,1,REPLY_KEY);ep_fixed32(&w,2,bits);(void)send_writer(c,50,&w);}
+static void reply_sync(void){if(!S.last_audio_status||(S.reply_sent_known&&S.reply_volume==S.reply_sent))return;S.reply_sent_known=1;S.reply_sent=S.reply_volume;for(unsigned k=0;k<CLIENTS;k++)if(S.clients[k].fd>=0&&S.clients[k].states)reply_state(&S.clients[k]);}
 /* Sends a settings entity only when it changed (or was never sent), so the 250 ms status polls stay quiet. */
 static void settings_sync(void){for(unsigned i=0;i<4;i++){int v=0,known=setting_now(i,&v);
  if(known==S.set_sent_known[i]&&(!known||v==S.set_sent_value[i]))continue;
  S.set_sent_known[i]=known;S.set_sent_value[i]=v;
- for(unsigned k=0;k<CLIENTS;k++)if(S.clients[k].fd>=0&&S.clients[k].states)setting_send(&S.clients[k],i);}}
+ for(unsigned k=0;k<CLIENTS;k++)if(S.clients[k].fd>=0&&S.clients[k].states)setting_send(&S.clients[k],i);}reply_sync();}
 static void states_send(struct client *c){unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};float f=(float)S.volume/100.0f;uint32_t bits;memcpy(&bits,&f,4);
  ep_fixed32(&w,1,MEDIA_KEY);ep_uint(&w,2,S.playing?2:S.radio_state);ep_fixed32(&w,3,bits);ep_uint(&w,4,S.output_muted);if(S.last_audio_status)(void)send_writer(c,64,&w);
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
- if(S.last_audio_status){f=(float)S.reply_volume;memcpy(&bits,&f,4);w.length=0;ep_fixed32(&w,1,REPLY_KEY);ep_fixed32(&w,2,bits);(void)send_writer(c,50,&w);}
 }
 static const char *const button_ids[BUTTON_COUNT]={"volume_up","volume_down","microphone_mute","action"};
 static const char *const button_labels[BUTTON_COUNT]={"Volume up button","Volume down button","Microphone mute button","Action button"};
@@ -536,7 +538,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  switch(type){case 7:return send_msg(c,8,NULL,0);case 8:return 0;case 5:if(send_msg(c,6,NULL,0))return -1;c->closing=1;return 0;case 9:device_info(c);return 0;case 11:entities(c);return 0;
  /* The lux state goes once on subscribe, then only from light_poll: all_states() runs on every adapter status change.
   * Only clients whose entity list carried the sensor get it (a late-found sensor waits for the next list). */
- case 20:c->states=1;states_send(c);for(unsigned i=0;i<4;i++)setting_send(c,i);if(c->light)light_state(c);if(c->level)level_state(c);if(c->led_light)led_state(c);text_states(c);time_request(c);return 0;
+ case 20:c->states=1;states_send(c);reply_state(c);for(unsigned i=0;i<4;i++)setting_send(c,i);if(c->light)light_state(c);if(c->level)level_state(c);if(c->led_light)led_state(c);text_states(c);time_request(c);return 0;
  case 37:time_response(p,n);return 0;
  /* LightCommandRequest (#395): HA sets the LED ring light; device indicators keep priority. */
  case 32:return led_command(p,n);
