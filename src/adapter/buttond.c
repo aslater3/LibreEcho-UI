@@ -31,7 +31,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -87,6 +89,9 @@
 #ifndef STATUS_PATH
 #define STATUS_PATH "/run/libreecho/buttond-status"
 #endif
+/* The Home Assistant satellite's status and local control socket (#404). */
+#define ESPHOME_STATUS_PATH "/run/libreecho/esphome-status.json"
+#define ESPHOME_CONTROL_PATH "/run/libreecho/esphome-control.sock"
 #ifndef STATUS_TMP_PATH
 #define STATUS_TMP_PATH "/run/libreecho/buttond-status.tmp"
 #endif
@@ -108,6 +113,8 @@ struct device {
 struct context {
     const char *audio_sock;
     const char *led_sock;
+    const char *esphome_status;   /* NULL: no voice satellite to cancel */
+    const char *esphome_control;
     struct device devices[MAX_DEVICES];
     size_t device_count;
     int volume;          /* cached; -1 when unknown */
@@ -572,6 +579,49 @@ static void play_sample(struct context *ctx, const char *name)
     snprintf(args, sizeof(args), "{\"name\":\"%s\"}", name);
     (void)le_adapter_call(adapter, "sample", args, NULL, 0);
     le_adapter_close(adapter);
+}
+
+/*
+ * While a voice request is in progress the action button cancels it (#404),
+ * at any stage: listening, thinking or replying. esphomed publishes whether a
+ * request is in progress and takes one "cancel" datagram; the ring and the HA
+ * pipeline are its to settle. Anything missing -- no satellite, no request, a
+ * stale status from a stopped daemon -- returns 0 and the press does its usual
+ * job, so the button can never go dead because of this.
+ */
+static int voice_request_cancel(const struct context *ctx)
+{
+    char status[512];
+    struct sockaddr_un address;
+    int fd, busy = 0;
+    ssize_t n;
+    size_t length;
+
+    if (!ctx->esphome_status || !ctx->esphome_control)
+        return 0;
+    fd = open(ctx->esphome_status, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0)
+        return 0;
+    n = read(fd, status, sizeof(status) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    status[n] = '\0';
+    if (json_get_bool(status, "in_progress", &busy) <= 0 || !busy)
+        return 0;
+    length = strlen(ctx->esphome_control);
+    if (!length || length >= sizeof(address.sun_path))
+        return 0;
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return 0;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, ctx->esphome_control, length + 1);
+    n = sendto(fd, "cancel", 6, MSG_DONTWAIT | MSG_NOSIGNAL,
+               (struct sockaddr *)&address, sizeof(address));
+    close(fd);
+    return n == 6;
 }
 
 /*
@@ -1048,6 +1098,10 @@ static void handle_key(struct context *ctx, int code, int value)
             le_log_info("buttond: action button (%s)", ctx->action);
             if (!strcmp(ctx->action, "disabled"))
                 return;
+            if (voice_request_cancel(ctx)) {
+                le_log_info("buttond: action button cancelled the voice request");
+                return;
+            }
             if (!strcmp(ctx->action, "noise")) {
                 (void)action_noise_toggle(ctx);
                 action_flourish(ctx);
@@ -1117,6 +1171,8 @@ int main(int argc, char **argv)
     ctx.led_sock = getenv("LE_LED_SOCK");
     if (!ctx.led_sock || !ctx.led_sock[0])
         ctx.led_sock = LE_ADAPTER_LED_SOCK;
+    ctx.esphome_status = ESPHOME_STATUS_PATH;
+    ctx.esphome_control = ESPHOME_CONTROL_PATH;
     ctx.volume = -1;
     ctx.muted = -1;
     ctx.privacy_state = -1;

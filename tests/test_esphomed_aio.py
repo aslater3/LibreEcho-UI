@@ -26,6 +26,8 @@ class PinnedFixture(Fixture):
   client.media_player_command(1,media_url='http://example.invalid/fixture.mp3');await self.wait_for(lambda:any(r['cmd']=='play' for r in self.adapters['radio'].calls),'play URL command');self.assertEqual(self.wait_call('radio','play')['args'],{'url':'http://example.invalid/fixture.mp3'})
   for command,verb in [(MediaPlayerCommand.PAUSE,'pause'),(MediaPlayerCommand.PLAY,'resume'),(MediaPlayerCommand.STOP,'stop')]:
    client.media_player_command(1,command=command);await self.wait_for(lambda:any(r['cmd']==verb for r in self.adapters['radio'].calls),verb)
+  # #404: the pinned client's Cancel request press is accepted while idle (no turn, connection kept).
+  client.button_command(404);await asyncio.sleep(.1)
   client.media_player_command(1,volume=.42);await self.wait_for(lambda:any(r['cmd']=='set_volume' and r['args']=={'volume':42} for r in self.adapters['audio'].calls),'volume command')
   client.media_player_command(1,command=MediaPlayerCommand.MUTE);await self.wait_for(lambda:any(r['cmd']=='set_volume' and r['args']=={'volume':0} for r in self.adapters['audio'].calls),'output mute');await self.wait_for(lambda:any(isinstance(s,MediaPlayerEntityState) and s.muted for s in states),'output muted state')
   client.media_player_command(1,command=MediaPlayerCommand.UNMUTE);await self.wait_for(lambda:isinstance(states[-2],MediaPlayerEntityState) and not states[-2].muted if len(states)>1 else False,'output unmuted state')
@@ -72,7 +74,9 @@ class PinnedFixture(Fixture):
    client=APIClient('127.0.0.1',self.port,client_info='LibreEcho isolated acceptance',provide_time=False)
    try:
     await client.connect(login=True);info=await client.device_info();self.assertEqual(info.name,'fixture-satellite');self.assertEqual(info.mac_address,'02:00:00:00:00:01');self.assertEqual(info.voice_assistant_feature_flags,61)
-    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2});self.assertFalse(services)
+    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,404});self.assertFalse(services)
+    from aioesphomeapi.model import ButtonInfo
+    cancel=next(e for e in entities if isinstance(e,ButtonInfo));self.assertEqual((cancel.key,cancel.object_id,cancel.name),(404,'cancel_request','Cancel request'))
     from aioesphomeapi.model import MediaPlayerEntityFeature,MediaPlayerInfo
     media=next(e for e in entities if isinstance(e,MediaPlayerInfo));self.assertTrue(media.supports_pause);self.assertEqual(media.feature_flags,int(MediaPlayerEntityFeature.PAUSE|MediaPlayerEntityFeature.PLAY|MediaPlayerEntityFeature.STOP|MediaPlayerEntityFeature.VOLUME_SET|MediaPlayerEntityFeature.VOLUME_MUTE|MediaPlayerEntityFeature.PLAY_MEDIA|MediaPlayerEntityFeature.MEDIA_ANNOUNCE))
     await self.exercise_controls_and_voice(client)
@@ -101,7 +105,7 @@ class PinnedFixture(Fixture):
    await asyncio.sleep(.05)
    good=APIClient('127.0.0.1',self.port,noise_psk=encoded,provide_time=False)
    try:
-    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2})
+    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,404})
     await self.exercise_controls_and_voice(good)
     await good._get_connection().send_message_await_response(PingRequest(),PingResponse);await good.disconnect()
    finally:await good.disconnect(force=True)

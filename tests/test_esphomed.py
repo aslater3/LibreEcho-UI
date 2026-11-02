@@ -95,7 +95,9 @@ class Fixture(Daemon):
  def test_hello_auth_device_list_ping_disconnect(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(b'fixture-satellite',b);self.assertIn(num(17,61),b)
   self.assertNotIn(var((16<<3)|2),b,'no room configured: DeviceInfo has no suggested_area')
-  self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(3)],[63,17,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
+  self.s.sendall(frame(11));listed=[receive(self.s) for _ in range(4)];self.assertEqual([t for t,_ in listed],[63,17,61,19])
+  button=listed[2][1];self.assertIn(b'\x15'+struct.pack('<I',404),button);self.assertIn(text(3,'Cancel request'),button)
+  self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
  def test_oversize_malformed_and_client_limit(self):
   self.hello();s2=self.connect();s3=self.connect();self.assertEqual(s3.recv(1),b'');s2.sendall(b'\0'+var(65537)+var(1));self.assertEqual(s2.recv(1),b'')
   time.sleep(.05);s4=self.connect();s4.sendall(frame(9,b'\x08'+b'\xff'*10));self.assertEqual(s4.recv(1),b'')
@@ -291,4 +293,75 @@ class RoomUnsafeNotSent(Daemon):
  config_fields=dict(ROOM_BASE,room='Hall\nsecond line')
  def test_unsafe_room_is_not_sent(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertNotIn(var((16<<3)|2),b);self.assertIn(b'fixture-satellite',b)
+CANCELLED=(90,num(1,0))
+class CancelRequest(Daemon):
+ # #404: the Action button, Home Assistant's "Cancel request" button and a
+ # second wake word end a request quietly; nothing of the stopped run plays.
+ def setUp(self):
+  self.ctl_dir=tempfile.mkdtemp(prefix='esc-',dir='/tmp');self.ctl=os.path.join(self.ctl_dir,'c.sock');self.extra_args=['--control-socket',self.ctl];super().setUp()
+ def tearDown(self):
+  super().tearDown();self.assertFalse(os.path.exists(self.ctl),'control socket is removed on exit');os.rmdir(self.ctl_dir)
+ def start(self,thinking):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  time.sleep(.1);a.wake(4000);t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(1,1),b);self.s.sendall(frame(91))
+  if thinking:self.s.sendall(frame(92,num(1,12)))
+  end=time.monotonic()+2
+  while time.monotonic()<end:
+   t,b=receive(self.s)
+   if not thinking or (t==106 and num(2,1) in b):break
+  self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress']);return a
+ def cancelled(self):
+  end=time.monotonic()+2
+  while time.monotonic()<end:
+   if receive(self.s)==CANCELLED:break
+  else:self.fail('no pipeline stop sent to Home Assistant')
+  status=json.loads((self.p/'status.json').read_text());self.assertFalse(status['in_progress']);self.assertEqual(status['last_result'],'cancelled')
+  time.sleep(.1);led=[r['args'] for r in self.adapters['led'].calls if r['cmd']=='pattern'];self.assertEqual(led[-1].get('name'),'stop','ring returns to idle');self.assertNotIn('flash',[x.get('name') for x in led],'a cancel is not an error')
+ def no_reply(self,url):
+  # Late events from the stopped run start no playback and no new turn.
+  self.s.sendall(frame(92,num(1,8)+text(2,text(1,'url')+text(2,url)))+frame(92,num(1,2)));self.s.settimeout(.4)
+  with self.assertRaises(TimeoutError):receive(self.s)
+  self.s.settimeout(3);time.sleep(.2)
+  with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
+  self.assertFalse(self.busbytes,'no reply audio after a cancel');self.assertFalse(json.loads((self.p/'status.json').read_text())['in_progress'])
+ def wav_url(self):
+  wav=io.BytesIO()
+  with wave.open(wav,'wb') as w:w.setnchannels(1);w.setsampwidth(2);w.setframerate(48000);w.writeframes(struct.pack('<h',1200)*4800)
+  data=wav.getvalue()
+  class HTTP(BaseHTTPRequestHandler):
+   def do_GET(self):self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+   def log_message(self,*a):pass
+  server=ThreadingHTTPServer(('127.0.0.1',0),HTTP);thread=threading.Thread(target=server.serve_forever);thread.start()
+  self.addCleanup(server.server_close);self.addCleanup(thread.join,2);self.addCleanup(server.shutdown);return f'http://127.0.0.1:{server.server_port}/tts.wav'
+ def control(self,message=b'cancel'):
+  c=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM);c.sendto(message,self.ctl);c.close()
+ def test_ha_button_cancels_while_thinking(self):
+  self.start(True);self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',404)));self.cancelled();self.no_reply(self.wav_url())
+ def test_ha_button_with_wrong_key_is_rejected(self):
+  self.start(True);self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',405)));self.assertEqual(self.s.recv(1),b'')
+ def test_action_button_cancels_while_listening(self):
+  a=self.start(False);self.control(b'other');time.sleep(.1);self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'],'only "cancel" is a command')
+  self.control();self.cancelled()
+  a.samples(6400);a.wake(6600);self.s.settimeout(.4)
+  with self.assertRaises(TimeoutError):receive(self.s)
+  self.s.settimeout(3);time.sleep(1.4);a.wake(30000);t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(1,1),b,'after the guard a wake starts a fresh request')
+ def test_action_button_cancels_while_replying(self):
+  self.start(True);url=self.wav_url();self.s.sendall(frame(92,num(1,8)+text(2,text(1,'url')+text(2,url))));end=time.monotonic()+2
+  while time.monotonic()<end and not self.busbytes:
+   with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
+   time.sleep(.01)
+  self.assertTrue(self.busbytes,'the reply was playing');self.control();self.cancelled()
+  with contextlib.suppress(BlockingIOError):os.read(self.busfd,1<<20)
+  self.busbytes=bytearray();self.s.sendall(frame(92,num(1,2)));time.sleep(.3)
+  with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
+  self.assertFalse(self.busbytes,'playback stops at the cancel')
+ def test_wake_word_cancels_while_thinking(self):
+  a=self.start(True);a.samples(6400);a.wake(6600);self.cancelled();self.no_reply(self.wav_url())
+ def test_wake_word_while_listening_does_not_cancel(self):
+  a=self.start(False);a.samples(6400);a.wake(6600);time.sleep(.3);self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'])
+ def test_cancel_when_idle_is_ignored(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));time.sleep(.1);self.control();self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',404)));self.s.settimeout(.3)
+  with self.assertRaises(TimeoutError):receive(self.s)
+  self.assertNotEqual(json.loads((self.p/'status.json').read_text())['last_result'],'cancelled')
 if __name__=='__main__':unittest.main()

@@ -39,6 +39,28 @@ configuration are not erased. There is no protocol selector, legacy satellite
 banner, or staged compatibility state. Integration bit 1 remains HA-enabled;
 missing/old `ha_protocol` values normalize to `esphome`.
 
+### Cancelling a request
+
+A request can be cancelled at any stage, and the light ring then goes straight
+back to idle (no error flash). Home Assistant is told to stop the run, and
+nothing from that run is played afterwards:
+
+- **Action button**: while a request is in progress (listening, thinking or
+  replying), a press cancels it instead of doing its usual job. A button whose
+  action is set to `disabled` stays inert.
+- **Home Assistant**: the device exposes a **Cancel request** button entity
+  (`button.<device>_cancel_request`), usable from dashboards and automations.
+- **Wake word**: saying the wake word again while Home Assistant is thinking
+  cancels the request. While listening and replying the wake word does not
+  cancel (your own command, or the reply's echo, could contain it); use the
+  button, Home Assistant or "stop" there.
+
+For about 1.5 seconds after a cancel, a new wake word is ignored, so late events
+from the stopped run can never attach to a new one. `buttond` reaches
+`esphomed` through the root-only datagram socket
+`/run/libreecho/esphome-control.sock` (`--control-socket`); the only command is
+`cancel`, and it does nothing when no request is in progress.
+
 ## Protocol contract
 
 The reviewed interoperability baseline is Home Assistant **2026.9.4**, which
