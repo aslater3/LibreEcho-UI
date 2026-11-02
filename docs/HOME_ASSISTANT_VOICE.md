@@ -54,6 +54,26 @@ window, so it can arrive a fraction of a second after the press. The buttons
 keep working locally as before; the events only report what the buttons did.
 An entity only sees presses from a button the board has.
 
+Device activity is offered the same way, as three more event entities. None of
+them carries transcript text, TTS or media URLs, or timer names; each event is
+only its type:
+
+- **Voice assistant** (`wake_word`, `listening`, `thinking`, `replying`,
+  `finished`, `stopped`): `wake_word` when the wake word is heard on the
+  device, `listening` when the request opens, `thinking` when capture ends,
+  `replying` when the reply is about to play, and one closing event per turn:
+  `finished` when it completed, or `stopped` when it was cancelled or failed.
+  Announcements and follow-up turns open and close their own turn the same way.
+- **Playback** (`started`, `stopped`): a finite reply or announcement URL starts
+  or stops playing on the device. Plain media-player URLs (radio streams) and
+  Bluetooth/AirPlay audio are not reported.
+- **Timer** (`started`, `updated`, `cancelled`, `finished`): the timer events
+  Home Assistant sends for its voice timers. A timer ringing on the device is
+  not reported yet.
+
+These entities are event-only: they carry no state, and HA receives them only
+while it is subscribed to the device's states, as with the buttons.
+
 Disabling HA restores the previously selected **Local** or **Custom** mode and
 its settings. Custom Whisper/Piper addresses, model/voice choices and assistant
 configuration are not erased. There is no protocol selector, legacy satellite
