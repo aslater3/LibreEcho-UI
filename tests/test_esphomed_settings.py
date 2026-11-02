@@ -60,7 +60,8 @@ class SettingsEntities(Settings):
   self.adapters['audio'].volume=30
   self.subscribe()
   latest=self.number_states(5,want={VOLUME:30.0,SENSITIVITY:55.0,LED_BRIGHTNESS:40.0})
-  self.assertEqual(latest,{VOLUME:30.0,SENSITIVITY:55.0,LED_BRIGHTNESS:40.0})
+  # Key 50 is the separate reply volume number (#409): it follows the master volume and is covered by test_esphomed_aio.
+  self.assertEqual({k:v for k,v in latest.items() if k!=50},{VOLUME:30.0,SENSITIVITY:55.0,LED_BRIGHTNESS:40.0})
 
  def test_unchanged_settings_are_not_repeated_on_status_polls(self):
   self.subscribe();self.number_states(1)
@@ -80,7 +81,7 @@ class SettingsCommands(Settings):
   self.s.sendall(number_command(VOLUME,30));self.assertEqual(self.wait_call('audio','set_volume'),{'volume':30})
   self.assertEqual(self.wait_call('led','activity'),{'source':'volume'},'web volume activity not sent')
   latest=self.number_states(5,want={LED_BRIGHTNESS:75.0,SENSITIVITY:60.0,VOLUME:30.0})
-  self.assertEqual(latest,{LED_BRIGHTNESS:75.0,SENSITIVITY:60.0,VOLUME:30.0})
+  self.assertEqual({k:v for k,v in latest.items() if k!=50},{LED_BRIGHTNESS:75.0,SENSITIVITY:60.0,VOLUME:30.0})
 
  def test_wake_switch_turns_wake_word_off_and_on(self):
   self.subscribe();self.number_states(1)
