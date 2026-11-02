@@ -36,6 +36,7 @@
 
 #define TIMER_SOCK "/run/libreecho/timer.sock"
 #define STATE_PATH "/data/libreecho/config/timers"
+#define TTS_SOCK LE_ADAPTER_TTS_SOCK
 #define MAX_CLIENTS 4
 #define POLL_CAP_MS 60000
 #define RESTORE_RETRY_MS 1000
@@ -47,6 +48,11 @@
 #define RING_LOW_HZ 880
 #define RING_HIGH_HZ 1320
 #define RING_CUE_MS 250
+
+/* A reminder is spoken, not rung. The chime is the same cue, then the speech
+   starts after the two tones have finished so the words are not talked over. */
+#define REMINDER_CHIME_GAP_MS 600
+#define REMINDER_TEXT_MAX (LE_TIMER_LABEL_MAX + 32)
 
 /* HA owns remote expiry. This table is separate from the persisted local
    schedule and cannot consume local timer/alarm slots or synthesize a due time. */
@@ -69,6 +75,7 @@ struct context {
     const char *socket_path;
     const char *state_path;
     const char *audio_sock;
+    const char *tts_socket;
     int listen_fd;
     int clients[MAX_CLIENTS];
     long long next_ring_ms;
@@ -385,9 +392,14 @@ static enum state_save_result state_save_at(struct context *ctx,
                 continue;
             due = now_epoch + (timer->due_monotonic_ms - now_ms) / 1000LL;
         }
+        /* v5 reminders are unknown to older daemons, which skip the line. */
         if (state_encode_label(encoded_label, sizeof(encoded_label),
                                timer->label) < 0 ||
-            (timer->kind == LE_TIMER_ALARM && timer->repeat_days
+            (timer->kind == LE_TIMER_ALARM && timer->reminder
+                 ? fprintf(file, "v5 reminder %u %lld %u %d %d %s\n", timer->id,
+                           due, timer->repeat_days, timer->hour, timer->minute,
+                           encoded_label)
+                 : timer->kind == LE_TIMER_ALARM && timer->repeat_days
                  ? fprintf(file, "v4 alarm %u %lld %u %d %d %s\n", timer->id,
                            due, timer->repeat_days, timer->hour, timer->minute,
                            encoded_label)
@@ -494,15 +506,17 @@ static int state_load_at(struct context *ctx, long long now_ms,
         int format = 0;
 
         label[0] = '\0';
-        if (!strncmp(line, "v4 alarm ", 9)) {
+        if (!strncmp(line, "v4 alarm ", 9) || !strncmp(line, "v5 reminder ", 12)) {
             unsigned int days = 0;
             unsigned int record_id = 0;
             int hour = -1, minute = -1, consumed = 0;
+            int reminder = line[1] == '5';
             size_t length;
 
-            if (sscanf(line, "v4 alarm %u %lld %u %d %d%n", &record_id, &due,
-                       &days, &hour, &minute, &consumed) != 5 || consumed <= 0 ||
-                !record_id)
+            if (sscanf(line, reminder ? "v5 reminder %u %lld %u %d %d%n"
+                                      : "v4 alarm %u %lld %u %d %d%n",
+                       &record_id, &due, &days, &hour, &minute, &consumed) != 5 ||
+                consumed <= 0 || !record_id)
                 continue;
             if (line[consumed] != ' ')
                 continue;
@@ -512,9 +526,14 @@ static int state_load_at(struct context *ctx, long long now_ms,
                 line[consumed + --length + 1] = '\0';
             if (state_decode_label(line + consumed + 1, label, sizeof(label)) < 0)
                 continue;
-            if (le_timer_restore_repeat_alarm(&ctx->timers, record_id, due, hour,
-                                              minute, days, label, now_epoch,
-                                              now_ms, &id) != LE_TIMER_OK)
+            if ((reminder
+                     ? le_timer_restore_reminder(&ctx->timers, record_id, due,
+                                                 hour, minute, days, label,
+                                                 now_epoch, now_ms, &id)
+                     : le_timer_restore_repeat_alarm(&ctx->timers, record_id,
+                                                     due, hour, minute, days,
+                                                     label, now_epoch, now_ms,
+                                                     &id)) != LE_TIMER_OK)
                 ++ctx->timers.missed;
             continue;
         }
@@ -723,6 +742,51 @@ static void ring_tick(struct context *ctx, long long now_ms)
     ctx->next_ring_ms = now_ms + RING_PERIOD_MS;
 }
 
+/*
+ * A due reminder is said once and cleared, not rung. The label is read before
+ * the dismiss because a one-off reminder leaves the schedule with it, and a
+ * repeating one moves to its next occurrence. Speech goes through ttsd, the
+ * same path the agent uses; if ttsd is down the reminder is logged and dropped
+ * rather than held back.
+ */
+static void announce_reminder(struct context *ctx, unsigned int id,
+                              long long now_epoch)
+{
+    char label[LE_TIMER_LABEL_MAX];
+    char text[REMINDER_TEXT_MAX];
+    char escaped[REMINDER_TEXT_MAX * 6];
+    char args[REMINDER_TEXT_MAX * 6 + 32];
+    struct le_timer *timer = le_timer_find(&ctx->timers, id);
+    struct le_adapter *tts;
+    struct timespec gap = { REMINDER_CHIME_GAP_MS / 1000,
+                            (REMINDER_CHIME_GAP_MS % 1000) * 1000000L };
+    int rc;
+
+    if (!timer)
+        return;
+    snprintf(label, sizeof(label), "%s", timer->label);
+    (void)le_timer_dismiss_at(&ctx->timers, id, now_epoch);
+    ctx->dirty = 1;
+    le_log_info("timerd: reminder %u is due", id);
+
+    audio_cue(ctx);
+    nanosleep(&gap, NULL);
+
+    snprintf(text, sizeof(text), "Reminder: %s", label[0] ? label : "your reminder");
+    json_escape(escaped, sizeof(escaped), text);
+    snprintf(args, sizeof(args), "{\"text\":\"%s\"}", escaped);
+    tts = le_adapter_connect(ctx->tts_socket, AUDIO_TIMEOUT_MS);
+    if (!tts) {
+        le_log_warn("timerd: speech daemon unavailable; reminder %u is silent", id);
+        return;
+    }
+    le_adapter_set_io_timeout(tts, AUDIO_TIMEOUT_MS);
+    rc = le_adapter_call(tts, "speak", args, NULL, 0);
+    if (rc != LE_ADAPTER_OK)
+        le_log_warn("timerd: reminder speech failed (%d)", rc);
+    le_adapter_close(tts);
+}
+
 /* ------------------------------- commands ------------------------------- */
 
 static int timers_json(struct context *ctx, char *out, size_t size)
@@ -758,8 +822,9 @@ static int timers_json(struct context *ctx, char *out, size_t size)
 
         if (timer->kind == LE_TIMER_ALARM) {
             /* A repeating alarm reports the time it is set for, not the due
-               instant of a snooze. A one-off reports the local time it rings. */
-            if (timer->repeat_days) {
+               instant of a snooze. A one-off reports the local time it rings.
+               A reminder always carries the time it was set for. */
+            if (timer->repeat_days || timer->reminder) {
                 hour = timer->hour;
                 minute = timer->minute;
             } else {
@@ -783,8 +848,8 @@ static int timers_json(struct context *ctx, char *out, size_t size)
                            "\"seconds_remaining\":%lld,\"label\":\"%s\","
                            "\"repeat_days\":%u,\"hour\":%d,\"minute\":%d}",
                            first ? "" : ",", timer->id,
-                           timer->kind == LE_TIMER_ALARM ? "alarm"
-                                                         : "countdown",
+                           timer->kind != LE_TIMER_ALARM ? "countdown"
+                           : timer->reminder ? "reminder" : "alarm",
                            timer->state == LE_TIMER_STATE_RINGING
                                ? "ringing" : "pending",
                            remaining, label,
@@ -923,14 +988,19 @@ static int remote_event(struct context *ctx, const char *args,
 /* The optional "kind" filter on next and cancel_all: "" matches everything. */
 static int kind_valid(const char *kind)
 {
-    return !kind[0] || !strcmp(kind, "alarm") || !strcmp(kind, "countdown");
+    return !kind[0] || !strcmp(kind, "alarm") || !strcmp(kind, "countdown") ||
+           !strcmp(kind, "reminder");
 }
 
+/* "alarm" selects alarms only, so cancelling an alarm cannot cancel a
+   reminder, and the reverse. */
 static int kind_matches(const struct le_timer *timer, const char *kind)
 {
     if (!kind[0])
         return 1;
-    return !strcmp(kind, timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown");
+    if (timer->kind != LE_TIMER_ALARM)
+        return !strcmp(kind, "countdown");
+    return !strcmp(kind, timer->reminder ? "reminder" : "alarm");
 }
 
 static int dispatch(struct context *ctx, const char *cmd, const char *args,
@@ -1019,6 +1089,29 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         return le_adapter_respond_ok(out, size, id, data);
     }
 
+    /* A spoken reminder at hour:minute, repeating on days (zero for once). */
+    if (!strcmp(cmd, "add_reminder")) {
+        unsigned int created = 0;
+        int hour = -1, minute = -1, days = 0;
+        int result;
+
+        if (!args || json_get_int(args, "hour", &hour) != 1 ||
+            json_get_int(args, "minute", &minute) != 1 ||
+            json_get_int(args, "days", &days) != 1)
+            return le_adapter_respond_err(out, size, id,
+                                          "add_reminder requires hour, minute and days");
+        result = le_timer_add_reminder(&ctx->timers, hour, minute,
+                                       (unsigned int)days, label, wall_epoch(),
+                                       &created);
+        if (result != LE_TIMER_OK)
+            return le_adapter_respond_err(out, size, id, add_error(result));
+        ctx->dirty = 1;
+        snprintf(data, sizeof(data), "{\"id\":%u}", created);
+        le_log_info("timerd: reminder %u at %02d:%02d days 0x%02x",
+                    created, hour, minute, days);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+
     if (!strcmp(cmd, "add_alarm")) {
         unsigned int created = 0;
         int result;
@@ -1051,7 +1144,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
 
         if (kind_result < 0 || !kind_valid(kind_result == 1 ? kind : ""))
             return le_adapter_respond_err(out, size, id,
-                                          "kind must be alarm or countdown");
+                                          "kind must be alarm, countdown or reminder");
         for (i = 0; i < LE_TIMER_MAX; ++i) {
             if (ctx->timers.timers[i].state != LE_TIMER_STATE_PENDING ||
                 !kind_matches(&ctx->timers.timers[i], kind_result == 1 ? kind : ""))
@@ -1080,7 +1173,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
 
         if (kind_result < 0 || !kind_valid(kind_result == 1 ? kind : ""))
             return le_adapter_respond_err(out, size, id,
-                                          "kind must be alarm or countdown");
+                                          "kind must be alarm, countdown or reminder");
         for (i = 0; i < LE_TIMER_MAX; ++i) {
             const struct le_timer *timer = &ctx->timers.timers[i];
             long long remaining;
@@ -1236,6 +1329,7 @@ int main(int argc, char **argv)
     ctx.socket_path = TIMER_SOCK;
     ctx.state_path = STATE_PATH;
     ctx.audio_sock = LE_ADAPTER_AUDIO_SOCK;
+    ctx.tts_socket = TTS_SOCK;
     ctx.listen_fd = -1;
     for (i = 0; i < MAX_CLIENTS; ++i)
         ctx.clients[i] = -1;
@@ -1248,6 +1342,8 @@ int main(int argc, char **argv)
             ctx.state_path = argv[++i];
         else if (!strcmp(argv[i], "--audio-socket") && i + 1 < argc)
             ctx.audio_sock = argv[++i];
+        else if (!strcmp(argv[i], "--tts-socket") && i + 1 < argc)
+            ctx.tts_socket = argv[++i];
         else if (!strcmp(argv[i], "--foreground"))
             continue;
         else if (argv[i][0] == '-' && strncmp(argv[i], "--verbose", 9) &&
@@ -1255,7 +1351,8 @@ int main(int argc, char **argv)
                  strncmp(argv[i], "--quiet", 7)) {
             fprintf(stderr,
                     "usage: %s [--foreground] [--socket PATH] "
-                    "[--state PATH] [--audio-socket PATH]\n", argv[0]);
+                    "[--state PATH] [--audio-socket PATH] [--tts-socket PATH]\n",
+                    argv[0]);
             return 2;
         }
     }
@@ -1297,10 +1394,15 @@ int main(int argc, char **argv)
         if (count > 0) {
             int k;
 
-            for (k = 0; k < count; ++k)
+            for (k = 0; k < count; ++k) {
+                if (le_timer_is_reminder(&ctx.timers, fired[k])) {
+                    announce_reminder(&ctx, fired[k], now_epoch);
+                    continue;
+                }
                 le_log_info("timerd: timer %u is due", fired[k]);
-            /* Ring at once rather than waiting out a period. */
-            ctx.next_ring_ms = 0;
+                /* Ring at once rather than waiting out a period. */
+                ctx.next_ring_ms = 0;
+            }
             ctx.dirty = 1;
         }
         ring_tick(&ctx, now_ms);

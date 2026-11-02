@@ -459,6 +459,71 @@ int main(void)
         assert(intent.alarm_days == 0U);
     }
 
+    /* Reminders: "remind me to X at TIME" and "remind me <days> at TIME to X".
+       The label is the words, never the time, and "stop" inside a reminder is
+       part of the label, not a silence request. */
+    {
+        struct le_timer_intent intent;
+        char speech[LE_TIMER_INTENT_SPEECH_MAX];
+
+        assert(le_timer_intent_parse("remind me to take pills at 6pm", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_hour == 18 && intent.alarm_minute == 0);
+        assert(intent.alarm_days == 0U);
+        assert(!strcmp(intent.label, "take pills"));
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(!strcmp(speech, "Reminder set for 6:00 pm: take pills."));
+
+        assert(le_timer_intent_parse(
+                   "remind me every weekday at 8 am to take pills", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_hour == 8 && intent.alarm_minute == 0);
+        assert(intent.alarm_days == 0x3eU);
+        assert(!strcmp(intent.label, "take pills"));
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(!strcmp(speech, "Reminder set for 8:00 am, on weekdays: take pills."));
+
+        /* The last "at" ends the label, so a name keeps its own "at". */
+        assert(le_timer_intent_parse(
+                   "remind me to call dad at the office at 6 30 pm", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_hour == 18 && intent.alarm_minute == 30);
+        assert(!strcmp(intent.label, "call dad at the office"));
+
+        assert(le_timer_intent_parse("remind me every day to stretch at 7am",
+                                     &intent) == LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_days == 0x7fU && !strcmp(intent.label, "stretch"));
+
+        /* A reminder whose verb is a silence or cancel word is still a reminder. */
+        assert(le_timer_intent_parse("remind me to stop smoking at 9pm", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(!strcmp(intent.label, "stop smoking"));
+
+        /* No time gives the model the request; so does a negated one. */
+        assert(kind_of("remind me to take pills") == LE_TIMER_INTENT_NONE);
+        assert(kind_of("don't remind me to take pills at 6pm") ==
+               LE_TIMER_INTENT_NONE);
+        /* No am or pm: asked, never guessed. */
+        assert(le_timer_intent_parse("remind me to take pills at 6", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_hour < 0);
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(!strcmp(speech, "What time should the reminder be?"));
+
+        /* Cancelling reminders is separate from cancelling alarms. */
+        assert(le_timer_intent_parse("cancel my reminder", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.reminder_only == 1 && intent.alarm_only == 0);
+        le_timer_intent_speech(&intent, 1, 0, speech, sizeof(speech));
+        assert(!strcmp(speech, "Reminder cancelled."));
+        assert(le_timer_intent_parse("cancel all my reminders", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.reminder_only == 1 && intent.cancel_all == 1);
+        assert(le_timer_intent_parse("cancel my alarm", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.alarm_only == 1 && intent.reminder_only == 0);
+    }
+
     printf("timer intent: ok\n");
     return 0;
 }

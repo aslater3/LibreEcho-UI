@@ -2222,10 +2222,12 @@ try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==s
  /* Alarms have their own list with the clock time (the server supplies it in
     the device zone); the countdown table keeps countdowns only. */
  const alarms=(t.timers||[]).filter(x=>x.kind==='alarm');
- const countdowns=(t.timers||[]).filter(x=>x.kind!=='alarm');
+ const reminders=(t.timers||[]).filter(x=>x.kind==='reminder');
+ const countdowns=(t.timers||[]).filter(x=>x.kind!=='alarm'&&x.kind!=='reminder');
  const rows=countdowns.map(x=>`<tr><td>${esc(x.label||'Timer')}</td><td>${x.state==='ringing'?'<strong>ringing</strong>':esc(sayLeft(x.seconds_remaining))}</td><td class="right">${x.state==='pending'?`<button class="link-btn" data-cancel="${x.id}">Cancel</button>`:''}</td></tr>`).join('');
  const alarmDays=d=>({'':'Once','sun,mon,tue,wed,thu,fri,sat':'Every day','mon,tue,wed,thu,fri':'Weekdays','sat,sun':'Weekends'})[d]||esc(d);
  const alarmRows=alarms.map(a=>`<tr><td>${esc(a.time||'')}</td><td>${esc(a.label||'Alarm')}</td><td>${esc(alarmDays(a.days||''))}</td><td>${a.state==='ringing'?'<strong>ringing</strong>':'in '+esc(sayLeft(a.seconds_remaining))}</td><td class="right">${a.state==='pending'?`<button class="link-btn" data-cancel-alarm="${a.id}">Cancel</button>`:''}</td></tr>`).join('');
+ const reminderRows=reminders.map(a=>`<tr><td>${esc(a.time||'')}</td><td>${esc(a.label||'Reminder')}</td><td>${esc(alarmDays(a.days||''))}</td><td class="right">${a.state==='pending'?`<button class="link-btn" data-cancel-reminder="${a.id}">Cancel</button>`:''}</td></tr>`).join('');
  state.timerViewReady=true;
  content.innerHTML=`<div class="settings-grid">${panel('Timers',
    (countdowns.length
@@ -2233,6 +2235,11 @@ try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==s
      :`<div class="empty-state"><p>No timers set.</p></div>`)
    +(t.ringing>0?`<div class="button-row">${action('Stop ringing','dismiss-timers','primary-btn')}${alarms.some(a=>a.state==='ringing')?action('Snooze alarm','snooze-alarms'):''}</div>`:'')
    +(t.missed>0?`<p class="muted">${t.missed} timer${t.missed===1?'':'s'} came due while the device was off and ${t.missed===1?'was':'were'} not rung.</p>`:''))}
+  ${panel('Reminders',
+   (reminders.length
+     ?`<table class="data-table"><thead><tr><th>Time</th><th>Reminder</th><th>Repeat</th><th></th></tr></thead><tbody>${reminderRows}</tbody></table>`
+     :`<div class="empty-state"><p>No reminders set.</p></div>`)
+   +`<label class="field"><span>Time (24-hour)</span><input id="reminder-time" type="time" value="08:00"></label><label class="field"><span>Repeat</span><select id="reminder-days"><option value="">Once</option><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="weekends">Weekends</option></select></label><label class="field"><span>Reminder text</span><input id="reminder-label" type="text" placeholder="take the pills"></label><div class="button-row">${action('Set reminder','add-reminder','primary-btn')}</div><p class="muted">The device says the reminder aloud at its time, and it survives a restart. Reminders can also be set by voice: “remind me to take the pills at 6pm”.</p>`)}
   ${panel('New timer',`<label class="field"><span>Minutes</span><input id="timer-minutes" type="number" min="1" max="1440" value="10"></label><label class="field"><span>Name (optional)</span><input id="timer-label" type="text" placeholder="pasta"></label><div class="button-row">${action('Start timer','add-timer','primary-btn')}</div><p class="muted">Optional name: up to 47 UTF-8 bytes. Timers can also be set by voice: “set a timer for ten minutes”.</p>`)}
   ${panel('Alarms',
    (alarms.length
@@ -2245,7 +2252,12 @@ try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==s
   if(!(minutes>=1)){toast('Enter a length of at least one minute',true);return}
   if(utf8Bytes(label)>47){toast('Timer name must be no longer than 47 UTF-8 bytes',true);return}
   post('/timers',{seconds:Math.round(minutes*60),label},'Timer started')};
- $('#add-alarm').onclick=()=>{
+ $('#add-reminder').onclick=()=>{
+  const time=$('#reminder-time').value||'',label=$('#reminder-label').value||'';
+  if(!/^\d{2}:\d{2}$/.test(time)){toast('Choose a time for the reminder',true);return}
+  const days=$('#reminder-days')?.value||'';
+  post('/reminders',days?{time,label,days}:{time,label},'Reminder set')};
+$('#add-alarm').onclick=()=>{
   const time=$('#alarm-time').value||'',label=$('#alarm-label').value||'';
   if(!/^\d{2}:\d{2}$/.test(time)){toast('Choose a time for the alarm',true);return}
   if(utf8Bytes(label)>47){toast('Alarm name must be no longer than 47 UTF-8 bytes',true);return}
@@ -2255,6 +2267,7 @@ try{t=await api('/timers')}catch(error){if(state.page!=='Timers'||generation!==s
  const snooze=$('#snooze-alarms');if(snooze)snooze.onclick=()=>post('/alarms/snooze',{},'Alarm snoozed for five minutes');
  content.querySelectorAll('[data-cancel]').forEach(b=>{b.onclick=()=>del('/timers/'+b.dataset.cancel,'Timer cancelled')});
  content.querySelectorAll('[data-cancel-alarm]').forEach(b=>{b.onclick=()=>del('/alarms/'+b.dataset.cancelAlarm,'Alarm cancelled')});
+content.querySelectorAll('[data-cancel-reminder]').forEach(b=>{b.onclick=()=>del('/timers/'+b.dataset.cancelReminder,'Reminder cancelled')});
  scheduleTimerRefresh()}
 async function render(){(state.renderGeneration=(state.renderGeneration||0)+1);const generation=state.renderGeneration,page=state.page;clearTimeout(state.timer);clearTimeout(state.lampTimer);clearTimeout(state.doaTimer);content.innerHTML='<div class="panel loading">Loading device state…</div>';try{if(state.page==='Overview')await overview();else if(state.page==='Device')await devicePage();else if(state.page==='Users')await usersPage();else if(state.page==='Audio')await audioPage();else if(state.page==='Timers')await timersPage();else if(state.page==='Nursery')await nurseryPage();else if(state.page==='Wake Word')await wakePage();else if(state.page==='Simulation')await simulationPage();else if(state.page==='LED & Buttons')await ledPage();else if(state.page==='Network')await networkPage();else if(state.page==='Bluetooth')await bluetoothPage();else if(state.page==='Privacy')await privacyPage();else if(state.page==='Integrations'){installIntegrationsExtras();await integrationsPage()}else if(state.page==='System')await systemPage();else if(state.page==='Logs')await logsPage();else await aboutPage()}catch(e){if(generation!==state.renderGeneration||page!==state.page)return;if(document.body.classList.contains('auth-pending'))markStartupUnavailable();errorView(e)}if(generation!==state.renderGeneration||page!==state.page)return;applyCssVars(content);if(state.page==='Overview')state.timer=setTimeout(refreshOverview,5000);else if(state.page==='Audio'||state.page==='LED & Buttons')state.lampTimer=setTimeout(refreshMuteLamp,5000)}
 function showPage(name,updateRoute=true){let corrected=false;if(!descriptions[name]||!navItems().some(([n])=>n===name)){name='Overview';corrected=true}if(state.page==='Nursery'&&name!=='Nursery')stopBabyStream();state.page=name;const path='/'+pageSlug(name);

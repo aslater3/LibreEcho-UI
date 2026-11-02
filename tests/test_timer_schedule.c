@@ -475,6 +475,83 @@ int main(void)
         tzset();
     }
 
+    /*
+     * Reminders are alarm records that are announced rather than rung. A one-off
+     * reminder fires once at its time and leaves the schedule once announced; a
+     * repeating one moves to its next weekday occurrence.
+     */
+    {
+        struct le_timer_set set;
+        unsigned int id = 0, fired[LE_TIMER_MAX];
+        struct le_timer *timer;
+        long long now = SYNCED_EPOCH;   /* 2026-01-01 00:00 UTC, a Thursday */
+        int count;
+
+        setenv("TZ", "UTC0", 1);
+        tzset();
+        le_timer_set_init(&set);
+        /* 00:00 today is not after now, so "00:00" means the next midnight. */
+        assert(le_timer_add_reminder(&set, 0, 30, 0, "take pills", now, &id) ==
+               LE_TIMER_OK);
+        assert(le_timer_is_reminder(&set, id) == 1);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->kind == LE_TIMER_ALARM && timer->reminder == 1);
+        assert(timer->due_epoch == now + 30 * 60);
+        assert(timer->hour == 0 && timer->minute == 30 && timer->repeat_days == 0);
+
+        /* Not due before its time, then announced exactly once. */
+        assert(le_timer_step(&set, 0, now + 29 * 60, fired, LE_TIMER_MAX) == 0);
+        count = le_timer_step(&set, 0, now + 30 * 60, fired, LE_TIMER_MAX);
+        assert(count == 1 && fired[0] == id);
+        assert(le_timer_dismiss_at(&set, id, now + 30 * 60) == 1);
+        assert(le_timer_find(&set, id) == NULL);
+        assert(le_timer_step(&set, 0, now + 31 * 60, fired, LE_TIMER_MAX) == 0);
+
+        /* A repeating weekday reminder at 08:00. Thursday is a weekday, so the
+           first occurrence is today; once announced, the next is Friday. */
+        le_timer_set_init(&set);
+        assert(le_timer_add_reminder(&set, 8, 0, 0x3eU, "standup", now, &id) ==
+               LE_TIMER_OK);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->repeat_days == 0x3eU && timer->reminder == 1);
+        assert(timer->due_epoch == now + 8 * 3600);
+        count = le_timer_step(&set, 0, timer->due_epoch, fired, LE_TIMER_MAX);
+        assert(count == 1 && le_timer_is_reminder(&set, id) == 1);
+        assert(le_timer_dismiss_at(&set, id, timer->due_epoch) == 1);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        assert(timer->due_epoch == now + 86400 + 8 * 3600);
+
+        /* Bad input is refused, not stored. */
+        assert(le_timer_add_reminder(&set, 24, 0, 0, "x", now, &id) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_add_reminder(&set, 9, 0, 0x80U, "x", now, &id) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_add_reminder(&set, 9, 0, 0, "x", 10, &id) ==
+               LE_TIMER_ERR_CLOCK);
+    }
+
+    /* A reminder restored from disk keeps its kind; a one-off that came due
+       while the device was down is missed, not spoken late. */
+    {
+        struct le_timer_set set;
+        unsigned int id = 0;
+        long long now = SYNCED_EPOCH;
+
+        setenv("TZ", "UTC0", 1);
+        tzset();
+        le_timer_set_init(&set);
+        assert(le_timer_restore_reminder(&set, 7, now + 600, 0, 10, 0, "tea",
+                                         now, 5000, &id) == LE_TIMER_OK);
+        assert(id == 7 && le_timer_is_reminder(&set, 7) == 1);
+        assert(le_timer_restore_reminder(&set, 8, now - 3600, 0, 10, 0, "old",
+                                         now, 5000, &id) == LE_TIMER_ERR_RANGE);
+        assert(le_timer_find(&set, 8) == NULL);
+        /* A plain alarm with the same id space is not a reminder. */
+        assert(le_timer_add_alarm(&set, now + 60, "wake", now, &id) == LE_TIMER_OK);
+        assert(le_timer_is_reminder(&set, id) == 0);
+    }
+
     printf("timer schedule: ok\n");
     return 0;
 }
