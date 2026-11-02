@@ -45,6 +45,14 @@ boards can point the daemon at a different file with `--light-sensor PATH`.
 The sensor is found when HA lists entities, so a sensor that appears late in
 boot shows up at HA's next reconnect.
 
+The last turn is offered as text sensors. **Last wake word** (the wake model
+waked reports, on by default) updates when a wake word is heard. **Last
+transcript** and **Last reply** carry speech text, so they are listed only when
+the owner sets `"esphome_speech_text_sensors": true` in the web configuration;
+they are off by default and nothing else is published about speech. The
+sensors clear to empty when the voice history is cleared. Values are kept in
+memory only, and a change reaches HA only while HA is subscribed.
+
 The four hardware buttons are offered as event entities, one each: **Volume up
 button**, **Volume down button**, **Microphone mute button** and **Action
 button**. Each event's type is the gesture: `press`, `long_press` (reported

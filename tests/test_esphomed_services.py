@@ -20,7 +20,7 @@ def int_arg(value):return num(5,zigzag(value))
 class Services(Daemon):
  def subscribe(self):
   # As Home Assistant does: list entities (3 services before ListEntitiesDone), then subscribe.
-  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(18)];self.s.sendall(frame(20))
+  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(19)];self.s.sendall(frame(20))
  def calls(self,kind,cmd):return [r for r in self.adapters[kind].calls if r['cmd']==cmd]
  def ring_calls(self,name=None):
   # Overlay writes owned by the service (the startup stop is one of them).
@@ -44,7 +44,7 @@ class Services(Daemon):
 class ServiceList(Services):
  def test_services_are_listed_before_list_entities_done(self):
   self.subscribe()
-  self.assertEqual([t for t,_ in self.listed][-4:],[41,41,41,19])
+  self.assertEqual([t for t,_ in self.listed][-5:],[18,41,41,41,19])
   svc=[all_fields(b) for t,b in self.listed[-4:-1]]
   self.assertEqual([dict(f)[1] for f in svc],[b'announce',b'play_sound',b'set_ring'])
   self.assertEqual([struct.unpack('<I',dict(f)[2])[0] for f in svc],[ANNOUNCE,PLAY_SOUND,SET_RING])
