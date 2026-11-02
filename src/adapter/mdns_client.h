@@ -18,6 +18,11 @@ int le_mdns_register_esphome(const char *path, unsigned int port,
 /* Nonblocking Sendspin player registration AFTER its listener is ready. The
  * caller holds the returned fd for as long as the record should exist. */
 int le_mdns_register_sendspin(const char *path, unsigned int port, const char *name);
+/* Nonblocking control-centre registration (_libreecho._tcp) by the web
+ * daemon. The caller holds the returned fd for as long as the record should
+ * exist and re-registers after closing it when its name or room changes. */
+int le_mdns_register_libreecho(const char *path, unsigned int port,
+                               const struct le_mdns_libreecho_metadata *metadata);
 /* Transitional obsolete Wyoming entry points: always -1, never advertise.
  * Kept only until old callers are removed by the parent integration. */
 int le_mdns_register_wyoming(const char *path, unsigned int port);
