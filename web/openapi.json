@@ -5188,6 +5188,67 @@
       ]
     }
   },
+  "/network/broadcast": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Announce a short text to paired devices",
+      "description": "Speaks a short text on every paired device found on the LAN (#412, first slice), or on one device when address and port are given. The text is signed into an announcement packet with the house key and sent to POST /api/v1/peer/announce on each target; this device speaks it too when it is paired and no address is given. Devices of another house and devices that are off are skipped or reported. Each target answers applied, not_supported (the target has no speaker), unpaired, failed or unreachable. The packet is signed, not encrypted. The fan-out is bounded to about 3 seconds after the LAN search. This device must be paired (409 otherwise).",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "description": "UTF-8 text with no control characters, 1 to 240 bytes"
+                },
+                "address": {
+                  "type": "string",
+                  "description": "IPv4 address of one device to announce to; omit to announce to every paired device"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "description": "HTTP port of that device; required with address"
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The announcement was sent. this_device is applied, not_supported, failed or not_included (single-device sends); devices lists each remote result; sent, applied and skipped count them."
+        },
+        "400": {
+          "description": "The text, address or port is not valid"
+        },
+        "401": {
+          "description": "Authentication is required"
+        },
+        "403": {
+          "description": "The CSRF token is missing or invalid"
+        },
+        "409": {
+          "description": "This device is not paired with other devices"
+        },
+        "503": {
+          "description": "The local network could not be searched or the reply could not be built"
+        }
+      }
+    }
+  },
   "/network/settings/copy": {
     "post": {
       "tags": [
@@ -5305,6 +5366,42 @@
         },
         "503": {
           "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/peer/announce": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Speak a signed announcement",
+      "description": "Device-to-device (#412). Needs no session or CSRF token: the body is a sealed packet of type announcement (LESIG1 header, then the UTF-8 text) made with the house key. A packet that does not verify, is outside the 300 second window, or was already accepted answers 401 not_verified. A device without a key answers 409 not_paired. Text that is blank, too long or holds control characters answers 400. A verified announcement answers 200 with spoken true when this device has a speaker, and 501 not_supported when it does not. Other methods are not exempt from authentication.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The announcement was verified and spoken"
+        },
+        "400": {
+          "description": "The announcement text is not valid"
+        },
+        "401": {
+          "description": "The packet did not verify with this device's key, or was already accepted"
+        },
+        "409": {
+          "description": "This device is not paired with other devices"
+        },
+        "501": {
+          "description": "The packet verified, but this device has no speaker"
         }
       }
     }

@@ -394,6 +394,7 @@ make test-peer-auth
 make test-wake-arbiter
 make test-peer-group
 make test-peer-settings
+make test-peer-announce
 # Guard the nested-make provenance contract before the ESPHome section: its
 # strict radio-controls build is the first -Werror consumer of the augmented
 # CPPFLAGS, so a snapshot mismatch surfaces there. This reproduces the
@@ -424,6 +425,7 @@ python3 tests/test_network_peers.py
 python3 tests/test_peer_pairing.py
 python3 tests/test_peer_group.py
 python3 tests/test_peer_settings.py
+python3 tests/test_peer_announce.py
 sh tests/test_setup_first_run.sh
 # First-boot provisioning drives the real daemon over loopback with the mock
 # backend and owns its own ports, so it runs outside the shared server above.
