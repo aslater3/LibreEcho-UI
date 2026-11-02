@@ -422,6 +422,7 @@ static void close_recognition(struct le_voice_pipeline *pipeline,
                               int *fd)
 {
     int stop_window = pipeline->stop_window;
+    int was_listening = *fd >= 0;
 
     if (*fd >= 0)
         close(*fd);
@@ -435,8 +436,13 @@ static void close_recognition(struct le_voice_pipeline *pipeline,
     else
         pipeline->metrics.recognizing = 0;
     pthread_mutex_unlock(&pipeline->mutex);
-    if (!stop_window)
+    if (!stop_window) {
         le_voice_listening_feedback_set(0);
+        /* Only a capture that was actually open ends audibly; the idle and
+           shutdown calls, and a hidden stop window, must not chime. */
+        if (was_listening)
+            le_voice_listening_end_sound();
+    }
 }
 
 /*

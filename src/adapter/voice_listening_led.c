@@ -61,6 +61,17 @@ void le_voice_listening_led_set(int active)
     le_adapter_close(adapter);
 }
 
+void le_voice_listening_end_sound(void)
+{
+    struct le_adapter *adapter = le_adapter_connect(LE_ADAPTER_AUDIO_SOCK, 100);
+
+    if (!adapter)
+        return;
+    (void)le_adapter_call(adapter, "event_sound", "{\"event\":\"end\"}",
+                          NULL, 0);
+    le_adapter_close(adapter);
+}
+
 void le_voice_listening_feedback_set(int active)
 {
     if (active)
