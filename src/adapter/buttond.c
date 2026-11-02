@@ -68,6 +68,17 @@
 #define DEFAULT_STEP 5
 #define DEFAULT_HOLD_MS 1500
 
+/*
+ * How long the action button has to be held to count as a long press (#372).
+ * Only consulted when a long-press action is configured: otherwise the button
+ * acts on the press itself, as it always has, with no added delay. The main
+ * loop wakes at least every PRIVACY_POLL_MS, so the long action fires within
+ * that of the threshold while the button is still held.
+ */
+#ifndef ACTION_LONG_PRESS_MS
+#define ACTION_LONG_PRESS_MS 800
+#endif
+
 /* The input nodes are created by libreecho-init before the services start,
    but nothing guarantees that ordering, and a device can disappear if its
    driver is unbound.  Rescan rather than exiting, so a late-appearing button
@@ -108,6 +119,8 @@ struct device {
 struct context {
     const char *audio_sock;
     const char *led_sock;
+    const char *wake_sock;       /* waked: "listen" starts a voice turn (#372) */
+    const char *radio_sock;      /* radiod: pause/resume for play/pause */
     struct device devices[MAX_DEVICES];
     size_t device_count;
     int volume;          /* cached; -1 when unknown */
@@ -150,6 +163,21 @@ struct context {
      */
     char action_sounds[192];
     unsigned int action_index;   /* where the rotation has got to */
+    /*
+     * What a long press does (#372): one of the action names above, or "same"
+     * (the default), which keeps the old behaviour -- the button acts as soon
+     * as it is pressed, however long it is held.
+     */
+    char action_long[24];
+    long long action_long_at_ms; /* when a held press becomes long; 0 when none is pending */
+    int action_long_fired;       /* the long action ran for the press still held */
+    /*
+     * What play/pause last paused, so the next press can resume it. Radio is
+     * resumed through radiod; a sleep sound cannot be paused, so it is stopped
+     * and started again from the settings it had (resume_noise).
+     */
+    int paused_source;           /* PAUSED_NONE, PAUSED_RADIO or PAUSED_NOISE */
+    char resume_noise[128];
     unsigned int action_brightness;
     unsigned int mute_brightness;   /* the ring that accompanies mute; the lamp itself has no PWM */
     int volume_capable;
@@ -373,6 +401,9 @@ static void remove_device(struct context *ctx, size_t index)
     --ctx->device_count;
     recompute_capabilities(ctx);
     ctx->held_key = 0;
+    /* A release that can no longer arrive must not turn into a long press. */
+    ctx->action_long_at_ms = 0;
+    ctx->action_long_fired = 0;
     ctx->rescan_requested = 1;
     write_capability_status(ctx);
 }
@@ -466,6 +497,8 @@ static void refresh_tone_setting(struct context *ctx)
     }
     (void)json_get_string(buffer, "button_action", ctx->action,
                           sizeof(ctx->action));
+    (void)json_get_string(buffer, "button_action_long", ctx->action_long,
+                          sizeof(ctx->action_long));
     /*
      * Re-read every tick like the rest, so curating the list in the UI takes
      * effect on the next press. The rotation index is deliberately not reset
@@ -630,6 +663,248 @@ static void action_flourish(struct context *ctx)
              "\"repeats\":3}", ctx->action_brightness);
     (void)le_adapter_call(adapter, "pattern", args, NULL, 0);
     le_adapter_close(adapter);
+}
+
+enum { PAUSED_NONE, PAUSED_RADIO, PAUSED_NOISE };
+
+static int adapter_call_at(const char *sock, const char *cmd, const char *args,
+                           char *out, size_t out_size)
+{
+    struct le_adapter *adapter;
+    int result;
+
+    if (!sock)
+        return LE_ADAPTER_ERR_CONNECT;
+    adapter = le_adapter_connect(sock, CONNECT_TIMEOUT_MS);
+    if (!adapter)
+        return LE_ADAPTER_ERR_CONNECT;
+    result = le_adapter_call(adapter, cmd, args, out, out_size);
+    le_adapter_close(adapter);
+    return result;
+}
+
+/*
+ * A press the button could not act on still gets an answer: one low, level
+ * tone and the ring flash, so it is not mistaken for a button that did not
+ * register. Level rather than rising or falling, so it cannot be read as a
+ * volume or mute cue.
+ */
+static void action_refused(struct context *ctx)
+{
+    play_cue(ctx, CUE_MUTE_HZ, CUE_MUTE_HZ, 160U);
+    action_flourish(ctx);
+}
+
+/*
+ * Action "listen": push-to-talk (#372). waked publishes a wake event exactly
+ * as if the wake word had been heard, so whichever pipeline is active --
+ * on-device, Home Assistant or a live session -- starts a turn, and waked
+ * draws the listening ring itself. A muted microphone would send silence, so
+ * the press is refused instead of starting a turn that cannot hear anything.
+ */
+static int action_listen(struct context *ctx)
+{
+    if (refresh_audio(ctx) == 0 && ctx->muted > 0) {
+        le_log_info("buttond: microphone is muted; start listening refused");
+        action_refused(ctx);
+        return -1;
+    }
+    if (adapter_call_at(ctx->wake_sock, "listen", NULL, NULL, 0) !=
+        LE_ADAPTER_OK) {
+        le_log_warn("buttond: wake service unavailable; start listening ignored");
+        action_refused(ctx);
+        return -1;
+    }
+    le_log_info("buttond: action button started listening");
+    return 0;
+}
+
+/* A sleep-sound name from audiod, before it goes back into a request. */
+static int noise_name_valid(const char *name)
+{
+    size_t i;
+
+    if (!name[0])
+        return 0;
+    for (i = 0; name[i]; i++)
+        if (!((name[i] >= 'a' && name[i] <= 'z') ||
+              (name[i] >= '0' && name[i] <= '9') ||
+              name[i] == '-' || name[i] == '_'))
+            return 0;
+    return 1;
+}
+
+/*
+ * Action "playpause" (#372): toggle what LibreEcho itself is playing.
+ *
+ * Internet radio pauses and resumes through radiod (the same control Home
+ * Assistant's media player uses). A sleep sound has no pause, so it is
+ * stopped and its source, bed and level are kept; the next press starts it
+ * again without a timer. AirPlay and Bluetooth are driven from the phone --
+ * LibreEcho is the speaker and cannot send them transport commands -- so with
+ * only those playing, or nothing at all, the press is refused audibly.
+ *
+ * Returns 1 when something was paused, 2 resumed, 0 when nothing could be
+ * toggled, and -1 when a daemon refused.
+ */
+static int action_play_pause(struct context *ctx)
+{
+    char data[2048], source[32], bed[32];
+    int radio_known, playing = 0, paused = 0, noise = 0, level = 40;
+
+    radio_known = adapter_call_at(ctx->radio_sock, "status", NULL, data,
+                                  sizeof(data)) == LE_ADAPTER_OK;
+    if (radio_known) {
+        (void)json_get_top_level_bool(data, strlen(data), "playing", &playing);
+        (void)json_get_top_level_bool(data, strlen(data), "paused", &paused);
+    }
+    if (playing) {
+        if (adapter_call_at(ctx->radio_sock, "pause", NULL, NULL, 0) !=
+            LE_ADAPTER_OK)
+            return -1;
+        ctx->paused_source = PAUSED_RADIO;
+        le_log_info("buttond: action button paused the radio");
+        return 1;
+    }
+    if (audio_call(ctx, "status", NULL, data, sizeof(data)) == LE_ADAPTER_OK &&
+        json_get_bool(data, "noise_active", &noise) > 0 && noise) {
+        if (json_get_string(data, "noise_source", source, sizeof(source)) < 1 ||
+            !noise_name_valid(source))
+            strcpy(source, "white");
+        if (json_get_string(data, "noise_bed", bed, sizeof(bed)) < 1 ||
+            !noise_name_valid(bed))
+            strcpy(bed, "none");
+        if (json_get_int(data, "noise_level", &level) < 1 || level < 1 ||
+            level > 100)
+            level = 40;
+        if (audio_call(ctx, "noise_stop", NULL, NULL, 0) != LE_ADAPTER_OK)
+            return -1;
+        snprintf(ctx->resume_noise, sizeof(ctx->resume_noise),
+                 "{\"source\":\"%s\",\"bed\":\"%s\",\"level\":%d,"
+                 "\"minutes\":0}", source, bed, level);
+        ctx->paused_source = PAUSED_NOISE;
+        le_log_info("buttond: action button paused the sleep sound");
+        return 1;
+    }
+    /*
+     * Nothing is playing: resume what this button paused last. A sleep sound
+     * it stopped comes first, since a radio left paused by something else
+     * (Home Assistant) is not this press's to pick over it.
+     */
+    if (ctx->paused_source == PAUSED_NOISE && ctx->resume_noise[0]) {
+        if (audio_call(ctx, "noise_start", ctx->resume_noise, NULL, 0) !=
+            LE_ADAPTER_OK)
+            return -1;
+        ctx->paused_source = PAUSED_NONE;
+        le_log_info("buttond: action button resumed the sleep sound");
+        return 2;
+    }
+    if (paused) {
+        if (adapter_call_at(ctx->radio_sock, "resume", NULL, NULL, 0) !=
+            LE_ADAPTER_OK)
+            return -1;
+        ctx->paused_source = PAUSED_NONE;
+        le_log_info("buttond: action button resumed the radio");
+        return 2;
+    }
+    ctx->paused_source = PAUSED_NONE;
+    le_log_info("buttond: play/pause: nothing LibreEcho can pause or resume "
+                "(AirPlay and Bluetooth are controlled from the phone)");
+    return 0;
+}
+
+/*
+ * One action-button behaviour, by its saved name. which says what kind of
+ * press it was, for the log.
+ */
+static void run_action(struct context *ctx, const char *action,
+                       const char *which)
+{
+    char sound[64];
+
+    le_log_info("buttond: action button %s (%s)", which, action);
+    if (!strcmp(action, "disabled"))
+        return;
+    if (!strcmp(action, "noise")) {
+        (void)action_noise_toggle(ctx);
+        action_flourish(ctx);
+        return;
+    }
+    if (!strcmp(action, "listen")) {
+        /* On success waked draws the listening ring; a flourish over it
+           would read as something else. */
+        (void)action_listen(ctx);
+        return;
+    }
+    if (!strcmp(action, "playpause")) {
+        if (action_play_pause(ctx) > 0)
+            action_flourish(ctx);
+        else
+            action_refused(ctx);
+        return;
+    }
+    if (strcmp(action, "sound")) {
+        le_log_warn("buttond: action \"%s\" is not a known behaviour", action);
+        return;
+    }
+    /*
+     * Rotate through the curated list so repeated presses do not sound like
+     * a stuck machine. An empty list is a deliberate choice -- every sound
+     * switched off -- so it still flashes the ring to acknowledge the press
+     * and says nothing about it. Bundled PCM rather than synthesised: the
+     * files ship in the image and survive the /data contract. All are low and
+     * falling, longer than any acknowledgement, so none can be mistaken for a
+     * volume cue.
+     */
+    if (!action_next_sound(ctx, sound, sizeof(sound))) {
+        action_flourish(ctx);
+        return;
+    }
+    play_sample(ctx, sound);
+    action_flourish(ctx);
+}
+
+static int action_long_configured(const struct context *ctx)
+{
+    return ctx->action_long[0] && strcmp(ctx->action_long, "same");
+}
+
+/*
+ * The action button's key events. With no long-press action configured the
+ * button acts on the press, exactly as before #372. With one, the press only
+ * starts the clock: a release before ACTION_LONG_PRESS_MS is a short press,
+ * and holding past it runs the long action at once, without waiting for the
+ * release. The kernel's autorepeat (value 2) never acts.
+ */
+static void action_key(struct context *ctx, int value, long long now_ms)
+{
+    if (value == 2)
+        return;
+    if (value == 1) {
+        if (!action_long_configured(ctx)) {
+            run_action(ctx, ctx->action, "press");
+            return;
+        }
+        ctx->action_long_at_ms = now_ms + ACTION_LONG_PRESS_MS;
+        if (!ctx->action_long_at_ms)
+            ctx->action_long_at_ms = 1;
+        ctx->action_long_fired = 0;
+        return;
+    }
+    if (ctx->action_long_at_ms && !ctx->action_long_fired)
+        run_action(ctx, ctx->action, "short press");
+    ctx->action_long_at_ms = 0;
+    ctx->action_long_fired = 0;
+}
+
+/* Called from the main loop: run the long action once the hold is long. */
+static void action_long_poll(struct context *ctx, long long now_ms)
+{
+    if (!ctx->action_long_at_ms || ctx->action_long_fired ||
+        now_ms < ctx->action_long_at_ms)
+        return;
+    ctx->action_long_fired = 1;
+    run_action(ctx, ctx->action_long, "long press");
 }
 
 /*
@@ -995,7 +1270,12 @@ static void toggle_mute(struct context *ctx)
 
 static void handle_key(struct context *ctx, int code, int value)
 {
-    /* value: 0 release, 1 press, 2 kernel autorepeat. */
+    /* value: 0 release, 1 press, 2 kernel autorepeat. The action button
+       acts on its release too, when a long press is configured. */
+    if (code == KEY_HELP) {
+        action_key(ctx, value, monotonic_ms());
+        return;
+    }
     if (value == 0) {
         if (ctx->held_key == code)
             ctx->held_key = 0;
@@ -1032,49 +1312,9 @@ static void handle_key(struct context *ctx, int code, int value)
     /*
      * The action button, on GPIO36 as KEY_HELP. It reported nothing at all
      * until the device tree declared that pin: the vendor puts it on the
-     * keypad matrix and mediatek,mt8163-keypad has no driver here.
+     * keypad matrix and mediatek,mt8163-keypad has no driver here. Its
+     * events are dispatched to action_key() above, release included.
      */
-    case KEY_HELP:
-        if (value == 1) {
-            /*
-             * Three of them, rotating, so repeated presses do not sound like
-             * Bundled PCM rather than synthesised: the files ship in the
-             * image and survive the /data contract. All three are low and falling,
-             * longer than any acknowledgement, so none can be mistaken for a
-             * volume cue.
-             */
-            char sound[64];
-
-            le_log_info("buttond: action button (%s)", ctx->action);
-            if (!strcmp(ctx->action, "disabled"))
-                return;
-            if (!strcmp(ctx->action, "noise")) {
-                (void)action_noise_toggle(ctx);
-                action_flourish(ctx);
-                return;
-            }
-            if (strcmp(ctx->action, "sound")) {
-                /* Chosen in the UI but not built yet. Say so once per press
-                   rather than doing nothing silently, which is the failure
-                   this button has already had once. */
-                le_log_warn("buttond: action \"%s\" is not implemented yet",
-                            ctx->action);
-                return;
-            }
-            /*
-             * Rotate through the curated list so repeated presses do not
-             * sound like a stuck machine. An empty list is a deliberate
-             * choice -- every sound switched off -- so it still flashes the
-             * ring to acknowledge the press and says nothing about it.
-             */
-            if (!action_next_sound(ctx, sound, sizeof(sound))) {
-                action_flourish(ctx);
-                return;
-            }
-            play_sample(ctx, sound);
-            action_flourish(ctx);
-        }
-        return;              /* no autorepeat: once per press */
     case KEY_MUTE:
     case KEY_POWER:
         if (value == 1) {
@@ -1117,6 +1357,12 @@ int main(int argc, char **argv)
     ctx.led_sock = getenv("LE_LED_SOCK");
     if (!ctx.led_sock || !ctx.led_sock[0])
         ctx.led_sock = LE_ADAPTER_LED_SOCK;
+    ctx.wake_sock = getenv("LE_WAKE_SOCK");
+    if (!ctx.wake_sock || !ctx.wake_sock[0])
+        ctx.wake_sock = LE_ADAPTER_WAKEWORD_SOCK;
+    ctx.radio_sock = getenv("LE_RADIO_SOCK");
+    if (!ctx.radio_sock || !ctx.radio_sock[0])
+        ctx.radio_sock = LE_ADAPTER_RADIO_SOCK;
     ctx.volume = -1;
     ctx.muted = -1;
     ctx.privacy_state = -1;
@@ -1128,6 +1374,7 @@ int main(int argc, char **argv)
     ctx.audio_poll_warned = 0;
     ctx.tones = 1;
     strcpy(ctx.action, "sound");
+    strcpy(ctx.action_long, "same");
     /* The rotation the button had before it was configurable. A config that
        carries the setting replaces this on the first status tick. */
     strcpy(ctx.action_sounds, "action-1,action-2,action-3");
@@ -1183,6 +1430,7 @@ int main(int argc, char **argv)
             break;
         }
         (void)sync_privacy_state(&ctx);
+        action_long_poll(&ctx, monotonic_ms());
         if (monotonic_ms() >= next_status_ms) {
             write_capability_status(&ctx);
             /* The ring must follow the mute state however it changed -- the

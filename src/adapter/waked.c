@@ -544,6 +544,23 @@ static void handle_control_client(
         publish_wake_event(ipc, &event);
         (void)respond(client_fd, id, 1,
                       "{\"detected\":true}");
+    } else if (!strcmp(command, "listen")) {
+        /*
+         * Push-to-talk (#372): the action button starts a turn as if the wake
+         * word had been heard. Subscribers -- the on-device pipeline, the
+         * Home Assistant satellite, a live session -- cannot tell it from a
+         * detection, which is the point; the model name says where it came
+         * from in the log and the voice history. The turn starts at the
+         * current sample, so nothing before the press is sent as speech.
+         */
+        const struct le_wake_event event = {
+            metrics->processed_frames *
+                LE_VOICE_AEC_FRAME_SAMPLES,
+            1.0f, 1.0f, metrics->playback_active, "button"
+        };
+
+        publish_wake_event(ipc, &event);
+        (void)respond(client_fd, id, 1, "{\"listening\":true}");
     } else {
         (void)respond(client_fd, id, 0, "unknown command");
     }
