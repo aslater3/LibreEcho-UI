@@ -24,6 +24,9 @@ struct le_voice_pipeline_metrics {
     int recognizing;
     int dispatching;
     int follow_up_pending;
+    /* A wake-free "stop" window is requested / currently open. */
+    int stop_listen_requested;
+    int stop_listening;
     unsigned long wake_events;
     unsigned long follow_up_listens;
     unsigned long completed_transcripts;
@@ -35,6 +38,9 @@ struct le_voice_pipeline_metrics {
     uint64_t last_stt_audio_ms;
     uint64_t last_stt_processing_ms;
     uint64_t last_stt_total_ms;
+    /* Wake-free stop windows opened, and how many heard a stop. */
+    unsigned long stop_windows;
+    unsigned long stops_heard;
 };
 
 /*
@@ -86,6 +92,24 @@ void le_voice_pipeline_set_outcome_callback(
 void le_voice_pipeline_set_turn_begin_callback(
     struct le_voice_pipeline *pipeline,
     le_voice_pipeline_turn_begin_fn turn_begin, void *context);
+
+/*
+ * Stop without the wake word. While the embedder holds stop listening on (a
+ * timer or alarm is ringing, a reply is playing), the pipeline keeps a short,
+ * wake-free recognition open. Its final transcript is never a turn: it goes
+ * only to the stop callback, which returns 1 when the text was a stop command
+ * it acted on and 0 to discard it. Nothing else is kept. A wake word, or a
+ * requested follow-up, closes the window at once and takes the recogniser.
+ * The callback runs on the capture thread and must not block.
+ */
+typedef int (*le_voice_pipeline_stop_fn)(void *context, const char *text);
+
+void le_voice_pipeline_set_stop_callback(
+    struct le_voice_pipeline *pipeline,
+    le_voice_pipeline_stop_fn stop, void *context);
+
+void le_voice_pipeline_set_stop_listen(
+    struct le_voice_pipeline *pipeline, int active);
 
 int le_voice_pipeline_request_follow_up(
     struct le_voice_pipeline *pipeline);

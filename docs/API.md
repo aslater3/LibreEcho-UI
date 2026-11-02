@@ -838,7 +838,9 @@ does not restart the voice pipeline.
 Returns assistant configuration, ChatGPT device-login state, pipeline
 connectivity, local STT timing, and first-audio latency telemetry. The
 returned configuration includes `clock_format`, the format used when the time
-is spoken aloud. The latency measurement is from the estimated end of speech to
+is spoken aloud, and `stop_without_wake` (see below). `stop_listening` is true
+while a wake-free stop window is open; `stop_windows` and `stops_heard` count
+the windows opened and the stops acted on since agentd started. The latency measurement is from the estimated end of speech to
 the first PCM submitted to the announcement bus; the current target is 3000 ms.
 
 #### GET /api/v1/live
@@ -924,6 +926,7 @@ Updates the provider-neutral assistant configuration:
   "provider": "openai-codex",
   "model": "gpt-5.4",
   "clock_format": "12",
+  "stop_without_wake": false,
   "prompt": "Reply in concise, natural spoken English without markdown."
 }
 ```
@@ -937,6 +940,21 @@ an external action succeeded without tool confirmation.
 device that has never stored a choice receives it, while an explicit `"12"` or
 `"24"` is kept. Any other value is rejected with HTTP 400 and the previous
 configuration is left unchanged.
+
+`stop_without_wake` (boolean, default `false`) lets a bare "stop" end a ringing
+timer or alarm, or a reply that is playing, without the wake word first. Only
+while one of those is sounding, agentd keeps short wake-free recognition windows
+open on the on-device recogniser (sttd's Zipformer). A window's transcript is
+never a turn: unless the whole utterance is one of the local stop phrases
+("stop", "stop the timer", "quiet", "dismiss the alarm", ...) it is dropped
+without being logged, kept or sent anywhere. A heard stop dismisses every
+ringing timer and alarm and cancels the reply; music and pending timers are left
+alone, as the wake-word stop does while something rings. It appears in the voice
+history as a completed turn. With a Wyoming (`custom` pipeline) recogniser no
+window is ever opened, because that would carry room audio to another machine;
+in Home Assistant mode agentd is not running and the wake word is still needed.
+The listening ring does not light for a stop window. A non-boolean value is
+rejected with HTTP 400.
 
 `home_location`, `latitude` and `longitude` place the device for weather and
 local answers: the place name is what the assistant says back, the coordinates
