@@ -12,6 +12,8 @@
 <meta name="apple-mobile-web-app-title" content="LibreEcho" />
 <meta name="mobile-web-app-capable" content="yes" />
   <link rel="stylesheet" href="/css/setup.css">
+  <script src="/js/timezones.js?rev=1"></script>
+  <script src="/js/timezone-ui.js?rev=1"></script>
 </head>
 <body>
   <main class="setup-shell">
@@ -83,6 +85,7 @@
           <label class="range-label"><span>Initial volume <output id="volume-output">64%</output></span><input id="setup-volume" type="range" min="0" max="100" value="64"></label>
           <label><span>Wake word</span><select id="setup-wake"><option>Alexa</option></select><small>This image currently includes the Alexa wake model.</small></label>
           <label class="range-label"><span>Wake-word sensitivity <output id="sensitivity-output">68%</output></span><input id="setup-sensitivity" type="range" min="0" max="100" value="68"></label>
+          <label><span>Time zone</span><select id="setup-timezone"></select><small>Taken from this browser; used for night mode and the spoken clock. You can change it, or let Home Assistant set it, in Device settings.</small></label>
         </div>
       </section>
 
