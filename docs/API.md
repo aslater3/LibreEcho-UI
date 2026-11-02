@@ -1582,6 +1582,48 @@ already accepted answers 401 `not_verified`. A device without a key answers
 must agree within the window; a device whose clock is far off reports
 `unreachable` or `unpaired`, never a silent success.
 
+#### Copy settings between devices (#449)
+
+An owner copies the settings of one device to another paired device in one
+step. The device the owner is on is the source; the target is a device from
+the device list. Only these groups can be chosen, and only these keys are sent
+or applied:
+
+| Group | Keys |
+|---|---|
+| `voice` | `wake_word`, `wake_sensitivity`, `stt_max_utterance_ms`, `stt_end_silence_ms`, `stt_vad_floor_rms` |
+| `audio` | `volume`, `microphone_gain` |
+| `ha` | `home_assistant_url` (sent only when this device has one set) |
+| `led` | `led_brightness`, `led_visualizer_enabled`, `button_action_brightness`, `button_mute_brightness` |
+
+Never copied: identity and network (hostname, MAC addresses, Wi-Fi, room,
+timezone), SSH and API exposure, privacy, feature switches, buttons, appearance,
+accounts, passwords, tokens and the ESPHome key. Each device keeps its own.
+
+**POST /api/v1/network/settings/copy** (CSRF required) with
+`{"address", "port", "voice", "audio", "ha", "led"}`. The group flags are
+optional booleans; at least one must be `true`. The address must be IPv4 and not
+this device. This device must be paired (409 otherwise), and a group with
+nothing to send answers 409. The answer holds `{"result", "groups", "address", "port"}`
+with `result` one of:
+
+| `result` | Meaning |
+|---|---|
+| `applied` | The target verified the packet and applied every listed key. |
+| `unpaired` | The target has no house key, another key, or runs older firmware. |
+| `failed` | The target answered, but not with a successful result. |
+| `unreachable` | No answer inside about 3 seconds. |
+
+**POST /api/v1/peer/settings** is device-to-device and needs no session or CSRF
+token; the signed packet is its credential. The body is the sealed packet
+`LESIG1 <key_id> settings-copy <ts> <nonce> <mac>`, newline, then a flat JSON
+object of setting values (for example `{"volume":33,"led_brightness":35}`).
+The target checks the packet (house key, 300 second window, replay cache) and
+then every listed key. A key outside the table above is ignored; a listed key
+with a wrong type or a value out of range refuses the whole packet with 400, and
+nothing is changed. A packet that does not verify answers 401 `not_verified`, and
+a device without a key answers 409 `not_paired`.
+
 Grouping is a first slice. Devices can be grouped and commanded from the
 device API. Ring, announce and volume commands, the Web UI for groups, and
 Home Assistant entities for each group are not in this release.

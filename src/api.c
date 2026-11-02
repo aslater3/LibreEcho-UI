@@ -25,6 +25,7 @@
 #include "peers.h"
 #include "peer_link.h"
 #include "peer_group.h"
+#include "peer_settings.h"
 #include "adapter/mdns_client.h"
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -76,7 +77,8 @@ static int loopback_origin(const char*o){const char*host;if(!strncmp(o,"http://"
 /* Paired-device proof (#450): another device asks without a session; the
    answer is only a signature over its own nonce, and is given only to GET. */
 static int peer_proof_path(const struct api_request*q){return !strcmp(q->method,"GET")&&!strncmp(q->path,"/api/v1/peer/proof",18)&&(q->path[18]==0||q->path[18]=='?');}
-static int peer_command_path(const struct api_request*q){return !strcmp(q->method,"POST")&&!strcmp(q->path,"/api/v1/peer/command");}
+/* Device-to-device POSTs carry a sealed packet as the whole body (#448 group commands, #449 settings copies); the packet is their credential. */
+static int peer_command_path(const struct api_request*q){return !strcmp(q->method,"POST")&&(!strcmp(q->path,"/api/v1/peer/command")||!strcmp(q->path,"/api/v1/peer/settings"));}
 static int allowed_origin(const struct api_context*c,const struct api_request*q){const char*origin=q->origin;if(!origin[0]||c->allow_insecure_lan)return 1;if(c->allowed_origin[0])return constant_equal(origin,c->allowed_origin);if(origin_matches_host(origin,q->host))return 1;return loopback_origin(origin);}static int security(const struct api_context*c,const struct api_request*q,struct api_response*r){int authorized=0,bootstrap_path=!strcmp(q->path,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST"),login_path=!strcmp(q->path,"/api/v1/auth/login")&&!strcmp(q->method,"POST");if(!strcmp(q->path,"/api/v1/config")||bootstrap_path||login_path||peer_proof_path(q)||peer_command_path(q))authorized=1;if(!authorized&&c->auth_token[0]){char expected[256];snprintf(expected,sizeof(expected),"Bearer %s",c->auth_token);authorized=constant_equal(q->authorization,expected);}if(!authorized&&c->auth.enabled&&!strncmp(q->authorization,"Bearer ",7))authorized=le_auth_session((struct le_auth_db*)&c->auth,q->authorization+7,0,0);if(api_bootstrap_required_internal(c)&&!authorized){err(r,401,LE_AUTH,"Initial account setup is required");return 0;}if((c->auth_token[0]||c->auth.enabled)&&!authorized){err(r,401,LE_AUTH,"Authentication is required");return 0;}/* The signed group packet (#448) is the credential here, as the proof GET is; it carries no CSRF token. */
 if(!changing(q->method)||peer_command_path(q))return 1;if(!constant_equal(q->csrf,c->csrf_token)){err(r,403,LE_AUTH,"Missing or invalid CSRF token");return 0;}if(!allowed_origin(c,q)){err(r,403,LE_AUTH,"Origin is not allowed");return 0;}return 1;}
 static int body_ok(const struct api_request*q,struct api_response*r){if(!json_valid_object(q->body,q->body_len)){err(r,400,LE_INVALID,"Request body must be a valid JSON object");return 0;}return 1;}
@@ -1996,6 +1998,237 @@ static int button_action_long_valid(const char *action)
     return action && (button_action_valid(action) || !strcmp(action, "same"));
 }
 static int import_configuration(struct api_context*c,const char*j,size_t n){char theme_in[16],cmode_in[16];int theme_field=json_get_string(j,"ui_theme",theme_in,sizeof(theme_in)),cmode_field=json_get_string(j,"color_mode",cmode_in,sizeof(cmode_in));if(theme_field<0||cmode_field<0||(theme_field>0&&!ui_theme_valid(theme_in))||(cmode_field>0&&cmode_in[0]&&!color_mode_valid(cmode_in)))return LE_INVALID;char room_in[64];int room_field=json_get_string(j,"room",room_in,sizeof(room_in));if(room_field<0||(room_field>0&&!room_valid(room_in)))return LE_INVALID;char wake[LE_TEXT],hostname[LE_TEXT],short_action[32],long_action[32],button_action[24],button_action_long[24],action_sounds[192],mode[16]="none",remote_url[256]="",mac_wifi[64],mac_bt[64],canon[24];int acoustic_events,acoustic_events_field,schema,volume,gain,muted,r,g,b,brightness,button_tones,button_action_brightness,button_mute_brightness,button_tones_field,button_action_field,button_action_long_field,button_action_brightness_field,button_mute_brightness_field,action_sounds_field,visualizer_enabled=1,visualizer_field,sensitivity,ssh,api_lan,local_only,audio_retention,telemetry,crash_reports,log_hours,integrations,max_utterance,end_silence,vad_floor,noise_suppression=0,noise_suppression_field=0,mode_field,hours_field,max_field,url_field,feature_https,feature_simulation,feature_https_field,feature_simulation_field,mac_wifi_field,mac_bt_field,retention_hours=LE_AUDIO_RETENTION_DEFAULT_HOURS,max_mb=LE_AUDIO_RETENTION_DEFAULT_MAX_MB,rc;if(strcmp(le_backend_mode(c->backend),"mock"))return LE_NOT_SUPPORTED;button_tones=c->button_tones;strcpy(button_action,c->button_action);strcpy(button_action_long,c->button_action_long);button_action_brightness=(int)c->button_action_brightness;button_mute_brightness=(int)c->button_mute_brightness;snprintf(action_sounds,sizeof(action_sounds),"%s",c->button_action_sounds);button_tones_field=json_get_bool(j,"button_tones",&button_tones);button_action_field=json_get_string(j,"button_action",button_action,sizeof(button_action));button_action_long_field=json_get_string(j,"button_action_long",button_action_long,sizeof(button_action_long));button_action_brightness_field=json_get_int(j,"button_action_brightness",&button_action_brightness);button_mute_brightness_field=json_get_int(j,"button_mute_brightness",&button_mute_brightness);action_sounds_field=json_get_string(j,"button_action_sounds",action_sounds,sizeof(action_sounds));mode_field=json_get_string(j,"privacy_audio_mode",mode,sizeof(mode));hours_field=json_get_int(j,"privacy_audio_retention_hours",&retention_hours);max_field=json_get_int(j,"privacy_audio_max_mb",&max_mb);url_field=json_get_string(j,"privacy_audio_remote_url",remote_url,sizeof(remote_url));feature_https_field=json_get_bool(j,"feature_https",&feature_https);feature_simulation_field=json_get_bool(j,"feature_simulation",&feature_simulation);mac_wifi_field=json_get_string(j,"mac_wifi",mac_wifi,sizeof(mac_wifi));mac_bt_field=json_get_string(j,"mac_bt",mac_bt,sizeof(mac_bt));if(mode_field==0)strcpy(mode,"none");if(mode_field==0&&json_get_bool(j,"privacy_audio_retention",&audio_retention)>0&&audio_retention)strcpy(mode,"local");if(!strcmp(mode,"remote")&&!remote_url[0])return LE_INVALID;if(mode_field<0||hours_field<0||max_field<0||url_field<0||(mode_field>0&&!audio_retention_mode_valid(mode))||(hours_field>0&&!audio_retention_hours_valid(retention_hours))||(max_field>0&&!audio_retention_max_mb_valid(max_mb))||(url_field>0&&remote_url[0]&&!audio_remote_url_valid(remote_url)))return LE_INVALID;visualizer_field=json_get_bool(j,"led_visualizer_enabled",&visualizer_enabled);if(json_duplicate_key(j,n,"feature_acoustic_events")!=0)return LE_INVALID;noise_suppression_field=json_get_top_level_bool(j,n,"voice_noise_suppression",&noise_suppression);if(noise_suppression_field<0)return LE_INVALID;acoustic_events_field=json_get_top_level_bool(j,n,"feature_acoustic_events",&acoustic_events);if(visualizer_field<0||acoustic_events_field<0||json_get_int(j,"schema_version",&schema)<1||schema!=1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_int(j,"microphone_gain",&gain)<1||gain<0||gain>100||json_get_bool(j,"microphone_muted",&muted)<1||json_get_int(j,"led_r",&r)<1||r<0||r>255||json_get_int(j,"led_g",&g)<1||g<0||g>255||json_get_int(j,"led_b",&b)<1||b<0||b>255||json_get_int(j,"led_brightness",&brightness)<1||brightness<0||brightness>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_string(j,"hostname",hostname,sizeof(hostname))<1||json_get_bool(j,"ssh",&ssh)<1||json_get_bool(j,"api_lan",&api_lan)<1||json_get_string(j,"button_short",short_action,sizeof(short_action))<1||json_get_string(j,"button_long",long_action,sizeof(long_action))<1||button_tones_field<0||button_action_field<0||button_action_brightness_field<0||button_mute_brightness_field<0||action_sounds_field<0||(action_sounds_field>0&&!button_sound_list_valid(action_sounds))||(button_action_field>0&&!button_action_valid(button_action))||button_action_long_field<0||(button_action_long_field>0&&!button_action_long_valid(button_action_long))||(button_action_brightness_field>0&&(button_action_brightness<0||button_action_brightness>100))||(button_mute_brightness_field>0&&(button_mute_brightness<0||button_mute_brightness>100))||json_get_bool(j,"privacy_local_only",&local_only)<1||json_get_bool(j,"privacy_audio_retention",&audio_retention)<1||json_get_bool(j,"privacy_telemetry",&telemetry)<1||json_get_bool(j,"privacy_crash_reports",&crash_reports)<1||json_get_int(j,"privacy_log_hours",&log_hours)<1||(log_hours!=24&&log_hours!=168&&log_hours!=720)||json_get_int(j,"integrations",&integrations)<1||integrations<0||integrations>127||json_get_int(j,"stt_max_utterance_ms",&max_utterance)<1||!stt_max_utterance_valid(max_utterance)||json_get_int(j,"stt_end_silence_ms",&end_silence)<1||!stt_end_silence_valid(end_silence)||json_get_int(j,"stt_vad_floor_rms",&vad_floor)<1||!stt_vad_floor_valid(vad_floor)||feature_https_field<1||feature_simulation_field<1||mac_wifi_field<1||mac_bt_field<1||(mac_wifi_field>0&&mac_wifi[0]&&!mac_override_valid(mac_wifi,canon,sizeof(canon)))||(mac_bt_field>0&&mac_bt[0]&&!mac_override_valid(mac_bt,canon,sizeof(canon))))return LE_INVALID;if((rc=le_set_volume(c->backend,volume))||(rc=le_set_microphone_gain(c->backend,gain))||(rc=le_set_microphone_muted(c->backend,muted))||(rc=le_set_led_colour(c->backend,(uint8_t)r,(uint8_t)g,(uint8_t)b))||(rc=le_set_led_brightness(c->backend,brightness))||(rc=le_set_led_visualizer_enabled(c->backend,visualizer_enabled))||(rc=le_set_wake_word(c->backend,wake))||(rc=le_set_wake_word_sensitivity(c->backend,sensitivity))||(rc=le_set_hostname(c->backend,hostname)))return rc;c->net_ssh=ssh;c->net_api_lan=api_lan;{int discoverable;if(json_get_bool(j,"discoverable",&discoverable)==1)c->discoverable=discoverable?1:0;if(json_get_bool(j,"nearest_answers",&discoverable)==1)c->nearest_answers=discoverable?1:0;}c->privacy_local_only=local_only;c->privacy_audio_retention=strcmp(mode,"none")!=0;snprintf(c->privacy_audio_mode,sizeof(c->privacy_audio_mode),"%s",mode);c->privacy_audio_retention_hours=retention_hours;c->privacy_audio_max_mb=max_mb;snprintf(c->privacy_audio_remote_url,sizeof(c->privacy_audio_remote_url),"%s",remote_url);c->privacy_telemetry=telemetry;c->privacy_crash_reports=crash_reports;{int active_ping;if(json_get_bool(j,"privacy_active_ping",&active_ping)==1)c->privacy_active_ping=active_ping;}c->privacy_log_hours=log_hours;c->integrations=(unsigned)integrations;if(acoustic_events_field>0)c->feature_acoustic_events=acoustic_events;c->stt_max_utterance_ms=max_utterance;c->stt_end_silence_ms=end_silence;c->stt_vad_floor_rms=vad_floor;if(noise_suppression_field>0)c->voice_noise_suppression=noise_suppression?1:0;c->feature_https=feature_https;c->feature_simulation=feature_simulation;if(mac_wifi_field>0){if(!mac_wifi[0])c->mac_wifi[0]=0;else if(mac_override_valid(mac_wifi,canon,sizeof(canon)))snprintf(c->mac_wifi,sizeof(c->mac_wifi),"%s",canon);}if(mac_bt_field>0){if(!mac_bt[0])c->mac_bt[0]=0;else if(mac_override_valid(mac_bt,canon,sizeof(canon)))snprintf(c->mac_bt,sizeof(c->mac_bt),"%s",canon);}strcpy(c->button_short,short_action);strcpy(c->button_long,long_action);if(button_tones_field>0)c->button_tones=button_tones;if(button_action_field>0)strcpy(c->button_action,button_action);if(button_action_long_field>0)strcpy(c->button_action_long,button_action_long);if(button_action_brightness_field>0)c->button_action_brightness=(unsigned)button_action_brightness;if(button_mute_brightness_field>0)c->button_mute_brightness=(unsigned)button_mute_brightness;if(action_sounds_field>0)snprintf(c->button_action_sounds,sizeof(c->button_action_sounds),"%s",action_sounds);if(theme_field>0)strcpy(c->ui_theme,theme_in);if(cmode_field>0)strcpy(c->color_mode,cmode_in);if(room_field>0)snprintf(c->room,sizeof(c->room),"%s",room_in);return persist_configuration(c);}
+/* Settings copy (#449). The device the owner is on reads the values of the chosen groups and sends them to one paired device as a signed "settings-copy" packet (peer_settings.h lists the keys). The receiver validates every key before it changes anything, and applies only the keys it knows, so identity, network and secrets never move. */
+#define LE_SETTINGS_FANOUT_MS 3000
+enum { I_WAKE_SENS, I_VOLUME, I_GAIN, I_MAX_UTT, I_END_SIL, I_VAD, I_LED, I_ACTION_BRIGHT, I_MUTE_BRIGHT, I_COUNT };
+static const struct { const char *key; int lo, hi; int (*valid)(int); } settings_ints[I_COUNT] = {
+    [I_WAKE_SENS] = {"wake_sensitivity", 0, 100, NULL},
+    [I_VOLUME] = {"volume", 0, 100, NULL},
+    [I_GAIN] = {"microphone_gain", 0, 100, NULL},
+    [I_MAX_UTT] = {"stt_max_utterance_ms", 0, 0, stt_max_utterance_valid},
+    [I_END_SIL] = {"stt_end_silence_ms", 0, 0, stt_end_silence_valid},
+    [I_VAD] = {"stt_vad_floor_rms", 0, 0, stt_vad_floor_valid},
+    [I_LED] = {"led_brightness", 0, 100, NULL},
+    [I_ACTION_BRIGHT] = {"button_action_brightness", 0, 100, NULL},
+    [I_MUTE_BRIGHT] = {"button_mute_brightness", 0, 100, NULL}
+};
+struct settings_copy { int has[I_COUNT], v[I_COUNT]; int has_wake, has_ha, has_vis, vis; char wake[64], ha[200]; };
+static int settings_int_add(char *b, size_t cap, size_t *used, const char *key, int value)
+{
+    int n = snprintf(b + *used, cap - *used, "%s\"%s\":%d", *used > 1 ? "," : "", key, value);
+    if (n < 0 || (size_t)n >= cap - *used) return -1;
+    *used += (size_t)n;
+    return 0;
+}
+static int settings_text_add(char *b, size_t cap, size_t *used, const char *key, const char *value)
+{
+    char esc[512];
+    int n;
+    json_escape(esc, sizeof esc, value);
+    n = snprintf(b + *used, cap - *used, "%s\"%s\":\"%s\"", *used > 1 ? "," : "", key, esc);
+    if (n < 0 || (size_t)n >= cap - *used) return -1;
+    *used += (size_t)n;
+    return 0;
+}
+static int settings_bool_add(char *b, size_t cap, size_t *used, const char *key, int value)
+{
+    int n = snprintf(b + *used, cap - *used, "%s\"%s\":%s", *used > 1 ? "," : "", key, value ? "true" : "false");
+    if (n < 0 || (size_t)n >= cap - *used) return -1;
+    *used += (size_t)n;
+    return 0;
+}
+/* Sender: the values this device holds for the chosen groups, as a flat JSON object ("{}" when none). Returns the length, or -1. */
+static int settings_copy_body(struct api_context *c, unsigned groups, char *b, size_t cap)
+{
+    struct le_audio_state a;
+    struct le_led_state l;
+    struct le_wake_word_state w;
+    size_t used = 1;
+    if (cap < 4) return -1;
+    b[0] = '{';
+    b[1] = 0;
+    if (groups & LE_SETTINGS_VOICE) {
+        if (le_get_wake_word_state(c->backend, &w)
+            || settings_text_add(b, cap, &used, "wake_word", w.wake_word)
+            || settings_int_add(b, cap, &used, "wake_sensitivity", w.sensitivity)
+            || settings_int_add(b, cap, &used, "stt_max_utterance_ms", c->stt_max_utterance_ms)
+            || settings_int_add(b, cap, &used, "stt_end_silence_ms", c->stt_end_silence_ms)
+            || settings_int_add(b, cap, &used, "stt_vad_floor_rms", c->stt_vad_floor_rms))
+            return -1;
+    }
+    if (groups & LE_SETTINGS_AUDIO) {
+        if (le_get_audio_state(c->backend, &a)
+            || settings_int_add(b, cap, &used, "volume", a.volume)
+            || settings_int_add(b, cap, &used, "microphone_gain", a.microphone_gain))
+            return -1;
+    }
+    if ((groups & LE_SETTINGS_HA) && c->home_assistant_url[0]
+        && settings_text_add(b, cap, &used, "home_assistant_url", c->home_assistant_url))
+        return -1;
+    if (groups & LE_SETTINGS_LED) {
+        if (le_get_led_state(c->backend, &l)
+            || settings_int_add(b, cap, &used, "led_brightness", l.current.brightness)
+            || settings_bool_add(b, cap, &used, "led_visualizer_enabled", l.visualizer_enabled)
+            || settings_int_add(b, cap, &used, "button_action_brightness", c->button_action_brightness)
+            || settings_int_add(b, cap, &used, "button_mute_brightness", c->button_mute_brightness))
+            return -1;
+    }
+    if (used + 2 > cap) return -1;
+    b[used] = '}';
+    b[used + 1] = 0;
+    return (int)used + 1;
+}
+/* Receiver: every member is checked before anything is applied. Keys outside the copy list are ignored; a bad value for a listed key refuses the whole packet. */
+static int settings_parse(const char *body, size_t blen, struct settings_copy *s)
+{
+    struct json_member m[LE_SETTINGS_KEYS_MAX];
+    size_t count = 0, i, k;
+    char key[LE_SETTINGS_KEY_MAX];
+    memset(s, 0, sizeof *s);
+    if (json_object_members(body, blen, m, LE_SETTINGS_KEYS_MAX, &count) < 0) return -1;
+    for (i = 0; i < count; i++) {
+        const char *v = m[i].value;
+        size_t vl = m[i].value_len;
+        if (m[i].name_len >= sizeof key) continue;
+        memcpy(key, m[i].name, m[i].name_len);
+        key[m[i].name_len] = 0;
+        if (!le_settings_key_group(key)) continue;
+        if (!strcmp(key, "wake_word")) {
+            if (json_string_span(v, vl, s->wake, sizeof s->wake) < 1 || !s->wake[0]) return -1;
+            s->has_wake = 1;
+            continue;
+        }
+        if (!strcmp(key, "home_assistant_url")) {
+            if (json_string_span(v, vl, s->ha, sizeof s->ha) < 1 || !home_assistant_url_valid(s->ha)) return -1;
+            s->has_ha = 1;
+            continue;
+        }
+        if (!strcmp(key, "led_visualizer_enabled")) {
+            if (json_bool_span(v, vl, &s->vis) < 1) return -1;
+            s->has_vis = 1;
+            continue;
+        }
+        for (k = 0; k < I_COUNT && strcmp(key, settings_ints[k].key); k++) ;
+        if (k == I_COUNT || json_int_span(v, vl, &s->v[k]) < 1) return -1;
+        if (settings_ints[k].valid ? !settings_ints[k].valid(s->v[k]) : (s->v[k] < settings_ints[k].lo || s->v[k] > settings_ints[k].hi)) return -1;
+        s->has[k] = 1;
+    }
+    return 0;
+}
+static int settings_ok(int rc) { return rc == LE_NOT_SUPPORTED ? LE_OK : rc; }
+static int settings_apply(struct api_context *c, const struct settings_copy *s)
+{
+    int rc = LE_OK;
+    if (s->has_wake && (rc = settings_ok(le_set_wake_word(c->backend, s->wake)))) return rc;
+    if (s->has[I_WAKE_SENS] && (rc = settings_ok(le_set_wake_word_sensitivity(c->backend, s->v[I_WAKE_SENS])))) return rc;
+    if (s->has[I_VOLUME] && (rc = settings_ok(le_set_volume(c->backend, s->v[I_VOLUME])))) return rc;
+    if (s->has[I_GAIN] && (rc = settings_ok(le_set_microphone_gain(c->backend, s->v[I_GAIN])))) return rc;
+    if (s->has[I_LED] && (rc = settings_ok(le_set_led_brightness(c->backend, s->v[I_LED])))) return rc;
+    if (s->has_vis && (rc = settings_ok(le_set_led_visualizer_enabled(c->backend, s->vis)))) return rc;
+    if (s->has[I_MAX_UTT]) c->stt_max_utterance_ms = s->v[I_MAX_UTT];
+    if (s->has[I_END_SIL]) c->stt_end_silence_ms = s->v[I_END_SIL];
+    if (s->has[I_VAD]) c->stt_vad_floor_rms = s->v[I_VAD];
+    if (s->has[I_ACTION_BRIGHT]) c->button_action_brightness = s->v[I_ACTION_BRIGHT];
+    if (s->has[I_MUTE_BRIGHT]) c->button_mute_brightness = s->v[I_MUTE_BRIGHT];
+    if (s->has_ha) snprintf(c->home_assistant_url, sizeof c->home_assistant_url, "%s", s->ha);
+    return persist_configuration(c);
+}
+/* Member side: a sealed "settings-copy" packet, verified, validated and applied once. */
+static void peer_settings(struct api_context *c, const struct api_request *q, struct api_response *r)
+{
+    const char *body = NULL;
+    size_t blen = 0;
+    struct settings_copy s;
+    int rc;
+    peer_key_ready(c);
+    if (!c->peer_key.set) {
+        out(r, 409, "{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_paired\",\"message\":\"This device is not paired with other devices\"}}");
+        return;
+    }
+    if (le_peer_open(&c->peer_key, &c->peer_replay, (long long)time(NULL), LE_GROUP_COMMAND_WINDOW_S, LE_SETTINGS_COPY_TYPE, q->body, q->body_len, &body, &blen) != LE_PEER_OK) {
+        api_log(c, "warning", "Refused a settings copy that did not verify");
+        out(r, 401, "{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_verified\",\"message\":\"The settings copy did not verify with this device's key\"}}");
+        return;
+    }
+    if (settings_parse(body, blen, &s)) {
+        err(r, 400, LE_INVALID, "The settings copy holds a value this device does not accept");
+        return;
+    }
+    rc = settings_apply(c, &s);
+    if (rc) {
+        err(r, rc == LE_INVALID ? 400 : 503, rc, "The settings could not be applied");
+        return;
+    }
+    api_log(c, "info", "Settings copied from a paired device");
+    ok(r, "{\"applied\":true}");
+}
+/* Owner side: POST /api/v1/network/settings/copy {"address","port","voice","audio","ha","led"}. */
+static void settings_copy_json(struct api_context *c, const struct api_request *q, struct api_response *r)
+{
+    static const char *names[] = {"voice", "audio", "ha", "led"};
+    char address[32], body[LE_SETTINGS_BODY_MAX], packet[LE_PEER_HEADER_MAX + LE_SETTINGS_BODY_MAX + 16], reply[1024], nonce[LE_PEER_NONCE_HEX + 1], list[32], data[256];
+    struct in_addr a;
+    int port = 0, flag = 0, status = 0, wire = 0, applied_here = 0, n;
+    unsigned groups = LE_SETTINGS_NONE;
+    size_t i, used = 0;
+    const char *result = "unreachable";
+    peer_key_ready(c);
+    if (!c->peer_key.set) {
+        err(r, 409, LE_BUSY, "Pair this device with the other device before copying settings");
+        return;
+    }
+    if (json_get_string(q->body, "address", address, sizeof address) < 1 || inet_pton(AF_INET, address, &a) != 1 || json_get_int(q->body, "port", &port) < 1 || port < 1 || port > 65535) {
+        err(r, 400, LE_INVALID, "A device needs an IPv4 address and a port");
+        return;
+    }
+    for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+        int rc = json_get_bool(q->body, names[i], &flag);
+        if (rc < 0) {
+            err(r, 400, LE_INVALID, "Each settings group must be true or false");
+            return;
+        }
+        if (rc == 1 && flag) groups |= le_settings_group_from_name(names[i]);
+    }
+    if (!groups) {
+        err(r, 400, LE_INVALID, "Choose at least one settings group");
+        return;
+    }
+    if (own_ipv4(address) && port == c->http_port) {
+        err(r, 400, LE_INVALID, "Choose another device; this device already has these settings");
+        return;
+    }
+    if (settings_copy_body(c, groups, body, sizeof body) < 0) {
+        err(r, 503, LE_IO, "The settings could not be read");
+        return;
+    }
+    if (!strcmp(body, "{}")) {
+        err(r, 409, LE_INVALID, "The chosen groups have no settings to copy");
+        return;
+    }
+    if (le_peer_nonce(nonce) || (wire = le_peer_seal(&c->peer_key, LE_SETTINGS_COPY_TYPE, (long long)time(NULL), nonce, body, strlen(body), packet, sizeof packet)) <= 0) {
+        err(r, 503, LE_IO, "The settings copy could not be sent");
+        return;
+    }
+    if (!le_peer_post(address, (unsigned)port, "/api/v1/peer/settings", packet, (size_t)wire, LE_SETTINGS_FANOUT_MS, &status, reply, sizeof reply)) {
+        if (status == 200 && json_get_bool(reply, "applied", &applied_here) > 0 && applied_here) result = "applied";
+        else if (status == 401 || status == 404 || status == 409) result = "unpaired";
+        else result = "failed";
+    }
+    list[0] = 0;
+    for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+        if (!(groups & le_settings_group_from_name(names[i]))) continue;
+        n = snprintf(list + used, sizeof list - used, "%s%s", used ? "," : "", names[i]);
+        if (n < 0 || (size_t)n >= sizeof list - used) break;
+        used += (size_t)n;
+    }
+    api_log(c, "info", "Settings copy sent to a paired device");
+    n = snprintf(data, sizeof data, "{\"result\":\"%s\",\"groups\":\"%s\",\"address\":\"%s\",\"port\":%d}", result, list, address, port);
+    if (n < 0 || (size_t)n >= sizeof data) {
+        err(r, 503, LE_IO, "The settings copy could not be reported");
+        return;
+    }
+    ok(r, data);
+}
 static int read_central_logs(char lines[LE_MAX_LOGS][LE_LOGD_MSG_MAX],size_t*count){FILE*f;char line[LE_LOGD_MSG_MAX],ordered[LE_MAX_LOGS][LE_LOGD_MSG_MAX];size_t next=0,total=0;if(!count)return 0;*count=0;f=fopen(LE_LOGD_FILE,"r");if(!f)return 0;while(fgets(line,sizeof(line),f)){size_t n=strlen(line);if(n&&line[n-1]=='\n')line[n-1]=0;memcpy(lines[next%LE_MAX_LOGS],line,sizeof(lines[0]));next++;if(total<LE_MAX_LOGS)total++;}fclose(f);if(total){size_t i,first=next-total;for(i=0;i<total;i++){memcpy(ordered[i],lines[(first+i)%LE_MAX_LOGS],sizeof(ordered[i]));}for(i=0;i<total;i++)memcpy(lines[i],ordered[i],sizeof(lines[i]));*count=total;}return *count>0;}
 static void logs_json(struct api_context*c,struct api_response*r){char central[LE_MAX_LOGS][LE_LOGD_MSG_MAX],message[256],escaped[512],level[16],service[32];size_t central_count=0,first,i,n=0;int timestamp,boot_seconds;int from_central=read_central_logs(central,&central_count);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"entries\":[");if(from_central){for(i=0;i<central_count&&n<sizeof(r->body)-500;i++){timestamp=0;boot_seconds=0;level[0]=0;service[0]=0;message[0]=0;json_get_int(central[i],"ts",&timestamp);json_get_int(central[i],"boot_seconds",&boot_seconds);json_get_string(central[i],"level",level,sizeof(level));json_get_string(central[i],"service",service,sizeof(service));json_get_string(central[i],"msg",message,sizeof(message));if(service[0]&&strncmp(message,service,strlen(service))){char prefixed[256];snprintf(prefixed,sizeof(prefixed),"%s: %s",service,message);strncpy(message,prefixed,sizeof(message)-1);message[sizeof(message)-1]=0;}json_escape(escaped,sizeof(escaped),message);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s{\"timestamp\":%d,\"boot_seconds\":%d,\"level\":\"%s\",\"message\":\"%s\"}",i?",":"",timestamp,boot_seconds,level[0]?level:"INFO",escaped);}}else{first=c->log_next-c->log_count;for(i=0;i<c->log_count&&n<sizeof(r->body)-500;i++)n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s%s",i?",":"",c->logs[(first+i)%LE_MAX_LOGS]);}n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"],\"source\":\"%s\",\"bounded\":true,\"capacity\":%d},\"error\":null}",from_central?"central-file":"web-memory",LE_MAX_LOGS);r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
 static void logs_stream_json(struct api_context*c,struct api_response*r){const char*prefix="event: logs\ndata: ",*suffix="\n\n";size_t prefix_len=strlen(prefix),suffix_len=strlen(suffix),n;logs_json(c,r);if(r->status!=200)return;if(r->length>sizeof(r->body)-prefix_len-suffix_len-1){err(r,503,LE_IO,"Log stream is too large");return;}n=r->length;memmove(r->body+prefix_len,r->body,n);memcpy(r->body,prefix,prefix_len);memcpy(r->body+prefix_len+n,suffix,suffix_len);r->length=prefix_len+n+suffix_len;r->body[r->length]=0;strcpy(r->type,"text/event-stream; charset=utf-8");}
@@ -2686,6 +2919,8 @@ if(!strcmp(p,"/api/v1/audio/test")&&!strcmp(q->method,"POST")){rc=le_play_test_t
  if(!strcmp(p,"/api/v1/network/pairing")){pairing_handle(c,q,r);return;}
  if(!strncmp(p,"/api/v1/peer/proof",18)&&(p[18]==0||p[18]=='?')){peer_proof(c,q,r);return;}
  if(!strcmp(p,"/api/v1/peer/command")){if(!strcmp(q->method,"POST")){peer_command(c,q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/peer/settings")){if(!strcmp(q->method,"POST")){peer_settings(c,q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/network/settings/copy")){if(!strcmp(q->method,"POST")){settings_copy_json(c,q,r);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/network/groups")||!strncmp(p,"/api/v1/network/groups/",23)){groups_handle(c,q,r);return;}
  if(!strcmp(p,"/api/v1/network/peers")){if(!strcmp(q->method,"GET")||!strcmp(q->method,"HEAD")){peers_json(c,r);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/network")){if(!strcmp(q->method,"GET")){net_json(c,r);return;}if(!strcmp(q->method,"PUT")){char host[64];int changed=0;{char m[64],canon[24];int k;for(k=0;k<2;k++){const char*key=k?"bt_mac":"wifi_mac";int result=json_get_string(q->body,key,m,sizeof(m));if(result<0){err(r,400,LE_INVALID,"MAC override must be a string no longer than 63 bytes");return;}if(result>0&&m[0]&&!mac_override_valid(m,canon,sizeof(canon))){err(r,400,LE_INVALID,"MAC address must be six hex octets and must not be multicast");return;}}}if(json_get_string(q->body,"hostname",host,sizeof(host))>0){rc=le_set_hostname(c->backend,host);changed=1;if(rc){err(r,rc==LE_INVALID?400:501,rc,"Hostname could not be applied");return;}}if(json_get_bool(q->body,"ssh",&v)>0){c->net_ssh=v;changed=1;}if(json_get_bool(q->body,"api_lan",&v)>0){c->net_api_lan=v;changed=1;}if(json_get_bool(q->body,"discoverable",&v)>0){c->discoverable=v?1:0;changed=1;}if(json_get_bool(q->body,"nearest_answers",&v)>0){c->nearest_answers=v?1:0;changed=1;}{char m[64],canon[24];int k;for(k=0;k<2;k++){const char*key=k?"bt_mac":"wifi_mac";char*dst=k?c->mac_bt:c->mac_wifi;size_t cap=k?sizeof(c->mac_bt):sizeof(c->mac_wifi);int result=json_get_string(q->body,key,m,sizeof(m));if(result<0){err(r,400,LE_INVALID,"MAC override must be a string no longer than 63 bytes");return;}if(result==0)continue;if(!m[0]){dst[0]=0;changed=1;continue;}if(!mac_override_valid(m,canon,sizeof(canon))){err(r,400,LE_INVALID,"MAC address must be six hex octets and must not be multicast");return;}snprintf(dst,cap,"%s",canon);changed=1;}}if(!changed){err(r,400,LE_INVALID,"No supported network setting was supplied");return;}if(persist_configuration(c)){err(r,503,LE_IO,"Network settings could not be saved");return;}net_json(c,r);return;}}if(!strcmp(p,"/api/v1/network/wifi/scan")&&!strcmp(q->method,"GET")){struct le_wifi_scan s;rc=le_scan_wifi(c->backend,&s);if(rc){err(r,501,rc,"Wi-Fi scan failed");return;}if(wifi_scan_json(r,&s)<0){err(r,503,LE_IO,"Wi-Fi scan response is too large");return;}return;}
