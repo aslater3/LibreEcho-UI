@@ -15,6 +15,9 @@ struct le_voice_pipeline_turn {
     uint64_t stt_total_ms;
     int endpoint;
     int follow_up;
+    /* Set only when whisper detection is enabled and the request audio
+       classified as whispered (see voice_whisper.h). */
+    int whispered;
 };
 
 struct le_voice_pipeline_metrics {
@@ -115,6 +118,11 @@ void le_voice_pipeline_set_stop_listen(
 /* Run the noise suppressor (voice_ns.h) on the audio sent to speech
  * recognition. Off by default; safe to call at any time. */
 void le_voice_pipeline_set_noise_suppression(
+    struct le_voice_pipeline *pipeline, int enabled);
+
+/* Enable or disable per-turn whisper classification. Off by default; the
+ * classification runs on the capture worker over the request audio. */
+void le_voice_pipeline_set_whisper_detection(
     struct le_voice_pipeline *pipeline, int enabled);
 
 int le_voice_pipeline_request_follow_up(

@@ -370,7 +370,7 @@ make build/test-voice-ns build/test-voice-pipeline-noise
 make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
 make build/test-voice-reply build/test-voice-playback
-make build/test-voice-pipeline
+make build/test-voice-pipeline build/test-voice-whisper
 make build/test-voice-listening-feedback
 ./build/test-voice-stream
 ./build/test-sttd
@@ -392,6 +392,7 @@ python3 tests/test_voice_listening_callers.py
 make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
+./build/test-voice-whisper
 ./build/test-voice-pipeline
 # Stop without the wake word (#405): the wake-free stop window in the pipeline,
 # then the real agent acting on it (timer, reply, chatter, remote STT guard).

@@ -8,6 +8,7 @@
 #include "voice_pipeline.h"
 #include "voice_history.h"
 #include "voice_playback.h"
+#include "voice_whisper.h"
 #include "timer_intent.h"
 #include "timer_schedule.h"
 #include "stop_intent.h"
@@ -2162,10 +2163,22 @@ static void voice_transcript(
             continuation = 0;
         if (!continuation)
             snprintf(input, sizeof(input), "%s", text);
+        if (turn->whispered) {
+            /* Whisper detection is opt-in. A whispered request is marked for
+               the agent so the reply can match its quiet register. */
+            char hinted[LE_LLM_TEXT_MAX];
+
+            if (snprintf(hinted, sizeof(hinted),
+                         "[The user whispered this request; answer briefly "
+                         "and quietly.]\n%s", input) < (int)sizeof(hinted))
+                snprintf(input, sizeof(input), "%s", hinted);
+        }
         le_log_info(
-            "agentd: transcript follow_up=%s detection_sample=%llu "
-            "audio_ms=%llu processing_ms=%llu total_ms=%llu text_chars=%lu",
+            "agentd: transcript follow_up=%s whispered=%s "
+            "detection_sample=%llu audio_ms=%llu processing_ms=%llu "
+            "total_ms=%llu text_chars=%lu",
             turn->follow_up ? "true" : "false",
+            turn->whispered ? "true" : "false",
             (unsigned long long)turn->detection_sample,
             (unsigned long long)turn->stt_audio_ms,
             (unsigned long long)turn->stt_processing_ms,
@@ -2907,6 +2920,10 @@ int main(int argc, char **argv)
         le_voice_pipeline_set_noise_suppression(state.voice_pipeline, 1);
         le_log_info("agentd: noise suppression on");
     }
+    le_voice_pipeline_set_whisper_detection(
+        state.voice_pipeline,
+        getenv("LE_VOICE_WHISPER_DETECT") &&
+            !strcmp(getenv("LE_VOICE_WHISPER_DETECT"), "1"));
     le_log_info("agentd: ready socket=%s provider=%s",
                 state.socket_path, state.provider->id);
     while (running) {
