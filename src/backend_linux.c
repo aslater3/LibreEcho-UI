@@ -1276,6 +1276,12 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
     if (json_get_bool(response, "muted", &v) > 0) { o->muted = v; found = 1; }
     /* Older audiod builds do not report it; leveling is then off (default). */
     o->volume_leveling = 0;
+    /* Older audiod builds have no reply level; replies then follow the master. */
+    o->reply_volume = o->volume; o->reply_volume_custom = 0;
+    if (json_get_bool(response, "reply_volume_custom", &v) > 0 && v &&
+        json_get_int(response, "reply_volume", &v) > 0 && v >= 0 && v <= 100) {
+        o->reply_volume = v; o->reply_volume_custom = 1;
+    }
     if (json_get_bool(response, "volume_leveling", &v) > 0) o->volume_leveling = v;
     else if (json_get_bool(response, "microphone_muted", &v) > 0) { o->muted = v; found = 1; }
     if (json_get_bool(response, "startup_sound", &v) > 0) { o->startup_sound = v; found = 1; }
@@ -1357,6 +1363,16 @@ static int volume_leveling(struct le_backend *b, int enabled)
     (void)b;
     snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
     return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_volume_leveling", args);
+}
+
+static int reply_volume(struct le_backend *b, int custom, int value)
+{
+    char args[32];
+    (void)b;
+    if (custom && (value < 0 || value > 100)) return LE_INVALID;
+    if (custom) snprintf(args, sizeof(args), "{\"volume\":%d}", value);
+    else snprintf(args, sizeof(args), "{\"custom\":false}");
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_reply_volume", args);
 }
 
 static int tone(struct le_backend *b)
@@ -3241,7 +3257,8 @@ static const struct le_backend_ops ops = {
     network_portal,
     linux_reboot_bootloader,
     volume_leveling,
-    sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing
+    sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing,
+    reply_volume
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)
