@@ -49,9 +49,15 @@ class Adapter:
    if self.kind=='wake' and cmd in ('subscribe','stream_audio'):
     self.streams[cmd]=c;data={'subscribed':True} if cmd=='subscribe' else {'streaming':True,'format':'pcm_s16_le','sample_rate':16000,'channels':1,'frame_header_bytes':24,'sample_indexed':True}
     c.sendall((json.dumps({'v':1,'id':req['id'],'ok':True,'data':data})+'\n').encode());return
+   if getattr(self,'track',False):
+    # Opt-in (#396): daemon state follows the setters so read-back tests see the change.
+    if cmd=='set_volume':self.volume=req['args']['volume']
+    if cmd=='set_brightness' and getattr(self,'status',None) is not None:self.status['brightness']=req['args']['brightness']
+    if cmd=='set_sensitivity' and getattr(self,'status',None) is not None:self.status['sensitivity']=req['args']['sensitivity']
    if cmd=='set_mute' and not self.fail:self.muted=req['args']['muted']
    if cmd=='set_reply_volume' and not self.fail:self.reply=req['args'].get('volume')
-   data={'muted':self.muted,'volume':66,'output_available':True,**({'reply_volume':self.reply,'reply_volume_custom':True} if self.reply is not None else {})} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}
+   data={'muted':self.muted,'volume':getattr(self,'volume',66),'output_available':True,**({'reply_volume':self.reply,'reply_volume_custom':True} if self.reply is not None else {})} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}
+   if cmd=='status' and getattr(self,'status',None) is not None:data=self.status
    c.sendall((json.dumps({'v':1,'id':req['id'],'ok':not self.fail,'data':data})+'\n').encode())
   except (OSError,ValueError):pass
   finally:
@@ -98,7 +104,7 @@ class Fixture(Daemon):
  def test_hello_auth_device_list_ping_disconnect(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(b'fixture-satellite',b);self.assertIn(num(17,61),b)
   self.assertNotIn(var((16<<3)|2),b,'no room configured: DeviceInfo has no suggested_area')
-  self.s.sendall(frame(11));listed=[receive(self.s) for _ in range(13)];self.assertEqual([t for t,_ in listed],[63,17,61,49,107,107,107,107,107,107,107,15,19])
+  self.s.sendall(frame(11));listed=[receive(self.s) for _ in range(17)];self.assertEqual([t for t,_ in listed],[63,17,61,49,17,49,49,49,107,107,107,107,107,107,107,15,19])
   button=listed[2][1];self.assertIn(b'\x15'+struct.pack('<I',404),button);self.assertIn(text(3,'Cancel request'),button)
   self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
  def test_oversize_malformed_and_client_limit(self):

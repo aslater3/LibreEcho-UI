@@ -30,7 +30,7 @@ class LightSensor(Daemon):
   tmp=self.lux.with_suffix('.tmp');tmp.write_text('%d\n'%v);os.replace(tmp,self.lux)
  def subscribe(self):
   # As Home Assistant does: list entities, then subscribe to states.
-  self.hello();self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(12)],[63,17,107,107,107,107,107,107,107,15,16,19])
+  self.hello();self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(16)],[63,17,17,49,49,49,107,107,107,107,107,107,107,15,16,19])
   self.s.sendall(frame(20))
   return self.light_states(1.5,stop_after=1)
  def light_states(self,seconds,stop_after=None):
@@ -43,9 +43,9 @@ class LightSensor(Daemon):
     f=fields(b);self.assertEqual(struct.unpack('<I',f[1])[0],3);got.append(lux_of(b))
   self.s.settimeout(3);return got
  def test_list_entities_has_illuminance_sensor(self):
-  self.hello();self.s.sendall(frame(11));msgs=[receive(self.s) for _ in range(12)]
-  self.assertEqual([t for t,_ in msgs],[63,17,107,107,107,107,107,107,107,15,16,19])
-  f=fields(msgs[10][1])
+  self.hello();self.s.sendall(frame(11));msgs=[receive(self.s) for _ in range(16)]
+  self.assertEqual([t for t,_ in msgs],[63,17,17,49,49,49,107,107,107,107,107,107,107,15,16,19])
+  f=fields(msgs[14][1])
   self.assertEqual(f[1],b'illuminance');self.assertEqual(struct.unpack('<I',f[2])[0],3);self.assertEqual(f[3],b'Illuminance')
   self.assertEqual(f[6],b'lx');self.assertEqual(f[9],b'illuminance');self.assertEqual(f[10],1,'STATE_CLASS_MEASUREMENT')
  def test_state_on_subscribe_and_on_change(self):
@@ -70,7 +70,7 @@ class LightSensor(Daemon):
 class NoLightSensor(Daemon):
  def test_no_sensor_no_entity_and_no_state(self):
   # The private fixture has no /sys/bus/i2c TSL2540 node, as on a board without one.
-  self.hello();self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(11)],[63,17,107,107,107,107,107,107,107,15,19])
+  self.hello();self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(15)],[63,17,17,49,49,49,107,107,107,107,107,107,107,15,19])
   self.s.sendall(frame(20));end=time.monotonic()+1.5;types=[]
   while time.monotonic()<end:
    self.s.settimeout(max(.01,end-time.monotonic()))
