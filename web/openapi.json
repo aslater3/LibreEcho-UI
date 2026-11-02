@@ -4419,6 +4419,225 @@
     }
    }
   },
+  "/wake-word/models": {
+    "get": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "List owner-staged wake models",
+      "description": "Lists committed model folders with their validation result and the selected folder. The stock model is always available; the bundled Alexa model is data.stock.",
+      "parameters": [],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/wake-word/model": {
+    "put": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "Select a wake model",
+      "description": "Selects a committed model folder, or the stock model with alexa_v0.1. The choice is saved on the device and applies when the wake service next starts.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "model"
+              ],
+              "properties": {
+                "model": {
+                  "type": "string",
+                  "maxLength": 63
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/wake-word/models/{name}": {
+    "delete": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "Delete a staged wake model",
+      "description": "Removes a committed model folder. The selected model cannot be removed.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 63
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/wake-word/models/{name}/files/{file}": {
+    "post": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "Upload one chunk of a model file",
+      "description": "Stages one base64 chunk of melspectrogram.onnx, embedding_model.onnx or alexa_v0.1.onnx. offset must equal the bytes already staged for that file; offset 0 starts the file again. A chunk decodes to at most 8192 bytes; a file is at most 8 MiB.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 63
+          }
+        },
+        {
+          "name": "file",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "melspectrogram.onnx",
+              "embedding_model.onnx",
+              "alexa_v0.1.onnx"
+            ]
+          }
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "offset",
+                "data"
+              ],
+              "properties": {
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "data": {
+                  "type": "string",
+                  "description": "Standard base64 of the chunk"
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/wake-word/models/{name}/commit": {
+    "post": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "Check and install a staged wake model",
+      "description": "Checks the three staged files (names, sizes, graph inputs and outputs, operators, opset and external data) and moves the folder into place. A folder that fails the check is discarded and the response carries the reason.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 63
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "422": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
   "/wake-word/test": {
    "post": {
     "tags": [

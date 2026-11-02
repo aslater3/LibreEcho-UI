@@ -50,7 +50,7 @@ def main():
                 cmd += ["-DLE_WAKE_ENGINE_ONNX"]
             cmd += SOURCES
             if enabled:
-                cmd += ["src/adapter/wake_worker.c"]
+                cmd += ["src/adapter/wake_worker.c", "src/wake_model.c"]
             cmd += speex + ["-lpthread", "-lm", "-o", str(binary)]
             subprocess.run(cmd, cwd=ROOT, check=True, timeout=30)
             for case in cases if enabled else ["disabled"]:

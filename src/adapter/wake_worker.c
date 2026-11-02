@@ -4,10 +4,12 @@
 
 #include "wake_engine.h"
 #include "wake_health.h"
+#include "wake_model.h"
 #include <time.h>
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -58,6 +60,8 @@ struct wake_decoder {
 struct wake_worker_impl {
     struct le_wake_engine *engine;
     char model_directory[WAKE_MODEL_DIRECTORY_BYTES];
+    /* The owner-visible name of the model being run; the stock model is alexa_v0.1. */
+    char model_name[LE_WAKE_MODEL_NAME_MAX];
     unsigned int threads;
     pthread_t thread;
     pthread_mutex_t mutex;
@@ -188,14 +192,16 @@ static void decode_score(struct wake_worker_impl *worker,
         decoder->observations[peak].detection_sample +
         WAKE_LOCKOUT_SAMPLES;
     if (worker->callback) {
-        const struct le_wake_event event = {
+        struct le_wake_event event = {
             decoder->observations[peak].detection_sample,
             decoder->scores[peak],
             decoder->observations[peak].vad_score,
             decoder->observations[peak].playback_active,
-            "alexa_v0.1"
+            ""
         };
 
+        /* The event carries at most 23 characters of the model name. */
+        snprintf(event.model_name, sizeof(event.model_name), "%.*s", (int)(sizeof(event.model_name) - 1), worker->model_name);
         worker->callback(&event, worker->callback_opaque);
     }
 }
@@ -300,6 +306,14 @@ int le_wake_worker_start(struct le_wake_worker *worker,
     if (!impl)
         return -1;
     memcpy(impl->model_directory, model_directory, strlen(model_directory) + 1);
+    {
+        char phrase[LE_WAKE_MODEL_NAME_MAX];
+
+        if (le_wake_model_label(model_directory, phrase, sizeof(phrase),
+                                impl->model_name, sizeof(impl->model_name)) < 0)
+            snprintf(impl->model_name, sizeof(impl->model_name), "%s",
+                     LE_WAKE_MODEL_STOCK_NAME);
+    }
     impl->threads = threads;
     impl->accept_threshold = accept_threshold;
     impl->callback = callback;

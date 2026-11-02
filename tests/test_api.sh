@@ -55,6 +55,33 @@ curl -sS -X POST "$URL/api/v1/assistant/respond" -H "$CSRF" -H 'Content-Type: ap
 respond_pid=$!
 timeout 1 curl -fsS "$URL/api/v1/assistant/latency" | jq -e '.ok and (.data.turns | length == 0)' >/dev/null
 wait "$respond_pid"
+# Owner-staged wake models: listing, the selection and chunk rejections, and a
+# staged folder that fails the check is refused and cleaned up. The test
+# server keeps its configuration in ./build, so models live in ./build/wakeword-models.
+curl -fsS "$URL/api/v1/wake-word/models" | jq -e '.ok and .data.stock.name == "alexa_v0.1" and .data.stock.wake_word == "Alexa" and (.data.models | type == "array")' >/dev/null
+code=$(curl -sS -o /tmp/le-wake-model-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H 'Content-Type: application/json' --data '{"model":"alexa_v0.1"}')
+[ "$code" = 403 ]
+code=$(curl -sS -o /tmp/le-wake-model-missing.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H "$CSRF" -H 'Content-Type: application/json' --data '{"model":"no-such-word"}')
+[ "$code" = 404 ]
+code=$(curl -sS -o /tmp/le-wake-model-traversal.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H "$CSRF" -H 'Content-Type: application/json' --data '{"model":"../etc"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-model-nofield.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-model-stock.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H "$CSRF" -H 'Content-Type: application/json' --data '{"model":"alexa_v0.1"}')
+[ "$code" = 200 ]
+code=$(curl -sS -o /tmp/le-wake-chunk-name.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/bad%20name/files/alexa_v0.1.onnx" -H "$CSRF" -H 'Content-Type: application/json' --data '{"offset":0,"data":"AAAA"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-chunk-file.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/test-word/files/other.bin" -H "$CSRF" -H 'Content-Type: application/json' --data '{"offset":0,"data":"AAAA"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-chunk-b64.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/test-word/files/alexa_v0.1.onnx" -H "$CSRF" -H 'Content-Type: application/json' --data '{"offset":0,"data":"a!b"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-chunk.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/test-word/files/melspectrogram.onnx" -H "$CSRF" -H 'Content-Type: application/json' --data '{"offset":0,"data":"AAAA"}')
+[ "$code" = 200 ]
+code=$(curl -sS -o /tmp/le-wake-commit.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/test-word/commit" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 422 ]
+grep -q 'Model rejected' /tmp/le-wake-commit.out
+code=$(curl -sS -o /tmp/le-wake-delete.out -w '%{http_code}' -X DELETE "$URL/api/v1/wake-word/models/test-word" -H "$CSRF")
+[ "$code" = 404 ]
 expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
 expect "$(curl -fsS "$URL/")" 'First-boot setup'
 code=$(curl -sS -o /tmp/le-bad-setup.out -w '%{http_code}' -X POST "$URL/api/v1/setup" -H "$CSRF" -H 'Content-Type: application/json' --data '{"hostname":"bad host"}')

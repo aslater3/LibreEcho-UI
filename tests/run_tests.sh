@@ -149,6 +149,8 @@ python3 tests/test_install_completeness.py
 python3 tests/test_watchdog_build_contract.py
 make build/test-wake-decode
 ./build/test-wake-decode
+make build/test-wake-model
+./build/test-wake-model
 make build/test-wake-health build/test-wake-health-api
 ./build/test-wake-health
 ./build/test-wake-health-api
