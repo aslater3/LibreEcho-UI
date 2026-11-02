@@ -18,7 +18,7 @@ class Settings(Daemon):
   self.adapters['led'].track=self.adapters['wake'].track=self.adapters['audio'].track=True
   self.adapters['led'].status={'brightness':40};self.adapters['wake'].status={'sensitivity':55}
  def subscribe(self):
-  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(15)];self.s.sendall(frame(20))
+  self.hello();self.s.sendall(frame(11));self.listed=[receive(self.s) for _ in range(18)];self.s.sendall(frame(20))
  def calls(self,kind,cmd):return [r for r in self.adapters[kind].calls if r['cmd']==cmd]
  def wait_call(self,kind,cmd,seconds=3):
   end=time.monotonic()+seconds

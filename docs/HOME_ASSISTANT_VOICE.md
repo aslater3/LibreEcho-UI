@@ -84,6 +84,24 @@ overlay; the ring returns to the saved ring settings. The light's state is kept
 in the daemon, so a restart of the satellite turns the light off and returns
 the ring to its saved settings.
 
+The satellite also offers three **device actions** for Home Assistant automations
+(ESPHome user services, under the device's ESPHome services in HA, for example
+`esphome.<device>_announce`). Each validates its arguments first; a malformed
+call disconnects that Home Assistant client and changes nothing. A call that
+arrives during a voice turn, playback or another LED write is ignored rather
+than queued, so the device's own activity keeps priority.
+
+- **announce**: `text` (string, 1-200 characters, no control characters). The
+  text is spoken through the device's TTS (audiod `speak`, the same path as the
+  voice replies). Not available as a URL.
+- **play_sound**: `name` (string, lowercase letters, digits, `-` or `_`, up to 48
+  characters). Plays one of the bundled sounds by name (currently `action-1`,
+  `action-2`, `action-3`); a name with no bundled file plays nothing.
+- **set_ring**: `colour` (string `#RRGGBB`), `effect` (string `Solid`, `Pulse` or
+  `Flash`) and `duration` (integer, 1-300 seconds). Shows the colour on the ring
+  for the duration, then releases only that overlay; the ring returns to what it
+  was showing before.
+
 Disabling HA restores the previously selected **Local** or **Custom** mode and
 its settings. Custom Whisper/Piper addresses, model/voice choices and assistant
 configuration are not erased. There is no protocol selector, legacy satellite
