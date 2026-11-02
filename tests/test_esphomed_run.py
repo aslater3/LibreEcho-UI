@@ -63,6 +63,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
  run([sys.executable,'tests/test_esphomed_buttons.py'],env)
  run([sys.executable,'tests/test_esphomed_activity.py'],env)
  run([sys.executable,'tests/test_esphomed_text_sensors.py'],env)
+ run([sys.executable,'tests/test_esphomed_room_level.py'],env)
  run([sys.executable,'tests/test_esphomed_led_light.py'],env)
  run([sys.executable,'tests/test_esphomed_settings.py'],env)
  run([sys.executable,'tests/test_esphomed_services.py'],env)
