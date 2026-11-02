@@ -525,6 +525,7 @@ static int number_command(const void *p,size_t n){unsigned key=(unsigned)ep_get_
   /* Same LED idle auto-off activity as the web volume change; best effort. */
   (void)job(S.led_path,"activity","{\"source\":\"volume\"}",0,0);return 0;
  case SENSITIVITY_NUMBER_KEY:snprintf(args,sizeof args,"{\"sensitivity\":%d}",target);return job(S.wake_path,"set_sensitivity",args,12,target)?-1:0;
+ case REPLY_KEY:snprintf(args,sizeof args,"{\"volume\":%d}",target);return job(S.audio_path,"set_reply_volume",args,JOB_REPLY,target)?-1:0;
  case LED_BRIGHTNESS_KEY:snprintf(args,sizeof args,"{\"brightness\":%d}",target);return job(S.led_path,"set_brightness",args,9,target)?-1:0;
  default:return -1;}
 }
@@ -559,7 +560,6 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  case 124:return provision(c,p,n);
  case 33:if(ep_get_uint(p,n,1,0)==WAKE_SWITCH_KEY){if(wake_set_active(!!ep_get_uint(p,n,2,0)))return -1;all_states();settings_sync();return 0;}if(ep_get_uint(p,n,1,0)!=MUTE_KEY)return -1;{int mute=!!ep_get_uint(p,n,2,0);if(!mute&&S.privacy!=0){all_states();return 0;}if(mute){S.local_mute_gate=1;S.muted=1;if(S.turn==1)cancel_turn("muted");else if(S.turn==2)stop_capture("muted");all_states();}snprintf(args,sizeof args,"{\"muted\":%s}",mute?"true":"false");return job(S.audio_path,"set_mute",args,3,mute);}
  case 62:if(ep_get_uint(p,n,1,0)!=CANCEL_KEY)return -1;user_cancel("Home Assistant");return 0;
- case 51:if(ep_get_uint(p,n,1,0)!=REPLY_KEY)return -1;{uint32_t bits=(uint32_t)ep_get_uint(p,n,2,0);float level;memcpy(&level,&bits,4);if(!isfinite(level)||level<0||level>100)return -1;int target=(int)lroundf(level);snprintf(args,sizeof args,"{\"volume\":%d}",target);return job(S.audio_path,"set_reply_volume",args,JOB_REPLY,target)?-1:0;}
  case 65:if(ep_get_uint(p,n,1,0)!=MEDIA_KEY)return -1;
  if(ep_get_uint(p,n,4,0)){uint32_t bits=(uint32_t)ep_get_uint(p,n,5,0);float volume;memcpy(&volume,&bits,4);if(!isfinite(volume)||volume<0||volume>1)return -1;snprintf(args,sizeof args,"{\"volume\":%d}",(int)lroundf(volume*100));if(job(S.audio_path,"set_volume",args,4,(int)lroundf(volume*100)))return -1;}
  if(ep_get_uint(p,n,6,0)){if(ep_get_text(p,n,7,url,sizeof url)||strlen(url)>900)return -1;json_escape(escaped,sizeof escaped,url);snprintf(args,sizeof args,"{\"url\":\"%.1900s\"}",escaped);
