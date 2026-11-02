@@ -1626,15 +1626,20 @@ static int local_services_set(int on){char marker[400],dir[400];int fd;if(!local
 #define LE_NEWS_STALE_REFRESH 120L
 static const char*news_env(const char*k,const char*d){const char*v=getenv(k);return v&&*v?v:d;}
 static void news_path(char*out,size_t n,const char*name){snprintf(out,n,"%s/%s",news_env("LIBREECHO_NEWS_DIR","/data/libreecho/update"),name);}
-static int news_supported(void){return !access(news_env("LIBREECHO_NEWS_CURL","/usr/bin/curl"),X_OK)&&!access(news_env("LIBREECHO_NEWS_CA","/etc/ssl/certs/ca-certificates.crt"),R_OK);}
+/* Owner-added private CAs are appended to the system roots in trust-bundle.pem
+   (see https_private_ca below). The bundle is used in addition to the system
+   roots, never instead of them, and verification stays on either way. */
+static char news_trust_dir[320]="/data/libreecho/config";
+static const char*news_ca_path(char*buf,size_t size){const char*env=getenv("LIBREECHO_NEWS_CA");int n;if(env&&*env)return env;n=snprintf(buf,size,"%s/trust-bundle.pem",news_trust_dir);if(n>0&&(size_t)n<size&&!access(buf,R_OK))return buf;return "/etc/ssl/certs/ca-certificates.crt";}
+static int news_supported(void){char ca[384];return !access(news_env("LIBREECHO_NEWS_CURL","/usr/bin/curl"),X_OK)&&!access(news_ca_path(ca,sizeof(ca)),R_OK);}
 struct news_status{long long attempt,success,refreshing;char result[16];};
 static void news_status_read(struct news_status*st){char path[512],text[512],*line,*save=NULL;memset(st,0,sizeof(*st));news_path(path,sizeof(path),"news-status");if(config_read(path,text,sizeof(text))<=0)return;for(line=strtok_r(text,"\n",&save);line;line=strtok_r(NULL,"\n",&save)){if(!strncmp(line,"last_attempt=",13))st->attempt=atoll(line+13);else if(!strncmp(line,"last_success=",13))st->success=atoll(line+13);else if(!strncmp(line,"refreshing_since=",17))st->refreshing=atoll(line+17);else if(!strncmp(line,"result=",7)){size_t i;snprintf(st->result,sizeof(st->result),"%s",line+7);for(i=0;st->result[i];i++)if(!(st->result[i]>='a'&&st->result[i]<='z')&&st->result[i]!='_'){st->result[0]=0;break;}}}}
 static void news_status_write(const struct news_status*st){char path[512],text[256];int n;news_path(path,sizeof(path),"news-status");n=snprintf(text,sizeof(text),"schema=1\nlast_attempt=%lld\nlast_success=%lld\nrefreshing_since=%lld\nresult=%s\n",st->attempt,st->success,st->refreshing,st->result);if(n>0&&(size_t)n<sizeof(text))(void)config_write_atomic(path,text,(size_t)n);}
 static int news_refreshing(const struct news_status*st,long long now){return st->refreshing>0&&now-st->refreshing<LE_NEWS_STALE_REFRESH;}
 /* Runs in the detached grandchild: try each source until one validates. */
-static void news_fetch(void){char sources[1024],*src,*save=NULL,tmp[512],cache[512],doc[LE_NEWS_MAX_BYTES+2];struct news_status st;struct le_news_item items[LE_NEWS_MAX_ITEMS];size_t count;int ok=0;news_status_read(&st);st.refreshing=(long long)time(NULL);st.attempt=st.refreshing;news_status_write(&st);news_path(tmp,sizeof(tmp),"news-download.tmp");news_path(cache,sizeof(cache),"news-cache.json");snprintf(sources,sizeof(sources),"%s",news_env("LIBREECHO_NEWS_SOURCES","https://dl.libreecho.org/news/news-v1.json https://github.com/aslater3/LibreEcho/releases/download/news-feed/news-v1.json"));snprintf(st.result,sizeof(st.result),"offline");
+static void news_fetch(void){char ca[384],sources[1024],*src,*save=NULL,tmp[512],cache[512],doc[LE_NEWS_MAX_BYTES+2];struct news_status st;struct le_news_item items[LE_NEWS_MAX_ITEMS];size_t count;int ok=0;news_status_read(&st);st.refreshing=(long long)time(NULL);st.attempt=st.refreshing;news_status_write(&st);news_path(tmp,sizeof(tmp),"news-download.tmp");news_path(cache,sizeof(cache),"news-cache.json");snprintf(sources,sizeof(sources),"%s",news_env("LIBREECHO_NEWS_SOURCES","https://dl.libreecho.org/news/news-v1.json https://github.com/aslater3/LibreEcho/releases/download/news-feed/news-v1.json"));snprintf(st.result,sizeof(st.result),"offline");
  /* The first failure is the one reported: it is usually the primary source and the most telling. */
- for(src=strtok_r(sources," ",&save);src&&!ok;src=strtok_r(NULL," ",&save)){pid_t pid;int status,n;if(strncmp(src,"https://",8))continue;unlink(tmp);pid=le_news_download(news_env("LIBREECHO_NEWS_CURL","/usr/bin/curl"),news_env("LIBREECHO_NEWS_CA","/etc/ssl/certs/ca-certificates.crt"),src,tmp);if(pid<0)break;
+ for(src=strtok_r(sources," ",&save);src&&!ok;src=strtok_r(NULL," ",&save)){pid_t pid;int status,n;if(strncmp(src,"https://",8))continue;unlink(tmp);pid=le_news_download(news_env("LIBREECHO_NEWS_CURL","/usr/bin/curl"),news_ca_path(ca,sizeof(ca)),src,tmp);if(pid<0)break;
   if(waitpid(pid,&status,0)<0||!WIFEXITED(status)||WEXITSTATUS(status)){if(!strcmp(st.result,"offline"))snprintf(st.result,sizeof(st.result),"%s",WIFEXITED(status)&&WEXITSTATUS(status)==63?"too_large":"http");continue;}
   n=config_read(tmp,doc,sizeof(doc));if(n<=0){if(!strcmp(st.result,"offline"))snprintf(st.result,sizeof(st.result),"too_large");continue;}
   if(le_news_parse(doc,(size_t)n,items,LE_NEWS_MAX_ITEMS,&count)){if(!strcmp(st.result,"offline"))snprintf(st.result,sizeof(st.result),"invalid");continue;}
@@ -3750,7 +3755,158 @@ static int wake_model_route(struct api_context*c,const struct api_request*q,stru
     err(r,404,LE_NOT_SUPPORTED,"Not found");return 1;
 }
 
-void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;(void)voice_pipeline_restart_reap();if(!api_request_authorize(c,q,r))return;if(wake_model_route(c,q,r))return;if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":setup_failure_message(c));return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"os_version\":\"%s\",\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\",\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",LE_OS_VERSION_STRING,c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false",c->ui_theme,c->color_mode);return;}api_handle_inner(c,q,r);}
+/* Owner-supplied HTTPS certificate and private CA trust. Both sets of files live
+   in the configuration directory beside the self-signed pair that main.c
+   manages. A custom certificate is read per TLS connection, so a replacement
+   applies to the next connection without a restart; the trust bundle is read
+   when a service starts (news reads it on each refresh). */
+void api_set_tls_dir(struct api_context*c,const char*dir)
+{
+    if(!c||!dir)return;
+    snprintf(c->tls_dir,sizeof(c->tls_dir),"%s",dir);
+    snprintf(news_trust_dir,sizeof(news_trust_dir),"%s",dir);
+}
+static int tls_file_path(const struct api_context*c,char*out,size_t size,const char*name)
+{
+    int n;
+    if(!c->tls_dir[0])return 0;
+    n=snprintf(out,size,"%s/%s",c->tls_dir,name);
+    return n>0&&(size_t)n<size;
+}
+static const char*system_ca_path(void)
+{
+    static const char*const fallback[]={"/usr/local/share/libreecho/cacert.pem","/etc/ssl/certs/ca-certificates.crt"};
+    const char*env=getenv("LIBREECHO_SYSTEM_CA");
+    size_t i;
+    if(env&&*env)return env;
+    for(i=0;i<sizeof(fallback)/sizeof(fallback[0]);i++)if(!access(fallback[i],R_OK))return fallback[i];
+    return fallback[0];
+}
+static unsigned char*read_bounded_file(const char*path,size_t*len)
+{
+    const long limit=4L*1024*1024;
+    FILE*f;long n;unsigned char*b;size_t got;
+    f=fopen(path,"rb");
+    if(!f)return 0;
+    if(fseek(f,0,SEEK_END)||(n=ftell(f))<0||n>limit||fseek(f,0,SEEK_SET)){fclose(f);return 0;}
+    b=malloc((size_t)n+1);
+    if(!b){fclose(f);return 0;}
+    got=fread(b,1,(size_t)n,f);
+    fclose(f);
+    if(got!=(size_t)n){free(b);return 0;}
+    b[n]=0;
+    *len=(size_t)n;
+    return b;
+}
+static int write_trust_bundle(const struct api_context*c,const char*ca_pem,size_t ca_len)
+{
+    char bundle[384];
+    unsigned char*base,*all;
+    size_t base_len=0,total;
+    int rc=LE_IO;
+    if(!tls_file_path(c,bundle,sizeof(bundle),"trust-bundle.pem"))return LE_IO;
+    base=read_bounded_file(system_ca_path(),&base_len);
+    if(!base)return LE_IO;
+    all=malloc(base_len+ca_len+3);
+    if(all){
+        memcpy(all,base,base_len);
+        total=base_len;
+        all[total++]='\n';
+        memcpy(all+total,ca_pem,ca_len);
+        total+=ca_len;
+        all[total++]='\n';
+        rc=le_tls_install_file(bundle,(const char*)all,total,1);
+        free(all);
+    }
+    free(base);
+    return rc;
+}
+static void https_certificate_report(struct api_context*c,struct api_response*r)
+{
+    char cert[384],marker[384],na[32]={0},fp[128]={0};
+    int custom;
+    if(!tls_file_path(c,cert,sizeof(cert),"https-cert.pem")||!tls_file_path(c,marker,sizeof(marker),LE_TLS_CUSTOM_MARKER)){err(r,503,LE_IO,"The configuration directory is unavailable");return;}
+    custom=!access(marker,F_OK)&&!access(cert,R_OK);
+    if(!access(cert,R_OK))le_tls_cert_info(cert,na,sizeof(na),fp,sizeof(fp));
+    out(r,200,"{\"ok\":true,\"data\":{\"tls_available\":%s,\"custom\":%s,\"https_expires\":\"%s\",\"https_fingerprint\":\"%s\"},\"error\":null}",le_tls_available()?"true":"false",custom?"true":"false",na,fp);
+}
+static void https_certificate_put(struct api_context*c,const struct api_request*q,struct api_response*r)
+{
+    char cert_path[384],key_path[384],marker[384],*cert,*key;
+    size_t cap=q->body_len+1,cn,kn;
+    int rc;
+    if(!le_tls_available()){err(r,501,LE_NOT_SUPPORTED,"HTTPS is not available in this build");return;}
+    if(!tls_file_path(c,cert_path,sizeof(cert_path),"https-cert.pem")||!tls_file_path(c,key_path,sizeof(key_path),"https-key.pem")||!tls_file_path(c,marker,sizeof(marker),LE_TLS_CUSTOM_MARKER)){err(r,503,LE_IO,"The configuration directory is unavailable");return;}
+    cert=malloc(cap);
+    key=malloc(cap);
+    if(!cert||!key){free(cert);free(key);err(r,503,LE_IO,"The certificate could not be read");return;}
+    cert[0]=key[0]=0;
+    if(json_get_string(q->body,"certificate_pem",cert,cap)<=0||json_get_string(q->body,"private_key_pem",key,cap)<=0){free(cert);free(key);err(r,400,LE_INVALID,"certificate_pem and private_key_pem are required");return;}
+    cn=strlen(cert);
+    kn=strlen(key);
+    rc=le_tls_check_certificate_pair(cert,cn,key,kn);
+    if(rc!=LE_OK){free(cert);free(key);err(r,400,LE_INVALID,"The certificate and private key must be a matching PEM pair that has not expired");return;}
+    /* Order matters: the marker goes first and comes back last. A crash before
+       the final step leaves no marker, and the next boot regenerates a valid
+       self-signed pair instead of serving a mismatched one. */
+    unlink(marker);
+    rc=le_tls_install_file(key_path,key,kn,0);
+    if(rc==LE_OK)rc=le_tls_install_file(cert_path,cert,cn,1);
+    if(rc==LE_OK)rc=le_tls_install_file(marker,"custom\n",7,0);
+    free(cert);
+    free(key);
+    if(rc!=LE_OK){err(r,503,LE_IO,"The certificate could not be saved");return;}
+    api_log(c,"info","Custom HTTPS certificate installed");
+    https_certificate_report(c,r);
+}
+static void https_certificate_reset(struct api_context*c,struct api_response*r)
+{
+    char cert_path[384],key_path[384],marker[384];
+    if(!le_tls_available()){err(r,501,LE_NOT_SUPPORTED,"HTTPS is not available in this build");return;}
+    if(!tls_file_path(c,cert_path,sizeof(cert_path),"https-cert.pem")||!tls_file_path(c,key_path,sizeof(key_path),"https-key.pem")||!tls_file_path(c,marker,sizeof(marker),LE_TLS_CUSTOM_MARKER)){err(r,503,LE_IO,"The configuration directory is unavailable");return;}
+    unlink(marker);
+    unlink(cert_path);
+    unlink(key_path);
+    if(le_tls_ensure_self_signed(cert_path,key_path,"libreecho")!=LE_OK){err(r,503,LE_IO,"A self-signed certificate could not be created");return;}
+    api_log(c,"info","Custom HTTPS certificate removed; self-signed certificate restored");
+    https_certificate_report(c,r);
+}
+static void https_private_ca(struct api_context*c,const struct api_request*q,struct api_response*r)
+{
+    char ca_path[384],bundle[384],*pem;
+    size_t cap=q->body_len+1,n;
+    int count,rc;
+    if(!tls_file_path(c,ca_path,sizeof(ca_path),"private-ca.pem")||!tls_file_path(c,bundle,sizeof(bundle),"trust-bundle.pem")){err(r,503,LE_IO,"The configuration directory is unavailable");return;}
+    if(!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"tls_available\":%s,\"configured\":%s},\"error\":null}",le_tls_available()?"true":"false",access(ca_path,R_OK)?"false":"true");return;}
+    if(!strcmp(q->method,"DELETE")){unlink(bundle);unlink(ca_path);api_log(c,"info","Private certificate authority removed");out(r,200,"{\"ok\":true,\"data\":{\"configured\":false},\"error\":null}");return;}
+    if(strcmp(q->method,"PUT")){method_not_allowed(r);return;}
+    if(!le_tls_available()){err(r,501,LE_NOT_SUPPORTED,"HTTPS is not available in this build");return;}
+    pem=malloc(cap);
+    if(!pem){err(r,503,LE_IO,"The certificate could not be read");return;}
+    pem[0]=0;
+    if(json_get_string(q->body,"ca_pem",pem,cap)<=0){free(pem);err(r,400,LE_INVALID,"ca_pem is required");return;}
+    n=strlen(pem);
+    count=le_tls_check_ca_bundle(pem,n);
+    if(count<=0){free(pem);err(r,400,LE_INVALID,"ca_pem must hold one or more PEM CA certificates");return;}
+    rc=write_trust_bundle(c,pem,n);
+    if(rc==LE_OK){rc=le_tls_install_file(ca_path,pem,n,1);if(rc!=LE_OK)unlink(bundle);}
+    free(pem);
+    if(rc!=LE_OK){err(r,503,LE_IO,"The private CA could not be saved; the system CA bundle must be present");return;}
+    api_log(c,"info","Private certificate authority added; news uses it now, LLM, HA and live services on their next start");
+    out(r,200,"{\"ok\":true,\"data\":{\"configured\":true,\"certificates\":%d},\"error\":null}",count);
+}
+static void https_route(struct api_context*c,const struct api_request*q,struct api_response*r)
+{
+    if(!strcmp(q->path,"/api/v1/https/certificate")){
+        if(!strcmp(q->method,"GET"))https_certificate_report(c,r);
+        else if(!strcmp(q->method,"PUT"))https_certificate_put(c,q,r);
+        else if(!strcmp(q->method,"DELETE"))https_certificate_reset(c,r);
+        else method_not_allowed(r);
+        return;
+    }
+    https_private_ca(c,q,r);
+}
+void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;(void)voice_pipeline_restart_reap();if(!api_request_authorize(c,q,r))return;if(wake_model_route(c,q,r))return;if(!strcmp(q->path,"/api/v1/https/certificate")||!strcmp(q->path,"/api/v1/https/private-ca")){https_route(c,q,r);return;}if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":setup_failure_message(c));return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"os_version\":\"%s\",\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\",\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",LE_OS_VERSION_STRING,c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false",c->ui_theme,c->color_mode);return;}api_handle_inner(c,q,r);}
 
 int api_persist_configuration(struct api_context*c){(void)voice_pipeline_restart_reap();return persist_configuration(c);}
 int api_diagnostics_kernel_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){if(strcmp(q->method,"GET")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;return 1;}

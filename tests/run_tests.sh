@@ -66,6 +66,7 @@ make build/test-http-worker-registry
 ./build/test-http-worker-registry
 python3 tests/test_http_worker_registry_contract.py
 python3 tests/test_pr141_review_contract.py
+python3 tests/test_https_trust_contract.py
 sh tests/test_pr137_review_contract.sh
 sh tests/test_pr139_review_contract.sh
 make build/test-backend-linux-wifi-emission build/test-thermal-zone-selection build/test-light-sensor
@@ -470,6 +471,7 @@ while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -l
 LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_timezone_api.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_https_trust_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh

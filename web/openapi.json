@@ -4113,6 +4113,211 @@
     }
    }
   },
+  "/https/certificate": {
+    "get": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Report the HTTPS certificate in use",
+      "description": "Returns whether an owner certificate is installed (`custom`), its expiry and SHA-256 fingerprint. The private key is never returned.",
+      "responses": {
+        "200": {
+          "description": "Current state",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "put": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Install an owner HTTPS certificate",
+      "description": "Owner-supplied HTTPS certificate. `certificate_pem` (the certificate, optionally followed by its chain) and `private_key_pem` (an unencrypted PEM key) must match and the certificate must not have expired; otherwise 400 and nothing is written. The pair replaces the self-signed certificate. New TLS connections use it at once; it is kept across restarts and not regenerated while the custom marker is present. 501 when the build has no TLS. `tls_available` is false on builds without mbedTLS.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "requestBody": {
+        "$ref": "#/components/requestBodies/JsonObject"
+      },
+      "responses": {
+        "200": {
+          "description": "Saved; the new state is returned",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "501": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "delete": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Restore the self-signed HTTPS certificate",
+      "description": "Removes the owner certificate and generates a new self-signed pair. Connections already open keep the old certificate; new connections get the new one.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Removed; the new state is returned",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "501": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/https/private-ca": {
+    "get": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Report the private CA trust",
+      "description": "Returns whether a private CA is configured.",
+      "responses": {
+        "200": {
+          "description": "Current state",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "put": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Add a private certificate authority",
+      "description": "Private certificate authority trusted for outbound HTTPS in addition to the system roots. `ca_pem` must hold one or more CA certificates (basic constraints CA:TRUE). The system roots and the CA are written to trust-bundle.pem in the configuration directory. Verification stays on. News refresh uses the bundle immediately; LLM, Home Assistant and live services read it when they next start.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "requestBody": {
+        "$ref": "#/components/requestBodies/JsonObject"
+      },
+      "responses": {
+        "200": {
+          "description": "Saved; the new state is returned",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "501": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "delete": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Remove the private certificate authority",
+      "description": "Removes the private CA and the trust bundle built from it.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Removed; the new state is returned",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "501": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+
   "/system/features": {
    "get": {
     "tags": [

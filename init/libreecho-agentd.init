@@ -13,7 +13,12 @@ PAYLOAD=${PAYLOAD:-/data/libreecho/features/assistant/payload.squashfs}
 RUNTIME_ROOT=${RUNTIME_ROOT:-/run/libreecho/features/assistant/root}
 DAEMON=${DAEMON:-$RUNTIME_ROOT/usr/local/sbin/libreecho-agentd}
 CURL=${CURL:-$RUNTIME_ROOT/usr/local/libexec/libreecho-curl}
-CA_BUNDLE=${CA_BUNDLE:-$RUNTIME_ROOT/usr/local/share/libreecho/cacert.pem}
+TRUST_BUNDLE=${TRUST_BUNDLE:-/data/libreecho/config/trust-bundle.pem}
+# An owner-added private CA lives in trust-bundle.pem (system roots plus the CA).
+if [ -z "${CA_BUNDLE:-}" ]; then
+    CA_BUNDLE=$RUNTIME_ROOT/usr/local/share/libreecho/cacert.pem
+    [ -r "$TRUST_BUNDLE" ] && CA_BUNDLE=$TRUST_BUNDLE
+fi
 PIDFILE=${PIDFILE:-/var/run/libreecho-agentd.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-agentd.log}
 SOCKET=${SOCKET:-/run/libreecho/agent.sock}
