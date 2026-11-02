@@ -59,6 +59,7 @@ run() {
     MIC_SOCKET="$T/mic.sock" REFERENCE_SOCKET="$T/ref.sock" \
     VAD_FLOOR_FILE="$T/none" AEC_FILE="$T/none" DUMP_FILE="$T/none" \
     WAKE_MODEL_FILE="$T/wake-model" WAKE_MODEL_BASE="$T/models" \
+    WAKE_SECOND_FILE="$T/wake-second" \
     WAKE_MODEL_SETTLE_SECONDS=1 timeout 20 sh "$INIT" "$1" 2>>"$T/stderr"
 }
 
@@ -107,3 +108,36 @@ model "$T/models/bad-load"
 echo bad-load >"$T/wake-model"
 expect "a model that fails to load restarts on stock" "$T/models/bad-load" "$STOCK"
 grep -q "owner-staged model failed to start; using stock model" "$T/stderr"
+
+# expect_second <case> <folder-or-empty>: the last start's --second-model-dir,
+# or none when empty. The second word never changes the primary model.
+expect_second() {
+    name=$1; folder=$2
+    : >"$T/args"
+    run start
+    line=$(tail -n 1 "$T/args")
+    if [ -n "$folder" ]; then
+        case "$line" in
+            *"--second-model-dir $folder"*) ;;
+            *) echo "FAIL $name: $line" >&2; cat "$T/stderr" >&2; exit 1 ;;
+        esac
+    else
+        case "$line" in
+            *--second-model-dir*) echo "FAIL $name: $line" >&2; exit 1 ;;
+        esac
+    fi
+    run stop
+    echo "waked init: $name"
+}
+
+rm -f "$T/wake-model"
+rm -f "$T/wake-second"
+expect_second "no second word file runs one word" ""
+echo mine >"$T/wake-second"
+expect_second "a staged folder is the second word" "$T/models/mine"
+echo "../mine" >"$T/wake-second"
+expect_second "a path-like second word is ignored" ""
+echo linked >"$T/wake-second"
+expect_second "a second word with a symlinked classifier is ignored" ""
+echo missing >"$T/wake-second"
+expect_second "a second word with no folder is ignored" ""
