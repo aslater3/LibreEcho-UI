@@ -66,8 +66,11 @@
 #define ACTIVITY_VOICE_KEY 20U
 #define ACTIVITY_PLAYBACK_KEY 21U
 #define ACTIVITY_TIMER_KEY 22U
+/* LED ring as a light (#395): Home Assistant's state is ledd's owner-scoped overlay. */
+#define LED_RING_KEY 30U
+#define LED_OWNER "esphome-light"
 #define NELEM(a) (sizeof(a)/sizeof((a)[0]))
-struct client { int fd,mode,phase,hello,states,closing,light; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at,time_at;struct en_session noise; };
+struct client { int fd,mode,phase,hello,states,closing,light,led_light; unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at,time_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
 struct state {
  struct client clients[CLIENTS];struct io jobs[JOBS],wake,mic,timer_cleanup;
@@ -77,6 +80,8 @@ struct state {
  /* Light sensor file (--light-sensor, else the first readable TSL2540 als_lux); empty until found. */
  char light_path[160];int lux,lux_sent;uint64_t light_poll,light_sent_at;
  int button_fd;char button_path[160];
+ /* HA light state for the LED ring (#395); the device's own indicators are never stored here. */
+ int led_on,led_r,led_g,led_b,led_brightness,led_effect,led_dirty;
  char name[32],friendly[64],mac[18];unsigned char psk[32];int provisioned,plaintext,ha_selected,ready,owner,turn,muted,local_mute_gate,privacy,volume,output_muted,restore_volume,radio_state,active_wake,reply_volume,voice_open;
  uint64_t cancel_guard,control_retry;int control_fd;
  uint64_t now,turn_deadline,turn_limit,last_audio_status,last_status_poll,wake_retry,mdns_retry,ring_first,ring_end,capture_next,timer_retry;
@@ -140,6 +145,42 @@ static void profile(const char *name){char a[192];if(!strcmp(name,"idle")){(void
  int error=!strcmp(name,"error");unsigned r=72,g=185,b=255;if(!strcmp(name,"thinking")){r=168;g=115;b=239;}else if(error){r=239;g=80;b=80;}
  snprintf(a,sizeof a,"{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":100,\"repeats\":%d,\"profile\":\"%s\",\"owner\":\"esphome\"}",error?"flash":"pulse",r,g,b,error?3:0,name);(void)job(S.led_path,"pattern",a,0,0);}
 static void light_state(struct client *c){unsigned char b[16];struct ep_writer w={b,sizeof b,0,0};float f=(float)(S.lux<0?0:S.lux);uint32_t bits;memcpy(&bits,&f,4);ep_fixed32(&w,1,LIGHT_KEY);ep_fixed32(&w,2,bits);if(S.lux<0)ep_uint(&w,3,1);(void)send_writer(c,25,&w);}
+/* LED ring as a Home Assistant light (#395). HA's state is one ledd overlay,
+ * owner "esphome-light" (solid, pulse or flash, repeats 0). Device voice
+ * indicators use owner "esphome"; ledd keeps the overlay as their previous layer
+ * and restores it when they stop. A HA change while a turn is open, or while an
+ * earlier overlay write is unacknowledged, waits (led_dirty) and is applied by
+ * led_tick once the turn has ended, so device animations always win. */
+static const char *const led_effects[]={"Solid","Pulse","Flash"};
+static const char *const led_ledd_names[]={"solid","pulse","flash"};
+static int led_busy(void){return S.turn||S.voice_open;}
+static void led_apply(void){char a[192];S.led_dirty=0;
+ if(!S.led_on){(void)job(S.led_path,"pattern","{\"name\":\"stop\",\"owner\":\"" LED_OWNER "\"}",0,0);return;}
+ snprintf(a,sizeof a,"{\"name\":\"%s\",\"r\":%d,\"g\":%d,\"b\":%d,\"brightness\":%d,\"repeats\":0,\"owner\":\"" LED_OWNER "\"}",led_ledd_names[S.led_effect],S.led_r,S.led_g,S.led_b,S.led_brightness);
+ (void)job(S.led_path,"pattern",a,0,0);}
+/* Overlay writes are serialised: ledd sees the device's stop/flash before HA's
+ * write, because the next write is only sent once the previous one is acknowledged. */
+static int led_job_pending(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i];if((j->fd>=0||j->stage)&&j->kind==0&&strstr(j->tx,"\"cmd\":\"pattern\""))return 1;}return 0;}
+static void led_changed(void){if(led_busy()||led_job_pending())S.led_dirty=1;else led_apply();}
+static void led_tick(void){if(S.led_dirty&&!led_busy()&&!led_job_pending())led_apply();}
+static void put_float(struct ep_writer *w,unsigned f,float v){uint32_t bits;memcpy(&bits,&v,4);ep_fixed32(w,f,bits);}
+/* LightStateResponse: what HA shows. Brightness and colour are the HA-set values, not the ring's live output. */
+static void led_state(struct client *c){unsigned char b[160];struct ep_writer w={b,sizeof b,0,0};float level=(float)S.led_brightness/100.0f;
+ ep_fixed32(&w,1,LED_RING_KEY);ep_uint(&w,2,S.led_on?1:0);put_float(&w,3,level);ep_uint(&w,11,35);put_float(&w,10,level);
+ put_float(&w,4,(float)S.led_r/255.0f);put_float(&w,5,(float)S.led_g/255.0f);put_float(&w,6,(float)S.led_b/255.0f);ep_string(&w,9,led_effects[S.led_effect]);(void)send_writer(c,24,&w);}
+static void led_states_all(void){for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].states&&S.clients[i].led_light)led_state(&S.clients[i]);}
+static int led_float(const void *p,size_t n,unsigned f,float *out){uint32_t bits=(uint32_t)ep_get_uint(p,n,f,0);float v;memcpy(&v,&bits,4);if(!isfinite(v)||v<0.0f||v>1.0f)return -1;*out=v;return 0;}
+/* LightCommandRequest. Every field is validated before any state changes. */
+static int led_command(const void *p,size_t n){float r=0,g=0,b=0,level=0;char effect[16];int on=S.led_on,index=S.led_effect,rr=S.led_r,gg=S.led_g,bb=S.led_b,brightness=S.led_brightness;
+ if(ep_get_uint(p,n,1,0)!=LED_RING_KEY)return -1;
+ if(ep_get_uint(p,n,2,0))on=ep_get_uint(p,n,3,0)!=0;
+ if(ep_get_uint(p,n,6,0)){if(led_float(p,n,7,&r)||led_float(p,n,8,&g)||led_float(p,n,9,&b))return -1;rr=(int)lroundf(r*255.0f);gg=(int)lroundf(g*255.0f);bb=(int)lroundf(b*255.0f);}
+ /* color_brightness is what HA sends for RGB lights; brightness is the legacy field. */
+ if(ep_get_uint(p,n,20,0)){if(led_float(p,n,21,&level))return -1;brightness=(int)lroundf(level*100.0f);}
+ else if(ep_get_uint(p,n,4,0)){if(led_float(p,n,5,&level))return -1;brightness=(int)lroundf(level*100.0f);}
+ if(ep_get_uint(p,n,18,0)){if(ep_get_text(p,n,19,effect,sizeof effect))return -1;index=-1;for(unsigned i=0;i<NELEM(led_effects);i++)if(!strcmp(effect,led_effects[i]))index=(int)i;if(index<0)return -1;}
+ S.led_on=on;S.led_effect=index;S.led_r=rr;S.led_g=gg;S.led_b=bb;S.led_brightness=brightness;
+ led_changed();led_states_all();return 0;}
 static void states_send(struct client *c){unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};float f=(float)S.volume/100.0f;uint32_t bits;memcpy(&bits,&f,4);
  ep_fixed32(&w,1,MEDIA_KEY);ep_uint(&w,2,S.playing?2:S.radio_state);ep_fixed32(&w,3,bits);ep_uint(&w,4,S.output_muted);if(S.last_audio_status)(void)send_writer(c,64,&w);
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
@@ -220,6 +261,8 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  for(unsigned i=0;i<BUTTON_COUNT;i++){w.length=0;ep_string(&w,1,button_ids[i]);ep_fixed32(&w,2,BUTTON_KEY_BASE+i);ep_string(&w,3,button_labels[i]);for(unsigned g=0;g<GESTURE_COUNT;g++)ep_string(&w,9,gesture_ids[g]);(void)send_writer(c,EVENT_LIST_TYPE,&w);}
  /* Activity entities (#393): one event entity each, event types listed as field 9. */
  for(unsigned i=0;i<NELEM(activity_entities);i++){w.length=0;ep_string(&w,1,activity_entities[i].id);ep_fixed32(&w,2,activity_entities[i].key);ep_string(&w,3,activity_entities[i].label);for(unsigned t=0;t<activity_entities[i].count;t++)ep_string(&w,9,activity_entities[i].types[t]);(void)send_writer(c,EVENT_LIST_TYPE,&w);}
+ /* ListEntitiesLightResponse (#395): the LED ring, RGB (colour mode 35) with brightness, one effect per ledd overlay kind. */
+ w.length=0;ep_string(&w,1,"led_ring");ep_fixed32(&w,2,LED_RING_KEY);ep_string(&w,3,"LED ring");ep_uint(&w,12,35);for(unsigned e=0;e<NELEM(led_effects);e++)ep_string(&w,11,led_effects[e]);ep_string(&w,14,"mdi:led-strip-variant");(void)send_writer(c,15,&w);c->led_light=1;
  /* ListEntitiesSensorResponse: lx, illuminance, STATE_CLASS_MEASUREMENT; only when the board has a sensor. */
  if(S.light_path[0]){c->light=1;w.length=0;ep_string(&w,1,"illuminance");ep_fixed32(&w,2,LIGHT_KEY);ep_string(&w,3,"Illuminance");ep_string(&w,6,"lx");ep_uint(&w,7,0);ep_string(&w,9,"illuminance");ep_uint(&w,10,1);(void)send_writer(c,16,&w);}
  (void)send_msg(c,19,NULL,0);
@@ -279,8 +322,10 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  switch(type){case 7:return send_msg(c,8,NULL,0);case 8:return 0;case 5:if(send_msg(c,6,NULL,0))return -1;c->closing=1;return 0;case 9:device_info(c);return 0;case 11:entities(c);return 0;
  /* The lux state goes once on subscribe, then only from light_poll: all_states() runs on every adapter status change.
   * Only clients whose entity list carried the sensor get it (a late-found sensor waits for the next list). */
- case 20:c->states=1;states_send(c);if(c->light)light_state(c);time_request(c);return 0;
+ case 20:c->states=1;states_send(c);if(c->light)light_state(c);if(c->led_light)led_state(c);time_request(c);return 0;
  case 37:time_response(p,n);return 0;
+ /* LightCommandRequest (#395): HA sets the LED ring light; device indicators keep priority. */
+ case 32:return led_command(p,n);
  case 89:if(!ep_get_uint(p,n,1,0)){if(S.owner==(int)idx){cancel_turn("unsubscribed");S.owner=-1;timer_owner_end();}return 0;}if(S.owner>=0&&S.owner!=(int)idx)return -1;
  /* Pinned client API_AUDIO subscription flag is 1<<2 (4), not 1. */
  if(!(ep_get_uint(p,n,2,0)&4))return -1;S.owner=(int)idx;return 0;
@@ -414,7 +459,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
   char *end;unsigned long p;if(!le_eh_decimal(argv[4]))return 2;p=strtoul(argv[4],&end,10);if(*end||p<1||p>65535)return 2;
   return le_esphome_health(argv[2],argv[3],argv[5],(unsigned)p,argv[6],!strcmp(argv[1],"--process-check"))?0:1;
  }
- memset(&S,0,sizeof S);S.owner=-1;S.mdns_fd=-1;S.muted=1;S.privacy=-1;S.radio_state=1;S.active_wake=1;S.restore_volume=66;S.turn_limit=120000;S.lux=S.lux_sent=-1;
+ memset(&S,0,sizeof S);S.owner=-1;S.mdns_fd=-1;S.muted=1;S.privacy=-1;S.radio_state=1;S.active_wake=1;S.restore_volume=66;S.turn_limit=120000;S.lux=S.lux_sent=-1;S.led_r=S.led_g=S.led_b=255;S.led_brightness=100;
  S.config_path=getenv("LE_CONFIG_PATH");if(!S.config_path||!S.config_path[0])S.config_path="/etc/libreecho/web-config.json";S.status_path="/run/libreecho/esphome-status.json";S.control_path="/run/libreecho/esphome-control.sock";S.control_fd=-1;S.audio_path="/run/libreecho/audio.sock";S.wake_path="/run/libreecho/wakeword.sock";S.radio_path="/run/libreecho/radio.sock";S.timer_path="/run/libreecho/timer.sock";S.led_path="/run/libreecho/led.sock";S.mdns_path=LE_MDNS_SOCKET;S.bus_path="/run/libreecho-audio/system.pcm";S.privacy_path="/sys/devices/platform/amz_privacy/privacy_state";S.idme_path="/sys/firmware/devicetree/base/idme";
  for(unsigned i=0;i<CLIENTS;i++)S.clients[i].fd=-1;for(unsigned i=0;i<JOBS;i++)S.jobs[i].fd=-1;S.wake.fd=S.mic.fd=S.timer_cleanup.fd=-1;S.button_fd=-1;esp_playback_init(&S.playback);
  snprintf(S.button_path,sizeof S.button_path,"%s",LE_ADAPTER_BUTTON_EVENT_SOCK);
@@ -437,13 +482,15 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  /* timerd outlives this process. Fence replacement events until a retried
   * reserved clear is ACKed, including recovery after SIGKILL/power loss. */
  timer_owner_end();S.ready=1;status_write();
+ /* A previous process may have left its light overlay on the ring; HA starts from off. */
+ led_apply();
  while(running){struct pollfd fds[2+CLIENTS];fds[0]=(struct pollfd){listener,POLLIN,0};for(unsigned i=0;i<CLIENTS;i++)fds[i+1]=(struct pollfd){S.clients[i].fd,(short)(POLLIN|(S.clients[i].tx_n?POLLOUT:0)),0};fds[1+CLIENTS]=(struct pollfd){S.button_fd,POLLIN,0};int ready=poll(fds,2+CLIENTS,10);S.now=now_ms();if(ready<0&&errno!=EINTR)break;
  if(reload_config){reload_config=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);if(load_configuration())break;}
  if(fds[0].revents&POLLIN){for(unsigned n=0;n<4;n++){int fd=accept(listener,NULL,NULL);if(fd<0)break;int flags=fcntl(fd,F_GETFL,0);if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){close(fd);continue;}unsigned idx;for(idx=0;idx<CLIENTS;idx++)if(S.clients[idx].fd<0)break;if(idx==CLIENTS){close(fd);continue;}struct client *c=&S.clients[idx];memset(c,0,sizeof *c);c->fd=fd;c->mode=-1;c->deadline=S.now+15000;c->last_seen=S.now;en_init(&c->noise);}}
  for(unsigned i=0;i<CLIENTS;i++)client_tick(i,fds[i+1].revents);
  if(S.button_fd>=0&&(fds[1+CLIENTS].revents&POLLIN))button_tick();
  if(S.now>=S.last_status_poll+250){S.last_status_poll=S.now;privacy_poll();light_poll();(void)job(S.audio_path,"status","{}",1,0);(void)job(S.radio_path,"status","{}",2,0);}
- jobs_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
+ jobs_tick();led_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);control_tick();capture_tick();
  if(S.turn&&S.now>S.turn_deadline)cancel_turn("timeout");
  if(S.playing){int rc=esp_playback_tick(&S.playback,S.now);if(rc){playback_stopped();if(rc<0)turn_clear("playback_error",1);else if(S.next_url[0]){char next[1024];snprintf(next,sizeof next,"%s",S.next_url);S.next_url[0]=0;if(playback_start(next)<0)turn_clear("playback_error",1);}else completed();}}

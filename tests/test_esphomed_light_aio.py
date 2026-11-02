@@ -10,7 +10,7 @@ class PinnedLight(LightSensor):
    client=APIClient('127.0.0.1',self.port,provide_time=False)
    try:
     await client.connect(login=True);entities,_=await client.list_entities_services()
-    self.assertEqual({e.key for e in entities},{1,2,3,10,11,12,13,20,21,22})
+    self.assertEqual({e.key for e in entities},{1,2,3,10,11,12,13,20,21,22,30})
     sensor=next(e for e in entities if isinstance(e,SensorInfo))
     self.assertEqual((sensor.object_id,sensor.name,sensor.unit_of_measurement,sensor.device_class,sensor.state_class,sensor.accuracy_decimals),('illuminance','Illuminance','lx','illuminance',SensorStateClass.MEASUREMENT,0))
     states=[];client.subscribe_states(lambda s:states.append(s) if isinstance(s,SensorState) else None)

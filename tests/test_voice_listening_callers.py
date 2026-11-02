@@ -19,7 +19,8 @@ class SilentWake(Fixture):
         time.sleep(.15)
         wake.wake(100)
         self.assertEqual(receive(self.s)[0], 90)
-        listening = self.wait_call('led', 'pattern')['args']
+        # Call 0 is the daemon's startup release of any stale HA light overlay (#395).
+        listening = self.wait_call('led', 'pattern', 1)['args']
         self.assertEqual((listening['name'], listening['profile'], listening['owner'], listening['repeats']),
                          ('pulse', 'listening', 'esphome', 0))
         # A turn indicator must never persist ring state via animate (#esphome-led).
@@ -41,7 +42,7 @@ class SilentWake(Fixture):
         self.assertFalse(any(req['cmd'] == 'cue' for req in self.adapters['audio'].calls))
         # The ended turn's indicator must expire on its own: a finite flash or an
         # owner release, never an open-ended breathing animation.
-        ended = self.wait_call('led', 'pattern', 1)['args']
+        ended = self.wait_call('led', 'pattern', 2)['args']
         self.assertEqual(ended['owner'], 'esphome')
         self.assertTrue(ended['name'] == 'stop' or (ended['name'] == 'flash' and 0 < ended['repeats'] <= 5), ended)
         self.assertFalse(any(req['cmd'] == 'animate' for req in self.adapters['led'].calls))

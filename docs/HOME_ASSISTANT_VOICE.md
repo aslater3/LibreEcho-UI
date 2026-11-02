@@ -74,6 +74,16 @@ only its type:
 These entities are event-only: they carry no state, and HA receives them only
 while it is subscribed to the device's states, as with the buttons.
 
+The LED ring is offered as an **LED ring** light: on/off, RGB colour, brightness
+and three effects, **Solid**, **Pulse** and **Flash** (the ring's own overlay
+patterns). HA's setting is shown on the ring only while the device is not
+showing its own voice indicator. The voice steps above take the ring while a
+turn is open, and HA's state is applied again when the turn ends, so a change
+made during a turn waits for it. Turning the light off releases only HA's
+overlay; the ring returns to the saved ring settings. The light's state is kept
+in the daemon, so a restart of the satellite turns the light off and returns
+the ring to its saved settings.
+
 Disabling HA restores the previously selected **Local** or **Custom** mode and
 its settings. Custom Whisper/Piper addresses, model/voice choices and assistant
 configuration are not erased. There is no protocol selector, legacy satellite
