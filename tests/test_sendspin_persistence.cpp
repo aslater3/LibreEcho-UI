@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 
 #include <sendspin/client.h>
@@ -65,6 +66,28 @@ static void put(const std::string& path, const char* key, const std::string& byt
     if (store) store->save(key, reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
 }
 
+// The owner's play-without-pairing choice, as the SDK reads it back from the
+// stored pairing config.
+static bool set_unpaired(const std::string& path, bool enabled) {
+    auto store = BlobStore::open(path, nullptr);
+    if (!store) return false;
+    SdkPersistence persistence(std::move(*store));
+    return libreecho::sendspin::apply_unpaired_access(persistence, enabled);
+}
+
+static bool stored_unpaired(const std::string& path, bool* out) {
+    auto store = BlobStore::open(path, nullptr);
+    if (!store) return false;
+    SdkPersistence persistence(std::move(*store));
+    const auto blob = persistence.load_blob(::sendspin::persistence_keys::PAIR_CONFIG);
+    if (!blob) return false;
+    const auto config = ::sendspin::decode_pairing_config(
+        std::string_view(reinterpret_cast<const char*>(blob->data()), blob->size()));
+    if (!config) return false;
+    *out = config->unpaired_access_enabled;
+    return true;
+}
+
 int main() {
     char base_template[] = "/tmp/le-sendspin-persist.XXXXXX";
     const std::string base = ::mkdtemp(base_template);
@@ -98,6 +121,19 @@ int main() {
     put(dir, "rec_0", "");
     put(dir, "pairing_psk", "{\"v\":1,\"psk_id\":\"x\",\"psk\":\"short\"}");
     REQUIRE(!verify(dir, &why) && why == "pairing_psk", "bad Pairing PSK accepted");
+
+    // Play without pairing: stored as the SDK's pairing config, both ways, and an
+    // undecodable config is refused rather than overwritten.
+    const std::string choice = base + "/unpaired-state";
+    bool on = true;
+    REQUIRE(set_unpaired(choice, true), "play without pairing not stored on a new state");
+    REQUIRE(stored_unpaired(choice, &on) && on, "stored play without pairing not read back");
+    REQUIRE(set_unpaired(choice, false) && stored_unpaired(choice, &on) && !on,
+            "play without pairing not switched back off");
+    put(choice, ::sendspin::persistence_keys::PAIR_CONFIG, "{not json");
+    REQUIRE(!set_unpaired(choice, true), "undecodable pairing config overwritten");
+    REQUIRE(!verify(choice, &why) && why == ::sendspin::persistence_keys::PAIR_CONFIG,
+            "undecodable pairing config accepted");
 
     const std::string cleanup = "rm -rf " + base;
     (void)!std::system(cleanup.c_str());

@@ -116,6 +116,8 @@ class SendspinService(unittest.TestCase):
     def start(self, *extra, player=True):
         self.run_dir = Path(tempfile.mkdtemp(prefix='r', dir=self.tmp.name))
         self.root = self.run_dir / 'root'
+        # Per-run state file, so nothing written by one test leaks into another.
+        self.state = self.run_dir / 'sendspin-state'
         sbin = self.root / 'usr/local/sbin'
         sbin.mkdir(parents=True)
         (self.root / 'run/libreecho-audio').mkdir(parents=True)
@@ -128,7 +130,8 @@ class SendspinService(unittest.TestCase):
         self.sock = self.run_dir / 'airplay.sock'
         self.proc = subprocess.Popen(
             [str(self.binary), '--foreground', '--socket', str(self.sock), '--root', str(self.root),
-             '--mdns-socket', str(self.run_dir / 'no-mdns.sock'), *extra],
+             '--mdns-socket', str(self.run_dir / 'no-mdns.sock'),
+             '--sendspin-state', str(self.state), *extra],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(self.stop)
         self.assertTrue(wait(lambda: self.sock.exists() and self.status() is not None, 15),
@@ -182,7 +185,9 @@ class SendspinService(unittest.TestCase):
         self.assertTrue(wait(lambda: self.running_player() is not None), 'player never started')
         args = self.starts()[-1].split()[1:]
         self.assertEqual(args[:3], ['--run', '--quiet', '--name'])
-        self.assertEqual(args[4:], ['--state-file', STATE_FILE])
+        # Never set by the owner: no --unpaired-access, so an older payload still starts.
+        self.assertEqual(args[4:], ['--state-file', str(self.state)])
+        self.assertNotIn('--unpaired-access', args)
         self.assertNotIn('--dev-allow-unpaired', args)
         self.assertTrue(self.status()['sendspin_running'])
 
@@ -241,6 +246,38 @@ class SendspinService(unittest.TestCase):
         state = Path(tempfile.mkdtemp(prefix='s', dir=self.tmp.name)) / 'sendspin-state'
         state.write_text('libreecho-sendspin-state 1\n')
         return state
+
+    def test_play_without_pairing_is_off_by_default_and_restarts_the_player(self):
+        state = self.pairing_state()
+        self.start('--sendspin-on-start', '--sendspin-state', str(state))
+        self.assertTrue(wait(lambda: self.running_player() is not None))
+        self.assertFalse(self.status()['sendspin_unpaired_access'])
+        self.assertNotIn('--unpaired-access', self.starts()[-1].split())
+
+        first = self.running_player()
+        self.assertTrue(call(self.sock, 'set_sendspin_unpaired', {'enabled': True})['ok'])
+        self.assertTrue(wait(lambda: self.running_player() not in (None, first)),
+                        'player not restarted to apply play without pairing')
+        self.assertEqual(self.starts()[-1].split()[-2:], ['--unpaired-access', 'on'])
+        self.assertTrue(self.status()['sendspin_unpaired_access'])
+        # The choice is a file beside the state file, and pairing state is untouched.
+        self.assertEqual(Path(str(state) + '.unpaired').read_text(), '1\n')
+        self.assertEqual(state.read_text(), 'libreecho-sendspin-state 1\n')
+
+        second = self.running_player()
+        self.assertTrue(call(self.sock, 'set_sendspin_unpaired', {'enabled': False})['ok'])
+        self.assertTrue(wait(lambda: self.running_player() not in (None, second)))
+        self.assertEqual(self.starts()[-1].split()[-2:], ['--unpaired-access', 'off'])
+        self.assertFalse(self.status()['sendspin_unpaired_access'])
+
+    def test_play_without_pairing_is_kept_while_disabled(self):
+        self.start()
+        self.assertFalse(call(self.sock, 'set_sendspin_unpaired', {'enabled': 'yes'})['ok'])
+        self.assertTrue(call(self.sock, 'set_sendspin_unpaired', {'enabled': True})['ok'])
+        self.assertTrue(self.status()['sendspin_unpaired_access'])
+        self.assertFalse(self.status()['sendspin_running'])
+        self.assertEqual(self.starts(), [])
+        self.assertEqual(Path(str(self.state) + '.unpaired').read_text(), '1\n')
 
     def test_reset_pairing_forgets_state_and_restarts(self):
         state = self.pairing_state()

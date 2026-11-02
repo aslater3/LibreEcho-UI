@@ -2880,6 +2880,8 @@ static int sendspin(struct le_backend *b, struct le_sendspin_state *o)
     (void)json_get_bool(response, "sendspin_available", &o->installed);
     (void)json_get_bool(response, "sendspin_enabled", &o->enabled);
     (void)json_get_bool(response, "sendspin_running", &o->running);
+    /* The owner's setting is kept by the supervisor, so it reads even while stopped. */
+    (void)json_get_bool(response, "sendspin_unpaired_access", &o->unpaired_access);
     if (!o->running ||
         adapter_command(LE_SENDSPIN_SOCK, "status", NULL, response,
                         sizeof(response)) != LE_OK)
@@ -2931,6 +2933,16 @@ static int sendspin_reset_pairing(struct le_backend *b)
 {
     (void)b;
     return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "reset_sendspin_pairing", "{}");
+}
+
+static int sendspin_set_unpaired(struct le_backend *b, int enabled)
+{
+    char args[32];
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_sendspin_unpaired", args);
 }
 
 static int playback(struct le_backend *b, struct le_playback_state *o)
@@ -3484,7 +3496,8 @@ static const struct le_backend_ops ops = {
     reply_volume,
     microphone_mix, microphone_lane,
     timer_add_repeat, timer_snooze, timer_add_reminder,
-    timer_sunrise_get, timer_sunrise_set
+    timer_sunrise_get, timer_sunrise_set,
+    sendspin_set_unpaired
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

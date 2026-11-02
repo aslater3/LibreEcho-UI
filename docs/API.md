@@ -3020,7 +3020,9 @@ is not yet listening), `waiting` (listening and advertised over mDNS, no server
 connected), `connected` or `playing`. The other fields come from the running
 player: `volume` is `null` while it is not running, `server` is the connected
 server's JSON-escaped name or `null`, and `paired` is true when that server
-connected with a stored pairing. Status never contains pairing material.
+connected with a stored pairing. `unpaired_access` is the play-without-pairing
+choice (see `PUT /api/v1/sendspin/unpaired-access`); it is kept while the player
+is stopped. Status never contains pairing material.
 
 Sendspin volume is the device volume: a server volume change is applied like
 the volume buttons, and local changes are reported back to the server. A
@@ -3042,6 +3044,25 @@ like every changing request.
 
 The token is never part of status, logs or configuration export, and clients
 must not store it.
+
+#### PUT /api/v1/sendspin/unpaired-access
+
+Sets whether Music Assistant servers that have not paired with this player may
+play to it. Off by default on every install, and paired servers are never
+affected. Body: `{ "enabled": true }` or `{ "enabled": false }`. The choice is
+stored by the supervisor and applied by restarting the player when it is
+running. Requires authentication and the CSRF header.
+
+**Response:**
+```json
+{ "ok": true, "data": { "unpaired_access": true }, "error": null }
+```
+
+- **400** — the body has no boolean `enabled`.
+- **503** — the choice could not be stored.
+
+The pending-approval queue (holding a first connection from a new server until
+the owner approves it) is not part of this setting and is not implemented yet.
 
 #### POST /api/v1/sendspin/unpair
 

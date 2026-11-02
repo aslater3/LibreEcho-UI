@@ -69,6 +69,7 @@ struct le_backend_ops {
  /* Sunrise wake light lead time (UI #447). Appended last, see above. */
  int (*timer_sunrise_get)(struct le_backend*,int*);
  int (*timer_sunrise_set)(struct le_backend*,int);
+ int (*sendspin_set_unpaired)(struct le_backend*,int);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

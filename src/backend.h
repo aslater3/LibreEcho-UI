@@ -156,6 +156,8 @@ struct le_sendspin_state {
     int installed, enabled, running;
     int listening, discoverable, connected, paired, streaming, time_synced;
     int volume, muted;
+    /* Owner's "play without pairing" choice (off by default). */
+    int unpaired_access;
     char server[64];
 };
 /* What radiod is doing. title and station are whatever the stream said about
@@ -223,6 +225,8 @@ int le_get_sendspin_state(struct le_backend*,struct le_sendspin_state*); int le_
 int le_sendspin_pairing_token(struct le_backend*,char*,size_t);
 /* Forget every paired server; the player restarts with a new pairing token. */
 int le_sendspin_reset_pairing(struct le_backend*);
+/* Owner's "play without pairing" choice; the player restarts to apply it. */
+int le_set_sendspin_unpaired(struct le_backend*,int);
 int le_get_playback_state(struct le_backend*,struct le_playback_state*);
 int le_get_timers(struct le_backend*,struct le_timer_list*); int le_add_timer(struct le_backend*,int,const char*,unsigned*); int le_cancel_timer(struct le_backend*,unsigned); int le_dismiss_timers(struct le_backend*,int*); int le_add_alarm(struct le_backend*,long long,const char*,unsigned*); int le_add_repeat_alarm(struct le_backend*,int,int,unsigned,const char*,unsigned*); int le_snooze_timers(struct le_backend*,int*); int le_add_reminder(struct le_backend*,int,int,unsigned,const char*,unsigned*); int le_get_alarm_sunrise(struct le_backend*,int*); int le_set_alarm_sunrise(struct le_backend*,int);
 int le_reboot(struct le_backend*); int le_reboot_bootloader(struct le_backend*); int le_shutdown(struct le_backend*); int le_factory_reset(struct le_backend*);

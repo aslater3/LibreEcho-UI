@@ -2703,7 +2703,7 @@
      "Integrations"
     ],
     "summary": "Read Sendspin player status",
-    "description": "Status of the Sendspin player (Music Assistant multiroom). installed: the audio feature carries the player; enabled: integrations bit 64; state is unavailable, disabled, starting, waiting (listening and discoverable, no server), connected or playing. listening, discoverable, connected, paired, streaming and time_synced come from the running player; volume is null while it is not running; server is the connected server's JSON-escaped name or null. Never contains pairing material. Read-only; other methods receive 405.",
+    "description": "Status of the Sendspin player (Music Assistant multiroom). installed: the audio feature carries the player; enabled: integrations bit 64; state is unavailable, disabled, starting, waiting (listening and discoverable, no server), connected or playing. listening, discoverable, connected, paired, streaming and time_synced come from the running player; volume is null while it is not running; unpaired_access is the owner's play-without-pairing choice (off by default), kept even while the player is stopped; server is the connected server's JSON-escaped name or null. Never contains pairing material. Read-only; other methods receive 405.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -2746,6 +2746,54 @@
       "$ref": "#/components/responses/Error"
      },
      "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sendspin/unpaired-access": {
+   "put": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Set play without pairing",
+    "description": "Sets whether Music Assistant servers that have not paired with this player may play to it. Off by default. Body: {\"enabled\": true|false}. Stored by the supervisor and applied by restarting the player when it is running. Returns data.unpaired_access. Authenticated and CSRF-checked like every changing request; 400 for a body without a boolean enabled, 503 when the setting could not be stored. Paired servers are unaffected.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": ["enabled"],
+        "properties": {
+         "enabled": {
+          "type": "boolean"
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
       "$ref": "#/components/responses/Error"
      },
      "503": {

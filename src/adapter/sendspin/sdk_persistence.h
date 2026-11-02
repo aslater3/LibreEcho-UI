@@ -76,6 +76,26 @@ private:
     BlobStore store_;
 };
 
+// Writes the owner's "play without pairing" choice into the stored pairing config.
+// The SDK reads its unpaired-access flag from that blob at start and ignores any
+// first-boot seed once a config exists, so the choice has to be stored here. A
+// stored config that does not decode is refused (false) rather than overwritten.
+inline bool apply_unpaired_access(SdkPersistence& persistence, bool enabled) {
+    namespace keys = ::sendspin::persistence_keys;
+    ::sendspin::SendspinPairingConfig config{};
+    if (const auto blob = persistence.load_blob(keys::PAIR_CONFIG)) {
+        const std::string_view bytes(reinterpret_cast<const char*>(blob->data()), blob->size());
+        const auto decoded = ::sendspin::decode_pairing_config(bytes);
+        if (!decoded) return false;
+        config = *decoded;
+    }
+    config.unpaired_access_enabled = enabled;
+    const std::string encoded = ::sendspin::encode_pairing_config(config);
+    return persistence.save_blob(keys::PAIR_CONFIG,
+                                 reinterpret_cast<const uint8_t*>(encoded.data()),
+                                 encoded.size());
+}
+
 }  // namespace libreecho::sendspin
 
 #endif
