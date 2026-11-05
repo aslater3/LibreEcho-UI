@@ -16,7 +16,7 @@ permissions:
 jobs:
   signed-provenance:
     name: Signed Platform to UI integration
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     defaults:
       run:
