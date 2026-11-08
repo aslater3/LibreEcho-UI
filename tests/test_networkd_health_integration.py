@@ -60,7 +60,9 @@ class FakeWpa:
                 response = "OK\n"
             elif command == "STATUS":
                 state = "COMPLETED" if self.connected else "DISCONNECTED"
-                response = f"wpa_state={state}\nssid=IntegrationNet\n"
+                ssid = self.network_settings.get(self.network_id, {}).get(
+                    "ssid", self.saved_ssid)
+                response = f"wpa_state={state}\nssid={ssid}\n"
                 if self.connected:
                     response += f"id={self.network_id}\n"
             elif command == "SIGNAL_POLL":
@@ -181,7 +183,7 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
                  barrier_at=None, preexisting_reboot=None,
                  preexisting_guard=False, reboot_fifo=False,
                  association_fails=False, scan_results="", fail_command="",
-                 initial_connected=True):
+                 initial_connected=True, dhcp_success=False):
     wpa_path = directory / "wpa.sock"
     adapter_path = directory / "network.sock"
     action_log = directory / "actions.log"
@@ -204,6 +206,11 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
         "LIBREECHO_GATEWAY_PROBE_SCRIPT": script,
         "LIBREECHO_NETWORKD_TEST_ACTION_LOG": str(action_log),
     })
+    if dhcp_success:
+        dhcp = directory / "dhcp-success"
+        dhcp.write_text("#!/bin/sh\nexit 0\n")
+        dhcp.chmod(0o700)
+        env["LIBREECHO_NETWORKD_DHCP_ORACLE"] = str(dhcp)
     if fail_interface:
         env["LIBREECHO_NETWORKD_TEST_FAIL_INTERFACE"] = fail_interface
     if barrier_at is not None:
@@ -411,36 +418,39 @@ def test_pending_association_keeps_daemon_responsive_and_restores_profile():
 
 def test_connect_directed_scan_is_saved_for_hidden_visible_and_open_networks():
     cases = (
-        ("HiddenNet", "wpa2", "hidden-pass", "WPA-PSK"),
-        ("VisibleNet", "wpa2", "visible-pass", "WPA-PSK"),
-        ("OpenNet", "open", "", "NONE"),
+        ("HiddenNet", "wpa2", "hidden-pass", "WPA-PSK", False),
+        ("VisibleNet", "wpa2", "visible-pass", "WPA-PSK", True),
+        ("OpenNet", "open", "", "NONE", True),
     )
-    for ssid, security, password, key_mgmt in cases:
+    for ssid, security, password, key_mgmt, initial_connected in cases:
         with tempfile.TemporaryDirectory(
                 prefix="libreecho-networkd-directed-scan-") as temp:
             directory = Path(temp)
             process, wpa, adapter, actions, reboot = start_daemon(
-                directory, "1,1,1")
-            client = None
+                directory, "1,1,1", initial_connected=initial_connected,
+                dhcp_success=True)
             try:
-                client = queue_adapter_request(
+                result = adapter_request(
                     adapter, 44, "connect",
                     {"ssid": ssid, "psk": password, "security": security})
-                wait_for(lambda: "SAVE_CONFIG" in wpa.commands,
-                         message=f"saved profile for {ssid}")
+                assert result["ok"] is True, result
+                assert result["data"]["state"] == "connected", result
+                assert result["data"]["ssid"] == ssid, result
+                assert result["data"]["ip"] == "192.0.2.10", result
                 profile = wpa.saved_profiles[1]
                 assert profile["ssid"] == ssid, profile
                 assert profile["key_mgmt"] == key_mgmt, profile
                 assert profile["scan_ssid"] == "1", profile
                 if password:
-                    assert profile["psk"] == f'"{password}"', profile
+                    assert profile["psk"] == password, profile
                 assert wpa.commands.index("SET_NETWORK 1 scan_ssid 1") < \
                     wpa.commands.index("ENABLE_NETWORK 1") < \
                     wpa.commands.index("SELECT_NETWORK 1"), wpa.commands
+                assert wpa.network_id == 1
                 assert wpa.connected is True
+                if initial_connected:
+                    assert 0 not in wpa.saved_profiles, wpa.saved_profiles
             finally:
-                if client:
-                    client.close()
                 stop_daemon(process, wpa)
 
 
@@ -577,6 +587,8 @@ def main():
     test_non_regular_reboot_request_fails_closed_without_blocking()
     test_action_failures_remain_bounded()
     test_pending_association_keeps_daemon_responsive_and_restores_profile()
+    test_connect_directed_scan_is_saved_for_hidden_visible_and_open_networks()
+    test_directed_scan_setting_failure_restores_previous_profile()
     test_preassociation_failure_restores_working_profile()
     test_preassociation_failure_does_not_restore_when_disconnected()
     test_scan_deduplicates_ssid_and_keeps_strongest_bssid()
