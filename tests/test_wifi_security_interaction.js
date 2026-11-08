@@ -182,6 +182,18 @@ async function testNetworkUi() {
                 b.id = match[2];
                 elements.set(b.id, b);
             }
+            for (const match of html.matchAll(
+                /<(form|input|select|div)\b[^>]*\bid="(wifi-manual[^"]*)"[^>]*>/g
+            )) {
+                const control = element(match[2]);
+                control.type = (match[0].match(/\btype="([^"]*)"/) || [])[1] || '';
+                control.required = /\brequired\b/.test(match[0]);
+                if (match[1] === 'select') {
+                    const options = html.slice(match.index).split('</select>')[0];
+                    control.value = (options.match(/<option value="([^"]*)"/) || [])[1] || '';
+                }
+                elements.set(control.id, control);
+            }
             if (html.includes('id="wifi-results"')) elements.set('wifi-results', wifiResults);
         }
     });
@@ -209,17 +221,59 @@ async function testNetworkUi() {
     vm.createContext(context);
     vm.runInContext(fs.readFileSync('web/js/app.js', 'utf8'), context, { filename: 'app.js' });
     const requests = [];
+    let scans = 0;
     context.api = async path => {
         if (path === '/network') return { state: 'connected', connectivity: 'healthy', signal: 80 };
-        if (path === '/network/wifi/scan') return { networks: [
+        if (path === '/network/wifi/scan') { scans++; return { networks: [
             { ssid: 'Transition', security: 'wpa3-transition', capabilities: 'WPA2-PSK, WPA3-SAE', wpa2_attempt: true, signal: 80 },
             { ssid: 'WPA3 only', security: 'wpa3-only', capabilities: 'WPA3-SAE', wpa2_attempt: false, signal: 70 },
             { ssid: 'Open', security: 'open', capabilities: 'open', wpa2_attempt: false, signal: 60 }
-        ] };
+        ] }; }
         throw new Error(`unexpected API path ${path}`);
     };
     context.post = async (path, data) => { requests.push({ path, data }); };
     await context.networkPage();
+    const manual = elements.get('wifi-manual-form');
+    const ssid = elements.get('wifi-manual-ssid');
+    const security = elements.get('wifi-manual-security');
+    const password = elements.get('wifi-manual-password');
+    assert.ok(manual && typeof manual.onsubmit === 'function',
+        'the Network page must offer manual connection without scan results');
+    assert.ok(ssid.required, 'manual network name must be required');
+    assert.strictEqual(security.value, 'wpa2');
+    assert.strictEqual(password.type, 'password', 'manual passwords must be masked');
+    assert.ok(password.required);
+    assert.ok(content.innerHTML.includes('id="wifi-manual-connect" type="submit"'),
+        'the form must support submitting with the keyboard');
+    ssid.value = ' Hidden café <&> ';
+    password.value = 'password123';
+    let prevented = false;
+    await manual.onsubmit({ preventDefault() { prevented = true; } });
+    assert.ok(prevented, 'manual submit must not navigate away');
+    assert.strictEqual(scans, 0, 'manual connection must not depend on scanning');
+    assert.strictEqual(JSON.stringify(requests), JSON.stringify([{
+        path: '/network/wifi/connect',
+        data: { ssid: ' Hidden café <&> ', password: 'password123', security: 'wpa2' }
+    }]), 'manual SSIDs must reach the API exactly as entered');
+    security.value = 'open';
+    security.onchange();
+    assert.strictEqual(password.value, '', 'selecting Open must clear the old password');
+    assert.strictEqual(password.required, false);
+    assert.strictEqual(password.disabled, true);
+    assert.strictEqual(elements.get('wifi-manual-password-field').hidden, true);
+    ssid.value = 'HiddenOpen';
+    password.value = 'stale-password';
+    await manual.onsubmit({ preventDefault() {} });
+    assert.strictEqual(JSON.stringify(requests[1]), JSON.stringify({
+        path: '/network/wifi/connect',
+        data: { ssid: 'HiddenOpen', password: '', security: 'open' }
+    }), 'Open must not submit a stale password');
+    security.value = 'wpa2';
+    security.onchange();
+    assert.strictEqual(password.required, true);
+    assert.strictEqual(password.disabled, false);
+    assert.strictEqual(elements.get('wifi-manual-password-field').hidden, false);
+    requests.length = 0;
     await elements.get('wifi-scan').onclick();
     const cards = content.querySelectorAll('.wifi-network');
     assert.strictEqual(cards.length, 3);
