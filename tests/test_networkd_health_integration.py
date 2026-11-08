@@ -26,6 +26,8 @@ class FakeWpa:
         self.connected = initial_connected
         self.network_id = 0
         self.next_network_id = 1
+        self.network_settings = {0: {"ssid": "IntegrationNet"}}
+        self.saved_profiles = {}
         self.monitor_addr = None
         self.saved_ssid = "IntegrationNet"
         self.commands = []
@@ -74,9 +76,29 @@ class FakeWpa:
                 response = "OK\n"
             elif command.startswith("SELECT_NETWORK"):
                 self.network_id = int(command.split()[1])
-                self.connected = self.network_id == 0 or not self.association_fails
+                settings = self.network_settings.get(self.network_id, {})
+                hidden_missing_directed_scan = (
+                    settings.get("ssid") == "HiddenNet" and
+                    settings.get("scan_ssid") != "1")
+                self.connected = self.network_id == 0 or (
+                    not self.association_fails and
+                    not hidden_missing_directed_scan)
+                response = "OK\n"
+            elif command.startswith("SET_NETWORK "):
+                fields = command.split(maxsplit=3)
+                network_id = int(fields[1])
+                settings = self.network_settings.setdefault(network_id, {})
+                value = fields[3].strip('"')
+                settings[fields[2]] = value
+                response = "OK\n"
+            elif command == "SAVE_CONFIG":
+                self.saved_profiles = {
+                    network_id: dict(settings)
+                    for network_id, settings in self.network_settings.items()
+                }
                 response = "OK\n"
             elif command.startswith("REMOVE_NETWORK"):
+                self.network_settings.pop(int(command.split()[1]), None)
                 response = "OK\n"
             elif command == "SCAN":
                 response = "OK\n"
@@ -379,6 +401,62 @@ def test_pending_association_keeps_daemon_responsive_and_restores_profile():
             assert result["ok"] is False
             assert "association" in result["error"].lower()
             assert "REMOVE_NETWORK all" not in wpa.commands
+            assert "REMOVE_NETWORK 1" in wpa.commands
+            assert "SELECT_NETWORK 0" in wpa.commands
+            assert wpa.network_id == 0
+            assert wpa.connected is True
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_connect_directed_scan_is_saved_for_hidden_visible_and_open_networks():
+    cases = (
+        ("HiddenNet", "wpa2", "hidden-pass", "WPA-PSK"),
+        ("VisibleNet", "wpa2", "visible-pass", "WPA-PSK"),
+        ("OpenNet", "open", "", "NONE"),
+    )
+    for ssid, security, password, key_mgmt in cases:
+        with tempfile.TemporaryDirectory(
+                prefix="libreecho-networkd-directed-scan-") as temp:
+            directory = Path(temp)
+            process, wpa, adapter, actions, reboot = start_daemon(
+                directory, "1,1,1")
+            client = None
+            try:
+                client = queue_adapter_request(
+                    adapter, 44, "connect",
+                    {"ssid": ssid, "psk": password, "security": security})
+                wait_for(lambda: "SAVE_CONFIG" in wpa.commands,
+                         message=f"saved profile for {ssid}")
+                profile = wpa.saved_profiles[1]
+                assert profile["ssid"] == ssid, profile
+                assert profile["key_mgmt"] == key_mgmt, profile
+                assert profile["scan_ssid"] == "1", profile
+                if password:
+                    assert profile["psk"] == f'"{password}"', profile
+                assert wpa.commands.index("SET_NETWORK 1 scan_ssid 1") < \
+                    wpa.commands.index("ENABLE_NETWORK 1") < \
+                    wpa.commands.index("SELECT_NETWORK 1"), wpa.commands
+                assert wpa.connected is True
+            finally:
+                if client:
+                    client.close()
+                stop_daemon(process, wpa)
+
+
+def test_directed_scan_setting_failure_restores_previous_profile():
+    with tempfile.TemporaryDirectory(
+            prefix="libreecho-networkd-directed-scan-failure-") as temp:
+        directory = Path(temp)
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1", fail_command="SET_NETWORK 1 scan_ssid")
+        try:
+            result = adapter_request(
+                adapter, 45, "connect",
+                {"ssid": "HiddenNet", "psk": "hidden-pass",
+                 "security": "wpa2"})
+            assert result["ok"] is False, result
+            assert "scan setting rejected" in result["error"], result
             assert "REMOVE_NETWORK 1" in wpa.commands
             assert "SELECT_NETWORK 0" in wpa.commands
             assert wpa.network_id == 0
