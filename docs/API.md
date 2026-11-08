@@ -2204,8 +2204,7 @@ Update one controller setting:
 the controller is explicit and is limited to one activation attempt per boot.
 A successful `enabled` change is saved as the `bluetooth` integration (the same
 setting as `PUT /api/v1/integrations/bluetooth`), so it survives a reboot; if
-the save fails the response is 503 `io_error`. At boot the saved setting is
-applied once `libreecho-btd` answers (up to about 6 seconds).
+the save fails the response is 503 `io_error`.
 
 #### POST /api/v1/bluetooth/pairing-mode
 
