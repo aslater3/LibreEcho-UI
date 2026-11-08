@@ -84,6 +84,7 @@ sh tests/test_bluetooth_profile_service_contract.sh
 sh tests/test_bluetooth_device_metadata_contract.sh
 sh tests/test_bluetooth_cache_bust_contract.sh
 sh tests/test_bluetooth_mgmt_observability_contract.sh
+sh tests/test_bluetooth_enable_persistence.sh
 # Compiles btd.c into the test so the real status writer and discovery
 # bookkeeping run. No -Werror here: the daemon source carries two
 # platform-dependent warnings this test must not silence for the main build.
