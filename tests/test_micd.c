@@ -458,6 +458,56 @@ int main(void)
         printf("micd: beams report a source at %.0f deg as %.1f deg, "
                "and clear when the stream stops\n", BEAM_TEST_AZIMUTH, doa);
     }
+    {
+        /*
+         * A capture that cannot open (busy PCM, missing endpoint) exits with
+         * no audio. The client must get an error, not an OK header followed
+         * by an empty stream, which looks like a working microphone.
+         */
+        struct sockaddr_un address;
+        const char request[] =
+            "{\"v\":1,\"id\":35,\"cmd\":\"stream_mono\",\"args\":{}}\n";
+        ssize_t count;
+        size_t used = 0;
+        FILE *file;
+
+        file = fopen(capture_path, "w");
+        CHECK(file != NULL);
+        CHECK(fprintf(file, "#!/bin/sh\nexit 1\n") > 0);
+        CHECK(fclose(file) == 0);
+        for (i = 0; i < 100; ++i) {
+            /* The mono stream worker from the previous check must be gone. */
+            adapter = le_adapter_connect(socket_path, 250);
+            CHECK(adapter != NULL);
+            CHECK(le_adapter_call(adapter, "status", "{}", response,
+                                  sizeof(response)) == LE_ADAPTER_OK);
+            le_adapter_close(adapter);
+            adapter = NULL;
+            if (strstr(response, "\"capture\":{\"active\":false"))
+                break;
+            nanosleep(&pause_time, NULL);
+        }
+        stream_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(stream_fd >= 0);
+        memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        strncpy(address.sun_path, socket_path, sizeof(address.sun_path) - 1);
+        CHECK(connect(stream_fd, (struct sockaddr *)&address,
+                      sizeof(address)) == 0);
+        CHECK(write(stream_fd, request, sizeof(request) - 1) ==
+              (ssize_t)(sizeof(request) - 1));
+        while (used + 1 < sizeof(response) &&
+               (count = read(stream_fd, response + used,
+                             sizeof(response) - used - 1)) > 0)
+            used += (size_t)count;
+        response[used] = '\0';
+        CHECK(strstr(response, "\"ok\":false") != NULL);
+        CHECK(strstr(response, "microphone capture unavailable") != NULL);
+        CHECK(strstr(response, "\"ok\":true") == NULL);
+        close(stream_fd);
+        stream_fd = -1;
+    }
+    puts("micd: mono stream reports an error when the capture cannot start");
     puts("micd: capture start applies the gain saved after boot");
 
 cleanup:

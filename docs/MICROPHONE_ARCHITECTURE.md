@@ -35,7 +35,10 @@ line protocol:
 - `stream_raw` returns one JSON response line and then switches that connection
   to the interleaved raw PCM byte stream.
 - `stream_mono` does the same for the calibrated, beamformed, high-passed mono
-  stream (`pcm_s16_le`, 16 kHz). `libreecho-waked` keeps one open.
+  stream (`pcm_s16_le`, 16 kHz). `libreecho-waked` keeps one open. Its OK
+  header is sent only once the capture has delivered audio; if the codec
+  cannot be opened, the client gets `microphone capture unavailable` instead
+  of an OK header followed by an empty stream.
 - `beams` returns a snapshot of the beamformer while a `stream_mono` is
   running (see below), or `running:false` when none is.
 - `stream_logical` fails closed: no consumer needs per-microphone logical

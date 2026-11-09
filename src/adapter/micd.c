@@ -926,7 +926,15 @@ static pid_t start_capture(const struct micd_config *config, int output_fd)
     }
 }
 
-static int relay_capture_mono(int client_fd, const struct micd_config *config)
+/*
+ * Streams calibrated mono audio. The OK header is the only success signal a
+ * client gets, so it is written once tinycap has delivered its first period.
+ * If tinycap exits first (the PCM is busy or missing), the client gets an
+ * error and not an OK header followed by an empty stream.
+ */
+static int relay_capture_mono(int client_fd, unsigned long id,
+                              const char *header, size_t header_size,
+                              const struct micd_config *config)
 {
     static const uint8_t identity_map[LE_VOICE_LOGICAL_CHANNELS] =
         {0, 1, 2, 3, 4, 5, 6};
@@ -973,45 +981,58 @@ static int relay_capture_mono(int client_fd, const struct micd_config *config)
     le_voice_highpass_init(&highpass);
     mix_mask = beam_mic_mask();
 
-    while ((count = read(pipe_fds[0], input + pending,
-                         sizeof(input) - pending)) > 0) {
-        size_t available = pending + (size_t)count;
-        size_t frames = available / LE_VOICE_RAW_FRAME_BYTES;
-        size_t consumed = frames * LE_VOICE_RAW_FRAME_BYTES;
+    count = read(pipe_fds[0], input, sizeof(input));
+    if (count <= 0) {
+        /* tinycap exited before its first period: no capture, say so. */
+        char error[LE_ADAPTER_MSG_MAX];
+        int n = le_adapter_respond_err(error, sizeof(error), id,
+                                       "microphone capture unavailable");
 
-        if (frames > 0) {
-            size_t frame;
+        if (n > 0)
+            (void)write_all(client_fd, error, (size_t)n);
+    } else if (write_all(client_fd, header, header_size) == 0) {
+        while (count > 0) {
+            size_t available = pending + (size_t)count;
+            size_t frames = available / LE_VOICE_RAW_FRAME_BYTES;
+            size_t consumed = frames * LE_VOICE_RAW_FRAME_BYTES;
 
-            for (frame = 0; frame < frames; ++frame) {
-                int16_t logical[LE_VOICE_LOGICAL_CHANNELS];
+            if (frames > 0) {
+                size_t frame;
 
-                le_voice_decode_calibrated(
-                    input + frame * LE_VOICE_RAW_FRAME_BYTES,
-                    &calibration, logical);
-                /* The beamformer runs in every mode, so its selection and
-                   beam view stay warm; the mode only picks the output. */
-                unsigned int mode = current_mix_mode();
-                int16_t mixed = le_beamformer_sample(&beamformer, logical);
+                for (frame = 0; frame < frames; ++frame) {
+                    int16_t logical[LE_VOICE_LOGICAL_CHANNELS];
 
-                if (mode == LE_MIC_MIX_AVERAGE)
-                    mixed = le_mic_mix_average(logical, mix_mask);
-                else if (mode == LE_MIC_MIX_SINGLE)
-                    mixed = le_mic_mix_single(logical, mix_mask,
-                                              current_mix_lane());
-                output[frame] = le_voice_highpass_sample(&highpass, mixed);
-                if (beamformer.fill == 0)
-                    beam_view_publish(&beamformer);
+                    le_voice_decode_calibrated(
+                        input + frame * LE_VOICE_RAW_FRAME_BYTES,
+                        &calibration, logical);
+                    /* The beamformer runs in every mode, so its selection
+                       and beam view stay warm; the mode only picks the
+                       output. */
+                    unsigned int mode = current_mix_mode();
+                    int16_t mixed = le_beamformer_sample(&beamformer, logical);
+
+                    if (mode == LE_MIC_MIX_AVERAGE)
+                        mixed = le_mic_mix_average(logical, mix_mask);
+                    else if (mode == LE_MIC_MIX_SINGLE)
+                        mixed = le_mic_mix_single(logical, mix_mask,
+                                                  current_mix_lane());
+                    output[frame] = le_voice_highpass_sample(&highpass, mixed);
+                    if (beamformer.fill == 0)
+                        beam_view_publish(&beamformer);
+                }
+                apply_digital_gain(output, frames, digital_gain);
+                if (write_all(client_fd, output,
+                              frames * sizeof(output[0])) < 0)
+                    break;
             }
-            apply_digital_gain(output, frames, digital_gain);
-            if (write_all(client_fd, output,
-                          frames * sizeof(output[0])) < 0)
-                break;
+            pending = available - consumed;
+            if (pending > 0)
+                memmove(input, input + consumed, pending);
+            count = read(pipe_fds[0], input + pending,
+                         sizeof(input) - pending);
         }
-        pending = available - consumed;
-        if (pending > 0)
-            memmove(input, input + consumed, pending);
+        result = count < 0 ? -1 : 0;
     }
-    result = count < 0 ? -1 : 0;
     beam_view_stop();
 
     close(pipe_fds[0]);
@@ -1056,11 +1077,12 @@ static void run_stream_worker(int client_fd, unsigned long id, int channel,
     else
         n = -1;
     if (n > 0) {
-        if (write_all(client_fd, response, (size_t)n) == 0) {
-            if (calibrated_mono)
-                (void)relay_capture_mono(client_fd, config);
-            else
-                (void)relay_capture(client_fd, config);
+        if (calibrated_mono) {
+            /* relay_capture_mono sends this header once capture has started. */
+            (void)relay_capture_mono(client_fd, id, response, (size_t)n,
+                                     config);
+        } else if (write_all(client_fd, response, (size_t)n) == 0) {
+            (void)relay_capture(client_fd, config);
         }
     }
     close(client_fd);
