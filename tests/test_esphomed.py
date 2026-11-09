@@ -378,7 +378,12 @@ class CancelRequest(Daemon):
  def test_ha_button_cancels_while_thinking(self):
   self.start(True);self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',404)));self.cancelled();self.no_reply(self.wav_url())
  def test_ha_button_with_wrong_key_is_rejected(self):
-  self.start(True);self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',405)));self.assertEqual(self.s.recv(1),b'')
+  self.start(True);self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',405)))
+  for _ in range(16):
+   try:t,b=receive(self.s)
+   except EOFError:break
+   self.assertIn(t,(24,25,26,27,36,50,64,106,108)) # Only state broadcasts, the GetTimeRequest sent on subscribe, or microphone audio (106) of the open turn already queued before rejection may drain.
+  else:self.fail('the connection was not closed after a button press with an unknown key')
  def test_action_button_cancels_while_listening(self):
   a=self.start(False);self.control(b'other');time.sleep(.1);self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'],'only "cancel" is a command')
   self.control();self.cancelled()
