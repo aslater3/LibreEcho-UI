@@ -434,7 +434,7 @@ static void entities(struct client *c){unsigned char b[768],nested[80];struct ep
  /* Settings (#396), config category: wake word on/off (ListEntitiesSwitchResponse) ... */
  w.length=0;ep_string(&w,1,"wake_word");ep_fixed32(&w,2,WAKE_SWITCH_KEY);ep_string(&w,3,"Wake word");ep_string(&w,5,"mdi:account-voice");ep_uint(&w,7,1);(void)send_writer(c,17,&w);
  /* ... and the 0-100 numbers (ListEntitiesNumberResponse: min 8, max 9, step 10, unit 11). */
- for(unsigned i=0;i<NELEM(setting_numbers);i++){w.length=0;ep_string(&w,1,setting_numbers[i].id);ep_fixed32(&w,2,setting_numbers[i].key);ep_string(&w,3,setting_numbers[i].label);ep_string(&w,5,setting_numbers[i].icon);ep_uint(&w,7,1);put_float(&w,8,0.0f);put_float(&w,9,100.0f);put_float(&w,10,1.0f);if(setting_numbers[i].unit[0])ep_string(&w,11,setting_numbers[i].unit);(void)send_writer(c,49,&w);}
+ for(unsigned i=0;i<NELEM(setting_numbers);i++){w.length=0;ep_string(&w,1,setting_numbers[i].id);ep_fixed32(&w,2,setting_numbers[i].key);ep_string(&w,3,setting_numbers[i].label);ep_string(&w,5,setting_numbers[i].icon);put_float(&w,6,0.0f);put_float(&w,7,100.0f);put_float(&w,8,1.0f);ep_uint(&w,10,1);if(setting_numbers[i].unit[0])ep_string(&w,11,setting_numbers[i].unit);ep_uint(&w,12,2);(void)send_writer(c,49,&w);}
  /* ListEntitiesEventResponse, one per button: the gesture is the event type. */
  for(unsigned i=0;i<BUTTON_COUNT;i++){w.length=0;ep_string(&w,1,button_ids[i]);ep_fixed32(&w,2,BUTTON_KEY_BASE+i);ep_string(&w,3,button_labels[i]);for(unsigned g=0;g<GESTURE_COUNT;g++)ep_string(&w,9,gesture_ids[g]);(void)send_writer(c,EVENT_LIST_TYPE,&w);}
  /* Activity entities (#393): one event entity each, event types listed as field 9. */

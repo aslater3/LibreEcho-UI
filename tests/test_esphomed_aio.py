@@ -122,6 +122,23 @@ class PinnedFixture(Fixture):
     await good._get_connection().send_message_await_response(PingRequest(),PingResponse);await good.disconnect()
    finally:await good.disconnect(force=True)
   asyncio.run(asyncio.wait_for(run(),20))
+ def test_pinned_settings_numbers_have_limits(self):
+  # ListEntitiesNumberResponse: min=6 max=7 step=8 entity_category=10 unit=11 mode=12.
+  # Wrong field numbers once left HA with min=max=step=0 (unusable sliders).
+  self.s.close();time.sleep(.05)
+  async def run():
+   from aioesphomeapi.model import EntityCategory,NumberInfo,NumberMode
+   client=APIClient('127.0.0.1',self.port,provide_time=False)
+   try:
+    await client.connect(login=True);entities,_=await client.list_entities_services()
+    numbers={e.object_id:e for e in entities if isinstance(e,NumberInfo)}
+    self.assertEqual(set(numbers),{'reply_volume','volume','wake_word_sensitivity','led_brightness'})
+    for n in numbers.values():
+     self.assertEqual((n.min_value,n.max_value,n.step),(0,100,1),n.object_id)
+     self.assertEqual((n.entity_category,n.mode),(EntityCategory.CONFIG,NumberMode.SLIDER),n.object_id)
+     self.assertFalse(n.disabled_by_default,n.object_id)
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),20))
  def test_pinned_reply_volume_number(self):
   # Separate reply volume (#409): a config number that follows the master until set.
   self.s.close();time.sleep(.05)

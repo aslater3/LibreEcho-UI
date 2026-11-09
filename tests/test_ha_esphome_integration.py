@@ -151,8 +151,28 @@ async def acceptance() -> None:
         # the fixture down, instead of leaking daemon threads into the outer
         # bubblewrap 180s timeout. See test_ha_esphome_wiring.py for the
         # pinned bluetooth import-chain dependency.
-        patches.enter_context(patch("homeassistant.components.bluetooth.async_setup", AsyncMock(return_value=True)))
-        patches.enter_context(patch("homeassistant.components.bluetooth.async_remove_scanner", return_value=None))
+        # The device advertises Bluetooth proxy feature flags, so HA's ESPHome
+        # integration registers a real habluetooth scanner for it. Install a
+        # real HomeAssistantBluetoothManager with no local adapters (no
+        # DBus/BlueZ/radios) so that path runs instead of stubbing it out;
+        # without a manager HA raises "BluetoothManager has not been set" in
+        # its on_connect handler and silently drops the assist_satellite
+        # platform.
+        async def bluetooth_setup(hass_, config_):
+            from bluetooth_adapters import get_adapters
+            from bleak_retry_connector import BleakSlotManager
+            from habluetooth import set_manager
+            from homeassistant.components.bluetooth.manager import HomeAssistantBluetoothManager
+            from homeassistant.components.bluetooth.match import IntegrationMatcher
+            from homeassistant.components.bluetooth.storage import BluetoothStorage
+            storage = BluetoothStorage(hass_)
+            await storage.async_setup()
+            manager = HomeAssistantBluetoothManager(
+                hass_, IntegrationMatcher([]), get_adapters(), storage, BleakSlotManager())
+            set_manager(manager)
+            await manager.async_setup()
+            return True
+        patches.enter_context(patch("homeassistant.components.bluetooth.async_setup", bluetooth_setup))
         patches.enter_context(patch("homeassistant.components.usb.USBDiscovery.async_setup", AsyncMock(return_value=None)))
         patches.enter_context(patch("homeassistant.components.zeroconf._async_get_zc_args",
                                     return_value={"interfaces": ["127.0.0.1"], "unicast": True}))
@@ -308,7 +328,11 @@ async def acceptance() -> None:
         entries = er.async_entries_for_config_entry(registry, entry.entry_id)
         entities = {}
         for domain in ("media_player", "switch", "assist_satellite"):
-            matched = [e.entity_id for e in entries if e.domain == domain]
+            # The daemon also exposes the (disabled-by-default) wake-word switch
+            # and settings entities; the controls under test are the mute
+            # switch, the media player and the Assist satellite.
+            matched = [e.entity_id for e in entries if e.domain == domain
+                       and (domain != "switch" or e.entity_id.endswith("_microphone_mute"))]
             assert len(matched) == 1, (domain, matched)
             entities[domain] = matched[0]
             await wait_for(lambda d=domain: hass.states.get(entities[d]).state not in ("unavailable", "unknown"),

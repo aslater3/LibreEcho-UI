@@ -53,8 +53,10 @@ class SettingsEntities(Settings):
   self.assertIn((1,b'wake_word'),sw);self.assertIn((2,struct.pack('<I',WAKE_SWITCH)),sw);self.assertIn((7,1),sw)
   for idx,(object_id,key) in zip((5,6,7),((b'volume',VOLUME),(b'wake_word_sensitivity',SENSITIVITY),(b'led_brightness',LED_BRIGHTNESS))):
    f=all_fields(self.listed[idx][1])
-   self.assertIn((1,object_id),f);self.assertIn((2,struct.pack('<I',key)),f);self.assertIn((7,1),f)
-   self.assertEqual(float_of([v for k,v in f if k==8][0]),0.0);self.assertEqual(float_of([v for k,v in f if k==9][0]),100.0)
+   self.assertIn((1,object_id),f);self.assertIn((2,struct.pack('<I',key)),f);self.assertIn((10,1),f)  # entity_category CONFIG
+   # ListEntitiesNumberResponse: min_value=6, max_value=7, step=8 (not 8/9/10).
+   self.assertEqual(float_of([v for k,v in f if k==6][0]),0.0);self.assertEqual(float_of([v for k,v in f if k==7][0]),100.0)
+   self.assertEqual(float_of([v for k,v in f if k==8][0]),1.0);self.assertIn((12,2),f)  # mode SLIDER
 
  def test_states_are_read_back_from_the_daemons(self):
   self.adapters['audio'].volume=30
