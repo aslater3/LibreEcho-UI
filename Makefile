@@ -262,6 +262,7 @@ test-sendspin-sink:
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_ack_validation.cpp $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-ack-validation
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_session.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-session
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_session_concurrency.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-session-concurrency
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_stream_recovery.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-stream-recovery
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_late_credit.cpp $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-late-credit
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L $(SENDPIN_C99FLAGS) -Isrc -Isrc/adapter -c src/adapter/adapter_client.c -o $(BUILD)/sendspin-adapter_client.o
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L $(SENDPIN_C99FLAGS) -Isrc -c src/log.c -o $(BUILD)/sendspin-log.o
@@ -288,6 +289,7 @@ test-sendspin-sink:
 	$(BUILD)/test-sendspin-ack-validation
 	$(BUILD)/test-sendspin-session
 	$(BUILD)/test-sendspin-session-concurrency
+	$(BUILD)/test-sendspin-stream-recovery
 
 test-sendspin-sink-sanitize: SENDPIN_CXXFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
 test-sendspin-sink-sanitize: SENDPIN_C99FLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
